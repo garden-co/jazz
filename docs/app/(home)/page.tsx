@@ -338,6 +338,9 @@ function Figure({
 
 const dateFormatter = new Intl.DateTimeFormat("en-US", { dateStyle: "medium" });
 
+/** The "From the blog" section is hidden for now; flip to show it again. */
+const SHOW_BLOG = false;
+
 function latestPosts(count: number) {
   return [...blogSource.getPages()]
     .sort((left, right) => new Date(right.data.date).getTime() - new Date(left.data.date).getTime())
@@ -534,40 +537,42 @@ export default function HomePage() {
         </div>
       </section>
 
-      <section className="home-section">
-        <div className="home-container">
-          <div className="flex flex-wrap items-end justify-between gap-4">
-            <Heading level={2} type="display-3" id="blog" className="home-anchor">
-              From the blog
-            </Heading>
-            <AppLink href="/blog" className="font-medium">
-              All posts →
-            </AppLink>
-          </div>
-          <ol className="home-posts mt-10">
-            {latestPosts(3).map((post) => (
-              <li key={post.url} className="home-post">
-                <Text as="p" display="block" type="supporting" color="secondary">
-                  <time dateTime={new Date(post.data.date).toISOString().slice(0, 10)}>
-                    {dateFormatter.format(new Date(post.data.date))}
-                  </time>{" "}
-                  · {post.data.author}
-                </Text>
-                <Heading level={3} className="mt-3">
-                  <a href={post.url} className="home-post-link">
-                    {post.data.title}
-                  </a>
-                </Heading>
-                {post.data.description ? (
-                  <Text as="p" display="block" color="secondary" className="mt-2">
-                    {post.data.description}
+      {SHOW_BLOG ? (
+        <section className="home-section">
+          <div className="home-container">
+            <div className="flex flex-wrap items-end justify-between gap-4">
+              <Heading level={2} type="display-3" id="blog" className="home-anchor">
+                From the blog
+              </Heading>
+              <AppLink href="/blog" className="font-medium">
+                All posts →
+              </AppLink>
+            </div>
+            <ol className="home-posts mt-10">
+              {latestPosts(3).map((post) => (
+                <li key={post.url} className="home-post">
+                  <Text as="p" display="block" type="supporting" color="secondary">
+                    <time dateTime={new Date(post.data.date).toISOString().slice(0, 10)}>
+                      {dateFormatter.format(new Date(post.data.date))}
+                    </time>{" "}
+                    · {post.data.author}
                   </Text>
-                ) : null}
-              </li>
-            ))}
-          </ol>
-        </div>
-      </section>
+                  <Heading level={3} className="mt-3">
+                    <a href={post.url} className="home-post-link">
+                      {post.data.title}
+                    </a>
+                  </Heading>
+                  {post.data.description ? (
+                    <Text as="p" display="block" color="secondary" className="mt-2">
+                      {post.data.description}
+                    </Text>
+                  ) : null}
+                </li>
+              ))}
+            </ol>
+          </div>
+        </section>
+      ) : null}
 
       <section className="home-section home-cta">
         <div className="home-container grid gap-8 lg:grid-cols-12 lg:items-end">

@@ -172,7 +172,7 @@ function roundMau(value: number) {
   return `~${formatCount(Math.floor(value / magnitude) * magnitude)}`;
 }
 
-// Header, totals, cost breakdown, button, sharding note, one row per trait, cost note.
+// Header, button, totals, cost breakdown, sharding note, one row per trait, cost note.
 const resultRows = (SHOW_MODEL_DETAILS ? 6 : 5) + traitRows.length;
 
 function PlatformResult({
@@ -214,6 +214,14 @@ function PlatformResult({
           </p>
         ) : null}
       </div>
+      <div>
+        <Button
+          label={platform.cta.label}
+          variant={platform.id === "vercel" ? "primary" : "secondary"}
+          href={platform.cta.href}
+          isDisabled={!platform.cta.href}
+        />
+      </div>
       <div className="grid grid-cols-2 gap-4">
         <div>
           <p className="text-sm text-fd-muted-foreground">Total / mo</p>
@@ -243,14 +251,6 @@ function PlatformResult({
             : `${jazzTiers[tier].name} $${Math.round(licenseCost).toLocaleString("en-US")}`}
         </dd>
       </dl>
-      <div>
-        <Button
-          label={platform.cta.label}
-          variant={platform.id === "vercel" ? "primary" : "secondary"}
-          href={platform.cta.href}
-          isDisabled={!platform.cta.href}
-        />
-      </div>
       {SHOW_MODEL_DETAILS ? (
         <p className="text-sm leading-relaxed">
           {sharded ? (
