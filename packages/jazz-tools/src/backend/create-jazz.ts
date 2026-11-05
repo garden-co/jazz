@@ -72,6 +72,7 @@ export {
   type S3BlobStore,
   type VercelBlobStore,
 } from "./blobs.js";
+import { isSameAdmission, recheckEvery } from "./session-recheck.js";
 
 /** Where the core keeps its data. */
 export type JazzStore =
@@ -329,7 +330,11 @@ export interface CreateJazzOptions {
    * How often `authenticate` is asked again for each open sync session of a
    * signed-in user. When it no longer names that user (they signed out, in
    * another tab or anywhere else, or their session expired or was revoked),
-   * the session ends as signed out. Defaults to 60 seconds; 0 turns it off.
+   * the session ends as signed out. When it names them with other claims
+   * (a role changed), the session ends too and the client reconnects with
+   * the new claims, so this bounds how long a claims change takes to reach
+   * an open session. Defaults to 60 seconds; 0 turns it off, and changes
+   * then wait for the session to end (`sessionTtlSeconds`).
    */
   recheckSeconds?: number;
   /**
@@ -1514,7 +1519,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     let ended = false;
     let userId: string | undefined;
     let trusted = false;
-    let recheck: ReturnType<typeof setInterval> | undefined;
+    let recheck: (() => void) | undefined;
     // A session that never sends its prelude ends too.
     let expiry: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
       onEvent(null, { kind: "close", code: 1008, reason: "no sign-in in time" });
@@ -1525,7 +1530,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       if (ended) return;
       ended = true;
       if (expiry) clearTimeout(expiry);
-      if (recheck) clearInterval(recheck);
+      recheck?.();
       socket?.close();
     };
     const admit = async (prelude: Uint8Array): Promise<boolean> => {
@@ -1555,53 +1560,26 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       expiry = setTimeout(end, Math.max(ttl, 0));
       (expiry as unknown as { unref?: () => void }).unref?.();
       const every = (options.recheckSeconds ?? 60) * 1000;
-      if (userId !== undefined && every > 0) {
-        const admittedUser = userId;
-        let checking = false;
-        recheck = setInterval(() => {
-          if (checking || ended) return;
-          checking = true;
-          void Promise.resolve()
-            .then(() => authenticate(request))
-            .then(
-              (user) => {
-                if (ended || user?.userId === admittedUser) return;
-                // The socket's request carries the cookies it opened with, so
-                // this may only mean they expired. The client reconnects with
-                // fresh ones; if no one is signed in, that admission fails as
-                // an auth failure (above).
-                onEvent(null, { kind: "close", code: 1008, reason: "authenticate again" });
-                end();
-              },
-              // A failing `authenticate` (its database is down) is not a
-              // sign-out; the next check asks again.
-              () => {},
-            )
-            .finally(() => {
-              checking = false;
-            });
-        }, every);
-        (recheck as unknown as { unref?: () => void }).unref?.();
+      // The socket's request carries the cookies it opened with, so a
+      // refusal may only mean they expired. The client reconnects with fresh
+      // ones; if no one is signed in, that admission fails as an auth
+      // failure (above), and otherwise it carries the user's claims now.
+      const authenticateAgain = () => {
+        if (ended) return;
+        onEvent(null, { kind: "close", code: 1008, reason: "authenticate again" });
+        end();
+      };
+      const admittedUser = admitted.user;
+      if (admittedUser && every > 0) {
+        // Signed out, someone else, or the same user with other claims.
+        recheck = recheckEvery(
+          every,
+          async () => isSameAdmission(admittedUser, await authenticate(request)),
+          authenticateAgain,
+        );
       } else if (admitted.guest && every > 0) {
         // The app may stop letting guests in (or this one): ask again, as for users.
-        let checking = false;
-        recheck = setInterval(() => {
-          if (checking || ended) return;
-          checking = true;
-          void acceptsGuest(request)
-            .then(
-              (accepted) => {
-                if (ended || accepted) return;
-                onEvent(null, { kind: "close", code: 1008, reason: "authenticate again" });
-                end();
-              },
-              () => {},
-            )
-            .finally(() => {
-              checking = false;
-            });
-        }, every);
-        (recheck as unknown as { unref?: () => void }).unref?.();
+        recheck = recheckEvery(every, () => acceptsGuest(request), authenticateAgain);
       }
       socket = core.openSocket(headerPairs(request.headers), onEvent, admitted.access);
       return socket.send(admitted.prelude);
@@ -1656,6 +1634,8 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
   ): Promise<{
     prelude: Uint8Array;
     userId: string | undefined;
+    /** The user (with the claims) `authenticate` named for a vouched session. */
+    user?: JazzUser;
     access: BackendAccess;
     trusted: boolean;
     expiresAt?: number;
@@ -1749,6 +1729,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     return {
       prelude: new TextEncoder().encode(JSON.stringify(rewritten)),
       userId: user.userId,
+      user,
       access: "backend",
       trusted: false,
       expiresAt: client?.expiresAt,
