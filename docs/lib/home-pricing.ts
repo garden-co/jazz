@@ -193,7 +193,7 @@ const globalParams = [
   param("global.kbPerWatchedRow", "Memory per watched row (KB)", 1.25, 0.05, 10, 0.05),
   param("global.rowsPerWrite", "Rows per write", 10, 1, 100, 1),
   param("global.idleGraceMinutes", "Idle time before sleeping (min)", 5, 0, 60, 1),
-  param("global.freeRamGb", "Jazz Pro free up to total RAM (GB)", 16, 0, 192, 1),
+  param("global.freeRamGb", "Jazz Pro free up to total RAM (GB)", 4, 0, 192, 1),
 ];
 
 type PlatformId = "vercel" | "cloudflare" | "server" | "aws";
