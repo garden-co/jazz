@@ -105,11 +105,7 @@ import { JazzProvider, useJazzAuth } from "jazz-tools/react";
 
 function SignOutButton() {
   const { reauthenticate } = useJazzAuth();
-  return (
-    <button onClick={async () => (await signOut(), await reauthenticate())}>
-      Sign out
-    </button>
-  );
+  return <button onClick={async () => (await signOut(), await reauthenticate())}>Sign out</button>;
 }
 ```
 
@@ -196,7 +192,7 @@ share account ownership while keeping distinct authorship.
 
 ## Backend request contexts
 
-`await jazz.forRequest(request)` runs your `authenticate` and returns a database with that user's
+`await jazz.forReqUser(request)` runs your `authenticate` and returns a database with that user's
 policies and authorship; `jazz.db` acts with backend authority. See
 [Main Backend](/docs/setup/deployment/own-server#user-scoped-use).
 

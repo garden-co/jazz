@@ -28,7 +28,7 @@ description: "Learn the mental model behind Jazz, how backends and clients talk 
 
 - Your main backend runs `createJazz` in its own process, with the schema and permissions it imports
 - Backend authority (`jazz.db`) sees everything, for admin and system work
-- `jazz.forRequest(request)` gives a user-scoped view: that user's policies and authorship apply
+- `jazz.forReqUser(request)` gives a user-scoped view: that user's policies and authorship apply
 - Backend clients (other trusted machines) reach Jazz through the main backend
 - Writes are confirmed by the server before they count as durable
 

@@ -18,14 +18,14 @@ Pass anything your policies need, such as the `admin` plugin's role, as `claims`
 
 ### Act as the signed-in user
 
-In a route handler, act as the signed-in user with `jazz.forRequest(request)`, which runs the same `authenticate`:
+In a route handler, act as the signed-in user with `jazz.forReqUser(request)`, which runs the same `authenticate`:
 
 ```ts title="messages.ts"
 import { jazz } from "./jazz.server";
 import { app } from "./schema";
 
 export async function messages(request: Request) {
-  const db = await jazz.forRequest(request);
+  const db = await jazz.forReqUser(request);
   return Response.json(await db.all(app.messages, { tier: "remote" }));
 }
 ```
@@ -72,9 +72,9 @@ For a full working example, including Better Auth's tables stored in Jazz, see t
 [Better Auth chat example](https://github.com/garden-co/jazz/tree/main/examples/auth-betterauth-chat).
 
 <Callout type="info">
-  If your users start as local-first guests and sign up later, call
-  `linkWithBackend()` after Better Auth's sign-up so they keep their data. See
-  [Other / Custom](/docs/setup/auth/custom#guests-who-sign-up).
+  If your users start as local-first guests and sign up later, call `linkWithBackend()` after Better
+  Auth's sign-up so they keep their data. See [Other /
+  Custom](/docs/setup/auth/custom#guests-who-sign-up).
 </Callout>
 
 ## Store Better Auth's tables in Jazz
@@ -222,8 +222,8 @@ export const auth = betterAuth({
 | `prefix`    | Table name prefix (defaults to `"better_auth_"`).                                                    |
 
 <Callout title="Leave Better Auth joins disabled">
-  The Jazz adapter does not support Better Auth experimental joins yet, so do
-  not enable `experimental.joins`.
+  The Jazz adapter does not support Better Auth experimental joins yet, so do not enable
+  `experimental.joins`.
 </Callout>
 
 ### Compatibility
@@ -237,8 +237,7 @@ The adapter is currently aligned with Better Auth `1.7.1`.
 | Email OTP             |      ✅       |
 
 <Callout title="Compatibility scope">
-  This section reflects the adapter behavior currently covered by this repo's
-  Better Auth integration and tests. If you add plugins that introduce extra
-  tables or custom schema fields, regenerate `schema-better-auth/schema.ts` and
-  re-run the Jazz schema workflow.
+  This section reflects the adapter behavior currently covered by this repo's Better Auth
+  integration and tests. If you add plugins that introduce extra tables or custom schema fields,
+  regenerate `schema-better-auth/schema.ts` and re-run the Jazz schema workflow.
 </Callout>

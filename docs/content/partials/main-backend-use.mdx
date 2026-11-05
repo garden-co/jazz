@@ -30,7 +30,7 @@ await jazz.db.insert(app.auditLog, { event: "invoice.paid" });
 
 ## User-scoped use
 
-`await jazz.forRequest(request)` runs your `authenticate` and returns a database with that user's
+`await jazz.forReqUser(request)` runs your `authenticate` and returns a database with that user's
 policies and authorship. It's the default for anything a user triggers: route handlers, server
 actions, server components. Concurrent requests stay isolated.
 
@@ -39,7 +39,7 @@ import { jazz } from "@/jazz.server";
 import { app } from "@/schema";
 
 export async function GET(request: Request) {
-  const db = await jazz.forRequest(request);
+  const db = await jazz.forReqUser(request);
   return Response.json(await db.all(app.todos));
 }
 ```

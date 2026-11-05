@@ -27,9 +27,7 @@ export const jazz = createJazz({
   store: sqlite({ path: "./data/jazz" }),
   authenticate: async (request) => {
     const session = await auth.api.getSession({ headers: request.headers });
-    return session
-      ? { userId: session.user.id, claims: { role: session.user.role } }
-      : null;
+    return session ? { userId: session.user.id, claims: { role: session.user.role } } : null;
   },
 });
 ```
@@ -41,7 +39,7 @@ export const jazz = createJazz({
   [local-first](/docs/setup/auth/local-first) guest sync. Guests are refused otherwise. An app with
   no sign-in at all passes `authenticate: acceptLocalFirstAuth`.
 
-Jazz asks `authenticate` on every sign-in, on every sync connection and in `jazz.forRequest`. A
+Jazz asks `authenticate` on every sign-in, on every sync connection and in `jazz.forReqUser`. A
 sign-out or changed claims apply on the next reconnect, and a connection ends when its sign-in
 expires (after an hour by default, `sessionTtlSeconds`), so the client reconnects and is asked
 again. There are no JWKS, issuer or audience settings, and no Jazz token in the browser.
@@ -189,7 +187,7 @@ account and issuer can't be registered or linked, and they grant no way around y
 
 Your main backend has full access by default. To run code as a user instead:
 
-- `await jazz.forRequest(request)` runs `authenticate` on the request and returns a scope with that
+- `await jazz.forReqUser(request)` runs `authenticate` on the request and returns a scope with that
   user's policies and authorship.
 - `await jazz.forAccount(account)` does the same from an account handle, for jobs and backend
   clients that already know whom they act for.
@@ -251,9 +249,7 @@ import { useJazzSession } from "jazz-tools/react";
 function AccountStatus() {
   const { status, error, retry } = useJazzSession();
   return error ? (
-    <button onClick={() => void retry().catch(console.error)}>
-      {error.message}: retry
-    </button>
+    <button onClick={() => void retry().catch(console.error)}>{error.message}: retry</button>
   ) : (
     <p>{status === "signed-out" ? "Sign in to continue" : "Loading…"}</p>
   );

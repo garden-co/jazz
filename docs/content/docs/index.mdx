@@ -47,7 +47,7 @@ new Hono()
   })
   // Runs as the signed-in user: the query only returns their own todos
   .get("/todos", async (c) => {
-    const db = await jazz.forRequest(c.req.raw);
+    const db = await jazz.forReqUser(c.req.raw);
     return c.json(await db.all(app.todos.where({ done: false })));
   })
   // Sync for browsers, on your own origin
@@ -240,8 +240,7 @@ Set up the client: [Thin Client](/docs/setup/web-client/thin-client) (the defaul
 ## What people build with Jazz
 
 <Callout type="info">
-  Preview: rough sketches of each scenario; each will link to a short path
-  through the docs.
+  Preview: rough sketches of each scenario; each will link to a short path through the docs.
 </Callout>
 
 - **A backend with live data.** Your API or server components read from and write to Jazz directly, with permissions checked per user and live queries pushed to the browser. Path: [Quickstart](/docs/setup/run-locally) → [User-scoped use](/docs/setup/deployment/own-server#user-scoped-use) → [Policies](/docs/schemas/policies) → [Thin client](/docs/setup/web-client/thin-client).

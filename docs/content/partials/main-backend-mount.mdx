@@ -49,7 +49,7 @@
       port: 3000,
       routes: {
         "/api/todos": async (request) => {
-          const db = await jazz.forRequest(request);
+          const db = await jazz.forReqUser(request);
           return Response.json(await db.all(app.todos));
         },
       },

@@ -78,9 +78,7 @@ const session = await createJazzClient({
 });
 
 const { client } = session.getSnapshot();
-await client!.db
-  .insert(app.imports, { source: "nightly" })
-  .wait({ tier: "global" });
+await client!.db.insert(app.imports, { source: "nightly" }).wait({ tier: "global" });
 await session.close();
 
 // GitHub Actions hands out OIDC tokens to jobs with `permissions: id-token: write`.
@@ -98,7 +96,7 @@ async function githubOidcToken() {
 The session opens as whatever your main backend trusts the token as: with backend authority for a
 trusted machine (a request from it to act for a user is refused), or signed in as its user for a
 scoped one. Your main backend's API routes see the
-same identity, so `jazz.forRequest(request)` and `jazz.accountFor(request)` work for requests that
+same identity, so `jazz.forReqUser(request)` and `jazz.accountFor(request)` work for requests that
 carry the token as `Authorization: Bearer …`.
 
 ## Machines without an OIDC token

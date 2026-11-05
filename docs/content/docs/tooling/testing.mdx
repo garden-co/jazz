@@ -149,7 +149,7 @@ const testJazz: TestJazz = await startTestJazz({ app, permissions });
   `claims` as the signed-in user. Spread the result into the client's config.
 - **Native clients** that send `Authorization: Bearer` use `testJazz.bearer(userId, claims)` as
   their token against `testJazz.url`.
-- `testJazz.jazz` is the app's `Jazz` handle, for `forRequest`, `db` and the rest of your backend
+- `testJazz.jazz` is the app's `Jazz` handle, for `forReqUser`, `db` and the rest of your backend
   code.
 - `await testJazz.stop()` stops everything it started.
 
@@ -208,7 +208,7 @@ it("signs in the user authenticate names", async () => {
     claims: { role: "admin" },
   });
 
-  const asAlice = await jazz.forRequest(
+  const asAlice = await jazz.forReqUser(
     new Request("http://app/", { headers: { "x-test-user": "alice" } }),
   );
   await asAlice.insert(app.todos, { title: "Buy milk", done: false }).wait({ tier: "local" });

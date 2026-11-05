@@ -70,7 +70,7 @@ import { app } from "@/schema";
 
 // Runs as the signed-in user: only their todos
 export async function GET(request: Request) {
-  const db = await jazz.forRequest(request);
+  const db = await jazz.forReqUser(request);
   const todos = await db.all(app.todos.where({ done: false }));
   return Response.json(todos);
 }`;
