@@ -357,7 +357,7 @@ pub async fn verify(args: &Args) -> Result<Json, String> {
     if args.link_backend_identities {
         let principals: Vec<String> = logins.iter().map(|(p, _)| p.clone()).collect();
         let planned = super::links::plan(&super::links::identities(&accounts, &principals)?)?;
-        let issuer = super::links::app_issuer(&args.app_id_text);
+        let issuer = super::links::BACKEND_ISSUER;
         for (index, link) in planned.iter().enumerate() {
             let candidate = json!({ "issuer": issuer, "subject": link.subject }).to_string();
             let login = migrate_import_login(&state, &candidate).await?;

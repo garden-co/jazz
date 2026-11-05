@@ -40,10 +40,7 @@ async fn backend_acts_as_one_user_across_workers() {
         account_id: None,
         jwt_token: None,
         backend_secret: Some(server.backend_secret().to_owned()),
-        backend_session: Some(Session::new(
-            format!("jazz:app:{}", server.app_id()),
-            "alice",
-        )),
+        backend_session: Some(Session::new("jazz:backend", "alice")),
         // Pinned to the bundle the backend published.
         bundle: Some(published.bundle),
         admin_secret: None,

@@ -91,7 +91,7 @@ describe("JazzBackend Effect layer", () => {
           _tag: "Some",
           value: {
             $createdBy: {
-              identity: { issuer: `jazz:app:${server.appId}`, subject: "effect-reader" },
+              identity: { issuer: "jazz:backend", subject: "effect-reader" },
             },
           },
         });

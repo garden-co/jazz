@@ -164,7 +164,7 @@ describe("createJazz", () => {
     const alice = await userSession(appId, origin, "alice");
     // The client holds no Jazz credential: its identity comes from the backend.
     expect(alice.session?.user?.identity).toEqual({
-      issuer: `jazz:app:${appId}`,
+      issuer: "jazz:backend",
       subject: "alice",
     });
 
@@ -176,7 +176,7 @@ describe("createJazz", () => {
       forged.send(
         JSON.stringify({
           peer_identity: "forged",
-          backend_session: { issuer: `jazz:app:${appId}`, user_id: "alice" },
+          backend_session: { issuer: "jazz:backend", user_id: "alice" },
         }),
       ),
     );
@@ -194,7 +194,7 @@ describe("createJazz", () => {
         JSON.stringify({
           peer_identity: "worker",
           jwt_token: null,
-          backend_session: { issuer: `jazz:app:${appId}`, user_id: "alice" },
+          backend_session: { issuer: "jazz:backend", user_id: "alice" },
           auth: { jwt_token: null, backend_session: { user_id: "alice" } },
         }),
       );
@@ -391,7 +391,7 @@ describe("createJazz", () => {
           socket.send(
             JSON.stringify({
               peer_identity: "page",
-              backend_session: { issuer: `jazz:app:${appId}`, user_id: "alice" },
+              backend_session: { issuer: "jazz:backend", user_id: "alice" },
             }),
           );
           socket.send(encodeWebSocketFrameBatch([encodeWireClientHello()]));
@@ -624,7 +624,7 @@ describe("createJazz", () => {
       const alice = session.getSnapshot().client!;
       expect(alice.session!.user!.account).toBe(account);
       expect(alice.session!.user!.identity).toEqual({
-        issuer: `jazz:app:${appId}`,
+        issuer: "jazz:backend",
         subject: "alice",
       });
       const seen = await alice.db.all(app.todos.where({ id: row.id }));
@@ -794,7 +794,7 @@ describe("createJazz", () => {
         identity: { issuer: string; subject: string };
       };
       expect(answer.account).toBeNull();
-      expect(answer.identity).toEqual({ issuer: `jazz:app:${appId}`, subject: "alice" });
+      expect(answer.identity).toEqual({ issuer: "jazz:backend", subject: "alice" });
     }
     // So the guest's link to alice still goes through, and the answer names
     // the guest's account from then on.
@@ -1057,7 +1057,7 @@ describe("createJazz", () => {
 
     // The app's own session still names alice, but her identity is revoked
     // at the core.
-    const alice = { issuer: `jazz:app:${appId}`, subject: "alice" };
+    const alice = { issuer: "jazz:backend", subject: "alice" };
     const admin = (operation: string, body: unknown) =>
       fetch(`${core.url}/apps/${appId}/admin/accounts/${operation}`, {
         method: "POST",
@@ -1256,6 +1256,21 @@ describe("createJazz", () => {
     ).toThrow(/belongs to app/);
     const rows = await second.db.all(app.todos.where({ id: inserted.id }));
     expect(rows.map((todo) => todo.title)).toEqual(["kept"]);
+  }, 60_000);
+
+  it("runs a sqlite store as the alpha.59 app its import kept", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jazz-imported-"));
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    // What `jazz-tools migrate-alpha59 import --app-id` leaves beside the
+    // data: the id exactly as given, case included.
+    const alpha59 = "0A590000-0000-4000-8000-000000000059";
+    await writeFile(join(dir, "app-id"), `${alpha59}\n`);
+    const jazz = await createJazz({ app, permissions, store: sqlite({ path: dir }) }).ready();
+    cleanups.push(() => jazz.close());
+    expect(jazz.appId).toBe(alpha59);
+    await jazz.db.insert(app.todos, { title: "after import", owner: randomUUID() }).wait({
+      tier: "global",
+    });
   }, 60_000);
 
   it("hands writes to the sqlite core before close, even ones it hasn't confirmed", async () => {

@@ -25,9 +25,9 @@ import side ships in `jazz-tools` until a release removes it.
    npx jazz-tools@<version> migrate-alpha59 verify --dump app.dump --data-dir ./data-new --app-id <app id>
    ```
 
-   `--app-id` must be the app id your app passes to `remote()`, exactly,
-   case included: it names the `createJazz` identity of every returning
-   user (see below).
+   `--app-id` must be the alpha.59 app's id, exactly, case included: its
+   guests' accounts are derived from it, and the import keeps it with the
+   data (see below).
 
 5. Start the new server on `./data-new`. Keep `./data` until you are happy.
 
@@ -50,15 +50,15 @@ checks before it builds anything.
   current engine's own hash function.
 - **Accounts:** the journal replayed command by command.
 - **Backend identity links:** apps moving to `createJazz` name users
-  `(jazz:app:<appId>, userId)`. So that `authenticate` answering
+  `(jazz:backend, userId)`. So that `authenticate` answering
   `{ userId: sub }` opens a returning user's old account, each admitted
-  external identity `(iss, sub)` gets `(jazz:app:<appId>, sub)` linked to the
+  external identity `(iss, sub)` gets `(jazz:backend, sub)` linked to the
   same account, through the registry's own link commands. Built-in issuers
-  (`urn:jazz:*`) are left alone, and revoked identities get no link. The
-  registry grants every linked identity the right to manage the account's
-  identities, so the import refuses an identity that lacks it (alpha.59
-  never creates one). It also refuses, naming only issuers, when two issuers
-  hold a subject on different accounts, revoked or not. Pass
+  (`urn:jazz:*`, `jazz:*`) are left alone, and revoked identities get no
+  link. The registry grants every linked identity the right to manage the
+  account's identities, so the import refuses an identity that lacks it
+  (alpha.59 never creates one). It also refuses, naming only issuers, when
+  two issuers hold a subject on different accounts, revoked or not. Pass
   `--no-backend-identity-links` to skip this.
 - **Rows:** each row (a row id names a row within its table) replayed the
   way alpha.59 settled it: a version replaces the row's content or deletion
@@ -79,6 +79,11 @@ answer, every backend identity link, and every row's deleted flag, cells
 and created/updated provenance against what alpha.59 itself reads as the
 row's current state, through the new server's own read paths. It prints row
 ids, table and column names only, never values or authors.
+
+`--app-id` is the alpha.59 app's id: its guests' accounts are derived from
+it. The import keeps it in `<new dir>/app-id`, so `createJazz` with
+`sqlite({ path: "<new dir>" })` runs as that app without the app naming
+the id.
 
 ## Not supported yet (fails loudly)
 

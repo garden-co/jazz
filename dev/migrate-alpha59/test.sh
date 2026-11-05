@@ -38,6 +38,9 @@ grep -q '"unsupported_by_sqlite":\[\]' "$work/census.json"
   tee "$work/import.json"
 # user-1, user-2 and user-9 link as createJazz users; revoked user-3 does not.
 grep -q '"backend_identities_linked":3' "$work/import.json"
+# The import keeps the app id beside the data, exactly as given: sqlite()
+# on this dir runs as the alpha.59 app.
+test "$(cat "$work/a60/app-id")" = "$app"
 # The row settled out of order keeps its update as the winner, with the
 # creation of the insert that settled after it.
 # (Repeated deletes need two alpha.59 clients; unit tests cover them.)
