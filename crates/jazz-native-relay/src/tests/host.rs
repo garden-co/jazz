@@ -347,6 +347,7 @@ fn incompatible_open_creates_no_relay_or_sqlite_store() {
         },
         sqlite_path: sqlite_path.clone(),
         schema: schema(),
+        migrations: Default::default(),
         identity: DbIdentity {
             node: NodeUuid::from_bytes([0xa1; 16]),
             author: AuthorSubject::for_test_bytes([0xa2; 16]),
@@ -775,6 +776,7 @@ fn a_relay_refuses_a_client_of_another_identity() {
         },
         sqlite_path: directory.path().join("alice.sqlite"),
         schema: schema(),
+        migrations: Default::default(),
         identity: identity(0x01),
     })
     .unwrap();

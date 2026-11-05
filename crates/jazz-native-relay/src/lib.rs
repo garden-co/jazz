@@ -49,7 +49,7 @@ use node_lease::{ForegroundNodeLease, ForegroundNodeLeasePool};
 /// 4 ends each subscription delta with its updated rows' splices.
 /// Append-only commands use optional native capabilities while existing
 /// command layouts remain stable.
-pub const NATIVE_RELAY_ABI_V1: u16 = 4;
+pub const NATIVE_RELAY_ABI_V1: u16 = 5;
 
 const FOREGROUND_WAKE_IMMEDIATE: u8 = 0;
 const FOREGROUND_WAKE_CANCELLED: u8 = 3;
@@ -1902,7 +1902,20 @@ impl NativeRelayHost {
             return Err(JazzNativeRelayStatus::LifecycleFailure);
         }
         reject_bearer_claims(&request.claims)?;
-        let public_schema = serde_json::from_str(&request.schema_json)
+        // The attached schema, and beside its tables the migrations the app
+        // ships, if any (`ClientMigrations` in jazz-tools).
+        let mut public_schema = serde_json::from_str::<serde_json::Value>(&request.schema_json)
+            .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+        let migrations = public_schema
+            .as_object_mut()
+            .and_then(|fields| fields.remove("migrations"))
+            .map(|bundle| serde_json::to_vec(&bundle))
+            .transpose()
+            .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+        let migrations =
+            jazz::tools::deployment::published::lowered_client_migrations(migrations.as_deref())
+                .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+        let public_schema = serde_json::from_value(public_schema)
             .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
         let schema =
             JazzSchema::new(&public_schema).map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
@@ -1914,7 +1927,15 @@ impl NativeRelayHost {
             scope: request.scope.into(),
             sqlite_path: PathBuf::from(request.sqlite_path),
             schema,
+            migrations,
             identity: request.identity,
+        };
+        let versions = |migrations: &jazz::db::Migrations| {
+            migrations
+                .schemas
+                .iter()
+                .map(|schema| schema.version_id())
+                .collect::<Vec<_>>()
         };
         // A scope is immutable once trusted code has admitted it. Reject a
         // conflicting second configuration before JavaScript can receive a
@@ -1923,6 +1944,7 @@ impl NativeRelayHost {
             admitted.config.scope == config.scope
                 && (admitted.config.sqlite_path != config.sqlite_path
                     || admitted.config.schema.version_id() != config.schema.version_id()
+                    || versions(&admitted.config.migrations) != versions(&config.migrations)
                     || admitted.config.identity != config.identity
                     || admitted.claims != request.claims)
         }) {

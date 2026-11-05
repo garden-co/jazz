@@ -220,7 +220,7 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
         this.admittedCapability = attachNativeAccountSchema(
           this.foregroundFactory!,
           pending,
-          serializeSchemaSource(context.schema),
+          serializeSchemaSource(context.schema, context.migrations),
         );
       } finally {
         this.pendingCapability = null;
