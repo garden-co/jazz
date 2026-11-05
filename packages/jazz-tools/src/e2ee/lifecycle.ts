@@ -147,7 +147,9 @@ export async function prepareInitialSpaceForTransaction<T, Init>(
             if (!result) return prepared.readAccepted(query);
             // These are exact responses from this transaction's authority
             // prefix, not local-cache evidence or a later independent cut.
-            return structuredClone(result) as AcceptedRows<T>;
+            const reply = await Promise.resolve(structuredClone(result) as AcceptedRows<T>);
+            prepared.assertActive();
+            return reply;
           },
         },
         scope,
