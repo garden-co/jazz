@@ -156,7 +156,7 @@ function roundMau(value: number) {
 }
 
 // Header, totals, cost breakdown, button, sharding note, one row per trait, cost note.
-const resultRows = 6 + traitRows.length;
+const resultRows = (SHOW_MODEL_DETAILS ? 6 : 5) + traitRows.length;
 
 function PlatformResult({
   estimate,
@@ -190,17 +190,12 @@ function PlatformResult({
       style={{ gridRow: `span ${resultRows}` }}
     >
       <div>
-        <p className="text-base font-medium">
-          {platform.name}
-          {platform.comingSoon ? (
-            <span className="ml-2 align-middle text-xs font-normal text-fd-muted-foreground">
-              coming soon
-            </span>
-          ) : null}
-        </p>
-        <p className="mt-1 text-sm leading-relaxed text-fd-muted-foreground">
-          One {largest.label}: {roundMau(mauPerInstance)} MAU at this usage
-        </p>
+        <p className="text-base font-medium">{platform.name}</p>
+        {SHOW_MODEL_DETAILS ? (
+          <p className="mt-1 text-sm leading-relaxed text-fd-muted-foreground">
+            One {largest.label}: {roundMau(mauPerInstance)} MAU at this usage
+          </p>
+        ) : null}
         {platform.id === "vercel" ? (
           <label className="mt-2 flex items-center gap-2 text-sm">
             <input
@@ -249,20 +244,22 @@ function PlatformResult({
           isDisabled={!platform.cta.href}
         />
       </div>
-      <p className="text-sm leading-relaxed">
-        {sharded ? (
-          <>
-            {requiredShards > 1
-              ? `Sharded: even the largest size needs ${formatCount(requiredShards)} shards.`
-              : "Sharded: cheaper than one larger instance with headroom."}{" "}
-            <span className="text-fd-muted-foreground">
-              {tier === "scale"
-                ? `Jazz Scale is billed on ${formatCount(peakActiveSessions)} peak active sessions.`
-                : `Jazz Pro covers shards with up to ${assumptions["global.proRamGb"]} GB of RAM in total.`}
-            </span>
-          </>
-        ) : null}
-      </p>
+      {SHOW_MODEL_DETAILS ? (
+        <p className="text-sm leading-relaxed">
+          {sharded ? (
+            <>
+              {requiredShards > 1
+                ? `Sharded: even the largest size needs ${formatCount(requiredShards)} shards.`
+                : "Sharded: cheaper than one larger instance with headroom."}{" "}
+              <span className="text-fd-muted-foreground">
+                {tier === "scale"
+                  ? `Jazz Scale is billed on ${formatCount(peakActiveSessions)} peak active sessions.`
+                  : `Jazz Pro covers shards with up to ${assumptions["global.proRamGb"]} GB of RAM in total.`}
+              </span>
+            </>
+          ) : null}
+        </p>
+      ) : null}
       {traitRows.map((row) => (
         <div key={row.key} className="border-t pt-3 text-sm leading-relaxed">
           <p className="text-xs text-fd-muted-foreground">{row.label}</p>
@@ -385,7 +382,7 @@ export function PricingCalculator() {
           onChange={(value) => setRealtimeIndex(Math.round(value))}
         />
         <TickSlider
-          label="Large values per user (files, images)"
+          label="Large values per user (files, images, rich text, durable streams)"
           max={6}
           min={0}
           step={0.05}
