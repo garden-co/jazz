@@ -75,7 +75,12 @@ function fixture(read: (query: QueryBuilder<unknown>) => AcceptedRows<unknown>) 
   );
   return {
     calls,
-    run: (ids?: string[]) => groups.readMembership(tx, null, ownHistory, undefined, ids),
+    run: (ids?: string[]) =>
+      groups.readMembership(
+        tx,
+        ids === undefined ? { accountId: account } : { groupIds: ids },
+        ownHistory,
+      ),
   };
 }
 

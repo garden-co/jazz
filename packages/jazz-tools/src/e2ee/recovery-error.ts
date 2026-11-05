@@ -5,6 +5,8 @@ const messages = {
   "recovery-delivery-unusable": "No authenticated recovery delivery for the current account epoch",
   "recovery-group-delivery-unavailable":
     "No authenticated group recovery delivery for the current epoch",
+  "recovery-space-delivery-unavailable":
+    "No authenticated space recovery delivery for the current epoch",
   "recovery-protector-missing": "No usable local-first recovery protector",
   "recovery-protector-unusable": "No usable local-first recovery protector",
   "recovery-state-changed": "Account epoch changed during recovery inspection; retry",
@@ -28,7 +30,8 @@ export class RecoveryCandidateError extends E2eeRecoveryError {
       | "recovery-root-mismatch"
       | "recovery-delivery-missing"
       | "recovery-delivery-unusable"
-      | "recovery-group-delivery-unavailable",
+      | "recovery-group-delivery-unavailable"
+      | "recovery-space-delivery-unavailable",
   ) {
     super(code);
   }

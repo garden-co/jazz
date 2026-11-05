@@ -141,7 +141,7 @@ accepted root and delivery; resumable publication remains unfinished.
 with the retained local-first account secret, checks the embedded root ID and
 runs the ordinary recovery-material and historical-authority checks. It tries
 later candidates when material is unusable, the root does not match, or an
-account or group delivery is missing or unusable, and reports failure if none
+account, group or space delivery is missing or unusable, and reports failure if none
 works. Only a recovery owner's candidate classification permits fallback.
 Operational signature-verifier errors while checking accepted membership or
 history abort the operation without trying another delivery or protector. An adapter throwing
