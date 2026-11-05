@@ -6,6 +6,7 @@ import {
   beginDbTransactionAfter,
   readAcceptedTransactionRows,
   prepareDbTransaction,
+  transactionHasRegisteredInsert,
 } from "./db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
 import { startTestJazz } from "../testing/index.js";
@@ -240,3 +241,54 @@ it("does not upgrade ordinary transactions through a registered accepted prepara
     await db.shutdown();
   }
 });
+
+it.each(["accepted-id", "accepted-full", "ordinary-id"] as const)(
+  "preserves local SELECT checks in bound accepted transactions (%s)",
+  async (mode) => {
+    const server = await startTestJazz({
+      app,
+      permissions,
+      coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+    });
+    let db: Awaited<ReturnType<typeof createDb>> | undefined;
+    try {
+      db = await createDb(await localAccountConfig(server.appId, server.url));
+      await db.all(app.notes, { tier: "remote" });
+      const tx = beginDbTransactionAfter(
+        db,
+        async () => {},
+        mode === "ordinary-id" ? undefined : "accepted-evidence",
+      );
+      await prepareDbTransaction(tx, async (scope) => {
+        if (mode === "ordinary-id") expect(await scope.all(app.notes)).toEqual([]);
+        else expect((await scope.readAccepted(app.notes)).rows).toEqual([]);
+      });
+      const row = tx.insert(app.notes, { body: "staged scope" });
+      expect(transactionHasRegisteredInsert(tx, app.notes, row.id)).toBe(true);
+      const other = db.beginSerializableTransaction();
+      expect(transactionHasRegisteredInsert(other, app.notes, row.id)).toBe(false);
+      await other.rollback();
+      const query = app.notes.where({ id: row.id });
+      // This SDK replica has no local SELECT policy. Accepted mode binds the
+      // subject and must preserve that policy boundary; ordinary client-local
+      // admission remains unbound. The authority's accepted reply is separate.
+      expect(await tx.one(mode === "accepted-full" ? query : query.select("id"))).toEqual(
+        mode === "ordinary-id" ? { id: row.id } : null,
+      );
+      tx.delete(app.notes, row.id);
+      expect(transactionHasRegisteredInsert(tx, app.notes, row.id)).toBe(false);
+      if (mode !== "ordinary-id") {
+        await expect(readAcceptedTransactionRows(tx, query, 5000)).rejects.toThrow(
+          "accepted reads cannot substitute already staged content",
+        );
+      }
+      await tx.rollback();
+      expect(() => transactionHasRegisteredInsert(tx, app.notes, row.id)).toThrow(/rolled back/);
+      expect(await db.all(app.notes, { tier: "remote" })).toEqual([]);
+    } finally {
+      await db?.shutdown();
+      await server.stop();
+    }
+  },
+  60000,
+);
