@@ -98,6 +98,22 @@ function cookies(origin: string, userId: string | null) {
   return jar;
 }
 
+/**
+ * Auth by session token (`<user>:<n>`, in the test header): `valid` holds
+ * the tokens the app's backend still accepts, so expiring or revoking one
+ * takes effect for the sockets that opened with it, as for a JWT cookie.
+ */
+function tokenAuth(...initial: string[]) {
+  const valid = new Set(initial);
+  return {
+    valid,
+    authenticate(request: Request) {
+      const token = request.headers.get("x-test-user");
+      return token && valid.has(token) ? { userId: token.split(":")[0]! } : null;
+    },
+  };
+}
+
 function memoryStore(): AccountStore {
   let stored: string | null = null;
   return {
@@ -295,5 +311,93 @@ describe("browser session against the app's backend", () => {
     expect(session.getSnapshot().client).toBe(client);
     await client.db.insert(app.todos, { title: "second", owner }).wait({ tier: "global" });
     await session.close();
+  }, 60_000);
+
+  // The app's access token expires before it refreshes it (a laptop
+  // asleep): the backend's re-check ends the socket, and a write made
+  // meanwhile waits. Once the app signs in again and says so, the same
+  // client reconnects and the write lands.
+  it("lands a write made while the session expired, once the app signs in again", async () => {
+    const auth = tokenAuth("alice:1");
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate: auth.authenticate,
+      recheckSeconds: 1,
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const served = await listen(jazz);
+    const jar = cookies(served.origin, "alice:1");
+    const session = await createJazzClient({
+      serverUrl: `${served.origin}/jazz`,
+      store: memoryStore(),
+      driver: { type: "memory" },
+    });
+    cleanups.push(() => session.close());
+    await session.loginWithBackend();
+    const client = session.getSnapshot().client!;
+    const owner = client.session!.user!;
+    await client.db.insert(app.todos, { title: "first", owner }).wait({ tier: "global" });
+
+    // Expired: the backend no longer accepts the token the tab holds.
+    auth.valid.delete("alice:1");
+    await expect
+      .poll(() => client.db.getSyncStatus().link, { timeout: 15_000 })
+      .toMatchObject({ state: "offline", reason: "auth" });
+    const pending = client.db.insert(app.todos, { title: "while expired", owner });
+    let landed = false;
+    void pending.wait({ tier: "global" }).then(() => (landed = true));
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    expect(landed).toBe(false);
+
+    // The app signs in again (a fresh token) and tells Jazz.
+    auth.valid.add("alice:2");
+    jar.user = "alice:2";
+    jar.socketUser = "alice:2";
+    await session.reauthenticate();
+    const row = await pending.wait({ tier: "global" });
+    expect(session.getSnapshot().client).toBe(client);
+    expect(client.db.getSyncStatus().link).toEqual({ state: "connected" });
+    expect((await jazz.db.all(app.todos.where({ id: row.id }))).map((t) => t.title)).toEqual([
+      "while expired",
+    ]);
+    await session.close();
+  }, 60_000);
+
+  // The app revokes a user whose tab stays open and in view: the backend's
+  // re-check ends the socket, and the tab signs out with no app code.
+  it("signs a revoked user's open tab out", async () => {
+    const auth = tokenAuth("alice:1");
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate: auth.authenticate,
+      recheckSeconds: 1,
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const served = await listen(jazz);
+    cookies(served.origin, "alice:1");
+    vi.stubGlobal("document", { visibilityState: "visible" });
+    const session = await createJazzClient({
+      serverUrl: `${served.origin}/jazz`,
+      store: memoryStore(),
+      driver: { type: "memory" },
+    });
+    cleanups.push(() => session.close());
+    await session.loginWithBackend();
+    const client = session.getSnapshot().client!;
+    const owner = client.session!.user!;
+    await client.db.insert(app.todos, { title: "private", owner }).wait({ tier: "global" });
+
+    auth.valid.delete("alice:1");
+    const revokedAt = Date.now();
+    await expect
+      .poll(() => session.getSnapshot().status, { timeout: 50_000, interval: 250 })
+      .toBe("signed-out");
+    // The refusal reaches the watch within the re-check; it confirms after
+    // its grace for a cookie the app is refreshing (30s), then once more.
+    expect(Date.now() - revokedAt).toBeLessThan(40_000);
   }, 60_000);
 });
