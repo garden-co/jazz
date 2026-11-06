@@ -48,7 +48,9 @@
     await jazz.attach(server as Server); // WebSocket upgrades on /jazz (needs `ws`)
     ```
 
-    `serve()` is typed as a server that may be HTTP/2, so `attach` needs the `Server` cast.
+    Install `ws` too: `attach` loads it, and without it the server fails at startup with
+    `ERR_MODULE_NOT_FOUND`. `serve()` is typed as a server that may be HTTP/2, so `attach` needs the
+    `Server` cast.
 
   </Tab>
   <Tab value="Express / Node">

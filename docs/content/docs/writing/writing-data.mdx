@@ -337,8 +337,8 @@ restart. In the browser, each tab counts only the transactions it committed itse
 recovered after a reload, or written by another tab, are uploaded by the shared worker and are not
 counted, and `db.waitForSync()` does not wait for them.
 
-The framework bindings expose the same object: `useSyncStatus()` in React, React Native and Solid
-(an accessor), `useSyncStatus()` in Vue (a ref), and `syncStatus()` in Svelte (a store, read as
+The framework bindings expose the same object: `useSyncStatus()` in React and React Native (the
+object), in Solid (an accessor) and in Vue (a ref), and `syncStatus()` in Svelte (a store, read as
 `$status`). The Effect layer has a `syncStatus` stream.
 
 ```tsx
@@ -367,8 +367,9 @@ A mutation can fail when you call it or while you wait:
 
 - If Jazz cannot apply the mutation locally, for example because the input is invalid, the mutation
   call throws immediately.
-- If a server later rejects the mutation, an active `wait(...)` call rejects with
-  `PersistedWriteRejectedError`.
+- If a server later rejects the mutation, an active `wait(...)` call rejects: with
+  `PersistedWriteRejectedError` on the local-first client, and with a `ThinRemoteError` (code
+  `WriteRejected`) on the thin client.
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
   <Tab value="TypeScript">

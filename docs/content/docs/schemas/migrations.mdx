@@ -72,6 +72,10 @@ In practice, this lets you:
    Each deployment's sessions run under that deployment's own bundle, so two deployments can run
    side by side, and rolling back your backend rolls back its permissions too.
 
+   Browser tabs opened before the deploy keep running the old app and its schema until they
+   reload; Jazz has no reload prompt yet, so add your own if you need one. Serve `index.html`
+   with `Cache-Control: no-cache`, or browsers can keep loading the old bundle even after a reload.
+
 The `jazz-tools` CLI only scaffolds and checks migrations (`migrations create`, `validate`,
 `migrations graph`). It never publishes anything: only your main backend does.
 

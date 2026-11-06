@@ -68,7 +68,8 @@ what you give it while the user is signed out, while Jazz starts and when it fai
     ```
 
     `client` and the other `createJazzClient` options pass through as attributes, so they aren't
-    type-checked in templates yet.
+    type-checked in templates yet. Write them in camelCase (`:clearOnSignOut="true"`): kebab-case
+    attributes such as `clear-on-sign-out` aren't picked up for now.
 
   </Tab>
   <Tab value="Svelte">
@@ -87,9 +88,15 @@ what you give it while the user is signed out, while Jazz starts and when it fai
     </JazzProvider>
     ```
 
+    Call `getDb()`, `getJazzSession()` and the other `get…` helpers during component setup (the
+    top level of a component's `<script>`), not later in an event handler.
+
     In SvelteKit, render the provider only in the browser (`{#if browser}` from `$app/environment`)
     and load server-rendered data in `+page.server.ts` with
-    [`jazz.forReqUser`](/docs/setup/deployment/own-server#user-scoped-use).
+    [`jazz.forReqUser`](/docs/setup/deployment/own-server#user-scoped-use). For production builds,
+    add `ssr: { external: ["jazz-napi"] }` to `vite.config.ts` so Vite doesn't bundle Jazz's native
+    module. Behind a proxy that terminates TLS, set `adapter-node`'s `PROTOCOL_HEADER` (for example
+    `x-forwarded-proto`), or Jazz sees `http://` and refuses sign-in as an origin it doesn't allow.
 
   </Tab>
   <Tab value="Solid">
