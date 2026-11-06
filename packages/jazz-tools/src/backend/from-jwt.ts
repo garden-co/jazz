@@ -54,6 +54,15 @@ function isReservedIssuer(issuer: string): boolean {
  * not verify, is signed out (null). A JWKS that cannot be fetched is the
  * server's problem and throws, so clients retry instead of signing out.
  *
+ * The JWKS is cached for up to five minutes, so a key your issuer drops is
+ * accepted until then. A token naming a key the cached JWKS doesn't publish
+ * fetches it again, at most once every 30 seconds, and is signed out if the
+ * JWKS still doesn't publish its key; within 30 seconds of a fetch it is
+ * signed out without one. So when rotating keys, publish the new key in
+ * your JWKS before your issuer signs with it, as issuers that rotate keys
+ * do; a key published less than 30 seconds before its first token may
+ * refuse that token.
+ *
  * ```ts
  * createJazz({
  *   app, permissions, store,
