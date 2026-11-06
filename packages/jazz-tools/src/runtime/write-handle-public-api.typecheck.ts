@@ -79,13 +79,13 @@ async function assertWriteHandleContract() {
     () => "committed",
   );
   serializableResult.wait();
-  // @ts-expect-error Serializable mutations are confirmed by the authority without a tier.
+  // Serializable results accept an explicit durability tier as well as the default.
   serializableResult.wait({ tier: "global" });
 
   const mergeableCommit: WriteHandle = db.beginTransaction().commit();
   const serializableCommit: SerializableWriteHandle = db.beginSerializableTransaction().commit();
   serializableCommit.wait();
-  // @ts-expect-error Serializable commits are confirmed by the authority without a tier.
+  // Serializable commits accept an explicit durability tier as well as the default.
   serializableCommit.wait({ tier: "global" });
 
   void restored;
