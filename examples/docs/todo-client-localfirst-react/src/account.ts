@@ -1,10 +1,6 @@
 import type { JazzSessionConfig } from "jazz-tools/client";
 
+/** The app's backend serves Jazz on this origin (`/jazz`), so the client needs no URL. */
 export function sessionConfig(overrides: Partial<JazzSessionConfig> = {}): JazzSessionConfig {
-  const env = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env;
-  const appId = overrides.appId ?? env?.VITE_JAZZ_APP_ID ?? env?.JAZZ_APP_ID;
-  const serverUrl = overrides.serverUrl ?? env?.VITE_JAZZ_SERVER_URL ?? env?.JAZZ_SERVER_URL;
-  if (!appId) throw new Error("Missing Jazz appId");
-  if (!serverUrl) throw new Error("Missing Jazz core serverUrl for account preparation");
-  return { env: "dev", ...overrides, appId, serverUrl, initial: "local-first" };
+  return { env: "dev", ...overrides, initial: "local-first" };
 }

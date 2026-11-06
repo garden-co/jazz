@@ -4,7 +4,7 @@ import { definePermissions } from "../permissions/index.js";
 import { PersistedWriteRejectedError } from "./client.js";
 import { createDb } from "./default-create-db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
-import { deploy, startLocalJazzServer } from "../testing/index.js";
+import { startTestJazz } from "../testing/index.js";
 
 // garden-co/jazz#3755: a policy `exists` sees committed rows plus the rows the
 // same transaction inserts or updates, so the server accepts the transaction the
@@ -30,23 +30,16 @@ const permissions = definePermissions(app, ({ policy, session }) => {
 async function withChief(
   run: (db: Awaited<ReturnType<typeof createDb>>, me: string) => Promise<void>,
 ): Promise<void> {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  const jazz = await startTestJazz({ app, permissions });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
   try {
-    await deploy({
-      serverUrl: server.url,
-      appId: server.appId,
-      adminSecret: server.adminSecret,
-      schema: app,
-      permissions,
-    });
-    const account = await localAccountConfig(server.appId, server.url);
+    const account = await localAccountConfig(jazz.appId, jazz.url);
     db = await createDb(account);
     await db.all(app.tasks, { tier: "remote" });
     await run(db, account.account.id);
   } finally {
     await db?.shutdown();
-    await server.stop();
+    await jazz.stop();
   }
 }
 

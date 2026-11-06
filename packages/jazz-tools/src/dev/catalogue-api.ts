@@ -158,6 +158,27 @@ export async function fetchStoredPermissions(
   };
 }
 
+/** A permissions bundle the core has published: what sessions pin to. */
+export interface PublishedBundle {
+  bundle: string;
+  schemaHash: string;
+  publishedAt: number;
+  permissions: Record<string, TablePolicies>;
+}
+
+/** Every bundle the core has published, oldest first. */
+export async function fetchPublishedBundles(
+  serverUrl: string,
+  options: FetchStoredPermissionsOptions,
+): Promise<PublishedBundle[]> {
+  const body = (await fetchAdminJson(
+    appScopedUrl(serverUrl, options.appId, "admin/bundles"),
+    options.adminSecret,
+    "Bundles",
+  )) as { bundles?: PublishedBundle[] };
+  return body.bundles ?? [];
+}
+
 export type PublishedMigrationValue =
   | { type: "Integer"; value: number }
   | { type: "BigInt"; value: bigint | string | number }
@@ -242,16 +263,9 @@ export interface DeploymentArtifacts {
   schemas: Array<{ hash: string; schema: WasmSchema }>;
   migrations: Array<{ fromHash: string; toHash: string; forward: PublishedTableLens[] }>;
   permissions: CompiledPermissionsMap;
-  /**
-   * Make the target and its permissions current (the default, `/deploy`), or
-   * only publish them as a bundle that sessions are pinned to (createJazz,
-   * `/bundles`). A core that predates bundles has no `/bundles` route, so it
-   * refuses such a publish instead of activating it.
-   */
-  activate?: boolean;
 }
 
-export interface DeploymentRequest extends Omit<DeploymentArtifacts, "schemas" | "activate"> {
+export interface DeploymentRequest extends Omit<DeploymentArtifacts, "schemas"> {
   schemas: Array<{ hash: string; schema: { tables: WasmSchema } }>;
 }
 
@@ -261,8 +275,8 @@ export interface DeploymentResponse {
     schemas: string[];
     migrations: Array<{ fromHash: string; toHash: string }>;
   };
-  /** The published bundle's id, for a deployment that activates nothing. */
-  bundle?: string;
+  /** The published bundle's id: what a backend pins its sessions to. */
+  bundle: string;
 }
 
 export class DeploymentError extends Error {
@@ -281,11 +295,9 @@ export async function publishDeployment(
   serverUrl: string,
   options: { appId: string; adminSecret: string } & DeploymentArtifacts,
 ): Promise<DeploymentResponse> {
-  const deployUrl = appScopedUrl(
-    serverUrl,
-    options.appId,
-    options.activate === false ? "admin/bundles" : "admin/deploy",
-  );
+  // A core that predates bundles has no `/bundles` route, so it refuses the
+  // publish instead of activating it.
+  const deployUrl = appScopedUrl(serverUrl, options.appId, "admin/bundles");
   const response = await fetchFor(deployUrl)(deployUrl, {
     method: "POST",
     headers: {

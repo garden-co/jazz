@@ -54,9 +54,10 @@ describe.skipIf(process.platform !== "linux")("vercel() start script", () => {
     version: string,
     tarballUrl = "http://127.0.0.1:9/none.tgz",
     workload = trust,
+    blobs?: Parameters<typeof startScript>[4],
   ) {
     const script = join(root, `start-${Math.random()}.sh`);
-    writeFileSync(script, startScript("app-1", version, tarballUrl, workload, root));
+    writeFileSync(script, startScript("app-1", version, tarballUrl, workload, blobs, root));
     const child = spawn("bash", [script], { stdio: "ignore", detached: true });
     children.push(child);
     const exited = new Promise<number>((resolve) =>
@@ -72,6 +73,36 @@ describe.skipIf(process.platform !== "linux")("vercel() start script", () => {
   }
 
   const alive = (pid: string | undefined) => !!pid && spawnSync("kill", ["-0", pid]).status === 0;
+
+  it("starts a core whose large values go to S3 under the project's role", async () => {
+    const bin = join(root, "data/bin/jazz-tools-1.0.0");
+    writeFileSync(
+      bin,
+      `#!/bin/bash\ntrap 'exit 0' TERM\necho "$S3_BUCKET_NAME $AWS_REGION $AWS_ROLE_ARN $*" >> ${join(root, "servers.log")}\nwhile true; do sleep 0.05; done\n`,
+    );
+    chmodSync(bin, 0o755);
+    const blobs = {
+      bucket: "app-blobs",
+      region: "us-east-1",
+      roleArn: "arn:aws:iam::1:role/vercel",
+      prefix: "it's/",
+    };
+    expect(await start("1.0.0", undefined, trust, blobs)).toBe("running");
+    const line = read("servers.log")!;
+    expect(line).toMatch(/^app-blobs us-east-1 arn:aws:iam::1:role\/vercel server /);
+    expect(line).toContain("--blobs s3 --s3-role-from-workload --s3-prefix it's/");
+  });
+
+  it("starts a core whose large values go to the project's Blob store", async () => {
+    installFake("1.0.0");
+    expect(await start("1.0.0", undefined, trust, { storeId: "abc", prefix: "it's/" })).toBe(
+      "running",
+    );
+    expect(read("servers.log")).toContain(
+      "--blobs vercel-blob --vercel-blob-token-from-workload --vercel-blob-store-id abc " +
+        "--vercel-blob-prefix it's/ --trusted-workload-issuer",
+    );
+  });
 
   it("starts once, leaves the same version alone, and upgrades to a newer one", async () => {
     installFake("1.0.0");

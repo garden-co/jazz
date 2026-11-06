@@ -1,12 +1,13 @@
 use jazz::account_registry::AccountId;
 use jazz::query::Query;
+use jazz::tools::identity;
 use jazz::tools::test_support::AllowAll;
 use jazz::tools::{ColumnType, ObjectId, SchemaBuilder, TableSchema, Value};
-use jazz_server::{JazzServer, TEST_JWT_ISSUER};
-use jazz_testkit::{connect, enroll_test_context, wait_for_global_txs};
+use jazz_server::JazzServer;
+use jazz_testkit::{connect, wait_for_global_txs};
 
 #[tokio::test]
-async fn public_native_client_requires_enrollment_and_cannot_choose_another_account() {
+async fn a_relayed_guest_authors_as_its_founding_account_and_cannot_choose_another() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let schema = SchemaBuilder::new()
@@ -16,17 +17,23 @@ async fn public_native_client_requires_enrollment_and_cannot_choose_another_acco
             let server = JazzServer::start_with_schema(schema.clone())
                 .await
                 .expect("start test server");
-            let mut context = server.make_client_context_for_user(schema, "native-account-fixture");
-            context.backend_secret = None;
-            context.admin_secret = None;
-            assert!(
-                connect(context.clone()).await.is_err(),
-                "bare JWT must not register an account"
+            // The guest's own proof, relayed by the app's backend: the core
+            // founds the account its key derives and binds the proof to it.
+            let seed = [0x4e; 32];
+            let subject = identity::derive_user_id(&seed).to_string();
+            let mut context = server.make_client_context_for_user(schema, &subject);
+            context.jwt_token = Some(
+                identity::mint_jazz_self_signed_token(
+                    &seed,
+                    identity::LOCAL_FIRST_ISSUER,
+                    &server.app_id().to_string(),
+                    3600,
+                )
+                .expect("mint guest proof"),
             );
-            enroll_test_context(&mut context)
-                .await
-                .expect("explicit fixture enrollment");
-            let account = context.account_id.expect("registry assignment");
+            let account =
+                jazz::account_registry::local_first_account_id(*server.app_id().uuid(), &subject);
+            context.account_id = Some(account);
             let client = connect(context.clone())
                 .await
                 .expect("connect enrolled account");
@@ -54,8 +61,8 @@ async fn public_native_client_requires_enrollment_and_cannot_choose_another_acco
                             Value::Row {
                                 id: None,
                                 values: vec![
-                                    Value::Text(TEST_JWT_ISSUER.into()),
-                                    Value::Text("native-account-fixture".into()),
+                                    Value::Text(identity::LOCAL_FIRST_ISSUER.into()),
+                                    Value::Text(subject.clone()),
                                 ]
                             },
                         ]

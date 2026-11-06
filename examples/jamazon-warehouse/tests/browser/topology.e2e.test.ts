@@ -15,7 +15,9 @@ import {
 } from "../../../../packages/jazz-tools/tests/browser/topology-harness.js";
 import {
   getJazzServerInfo,
-  getJazzServerJwtForUser,
+  jazzAppUserUrl,
+  loginAtJazzAppUser,
+  startJazzApp,
 } from "../../../../packages/jazz-tools/tests/browser/testing-server.js";
 import permissions from "../../permissions.js";
 import { app } from "../../schema.js";
@@ -38,7 +40,7 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
     let nextOperator: Db;
     let ownerAccount: string;
     let nextOperatorAccount: string;
-    let ownerToken: string;
+    let ownerUrl: string;
     let ownerDbName: string;
     let warehouse: { id: string };
     let district: { id: string };
@@ -64,7 +66,7 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
             restart: async () => {
               await owner.shutdown();
               ctx.untrack(owner);
-              owner = await openClient(server, "owner-reopened", ownerToken, ownerDbName);
+              owner = await openClient(server, "owner-reopened", ownerUrl, ownerDbName);
             },
           },
           authorization: {
@@ -72,7 +74,7 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
               const outsider = await openClient(
                 server,
                 "outsider",
-                await getJazzServerJwtForUser("jamazon-outsider", undefined, server.appId),
+                await jazzAppUserUrl(server, "jamazon-outsider"),
               );
               await expect(
                 outsider
@@ -100,26 +102,27 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
           {
             name: "bootstrap the warehouse and its operational rows",
             run: async () => {
-              server = await getJazzServerInfo(uniqueDbName("jamazon-warehouse-topology"));
+              const core = await getJazzServerInfo(uniqueDbName("jamazon-warehouse-topology"));
               await deploy({
-                appId: server.appId,
-                serverUrl: server.serverUrl,
-                adminSecret: server.adminSecret,
+                appId: core.appId,
+                serverUrl: core.serverUrl,
+                adminSecret: core.adminSecret,
                 schema: app,
                 permissions,
               });
-              ownerToken = await getJazzServerJwtForUser("jamazon-owner", undefined, server.appId);
+              server = await startJazzApp(core, { schema: app, permissions });
+              ownerUrl = await jazzAppUserUrl(server, "jamazon-owner");
               ownerDbName = uniqueDbName("jamazon-owner-persistent");
-              owner = await openClient(server, "owner", ownerToken, ownerDbName);
+              owner = await openClient(server, "owner", ownerUrl, ownerDbName);
               observer = await openClient(
                 server,
                 "observer",
-                await getJazzServerJwtForUser("jamazon-observer", undefined, server.appId),
+                await jazzAppUserUrl(server, "jamazon-observer"),
               );
               nextOperator = await openClient(
                 server,
                 "next-operator",
-                await getJazzServerJwtForUser("jamazon-next-operator", undefined, server.appId),
+                await jazzAppUserUrl(server, "jamazon-next-operator"),
               );
               ownerAccount = accountFromDb(owner);
               nextOperatorAccount = accountFromDb(nextOperator);
@@ -637,17 +640,16 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
 async function openClient(
   server: { appId: string; serverUrl: string },
   label: string,
-  jwtToken: string,
+  userUrl: string,
   dbName = uniqueDbName(`jamazon-${label}`),
 ): Promise<Db> {
-  // Public clients sign in through a real account handle: the JWT is
-  // registered with the account registry once, and reopening logs it in again.
+  // Users sign in through the app's backend on their own origin; reopening
+  // signs in again there, to the same account.
   return ctx.track(
     await createBrowserTestDb({
       appId: server.appId,
-      serverUrl: server.serverUrl,
-      jwtToken,
-      registerJwt: true,
+      serverUrl: userUrl,
+      account: await loginAtJazzAppUser(server.appId, userUrl),
       driver: { type: "persistent", dbName },
     }),
   );
