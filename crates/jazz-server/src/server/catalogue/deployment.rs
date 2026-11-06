@@ -37,6 +37,7 @@ impl StoredCatalogue {
         Ok(DeploymentCatalogue {
             schemas: index.schemas.values().cloned().collect(),
             migrations: index.lenses.values().cloned().collect(),
+            admitted_schema_hashes: index.admitted.clone(),
         })
     }
 
@@ -175,6 +176,7 @@ mod tests {
                     schemas,
                     migrations,
                     permissions,
+                    allow_dropping_history: false,
                 },
             )
             .unwrap();
