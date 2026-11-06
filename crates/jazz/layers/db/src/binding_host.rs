@@ -716,7 +716,7 @@ impl Hooks {
 /// for the authority's verdict. One at `none` or `local` resolves once the
 /// write is committed here, so a refusal that arrives later (after an
 /// offline write reconnects) still goes to the mutation-error listener.
-pub fn wait_claims_rejection(write: &Write, tier: &str) -> bool {
+fn wait_claims_rejection(write: &Write, tier: &str) -> bool {
     write.rejected.is_some()
         || matches!(
             crate::binding_args::durability_tier(tier),
@@ -727,7 +727,7 @@ pub fn wait_claims_rejection(write: &Write, tier: &str) -> bool {
 /// A wait's `fate` that claims the write's rejection when it reports one
 /// itself: a non-durable replica's `local` wait, still open when the
 /// refusal arrives (one a relay answers), fails with it, so the listener is not told a second time.
-pub fn claiming(fate: HostFuture<()>, claimed: Rc<Cell<bool>>) -> HostFuture<()> {
+fn claiming(fate: HostFuture<()>, claimed: Rc<Cell<bool>>) -> HostFuture<()> {
     Box::pin(async move {
         let result = fate.await;
         if result.is_err() {
@@ -1517,17 +1517,33 @@ impl Binding {
     }
 
     /// Resolve once `write` reached `tier`; fail at once with its
-    /// rejection, if it was rejected.
-    pub fn wait_for_write(&self, write: &Write, tier: &str) -> HostResult<HostFuture<()>> {
+    /// rejection, if it was rejected. A wait given the write's `claim`
+    /// claims reporting its rejection whenever it reports it itself (see
+    /// [`wait_claims_rejection`] and [`claiming`]), so the mutation-error
+    /// listener is not told too; an observing wait passes `None`.
+    pub fn wait_for_write(
+        &self,
+        write: &Write,
+        tier: &str,
+        claim: Option<Rc<Cell<bool>>>,
+    ) -> HostResult<HostFuture<()>> {
         if self.node != write.node {
             return Err("write belongs to a different database node".into());
         }
-        if let Some(error) = &write.rejected {
+        let fate: HostFuture<()> = if let Some(error) = &write.rejected {
             binding_args::durability_tier(tier)?;
             let error = error.clone();
-            return Ok(Box::pin(async move { Err(HostError::Engine(error)) }));
+            Box::pin(async move { Err(HostError::Engine(error)) })
+        } else {
+            self.wait_for(write.seq, tier)?
+        };
+        let Some(claim) = claim else {
+            return Ok(fate);
+        };
+        if wait_claims_rejection(write, tier) {
+            claim.set(true);
         }
-        self.wait_for(write.seq, tier)
+        Ok(claiming(fate, claim))
     }
 
     /// Resolve once every local write so far reached the server. Local

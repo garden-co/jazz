@@ -1388,7 +1388,7 @@ fn a_tabs_remote_reads_and_global_waits_stay_pending_when_its_worker_has_no_serv
     let mut stream = tab.subscribe(&query, &remote, None, None).unwrap();
     still_pending(&links, pin!(tab.next_event(&mut stream)));
     let write = tab.insert("notes", &title("tab's"), &none()).unwrap();
-    let mut global = tab.wait_for_write(&write, "global").unwrap();
+    let mut global = tab.wait_for_write(&write, "global", None).unwrap();
     still_pending(&links, global.as_mut());
 
     let local = tab
@@ -1558,4 +1558,109 @@ fn a_remote_subscription_never_lists_pending_local_versions() {
         .unwrap();
     assert_eq!(rows_in(&drive(&links, read).unwrap()), 2);
     assert_eq!(titles(&server), ["changed", "pending"]);
+}
+
+/// A tab's `local` wait still open when its worker refuses the write
+/// fails with the refusal and claims it, so a listener the binding tells
+/// later (on its next task, unless claimed by then) hears it once, from
+/// the wait. The tab builds a second update on its first while the worker
+/// already knows the server refused the first: the worker refuses the
+/// second before storing it. The first, whose local wait resolved, stays
+/// unclaimed for the listener.
+#[test]
+fn a_tabs_local_wait_the_worker_refuses_claims_the_refusal() {
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+    // Notes may be inserted and read, never changed.
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("title", ColumnType::Text)
+                    .policies(
+                        jazz::tools::TablePolicies::new()
+                            .with_select(jazz::tools::PolicyExpr::True)
+                            .with_insert(jazz::tools::PolicyExpr::True),
+                    ),
+            )
+            .build(),
+    );
+    let open = |node: u8| {
+        let identity = identity(node);
+        let db = block_on(Db::open(DbConfig::new(schema.clone(), identity))).unwrap();
+        Binding::new(db, identity, false)
+    };
+    let server = {
+        let identity = DbIdentity {
+            node: NodeUuid::from_bytes([0xed; 16]),
+            author: AuthorSubject::SYSTEM,
+        };
+        let db = block_on(Db::open_history_complete(DbConfig::new(
+            schema.clone(),
+            identity,
+        )))
+        .unwrap();
+        Binding::new(db, identity, true)
+    };
+    let worker = open(0xe0);
+    worker.set_remote_link_hint("live").unwrap();
+    let up = worker.connect_upstream();
+    let down = server
+        .accept_subscriber(worker.author(), Default::default())
+        .unwrap();
+    let (tab, tab_up, tab_down) = tab_over(&worker, open(0xe1));
+    let told = Rc::new(RefCell::new(Vec::new()));
+    let heard = Rc::clone(&told);
+    *tab.hooks.rejected.borrow_mut() = Some(Box::new(move |tx_id, _, _, claim| {
+        heard
+            .borrow_mut()
+            .push((tx_id.clone(), claim.map(|claim| claim.get())));
+        true
+    }));
+    let server_link = [(&up, &down)];
+    let tab_link = [(&tab_up, &tab_down)];
+    let links = [(&up, &down), (&tab_up, &tab_down)];
+
+    let write = tab.insert("notes", &title("kept"), &none()).unwrap();
+    drive(&links, tab.wait_for(write.seq, "global").unwrap()).unwrap();
+    let row = *write.row_id.0.as_bytes();
+
+    // The first update reaches the worker: its local wait resolves.
+    let first = tab.update("notes", &row, &title("first"), &none()).unwrap();
+    let first_claim = Rc::new(Cell::new(false));
+    tab.hooks.track(&first, &first_claim);
+    let wait = tab
+        .wait_for_write(&first, "local", Some(Rc::clone(&first_claim)))
+        .unwrap();
+    drive(&tab_link, wait).unwrap();
+    // The second is built on it, its local wait open.
+    let second = tab
+        .update("notes", &row, &title("second"), &none())
+        .unwrap();
+    let second_claim = Rc::new(Cell::new(false));
+    tab.hooks.track(&second, &second_claim);
+    let mut wait = tab
+        .wait_for_write(&second, "local", Some(Rc::clone(&second_claim)))
+        .unwrap();
+    // The server refuses the first; only the worker hears it.
+    pump(&server_link);
+    // The worker refuses the second, and tells the tab of both.
+    let error = drive(&tab_link, wait.as_mut()).unwrap_err();
+    pump(&links);
+
+    assert!(
+        format!("{error:?}").contains("built on a write"),
+        "{error:?}"
+    );
+    assert!(
+        second_claim.get(),
+        "the wait that failed with the refusal claims it"
+    );
+    assert!(
+        !first_claim.get(),
+        "the refusal of the write whose wait resolved is the listener's"
+    );
+    let told = told.borrow();
+    assert!(told.iter().any(|(id, _)| *id == first.tx_id), "{told:?}");
+    assert_eq!(titles(&tab), ["kept"]);
 }
