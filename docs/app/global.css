@@ -841,44 +841,58 @@ h6 {
   fill: currentColor;
 }
 .home-carousel-tabs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--spacing-2);
-  margin-bottom: var(--spacing-6);
+  position: absolute;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  border: 1px solid var(--color-text-primary);
+  border-radius: 2px;
+  overflow: hidden;
+  /* Text in step with the diagram's 12-unit labels at any width. */
+  font-family: var(--font-family-code);
+  font-size: calc(12 / 560 * 100cqw);
 }
 .home-carousel-tab {
   display: inline-flex;
   align-items: center;
-  gap: var(--spacing-2);
-  padding: var(--spacing-2) var(--spacing-4);
-  border: 1px solid var(--color-border);
-  border-radius: 999px;
+  justify-content: center;
+  gap: 0.4em;
+  min-width: 0;
+  padding: 0 0.4em;
   background-color: var(--color-background-card);
   color: var(--color-text-secondary);
-  font-size: 0.9375rem;
-  font-weight: 500;
+  white-space: nowrap;
   transition:
     background-color 200ms,
-    border-color 200ms,
     color 200ms;
+}
+.home-carousel-tab:nth-child(odd) {
+  border-right: 1px solid var(--color-text-primary);
+}
+.home-carousel-tab:nth-child(-n + 2) {
+  border-bottom: 1px solid var(--color-text-primary);
 }
 .home-carousel-tab:hover {
   color: var(--color-text-primary);
-  border-color: var(--color-text-secondary);
 }
 .home-carousel-tab[aria-selected="true"] {
-  border-color: #146aff;
   background-color: #146aff;
   color: #fff;
 }
 .home-carousel-tab-icon {
-  width: 1rem;
-  height: 1rem;
+  width: 1.1em;
+  height: 1.1em;
   flex: none;
+}
+.home-carousel-soon {
+  font-size: 0.75em;
+  opacity: 0.8;
 }
 /* All slides share one grid cell, so the tallest sets the height and they
    cross-fade in place. */
 .home-carousel-slides {
+  position: relative;
+  container-type: inline-size;
   display: grid;
   /* The figure is drawn narrow for phones; cap it so it isn't huge on desktop. */
   max-width: 640px;
@@ -891,6 +905,10 @@ h6 {
 }
 .home-carousel-slide[data-active="true"] {
   opacity: 1;
+}
+/* Only the visible diagram takes the pointer (and text selection). */
+.home-carousel-slide:not([data-active="true"]) {
+  pointer-events: none;
 }
 @media (prefers-reduced-motion: reduce) {
   .home-carousel-slide {

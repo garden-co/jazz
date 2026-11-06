@@ -2,8 +2,9 @@
 
 import { Cloud, Server } from "lucide-react";
 import { siCloudflare, siVercel } from "simple-icons";
-import { useEffect, useRef, useState } from "react";
+import { type CSSProperties, useEffect, useRef, useState } from "react";
 import {
+  DEPLOYMENT_LAYOUT,
   DeploymentDiagram,
   deploymentScenarioNames,
   type DeploymentScenario,
@@ -11,6 +12,23 @@ import {
 
 const scenarios: DeploymentScenario[] = ["vercel", "cloudflare", "aws", "server"];
 const INTERVAL_MS = 4500;
+const shortNames: Record<DeploymentScenario, string> = {
+  vercel: "Vercel",
+  cloudflare: "Cloudflare",
+  aws: "AWS",
+  server: "Server",
+};
+
+// Place the switcher over its space in the diagram, in percentages of the
+// diagram, so it scales with it.
+const { width, height, switcher } = DEPLOYMENT_LAYOUT;
+const stageStyle: CSSProperties = { aspectRatio: `${width} / ${height}` };
+const switcherStyle: CSSProperties = {
+  left: `${(switcher.x / width) * 100}%`,
+  top: `${(switcher.y / height) * 100}%`,
+  width: `${(switcher.w / width) * 100}%`,
+  height: `${(switcher.h / height) * 100}%`,
+};
 
 /**
  * Fig. 1: the same app deployed four ways, cross-fading from one to the next.
@@ -53,26 +71,7 @@ export function DeploymentCarousel() {
       onFocus={() => setPaused(true)}
       onBlur={() => setPaused(false)}
     >
-      <div className="home-carousel-tabs" role="tablist" aria-label="Where Jazz runs">
-        {scenarios.map((scenario, index) => (
-          <button
-            key={scenario}
-            type="button"
-            role="tab"
-            aria-selected={index === active}
-            aria-controls={`deployment-${scenario}`}
-            className="home-carousel-tab"
-            onClick={() => {
-              setActive(index);
-              setPicked(true);
-            }}
-          >
-            <ScenarioIcon scenario={scenario} />
-            {deploymentScenarioNames[scenario]}
-          </button>
-        ))}
-      </div>
-      <div className="home-carousel-slides">
+      <div className="home-carousel-slides" style={stageStyle}>
         {scenarios.map((scenario, index) => (
           <div
             key={scenario}
@@ -85,6 +84,34 @@ export function DeploymentCarousel() {
             <DeploymentDiagram scenario={scenario} />
           </div>
         ))}
+        {/* The switcher sits in the space the diagram leaves for it, under
+            "Your own:", and stays put while the diagrams cross-fade. */}
+        <div
+          className="home-carousel-tabs"
+          role="tablist"
+          aria-label="Where Jazz runs"
+          style={switcherStyle}
+        >
+          {scenarios.map((scenario, index) => (
+            <button
+              key={scenario}
+              type="button"
+              role="tab"
+              aria-selected={index === active}
+              aria-controls={`deployment-${scenario}`}
+              aria-label={deploymentScenarioNames[scenario]}
+              className="home-carousel-tab"
+              onClick={() => {
+                setActive(index);
+                setPicked(true);
+              }}
+            >
+              <ScenarioIcon scenario={scenario} />
+              {shortNames[scenario]}
+              {scenario === "cloudflare" ? <span className="home-carousel-soon">soon</span> : null}
+            </button>
+          ))}
+        </div>
       </div>
     </div>
   );
