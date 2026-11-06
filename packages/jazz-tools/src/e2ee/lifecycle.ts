@@ -45,7 +45,7 @@ import { groupSchema, type GroupMember, type GroupTables } from "./groups.js";
 import { Spaces } from "./space-lifecycle.js";
 import type { SpaceDataPreparation, SpaceRecoveryPath } from "./space-lifecycle.js";
 import { spaceSchema, type SpaceTables, type SpaceRoot } from "./spaces.js";
-import type { CellCipher, DeviceSigner, JazzCrypto, KeyEnvelope } from "./types.js";
+import type { CellCipher, DeviceSigner, EqualityIndex, JazzCrypto, KeyEnvelope } from "./types.js";
 
 export type E2eeConfig = {
   /** Application returned by defineApp; encrypted apps include managed bindings automatically. */
@@ -64,6 +64,14 @@ export type DeviceInfo = Readonly<{
   mechanism: CryptoMechanism;
 }>;
 
+const equalityCrypto = new WeakMap<Db, () => Promise<EqualityIndex>>();
+
+/** @internal Index adapters never decide what a candidate is allowed to match. */
+export async function equalityCryptoForDb(db: Db): Promise<EqualityIndex> {
+  e2eeForDb(db);
+  return equalityCrypto.get(db)!();
+}
+
 const contexts = new WeakMap<Db, E2ee>();
 const startupPreparers = new WeakMap<Db, () => Promise<void>>();
 
@@ -71,6 +79,14 @@ const startupPreparers = new WeakMap<Db, () => Promise<void>>();
 export async function prepareE2eeStartup(db: Db): Promise<void> {
   const schema = configuredSchemas.get(db);
   if (schema && encryptedSchemas.has(schema)) await startupPreparers.get(db)!();
+}
+
+const configuredAccounts = new WeakMap<Db, string>();
+
+/** @internal Dependency observation follows the caller, not the space author. */
+export function e2eeAccountForDb(db: Db): string {
+  e2eeForDb(db);
+  return configuredAccounts.get(db)!;
 }
 const cellCrypto = new WeakMap<Db, () => Promise<{ cipher: CellCipher; application: string }>>();
 
@@ -248,7 +264,23 @@ export function registerInitialSpaceAuthority(
       {
         ...scope,
         async readAccepted(query) {
-          const result = await scope.readAccepted(query);
+          let result;
+          try {
+            result = await scope.readAccepted(query);
+          } catch (error) {
+            // Preserve the actual authority refusal and its type; add the public
+            // prewrite contract rather than retrying in a different transaction.
+            if (
+              error instanceof Error &&
+              error.message.includes("accepted reads cannot substitute already staged content")
+            ) {
+              error.message +=
+                "; declare the encrypted scope before the first write with " +
+                "tx.prepareEncryptedScope(scopeTable, { initialRecipients: recipients }); " +
+                "use the same recipients for the scope insert/upsert (omit for creator default)";
+            }
+            throw error;
+          }
           scope.assertActive();
           let queries = memo.get(query._schema);
           if (!queries) memo.set(query._schema, (queries = new Map()));
@@ -377,6 +409,7 @@ export type RecoveryStatus = Readonly<{
 /** @internal Only verified account-context creation binds lifecycle state. */
 export function attachE2ee(db: Db, account: AccountHandle, config: E2eeConfig, env: string): void {
   contexts.set(db, new E2ee(db, account, config, env));
+  configuredAccounts.set(db, account.id);
 }
 
 /** @internal Schema objects never own account keys or lifecycle state. */
@@ -822,6 +855,16 @@ export class E2ee {
       this.preparation = undefined;
     });
     let cellCipher: Promise<CellCipher> | undefined;
+    let equalityIndex: Promise<EqualityIndex> | undefined;
+    equalityCrypto.set(db, async () => {
+      this.assertOpen();
+      equalityIndex ??= this.config.crypto?.equalityIndex
+        ? Promise.resolve(this.config.crypto.equalityIndex)
+        : import("./browser.js").then((module) => module.createBrowserEqualityIndex());
+      const index = await equalityIndex;
+      this.assertOpen();
+      return index;
+    });
     cellCrypto.set(db, async () => {
       this.assertOpen();
       cellCipher ??= this.config.crypto?.cellCipher

@@ -1,4 +1,4 @@
-import type { EncryptionDeclaration } from "./e2ee/encrypted-schema.js";
+import { equalityIndexColumn, type EncryptionDeclaration } from "./e2ee/encrypted-schema.js";
 import {
   assertRelationshipDeclaration,
   type Relationships,
@@ -40,6 +40,7 @@ export class DefinedTable<
   encrypted(options: {
     space: StoredColumnKeys<TColumns>;
     columns?: readonly StoredColumnKeys<TColumns>[];
+    indexes?: Partial<Record<StoredColumnKeys<TColumns>, "equality">>;
   }): DefinedTable<TColumns, TRelations, EncryptionDeclaration> {
     const referenceColumns = new Set<string>();
     for (const relation of Object.values(this.relations)) {
@@ -75,8 +76,22 @@ export class DefinedTable<
       spaceBuilder && !isComputedColumn(spaceBuilder)
         ? spaceBuilder._build(options.space)
         : undefined;
-    if (Object.hasOwn(options, "indexes"))
-      throw new Error("Encrypted equality indexes are not supported yet");
+    if (
+      options.indexes !== undefined &&
+      (options.indexes === null ||
+        typeof options.indexes !== "object" ||
+        Array.isArray(options.indexes))
+    )
+      throw new Error("Encrypted indexes must map column names to equality");
+    const indexes: Record<string, "equality"> = Object.create(null);
+    for (const [name, mode] of Object.entries(options.indexes ?? {})) {
+      if (!selected.some((column) => column === name))
+        throw new Error(`Index column "${name}" must be encrypted`);
+      if (mode !== "equality") throw new Error(`Encrypted index "${name}" only supports equality`);
+      indexes[name] = mode;
+      if (Object.hasOwn(this.columns, equalityIndexColumn(name)))
+        throw new Error(`Column "${equalityIndexColumn(name)}" conflicts with an encrypted index`);
+    }
     if (
       !referenceColumns.has(options.space) ||
       !space ||
@@ -93,6 +108,7 @@ export class DefinedTable<
       {
         space: options.space,
         columns: [...new Set(selected)],
+        indexes,
       },
     );
   }
