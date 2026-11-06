@@ -3542,14 +3542,21 @@ export class Db {
           // instance), read it through the caller's session and stage again;
           // later writes wait behind this one, so their order holds.
           if (nativeCoreErrorCode(error) !== "not_observed") throw error;
-          return loadRow(client, table, id, context?.readSession, normalized?.branch).then(
-            (rows) => {
-              // As the authority answers: a missing row and one the session
-              // may not read are refused alike, with the denial's code.
-              if (rows.length === 0) throw unreadableTargetError("Update", table._table);
+          // The read's row count is not the answer: this replica may filter
+          // out a row it now holds, lacking the rows that grant the session
+          // access, and only the authority decides whether the session may
+          // write it. Stage again whatever came back.
+          return loadRow(client, table, id, context?.readSession, normalized?.branch).then(() => {
+            try {
               return submit(record);
-            },
-          );
+            } catch (retryError) {
+              // Still not held: the server sent no row, so it does not exist
+              // or the session may not read it, and the two are refused alike,
+              // with the denial's code, as the authority answers.
+              if (nativeCoreErrorCode(retryError) !== "not_observed") throw retryError;
+              throw unreadableTargetError("Update", table._table);
+            }
+          });
         }
       }
       const transaction = client.beginTransaction(
