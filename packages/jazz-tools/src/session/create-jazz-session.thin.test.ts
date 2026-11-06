@@ -290,6 +290,23 @@ describe("browser session", () => {
     expect((await read)?.text).toBe("mine");
   }, 60_000);
 
+  it("answers a read made while the server is down from the local-first Db once the upgrade goes ahead", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const kept = db(session);
+    await kept.insert(app.notes, { text: "mine" }).wait({ tier: "global" });
+    await server.stop();
+    await expect
+      .poll(() => kept.getSyncStatus().link.state, { timeout: 5_000 })
+      .not.toBe("connected");
+    // Never sent: it waits for a connection, which the upgrade ends. The
+    // local-first Db answers from what it has, as it would offline.
+    const read = kept.all(app.notes, { tier: "local-first" });
+    await kept.upgradeToLocalFirst(loadLocalFirst);
+    expect(isThinDb(kept)).toBe(false);
+    await expect(read).resolves.toBeInstanceOf(Array);
+  }, 60_000);
+
   it("keeps a read's own error after the upgrade instead of asking the local-first Db again", async () => {
     const server = await startServer();
     const session = await open(server, memoryStore());

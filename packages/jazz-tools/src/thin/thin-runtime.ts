@@ -331,11 +331,13 @@ export class ThinRuntime implements Runtime {
     this.closed = true;
     this.wanted = false;
     this.stop();
-    this.dropConnection(
-      new ThinConnectionLostError("the thin runtime is closed", {
-        cause: new RuntimeClosedError("the thin runtime is closed"),
-      }),
-    );
+    const closed = new ThinConnectionLostError("the thin runtime is closed", {
+      cause: new RuntimeClosedError("the thin runtime is closed"),
+    });
+    this.dropConnection(closed);
+    // Nothing connects again: a request not sent yet ends too, so a read the
+    // app made while the server was down asks the Db's successor instead.
+    this.endWaitingRequests(closed);
     for (const live of this.liveQueries.values()) live.callback = undefined;
     this.liveQueries.clear();
   }
@@ -442,10 +444,10 @@ export class ThinRuntime implements Runtime {
       return;
     }
     if (error.retry === "never") {
-      // Stopped for good, as `fatal`: only an explicit connect starts over.
-      this.wanted = false;
-      this.stopped = true;
-      this.clearOutage();
+      // Stopped for good, as `fatal`: only an explicit connect starts over,
+      // and requests waiting for a connection end now.
+      this.fatal(lostError);
+      return;
     }
     this.dropConnection(lostError, this.wanted && !this.closed);
     // An attempt that fails past the window reports the outage.
@@ -468,7 +470,12 @@ export class ThinRuntime implements Runtime {
   /** Close the connection; requests already sent fail with `error`, live queries reopen later.
    * With `resend`, a write under a `writeKey` the connection left unanswered
    * waits for the next connection instead, and goes out again in order. */
-  private dropConnection(error: Error | undefined, resend = false): void {
+  private dropConnection(
+    error: Error | undefined,
+    resend = false,
+    /** What a sent write ends with, when not `error`: it may have committed. */
+    sentWriteError: Error | undefined = error,
+  ): void {
     clearTimeout(this.reconnectTimer);
     const carrier = this.carrier;
     this.carrier = undefined;
@@ -509,7 +516,7 @@ export class ThinRuntime implements Runtime {
         continue;
       }
       this.oneShots.delete(id);
-      if (error) oneShot.reject(error);
+      if (error) oneShot.reject(oneShot.write ? (sentWriteError ?? error) : error);
       // A sent write is never sent again after an explicit disconnect: it may
       // have committed, so it ends with its fate unknown. (A sent read is
       // dropped unanswered, as before.)
@@ -521,13 +528,24 @@ export class ThinRuntime implements Runtime {
     this.wanted = false;
     this.failure = error;
     this.stop();
-    this.dropConnection(error);
+    // A write the server may have taken ends with its fate unknown, not as
+    // the server's rejection of it.
+    this.dropConnection(error, false, unknownOutcome(error));
     // Requests not sent yet would wait for a connection that never comes.
+    this.endWaitingRequests(error);
+    for (const live of this.liveQueries.values()) live.callback?.(error);
+  }
+
+  /**
+   * End every request still waiting for a connection with `error`. A write
+   * sent once and waiting to go out again may have committed: it ends with
+   * its fate unknown.
+   */
+  private endWaitingRequests(error: Error): void {
     for (const [id, oneShot] of this.oneShots) {
       this.oneShots.delete(id);
-      oneShot.reject(error);
+      oneShot.reject(oneShot.resending ? unknownOutcome(error) : error);
     }
-    for (const live of this.liveQueries.values()) live.callback?.(error);
   }
 
   // ---- requests ---------------------------------------------------------
@@ -1402,4 +1420,14 @@ function tooLarge(op: string, bytes: number): ThinRemoteError {
     `this ${op} is ${bytes} bytes, more than the ${MAX_THIN_MESSAGE_BYTES} a thin client ` +
       `sends in one request: write values that large with insertStreaming or updateStreaming`,
   );
+}
+
+/** The error for a write that may have committed before `cause` ended it. */
+function unknownOutcome(cause: Error): ThinConnectionLostError {
+  return cause instanceof ThinConnectionLostError
+    ? cause
+    : new ThinConnectionLostError(
+        `the connection ended before the server answered: ${cause.message}`,
+        { cause },
+      );
 }

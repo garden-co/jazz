@@ -514,6 +514,80 @@ describe("thin client", () => {
     expect(db.getSyncStatus().link).toMatchObject({ state: "offline", reason: "stopped" });
   }, 60_000);
 
+  it("ends requests never sent when it closes, so none of them hangs", async () => {
+    const server = await startServer();
+    const db = await thinDb(server);
+    await db.insert(app.notes, { text: "first", done: false }).wait({ tier: "global" });
+    const runtime = db.currentRuntime() as ThinRuntime;
+    await server.stop();
+    await expect
+      .poll(() => db.getSyncStatus().link.state, { timeout: 5_000 })
+      .not.toBe("connected");
+
+    // Made while the server is down: they wait for a connection.
+    const read = db.all(app.notes);
+    const write = db.insert(app.notes, { text: "unsent", done: false });
+    const waiting = (runtime as unknown as { oneShots: Map<number, unknown> }).oneShots;
+    await expect.poll(() => waiting.size).toBe(2);
+    runtime.close();
+    const readError = await read.catch((error: unknown) => error);
+    // What lets the Db ask its successor (see `Db.all`).
+    expect(causes(readError)).toContain("RuntimeClosedError");
+    await expect(write.wait({ tier: "global" })).rejects.toThrow();
+  }, 60_000);
+
+  it("ends a write waiting to go out again with its fate unknown when the runtime stops for good", async () => {
+    const server = await startServer();
+    const db = await thinDb(server);
+    await db.insert(app.notes, { text: "first", done: false }).wait({ tier: "global" });
+    const runtime = db.currentRuntime() as ThinRuntime;
+    const internals = runtime as unknown as {
+      carrier: unknown;
+      receive(carrier: unknown, piece: Uint8Array): void;
+      lost(carrier: unknown, error: { code: string; retry: string; message: string }): void;
+      fatal(error: Error): void;
+    };
+    // The write is sent, and its answer is lost with the connection: it waits
+    // to go out again. Then the server refuses the next connection for good.
+    const receive = internals.receive.bind(runtime);
+    let dropped = false;
+    internals.receive = (carrier, piece) => {
+      if (!dropped && isThinResponse(piece) && decodeThinResponse(piece).body.type === "written") {
+        dropped = true;
+        internals.lost(carrier, { code: "websocket_closed", retry: "later", message: "lost" });
+        internals.fatal(Object.assign(new Error("not deployed"), { name: "ThinRemoteError" }));
+        return;
+      }
+      receive(carrier, piece);
+    };
+    const write = db.insert(app.notes, { text: "in flight", done: false });
+    const error = await write.wait({ tier: "global" }).catch((cause: unknown) => cause);
+    expect(dropped).toBe(true);
+    // It may have committed: its fate is unknown, not the server's rejection.
+    expect(error).toMatchObject({
+      name: "ThinConnectionLostError",
+      cause: { name: "ThinRemoteError" },
+    });
+  }, 60_000);
+
+  it("ends requests waiting for a connection on an error that never retries", async () => {
+    const server = await startServer();
+    const db = await thinDb(server);
+    await db.insert(app.notes, { text: "first", done: false }).wait({ tier: "global" });
+    const runtime = db.currentRuntime() as ThinRuntime;
+    const internals = runtime as unknown as {
+      carrier: unknown;
+      lost(carrier: unknown, error: { code: string; retry: string; message: string }): void;
+    };
+    await db.disconnect();
+    const read = db.all(app.notes);
+    // The connection that would send it ends with a terminal error.
+    await db.reconnect().catch(() => {});
+    internals.lost(internals.carrier, { code: "gone", retry: "never", message: "for good" });
+    await expect(read).rejects.toThrow(/for good/);
+    expect(db.getSyncStatus().link).toMatchObject({ state: "offline", reason: "stopped" });
+  }, 60_000);
+
   it("fails a transaction its connection took with it, and nothing else", async () => {
     const server = await startServer();
     const db = await thinDb(server);
@@ -656,4 +730,11 @@ function reconnect(db: Db): void {
   const runtime = db.currentRuntime();
   if (!(runtime instanceof ThinRuntime)) throw new Error("not a thin Db");
   runtime.updateAuth((runtime as unknown as { authJson: string }).authJson);
+}
+
+/** The names along an error's cause chain. */
+function causes(error: unknown): string[] {
+  const names: string[] = [];
+  for (let at = error; at instanceof Error; at = at.cause) names.push(at.name);
+  return names;
 }
