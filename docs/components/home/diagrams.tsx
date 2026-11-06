@@ -500,10 +500,9 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
   // stays where it is in the other variants.
   const single = scenario === "server";
   const backendTop = single ? shardRow.y : backend.y;
-  const local = { y: 134, h: 44, sqlite: { x: 224, w: 124 }, files: { x: 364, w: 124 } };
+  const local = { y: 98, h: 76, sqlite: { x: 224, w: 124 }, files: { x: 364, w: 124 } };
   return (
     <Diagram viewBox={`0 0 ${W} ${H}`} label={label}>
-      <rect x={4} y={4} width={W - 8} height={340} rx={4} className="dg-cloud" />
       <Label x={switcher.x} y={22} tone="ink">
         Your own cloud:
       </Label>
@@ -517,8 +516,20 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
       />
       {single ? (
         <g>
-          <Box {...local.sqlite} y={local.y} h={local.h} tone="blue" title="local SQLite" center />
-          <Box {...local.files} y={local.y} h={local.h} tone="blue" title="local files" center />
+          <Nested
+            {...local.sqlite}
+            y={local.y}
+            h={local.h}
+            title={["local SQLite"]}
+            inner={["jazz SQLite", "shard"]}
+          />
+          <Nested
+            {...local.files}
+            y={local.y}
+            h={local.h}
+            title={["local files"]}
+            inner={LARGE_VALUES}
+          />
           {[local.sqlite, local.files].map((box) => (
             <Wire
               key={box.x}

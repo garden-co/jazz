@@ -340,11 +340,6 @@ h6 {
   fill: none;
   stroke-width: 2.5;
 }
-.home-diagram .dg-cloud {
-  fill: var(--color-text-primary);
-  fill-opacity: 0.03;
-  stroke: none;
-}
 .home-diagram .dg-region {
   fill: none;
   stroke: var(--color-text-secondary);
