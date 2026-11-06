@@ -14,5 +14,8 @@ later without changing app code.
 | Wasm and workers | none                                              | a Wasm engine in a shared worker                                |
 | Setup            | nothing beyond `JazzProvider`                     | a `client` loader and a few bundler lines                       |
 
+Both need React 19 or later for the React bindings (`jazz-tools` declares `react >=19`, so npm
+refuses to install it next to React 18).
+
 Pick the thin client by default. Pick local-first when users need instant UI on every change, work
 offline, or keep large working sets that should not round-trip on every read.

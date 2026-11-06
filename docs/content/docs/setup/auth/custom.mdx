@@ -193,8 +193,13 @@ When the guest signs up, call `linkWithBackend()` in your sign-up handler:
 
 ```ts
 await yourAuth.signUp(email, password); // sets your session cookie
-await jazz.linkWithBackend();
+// Only a device with a guest has something to link.
+if (jazz.getSnapshot().status === "ready") await jazz.linkWithBackend();
+else await jazz.reauthenticate();
 ```
+
+Without a guest on this device, `linkWithBackend()` rejects with "Linking requires a logged-in
+account"; `reauthenticate()` signs the new user in instead.
 
 The guest proves itself with its own local-first key; your backend checks that the user
 `authenticate` names has no Jazz account yet and links the two. From then on, signing in as that

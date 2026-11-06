@@ -34,7 +34,7 @@ after the first load:
       ../examples/docs/todo-client-localfirst-ts/src/auth-snippets.ts#auth-localfirst-ts
     </include>
 
-    The background upgrade to the local-first client keeps the same `Db`: its live queries, listeners and writes carry on. `db.isLocalFirst()` tells whether it has happened yet, and `await db.upgradeToLocalFirst(loader)` waits for it. If the app took the `Db` offline with `disconnect()`, it stays offline. In the browser, a local-first `Db` is offline for every tab of the app, so at the upgrade that also takes the app's other local-first tabs offline. Signing in, signing out and switching accounts do give the session a new `Db`. The old one then ends its live queries with a `DbReplacedError` and throws it on writes. Follow the session to pick up the new one, and read the current `Db` for each write:
+    The background upgrade to the local-first client keeps the same `Db`: its live queries, listeners and writes carry on. `db.isLocalFirst()` tells whether it has happened yet, and `await db.upgradeToLocalFirst(loader)` waits for it. If the app took the `Db` offline with `disconnect()`, it stays offline. In the browser, a local-first `Db` is offline for every tab of the app, so at the upgrade that also takes the app's other local-first tabs offline. Signing in, signing out and switching accounts do give the session a new `Db`. The old one then ends its live queries with a `DbReplacedError` (from `"jazz-tools"`) and throws it on writes. Follow the session to pick up the new one, and read the current `Db` for each write:
 
     <include cwd lang="ts" meta='title="app.ts"'>
       ../examples/docs/todo-client-localfirst-ts/src/main.ts#follow-session-ts
@@ -84,8 +84,8 @@ The local-first client also takes:
 
 ## Local storage
 
-By default the replica lives in IndexedDB: one IndexedDB database (`jazz-idb`) for the origin,
-holding a separate SQLite file per endpoint and account, so two users on the same browser never
+By default the replica lives in IndexedDB, kept apart per endpoint and account (`jazz-idb`, plus one
+database per account named with its URL-encoded account id), so two users on the same browser never
 share data. `driver: { type: "memory" }` keeps it in memory only, and it is
 gone when the tab closes. `await db.deleteClientStorage()` clears the current one; see
 [Resetting browser storage](/docs/setup/auth/backend#resetting-browser-storage).
@@ -95,7 +95,8 @@ What stays on the device:
 - Signing out closes the account's client but keeps its local data, synced rows included, for that
   user's next sign-in, and the remembered user (account, identity and claims, never a credential)
   stays in `localStorage`. On shared devices, pass `clearOnSignOut: true`; see the
-  [shared device checklist](/docs/setup/auth/backend#shared-devices).
+  [shared device checklist](/docs/setup/auth/backend#shared-devices). It wipes the account's data,
+  but the empty per-account database and the list of account ids on this device remain.
 - Your schema, including tables a user can't read, ships in the app bundle. Permissions decide
   which rows a user can read, not which tables they can see exist.
 
@@ -150,7 +151,9 @@ module (`jazz-napi`) on the server. Tell your bundler to leave them alone:
     });
     ```
 
-    This is the same for React, Vue, Svelte, Solid and SvelteKit. With pnpm, also add `jazz-wasm` as a
+    It needs Vite 6 or later: Vite 5 answers the local-first chunk with a 500, "Vite is unable to
+    parse the worker options as the value is not static". This is the same for React, Vue, Svelte,
+    Solid and SvelteKit. With pnpm, also add `jazz-wasm` as a
     direct dependency of your app so its strict layout resolves it.
 
     SvelteKit also needs `ssr: { external: ["jazz-napi"] }` in the same config, because its server
