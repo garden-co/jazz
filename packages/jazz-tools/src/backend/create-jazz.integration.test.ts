@@ -8,7 +8,11 @@ import {
   type IncomingMessage,
   type Server,
 } from "node:http";
-import type { Http2SecureServer, Http2Server } from "node:http2";
+import {
+  createServer as createHttp2Server,
+  type Http2SecureServer,
+  type Http2Server,
+} from "node:http2";
 import { createRequire } from "node:module";
 import type { AddressInfo, Socket } from "node:net";
 import { tmpdir } from "node:os";
@@ -1853,7 +1857,9 @@ describe("createJazz", () => {
   it("closes the connections its routes are asked on once it has closed", async () => {
     const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
     const viaFetch = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
-    // One host mounts nodeHandler, the other a Fetch handler (Next's route handlers).
+    // One host mounts nodeHandler, the other a Fetch handler (Next's route
+    // handlers). That Next passes the header on, and so lets `next start`
+    // stop, was checked by hand against a real `next start` (#4900).
     const servers = [
       createServer((req, res) => jazz.nodeHandler(req, res)),
       createServer(async (req, res) => {
@@ -1864,6 +1870,7 @@ describe("createJazz", () => {
         res.end(Buffer.from(await response.arrayBuffer()));
       }),
     ];
+    await jazz.attach(servers[0]!);
     for (const server of servers) {
       await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
       cleanups.push(
@@ -1898,6 +1905,30 @@ describe("createJazz", () => {
       );
       expect(answer).toEqual({ status: 503, connection: "close" });
     }
+    // A socket asked for after the close is refused the same way.
+    const socketAnswer = await new Promise<{ status?: number; connection?: string }>(
+      (resolve, reject) => {
+        const req = httpRequest({
+          host: "127.0.0.1",
+          port: (servers[0]!.address() as AddressInfo).port,
+          path: "/jazz/apps/a1/ws",
+          headers: {
+            connection: "Upgrade",
+            upgrade: "websocket",
+            "sec-websocket-version": "13",
+            "sec-websocket-key": randomBytesBase64(),
+          },
+        });
+        req.on("response", (res) => {
+          res.resume();
+          resolve({ status: res.statusCode, connection: res.headers.connection });
+        });
+        req.on("upgrade", () => resolve({ status: 101 }));
+        req.on("error", reject);
+        req.end();
+      },
+    );
+    expect(socketAnswer).toEqual({ status: 503, connection: "close" });
     // A closed Jazz answering 503 is how shutdown goes, not an error to log.
     expect(errors).not.toHaveBeenCalled();
   });
@@ -1938,7 +1969,35 @@ describe("createJazz", () => {
       req.end();
     });
     expect(others).toEqual(["/_next/webpack-hmr"]);
+    // So does one only looking like Jazz's, and a malformed one doesn't
+    // take the process down.
+    const upgrade = (path: string) =>
+      new Promise<void>((resolve) => {
+        const req = httpRequest({
+          host: "127.0.0.1",
+          port: (server.address() as AddressInfo).port,
+          path,
+          headers: { connection: "Upgrade", upgrade: "websocket" },
+        });
+        req.on("error", () => resolve());
+        req.on("close", () => resolve());
+        req.end();
+      });
+    await upgrade("/jazz/apps/a/b/ws");
+    await upgrade("http://[/jazz/apps/a/ws");
+    expect(others).toEqual(["/_next/webpack-hmr", "/jazz/apps/a/b/ws", "http://[/jazz/apps/a/ws"]);
+    // Attaching again changes nothing.
+    await jazz.attach(server);
+    await upgrade("/_next/again");
+    expect(others.at(-1)).toBe("/_next/again");
   }, 30_000);
+
+  it("refuses to attach to an HTTP/2 server, which has no WebSocket upgrades", async () => {
+    const jazz = createJazz({ app, permissions, store: memory(), authenticate });
+    cleanups.push(() => jazz.close());
+    const h2 = createHttp2Server();
+    await expect(jazz.attach(h2)).rejects.toThrow(/an HTTP\/2 server has no WebSocket upgrades/);
+  });
 
   it("attaches with its remote core down at start, names the core, and serves once it is up", async () => {
     const appId = randomUUID();
@@ -1972,10 +2031,17 @@ describe("createJazz", () => {
     await jazz.attach(server);
     const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 
-    // Jazz routes answer 503, naming the core, instead of a bare 500.
+    // Jazz routes answer 503 instead of a bare 500. The log names the core;
+    // the client isn't told internal addresses.
     const signIn = await fetch(`${origin}/jazz/auth/sign-in`, { method: "POST" });
     expect(signIn.status).toBe(503);
-    expect(await signIn.text()).toContain(`could not reach the Jazz core at ${coreUrl}`);
+    expect(Number(signIn.headers.get("retry-after"))).toBeGreaterThanOrEqual(1);
+    const body = await signIn.text();
+    expect(body).toBe("Jazz is unavailable; try again shortly");
+    expect(body).not.toContain(coreUrl);
+    expect(errors.mock.calls.flat().map(String).join(" ")).toContain(
+      `could not reach the Jazz core at ${coreUrl}`,
+    );
     // So does a socket.
     const upgraded = await new Promise<number | undefined>((resolve, reject) => {
       const req = httpRequest(`${origin}/jazz/apps/${appId}/ws`, {
