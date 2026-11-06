@@ -49,9 +49,10 @@ describe.runIf(chromium)("IndexedDB storage quota", () => {
 
       // Close while still full, then reopen with room again: the store is
       // whole and holds every write that was reported saved, and writes are
-      // saved again. (Opening records a node lease, so an open with no room
-      // at all is refused with code "storage"; the page store's unit tests
-      // cover that, as a cap set now would not reliably reach IndexedDB.)
+      // saved again. Reopening while still full isn't tested here: a cap set
+      // now would not reliably reach IndexedDB. (Opening writes a node lease;
+      // the page store's unit tests cover that write failing for lack of
+      // space, on an open store.)
       await shutdownDbAndWorker(db).catch(() => untrack(db));
       await quota.overrideStorageQuota(origin, null);
       db = track(await createDb(config));

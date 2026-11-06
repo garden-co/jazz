@@ -156,16 +156,17 @@ export class IndexedDbStorageInvalidatedError extends Error {
  */
 export class IndexedDbStorageFullError extends Error {
   readonly code = "storage";
-  constructor() {
+  constructor(cause: unknown) {
     super(
       "browser storage: could not write to IndexedDB (QuotaExceededError); the browser may be out of storage space for this site",
+      { cause },
     );
     this.name = "IndexedDbStorageFullError";
   }
 }
 
 function indexedDbFailure(error: DOMException | null, fallback: string): Error {
-  if (error?.name === "QuotaExceededError") return new IndexedDbStorageFullError();
+  if (error?.name === "QuotaExceededError") return new IndexedDbStorageFullError(error);
   return error ?? new Error(fallback);
 }
 
@@ -916,7 +917,13 @@ function transactionDone(tx: IDBTransaction): Promise<void> {
   return new Promise((resolve, reject) => {
     tx.oncomplete = () => resolve();
     tx.onabort = () => reject(indexedDbFailure(tx.error, "IndexedDB transaction aborted"));
-    tx.onerror = () => reject(indexedDbFailure(tx.error, "IndexedDB transaction failed"));
+    // A failed request reaches the transaction before the transaction
+    // records the error (while an abort records it first), so fall back to
+    // the request's own.
+    tx.onerror = (event) => {
+      const request = event.target === tx ? null : (event.target as IDBRequest | null);
+      reject(indexedDbFailure(tx.error ?? request?.error ?? null, "IndexedDB transaction failed"));
+    };
   });
 }
 

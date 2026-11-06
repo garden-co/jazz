@@ -563,7 +563,7 @@ describe("IndexedDbPageStore", () => {
     store.close();
   });
 
-  it("reports a lease write refused for lack of space as a storage failure", async () => {
+  it("reports a commit the browser refuses for lack of space as a storage failure", async () => {
     const name = databaseName();
     const store = await IndexedDbPageStore.open(name);
     // As a browser does when the origin is over its quota: the transaction
@@ -588,6 +588,36 @@ describe("IndexedDbPageStore", () => {
       IDBObjectStore.prototype.put = put;
     }
     // With room again, leasing works.
+    const lease = await store.acquireForegroundNodeLease();
+    await store.retireForegroundNodeLease(lease.leaseId);
+    store.close();
+  });
+
+  it("reports a put the browser refuses for lack of space as a storage failure", async () => {
+    const name = databaseName();
+    const store = await IndexedDbPageStore.open(name);
+    // As a browser may: the put request itself fails with QuotaExceededError.
+    const quotaExceeded = Object.assign(new Error("over quota"), { name: "QuotaExceededError" });
+    const put = IDBObjectStore.prototype.put;
+    IDBObjectStore.prototype.put = function (this: IDBObjectStore) {
+      return (
+        this.transaction as unknown as {
+          _execRequestAsync(request: { operation: () => never; source: unknown }): IDBRequest;
+        }
+      )._execRequestAsync({
+        operation: () => {
+          throw quotaExceeded;
+        },
+        source: this,
+      });
+    } as typeof put;
+    try {
+      const refused = store.acquireForegroundNodeLease();
+      await expect(refused).rejects.toBeInstanceOf(IndexedDbStorageFullError);
+      await expect(refused).rejects.toMatchObject({ code: "storage", cause: quotaExceeded });
+    } finally {
+      IDBObjectStore.prototype.put = put;
+    }
     const lease = await store.acquireForegroundNodeLease();
     await store.retireForegroundNodeLease(lease.leaseId);
     store.close();
