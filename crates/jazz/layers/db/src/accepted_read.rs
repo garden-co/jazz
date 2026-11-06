@@ -9,7 +9,7 @@ use jazz_types::time::TxTime;
 
 /// One authority-accepted commit. `sequence` is the authority's ordering
 /// coordinate, not a wall-clock timestamp or a local durability receipt.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AcceptedVersion {
     pub transaction: TxId,
     pub sequence: u64,
@@ -17,7 +17,7 @@ pub struct AcceptedVersion {
 
 /// A row's state and content may come from different accepted commits:
 /// deletion and restoration without replacement retain earlier content.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AcceptedRowEvidence {
     pub row: RowUuid,
     pub state: AcceptedVersion,
@@ -61,6 +61,31 @@ pub(super) fn check_accepted_shape(prepared: &PreparedQuery, schema: &Schema) ->
     Ok(())
 }
 
+impl Inner {
+    /// Retain admitted names under the handle's authenticated governing policies.
+    pub(super) fn governed_accepted_query(
+        &self,
+        prepared: &PreparedQuery,
+        policies: Rc<Schema>,
+    ) -> Result<PreparedQuery, Error> {
+        let version = prepared
+            .schema
+            .as_ref()
+            .unwrap_or(&self.owner)
+            .jazz
+            .version_id();
+        let schema = self.governed_by(version, policies).ok_or_else(|| {
+            Error::new(
+                ErrorCode::Schema,
+                "accepted-read schema is not admitted by the authority",
+            )
+        })?;
+        let mut prepared = prepared.clone();
+        prepared.schema = Some(schema);
+        Ok(prepared)
+    }
+}
+
 impl Db {
     /// Evaluate ordinary, unbranched stored rows on the authority, pairing
     /// each projected body with the origins of its state and retained content.
@@ -73,6 +98,7 @@ impl Db {
         include_deleted: bool,
         identity: Option<AuthorSubject>,
     ) -> Result<AcceptedRead, Error> {
+        let policies = self.view_policies();
         let inner = self.inner();
         if inner.client.is_some() || !inner.authority {
             return Err(Error::new(
@@ -80,6 +106,8 @@ impl Db {
                 "accepted row evidence requires the authority's complete history",
             ));
         }
+        let governed = inner.governed_accepted_query(prepared, policies)?;
+        let prepared = &governed;
         let complete = inner.served_through();
         let through = through.unwrap_or(complete);
         if through > complete {
@@ -163,5 +191,69 @@ impl Db {
             rows,
             evidence,
         })
+    }
+}
+
+/// The identity and claims used by the authority to evaluate one read.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AcceptedReadScope {
+    pub author: AuthorSubject,
+    pub claims: BTreeMap<String, Value>,
+}
+
+/// `jazz.sqlite.accepted-read.v1`: paired origins and ordinary encoded rows
+/// from the same authority evaluation. This is neither a write receipt nor
+/// an authorization decision that may be reused for a later operation.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct EncodedAcceptedRead {
+    pub through: u64,
+    pub schema: [u8; 16],
+    pub scope: AcceptedReadScope,
+    pub evidence: Vec<AcceptedRowEvidence>,
+    pub rows: Vec<u8>,
+}
+
+impl AcceptedRead {
+    pub(crate) fn encode(
+        self,
+        schema: [u8; 16],
+        scope: AcceptedReadScope,
+    ) -> Result<EncodedAcceptedRead, Error> {
+        let rows = crate::binding_codec::encode_rows(&self.rows)
+            .map_err(|error| Error::new(ErrorCode::Storage, error.to_string()))?;
+        Ok(EncodedAcceptedRead {
+            through: self.through,
+            schema,
+            scope,
+            evidence: self.evidence,
+            rows,
+        })
+    }
+}
+
+impl EncodedAcceptedRead {
+    pub(crate) fn validate(&self) -> Result<(), Error> {
+        let bad = || Error::new(ErrorCode::Protocol, "invalid accepted-read-v1 result");
+        if self.through > sync::MAX_SEQ {
+            return Err(bad());
+        }
+        let batches = crate::binding_codec::decode_rows(&self.rows).map_err(|_| bad())?;
+        let rows: Vec<_> = batches.iter().flat_map(|batch| &batch.rows).collect();
+        if rows.len() != self.evidence.len() {
+            return Err(bad());
+        }
+        let mut seen = BTreeSet::new();
+        for (row, evidence) in rows.iter().zip(&self.evidence) {
+            if row.row_id != evidence.row
+                || !seen.insert(evidence.row)
+                || evidence.state.sequence == 0
+                || evidence.state.sequence > self.through
+                || evidence.content.sequence == 0
+                || evidence.content.sequence > evidence.state.sequence
+            {
+                return Err(bad());
+            }
+        }
+        Ok(())
     }
 }
