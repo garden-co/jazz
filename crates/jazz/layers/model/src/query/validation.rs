@@ -306,19 +306,25 @@ pub enum QueryError {
         /// Expected type.
         expected: ColumnType,
     },
-    /// Join column is not a reference to the current table.
-    #[error(
-        "column {join_table}.{column} is matched against the ids of {target_table}, but it does \
-         not declare that it references them: declare the relation on {join_table}, for example \
-         `s.rel(\"<table>\", \"{column}\")`"
-    )]
+    /// Join column is not a reference to the table the join needs.
+    #[error("{}", join_not_ref_message(.join_table, .column, .target_table.as_deref(), .references.as_deref()))]
     JoinNotRefCompatible {
         /// Junction table.
         join_table: String,
         /// Column name.
         column: String,
-        /// Expected target table.
-        target_table: String,
+        /// The table the join needs the column to reference, when it names one.
+        target_table: Option<String>,
+        /// The table the column does reference, when it declares one.
+        references: Option<String>,
+    },
+    /// A join is malformed in a way the schema language can't produce.
+    #[error("malformed join on {join_table}: {detail}")]
+    MalformedJoin {
+        /// Junction table.
+        join_table: String,
+        /// What is wrong with it.
+        detail: String,
     },
     /// Include path did not resolve through reference metadata.
     #[error("bad include path {path}")]
@@ -1804,10 +1810,9 @@ fn validate_join(
             || join.source_lookup.is_some()
             || !join.correlated_filters.is_empty()
         {
-            return Err(not_ref_compatible(
+            return Err(malformed_join(
                 &join.table,
-                &join.on_column,
-                "uncorrelated existence (no join keys)",
+                "an uncorrelated existence join takes no join keys",
             ));
         }
         return validate_join_conditions(schema, join_table, join, params);
@@ -1864,15 +1869,15 @@ fn validate_join(
                     &root_table,
                     &lookup.row_id_source_column,
                     &lookup.table,
+                    root.references.get(&lookup.row_id_source_column),
                 ));
             }
         }
         planner_column_type(lookup_table, &lookup.value_column)?;
         if join.source_column.as_deref() != Some(lookup.value_column.as_str()) {
-            return Err(not_ref_compatible(
+            return Err(malformed_join(
                 &lookup.table,
-                &lookup.value_column,
-                "join source column",
+                "the lookup's value column must be the join's source column",
             ));
         }
         if lookup.value_column == "id" {
@@ -1883,7 +1888,7 @@ fn validate_join(
                 .get(&lookup.value_column)
                 .cloned()
                 .ok_or_else(|| {
-                    not_ref_compatible(&lookup.table, &lookup.value_column, "another table")
+                    not_a_reference(&lookup.table, &lookup.value_column)
                 })?
         }
     } else if let Some(source_column) = &join.source_column {
@@ -1892,7 +1897,12 @@ fn validate_join(
         } else {
             planner_column_type(root, source_column)?;
             root.references.get(source_column).cloned().ok_or_else(|| {
-                not_ref_compatible(&root_table, &source_column, "another table")
+                // A row-id join names the table the column must reference.
+                if join.target == JoinTarget::RowId {
+                    not_ref_compatible(&root_table, source_column, &join.table, None)
+                } else {
+                    not_a_reference(&root_table, source_column)
+                }
             })?
         }
     } else {
@@ -1917,6 +1927,7 @@ fn validate_join(
                     &join.table,
                     &join.on_column,
                     &target_table,
+                    join_table.references.get(&join.on_column),
                 ));
             }
         },
@@ -1926,6 +1937,7 @@ fn validate_join(
                     &join.table,
                     &join.on_column,
                     &target_table,
+                    None,
                 ));
             }
         }
@@ -2156,6 +2168,7 @@ fn validate_reachable(
                 &reachable.access_table,
                 &reachable.access_row_column,
                 &root.name,
+                None,
             ));
         }
     } else if access.name == root.name {
@@ -2165,6 +2178,7 @@ fn validate_reachable(
                 &reachable.access_table,
                 &reachable.access_row_column,
                 &root.name,
+                None,
             ));
         }
     } else {
@@ -2175,6 +2189,7 @@ fn validate_reachable(
                     &reachable.access_table,
                     &reachable.access_row_column,
                     &root.name,
+                    access.references.get(&reachable.access_row_column),
                 ));
             }
         }
@@ -2187,21 +2202,16 @@ fn validate_reachable(
     }
     let team_table = match reachable.access_team_target {
         JoinTarget::Uncorrelated => {
-            return Err(not_ref_compatible(
+            return Err(malformed_join(
                 &reachable.access_table,
-                &reachable.access_team_column,
-                "reachability requires a team reference",
+                "reachability needs a team reference",
             ));
         }
         JoinTarget::Column => access
             .references
             .get(&reachable.access_team_column)
             .ok_or_else(|| {
-                not_ref_compatible(
-                    &reachable.access_table,
-                    &reachable.access_team_column,
-                    "another table",
-                )
+                not_a_reference(&reachable.access_table, &reachable.access_team_column)
             })?,
         JoinTarget::RowId => {
             if reachable.access_team_column != "id" {
@@ -2209,6 +2219,7 @@ fn validate_reachable(
                     &reachable.access_table,
                     &reachable.access_team_column,
                     &reachable.access_table,
+                    None,
                 ));
             }
             &access.name
@@ -2225,8 +2236,9 @@ fn validate_reachable(
             _ => {
                 return Err(not_ref_compatible(
                     &reachable.edge_table,
-                    &column,
-                    &team_table,
+                    column,
+                    team_table,
+                    edge.references.get(column),
                 ));
             }
         }
@@ -2251,7 +2263,8 @@ fn validate_reachable(
             return Err(not_ref_compatible(
                 &seed.table,
                 &seed.team_column,
-                &team_table,
+                team_table,
+                seed_table.references.get(&seed.team_column),
             ));
         }
         validate_predicates(seed_table, &mut seed.filters, params)?;
@@ -2283,16 +2296,65 @@ fn validate_inherits(root: &TableSchema, inherits: &InheritsVia) -> Result<(), Q
     root.references
         .get(&inherits.parent_column)
         .ok_or_else(|| {
-            not_ref_compatible(&root.name, &inherits.parent_column, "another table")
+            not_a_reference(&root.name, &inherits.parent_column)
         })?;
     Ok(())
 }
 
-fn not_ref_compatible(join_table: &str, column: &str, target_table: &str) -> QueryError {
+/// The column must reference `target_table`; `references` is the table it
+/// declares instead, if any.
+fn not_ref_compatible(
+    join_table: &str,
+    column: &str,
+    target_table: &str,
+    references: Option<&String>,
+) -> QueryError {
     QueryError::JoinNotRefCompatible {
         join_table: join_table.to_owned(),
         column: column.to_owned(),
-        target_table: target_table.to_owned(),
+        target_table: Some(target_table.to_owned()),
+        references: references.cloned(),
+    }
+}
+
+/// The column is followed as a reference but declares none.
+fn not_a_reference(join_table: &str, column: &str) -> QueryError {
+    QueryError::JoinNotRefCompatible {
+        join_table: join_table.to_owned(),
+        column: column.to_owned(),
+        target_table: None,
+        references: None,
+    }
+}
+
+fn malformed_join(join_table: &str, detail: &str) -> QueryError {
+    QueryError::MalformedJoin {
+        join_table: join_table.to_owned(),
+        detail: detail.to_owned(),
+    }
+}
+
+fn join_not_ref_message(
+    join_table: &str,
+    column: &str,
+    target_table: Option<&str>,
+    references: Option<&str>,
+) -> String {
+    match (target_table, references) {
+        (Some(target), Some(declared)) => format!(
+            "column {join_table}.{column} references {declared}, but it is matched against the \
+             ids of {target} here"
+        ),
+        (Some(target), None) => format!(
+            "column {join_table}.{column} is matched against the ids of {target}, but it is not \
+             declared as a reference: declare it on {join_table}, for example \
+             `<relation>: s.rel(\"{target}\", \"{column}\")`"
+        ),
+        (None, _) => format!(
+            "column {join_table}.{column} is followed as a reference, but it is not declared as \
+             one: declare it on {join_table}, for example \
+             `<relation>: s.rel(\"<table>\", \"{column}\")`"
+        ),
     }
 }
 
@@ -2759,8 +2821,7 @@ fn claim_type_mismatch_error(
     let hint = if claim_path == "user"
         && matches!(non_null_column_type(other_type), ColumnType::String)
     {
-        ": session.user is the account's id, so store it in an s.uuid() column, or compare a \
-         string column with session.identity.subject"
+        ": session.user is the account's id, so store it in an s.uuid() column"
             .to_owned()
     } else {
         String::new()
@@ -2797,5 +2858,35 @@ fn check_inferred_param(
         }),
         Some(_) => Ok(()),
         None => Err(QueryError::OperandTypeMismatch),
+    }
+}
+
+#[cfg(test)]
+mod join_message_tests {
+    use super::join_not_ref_message;
+
+    #[test]
+    fn a_wrong_reference_names_both_tables() {
+        assert_eq!(
+            join_not_ref_message("members", "boardId", Some("boards"), Some("teams")),
+            "column members.boardId references teams, but it is matched against the ids of boards here"
+        );
+    }
+
+    #[test]
+    fn a_missing_reference_suggests_a_named_relation_to_the_target() {
+        assert_eq!(
+            join_not_ref_message("members", "boardId", Some("boards"), None),
+            "column members.boardId is matched against the ids of boards, but it is not declared \
+             as a reference: declare it on members, for example \
+             `<relation>: s.rel(\"boards\", \"boardId\")`"
+        );
+    }
+
+    #[test]
+    fn a_missing_reference_without_a_target_leaves_the_table_open() {
+        let message = join_not_ref_message("nodes", "parent", None, None);
+        assert!(message.starts_with("column nodes.parent is followed as a reference"));
+        assert!(message.ends_with("`<relation>: s.rel(\"<table>\", \"parent\")`"));
     }
 }

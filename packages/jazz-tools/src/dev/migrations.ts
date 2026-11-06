@@ -275,7 +275,8 @@ const KEEP_VALUES_ADVICE =
   "A migration can add, drop or rename a column but not convert its values, and a column " +
   "added in its place starts every existing row at its default. To keep the values, add " +
   "the new column under another name next to this one, copy the values into it from your " +
-  "backend, and drop this column in a later release.";
+  "backend, and drop this column in a later release. Clients on the older schema keep " +
+  "writing this column until then, so copy again before you drop it.";
 
 /**
  * The TODOs a generated stub leaves where a step needs the author's value:
@@ -283,7 +284,7 @@ const KEEP_VALUES_ADVICE =
  * schema, so it cannot deploy.
  */
 export const UNFILLED_STUB_TODO =
-  /\/\/ TODO: ((?:Added|Removed) required column "[^"]+" needs an explicit (?:default|backwardsDefault)\.)/;
+  /\/\/ TODO: ((?:Added|Removed) required column "([^"]+)" needs an explicit (?:default|backwardsDefault)\.)/;
 
 /**
  * A column kept under the same name must keep its type and optionality: no
@@ -368,9 +369,11 @@ function inferTableSuggestions(
 
   for (const columnName of removedColumns) {
     const column = fromColumns.get(columnName)!;
-    if (column.nullable) {
+    if (column.nullable || column.default !== undefined) {
+      // Older clients read the dropped column back as its declared default.
+      const fill = column.default === undefined ? "null" : defaultExpression(column.default);
       properties.push(
-        `${JSON.stringify(columnName)}: ${renderColumnOperationExpression("drop", column, "null")},`,
+        `${JSON.stringify(columnName)}: ${renderColumnOperationExpression("drop", column, fill)},`,
       );
     } else {
       comments.push(

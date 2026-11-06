@@ -239,6 +239,12 @@ export async function validateProject(
   };
 }
 
+/** A line that gives `column` a step: `column: …` or `"column": …`. */
+function stepKey(column: string): RegExp {
+  const name = column.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^\\s*(?:${name}|"${name}"|'${name}')\\s*:`);
+}
+
 /** Refuse a migration file that still holds a step its stub left to fill in. */
 async function refuseUnfilledStubs(migrationsDir: string): Promise<void> {
   const files = await readdir(migrationsDir).catch(() => [] as string[]);
@@ -247,7 +253,11 @@ async function refuseUnfilledStubs(migrationsDir: string): Promise<void> {
     const lines = (await readFile(join(migrationsDir, file), "utf8")).split("\n");
     lines.forEach((line, index) => {
       const todo = UNFILLED_STUB_TODO.exec(line);
-      if (todo) unfilled.push(`  ${join(basename(migrationsDir), file)}:${index + 1}: ${todo[1]}`);
+      // Authors often fill the step in under the comment and keep it, so
+      // only a column that no later line gives a step is unfilled.
+      if (todo && !lines.slice(index + 1).some((later) => stepKey(todo[2]!).test(later))) {
+        unfilled.push(`  ${join(basename(migrationsDir), file)}:${index + 1}: ${todo[1]}`);
+      }
     });
   }
   if (unfilled.length === 0) return;

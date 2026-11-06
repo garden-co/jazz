@@ -27,7 +27,7 @@ describe.each(["native", "wasm"])("%s schema validation binding", (runtime) => {
         encodeSchema(mergePermissionsIntoWasmSchema(app.wasmSchema, wrongType)),
       ),
     ).toThrow(
-      "session.user has type uuid, but column owner has type string: session.user is the account's id, so store it in an s.uuid() column, or compare a string column with session.identity.subject",
+      "session.user has type uuid, but column owner has type string: session.user is the account's id, so store it in an s.uuid() column",
     );
 
     const linked = s.defineApp(
@@ -41,7 +41,9 @@ describe.each(["native", "wasm"])("%s schema validation binding", (runtime) => {
       binding.validateSchema(
         encodeSchema(mergePermissionsIntoWasmSchema(linked.wasmSchema, withoutRelation)),
       ),
-    ).toThrow('declare the relation on members, for example `s.rel("<table>", "boardId")`');
+    ).toThrow(
+      'column members.boardId is matched against the ids of boards, but it is not declared as a reference: declare it on members, for example `<relation>: s.rel("boards", "boardId")`',
+    );
 
     const changed = s.defineApp(
       { notes: s.table({ title: s.string() }, {}) },

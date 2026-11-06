@@ -266,6 +266,29 @@ describe("cli validate", () => {
     );
   });
 
+  it("accepts a migration that filled in the step under its stub's TODO", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await writeFile(join(root, "permissions.ts"), "export default {};\n");
+    await mkdir(join(root, "migrations"), { recursive: true });
+    await writeFile(
+      join(root, "migrations", "20260101-add-points.ts"),
+      [
+        "export default m.defineMigration({",
+        "  migrate: {",
+        '    "todos": {',
+        '      // TODO: Added required column "points" needs an explicit default.',
+        "      points: m.add.int({ default: 1 }),",
+        "    },",
+        "  },",
+        "});",
+        "",
+      ].join("\n"),
+    );
+
+    await validate({ schemaDir: root });
+  });
+
   it("fails when pointed at the legacy ./schema shim directory", async () => {
     const { root, schemaDir } = await createWorkspace();
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
