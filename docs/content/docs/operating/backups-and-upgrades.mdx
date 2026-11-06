@@ -68,6 +68,30 @@ Alpha.60 changes how Jazz runs, so an alpha.59 app needs more than a version bum
   client speaks wire protocol 3..=3, older than this server's 6".
 - **The storage engine is now SQLite.** Alpha.59's data directory doesn't open in alpha.60.
 
+### Code changes
+
+Besides moving to `createJazz` and `authenticate`, change these before the new backend first
+starts:
+
+- **Pass your migrations to `defineApp`**, also when your data was imported:
+
+  ```ts title="schema.ts"
+  import { migrations } from "./migrations";
+
+  export const app = s.defineApp(schema, { migrations });
+  ```
+
+  Don't use `{ migrations: "none" }` here: it's for an app that only ever has one version, such as
+  a test's. Then run `jazz-tools validate`. It creates `migrations/index.ts` if it's missing and moves
+  alpha.59's migrations to `migrations/legacy/`. The upgraded app's history starts again from its
+  current schema.
+
+- **Snapshot the current schema before you change it.** Run `jazz-tools migrations create` with no
+  flags while `schema.ts` still matches what you imported. Later schema changes follow
+  [Migrations](/docs/schemas/migrations) as usual.
+- **Replace `isCreator`** with `{ $createdBy: session.user }`. It compares accounts, so it keeps
+  matching the rows users wrote on alpha.59.
+
 ### Data on Jazz Cloud
 
 Jazz Cloud moves your app's data to alpha.60 for you. The move keeps every row with its history,
@@ -87,7 +111,7 @@ Before you start:
   themselves take seconds for a small app.
 - **Let clients finish syncing.** Writes still queued in an alpha.59 browser, such as ones made
   offline, are not carried over: alpha.60 opens a new local database and the old one is left unused.
-- **Make the code changes first** (the list above), so the new backend can start as soon as the
+- **Make the [code changes](#code-changes) first**, so the new backend can start as soon as the
   import is verified.
 - **Run `verify` before the new backend's first start.** That first start moves large values out of
   `jazz.sqlite` into `blobs/`, and `verify` can't read the directory after that.
