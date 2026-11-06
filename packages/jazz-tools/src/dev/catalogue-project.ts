@@ -1919,7 +1919,8 @@ async function localClientMigrations(
   );
   schemas.set(current.hash, current.schema);
   const edges: MigrationEdge[] = [];
-  if (await pathExists(migrationsDir)) {
+  // A migration joins two known versions: with one, none can, so none is loaded.
+  if (schemas.size > 1 && (await pathExists(migrationsDir))) {
     await assertNoSymlinkComponents(migrationsDir);
     for (const fileName of (await readdir(migrationsDir)).filter(isMigrationFile).sort()) {
       const migration = await loadDefinedMigration(join(migrationsDir, fileName));
