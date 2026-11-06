@@ -18,7 +18,9 @@ import type { Db } from "../runtime/db.js";
 import { isThinDb, markThinDb } from "../runtime/local-first-upgrade.js";
 import { LOCAL_FIRST_ISSUER, mintSelfSignedToken } from "./self-signed-token.js";
 import { ThinRuntimeSource } from "./thin-runtime-source.js";
-import { ThinRuntime, type ThinRuntimeOptions } from "./thin-runtime.js";
+import { ThinRuntime, type ThinRuntimeOptions, type WrittenRow } from "./thin-runtime.js";
+import { translateQuery } from "../runtime/query-adapter.js";
+import type { WasmSchema } from "../drivers/types.js";
 
 export { ThinRuntimeSource } from "./thin-runtime-source.js";
 export {
@@ -72,6 +74,7 @@ export async function upgradeToLocalFirst(thin: Db, open: () => Promise<Db>): Pr
   const next = await open();
   try {
     await prefetchThinQueries(thin, next);
+    await handOffThinWrites(thin, next);
   } catch (error) {
     await next.shutdown();
     throw error;
@@ -133,6 +136,74 @@ async function prefetchRounds(
     await next.prefetchRuntimeQueries(runtime.schema, pending);
     for (const query of pending) read.add(query);
   }
+}
+
+/** How long one hand-off read may wait for the server. */
+const HAND_OFF_READ_MS = 5_000;
+
+/**
+ * @internal The rows `thin` wrote reach `next` too, so a local-first read
+ * there shows them: those the server already confirmed now, later ones as
+ * the server confirms them. Each read is best-effort, like the prefetch: it
+ * ends when either link reports offline or after {@link HAND_OFF_READ_MS},
+ * so neither the upgrade nor a write's wait hangs on a server that doesn't
+ * answer; the rows then arrive with `next`'s own sync. It never throws.
+ *
+ * Not handed off, also left to sync: a delete (a read of a deleted row
+ * brings nothing back, and only a local store that already held the row,
+ * another tab's, can show it), and writes older than the last
+ * 1,024 the thin runtime keeps.
+ */
+export async function handOffThinWrites(thin: Db, next: Db): Promise<void> {
+  const runtime = thinRuntimeOf(thin);
+  if (!runtime) return;
+  const read = (rows: readonly WrittenRow[]) =>
+    readWhileOnline([thin, next], () =>
+      next.prefetchRuntimeQueries(runtime.schema, rowQueries(runtime.schema, rows)),
+    );
+  const committed = runtime.handOffWrittenRows(read);
+  // A failed or superseded upgrade shuts `next` down: nothing to hand to.
+  next.onShutdown(() => runtime.stopHandingOffWrittenRows(read));
+  if (committed.length > 0) await read(committed);
+}
+
+/** Run `read` until it settles, one of `dbs` reports offline, or the time is up. */
+async function readWhileOnline(dbs: readonly Db[], read: () => Promise<void>): Promise<void> {
+  if (dbs.some((db) => db.getSyncStatus().link.state === "offline")) return;
+  const stops: (() => void)[] = [];
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const ended = new Promise<void>((resolve) => {
+    for (const db of dbs)
+      stops.push(
+        db.onSyncStatusChange(({ link }) => {
+          if (link.state === "offline") resolve();
+        }),
+      );
+    timer = setTimeout(resolve, HAND_OFF_READ_MS);
+  });
+  try {
+    await Promise.race([read().catch(() => {}), ended]);
+  } finally {
+    clearTimeout(timer);
+    for (const stop of stops) stop();
+  }
+}
+
+/** One runtime query per table, for the rows of it in `rows`. */
+function rowQueries(schema: WasmSchema, rows: readonly WrittenRow[]): string[] {
+  const ids = new Map<string, Set<string>>();
+  for (const { table, id } of rows) {
+    if (!schema[table]) continue;
+    let set = ids.get(table);
+    if (!set) ids.set(table, (set = new Set()));
+    set.add(id);
+  }
+  return [...ids].map(([table, set]) =>
+    translateQuery(
+      JSON.stringify({ table, conditions: [{ column: "id", op: "in", value: [...set] }] }),
+      schema,
+    ),
+  );
 }
 
 function thinRuntimeOf(thin: Db): ThinRuntime | null {

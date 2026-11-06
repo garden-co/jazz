@@ -2877,9 +2877,12 @@ export class Db {
 
   private wrapWriteWait<THandle extends WriteHandle<unknown, unknown>>(handle: THandle): THandle {
     notifyLocalWrite(this);
-    return setWriteWaitReadiness(handle, (tier) =>
-      this.ensureReady(tier === "global" ? "upload" : "runtime"),
-    );
+    return setWriteWaitReadiness(handle, async (tier) => {
+      // A write made before this Db handed over to a successor waits on its
+      // own runtime's last uploads, which the drain keeps going.
+      if (this.drain) return;
+      await this.ensureReady(tier === "global" ? "upload" : "runtime");
+    });
   }
 
   protected getAccessContext(): DbAccessContext | null {
