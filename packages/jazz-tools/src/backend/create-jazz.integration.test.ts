@@ -383,6 +383,22 @@ describe("createJazz", () => {
     }, 60_000);
   }
 
+  it("keeps its own link when synchronous work holds the event loop as it opens", async () => {
+    const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    cleanups.push(() => jazz.close());
+    const owner = randomUUID();
+    // The first write opens the backend's link to its core; the loop then
+    // holds the event loop past a network peer's 2 s handshake deadline
+    // before the client could send its Hello.
+    jazz.db.insert(app.todos, { title: "first", owner });
+    const until = performance.now() + 3_000;
+    while (performance.now() < until) {
+      // A burst of synchronous work, as a bulk insert is.
+    }
+    const rows = await jazz.db.all(app.todos.where({ owner }));
+    expect(rows.map((row) => row.title)).toEqual(["first"]);
+  });
+
   it("answers a signed-out request with an authentication error, not a plain one", async () => {
     const failure = new Error("auth service down");
     const jazz = await createJazz({
