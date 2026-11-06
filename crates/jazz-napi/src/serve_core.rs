@@ -181,13 +181,7 @@ pub fn serve_core(options: JsonValue) -> Result<ServedCore> {
         trusted_workload,
         ..Default::default()
     };
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("jazz=info".parse().expect("static directive"))
-                .add_directive("jazz_tools=info".parse().expect("static directive")),
-        )
-        .try_init();
+    crate::init_server_logs();
     let (stop, stop_requested) = tokio::sync::watch::channel(false);
     let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
     napi::bindgen_prelude::spawn(async move {

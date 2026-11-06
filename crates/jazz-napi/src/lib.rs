@@ -2095,8 +2095,11 @@ fn parse_jazz_server_start_options(options: JsonValue) -> napi::Result<JazzServe
         .map_err(|error| napi::Error::from_reason(format!("Invalid JazzServer options: {error}")))
 }
 
+/// Where a server this process runs reports: to `collector_url` when one
+/// is given, else to stderr ([`init_server_logs`]).
 pub(crate) fn init_jazz_server_telemetry(collector_url: Option<&str>) {
     let Some(collector_url) = collector_url else {
+        init_server_logs();
         return;
     };
     jazz_otel::init_process_tracing_with_endpoint_once(
@@ -2104,6 +2107,22 @@ pub(crate) fn init_jazz_server_telemetry(collector_url: Option<&str>) {
         collector_url,
         &["jazz_tools=trace", "tower_http=debug"],
     );
+}
+
+/// Print the server's logs (Jazz's at `info` and up, others' errors, more
+/// with `RUST_LOG`) to stderr, unless the process already reports
+/// elsewhere. Without it, a server inside a Node process says nothing: a
+/// blob store refusing its credentials, or a failing upload, goes
+/// unnoticed.
+pub(crate) fn init_server_logs() {
+    let _ = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive("jazz=info".parse().expect("static directive"))
+                .add_directive("jazz_tools=info".parse().expect("static directive")),
+        )
+        .try_init();
 }
 
 // ============================================================================
