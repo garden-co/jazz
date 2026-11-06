@@ -469,7 +469,7 @@ describe("cli migrations", () => {
         toHash: toHash.slice(0, 12),
       }),
     ).rejects.toThrow(
-      'Changing column "todos.done" from required to optional is not supported yet. Add a column under a new name and drop the old one instead.',
+      'Changing column "todos.done" from required to optional is not supported yet. A migration can add, drop or rename a column but not convert its values',
     );
     expect(
       (await readdir(migrationsDir).catch(() => [])).filter((name) => name.endsWith(".ts")),
@@ -522,7 +522,7 @@ describe("cli migrations", () => {
           toHash: toHash.slice(0, 12),
         }),
       ).rejects.toThrow(
-        `Changing ${change} column "todos.state" is not supported yet. Add a column under a new name and drop the old one instead.`,
+        `Changing ${change} column "todos.state" is not supported yet. A migration can add, drop or rename a column but not convert its values`,
       );
       expect(
         (await readdir(migrationsDir).catch(() => [])).filter((name) => name.endsWith(".ts")),
