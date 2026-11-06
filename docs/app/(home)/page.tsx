@@ -360,9 +360,10 @@ export default function HomePage() {
               <span className="block whitespace-nowrap">that you own</span>
             </Heading>
             <Text as="p" display="block" className="max-w-[40em] text-xl leading-relaxed">
-              Jazz is a relational database that runs inside your backend, with live queries,
-              permissions and collaboration features built in. Query it from your server and
-              straight from your frontend with thin or local-first clients.
+              Jazz is a relational database with tables, blobs, durable streams, collaborative rich
+              text and more, all protected by declarative permissions. It runs in your existing
+              cloud as part of your backend. Use live queries from your server or straight from your
+              clients, including local-first apps.
             </Text>
           </div>
         </div>
