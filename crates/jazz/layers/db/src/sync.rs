@@ -12580,9 +12580,7 @@ impl Db {
                         .entry(local)
                         .or_default()
                         .push((index, id, rows));
-                    inner.sessions[index]
-                        .outbox
-                        .push(SyncMessage::Stored { id });
+                    inner.push_durability_ack(index, SyncMessage::Stored { id });
                 } else {
                     // A replica's own last word (it has no server) orders
                     // the commit at its own position, but is not the
@@ -12606,15 +12604,27 @@ impl Db {
                             });
                         }
                     }
+                    let accepted = result.is_ok();
                     let outcome = match result {
                         Ok(()) => Outcome::accepted(through, accepted_at),
                         Err(error) => Outcome::Refused { through, error },
                     };
-                    inner.sessions[index].outbox.push(SyncMessage::Fate {
+                    let fate = SyncMessage::Fate {
                         id,
                         outcome,
                         global,
-                    });
+                    };
+                    // A replica's own acceptance is the session's `Local`:
+                    // it promises the commit is in this store. A refusal
+                    // or the authority's verdict promises nothing local, so
+                    // it goes at once, even ahead of held acceptances: a
+                    // session settles each commit by its own fate, and a
+                    // refusal must reach it while persisting keeps failing.
+                    if accepted && !global {
+                        inner.push_durability_ack(index, fate);
+                    } else {
+                        inner.sessions[index].outbox.push(fate);
+                    }
                 }
             }
             SyncMessage::ChunkRequests { pulls } => {
@@ -13683,6 +13693,87 @@ impl Db {
             read => Poll::Ready(read.map(result)),
         })
         .await
+    }
+}
+
+/// Durability acks a store holds back from its sessions until its host
+/// has persisted the store ([`Db::defer_durability_acks`]).
+#[derive(Default)]
+pub(crate) struct HeldAcks {
+    /// Acks held so far: the number the next one gets.
+    issued: u64,
+    /// Each held ack, by number, with the session it is for.
+    held: VecDeque<(u64, SubscriberId, SyncMessage)>,
+}
+
+impl Inner {
+    /// Send `message`, which tells session `index` one of its commits is
+    /// in this store, or hold it until the host has persisted the store.
+    pub(crate) fn push_durability_ack(&mut self, index: usize, message: SyncMessage) {
+        let generation = self.sessions[index].generation;
+        match self.held_acks.as_mut() {
+            Some(acks) => {
+                let subscriber = SubscriberId {
+                    slot: index,
+                    generation,
+                };
+                acks.held.push_back((acks.issued, subscriber, message));
+                acks.issued += 1;
+            }
+            None => self.sessions[index].outbox.push(message),
+        }
+    }
+}
+
+impl Db {
+    /// Hold every ack that tells a session one of its commits is in this
+    /// store (a relay's `Stored`, a replica's own acceptance) until the
+    /// host reports the store persisted ([`Self::persisted`]). For a host
+    /// whose file writes complete only after the commit returns, as an
+    /// IndexedDB-backed browser file's do: without it a session would
+    /// count as `Local` a commit that a failed or unfinished write can
+    /// still lose (INV-SYNC-55).
+    pub fn defer_durability_acks(&self) {
+        self.inner
+            .borrow_mut()
+            .held_acks
+            .get_or_insert_with(HeldAcks::default);
+    }
+
+    /// The point a persist starting now covers, while any ack is held:
+    /// pass it to [`Self::persisted`] once everything committed so far is
+    /// in the host's storage. `None` when nothing waits for a persist.
+    pub fn persist_point(&self) -> Option<u64> {
+        let inner = self.inner.borrow();
+        let acks = inner.held_acks.as_ref()?;
+        (!acks.held.is_empty()).then_some(acks.issued)
+    }
+
+    /// Everything committed before `point` ([`Self::persist_point`]) is in
+    /// the host's storage: send the acks held for it to their sessions
+    /// (dropping those of sessions that went away). Whether any was sent:
+    /// the host then ticks to deliver them.
+    pub fn persisted(&self, point: u64) -> bool {
+        let mut inner = self.inner.borrow_mut();
+        let Some(acks) = inner.held_acks.as_mut() else {
+            return false;
+        };
+        let mut released = Vec::new();
+        while acks.held.front().is_some_and(|(at, _, _)| *at < point) {
+            released.extend(acks.held.pop_front().map(|(_, to, message)| (to, message)));
+        }
+        let mut sent = false;
+        for (to, message) in released {
+            if let Some(session) = inner
+                .sessions
+                .get_mut(to.slot)
+                .filter(|session| session.open && session.generation == to.generation)
+            {
+                session.outbox.push(message);
+                sent = true;
+            }
+        }
+        sent
     }
 }
 

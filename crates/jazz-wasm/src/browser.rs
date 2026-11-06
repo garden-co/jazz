@@ -1,10 +1,13 @@
 //! Durable browser stores: the worker's SQLite file on IndexedDB.
 //!
-//! The `relaxed-idb` VFS keeps the whole file in memory and queues every
-//! commit as one IndexedDB transaction, applied in order. A commit is never
-//! torn, but a crash can lose the newest ones until [`Store::flush`]
-//! resolves. It works in any worker, so one shared worker can own the file
-//! for every tab.
+//! The IndexedDB VFS ([`crate::idb_vfs`]) keeps the whole file in memory
+//! and queues every commit as one IndexedDB transaction, applied in order.
+//! IndexedDB always holds one whole committed state, but the newest commits
+//! are only in memory until [`Store::flush`] resolves, and a failed write
+//! (storage full) keeps them there until a flush succeeds. So the database
+//! holds back the acks that tell a tab its commit is `Local` until a flush
+//! covers it ([`jazz::db::Db::defer_durability_acks`]). It works in any
+//! worker, so one shared worker can own the file for every tab.
 //!
 //! The VFS has no real locks or shared memory, so the file runs a non-WAL
 //! journal (see [`jazz::db::Journal`]) and must have one owner.
@@ -12,15 +15,12 @@
 use std::path::Path;
 use std::rc::Rc;
 
+use crate::idb_vfs::{self, IdbVfsUtil};
 use jazz::db::{Db, DbConfig, FileOptions, Journal};
 use sha2::{Digest, Sha256};
-use sqlite_wasm_vfs::relaxed_idb::{self, Preload, RelaxedIdbCfgBuilder, RelaxedIdbUtil};
 use wasm_bindgen::prelude::*;
 
 const IDB_VFS: &str = "jazz-idb";
-/// Deleting this never-opened file is queued behind every pending commit,
-/// so its completion is a flush barrier.
-const IDB_BARRIER: &str = "/.jazz-flush-barrier";
 
 pub(crate) struct StoreSpec {
     path: String,
@@ -73,16 +73,34 @@ impl StoreSpec {
 
 /// The open file's backing storage, kept by the database's host.
 #[derive(Clone)]
-pub(crate) struct Store(Rc<RelaxedIdbUtil>);
+pub(crate) struct Store {
+    util: Rc<IdbVfsUtil>,
+    /// The file's path.
+    path: Rc<str>,
+}
 
 impl Store {
-    /// Resolves once every commit so far is in the backing storage.
-    pub(crate) async fn flush(&self) -> Result<(), JsValue> {
-        self.0
-            .delete_db(IDB_BARRIER)
-            .map_err(vfs_error)?
+    /// Resolves once every commit so far is in the backing storage, or
+    /// fails with why it could not be written (it stays in memory, and the
+    /// next flush tries again).
+    pub(crate) async fn flush(&self) -> Result<(), String> {
+        self.util
+            .flush(&self.path)
+            .map_err(|error| error.to_string())?
             .await
-            .map_err(vfs_error)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Call `hook` when a commit's own write to the backing storage fails
+    /// (`None` removes it).
+    pub(crate) fn on_write_failed(&self, hook: Option<Rc<dyn Fn()>>) {
+        self.util.on_write_failed(&self.path, hook);
+    }
+
+    /// Whether the last write to the backing storage failed, so commits
+    /// since wait in memory for a flush to retry them.
+    pub(crate) fn write_failed(&self) -> bool {
+        self.util.write_failed(&self.path)
     }
 }
 
@@ -90,12 +108,8 @@ fn vfs_error(error: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&format!("browser storage: {error}"))
 }
 
-async fn install_idb() -> Result<RelaxedIdbUtil, JsValue> {
-    let cfg = RelaxedIdbCfgBuilder::new()
-        .vfs_name(IDB_VFS)
-        .preload(Preload::None)
-        .build();
-    relaxed_idb::install::<sqlite_wasm_rs::WasmOsCallback>(&cfg, false)
+async fn install_idb() -> Result<IdbVfsUtil, JsValue> {
+    idb_vfs::install::<sqlite_wasm_rs::WasmOsCallback>(IDB_VFS)
         .await
         .map_err(vfs_error)
 }
@@ -120,7 +134,13 @@ pub(crate) async fn open(spec: &StoreSpec, config: DbConfig) -> Result<(Db, Stor
         // Keeps the stable code, so a refused store's
         // `unsupported_storage_codecs` reaches JavaScript.
         .map_err(|error| crate::core_error_to_js(&error))?;
-    Ok((db, Store(Rc::new(util))))
+    Ok((
+        db,
+        Store {
+            util: Rc::new(util),
+            path: Rc::from(spec.path.as_str()),
+        },
+    ))
 }
 
 pub(crate) async fn destroy(spec: &StoreSpec) -> Result<(), JsValue> {
