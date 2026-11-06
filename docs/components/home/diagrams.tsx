@@ -410,19 +410,22 @@ function ClientBox({
   h: number;
   client: Client;
 }) {
-  // The client's own part on top, its name along the bottom.
+  // The client's own part on top (a size smaller, so "local-first jazz
+  // client" fits one line), its name along the bottom.
   return (
     <g>
       <Frame x={x} y={y} w={w} h={h} tone="ink" />
       <Lines
-        x={x + 12}
+        x={x + 10}
         y={y + 22}
         lines={client.inner}
         step={16}
-        className={client.tone === "blue" ? "dg-detail dg-fill-blue" : "dg-detail"}
+        className={
+          client.tone === "blue" ? "dg-detail dg-small dg-fill-blue" : "dg-detail dg-small"
+        }
       />
       <Lines
-        x={x + 12}
+        x={x + 10}
         y={y + h - 14 - (client.name.length - 1) * 18}
         lines={client.name}
         className="dg-title dg-fill-ink"
@@ -469,9 +472,12 @@ export const DEPLOYMENT_LAYOUT = {
 export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }) {
   const { label, runtime, shard, store } = deploymentScenarios[scenario];
   const { width: W, height: H, switcher } = DEPLOYMENT_LAYOUT;
-  // The store closes the shard row, as wide as a Vercel Sandbox.
-  const shardRow = { x: 16, y: 66, w: 414, h: 80 };
-  const storeBox = { x: 440, y: shardRow.y, w: 96, h: shardRow.h };
+  // The store closes the shard row, as wide as a Vercel Sandbox (one of
+  // four, 10 apart) and set off from the shards by a wider gap.
+  const storeGap = 16;
+  const unit = (520 - storeGap - 3 * 10) / 5;
+  const shardRow = { x: 16, y: 66, w: 4 * unit + 3 * 10, h: 80 };
+  const storeBox = { x: 536 - unit, y: shardRow.y, w: unit, h: shardRow.h };
   const backend = { x: 16, y: 186, w: 484 };
   const backendBottom = 314;
   const authH = 24;
@@ -479,9 +485,8 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
   // The jazz core above, its mounted /jazz route below the divider, level
   // with the normal API route.
   const jazz = { x: 224, y: 198, w: 264, h: 104, divider: api.y };
-  // Widths fit each client's longest line ("local-first jazz client").
-  const cws = [150, 182, 160];
-  const colX = [16, 178, 372];
+  const cws = [168, 168, 168];
+  const colX = [16, 192, 368];
   // The one large-value lane, right of your backend.
   const lane = 512;
   const center = (col: number) => colX[col] + cws[col] / 2;
