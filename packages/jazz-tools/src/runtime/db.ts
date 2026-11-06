@@ -463,8 +463,29 @@ export interface UpdateOptions extends TimestampOverrideOptions {
   base?: BranchBase;
 }
 
-type TypedUpdateOptionsWithDiffs<TReplacements extends object, TDiffs> = UpdateOptions & {
+/** `update` options, with `editedFrom` for the columns `TReplacements` writes. */
+export type UpdateEditOptions<TReplacements extends object> = UpdateOptions & {
+  /**
+   * For text-merge columns written whole by an editor: the value each was
+   * edited from, which the editor last showed or wrote. When the column
+   * holds a newer value (a merge that reached this store before the editor
+   * showed it), the write is merged over it instead of undoing it. A column
+   * left `undefined` here is written as usual.
+   */
+  editedFrom?: { readonly [TColumn in keyof TReplacements]?: string };
+};
+
+type TypedUpdateOptionsWithDiffs<
+  TReplacements extends object,
+  TDiffs,
+> = UpdateEditOptions<TReplacements> & {
   applyDiffs?: TDiffs & { [TColumn in keyof TReplacements]?: never };
+};
+
+/** The options an untyped `update` call is lowered from. */
+type LoweredUpdateOptions = UpdateOptions & {
+  applyDiffs?: object;
+  editedFrom?: { readonly [column: string]: string | undefined };
 };
 
 export interface DeleteOptions extends TimestampOverrideOptions {
@@ -791,6 +812,12 @@ type WireLargeValueUpdate =
       kind: "json_set";
       column: string;
       edits: Array<{ at: string; value: unknown }>;
+    }
+  | {
+      kind: "text_edit";
+      column: string;
+      text: string;
+      edited_from: string;
     };
 
 function isPartialLargeValueUpdate(value: unknown): value is Record<string, unknown> {
@@ -816,6 +843,58 @@ function requirePageRange(from: number, to: number, column: string): void {
   if (from > to) {
     throw new Error(`Large-value page for "${column}" must have from <= to.`);
   }
+}
+
+/**
+ * An `update` call's replacements and wire descriptors: its `applyDiffs`,
+ * and each `editedFrom` column's replacement as a text edit of that value.
+ */
+function lowerUpdate(
+  table: TableProxy<any, any, any, any, any>,
+  data: Record<string, unknown>,
+  options: LoweredUpdateOptions | undefined,
+): { replacements: Record<string, unknown>; descriptors: WireLargeValueUpdate[] } {
+  const descriptors = lowerApplyDiffs(table, data, options?.applyDiffs);
+  const editedFrom = options?.editedFrom;
+  if (editedFrom === undefined) {
+    rejectIncompleteDependencies(table, data, Object.keys(options?.applyDiffs ?? {}));
+    return { replacements: data, descriptors };
+  }
+  if (typeof editedFrom !== "object" || editedFrom === null || Array.isArray(editedFrom)) {
+    throw new Error("update option editedFrom must be an object keyed by column name.");
+  }
+  const replacements = { ...data };
+  const edited: string[] = [];
+  for (const [column, from] of Object.entries(editedFrom)) {
+    if (from === undefined) continue;
+    const transform = table._columnTransforms?.[column];
+    if (transform && !transform.computed) {
+      throw new Error(
+        `update option editedFrom is not supported yet on "${column}", which has a transform.`,
+      );
+    }
+    const text = replacements[column];
+    if (typeof text !== "string" || typeof from !== "string") {
+      throw new Error(
+        `update option editedFrom.${column} needs a string, and a string replacement for "${column}".`,
+      );
+    }
+    delete replacements[column];
+    edited.push(column);
+    descriptors.push({ kind: "text_edit", column, text, edited_from: from });
+  }
+  rejectIncompleteDependencies(table, replacements, [
+    ...Object.keys(options?.applyDiffs ?? {}),
+    ...edited,
+  ]);
+  return { replacements, descriptors };
+}
+
+/** `options` without `editedFrom`, which {@link lowerUpdate} turned into descriptors. */
+function withoutEditedFrom(options: LoweredUpdateOptions | undefined) {
+  if (options?.editedFrom === undefined) return options;
+  const { editedFrom: _, ...rest } = options;
+  return rest;
 }
 
 /** Validate an `update` call's `applyDiffs` option and lower it to wire descriptors. */
@@ -2157,54 +2236,47 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     table: TableProxy<T, Init>,
     id: string,
     data: Partial<Init>,
-    options?: UpdateOptions,
+    options?: UpdateEditOptions<Partial<Init>>,
   ): void;
   update(
     table: TableProxy<any, any, any, any, any>,
     id: string,
     data: Record<string, unknown>,
-    options?: UpdateOptions & { applyDiffs?: object },
+    options?: LoweredUpdateOptions,
   ): void {
     assertWritableTable(table);
     this.bindTable(table);
-    const descriptors = lowerApplyDiffs(table, data, options?.applyDiffs);
-    rejectIncompleteDependencies(table, data, Object.keys(options?.applyDiffs ?? {}));
+    const { replacements, descriptors } = lowerUpdate(table, data, options);
+    options = withoutEditedFrom(options);
     const client = this.resolveClient(table._schema);
     const { openTransactionId, session, attribution } = this.requireBinding("update");
     const normalizedOptions = normalizeViewOptions(table._schema, table._table, options);
-    this.prepareMutation(
-      table,
-      id,
-      data as Record<string, unknown>,
-      "Update",
-      options,
-      (updates) => {
-        if (descriptors.length > 0) {
-          client.updateLargeValuesInternal(
-            table._table,
-            id,
-            updates,
-            descriptors,
-            normalizedOptions?.updatedAt,
-            session,
-            attribution,
-            openTransactionId,
-            normalizedOptions?.branch,
-          );
-          return;
-        }
-        client.updateInternal(
+    this.prepareMutation(table, id, replacements, "Update", options, (updates) => {
+      if (descriptors.length > 0) {
+        client.updateLargeValuesInternal(
           table._table,
           id,
           updates,
+          descriptors,
           normalizedOptions?.updatedAt,
           session,
           attribution,
           openTransactionId,
           normalizedOptions?.branch,
         );
-      },
-    );
+        return;
+      }
+      client.updateInternal(
+        table._table,
+        id,
+        updates,
+        normalizedOptions?.updatedAt,
+        session,
+        attribution,
+        openTransactionId,
+        normalizedOptions?.branch,
+      );
+    });
   }
 
   private prepareMutation(
@@ -3491,21 +3563,21 @@ export class Db {
     table: TableProxy<T, Init>,
     id: string,
     data: Partial<Init>,
-    options?: UpdateOptions,
+    options?: UpdateEditOptions<Partial<Init>>,
   ): WriteHandle;
   update(
     table: TableProxy<any, any, any, any, any>,
     id: string,
     data: Record<string, unknown>,
-    options?: UpdateOptions & { applyDiffs?: object },
+    options?: LoweredUpdateOptions,
   ): WriteHandle {
     assertWritableTable(table);
     const client = this.getClient(table._schema);
-    const descriptors = lowerApplyDiffs(table, data, options?.applyDiffs);
-    rejectIncompleteDependencies(table, data, Object.keys(options?.applyDiffs ?? {}));
+    const { replacements, descriptors } = lowerUpdate(table, data, options);
+    options = withoutEditedFrom(options);
     const context = this.getAccessContext();
     if (descriptors.length > 0) {
-      return this.prepareMutation(table, id, data, "Update", options, (updates) =>
+      return this.prepareMutation(table, id, replacements, "Update", options, (updates) =>
         client.updateLargeValues(
           table._table,
           id,
