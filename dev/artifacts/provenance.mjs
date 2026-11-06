@@ -266,7 +266,9 @@ function trackedInputContents(root, paths) {
       cwd: root,
       input: Buffer.from(batch.map((path) => `:${path}\n`).join("")),
       encoding: "buffer",
-      maxBuffer: bytes + batch.length * 128 + 1,
+      // spawnSync counts stderr too. Leave bounded headroom for Git warnings
+      // (for example macOS sandbox temporary-directory warnings).
+      maxBuffer: bytes + batch.length * 128 + 64 * 1024,
     });
     if (objects.status !== 0)
       throw new Error(`artifact provenance: could not read ${batch.length} clean Git inputs`);

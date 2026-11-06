@@ -97,7 +97,7 @@ Native regression coverage includes callback suspension/resumption,
 cancellation, caught errors, read-your-writes, schema-view writes, commit
 receipts, upload-record failures, and large-value edits and streaming.
 
-## 5. Replace the persistent transaction overlay — in progress
+## 5. Replace the persistent transaction overlay — deferred
 
 Client DBs and servers serving thin-client transactions use the same staged
 transaction engine: begin a batch, stage writes, read through its private view,
@@ -140,25 +140,63 @@ conflict behavior. Then cover joins, permissions, read prefixes, large values,
 and thin-session disconnects through the shared engine. Section 5 remains required
 for full DO transaction support, even when the DO is only used as a server.
 
-## 6. Preserve exact SQL values through JavaScript
+## 6. Preserve integer precision and SQL value types in the DO bridge — completed
 
-Current app columns have no SQLite affinity. Transport wide integers as
-decimal text, but explicitly cast bound integer expressions to INTEGER so
-storage and comparisons remain numeric. Project exact integer digits on reads
-and reconstruct typed cells before decoding. Cover policies, history, ordering,
-aggregates, and internal queries as well as app reads. Preserve the existing
-rejection of `U64` above `i64::MAX`, REAL values, NULL, and binary values.
-Current large values use INTEGER epoch markers; the experiment's TEXT-marker
-workaround is obsolete. Preserve durable bytes; any necessary encoding change
-requires a named version, byte fixtures, and a compatibility write-up.
+**Problem.** SQLite stores signed 64-bit integers, but Cloudflare passes numeric
+results through JavaScript `Number`. Integers outside ±(2^53−1) can be rounded.
+Also, numeric JS bindings become SQL REAL, and JavaScript cannot distinguish
+INTEGER `1` from REAL `1.0`. REAL already uses the same floating-point format
+as JS; TEXT, BLOB, and NULL have no numeric precision problem.
+
+**Agreed behavior.** The DO backend supports integers only between
+−9,007,199,254,740,991 and +9,007,199,254,740,991. Reject values outside this
+range before binding and when decoding integer results, including SQL aggregates.
+Do not round them or limit REAL values to this range. Preserve SQL INTEGER on
+writes with `+CAST(? AS INTEGER)`, which avoids adding comparison affinity.
+Native/browser integer support and durable storage/sync encodings stay unchanged.
+
+**Use existing type information.** Compiled queries already describe their
+outputs, including joins, history and aggregates. Sync and subscriptions can
+use the stored-column type catalogue; pending cells have a known physical
+encoding. Pass these descriptions to the managed backend so it can decode JS
+numbers without wrapping known result columns in SQL. Native SQLite continues
+using rusqlite's types and does not build these descriptions. Keep runtime SQL
+type handling for remaining raw-cell reads, including heterogeneous defaults
+and internal queries that do not yet supply descriptions. Do not guess numeric
+types from `Number.isInteger`.
+
+**Current implementation and validation.** The schema-directed paths are in
+place, with streamed rows and a bounded per-owner cache for remaining metadata
+and runtime projections. Workerd checks cover safe boundaries, rejected unsafe
+bindings/results, large REAL values and `1.0`, mixed known/unknown result types,
+permissions, aggregates, selected history fields, and replica sync. The private
+`do-value-bridge-v2` framing is transient, not a durable encoding.
+Native integration validation: 948 passed, 4 ignored. The same-base local
+comparison with full wrapping shows no demonstrated speedup (ten-row tick time
+4.49 versus 4.58 ms, overlapping ranges); see the README for methodology.
 
 History's `$acceptedAt` now projects the acceptance clock as Unix milliseconds
 inside `history.rs`, so filtering and results stay within the safe range.
 The full `_clock` still breaks ordering ties within a millisecond. No special
 DO conversion is needed; all backends use the same timestamp semantics.
 Validated on 2026-11-06 with 950 native integration tests (4 ignored), including
-same-millisecond history filters/order. The TypeScript history suite is blocked
-by the correctness-artifact producer (`could not read 1 clean Git inputs`).
+same-millisecond history filters/order, and the workerd value bridge checks.
+Additional validation on 2026-11-06: native replicas upload safe-boundary integers
+and REAL values (`1.0`, `1.5`, and ±`1e100`) through the DO, and fresh replicas
+read them back after a workerd restart with only SQLite retained. Batches with
+a valid row followed by an unsupported integer (`i64::MIN`, `i64::MAX`, or either
+safe-range boundary plus one) fail without subscriber updates, physical rows,
+history residue, or pending change markers. Backend failures currently surface
+through the existing protocol as `Protocol` errors containing the range message.
+Run `test-values.mjs --sync` as documented in the README.
+
+The artifact-provenance buffer issue is fixed; fresh native/WASM artifacts build
+and all 84 TypeScript history tests pass, including timestamp predicates.
+Raw-cell paths retain runtime type projections as the supported fallback.
+Named bindings and data-modifying RETURNING reads remain explicitly unsupported.
+No production deployment or full transaction compatibility is claimed; section 5
+remains deferred, section 7 owns durable chunk access, and section 11 owns wider
+lifecycle and deployment validation.
 
 ## 7. Use one connection with bounded chunk storage
 
@@ -219,9 +257,9 @@ sync. Use same-base CodSpeed comparisons for end-to-end performance claims.
 ## Delivery order
 
 The refreshed harness, SQL storage boundary, callback scopes, and unified
-transaction implementation are in place. Next adapt the shared staged overlay,
-then exact SQL values and single-connection chunk access, followed by the shared
-core, lifecycle, and provider. Resolve overlay support
+transaction implementation are in place. The shared staged overlay is deferred.
+Exact SQL value handling is validated. Next adapt single-connection chunk access, followed
+by the shared core, lifecycle, and provider. Resolve overlay support
 before claiming full transaction compatibility. Workers-hosted `createJazz()`
 and hibernation have separate acceptance criteria.
 

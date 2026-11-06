@@ -707,6 +707,32 @@ impl Names {
         self.types.get(table)?.get(column)
     }
 
+    /// Physical result descriptions for SELECT * on current/history tables,
+    /// including columns retained for older schema versions.
+    pub(crate) fn result_types(&self, table: &str) -> crate::storage::ResultTypes {
+        use crate::storage::{ResultType as T, ResultTypes};
+        let mut named = self
+            .types
+            .get(table)
+            .into_iter()
+            .flat_map(|columns| columns.iter())
+            .map(|(name, ty)| (name.clone(), crate::values::result_type(ty)))
+            .collect::<BTreeMap<_, _>>();
+        for name in ["rid", "_clock", "_state", "_base"]
+            .into_iter()
+            .chain(crate::values::STORED_PROVENANCE)
+        {
+            named.insert(name.into(), T::Integer);
+        }
+        for name in ["id", "_branch", "_writer", "_touched"] {
+            named.insert(name.into(), T::NonNumeric);
+        }
+        ResultTypes {
+            named,
+            ..ResultTypes::default()
+        }
+    }
+
     /// Every stored enum column's tags.
     pub(crate) fn tags(&self) -> &TagRegistry {
         &self.tags

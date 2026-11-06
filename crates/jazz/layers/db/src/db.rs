@@ -4298,7 +4298,40 @@ impl Inner {
             .map(|(_, ty, _)| ty.clone())
             .collect();
         let mut rows = statement
-            .query(params_from_iter(compiled.params.iter()))
+            .query_typed(params_from_iter(compiled.params.iter()), || {
+                use crate::storage::{ResultType as T, ResultTypes};
+                let key = if compiled.aggregate {
+                    // Enum group identities are projected by name, while
+                    // other group keys use the first projected column's type.
+                    compiled
+                        .projection
+                        .first()
+                        .map(|(_, ty, _)| crate::values::result_type(ty))
+                        .unwrap_or(T::Integer)
+                } else {
+                    T::NonNumeric
+                };
+                let mut types = vec![key, T::Integer, T::Integer];
+                if compiled.versioned {
+                    types.push(T::NonNumeric);
+                }
+                for _ in 0..compiled.joined {
+                    types.extend([T::NonNumeric, T::NonNumeric]);
+                }
+                if compiled.union {
+                    types.push(T::NonNumeric);
+                }
+                types.extend(
+                    compiled
+                        .projection
+                        .iter()
+                        .map(|(_, ty, _)| crate::values::result_type(ty)),
+                );
+                if compiled.writer {
+                    types.push(T::NonNumeric);
+                }
+                ResultTypes::positional(types)
+            })
             .map_err(storage)?;
         let mut out = Vec::new();
         // A replica missing chunks reads on past the first blocked cell, so

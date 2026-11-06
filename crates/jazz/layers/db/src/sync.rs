@@ -3868,48 +3868,54 @@ impl Inner {
         // read from the first row.
         let mut names: Vec<String> = Vec::new();
         let rows = statement
-            .query_map(params, |r| {
-                if names.is_empty() {
-                    let statement = r;
-                    names = (0..statement.column_count())
-                        .map(|i| statement.column_name(i).map(str::to_owned))
-                        .collect::<Result<_, _>>()?;
-                }
-                let mut image = Image {
-                    table: table.to_owned(),
-                    id: [0; 16],
-                    key: Vec::new(),
-                    at: Pos::default(),
-                    deleted: false,
-                    content: true,
-                    cells: Vec::new(),
-                    written: None,
-                };
-                for (i, name) in names.iter().enumerate() {
-                    match name.as_str() {
-                        "rid" => {}
-                        "id" => image.id = r.get::<_, Vec<u8>>(i)?.try_into().unwrap_or([0; 16]),
-                        "_branch" => image.key = r.get(i)?,
-                        "_clock" => image.at = Pos::from_t(r.get::<_, i64>(i)?),
-                        "_state" => {
-                            let state = r.get::<_, i64>(i)?;
-                            image.deleted = state & STATE_DELETED != 0;
-                            image.content = state & STATE_NO_CONTENT == 0;
-                        }
-                        // The authority's record of what the version was
-                        // built on; never replicated.
-                        "_base" | "_touched" => {}
-                        "_writer" => {
-                            image.written = writer_of_bytes(&r.get::<_, Vec<u8>>(i)?)
-                                .map(|(node, tx)| (0, node, tx));
-                        }
-                        _ => image
-                            .cells
-                            .push((name.clone(), Cell::from(r.get::<_, Sql>(i)?))),
+            .query_map_typed(
+                params,
+                || self.names.result_types(table),
+                |r| {
+                    if names.is_empty() {
+                        let statement = r;
+                        names = (0..statement.column_count())
+                            .map(|i| statement.column_name(i).map(str::to_owned))
+                            .collect::<Result<_, _>>()?;
                     }
-                }
-                Ok(image)
-            })
+                    let mut image = Image {
+                        table: table.to_owned(),
+                        id: [0; 16],
+                        key: Vec::new(),
+                        at: Pos::default(),
+                        deleted: false,
+                        content: true,
+                        cells: Vec::new(),
+                        written: None,
+                    };
+                    for (i, name) in names.iter().enumerate() {
+                        match name.as_str() {
+                            "rid" => {}
+                            "id" => {
+                                image.id = r.get::<_, Vec<u8>>(i)?.try_into().unwrap_or([0; 16])
+                            }
+                            "_branch" => image.key = r.get(i)?,
+                            "_clock" => image.at = Pos::from_t(r.get::<_, i64>(i)?),
+                            "_state" => {
+                                let state = r.get::<_, i64>(i)?;
+                                image.deleted = state & STATE_DELETED != 0;
+                                image.content = state & STATE_NO_CONTENT == 0;
+                            }
+                            // The authority's record of what the version was
+                            // built on; never replicated.
+                            "_base" | "_touched" => {}
+                            "_writer" => {
+                                image.written = writer_of_bytes(&r.get::<_, Vec<u8>>(i)?)
+                                    .map(|(node, tx)| (0, node, tx));
+                            }
+                            _ => image
+                                .cells
+                                .push((name.clone(), Cell::from(r.get::<_, Sql>(i)?))),
+                        }
+                    }
+                    Ok(image)
+                },
+            )
             .map_err(storage)?;
         let mut images = rows.collect::<Result<Vec<_>, _>>().map_err(storage)?;
         for image in &mut images {

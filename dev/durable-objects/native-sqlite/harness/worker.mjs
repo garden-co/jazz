@@ -112,6 +112,11 @@ export class Authority {
 
   async fetch(request) {
     const url = new URL(request.url);
+    if (url.pathname === "/value-checks") {
+      wasm ??= initSync({ module: wasmModule });
+      WasmDb.checkDurableObjectValues(this.ctx.storage);
+      return new Response("value checks passed");
+    }
     const [client, server] = Object.values(new WebSocketPair());
     server.accept();
     // Frames as ArrayBuffers: newer compatibility dates default to Blob.
@@ -125,7 +130,7 @@ export class Authority {
               JSON.stringify({ ok: true, openMs: this.open(message.schema, message.config) }),
             );
           } else if (message.op === "checkRejected") {
-            this.db.checkRejectedRow(new Uint8Array(message.row));
+            this.db.checkRejectedRow(new Uint8Array(message.row), message.table);
             server.send(JSON.stringify({ ok: true }));
           } else if (message.op === "scopeChecks") {
             this.db.checkSqlScopes();

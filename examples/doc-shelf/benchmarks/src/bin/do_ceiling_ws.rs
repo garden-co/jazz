@@ -326,10 +326,17 @@ fn mb(bytes: &Json) -> f64 {
     bytes.as_f64().unwrap_or(0.0) / 1e6
 }
 
+#[path = "do_ceiling_ws/numeric_values.rs"]
+mod numeric_values;
+
 fn main() {
     let base = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "ws://127.0.0.1:8787".into());
+    if std::env::var_os("VALUE_TEST").is_some() {
+        numeric_values::run(&base);
+        return;
+    }
     let store = env("STORE", 10_000);
     let sessions = env("SESSIONS", 50);
     let group = env("GROUP", 5).max(1);

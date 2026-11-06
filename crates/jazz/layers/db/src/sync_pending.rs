@@ -758,15 +758,30 @@ fn cells(
         ))
         .map_err(storage)?;
     let rows = statement
-        .query_map([tx, n], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, i64>(3)?,
-                r.get::<_, SqlValue>(4)?,
-            ))
-        })
+        .query_map_typed(
+            [tx, n],
+            || {
+                use crate::storage::{ResultType as T, ResultTypes};
+                // All numeric pending-cell payloads are integers. F64 is stored
+                // as bytes to retain NaN/-0.0; other types stay text/blob/null.
+                ResultTypes::positional([
+                    T::Integer,
+                    T::NonNumeric,
+                    T::NonNumeric,
+                    T::Integer,
+                    T::Integer,
+                ])
+            },
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, SqlValue>(4)?,
+                ))
+            },
+        )
         .map_err(storage)?;
     let mut lists = (BTreeMap::new(), BTreeMap::new());
     for row in rows {

@@ -82,6 +82,34 @@ must be inspected rather than counted as platform incompatibility. Failed
 native prepares do not enter the SQL trace. Native limits do not emulate the
 DO authorizer, JS value bridge, or callback transaction lifetime.
 
+## Exact SQL value probe
+
+Run `node dev/durable-objects/run-value-probe.mjs` from the repository root
+(after `npm ci --prefix dev/durable-objects`). No Rust/WASM rebuild is needed.
+This standalone platform proof passed on 2026-11-05 with Miniflare
+4.20260730.0, workerd 1.20260730.1, and compatibility date 2026-07-01.
+
+- JavaScript numbers bind as SQL REAL, including `1`. All Rust INTEGER
+  bindings need explicit SQL conversion, not only integers wider than 2^53.
+- Decimal text with `+CAST(? AS INTEGER)` preserves signed 64-bit values and
+  numeric storage. The unary `+` matters: plain `CAST` adds expression affinity,
+  so an affinity-free TEXT cell containing `"10"` incorrectly matches an integer
+  parameter expressed as `CAST('10' AS INTEGER)`. The unary form matches native
+  affinity-free numeric-parameter comparison behavior in this fixture.
+- Integer results projected as text retain exact digits, but transport casts
+  must not change query semantics. An unqualified ORDER BY matching the cast's
+  alias orders text, not integers. This probe orders by the original column.
+- SQL storage-class information distinguishes INTEGER, integral REAL, and
+  numeric TEXT. The prototype uses `typeof` plus a conditional integer-to-text
+  projection; this is not yet a chosen production projection representation.
+
+Assertions cover i64 endpoints and neighbors around ±2^53, equality, numeric
+ordering/LIMIT, MIN/MAX/SUM, UPDATE RETURNING, rollback, REAL 1.0 and 1e100,
+NULL, numeric TEXT, UTF-8 text containing NUL, and binary bytes. Only fixture
+rows are read. No performance, full engine compatibility, or deployed Cloudflare
+claim is made. Persisted encodings are unchanged. For actual adapter coverage, use the
+Rust/WASM checks below; the standalone probe remains independent of the adapter.
+
 ## Experimental WASM build and WebSocket harness
 
 `native-sqlite/` ports the isolated build from
@@ -143,17 +171,100 @@ and connecting fresh replicas. Two objects in the same process run the same
 fixture independently. This remains a local harness, not deployment or
 hibernation validation.
 
-Wide integer bindings fail explicitly: the older
-experiment's decimal-text binding would silently change current app values.
-Wide reads and non-UTF-8 text also fail; integral REAL results lose their storage
-class in the bridge. SQL results are streamed one row at a time. The backend
-is opened explicitly, but chunk caching still uses the pathless configuration;
-its memory budget and durable chunk-reader behavior require section 7. These limitations are intentional evidence for the storage and
-transaction work in the plan, not supported Jazz semantics.
+### Exact values in the DO adapter
+
+After building with `FAST=1 ... --features scope-tests`, run:
+
+```sh
+# Actual Rust -> JS -> SQLite -> JS -> Rust, plus public Jazz API checks.
+node dev/durable-objects/native-sqlite/harness/test-values.mjs
+# Also check native/DO numeric sync, atomic rejection, and persisted restart.
+RUSTC_WRAPPER= cargo build -p jazz-example-doc-shelf-benchmark --bin doc-shelf-do-ceiling-ws
+node dev/durable-objects/native-sqlite/harness/test-values.mjs --sync
+```
+
+The `--sync` mode runs a correctness fixture through the existing WebSocket
+transport (`VALUE_TEST=1`), separate from the ceiling performance workload.
+Alice's native SQLite replica uploads safe-range boundary integers and REAL
+values (`1.0`, `1.5`, ±`1e100`); Bob's fresh native replica checks exact typed
+results. Four batches pairing a valid row with an unsupported integer must fail
+without publishing subscriber updates. The existing test-only storage assertion
+checks physical row/history absence and pending change markers, in addition to
+public history reads. These backend errors use the current wire error mapping:
+`Protocol` with the safe-integer-range message, not a policy `WriteRejected`.
+The runner then recreates workerd from persisted SQLite and verifies values and
+rejected-row absence using fresh replicas. Both phases pass locally (2026-11-06).
+
+The TypeScript history suite also passes all 84 tests with fresh native/WASM
+artifacts. The artifact producer previously overflowed its Git output buffer
+when macOS emitted a sandbox warning; bounded stderr headroom fixes that blocker.
+
+The DO backend rejects integer bindings and integer results outside
+±9,007,199,254,740,991. Safe integer bindings cross JS as numbers and use
+`+CAST(? AS INTEGER)` to retain INTEGER without changing comparison affinity.
+REAL values, including `1.0` and `1e100`, remain REAL and are not range-limited.
+
+Compiled query projections, stored-column types for sync/subscriptions, pending
+cell encodings, and adapter counters now supply result descriptions. Known
+positional results execute directly; named results use cached metadata to align
+types with columns. Unknown physical cells still use SQL transport projections,
+including raw defaults and unannotated internal queries. Only unknown cells are
+tagged; known cells in a mixed result pass through directly. Native SQLite does
+not build result descriptions and retains its original decoding path.
+
+Metadata/projection caches remain bounded to 64 entries and 1 MiB of estimated
+string data per owner, invalidated by schema operations and rollback. Results
+remain streamed. Named bindings and data-modifying RETURNING reads fail
+explicitly; non-UTF-8 text bindings remain refused. Extra projection SQL counts
+toward platform compilation limits.
 
 History's `$acceptedAt` is projected from the acceptance clock into Unix
 milliseconds before SQL filtering and result decoding. It fits the safe range;
-`_clock` preserves acceptance ordering within a millisecond.
+`_clock` preserves acceptance ordering within a millisecond. Workerd checks
+cover history timestamps, safe integer
+boundaries, rejected wide binds and aggregates, REAL values, mixed decoding,
+permission boundaries, cache invalidation, 100-column results, and sync smoke.
+
+The following measurement describes the earlier full-wrapping implementation,
+not the subsequent schema-directed decoder.
+
+Local A/B measurement (2026-11-05, macOS arm64): baseline `746da3b616f4`
+versus the exact-value adapter, both built with `FAST=1 --features scope-tests`.
+The same native benchmark client drove fresh workerd instances, with four runs
+per build and workload in alternating order: 400 stored rows, 200 rows/project,
+10 sessions, groups of 5, and 150 writes per run. Median authority tick time per
+write rose from 0.76 to 0.83 ms for one-row writes and from 3.45 to 4.40 ms for
+ten-row writes. Median client p50 latency rose from 3.70 to 3.79 ms and from
+9.28 to 10.30 ms respectively. SQL execs per ten-row write were almost unchanged
+(327.06 versus 327.10). One-row timing ranges overlap; ten-row ranges do not.
+These are local timings with a 1-ms workerd clock, not production CPU/capacity
+measurements or CodSpeed results. They do not isolate individual conversion costs
+or cover large values. WASM linear memory was unchanged; JS heap was not measured.
+
+The subsequent schema-directed decoder was compared with full wrapping on the
+same rebased source (`3bf228e5c027`), using the same build settings and workloads
+above, with four alternating samples per variant/workload. Median tick time per
+one-row write was 1.03 ms for both variants; ten-row writes were 4.49 ms with full
+wrapping versus 4.58 ms with schema-directed decoding. Median client p50 latency
+was 4.27 versus 4.29 ms and 10.83 versus 10.97 ms respectively. Tick timing ranges
+overlap, and SQL calls remain effectively unchanged (327.10 versus 327.09 per
+ten-row write). This does not demonstrate a performance improvement. These
+measurements compare the two implementations on safe-valued workloads; their
+behavior for unsupported wide integers differs. The local raw results, source
+patches, runner, and binary hashes are retained in `/tmp/jazz-do-typed-perf/`.
+
+The `do-value-bridge-v2` framing is private to the matching WASM/JS module, never
+persisted or sent to peers: byte tags 0=NULL, 1=i64 LE, 2=f64 LE, 3=text, 4=blob;
+text/blob carry a u32 LE byte length, and result rows start with a u32 LE cell
+count. Tests pin integer/REAL binding bytes and exercise the full bridge. No
+SQLite storage or sync encoding changes, migration, or mixed-version protocol
+changes are introduced.
+
+The standalone platform probe demonstrates full-width integer transport; the
+production adapter instead enforces the agreed safe-integer limit. Chunk caching
+still uses the pathless configuration; bounded memory and durable chunk reads
+remain section 7. Numeric sync and persisted restart are covered above; full lifecycle and
+production deployment validation remain in section 11.
 
 ## Validation of this refresh
 

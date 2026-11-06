@@ -1,8 +1,14 @@
 //! Durable Object SQL storage: typed parameters, a forward-only cursor and
 //! callback-owned transactions on one explicit storage owner. No SQLite C ABI
 //! emulation, global current database or separately registered scope driver.
+//!
+//! `do-value-bridge-v2` is transient Rust/JS framing, never stored or synced:
+//! tags 0=NULL, 1=i64 LE, 2=f64 LE, 3=UTF-8 bytes, 4=blob bytes. Variable
+//! payloads have a u32 LE length; result rows start with a u32 LE cell count.
+//! Known result types decode JS numbers directly; unknown physical cells use
+//! tagged SQL projections. Unsafe integers are refused. Database bytes are unchanged.
 use crate::WasmDb;
-use jazz::storage::{self, Backend, Cursor, Storage, Value};
+use jazz::storage::{self, Backend, Cursor, ResultType, ResultTypes, Storage, Value};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
@@ -26,13 +32,6 @@ function room(pos, n) {
   next.set(out.subarray(0, pos));
   out = next;
   view = new DataView(out.buffer);
-}
-function text(pos, s) {
-  room(pos, 5 + s.length * 3);
-  out[pos] = 3;
-  const { written } = encoder.encodeInto(s, out.subarray(pos + 5));
-  view.setUint32(pos + 1, written, true);
-  return pos + 5 + written;
 }
 function bytes(pos, b) {
   room(pos, 5 + b.length);
@@ -76,10 +75,55 @@ export function jazz_do_scope(storage, body) {
       if (!body()) throw rollback;
     });
   } catch (error) {
+    // A rolled-back schema change can invalidate metadata learned inside it.
+    projections.delete(storage);
     if (error !== rollback) throw error;
   }
 }
 
+// A bounded, per-owner projection cache. Metadata probes use LIMIT 0: no rows
+// are consumed and no write statement can be nested in the read subquery.
+const projections = new WeakMap();
+const unknownResults = { positional: [], named: {} };
+function exactQuery(storage, query, bindings, description) {
+  const hints = description ? JSON.parse(description) : unknownResults;
+  if (hints.positional.length && hints.positional.every(t => t !== "Dynamic")) {
+    const cursor = storage.sql.exec(query, ...bindings);
+    if (cursor.columnNames.length !== hints.positional.length) throw new Error("incorrect SQL result type count");
+    return { cursor, rows: cursor.raw(), columns: cursor.columnNames, exact: true, types: hints.positional, probes: 0 };
+  }
+  const cacheKey = description ? query + "\0" + description : query;
+  let cache = projections.get(storage);
+  if (!cache) projections.set(storage, cache = { entries: new Map(), bytes: 0 });
+  let entry = cache.entries.get(cacheKey);
+  let probes = 0;
+  if (!entry) {
+    const metadata = storage.sql.exec(`SELECT * FROM (${query}\n) LIMIT 0`, ...bindings);
+    const columns = metadata.columnNames;
+    const types = columns.map((name, i) => hints.positional[i] ?? (Object.hasOwn(hints.named, name) ? hints.named[name] : "Dynamic"));
+    const names = columns.map((_, i) => `c${i}`);
+    // Avoid shadowing identifiers in the original statement.
+    let alias = "_jazz_do_result";
+    while (query.includes(alias)) alias += "_";
+    const cells = names.map((c, i) => types[i] !== "Dynamic" ? c : `CASE typeof(${c}) WHEN 'integer' THEN CAST(X'01' || CAST(${c} AS TEXT) AS BLOB) WHEN 'text' THEN CAST(X'03' || CAST(${c} AS BLOB) AS BLOB) WHEN 'blob' THEN CAST(X'04' || ${c} AS BLOB) ELSE ${c} END`);
+    const sql = `WITH ${alias}(${names.join(",")}) AS (${query}\n) SELECT ${cells.join(",")} FROM ${alias}`;
+    entry = { sql: types.every(t => t !== "Dynamic") ? query : sql, columns, types };
+    const size = 2 * (cacheKey.length + sql.length + columns.join("").length);
+    while (cache.entries.size && (cache.entries.size >= 64 || cache.bytes + size > 1048576)) {
+      const key = cache.entries.keys().next().value;
+      cache.bytes -= cache.entries.get(key).size;
+      cache.entries.delete(key);
+    }
+    if (size <= 1048576) {
+      entry.size = size;
+      cache.entries.set(cacheKey, entry);
+      cache.bytes += size;
+    }
+    probes = 1;
+  }
+  const cursor = storage.sql.exec(entry.sql, ...bindings);
+  return { cursor, rows: cursor.raw(), columns: entry.columns, types: entry.types, exact: true, probes };
+}
 // Rewrite parameter tokens only, never strings, identifiers, or comments.
 // Jazz uses positional parameters. Refuse other parameter syntaxes explicitly.
 function numericBindings(query, types) {
@@ -113,29 +157,75 @@ function numericBindings(query, types) {
     out += query.slice(start, i);
   }
   if (highest !== types.length) throw new Error("incorrect SQL parameter count");
-  return out;
+  // Read wrappers cannot contain a trailing terminator. Preserve newlines
+  // before wrapper syntax, so a trailing line comment cannot swallow it.
+  return out.trimEnd().replace(/;$/, '');
 }
-export function jazz_do_query(storage, query, bindings) {
+export function jazz_do_query(storage, query, bindings, exact, description) {
   const { list, types } = args(bindings);
   query = numericBindings(query, types);
+  if (exact) {
+    // Jazz introspection uses these read-only PRAGMAs. Their table-valued
+    // forms can participate in the same typed projection as other reads.
+    const info = /^\s*PRAGMA\s+table_info\s*\(\s*("(?:[^"]|"")*"|'(?:[^']|'')*'|[a-zA-Z_][a-zA-Z_0-9]*)\s*\)\s*$/i.exec(query);
+    if (info) {
+      let name = info[1];
+      if (name[0] === '"' || name[0] === "'") {
+        const quote = name[0];
+        name = name.slice(1, -1).split(quote + quote).join(quote);
+      }
+      query = `SELECT * FROM pragma_table_info('${name.replaceAll("'", "''")}')`;
+    } else if (/^\s*PRAGMA\s+schema_version\s*$/i.test(query)) {
+      query = "SELECT * FROM pragma_schema_version";
+    }
+    if (/^\s*(INSERT|UPDATE|DELETE|REPLACE)\b/i.test(query)) {
+      throw new Error("reading data-modifying RETURNING statements is not supported by Durable Object storage");
+    }
+    return exactQuery(storage, query, list, description);
+  }
+  // Schema changes invalidate SELECT * metadata. Ordinary writes keep it.
+  if (!/^\s*(INSERT|UPDATE|DELETE|REPLACE)\b/i.test(query)) projections.delete(storage);
   const cursor = storage.sql.exec(query, ...list);
-  return { cursor, rows: cursor.raw(), columns: cursor.columnNames };
+  return { cursor, rows: cursor.raw(), columns: cursor.columnNames, exact: false, probes: 0 };
 }
+export function jazz_do_probes(result) { return result.probes; }
 export function jazz_do_columns(result) { return result.columns; }
 export function jazz_do_next(result) {
   const { value: row, done } = result.rows.next();
   if (done) return new Uint8Array();
+  // execute() drains results but never exposes their cells.
+  if (!result.exact) return new Uint8Array(4);
   room(0, 4);
   view.setUint32(0, row.length, true);
   let pos = 4;
-  for (const cell of row) {
+  for (let i = 0; i < row.length; i++) {
+    const cell = row[i], type = result.types[i];
     if (cell === null) { room(pos, 1); out[pos++] = 0; }
     else if (typeof cell === "number") {
-      if (Number.isInteger(cell) && !Number.isSafeInteger(cell)) throw new Error("wide SQL integers require exact projections");
-      room(pos, 9); out[pos++] = Number.isInteger(cell) ? 1 : 2;
-      view.setFloat64(pos, cell, true); pos += 8;
-    } else if (typeof cell === "string") { pos = text(pos, cell); }
-    else { pos = bytes(pos, new Uint8Array(cell)); }
+      if (type === "NonNumeric") throw new Error("unexpected numeric SQL result");
+      room(pos, 9);
+      if (type === "Integer") {
+        if (!Number.isSafeInteger(cell)) throw new Error("SQL INTEGER outside Durable Object safe integer range");
+        out[pos++] = 1; view.setBigInt64(pos, BigInt(cell), true);
+      } else { out[pos++] = 2; view.setFloat64(pos, cell, true); }
+      pos += 8;
+    } else if (type !== "Dynamic") {
+      const start = pos;
+      pos = bytes(pos, typeof cell === "string" ? encoder.encode(cell) : new Uint8Array(cell));
+      out[start] = typeof cell === "string" ? 3 : 4;
+    } else {
+      const b = new Uint8Array(cell), tag = b[0];
+      if (tag === 1) {
+        const n = BigInt(decoder.decode(b.subarray(1)));
+        if (n < -9007199254740991n || n > 9007199254740991n) throw new Error("SQL INTEGER outside Durable Object safe integer range");
+        room(pos, 9); out[pos++] = 1;
+        view.setBigInt64(pos, n, true); pos += 8;
+      } else if (tag === 3 || tag === 4) {
+        const start = pos;
+        pos = bytes(pos, b.subarray(1));
+        out[start] = tag;
+      } else { throw new Error("invalid typed SQL result"); }
+    }
   }
   return out.slice(0, pos);
 }
@@ -149,7 +239,10 @@ extern "C" {
         storage: &ObjectStorage,
         query: &str,
         bindings: &[u8],
+        exact: bool,
+        description: &str,
     ) -> Result<JsValue, JsValue>;
+    fn jazz_do_probes(result: &JsValue) -> u32;
     fn jazz_do_columns(result: &JsValue) -> js_sys::Array;
     #[wasm_bindgen(catch)]
     fn jazz_do_next(result: &JsValue) -> Result<Vec<u8>, JsValue>;
@@ -196,10 +289,36 @@ impl Drop for ObjectCursor {
     }
 }
 impl ObjectSql {
-    fn cursor(&self, query: &str, bindings: &[Value]) -> storage::Result<ObjectCursor> {
+    fn cursor(
+        &self,
+        query: &str,
+        bindings: &[Value],
+        exact: bool,
+    ) -> storage::Result<ObjectCursor> {
+        self.typed_cursor(query, bindings, exact, &ResultTypes::default())
+    }
+    fn typed_cursor(
+        &self,
+        query: &str,
+        bindings: &[Value],
+        exact: bool,
+        types: &ResultTypes,
+    ) -> storage::Result<ObjectCursor> {
         traced(query);
-        let result = jazz_do_query(&self.storage, query, &encode(bindings)?).map_err(sql_error)?;
-        STATS.with(|s| s.borrow_mut().execs += 1.0);
+        let description = if types.positional.is_empty() && types.named.is_empty() {
+            String::new()
+        } else {
+            serde_json::to_string(types).map_err(|e| bridge_error(e.to_string()))?
+        };
+        let result = jazz_do_query(
+            &self.storage,
+            query,
+            &encode(bindings)?,
+            exact,
+            &description,
+        )
+        .map_err(sql_error)?;
+        STATS.with(|s| s.borrow_mut().execs += 1.0 + jazz_do_probes(&result) as f64);
         let columns = jazz_do_columns(&result)
             .iter()
             .map(|v| v.as_string().unwrap())
@@ -212,7 +331,12 @@ impl ObjectSql {
     }
     fn scalar(&self, query: &str) -> storage::Result<i64> {
         STATS.with(|s| s.borrow_mut().lookups += 1.0);
-        let mut cursor = self.cursor(query, &[])?;
+        let mut cursor = self.typed_cursor(
+            query,
+            &[],
+            true,
+            &ResultTypes::positional([ResultType::Integer]),
+        )?;
         match cursor.next()?.and_then(|row| row.first()) {
             Some(Value::Integer(n)) => Ok(*n),
             _ => Err(bridge_error("expected integer SQL result".into())),
@@ -221,10 +345,18 @@ impl ObjectSql {
 }
 impl Backend for ObjectSql {
     fn query(&self, sql: &str, parameters: &[Value]) -> storage::Result<Box<dyn Cursor + '_>> {
-        Ok(Box::new(self.cursor(sql, parameters)?))
+        Ok(Box::new(self.cursor(sql, parameters, true)?))
+    }
+    fn query_typed(
+        &self,
+        sql: &str,
+        parameters: &[Value],
+        types: &ResultTypes,
+    ) -> storage::Result<Box<dyn Cursor + '_>> {
+        Ok(Box::new(self.typed_cursor(sql, parameters, true, types)?))
     }
     fn execute(&self, sql: &str, parameters: &[Value]) -> storage::Result<usize> {
-        let mut cursor = self.cursor(sql, parameters)?;
+        let mut cursor = self.cursor(sql, parameters, false)?;
         while cursor.next()?.is_some() {}
         drop(cursor);
         let first = sql
@@ -315,15 +447,7 @@ impl Cells<'_> {
     fn value(&mut self) -> Result<Value, String> {
         Ok(match self.take(1)?[0] {
             0 => Value::Null,
-            1 => {
-                let n = self.f64()?;
-                if n.abs() > MAX_SAFE as f64 {
-                    return Err(format!(
-                        "the integer {n} is beyond 2^53, which Durable Object SQLite returns inexactly: not supported yet"
-                    ));
-                }
-                Value::Integer(n as i64)
-            }
+            1 => Value::Integer(i64::from_le_bytes(self.take(8)?.try_into().unwrap())),
             2 => Value::Real(self.f64()?),
             3 => {
                 let n = self.u32()?;
@@ -572,14 +696,14 @@ impl WasmDb {
 #[wasm_bindgen]
 impl WasmDb {
     #[wasm_bindgen(js_name = checkRejectedRow)]
-    pub fn check_rejected_row(&self, row: Vec<u8>) -> Result<(), JsValue> {
+    pub fn check_rejected_row(&self, row: Vec<u8>, table: Option<String>) -> Result<(), JsValue> {
         let row = jazz::ids::RowUuid::from_bytes(
             row.try_into()
                 .map_err(|_| JsValue::from_str("expected row UUID"))?,
         );
         self.binding()?
             .db
-            .check_rejected_row_for_test("tasks", row)
+            .check_rejected_row_for_test(table.as_deref().unwrap_or("tasks"), row)
             .map_err(crate::to_js_error)
     }
 
@@ -606,6 +730,374 @@ impl WasmDb {
         assert!(error.message.contains("SQL savepoint `overlay`"));
         db.abandon_transaction_handle(id)
             .map_err(crate::to_js_error)?;
+        Ok(())
+    }
+}
+
+/// Exercise the actual Rust/JS value bridge in workerd. A backend-level test
+/// is necessary because application decoding can hide INTEGER/REAL confusion.
+#[cfg(feature = "durable-object-tests")]
+#[wasm_bindgen]
+impl WasmDb {
+    #[wasm_bindgen(js_name = checkDurableObjectValues)]
+    pub fn check_durable_object_values(storage: ObjectStorage) -> Result<(), JsValue> {
+        fn check(storage: ObjectStorage) -> storage::Result<()> {
+            assert_eq!(
+                encode(&[Value::Integer(-MAX_SAFE)])?,
+                vec![1, 1, 0, 0, 0, 0, 0, 224, 255]
+            );
+            assert_eq!(
+                encode(&[Value::Real(1.0)])?,
+                vec![2, 0, 0, 0, 0, 0, 0, 240, 63]
+            );
+            let db = ObjectSql { storage };
+            for n in [i64::MIN, -MAX_SAFE - 1, MAX_SAFE + 1, i64::MAX] {
+                let error = db.execute("SELECT ?1", &[Value::Integer(n)]).unwrap_err();
+                assert!(error.to_string().contains("safe integer range"));
+            }
+            let integer = ResultTypes::positional([ResultType::Integer]);
+            let real = ResultTypes::positional([ResultType::Real]);
+            // A SQL calculation can exceed the range without a wide binding.
+            for sql in [
+                "SELECT 9007199254740992",
+                "SELECT sum(x) FROM (SELECT 9007199254740991 AS x UNION ALL SELECT 1)",
+            ] {
+                for typed in [false, true] {
+                    let mut cursor = if typed {
+                        db.query_typed(sql, &[], &integer)?
+                    } else {
+                        db.query(sql, &[])?
+                    };
+                    assert!(cursor
+                        .next()
+                        .unwrap_err()
+                        .to_string()
+                        .contains("safe integer range"));
+                }
+            }
+            for number in [1.0, 1e100] {
+                let mut cursor = db.query_typed("SELECT ?1", &[Value::Real(number)], &real)?;
+                assert_eq!(cursor.next()?.unwrap(), &[Value::Real(number)]);
+            }
+            let mixed = ResultTypes::positional([
+                ResultType::Integer,
+                ResultType::Real,
+                ResultType::Dynamic,
+            ]);
+            let mut cursor = db.query_typed("SELECT 1, 1.0, 1.0", &[], &mixed)?;
+            assert_eq!(
+                cursor.next()?.unwrap(),
+                &[Value::Integer(1), Value::Real(1.0), Value::Real(1.0)]
+            );
+            drop(cursor);
+
+            let read = |sql: &str, params: &[Value]| -> storage::Result<Vec<Vec<Value>>> {
+                let mut cursor = db.query(sql, params)?;
+                let mut rows = Vec::new();
+                while let Some(row) = cursor.next()? {
+                    rows.push(row.to_vec());
+                }
+                Ok(rows)
+            };
+            assert_eq!(
+                read("SELECT 1 AS constructor, 1.0 AS toString", &[])?,
+                vec![vec![Value::Integer(1), Value::Real(1.0)]]
+            );
+            db.execute("CREATE TABLE exact_values (id INTEGER PRIMARY KEY, v)", &[])?;
+            let values = vec![
+                Value::Integer(-MAX_SAFE),
+                Value::Integer(-9007199254740990),
+                Value::Integer(-9007199254740989),
+                Value::Integer(-9007199254740988),
+                Value::Integer(0),
+                Value::Integer(9007199254740988),
+                Value::Integer(9007199254740989),
+                Value::Integer(9007199254740990),
+                Value::Integer(MAX_SAFE),
+                Value::Real(1.0),
+                Value::Real(1e100),
+                Value::Text(b"9007199254740990".to_vec()),
+                Value::Text("a\0λ🙂".as_bytes().to_vec()),
+                Value::Blob(vec![0, 1, 3, 4, 128, 255]),
+                Value::Blob(vec![]),
+                Value::Null,
+            ];
+            for (id, value) in values.iter().enumerate() {
+                assert_eq!(
+                    db.execute(
+                        "INSERT INTO exact_values VALUES (?1, ?2)",
+                        &[Value::Integer(id as i64), value.clone()]
+                    )?,
+                    1
+                );
+            }
+            assert_eq!(
+                read("SELECT v FROM exact_values ORDER BY id", &[])?,
+                values.iter().cloned().map(|v| vec![v]).collect::<Vec<_>>()
+            );
+            assert_eq!(
+                read(
+                    "SELECT v AS value FROM exact_values WHERE id < 9 ORDER BY value DESC LIMIT 2",
+                    &[]
+                )?,
+                vec![
+                    vec![Value::Integer(MAX_SAFE)],
+                    vec![Value::Integer(9007199254740990)]
+                ]
+            );
+            assert_eq!(
+                read("SELECT min(v), max(v) FROM exact_values WHERE id < 9", &[])?,
+                vec![vec![Value::Integer(-MAX_SAFE), Value::Integer(MAX_SAFE)]]
+            );
+            assert_eq!(
+                read("SELECT sum(v) FROM exact_values WHERE id IN (4, 7)", &[])?,
+                vec![vec![Value::Integer(9007199254740990)]]
+            );
+            assert_eq!(
+                read(
+                    "SELECT id FROM exact_values WHERE v = ?",
+                    &[Value::Integer(9007199254740990)]
+                )?,
+                vec![vec![Value::Integer(7)]]
+            );
+            assert_eq!(
+                read(
+                    "SELECT ?2, ?1, ?2, '?' /* ?3 */ -- ?4\n",
+                    &[Value::Real(1.0), Value::Integer(MAX_SAFE)]
+                )?,
+                vec![vec![
+                    Value::Integer(MAX_SAFE),
+                    Value::Real(1.0),
+                    Value::Integer(MAX_SAFE),
+                    Value::Text(b"?".to_vec())
+                ]]
+            );
+            assert_eq!(
+                read(
+                    "WITH q AS (SELECT v FROM exact_values WHERE id=7) SELECT v, v FROM q;",
+                    &[]
+                )?,
+                vec![vec![Value::Integer(9007199254740990); 2]]
+            );
+            assert!(db
+                .query("UPDATE exact_values SET v = 1 RETURNING v", &[])
+                .is_err());
+            assert_eq!(
+                read("SELECT v FROM exact_values WHERE id=0", &[])?,
+                vec![vec![Value::Integer(-MAX_SAFE)]]
+            );
+            let info = read("PRAGMA table_info(\"exact_values\")", &[])?;
+            assert_eq!(info.len(), 2);
+            assert_eq!(info[0][0], Value::Integer(0));
+            // Cache entries must not outlive DDL that changes a result shape.
+            assert_eq!(
+                read("SELECT * FROM exact_values WHERE id=0", &[])?[0].len(),
+                2
+            );
+            db.execute("ALTER TABLE exact_values ADD COLUMN extra", &[])?;
+            assert_eq!(
+                read("SELECT * FROM exact_values WHERE id=0", &[])?[0].len(),
+                3
+            );
+            db.transaction(&mut || {
+                db.execute("ALTER TABLE exact_values ADD COLUMN temporary", &[])
+                    .unwrap();
+                assert_eq!(
+                    read("SELECT * FROM exact_values WHERE id=0", &[]).unwrap()[0].len(),
+                    4
+                );
+                false
+            })?;
+            assert_eq!(
+                read("SELECT * FROM exact_values WHERE id=0", &[])?[0].len(),
+                3
+            );
+            // A full-width result still fits DO's 100-result-column limit.
+            let wide = format!(
+                "SELECT {}",
+                (0..100)
+                    .map(|i| format!("{i} AS c{i}"))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
+            assert_eq!(read(&wide, &[])?[0].len(), 100);
+            db.execute("DROP TABLE exact_values", &[])?;
+            Ok(())
+        }
+        check(storage.clone())
+            .map_err(|error| JsValue::from_str(&format!("backend check: {error}")))?;
+        // Alice's authority writes and queries exact values through the public
+        // engine, including its generated SQL and handwritten history writes.
+        use jazz::db::{Db, DbConfig, DbIdentity};
+        use jazz::ids::{AuthorSubject, NodeUuid};
+        use jazz::records::Value as Cell;
+        use jazz::tools::{
+            ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder,
+        };
+        use std::collections::BTreeMap;
+        let schema = jazz::schema::JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("exact_items")
+                        .column("n", ColumnType::BigInt)
+                        .policies(
+                            TablePolicies::new()
+                                .with_select(PolicyExpr::True)
+                                .with_insert(PolicyExpr::Cmp {
+                                    column: "n".into(),
+                                    op: jazz::tools::CmpOp::Gt,
+                                    value: jazz::tools::PolicyValue::Literal(
+                                        jazz::tools::Value::BigInt(9007199254740989),
+                                    ),
+                                })
+                                .with_update(Some(PolicyExpr::True), PolicyExpr::True),
+                        ),
+                )
+                .table(
+                    TableSchemaBuilder::new("real_items")
+                        .column("v", ColumnType::Double)
+                        .policies(TablePolicies::new().with_select(PolicyExpr::True)),
+                )
+                .build(),
+        )
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let db = crate::block_on(Db::open_storage(
+            DbConfig::new(
+                schema,
+                DbIdentity {
+                    node: NodeUuid::from_bytes([17; 16]),
+                    author: AuthorSubject::SYSTEM,
+                },
+            ),
+            Storage::from_backend(ObjectSql { storage }),
+        ))
+        .map_err(crate::to_js_error)?;
+        db.set_authority();
+        for v in [1.0, 1e100] {
+            crate::block_on(db.insert(
+                "real_items",
+                BTreeMap::from([("v".into(), Cell::F64(v))]),
+                Default::default(),
+            ))
+            .map_err(crate::to_js_error)?;
+        }
+        let real_query = db
+            .prepare_query(
+                &jazz::query::Query::from("real_items")
+                    .select(["v"])
+                    .order_by("v", jazz::query::OrderDirection::Asc),
+            )
+            .map_err(crate::to_js_error)?;
+        let real_rows = db.read(&real_query).map_err(crate::to_js_error)?;
+        assert_eq!(real_rows[0].cell("v"), Some(Cell::F64(1.0)));
+        assert_eq!(real_rows[1].cell("v"), Some(Cell::F64(1e100)));
+        let avg = db
+            .prepare_query(
+                &jazz::query::Query::from("real_items")
+                    .aggregate([jazz::query::Aggregate::avg("v").alias("mean")]),
+            )
+            .map_err(crate::to_js_error)?;
+        let averages = db.read(&avg).map_err(crate::to_js_error)?;
+        assert_eq!(
+            averages[0].cell("mean"),
+            Some(Cell::Nullable(Some(Box::new(Cell::F64(5e99)))))
+        );
+        let values = [-MAX_SAFE, -9007199254740990, 9007199254740990, MAX_SAFE];
+        for n in values {
+            crate::block_on(db.insert(
+                "exact_items",
+                BTreeMap::from([("n".into(), Cell::I64(n))]),
+                Default::default(),
+            ))
+            .map_err(crate::to_js_error)?;
+        }
+        let query = db
+            .prepare_query(
+                &jazz::query::Query::from("exact_items")
+                    .order_by("n", jazz::query::OrderDirection::Asc),
+            )
+            .map_err(crate::to_js_error)?;
+        let rows = db.read(&query).map_err(crate::to_js_error)?;
+        let actual = rows
+            .iter()
+            .map(|row| {
+                row.cells()
+                    .find(|(name, _)| *name == "n")
+                    .unwrap()
+                    .1
+                    .cloned()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual,
+            values
+                .into_iter()
+                .map(|n| Some(Cell::I64(n)))
+                .collect::<Vec<_>>()
+        );
+        let bob = AuthorSubject::for_test_bytes([18; 16]);
+        let refused = crate::block_on(db.insert(
+            "exact_items",
+            BTreeMap::from([("n".into(), Cell::I64(9007199254740989))]),
+            jazz::db::InsertOptions {
+                identity: jazz::db::WriteIdentity::Session(bob),
+                ..Default::default()
+            },
+        ));
+        assert!(
+            refused.is_err(),
+            "safe integer policy boundary must reject equal values"
+        );
+        let accepted = crate::block_on(db.insert(
+            "exact_items",
+            BTreeMap::from([("n".into(), Cell::I64(9007199254740990))]),
+            jazz::db::InsertOptions {
+                identity: jazz::db::WriteIdentity::Session(bob),
+                ..Default::default()
+            },
+        ))
+        .map_err(crate::to_js_error)?;
+        let history = db
+            .prepare_query(
+                &jazz::query::Query::from("history.exact_items")
+                    .select(["n"])
+                    .filter(jazz::query::eq(
+                        jazz::query::col("id"),
+                        jazz::query::lit(Cell::Uuid(accepted.row_uuid().0)),
+                    )),
+            )
+            .map_err(crate::to_js_error)?;
+        let history = db.read(&history).map_err(crate::to_js_error)?;
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].cell("n"), Some(Cell::I64(9007199254740990)));
+        let history_time = db
+            .prepare_query(
+                &jazz::query::Query::from("history.exact_items")
+                    .select(["$acceptedAt"])
+                    .filter(jazz::query::eq(
+                        jazz::query::col("id"),
+                        jazz::query::lit(Cell::Uuid(accepted.row_uuid().0)),
+                    )),
+            )
+            .map_err(crate::to_js_error)?;
+        let history_time = db.read(&history_time).map_err(crate::to_js_error)?;
+        assert_eq!(history_time.len(), 1);
+        assert_eq!(
+            history_time[0].cell("$acceptedAt"),
+            Some(Cell::U64(jazz::db::shard::hlc_ms(
+                accepted.mergeable_tx_id()
+            )))
+        );
+        let before = db.read(&query).map_err(crate::to_js_error)?.len();
+        for n in [i64::MIN, -MAX_SAFE - 1, MAX_SAFE + 1, i64::MAX] {
+            assert!(crate::block_on(db.insert(
+                "exact_items",
+                BTreeMap::from([("n".into(), Cell::I64(n))]),
+                Default::default()
+            ))
+            .is_err());
+        }
+        assert_eq!(db.read(&query).map_err(crate::to_js_error)?.len(), before);
         Ok(())
     }
 }

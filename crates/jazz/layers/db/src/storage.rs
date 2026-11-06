@@ -18,11 +18,44 @@ pub trait BackendThreading {}
 #[cfg(target_arch = "wasm32")]
 impl<T> BackendThreading for T {}
 
+/// Numeric interpretation supplied by the query's author. Other JS values
+/// (NULL, text and bytes) retain their own type. Unknown physical cells must
+/// use Dynamic rather than guessing from a number's fractional part.
+#[derive(Clone, Copy, serde::Serialize)]
+pub enum ResultType {
+    Dynamic,
+    Integer,
+    Real,
+    NonNumeric,
+}
+
+#[derive(Default, serde::Serialize)]
+pub struct ResultTypes {
+    pub positional: Vec<ResultType>,
+    pub named: std::collections::BTreeMap<String, ResultType>,
+}
+impl ResultTypes {
+    pub fn positional(types: impl IntoIterator<Item = ResultType>) -> Self {
+        Self {
+            positional: types.into_iter().collect(),
+            ..Self::default()
+        }
+    }
+}
+
 /// One SQL owner, including its transaction API. A transaction invokes its
 /// callback synchronously once; false means rollback. Errors also roll back.
 /// SQL called through this owner inside the callback belongs to that scope.
 pub trait Backend: BackendThreading {
     fn query(&self, sql: &str, parameters: &[Value]) -> Result<Box<dyn Cursor + '_>>;
+    fn query_typed(
+        &self,
+        sql: &str,
+        parameters: &[Value],
+        _types: &ResultTypes,
+    ) -> Result<Box<dyn Cursor + '_>> {
+        self.query(sql, parameters)
+    }
     fn execute(&self, sql: &str, parameters: &[Value]) -> Result<usize>;
     fn execute_script(&self, sql: &str) -> Result<()>;
     fn transaction(&self, body: &mut dyn FnMut() -> bool) -> Result<()>;
@@ -442,6 +475,15 @@ impl Statement<'_> {
         }
     }
     pub fn query<P: Params>(&mut self, params: P) -> Result<Rows<'_>> {
+        self.query_typed(params, ResultTypes::default)
+    }
+    /// Result descriptions are built only for managed storage. Native reads
+    /// keep rusqlite's borrowed rows and do not allocate a type description.
+    pub fn query_typed<P: Params>(
+        &mut self,
+        params: P,
+        types: impl FnOnce() -> ResultTypes,
+    ) -> Result<Rows<'_>> {
         params.bind(self)?;
         match self {
             #[cfg(feature = "sqlite")]
@@ -451,7 +493,7 @@ impl Statement<'_> {
                 sql,
                 bindings,
             } => {
-                let cursor = backend.query(sql, bindings)?;
+                let cursor = backend.query_typed(sql, bindings, &types())?;
                 let columns = cursor.columns().to_vec();
                 Ok(Rows::Managed { cursor, columns })
             }
@@ -473,6 +515,17 @@ impl Statement<'_> {
     ) -> Result<MappedRows<'_, F>> {
         Ok(MappedRows {
             rows: self.query(params)?,
+            f,
+        })
+    }
+    pub fn query_map_typed<P: Params, T, F: FnMut(&Row<'_>) -> Result<T>>(
+        &mut self,
+        params: P,
+        types: impl FnOnce() -> ResultTypes,
+        f: F,
+    ) -> Result<MappedRows<'_, F>> {
+        Ok(MappedRows {
+            rows: self.query_typed(params, types)?,
             f,
         })
     }

@@ -391,6 +391,28 @@ pub(crate) fn array_needle(sql: Sql) -> Sql {
     }
 }
 
+/// The physical numeric form of a schema value. Strings and bytes can hold
+/// integer enum tags/large-value epochs; pending-cell encodings are separate.
+pub(crate) fn result_type(ty: &ValueType) -> crate::storage::ResultType {
+    use crate::storage::ResultType as T;
+    match ty {
+        ValueType::Nullable(inner) => result_type(inner),
+        ValueType::F64 => T::Real,
+        ValueType::U8
+        | ValueType::U16
+        | ValueType::U32
+        | ValueType::U48
+        | ValueType::U64
+        | ValueType::I32
+        | ValueType::I64
+        | ValueType::Bool
+        | ValueType::EnumTag(_)
+        | ValueType::String
+        | ValueType::Bytes => T::Integer,
+        _ => T::NonNumeric,
+    }
+}
+
 /// Decode column `column`'s cell (see [`cell_from_sql`]).
 pub(crate) fn column_from_sql(
     column: &Column,
