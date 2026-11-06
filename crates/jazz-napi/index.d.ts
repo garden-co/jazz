@@ -125,6 +125,8 @@ export declare class NapiDb {
   registerSchema(schema: Uint8Array, migrations?: Uint8Array | undefined | null): NapiDb
   /** Begin one owner-wide transaction. */
   beginTransaction(openTransactionId: string, kind: string, author?: Uint8Array | undefined | null, attribution?: Uint8Array | undefined | null, acceptedEvidence?: boolean | undefined | null): void
+  /** Open the actual replica owner with ordinary reads and separate evidence. */
+  beginClientEvidenceTransaction(openTransactionId: string): void
   /** Commit an owner-wide transaction by id and optional kind. */
   commitTransaction(openTransactionId: string, kind?: string | undefined | null): Write
   /** Roll back an owner-wide open transaction by id. */

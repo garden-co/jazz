@@ -7523,6 +7523,9 @@ struct Batch {
     kind: BatchKind,
     reads_state: Rc<RefCell<transaction_reads::ReadState>>,
     accepted: Option<accepted_transactions::AcceptedScope>,
+    // Ordinary replica reads keep their own-client mode. Authority evidence
+    // authenticates this exact opened owner independently in the same batch.
+    client_evidence_owner: Option<DbIdentity>,
     /// None retains the ordinary per-operation identity contract.
     identity: Option<WriteIdentity>,
     ops: Vec<(Rc<Schema>, StagedOp)>,
@@ -8008,6 +8011,38 @@ pub struct TxRef<'a> {
 }
 
 impl Db {
+    /// Open a replica's ordinary serializable snapshot with a separate
+    /// accepted-evidence scope for its actual owner. This is not a delegated
+    /// session or an authority-side policy bypass, and cannot upgrade a batch.
+    pub async fn begin_client_evidence_transaction(
+        &self,
+        id: OpenTransactionId,
+    ) -> Result<(), Error> {
+        let owner = {
+            let inner = self.inner.borrow();
+            if inner.client.is_none()
+                || inner.authority
+                || matches!(
+                    inner.identity.author,
+                    AuthorSubject::System | AuthorSubject::SystemAt(_)
+                )
+            {
+                return Err(unsupported(
+                    "own-client evidence requires an unprivileged replica",
+                ));
+            }
+            inner.identity
+        };
+        self.begin_serializable(id).await?;
+        self.inner
+            .borrow_mut()
+            .batches
+            .get_mut(&id)
+            .expect("opened")
+            .client_evidence_owner = Some(owner);
+        Ok(())
+    }
+
     pub async fn begin_mergeable(&self, id: OpenTransactionId) -> Result<(), Error> {
         self.begin(id, BatchKind::Mergeable)
     }
@@ -8105,6 +8140,12 @@ impl Db {
             .batches
             .get(&id)
             .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
+        Self::check_client_evidence_owner(&inner, batch)?;
+        if batch.client_evidence_owner.is_some() && requested != WriteIdentity::Database {
+            return Err(rejected(
+                "own-client evidence cannot select another write identity",
+            ));
+        }
         match batch.identity {
             None => Ok(requested),
             Some(bound) if requested == WriteIdentity::Database || requested == bound => Ok(bound),
@@ -8124,6 +8165,7 @@ impl Db {
                 kind,
                 reads_state: Rc::new(RefCell::new(transaction_reads::ReadState::default())),
                 accepted: None,
+                client_evidence_owner: None,
                 identity: None,
                 ops: Vec::new(),
                 observation_provenance: Vec::new(),
@@ -8439,6 +8481,7 @@ impl Db {
             .batches
             .get(&id)
             .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
+        Self::check_client_evidence_owner(&inner, batch)?;
         let staged = batch.ops.len();
         let live = inner
             .overlay
@@ -8534,6 +8577,7 @@ impl Db {
             .batches
             .get(&id)
             .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
+        Self::check_client_evidence_owner(&inner, batch)?;
         let unavailable = || {
             Error::new(
                 ErrorCode::NotObserved,
@@ -8900,6 +8944,12 @@ impl TxRef<'_> {
                 .batches
                 .get(&self.id)
                 .ok_or_else(|| rejected("transaction is not open"))?;
+            Db::check_client_evidence_owner(&inner, batch)?;
+            if batch.client_evidence_owner.is_some()
+                && (identity.is_some() || prepared.request_claims.is_some())
+            {
+                return Err(rejected("own-client evidence cannot select a read session"));
+            }
             if batch.identity.is_some() {
                 let reader = batch.reader();
                 let author = reader.unwrap_or(AuthorSubject::SYSTEM);

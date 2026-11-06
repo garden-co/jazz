@@ -56,8 +56,15 @@ impl Db {
             if !matches!(batch.kind, BatchKind::Serializable { .. }) {
                 return Err(unsupported("accepted evidence in a mergeable transaction"));
             }
-            match batch.identity {
-                Some(WriteIdentity::Session(author)) => author,
+            Self::check_client_evidence_owner(&inner, batch)?;
+            if batch.client_evidence_owner.is_some() && prepared.request_claims.is_some() {
+                return Err(rejected(
+                    "own-client evidence uses its live registered claims",
+                ));
+            }
+            match (batch.identity, batch.client_evidence_owner) {
+                (Some(WriteIdentity::Session(author)), None) => author,
+                (None, Some(owner)) => owner.author,
                 _ => {
                     return Err(unsupported(
                         "accepted evidence without an explicitly bound session identity",
@@ -235,7 +242,33 @@ impl Db {
         Self::check_accepted_batch_inner(&self.inner(), batch)
     }
 
+    pub(crate) fn client_evidence_author(
+        &self,
+        id: OpenTransactionId,
+    ) -> Result<Option<AuthorSubject>, Error> {
+        let inner = self.inner();
+        let Some(batch) = inner.batches.get(&id) else {
+            // This optional lookup must leave legacy host admission/errors
+            // to the original bound-session path when no batch remains.
+            return Ok(None);
+        };
+        Self::check_client_evidence_owner(&inner, batch)?;
+        Ok(batch.client_evidence_owner.map(|owner| owner.author))
+    }
+
+    pub(super) fn check_client_evidence_owner(inner: &Inner, batch: &Batch) -> Result<(), Error> {
+        if let Some(owner) = batch.client_evidence_owner
+            && (inner.client.is_none() || inner.authority || inner.identity != owner)
+        {
+            return Err(rejected(
+                "own-client evidence owner changed before validation",
+            ));
+        }
+        Ok(())
+    }
+
     fn check_accepted_batch_inner(inner: &Inner, batch: &Batch) -> Result<(), Error> {
+        Self::check_client_evidence_owner(inner, batch)?;
         let Some(context) = &batch.accepted else {
             return Ok(());
         };
@@ -284,6 +317,7 @@ impl Db {
             .batches
             .get(&id)
             .ok_or_else(|| rejected("transaction is not open"))?;
+        Self::check_client_evidence_owner(&inner, batch)?;
         let Some(context) = &batch.accepted else {
             return Ok(());
         };

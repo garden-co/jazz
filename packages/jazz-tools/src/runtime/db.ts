@@ -1,5 +1,6 @@
 import {
   validateAcceptedReadTimeout,
+  isAcceptedReadCapability,
   type AcceptedRows,
   type TransactionReadCapability,
 } from "./accepted-read.js";
@@ -2247,7 +2248,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
 
   [acceptedRows]<T>(query: QueryBuilder<T>, timeoutMs: number): Promise<AcceptedRows<T>> {
     validateAcceptedReadTimeout(timeoutMs);
-    if (this.kind !== "serializable" || this.openingReadCapability !== "accepted-evidence")
+    if (this.kind !== "serializable" || !isAcceptedReadCapability(this.openingReadCapability))
       return Promise.reject(
         new Error("Accepted evidence was not selected before transaction opening"),
       );
@@ -2416,7 +2417,7 @@ export function prepareDbTransaction(
           const output = resolveQueryOutputTable(schema, built);
           const planned = prepareTransformRead(query, built, output);
           if (acceptedTimeout !== undefined) {
-            if (binding.readCapability !== "accepted-evidence")
+            if (!isAcceptedReadCapability(binding.readCapability))
               throw new Error("Accepted evidence was not selected before transaction opening");
             if (planned.computedState)
               throw new Error("Accepted evidence does not support computed preparation");

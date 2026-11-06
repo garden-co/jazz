@@ -30,6 +30,7 @@ type RawDb = {
     attribution?: Uint8Array,
     acceptedEvidence?: boolean,
   ): void;
+  beginClientEvidenceTransaction(id: string): void;
   rollbackTransaction(id: string): void;
   commitTransaction(id: string, kind: string): { wait(tier: string): Promise<unknown> };
   registerSchema(schema: Uint8Array): RawDb;
@@ -114,6 +115,68 @@ function deferred<T>() {
 
 for (const host of ["NAPI", "WASM"] as const) {
   describe(`${host} accepted host lifecycle`, () => {
+    it("keeps implicit own-client admission separate without selecting or reinstalling a session", async () => {
+      const raw = await open(host);
+      await raw.connectUpstream();
+      raw.setRemoteLinkHint("live");
+      raw.setSessionClaims({ team: "live" });
+      let clientBegins = 0;
+      let ordinaryBegins = 0;
+      let registrations = 0;
+      const adapter = runtime(
+        observe(raw, {
+          beginClientEvidenceTransaction(id) {
+            clientBegins++;
+            raw.beginClientEvidenceTransaction(id);
+          },
+          beginTransaction(...args) {
+            ordinaryBegins++;
+            raw.beginTransaction(...args);
+          },
+          setIdentityClaims(identity, claims) {
+            registrations++;
+            raw.setIdentityClaims(identity, claims);
+          },
+        }),
+      );
+      const id = createOpenTransactionId();
+      const [account_id, issuer, user_id] = JSON.parse(new TextDecoder().decode(author));
+      const explicit = JSON.stringify({ account_id, issuer, user_id, claims: {} });
+      try {
+        expect(() =>
+          adapter.beginTransaction("serializable", id, explicit, "client-accepted-evidence"),
+        ).toThrow(/implicit replica owner/);
+        expect(() =>
+          adapter.beginTransaction("mergeable", id, undefined, "client-accepted-evidence"),
+        ).toThrow(/serializable/);
+        expect(clientBegins).toBe(0);
+        adapter.beginTransaction("serializable", id, undefined, "client-accepted-evidence");
+        expect(clientBegins).toBe(1);
+        expect(ordinaryBegins).toBe(0);
+        expect(registrations).toBe(0);
+        await expect(
+          adapter.queryAccepted(JSON.stringify({ table: "notes" }), id, explicit, 1000),
+        ).rejects.toThrow(/cannot select a read session/);
+        expect(() => raw.acceptedRead(query, id, false, 1000, author, {})).toThrow(
+          /cannot select a session/,
+        );
+        const read = pending(raw.acceptedRead(query, id, false, 1000));
+        read.cancel();
+        await adapter.rollbackTransaction(id);
+      } finally {
+        await adapter.close();
+      }
+
+      const backend = await open(host, true);
+      try {
+        expect(() => backend.beginClientEvidenceTransaction(createOpenTransactionId())).toThrow(
+          /backend/,
+        );
+      } finally {
+        await backend.close();
+      }
+    });
+
     for (const installAfterRead of [false, true]) {
       it(`finishes a quiet accepted deadline with the existing SDK timer (${installAfterRead ? "late" : "early"} hook)`, async () => {
         const raw = await open(host);
