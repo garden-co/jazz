@@ -32,7 +32,7 @@ function authenticate(request: Request) {
   return userId ? { userId } : null;
 }
 
-async function serve(jazz: Jazz): Promise<string> {
+async function serve(jazz: Jazz, port = 0): Promise<string> {
   const server: Server = createServer((req, res) =>
     jazz.nodeHandler(req, res, () => {
       res.statusCode = 404;
@@ -40,7 +40,7 @@ async function serve(jazz: Jazz): Promise<string> {
     }),
   );
   await jazz.attach(server);
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  await new Promise<void>((resolve) => server.listen(port, "127.0.0.1", resolve));
   cleanups.push(
     () =>
       new Promise((resolve) => {
@@ -53,6 +53,8 @@ async function serve(jazz: Jazz): Promise<string> {
 
 /** Every request and socket to `origin` carries `userId`'s session, as a cookie would. */
 function signInAs(origin: string, userId: string) {
+  // A browser page: the host that sends the backend's cookie.
+  vi.stubGlobal("document", {});
   const realFetch = globalThis.fetch;
   const RealWebSocket = globalThis.WebSocket;
   globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
@@ -185,4 +187,53 @@ describe("browser session against the app's backend", () => {
       "thin",
     ]);
   }, 60_000);
+
+  // The core no longer holds the user's account (a reset dev store, a new
+  // core): the sync server refuses the thin client, which must say so for the
+  // session to sign the user in again instead of hanging.
+  it("signs a user in again after the backend restarts on an empty store", async () => {
+    const first = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    const closeFirst = once(() => first.close());
+    cleanups.push(closeFirst);
+    const origin = await serve(first);
+    signInAs(origin, "alice");
+    const session = await createJazzClient({
+      serverUrl: `${origin}/jazz`,
+      store: memoryStore(),
+      driver: { type: "memory" },
+    });
+    cleanups.push(() => session.close());
+    await session.loginWithBackend();
+    const before = session.getSnapshot().client!;
+    const lost = before.session!.user!;
+    await before.db.insert(app.todos, { title: "before", owner: lost }).wait({ tier: "global" });
+    // The thin client reports its link: the backend watch acts on a refusal.
+    expect(before.db.getSyncStatus().link.state).toBe("connected");
+
+    // The same backend, restarted on an empty store: alice has no account.
+    const servers = cleanups.splice(cleanups.length - 3, 1);
+    await closeFirst();
+    await servers[0]!();
+    const second = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    cleanups.push(() => second.close());
+    await serve(second, Number(new URL(origin).port));
+
+    await expect
+      .poll(() => session.getSnapshot().client?.session?.user, { timeout: 30_000 })
+      .not.toBe(lost);
+    const after = session.getSnapshot().client!;
+    const row = await after.db
+      .insert(app.todos, { title: "after", owner: after.session!.user! })
+      .wait({ tier: "global" });
+    expect((await second.db.all(app.todos.where({ id: row.id }))).map((t) => t.title)).toEqual([
+      "after",
+    ]);
+    // Its sockets close before the server does.
+    await session.close();
+  }, 60_000);
 });
+
+function once(run: () => Promise<unknown>): () => Promise<unknown> {
+  let done: Promise<unknown> | undefined;
+  return () => (done ??= run());
+}

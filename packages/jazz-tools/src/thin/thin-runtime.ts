@@ -30,6 +30,7 @@ import type {
   TxId,
 } from "../runtime/client.js";
 import { parseSnapshotRef, type SnapshotRef } from "../runtime/snapshot-ref.js";
+import { CONNECTED, CONNECTING, offlineLink, type LinkStatus } from "../runtime/sync-status.js";
 import { streamingChunks } from "../runtime/streaming-source.js";
 import { runtimeRandomBytes } from "../runtime/runtime-entropy.js";
 import { writeRow } from "../runtime/write-row.js";
@@ -178,6 +179,12 @@ type Write = {
   answered: boolean;
 };
 
+/**
+ * How long the connection may keep failing before the link reports an
+ * outage, as the core link does: a short blip never shows as offline.
+ */
+const OUTAGE_REPORT_MS = 7_500;
+
 /** Committed writes kept for later waits on them. */
 const RETAINED_WRITES = 1024;
 
@@ -198,6 +205,13 @@ export class ThinRuntime implements Runtime {
   private closed = false;
   private attempt = 0;
   private reconnectTimer?: ReturnType<typeof setTimeout>;
+  /** The server refused the credential: nothing reconnects until `updateAuth`. */
+  private refused = false;
+  /** The connection ended for good (`fatal`, `close`). */
+  private stopped = false;
+  /** Armed while not connected; reports the outage when it fires. */
+  private outageTimer?: ReturnType<typeof setTimeout>;
+  private outagePublished = false;
   private nextRequestId = 1;
   private readonly oneShots = new Map<number, OneShot>();
   private nextHandle = 1;
@@ -230,6 +244,7 @@ export class ThinRuntime implements Runtime {
 
   async disconnect(options?: { rejectWaiters?: boolean }): Promise<void> {
     this.wanted = false;
+    this.clearOutage();
     this.dropConnection(
       options?.rejectWaiters === false ? undefined : new ThinConnectionLostError(),
     );
@@ -237,6 +252,7 @@ export class ThinRuntime implements Runtime {
 
   updateAuth(authJson: string): void {
     this.authJson = authJson;
+    this.setRefused(false);
     if (!this.wanted) return;
     // The server binds a connection to the credential it opened with: a new
     // one takes a new connection.
@@ -266,6 +282,7 @@ export class ThinRuntime implements Runtime {
   close(): void {
     this.closed = true;
     this.wanted = false;
+    this.stop();
     this.dropConnection(new ThinConnectionLostError("the thin runtime is closed"));
     for (const live of this.liveQueries.values()) live.callback = undefined;
     this.liveQueries.clear();
@@ -274,6 +291,10 @@ export class ThinRuntime implements Runtime {
   private open(): void {
     if (this.closed || !this.url || this.authJson === undefined || this.carrier) return;
     clearTimeout(this.reconnectTimer);
+    this.outageTimer ??= setTimeout(() => {
+      this.outagePublished = true;
+      this.notifySyncStatus();
+    }, OUTAGE_REPORT_MS);
     this.parts.reset();
     const carrier = new WebSocketCarrier({
       endpointUrl: this.url,
@@ -316,6 +337,8 @@ export class ThinRuntime implements Runtime {
         }
         this.attempt = 0;
         this.bound = true;
+        this.clearOutage();
+        this.notifySyncStatus();
         for (const live of this.liveQueries.values()) if (live.callback) this.openLive(live);
         for (const [requestId, oneShot] of this.oneShots) {
           if (!oneShot.sent) this.transmit(requestId, oneShot);
@@ -357,6 +380,7 @@ export class ThinRuntime implements Runtime {
     const authFailure = wireAuthFailureReason(error);
     if (authFailure) {
       // Nothing reconnects until the credential is renewed (`updateAuth`).
+      this.setRefused(true);
       this.authFailureCallback?.(authFailure);
       return;
     }
@@ -372,7 +396,10 @@ export class ThinRuntime implements Runtime {
     clearTimeout(this.reconnectTimer);
     const carrier = this.carrier;
     this.carrier = undefined;
-    this.bound = false;
+    if (this.bound) {
+      this.bound = false;
+      this.notifySyncStatus();
+    }
     carrier?.close();
     for (const live of this.liveQueries.values()) {
       if (live.requestId !== undefined) this.liveByRequest.delete(live.requestId);
@@ -410,6 +437,7 @@ export class ThinRuntime implements Runtime {
 
   private fatal(error: Error): void {
     this.wanted = false;
+    this.stop();
     this.dropConnection(error);
     for (const live of this.liveQueries.values()) live.callback?.(error);
   }
@@ -1013,12 +1041,39 @@ export class ThinRuntime implements Runtime {
     ]);
   }
 
+  /** The upstream link as the app sees it (see `linkStatusFromUpstream`). */
+  upstreamLinkStatus(): LinkStatus {
+    if (this.stopped) return offlineLink("stopped");
+    if (this.refused) return offlineLink("auth");
+    if (this.bound) return CONNECTED;
+    return this.outagePublished ? offlineLink("network") : CONNECTING;
+  }
+
+  private setRefused(refused: boolean): void {
+    if (this.refused === refused) return;
+    this.refused = refused;
+    this.notifySyncStatus();
+  }
+
+  private clearOutage(): void {
+    clearTimeout(this.outageTimer);
+    this.outageTimer = undefined;
+    this.outagePublished = false;
+  }
+
+  private stop(): void {
+    this.clearOutage();
+    if (this.stopped) return;
+    this.stopped = true;
+    this.notifySyncStatus();
+  }
+
   /** How many writes still wait for the server's answer. */
   pendingUploadCount(): number {
     return this.unanswered;
   }
 
-  /** Observe changes of {@link pendingUploadCount}. */
+  /** Observe changes of {@link pendingUploadCount} and {@link upstreamLinkStatus}. */
   onSyncStatusChange(listener: () => void, signal: AbortSignal): void {
     if (signal.aborted) return;
     this.syncStatusListeners.add(listener);
