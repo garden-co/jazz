@@ -1770,7 +1770,12 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
 
   // HTTP stream sessions, by id, with the key that proves a request comes
   // from the client that opened them.
-  const streams = new Map<string, { session: ClientSession; key: Buffer }>();
+  const streams = new Map<
+    string,
+    { session: ClientSession; key: Buffer; end(code: number, reason: string): void }
+  >();
+  // Sockets accepted for clients, so close() can end them.
+  const clientSockets = new Set<WsLikeSocket>();
 
   function openStream(request: Request): Response {
     const id = randomUUID();
@@ -1811,7 +1816,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     } catch (error) {
       return new Response(error instanceof Error ? error.message : String(error), { status: 503 });
     }
-    streams.set(id, { session: socket, key });
+    streams.set(id, { session: socket, key, end });
     controller.enqueue(
       encodeStreamRecord(
         STREAM_RECORD_SESSION,
@@ -1904,10 +1909,14 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       ws.close(1013, error instanceof Error ? error.message : String(error));
       return;
     }
+    clientSockets.add(ws);
     ws.on("message", (data) => {
       if (!socket.send(toBytes(data))) ws.close(1000, "session ended");
     });
-    ws.on("close", () => socket.close());
+    ws.on("close", () => {
+      clientSockets.delete(ws);
+      socket.close();
+    });
     ws.on("error", () => socket.close());
   }
 
@@ -2325,8 +2334,16 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     },
     close() {
       closing ??= (async () => {
-        for (const { session: stream } of streams.values()) stream.close();
+        // Every client connection ends, so the host's own shutdown (which
+        // waits for the connections it serves) can finish, and the clients
+        // reconnect to whichever instance serves next.
+        for (const stream of [...streams.values()]) {
+          stream.session.close();
+          stream.end(1012, "server shutting down");
+        }
         streams.clear();
+        for (const ws of [...clientSockets]) ws.close(1012, "server shutting down");
+        clientSockets.clear();
         await Promise.all([...retiring].map((close) => close()));
         // Writes that resolved at the "local" tier may still be on their way
         // to the core. Hand them over before closing it, so a close right
@@ -2434,8 +2451,12 @@ function storeKey(store: JazzStore): string | undefined {
   if (store.kind === "sqlite") return `sqlite:${resolve(store.path)}`;
   if (store.kind === "vercel") {
     const project = store.options.credentials?.projectId ?? process.env.VERCEL_PROJECT_ID;
-    const name =
-      store.options.name ?? (project ? defaultCoreName(project, process.env) : undefined);
+    let name = store.options.name;
+    try {
+      name ??= project ? defaultCoreName(project, process.env) : undefined;
+    } catch {
+      // A preview without a branch: its open reports that, not createJazz.
+    }
     // Without a name the core is unknown: its open reports that.
     return name ? `vercel:${name}` : undefined;
   }
@@ -2555,6 +2576,7 @@ function openEntry(entry: Entry): Promise<OpenedJazz> {
       entry.failure = undefined;
       entry.opened = opened;
       entry.applied = options;
+      drainOnSignal(entry);
       return opened;
     },
     (error: unknown) => {
@@ -2568,6 +2590,43 @@ function openEntry(entry: Entry): Promise<OpenedJazz> {
   );
   entry.opening = opening;
   return opening;
+}
+
+/** The signals a host stops a server with (a deploy, a rolling restart, Ctrl-C). */
+const SHUTDOWN_SIGNALS = ["SIGTERM", "SIGINT"] as const;
+/** Every open Jazz in this process, closed when the process is asked to stop. */
+const drained = new Set<Entry>();
+const onShutdownSignal = (signal: NodeJS.Signals) => void shutDownOnSignal(signal);
+
+/**
+ * Close every open Jazz when the process is asked to stop. A host's own
+ * shutdown (`next start`, an Effect runtime, `server.close()`) waits for the
+ * connections it serves, and Jazz's sync sockets and streams last until Jazz
+ * ends them: without this, the process lingers and keeps its store locked
+ * for as long as a browser stays connected. The clients reconnect to
+ * whichever instance serves next. With no other handler for the signal the
+ * process then stops as it would have; otherwise that handler decides.
+ */
+function drainOnSignal(entry: Entry): void {
+  if (typeof process === "undefined" || typeof process.on !== "function") return;
+  if (drained.size === 0) {
+    for (const signal of SHUTDOWN_SIGNALS) process.on(signal, onShutdownSignal);
+  }
+  drained.add(entry);
+}
+
+function undrain(entry: Entry): void {
+  if (!drained.delete(entry) || drained.size > 0) return;
+  for (const signal of SHUTDOWN_SIGNALS) process.off(signal, onShutdownSignal);
+}
+
+async function shutDownOnSignal(signal: NodeJS.Signals): Promise<void> {
+  for (const each of SHUTDOWN_SIGNALS) process.off(each, onShutdownSignal);
+  const open = [...drained];
+  drained.clear();
+  await Promise.allSettled(open.map((entry) => entry.jazz.close()));
+  // Nobody else asked to handle it: stop the way the signal would have.
+  if (process.listenerCount(signal) === 0) process.kill(process.pid, signal);
 }
 
 /**
@@ -2592,6 +2651,7 @@ async function closeEntry(entry: Entry, early: EarlyDb): Promise<void> {
       if (entry.key !== undefined && registry().get(entry.key) === entry) {
         registry().delete(entry.key);
       }
+      undrain(entry);
       release();
     });
   let timer: ReturnType<typeof setTimeout> | undefined;
