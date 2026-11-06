@@ -46,6 +46,7 @@ describe("deployed permissions with claims in referenced read policies", () => {
     // Each user is a request scope the app's `authenticate` names, carrying
     // the claims the policies compare.
     const connect = async (subject: string, claims: Record<string, unknown>) => {
+      await server.jazz.createAccountFor(subject);
       const db = await server.jazz.forReqUser(
         new Request("http://app.example/", {
           headers: { authorization: `Bearer ${server.bearer(subject, claims)}` },

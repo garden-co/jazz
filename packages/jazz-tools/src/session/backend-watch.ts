@@ -85,6 +85,11 @@ export interface BackendWatch {
  * The app calls `reauthenticate` after its own sign-in or sign-out, so the
  * session follows at once.
  *
+ * A user the sync server refuses whom the backend still names but says has
+ * no account (the core lost it: a reset dev store, a new core) is signed in
+ * again, once, which gives them a new account; reconnecting would only be
+ * refused again.
+ *
  * A sync server refusing the sign-in (`authRefused`) asks the backend too, but
  * only to reconnect, with backoff, while it still names the same user. It
  * never signs anyone out: a background tab's cookie may just be stale, so a
@@ -167,6 +172,9 @@ export function watchBackendUser<Client>(
   // user: one re-check follows the newer answer, more would loop if they
   // disagree. Kept per user, so another user gets their own re-check.
   let signedOutLink: string | undefined;
+  // A signed-in user the backend said has no account any more, signed in
+  // again once: kept per user until the backend says they have one.
+  let lostAccount: string | undefined;
   let checking: Promise<void> | undefined;
   // Checks asked for while one runs: a plain one (may sign out), a refused
   // one (only reconnects) and an asked one (the app's auth changed: no
@@ -270,6 +278,26 @@ export function watchBackendUser<Client>(
         // The same user, whose client failed to open: the app asking is
         // how it recovers.
         if (asked && session.getSnapshot().status === "error") return attempt(session.retry());
+        const who = `${signedIn.issuer}\0${signedIn.subject}`;
+        // The sync server refused them, and the core holds no account for
+        // them any more (a reset dev store, a new core): it refuses this
+        // account for good, so reconnecting would loop. Sign in again, which
+        // gives them a new one. Once per user, so a backend whose answers keep
+        // saying no account doesn't sign in again and again.
+        if (signedIn.hasAccount === false && (refused || refusedPending)) {
+          if (lostAccount === who) return;
+          lostAccount = who;
+          remembered = undefined;
+          // A sign-in that fails (a network error, a 5xx) is tried again on
+          // the next refusal.
+          return attempt(
+            session.loginWithBackend().catch((cause: unknown) => {
+              if (lostAccount === who) lostAccount = undefined;
+              throw cause;
+            }),
+          );
+        }
+        if (signedIn.hasAccount !== false && lostAccount === who) lostAccount = undefined;
         const account = session.getSnapshot().account;
         if (account === remembered && !refused) {
           remembered = undefined;

@@ -73,6 +73,7 @@ export {
   type VercelBlobStore,
 } from "./blobs.js";
 import { isSameAdmission, recheckEvery } from "./session-recheck.js";
+import { NoJazzAccountError } from "./no-account-error.js";
 import { RequestAuthenticationError } from "./request-auth.js";
 
 /** Where the core keeps its data. */
@@ -439,14 +440,31 @@ export interface Jazz {
    * wait for it.
    */
   readonly db: Db;
-  /** The database as the request's user, judged by your permissions. */
+  /**
+   * The database as the request's user, judged by your permissions. Throws
+   * a {@link NoJazzAccountError} (`code: "no_account"`) for a user who has no
+   * account yet (see {@link createAccountFor}).
+   */
   forReqUser(request: Request): Promise<Db>;
   /**
-   * The Jazz account of the request's signed-in user (created on first use),
-   * or null when `authenticate` names no user. For API routes that act on
+   * The Jazz account of the request's signed-in user, or null when
+   * `authenticate` names no user or the user has no account yet. It never
+   * creates one (see {@link createAccountFor}). For API routes that act on
    * the user's data with the backend's own `db`.
    */
   accountFor(request: Request): Promise<string | null>;
+  /**
+   * Create the Jazz account of `userId` (the id your `authenticate` returns
+   * for them), or return the one they have. Jazz never creates accounts on
+   * its own on the backend: a user gets one when they sign in from a client,
+   * when a local-first guest links to them (`linkWithBackend`, so the
+   * guest's data becomes theirs), or here. Call it for a user who never
+   * opens a client (a webhook, an import, an API-only user) or to seed data
+   * before their first visit. A user with an account can no longer link a
+   * guest, so don't call it in a sign-up flow whose browser may hold one.
+   * Returns the account id.
+   */
+  createAccountFor(userId: string): Promise<string>;
   /**
    * The backend's own database (backend permissions), with every write
    * stamped as the request's signed-in user: for server actions that do what
@@ -455,6 +473,9 @@ export interface Jazz {
    * **Your permissions are not checked.** It writes with the backend's full
    * authority; only the attribution is the user's. Check yourself that the
    * user may do what the action does, and keep it in server-only code.
+   *
+   * Throws a {@link NoJazzAccountError} (`code: "no_account"`) for a user
+   * who has no account yet (see {@link createAccountFor}).
    */
   withAttribution(request: Request): Promise<Db>;
   /**
@@ -1260,6 +1281,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         new Error(`Jazz account ${operation} failed (${response.status}): ${text}`),
         {
           status: response.status,
+          code: text.trim(),
         },
       );
     }
@@ -1269,26 +1291,57 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
 
   const identity = (userId: string) => ({ issuer, subject: userId });
 
-  /** The user's session: their account, created on first sign-in. */
   // A user's account never changes once assigned (linking only adds
   // identities to an account), so the core is asked once per user for a
-  // while, not on every sign-in, socket and request.
+  // while, not on every sign-in, socket and request. Only assignments are
+  // cached: a user without an account may get one at any moment.
   const accounts = new Map<string, { account: string; until: number }>();
   const ACCOUNT_CACHE_LIMIT = 10_000;
-  async function accountOf(userId: string): Promise<string> {
-    const now = Date.now();
-    const cached = accounts.get(userId);
-    if (cached && cached.until > now) return cached.account;
-    const { account } = await adminAccounts("login-or-register", { identity: identity(userId) });
+  function remember(userId: string, account: string): string {
     if (accounts.size >= ACCOUNT_CACHE_LIMIT) {
       accounts.delete(accounts.keys().next().value!);
     }
-    accounts.set(userId, { account, until: now + (options.sessionTtlSeconds ?? 3600) * 1000 });
+    accounts.set(userId, {
+      account,
+      until: Date.now() + (options.sessionTtlSeconds ?? 3600) * 1000,
+    });
     return account;
   }
 
-  async function sessionFor(user: JazzUser): Promise<Session> {
-    const account = await accountOf(user.userId);
+  /**
+   * The user's account, or null while they have none. Never creates one:
+   * only a client's sign-in (`backend-sign-in`), a guest's link
+   * (`backend-link`) and `createAccountFor` do, so a local-first guest can
+   * still link to a user the backend has only looked up or acted for (V9).
+   */
+  async function existingAccountOf(userId: string): Promise<string | null> {
+    const cached = accounts.get(userId);
+    if (cached && cached.until > Date.now()) return cached.account;
+    try {
+      const { account } = await adminAccounts("resolve", { identity: identity(userId) });
+      return remember(userId, account);
+    } catch (error) {
+      // Only the core's own "no account for this identity" answer: any other
+      // 404 (an unknown app, a missing route) is a server error, not a user
+      // without an account.
+      const { status, code } = error as { status?: number; code?: string };
+      if (status === 404 && code === "identity_not_assigned") return null;
+      throw error;
+    }
+  }
+
+  /** The user's account, created if they have none (a sign-in, or `createAccountFor`). */
+  async function accountOf(userId: string): Promise<string> {
+    const cached = accounts.get(userId);
+    if (cached && cached.until > Date.now()) return cached.account;
+    const { account } = await adminAccounts("login-or-register", { identity: identity(userId) });
+    return remember(userId, account);
+  }
+
+  /** The user's session, on the account they already have. */
+  async function sessionFor(user: JazzUser, caller: string): Promise<Session> {
+    const account = await existingAccountOf(user.userId);
+    if (account === null) throw new NoJazzAccountError(user.userId, caller);
     return {
       account_id: account,
       issuer,
@@ -1336,20 +1389,14 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     const user = await authenticate(request);
     if (!user) return new Response("signed_out", { status: 401 });
     let account: string | null;
-    const cached = accounts.get(user.userId);
-    if (cached && cached.until > Date.now()) {
-      account = cached.account;
-    } else {
-      try {
-        ({ account } = await adminAccounts("resolve", { identity: identity(user.userId) }));
-      } catch (error) {
-        const status = (error as { status?: number }).status;
-        // The core refuses this identity (it was revoked): say so, as the
-        // core does, rather than fail as a server error.
-        if (status === 403) return new Response("identity_not_authorized", { status: 403 });
-        if (status !== 404) throw error;
-        account = null;
-      }
+    try {
+      account = await existingAccountOf(user.userId);
+    } catch (error) {
+      // The core refuses this identity (it was revoked): say so, as the
+      // core does, rather than fail as a server error.
+      if ((error as { status?: number }).status === 403)
+        return new Response("identity_not_authorized", { status: 403 });
+      throw error;
     }
     return Response.json(
       { account, identity: identity(user.userId), claims: user.claims ?? {} },
@@ -1756,7 +1803,16 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     }
     const user = await authenticate(request);
     if (!user || user.userId !== stated.user_id) return null;
-    const vouched = { backend_secret: core.backendSecret, backend_session: await sessionFor(user) };
+    // A browser states a user's session only once its sign-in (or link)
+    // gave them an account; this never makes one.
+    let session: Session;
+    try {
+      session = await sessionFor(user, "a sync session");
+    } catch (error) {
+      if (error instanceof NoJazzAccountError) return null;
+      throw error;
+    }
+    const vouched = { backend_secret: core.backendSecret, backend_session: session };
     const rewritten = { ...parsed, ...vouched, auth: { ...auth, ...vouched } };
     return {
       prelude: new TextEncoder().encode(JSON.stringify(rewritten)),
@@ -2321,16 +2377,21 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     async forReqUser(request) {
       const user = await authenticate(request);
       if (!user) throw signedOut("forReqUser");
-      return backendDbForSession(backend, await sessionFor(user));
+      return backendDbForSession(backend, await sessionFor(user, "forReqUser"));
     },
     async withAttribution(request) {
       const user = await authenticate(request);
       if (!user) throw signedOut("withAttribution");
-      return backendDbAttributedTo(backend, await sessionFor(user));
+      return backendDbAttributedTo(backend, await sessionFor(user, "withAttribution"));
     },
     async accountFor(request) {
       const user = await authenticate(request);
-      return user ? ((await sessionFor(user)).account_id ?? null) : null;
+      return user ? await existingAccountOf(user.userId) : null;
+    },
+    async createAccountFor(userId) {
+      if (typeof userId !== "string" || userId === "")
+        throw new Error("createAccountFor: pass the user's id, as your authenticate names it");
+      return accountOf(userId);
     },
     close() {
       closing ??= (async () => {
@@ -2804,6 +2865,7 @@ function facade(entry: Entry): Jazz {
     forReqUser: async (request) => (await use()).forReqUser(request),
     withAttribution: async (request) => (await use()).withAttribution(request),
     accountFor: async (request) => (await use()).accountFor(request),
+    createAccountFor: async (userId) => (await use()).createAccountFor(userId),
     linkIdentity: async (link) => (await use()).linkIdentity(link),
     async ready() {
       await use();

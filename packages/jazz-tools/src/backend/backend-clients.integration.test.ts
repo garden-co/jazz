@@ -337,9 +337,7 @@ describe("trusted backend clients", () => {
     const { appId, jazz, origin } = await appWith([
       trustWorkload({ issuer, audience: AUDIENCE, claims: { sub: "ops" }, as: "backend" }),
     ]);
-    const alice = await jazz.accountFor(
-      new Request("http://app/x", { headers: { "x-test-user": "alice" } }),
-    );
+    const alice = await jazz.createAccountFor("alice");
     // A prelude stating alice's session is admitted on the machine's token.
     const socket = new WebSocket(`${origin.replace("http", "ws")}/jazz/apps/${appId}/ws`, {
       headers: { authorization: `Bearer ${await sign({ sub: "ops" })}` },
