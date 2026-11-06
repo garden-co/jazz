@@ -51,7 +51,7 @@ function unwrap(markdown: string) {
 }
 
 export const metadata: Metadata = {
-  title: "Jazz - The database that syncs.",
+  title: "Jazz - The data layer that you own.",
 };
 
 const serverCode = `import { createJazz, vercel } from "jazz-tools/backend";
@@ -349,11 +349,11 @@ export default function HomePage() {
         <StippleCanvas pattern={heroPattern} className="home-hero-pattern" />
         <div aria-hidden className="home-hero-fade" />
         <div className="mx-auto flex h-full w-full max-w-(--fd-layout-width) items-end px-4 relative">
-          <div className="w-full max-w-[42rem] space-y-6 pb-2 sm:space-y-10">
+          <div className="w-full max-w-[48rem] space-y-6 pb-2 sm:space-y-10">
             <Heading level={1} type="display-1">
               <span className="block">the</span>
-              <span className="block -ml-[0.04em]">database</span>
-              <span className="block">that syncs</span>
+              <span className="block -ml-[0.04em]">data layer</span>
+              <span className="block whitespace-nowrap">that you own</span>
             </Heading>
             <Text as="p" display="block" className="max-w-[40em] text-xl leading-relaxed">
               Jazz is a relational database that runs inside your backend, with live queries,
