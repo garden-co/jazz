@@ -38,6 +38,7 @@
 //! callback that frees through mimalloc instead.
 
 mod e2ee_crypto;
+mod text;
 
 #[cfg(feature = "rn-test-bridge")]
 mod rn_test_bridge;
@@ -52,7 +53,6 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
-use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -65,7 +65,6 @@ use jazz::tools::AppId;
 use jazz::tx::DurabilityTier;
 use jazz_server::{
     AuthConfig, JazzServer as CoreJazzServer, ServerBuilder, ServerDataDir, StorageBackend,
-    TEST_JWT_AUDIENCE, TEST_JWT_ISSUER, TestJwtIssuer as JazzTestJwtIssuer, TestJwtOptions,
 };
 mod embedded;
 
@@ -924,6 +923,12 @@ impl StreamingMutation {
         Ok(self.inner.write(&env, write)?)
     }
 
+    /// Stage the value's row mutation in the transaction it began in.
+    #[napi(js_name = "finishInTransaction")]
+    pub fn finish_in_transaction(&mut self) -> js::Result<()> {
+        Ok(self.mutation.finish_in_transaction().map_err(host_error)?)
+    }
+
     #[napi]
     pub fn abort(&mut self) -> js::Result<bool> {
         Ok(self.mutation.abort().map_err(host_error)?)
@@ -1574,6 +1579,7 @@ impl NapiDb {
         updated_at_ms: Option<f64>,
         head: Option<JsonValue>,
         base: Option<JsonValue>,
+        transaction: Option<String>,
     ) -> js::Result<StreamingMutation> {
         let head = structured(head, "head")?;
         let base = structured(base, "base")?;
@@ -1591,6 +1597,7 @@ impl NapiDb {
                 updated_at_ms,
                 head,
                 base,
+                transaction.as_deref(),
             )
             .map_err(host_error)?;
         Ok(StreamingMutation { inner, mutation })
@@ -2065,21 +2072,14 @@ impl NapiDb {
     }
 }
 
-// ============================================================================
-// TestJwtIssuer
-// ============================================================================
-
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct JazzServerStartOptions {
     app_id: String,
     port: Option<u16>,
     host: Option<String>,
     data_dir: Option<String>,
     in_memory: Option<bool>,
-    jwks_url: Option<String>,
-    jwt_issuer: Option<String>,
-    jwt_audience: Option<String>,
     /// Required unless the server trusts a workload, which replaces them.
     backend_secret: Option<String>,
     admin_secret: Option<String>,
@@ -2092,17 +2092,11 @@ struct JazzServerStartOptions {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TrustedWorkloadOptions {
     issuer: String,
     audience: String,
     subject: String,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct TestJwtForUserOptions {
-    expires_in_seconds: Option<u64>,
-    issuer: Option<String>,
 }
 
 fn parse_jazz_server_start_options(options: JsonValue) -> napi::Result<JazzServerStartOptions> {
@@ -2119,81 +2113,6 @@ pub(crate) fn init_jazz_server_telemetry(collector_url: Option<&str>) {
         collector_url,
         &["jazz_tools=trace", "tower_http=debug"],
     );
-}
-
-#[napi]
-pub struct TestJwtIssuer {
-    inner: Mutex<Option<JazzTestJwtIssuer>>,
-    jwks_url: String,
-}
-
-#[napi]
-impl TestJwtIssuer {
-    #[napi(factory, ts_return_type = "Promise<TestJwtIssuer>")]
-    pub async fn start() -> napi::Result<Self> {
-        let issuer = JazzTestJwtIssuer::start().await;
-        let jwks_url = issuer.endpoint();
-        Ok(Self {
-            inner: Mutex::new(Some(issuer)),
-            jwks_url,
-        })
-    }
-
-    #[napi(getter, js_name = "jwksUrl")]
-    pub fn jwks_url(&self) -> String {
-        self.jwks_url.clone()
-    }
-
-    #[napi(getter)]
-    pub fn issuer(&self) -> String {
-        TEST_JWT_ISSUER.to_owned()
-    }
-
-    #[napi(getter)]
-    pub fn audience(&self) -> String {
-        TEST_JWT_AUDIENCE.to_owned()
-    }
-
-    #[napi(js_name = "jwtForUser")]
-    pub fn jwt_for_user(
-        &self,
-        user_id: String,
-        #[napi(ts_arg_type = "Record<string, unknown> | undefined")] claims: Option<JsonValue>,
-        #[napi(ts_arg_type = "{ expiresInSeconds?: number; issuer?: string } | undefined")]
-        options: Option<JsonValue>,
-    ) -> napi::Result<String> {
-        let claims = claims.unwrap_or_else(|| serde_json::json!({ "role": "user" }));
-        let options = match options {
-            None | Some(JsonValue::Null) => TestJwtForUserOptions::default(),
-            Some(value) => {
-                serde_json::from_value::<TestJwtForUserOptions>(value).map_err(|error| {
-                    napi::Error::from_reason(format!("Invalid JWT options: {error}"))
-                })?
-            }
-        };
-        let expires_in_seconds = options.expires_in_seconds.unwrap_or(3600);
-
-        Ok(JazzTestJwtIssuer::jwt_for_user_with_options(
-            &user_id,
-            claims,
-            TestJwtOptions {
-                expires_in: Duration::from_secs(expires_in_seconds),
-                // Keep the server test helper's ordinary external-session
-                // default. `None` is reserved for tests that explicitly
-                // exercise an issuer-less bearer, not the NAPI omission case.
-                issuer: options.issuer.or_else(|| Some(TEST_JWT_ISSUER.to_owned())),
-            },
-        ))
-    }
-
-    #[napi]
-    pub async fn stop(&self) -> napi::Result<()> {
-        self.inner
-            .lock()
-            .map_err(|_| napi::Error::from_reason("lock"))?
-            .take();
-        Ok(())
-    }
 }
 
 // ============================================================================
@@ -2221,7 +2140,7 @@ impl JazzServer {
     #[napi(factory, ts_return_type = "Promise<JazzServer>")]
     pub async fn start(
         #[napi(
-            ts_arg_type = "{ appId: string; backendSecret?: string; adminSecret?: string; port?: number; host?: string; dataDir?: string; inMemory?: boolean; jwksUrl?: string; jwtIssuer?: string; jwtAudience?: string; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string; schema?: Buffer | Uint8Array | number[]; trustedWorkload?: { issuer: string; audience: string; subject: string } }"
+            ts_arg_type = "{ appId: string; backendSecret?: string; adminSecret?: string; port?: number; host?: string; dataDir?: string; inMemory?: boolean; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string; schema?: Buffer | Uint8Array | number[]; trustedWorkload?: { issuer: string; audience: string; subject: string } }"
         )]
         options: JsonValue,
     ) -> napi::Result<Self> {
@@ -2266,9 +2185,6 @@ impl JazzServer {
         };
 
         let auth_config = AuthConfig {
-            jwks_url: opts.jwks_url,
-            jwt_issuer: opts.jwt_issuer,
-            jwt_audience: opts.jwt_audience,
             allow_local_first_auth: opts.allow_local_first_auth.unwrap_or(true),
             backend_secret: backend_secret.clone(),
             admin_secret: admin_secret.clone(),

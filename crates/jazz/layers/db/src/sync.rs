@@ -55,7 +55,11 @@ use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::future::poll_fn;
 use std::rc::Rc;
-use std::task::Poll;
+use std::task::{Poll, Waker};
+
+#[path = "accepted_transport.rs"]
+mod accepted_transport;
+use crate::db::{AcceptedReadScope, EncodedAcceptedRead};
 use web_time::Instant;
 
 use crate::protocol::SnapshotRef;
@@ -66,6 +70,14 @@ use jazz_types::time::{GlobalTime, TxTime};
 use serde::{Deserialize, Serialize};
 
 use super::*;
+
+#[path = "local_observation.rs"]
+mod local_observation;
+pub(super) use local_observation::SubmissionProvenance;
+pub use local_observation::{
+    LocalEvidenceProvenance, LocalObservation, LocalObservationCut, LocalSubmissionExport,
+    LocalSubmissionRoute,
+};
 
 #[path = "large_delta.rs"]
 mod large_delta;
@@ -1276,11 +1288,12 @@ pub enum SyncMessage {
         nodes: Vec<WireChunk>,
         missing: Vec<WireChunkRef>,
     },
-    /// Row images. `tx_ids` names the transactions behind the history
+    /// Row images. `tx_ids` names the transactions behind the shipped
     /// versions among them, as [`TxName`]s: a replica lists a history
     /// version only once it knows its `$transactionId`, and a one-shot
     /// read frozen at a snapshot names the commits that snapshot holds.
-    /// Empty for current rows.
+    /// They also prevent replaying an accepted write over its own result;
+    /// only `Fate` settles a pending write.
     Rows {
         images: Vec<Image>,
         tx_ids: Vec<TxName>,
@@ -1389,6 +1402,11 @@ pub enum SyncMessage {
     ConnectionSettled {
         through: u64,
     },
+    /// An authority's paired accepted evidence, returned on the normal read route.
+    Accepted {
+        id: u64,
+        read: EncodedAcceptedRead,
+    },
 }
 
 /// The catalogue entries a [`SyncMessage::Catalogue`] or
@@ -1420,6 +1438,13 @@ pub enum ReadSpan {
     /// reopened tab's capture, which its worker settled), which also sends
     /// the tx ids of the commits it names (see [`SyncMessage::Rows`]).
     Once { at: Option<u64> },
+    /// One authority evaluation in an explicitly admitted schema and scope.
+    /// Relays forward its evidence; they cannot reconstruct it from cached rows.
+    AcceptedOnce {
+        at: Option<u64>,
+        schema: [u8; 16],
+        scope: Option<AcceptedReadScope>,
+    },
 }
 
 /// One admitted schema version in a [`SyncMessage::Catalogue`].
@@ -1466,6 +1491,7 @@ impl SyncMessage {
             Self::Catalogue(_) => "Catalogue",
             Self::Welcome { .. } => "Welcome",
             Self::ConnectionSettled { .. } => "ConnectionSettled",
+            Self::Accepted { .. } => "Accepted",
         }
     }
 }
@@ -1685,7 +1711,7 @@ struct LiveRead {
 }
 
 enum ReadLifetime {
-    Once { historical: bool },
+    Once { cache_result: bool },
     Live(LiveRead),
 }
 
@@ -1808,7 +1834,7 @@ pub(crate) struct Client {
     /// A live read's position, the connection's, or an own commit past
     /// them moved since results last ran.
     pub(crate) visibility_moved: bool,
-    answers: HashMap<u64, Option<Result<(Pos, Vec<[u8; 16]>), Error>>>,
+    answers: HashMap<u64, Option<Result<OnceAnswer, Error>>>,
     /// Permission preflights asked for; `None` until answered.
     advice: HashMap<u64, Option<PermissionAdvice>>,
     /// The next permission preflight's id. Each client starts at a random
@@ -1896,6 +1922,29 @@ type RelayedAnswer = (
     u64,
 );
 
+/// Both result modes share the same one-shot slot, request lifetime and relay.
+enum OnceAnswer {
+    Coverage(Pos, Vec<[u8; 16]>),
+    Evidence(EncodedAcceptedRead),
+}
+
+/// A scheduled read retains its task waker until the next drive turn. The
+/// existing deadline registry owns only weak references, so cancellation
+/// releases both the task and the deadline without a parallel request queue.
+pub(crate) struct ReadDeadline {
+    at: Instant,
+    waker: RefCell<Option<Waker>>,
+}
+
+impl ReadDeadline {
+    pub(crate) fn watch(&self, waker: &Waker) {
+        let mut slot = self.waker.borrow_mut();
+        if slot.as_ref().is_none_or(|prior| !prior.will_wake(waker)) {
+            *slot = Some(waker.clone());
+        }
+    }
+}
+
 /// A session's one-shot `Read` a relay asked its upstream for.
 struct RelayedFetch {
     /// The relay's own fetch id upstream.
@@ -1908,6 +1957,8 @@ struct RelayedFetch {
     /// Otherwise it is served from this store once the upstream can no
     /// longer answer, or its wait runs out (`None`: never).
     until: Option<Instant>,
+    /// Keep the existing host deadline registration alive while relaying.
+    _deadline_guard: Option<Rc<ReadDeadline>>,
     session: usize,
     /// The session's `Read`, served locally once the upstream answered.
     message: SyncMessage,
@@ -2119,6 +2170,8 @@ pub(crate) struct Session {
     /// different claims (two tokens), so its reads and writes evaluate
     /// policies with these, not the identity's latest.
     claims: Option<BTreeMap<String, Value>>,
+    // One opaque local companion; ordinary wire messages cannot construct it.
+    local_submission: Option<LocalSubmissionExport>,
     /// Per client subscription: its queue, its group, whether it is
     /// windowed, and whether its opening's row ids were sent.
     subs: BTreeMap<u64, (fanout::Queue, Weak<RefCell<fanout::Group>>, bool, bool)>,
@@ -2254,6 +2307,7 @@ impl Session {
             transport,
             identity,
             claims: None,
+            local_submission: None,
             subs: BTreeMap::new(),
             outbox: Vec::new(),
             touched: BTreeSet::new(),
@@ -3304,7 +3358,7 @@ impl Inner {
 
     /// Who committed each of `seqs`, as (seq, node, tx): `_jazz_transactions`
     /// for uploads, this authority's node for its own commits.
-    fn tx_ids(&self, seqs: &BTreeSet<u64>) -> Result<Vec<TxName>, Error> {
+    pub(super) fn tx_ids(&self, seqs: &BTreeSet<u64>) -> Result<Vec<TxName>, Error> {
         let mut statement = self
             .conn
             .prepare_cached(
@@ -5013,9 +5067,9 @@ struct PendingFetch<'a> {
 impl Drop for PendingFetch<'_> {
     fn drop(&mut self) {
         if let Some((id, _)) = self.asked
-            && let Some(client) = self.db.inner.borrow_mut().client.as_mut()
+            && self.db.inner.cancel_fetch(id)
         {
-            client.forget_once(id);
+            self.db.schedule_pending_tick();
         }
     }
 }
@@ -5315,8 +5369,8 @@ impl Inner {
     ) -> ActiveRead {
         let resumable = match &lifetime {
             ReadLifetime::Live(_) => true,
-            ReadLifetime::Once { historical } => {
-                !historical && matches!(view, ReadViewSourceSpec::Current)
+            ReadLifetime::Once { cache_result } => {
+                *cache_result && matches!(view, ReadViewSourceSpec::Current)
             }
         };
         let watermark = resumable.then(|| {
@@ -5343,7 +5397,8 @@ impl Inner {
         }
     }
 
-    /// Register a one-shot request in the same table as live reads.
+    /// Register a one-shot request in the same table as live reads. Historical
+    /// and evidence reads do not populate or resume the ordinary row cache.
     fn register_once_read(
         &mut self,
         id: u64,
@@ -5351,16 +5406,14 @@ impl Inner {
         binding: &BTreeMap<String, Value>,
         include_deleted: bool,
         view: &ReadViewSourceSpec,
-        at: Option<u64>,
+        cache_result: bool,
     ) -> Option<u64> {
         let read = self.active_read(
             query.clone(),
             binding.clone(),
             include_deleted,
             view.clone(),
-            ReadLifetime::Once {
-                historical: at.is_some(),
-            },
+            ReadLifetime::Once { cache_result },
         );
         let since = read.since();
         self.client.as_mut().expect("client").reads.insert(id, read);
@@ -6171,14 +6224,15 @@ impl Inner {
         // Membership inputs: every table the read and its policies read
         // (its own included: a filter or policy may read other rows of
         // it), and the supporting tables with their policies' inputs.
-        let mut inputs = self.read_dependencies(prepared, identity)?;
+        let mut inputs = self.read_dependencies_in(prepared, identity, read)?;
         let mut tables = Vec::new();
         support_tables(support, &mut tables);
+        let policies = read.governance.policies(self);
         for table in tables {
             if let Some(author) = identity
-                && self.owner.by_stored(&table).is_some()
+                && policies.by_stored(&table).is_some()
             {
-                inputs.extend(self.read_policy_tables(&self.owner, &table, author)?);
+                inputs.extend(self.read_policy_tables(&policies, &table, author)?);
             }
             inputs.insert(table);
         }
@@ -6520,12 +6574,16 @@ impl Inner {
 }
 
 impl Client {
-    fn forget_once(&mut self, id: u64) {
-        self.answers.remove(&id);
+    pub(super) fn forget_once(&mut self, id: u64) -> bool {
+        let pending = self.answers.remove(&id).is_some();
         self.reads.remove(&id);
         self.outbox.retain(|message| {
-            !matches!(message, SyncMessage::Read { id: read, span: ReadSpan::Once { .. }, .. } if *read == id)
+            !matches!(message, SyncMessage::Read { id: read, span: ReadSpan::Once { .. } | ReadSpan::AcceptedOnce { .. }, .. } if *read == id)
         });
+        if pending {
+            self.outbox.push(SyncMessage::Unsubscribe { id });
+        }
+        pending
     }
 
     /// These requests belonged to the old link. Live fetch futures and
@@ -6537,7 +6595,7 @@ impl Client {
             !matches!(
                 message,
                 SyncMessage::Read {
-                    span: ReadSpan::Once { .. },
+                    span: ReadSpan::Once { .. } | ReadSpan::AcceptedOnce { .. },
                     ..
                 }
             )
@@ -6770,7 +6828,32 @@ impl Db {
                 ..
             } = &mut ask
             {
-                *since = inner.register_once_read(*id, query, binding, *include_deleted, view, *at);
+                *since = inner.register_once_read(
+                    *id,
+                    query,
+                    binding,
+                    *include_deleted,
+                    view,
+                    at.is_none(),
+                );
+            }
+            if let SyncMessage::Read {
+                id,
+                query,
+                binding,
+                include_deleted,
+                span: ReadSpan::AcceptedOnce { .. },
+                ..
+            } = &ask
+            {
+                inner.register_once_read(
+                    *id,
+                    query,
+                    binding,
+                    *include_deleted,
+                    &ReadViewSourceSpec::Current,
+                    false,
+                );
             }
             inner.client.as_mut().expect("client").outbox.push(ask);
         }
@@ -6840,7 +6923,7 @@ impl Db {
             },
             ..ReadOpts::default()
         };
-        let mut read = ReadSpec::of(&opts, &self.inner.borrow())?;
+        let mut read = ReadSpec::of(&opts, &self.inner.borrow(), self.governance.clone())?;
         read.position = Position::Current;
         // A frozen view is this store's own state, not the server's to judge.
         if read.frozen() {
@@ -7001,12 +7084,21 @@ impl Db {
         kind: Kind,
         relayed: Option<Relayed>,
     ) -> Result<(), Error> {
-        let ops = {
+        let (ops, provenance) = {
             let mut inner = self.inner.borrow_mut();
             if inner.client.is_none() {
                 return Ok(());
             }
             let schema = inner.schema.clone();
+            let provenance: Vec<_> = ops
+                .iter()
+                .map(|op| {
+                    relayed
+                        .is_none()
+                        .then(|| inner.observation_submission(&schema, op, &self.governance))
+                        .flatten()
+                })
+                .collect();
             let ops = ops
                 .into_iter()
                 .map(|op| inner.stored_op(op, &schema))
@@ -7015,9 +7107,9 @@ impl Db {
                 inner.capture.extend(ops);
                 return Ok(());
             }
-            ops
+            (ops, provenance)
         };
-        self.record_stored_upload(ops, seq, kind, relayed)
+        self.record_stored_upload_with_provenance(ops, seq, kind, relayed, Some(&provenance), None)
     }
 
     /// [`Db::record_upload`] of ops already named by stored names.
@@ -7028,16 +7120,18 @@ impl Db {
         kind: Kind,
         relayed: Option<Relayed>,
     ) -> Result<(), Error> {
-        self.record_stored_upload_with_identity(ops, seq, kind, relayed, None)
+        self.record_stored_upload_with_provenance(ops, seq, kind, relayed, None, None)
     }
 
-    /// An explicit batch identity also governs read-only serializable uploads.
-    pub(crate) fn record_stored_upload_with_identity(
+    /// Preserve original operation scopes and the explicit batch identity.
+    /// Read-only serializable uploads still carry their bound session.
+    pub(crate) fn record_stored_upload_with_provenance(
         &self,
         ops: Vec<StagedOp>,
         seq: u64,
         kind: Kind,
         relayed: Option<Relayed>,
+        provenance: Option<&[Option<SubmissionProvenance>]>,
         identity: Option<WriteIdentity>,
     ) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
@@ -7048,7 +7142,8 @@ impl Db {
         let view = inner.stored_view();
         let active = std::mem::replace(&mut inner.schema, view);
         drop(inner);
-        let recorded = self.record_upload_under_stored_view(ops, seq, kind, relayed, identity);
+        let recorded =
+            self.record_upload_under_stored_view(ops, seq, kind, relayed, provenance, identity);
         self.inner.borrow_mut().schema = active;
         recorded
     }
@@ -7059,6 +7154,7 @@ impl Db {
         seq: u64,
         kind: Kind,
         relayed: Option<Relayed>,
+        provenance: Option<&[Option<SubmissionProvenance>]>,
         identity: Option<WriteIdentity>,
     ) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
@@ -7224,7 +7320,9 @@ impl Db {
                     rows: rows.clone(),
                     expected: Some(expected),
                 });
-                let persisted = inner.persist_pending(seq, &commit, &rows);
+                let persisted = inner
+                    .persist_pending(seq, &commit, &rows)
+                    .and_then(|()| inner.persist_observation_submission(seq, provenance));
                 if let Err(error) = persisted {
                     let client = inner.client.as_mut().expect("client");
                     client.unsent.pop();
@@ -7492,7 +7590,43 @@ impl Db {
         strict: bool,
         view: &ReadViewSourceSpec,
     ) -> Result<Option<Pos>, Error> {
-        let _deadline = self.read_deadline(deadline);
+        match self
+            .fetch_once(
+                prepared,
+                at,
+                include_deleted,
+                reach,
+                deadline,
+                coverage,
+                strict,
+                view,
+                None,
+            )
+            .await?
+        {
+            Some(OnceAnswer::Coverage(through, _)) => Ok(Some(through)),
+            None => Ok(None),
+            Some(OnceAnswer::Evidence(_)) => Err(Error::new(
+                ErrorCode::Protocol,
+                "evidence cannot replace ordinary read coverage",
+            )),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn fetch_once(
+        &self,
+        prepared: &PreparedQuery,
+        at: Option<Pos>,
+        include_deleted: bool,
+        reach: RemoteReach,
+        deadline: Option<Instant>,
+        coverage: Option<&dyn Fn() -> bool>,
+        strict: bool,
+        view: &ReadViewSourceSpec,
+        evidence: Option<([u8; 16], Option<AcceptedReadScope>)>,
+    ) -> Result<Option<OnceAnswer>, Error> {
+        let deadline_guard = self.read_deadline(deadline);
         let _attempt = self.read_attempt_deadline();
         let tier = reach.tier;
         // Held on a live link: leaving it (even for a new attempt) releases
@@ -7529,24 +7663,41 @@ impl Db {
         };
         let message = |id: u64, since: Option<u64>| SyncMessage::Read {
             id,
-            query: Box::new(remote_query(&prepared.query).into_owned()),
+            query: Box::new(if evidence.is_some() {
+                prepared.query.clone()
+            } else {
+                remote_query(&prepared.query).into_owned()
+            }),
             binding: prepared.binding.clone(),
             include_deleted,
             tier,
             wait: reach.wait,
             view: Box::new(view.clone()),
             since,
-            span: ReadSpan::Once { at },
+            span: match &evidence {
+                Some((schema, scope)) => ReadSpan::AcceptedOnce {
+                    at,
+                    schema: *schema,
+                    scope: scope.clone(),
+                },
+                None => ReadSpan::Once { at },
+            },
         };
         // The request in flight, and the connection it went out on.
         let mut request = PendingFetch {
             db: self,
             asked: None,
         };
-        let answer = poll_fn(|_| {
+        let answer = poll_fn(|cx| {
+            if let Some(guard) = &deadline_guard {
+                guard.watch(cx.waker());
+            }
             let mut inner = self.inner.borrow_mut();
             let answerable = answerable(&inner);
             let client = inner.client.as_mut().expect("client");
+            if evidence.is_some() && deadline.is_some_and(|at| Instant::now() >= at) {
+                return Poll::Ready(Ok(None));
+            }
             if let Some((id, _)) = request.asked
                 && let Some(Some(_)) = client.answers.get(&id)
             {
@@ -7579,15 +7730,20 @@ impl Db {
                 client.answers.insert(id, None);
                 // Asked while detached, it goes out on the next connection.
                 let connection = client.connection + u64::from(client.transport.is_none());
-                let query = remote_query(&prepared.query).into_owned();
+                let query = if evidence.is_some() {
+                    prepared.query.clone()
+                } else {
+                    remote_query(&prepared.query).into_owned()
+                };
                 let since = inner.register_once_read(
                     id,
                     &query,
                     &prepared.binding,
                     include_deleted,
                     view,
-                    at,
+                    evidence.is_none() && at.is_none(),
                 );
+                let since = if evidence.is_some() { None } else { since };
                 inner
                     .client
                     .as_mut()
@@ -7600,35 +7756,25 @@ impl Db {
             if (!strict && !answerable) || deadline.is_some_and(|d| Instant::now() >= d) {
                 return Poll::Ready(Ok(None));
             }
-            if let Some(expired) = coverage {
-                if client.unadmitted {
-                    return Poll::Ready(Err(Error::new(
-                        ErrorCode::Schema,
-                        "schema version is awaiting published catalogue admission; \
-                         deploy it to the server",
-                    )));
-                }
-                if expired() {
-                    return Poll::Ready(Err(Error::new(
-                        ErrorCode::NotObserved,
-                        "Timed out waiting for query coverage",
-                    )));
-                }
+            if client.unadmitted && (coverage.is_some() || evidence.is_some()) {
+                return Poll::Ready(Err(Error::new(
+                    ErrorCode::Schema,
+                    "schema version is awaiting published catalogue admission; deploy it to the server",
+                )));
+            }
+            if coverage.is_some_and(|expired| expired()) {
+                return Poll::Ready(Err(Error::new(ErrorCode::NotObserved, "Timed out waiting for query coverage")));
             }
             drop(inner);
             if ask {
                 self.schedule_pending_tick();
+            } else {
+                self.flush_pending_tick();
             }
             Poll::Pending
         })
         .await?;
-        // A current answer lists its result's rows: cached rows the
-        // replica's settled view of it holds and the answer lacks lost their
-        // listing (INV-SYNC-14), though no subscription saw them leave.
-        let Some((through, _listed)) = answer else {
-            return Ok(None);
-        };
-        Ok(Some(through))
+        Ok(answer)
     }
 
     /// Freeze everything this database has committed, its own unsettled
@@ -7769,7 +7915,7 @@ impl Db {
                     matches!(
                         message,
                         SyncMessage::Read {
-                            span: ReadSpan::Once { .. },
+                            span: ReadSpan::Once { .. } | ReadSpan::AcceptedOnce { .. },
                             ..
                         }
                     )
@@ -8211,10 +8357,11 @@ impl Db {
                         let mut once = false;
                         if let Some(read) = client.reads.get_mut(&id) {
                             let (listed, save_after) = match &mut read.lifetime {
-                                ReadLifetime::Once { historical } => {
+                                ReadLifetime::Once { cache_result } => {
                                     once = true;
                                     (
-                                        (!*historical).then(|| members.clone().unwrap_or_default()),
+                                        (*cache_result)
+                                            .then(|| members.clone().unwrap_or_default()),
                                         global,
                                     )
                                 }
@@ -8249,7 +8396,7 @@ impl Db {
                             client.reads.remove(&id);
                         }
                         if let Some(slot) = client.answers.get_mut(&id) {
-                            *slot = Some(Ok((at, members.unwrap_or_default())));
+                            *slot = Some(Ok(OnceAnswer::Coverage(at, members.unwrap_or_default())));
                             client.relay_ready |=
                                 client.relayed_fetches.iter().any(|f| f.upstream == id);
                         }
@@ -8268,6 +8415,15 @@ impl Db {
                     }
                     SyncMessage::SchemaAdmission { admitted } => {
                         inner.client.as_mut().expect("client").unadmitted = !admitted;
+                    }
+                    SyncMessage::Accepted { id, read } => {
+                        let client = inner.client.as_mut().expect("client");
+                        if let Some(slot @ None) = client.answers.get_mut(&id) {
+                            *slot = Some(read.validate().map(|()| OnceAnswer::Evidence(read)));
+                            client.reads.remove(&id);
+                            client.relay_ready |=
+                                client.relayed_fetches.iter().any(|f| f.upstream == id);
+                        }
                     }
                     SyncMessage::Refused { id, code, message } => {
                         let client = inner.client.as_mut().expect("client");
@@ -8374,6 +8530,9 @@ impl Db {
                         let result = outcome.result();
                         let accepted = matches!(outcome, Outcome::Accepted { .. });
                         let landed = Pos::at(through);
+                        if accepted && global {
+                            inner.observe_global_submission(tx, id, through)?;
+                        }
                         // Accepted past what this replica knows, its own
                         // commit is named by tx until the connection's
                         // position covers it.
@@ -8675,6 +8834,7 @@ impl Db {
             return Ok(());
         };
         let baseline = std::mem::take(&mut client.baselines);
+        let node = client.node;
         // Unsettled versions order last-writer-wins by their commits'
         // `Order` (SPEC 8 §8.13): the pending commits replay in it, and one
         // replays on a row only over an upstream's unsettled version that
@@ -8713,6 +8873,22 @@ impl Db {
         let view = inner.stored_view();
         let active = std::mem::replace(&mut inner.schema, view);
         let replayed = pending.into_iter().try_for_each(|(order, tx, ops, rows)| {
+            // Transaction IDs identify accepted versions, not the write's
+            // receipt. If every coordinate has reached this commit or later,
+            // replay would apply it twice. Keep the pending upload and its
+            // waiters until the actual Fate arrives.
+            if let Some(Some(accepted)) = inner.settled(node, tx)?
+                && !rows.is_empty()
+                && rows.iter().all(|row| {
+                    baseline
+                        .get(row)
+                        .and_then(Option::as_ref)
+                        .is_some_and(|image| image.at.accepted() && image.at >= accepted)
+                })
+            {
+                return Ok(());
+            }
+
             begin_savepoint(&inner.conn, "replay")?;
             inner.merging = true;
             // The branches this commit wrote that an upstream's later
@@ -8828,6 +9004,10 @@ impl Inner {
             for remote in client.reads.values().filter_map(ActiveRead::live) {
                 *remote.refused.borrow_mut() = Some(error.clone());
             }
+            for slot in client.answers.values_mut() {
+                *slot = Some(Err(error.clone()));
+            }
+            client.relay_ready |= !client.relayed_fetches.is_empty();
         }
     }
 
@@ -8889,16 +9069,17 @@ impl Inner {
         let Some(client) = self.client.as_mut() else {
             return;
         };
-        let answers = &mut client.answers;
-        let reads = &mut client.reads;
+        let mut cancelled = Vec::new();
         client.relayed_fetches.retain(|fetch| {
             let keep = fetch.session != index;
             if !keep {
-                answers.remove(&fetch.upstream);
-                reads.remove(&fetch.upstream);
+                cancelled.push(fetch.upstream);
             }
             keep
         });
+        for id in cancelled {
+            client.forget_once(id);
+        }
         for sessions in client.relayed_fates.values_mut() {
             sessions.retain(|(session, _, _)| *session != index);
         }
@@ -8958,8 +9139,15 @@ impl Inner {
         let mut kept = Vec::new();
         for fetch in std::mem::take(&mut client.relayed_fetches) {
             let answered = matches!(client.answers.get(&fetch.upstream), Some(Some(_)));
-            let given_up =
-                !fetch.strict && (!can_wait || fetch.until.is_some_and(|until| now >= until));
+            let evidence = matches!(
+                &fetch.ask,
+                SyncMessage::Read {
+                    span: ReadSpan::AcceptedOnce { .. },
+                    ..
+                }
+            );
+            let expired = fetch.until.is_some_and(|until| now >= until);
+            let given_up = (evidence && expired) || (!fetch.strict && (!can_wait || expired));
             if fetch.session != index || !answered && !given_up {
                 kept.push(fetch);
                 continue;
@@ -8968,13 +9156,45 @@ impl Inner {
             let SyncMessage::Read { id, .. } = &fetch.message else {
                 continue;
             };
+            // Release the shared request lifetime, including timed-out relay requests.
+            client.forget_once(fetch.upstream);
+            if !answered {
+                client
+                    .outbox
+                    .push(SyncMessage::Unsubscribe { id: fetch.upstream });
+            }
             match answer {
+                _ if evidence && expired => refused.push(SyncMessage::Refused {
+                    id: *id,
+                    code: ErrorCode::NotObserved,
+                    message: "timed out waiting for authority accepted evidence".into(),
+                }),
+                Some(Ok(OnceAnswer::Evidence(read))) if evidence => {
+                    refused.push(SyncMessage::Accepted { id: *id, read })
+                }
+                Some(Ok(OnceAnswer::Evidence(_))) => refused.push(SyncMessage::Refused {
+                    id: *id,
+                    code: ErrorCode::Protocol,
+                    message: "unexpected evidence for ordinary coverage".into(),
+                }),
+                None if evidence => refused.push(SyncMessage::Refused {
+                    id: *id,
+                    code: ErrorCode::NotObserved,
+                    message: "timed out waiting for authority accepted evidence".into(),
+                }),
                 Some(Err(error)) => refused.push(SyncMessage::Refused {
                     id: *id,
                     code: error.code,
                     message: error.message,
                 }),
-                Some(Ok((through, listed))) => {
+                Some(Ok(OnceAnswer::Coverage(_, _))) if evidence => {
+                    refused.push(SyncMessage::Refused {
+                        id: *id,
+                        code: ErrorCode::Protocol,
+                        message: "ordinary coverage cannot replace accepted evidence".into(),
+                    })
+                }
+                Some(Ok(OnceAnswer::Coverage(through, listed))) => {
                     if let SyncMessage::Read {
                         query,
                         binding,
@@ -9032,6 +9252,21 @@ impl Inner {
             .map_or_else(|| self.owner.clone(), |(_, governing)| governing.clone())
     }
 
+    /// Admission has resolved every pinned bundle before serving a session.
+    fn session_governance(&self, index: usize) -> Governance {
+        match self.sessions[index].bundle {
+            None => Governance::CurrentOwner,
+            Some(bundle) => Governance::Selected(
+                self.bundles
+                    .get(&bundle)
+                    .expect("admitted session bundle")
+                    .1
+                    .clone(),
+                bundle,
+            ),
+        }
+    }
+
     /// `view` governed by session `index`'s policies: unchanged unless the
     /// session is pinned to a bundle, whose policies then replace its own.
     pub(crate) fn governed_view(&self, view: &Rc<Schema>, index: usize) -> Rc<Schema> {
@@ -9050,6 +9285,31 @@ impl Inner {
         let governed = Rc::new((**view).clone().with_policies_of(governing.clone()));
         cache.insert(bundle, (view.clone(), governed.clone()));
         governed
+    }
+
+    /// Refuse a trusted link that acts for a user (`who` is a session it
+    /// vouches for) while unpinned on a store that serves bundles: nothing
+    /// deploys this store's own permissions any more, so that user would be
+    /// checked by permissions no deployment chose. A backend pins its link
+    /// to the bundle it deployed (createJazz does).
+    fn check_acts_pinned(
+        &self,
+        index: usize,
+        policy: Option<AuthorSubject>,
+        who: Who,
+    ) -> Result<(), Error> {
+        if policy.is_none()
+            && matches!(who, Who::Session(_))
+            && self.sessions[index].bundle.is_none()
+            && (self.pins_required || crate::catalogue::serves_bundles(&self.conn)?)
+        {
+            return Err(Error::new(
+                ErrorCode::WriteRejected,
+                "an unpinned backend link cannot act for a user: pin the link to the \
+                 bundle the backend deployed",
+            ));
+        }
+        Ok(())
     }
 
     /// Whether session `index` declared a schema version this store has
@@ -9198,7 +9458,7 @@ impl Inner {
 
     /// Admitted `version` under its stored names, governed by `policies`'
     /// policies.
-    fn governed_by(
+    pub(crate) fn governed_by(
         &self,
         version: crate::ids::SchemaVersionId,
         policies: Rc<Schema>,
@@ -9503,6 +9763,50 @@ impl Db {
         Ok(())
     }
 
+    /// Whether this store may serve a session of `identity` pinned to
+    /// `bundle` ([`Self::check_serves`] first). A bundle this store has not
+    /// published, or whose write schema it has not admitted, is refused, and
+    /// so is an unpinned session of a user once createJazz publishes
+    /// bundles here.
+    pub fn check_session_pin(
+        &self,
+        identity: AuthorSubject,
+        bundle: Option<&crate::catalogue::BundleId>,
+    ) -> Result<(), Error> {
+        self.check_serves(identity)?;
+        let mut inner = self.inner.borrow_mut();
+        if let Some(bundle) = bundle
+            && inner.bundle(bundle)?.is_none()
+        {
+            let published = crate::catalogue::bundle(&inner.conn, bundle)?.is_some();
+            return Err(Error::new(
+                ErrorCode::Schema,
+                if published {
+                    format!(
+                        "permissions bundle {bundle} is published, but this store never admitted its write schema"
+                    )
+                } else {
+                    format!("permissions bundle {bundle} is not published on this store")
+                },
+            ));
+        }
+        // A core's backend (createJazz) pins every session it opens. An
+        // unpinned policy session would be governed by this store's own
+        // permissions, which nothing deploys, so a tightening or rollback
+        // would never reach it.
+        if bundle.is_none()
+            && identity != AuthorSubject::SYSTEM
+            && (inner.pins_required || crate::catalogue::serves_bundles(&inner.conn)?)
+        {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "this app is served through createJazz: connect through its backend, \
+                 which pins each session to the permissions it deployed",
+            ));
+        }
+        Ok(())
+    }
+
     /// Serve a client over `transport` as `identity`, once
     /// [`Self::check_serves`] allows it.
     pub fn accept_subscriber(
@@ -9536,37 +9840,8 @@ impl Db {
         claims: Option<BTreeMap<String, Value>>,
         bundle: Option<crate::catalogue::BundleId>,
     ) -> Result<SubscriberId, Error> {
-        self.check_serves(identity)?;
+        self.check_session_pin(identity, bundle.as_ref())?;
         let mut inner = self.inner.borrow_mut();
-        if let Some(bundle) = &bundle
-            && inner.bundle(bundle)?.is_none()
-        {
-            let published = crate::catalogue::bundle(&inner.conn, bundle)?.is_some();
-            return Err(Error::new(
-                ErrorCode::Schema,
-                if published {
-                    format!(
-                        "permissions bundle {bundle} is published, but this store never admitted its write schema"
-                    )
-                } else {
-                    format!("permissions bundle {bundle} is not published on this store")
-                },
-            ));
-        }
-        // Once createJazz publishes bundles here, its backend pins every
-        // session it opens. An unpinned policy session would be governed by
-        // the current permissions, which createJazz no longer advances, so
-        // a later tightening or rollback would never reach it.
-        if bundle.is_none()
-            && identity != AuthorSubject::SYSTEM
-            && crate::catalogue::serves_bundles(&inner.conn)?
-        {
-            return Err(Error::new(
-                ErrorCode::Protocol,
-                "this app is served through createJazz: connect through its backend, \
-                 which pins each session to the permissions it deployed",
-            ));
-        }
         // One relay tier only (SPEC 9 §9.5).
         debug_assert!(
             !inner.non_durable,
@@ -9822,7 +10097,7 @@ impl Db {
             let fetch = matches!(
                 message,
                 SyncMessage::Read {
-                    span: ReadSpan::Once { .. },
+                    span: ReadSpan::Once { .. } | ReadSpan::AcceptedOnce { .. },
                     ..
                 }
             )
@@ -9894,6 +10169,10 @@ impl Db {
             SyncMessage::CheckAllowed { .. } => true,
             // A read frozen at a snapshot may name the held commits
             // themselves, which the server cannot resolve until they apply.
+            SyncMessage::Read {
+                span: ReadSpan::AcceptedOnce { .. },
+                ..
+            } => false,
             SyncMessage::Read { view, .. } if frozen_at(view).is_some() => {
                 barrier.tables.is_some() && !barrier.commits
             }
@@ -9969,13 +10248,11 @@ impl Db {
             .filter(|_| identity != AuthorSubject::SYSTEM)
             .map(|claims| (identity, claims));
         let tables = self.with_claims(vouched, || {
-            let prepared = self
-                .session_db(index)
-                .prepare_query_bound(query, binding.clone())
-                .ok()?;
+            let db = self.session_db(index);
+            let prepared = db.prepare_query_bound(query, binding.clone()).ok()?;
             self.inner
                 .borrow()
-                .read_dependencies(&prepared, policy)
+                .read_dependencies_in(&prepared, policy, &ReadSpec::new(db.governance.clone()))
                 .ok()
         });
         // An unadmitted version may be admitted without the owner schema
@@ -10697,11 +10974,6 @@ impl Db {
                     SyncMessage::Catalogue(catalogue)
                 });
             }
-            let tx_ids = if history_seqs.is_empty() {
-                Vec::new()
-            } else {
-                inner.tx_ids(&history_seqs)?
-            };
             let session = &mut inner.sessions[index];
             session.watch = watch;
             session.held = held_rows;
@@ -10758,6 +11030,16 @@ impl Db {
                     }
                 }
             }
+            // Rows may precede their receipt. Name accepted versions after
+            // echo suppression so the writer does not replay them twice.
+            history_seqs.extend(
+                images
+                    .iter()
+                    .filter(|image| image.at.accepted())
+                    .map(|image| image.at.seq),
+            );
+            let tx_ids = inner.tx_ids(&history_seqs)?;
+            let session = &mut inner.sessions[index];
             out.extend(rows_messages(images, tx_ids, ROWS_MESSAGE_BYTES));
             out.extend(evictions);
             out.extend(std::mem::take(&mut session.outbox));
@@ -11013,7 +11295,10 @@ impl Db {
             let (queue, group) = inner.subscribe_member(
                 &wait.prepared,
                 policy,
-                wait.read,
+                ReadSpec {
+                    governance: db.governance.clone(),
+                    ..wait.read
+                },
                 SettledBy::Always(authority),
             )?;
             let session = &mut inner.sessions[index];
@@ -11032,27 +11317,29 @@ impl Db {
     fn stored_db_for(&self, index: usize) -> Db {
         let inner = self.inner.borrow();
         let view = inner.governed_view(&inner.stored_view(), index);
+        let governance = inner.session_governance(index);
         drop(inner);
         Db {
             inner: self.inner.clone(),
             view: Some(view),
+            governance,
         }
     }
 
-    /// The schema whose policies this handle's reads and writes are
-    /// governed by: its view's, else the current schema's.
-    fn view_policies(&self) -> Rc<Schema> {
-        self.view
-            .as_ref()
-            .and_then(|view| view.policies_from.clone())
-            .unwrap_or_else(|| self.inner.borrow().owner.clone())
+    /// Resolve the policy source chosen by trusted handle construction.
+    /// Named-view policy snapshots do not establish an authenticated pin.
+    pub(super) fn view_policies(&self) -> Rc<Schema> {
+        self.governance.policies(&self.inner.borrow())
     }
 
     fn session_db(&self, index: usize) -> Db {
-        let view = self.inner.borrow_mut().session_schema(index);
+        let mut inner = self.inner.borrow_mut();
+        let view = inner.session_schema(index);
+        let governance = inner.session_governance(index);
         Db {
             inner: self.inner.clone(),
             view,
+            governance,
         }
     }
 
@@ -11126,6 +11413,38 @@ impl Db {
                 wait,
                 view,
                 since,
+                span: ReadSpan::AcceptedOnce { at, schema, scope },
+            } => {
+                if !matches!(*view, ReadViewSourceSpec::Current)
+                    || tier != ReadTier::Remote
+                    || since.is_some()
+                {
+                    return Err(unsupported(
+                        "accepted evidence outside a fresh Remote Current read",
+                    ));
+                }
+                self.serve_accepted(
+                    index,
+                    id,
+                    *query,
+                    binding,
+                    include_deleted,
+                    at,
+                    schema,
+                    scope,
+                    claims,
+                    wait,
+                )?;
+            }
+            SyncMessage::Read {
+                id,
+                query,
+                binding,
+                include_deleted,
+                tier,
+                wait,
+                view,
+                since,
                 span: ReadSpan::Live,
             } => {
                 let local = tier == ReadTier::LocalOnly;
@@ -11144,7 +11463,7 @@ impl Db {
                     // A session's read is served as this store holds it.
                     ReadSpec {
                         position: Position::Current,
-                        ..ReadSpec::of(&opts, &db.inner())?
+                        ..ReadSpec::of(&opts, &db.inner(), db.governance.clone())?
                     }
                 };
                 let resume_read = viewed.clone();
@@ -11302,6 +11621,17 @@ impl Db {
             }
             SyncMessage::Unsubscribe { id } => {
                 let mut inner = self.inner.borrow_mut();
+                if let Some(client) = inner.client.as_mut() {
+                    let mut cancelled = Vec::new();
+                    client.relayed_fetches.retain(|fetch| {
+                        let keep = fetch.session != index || !matches!(&fetch.message, SyncMessage::Read { id: downstream, .. } if *downstream == id);
+                        if !keep { cancelled.push(fetch.upstream); }
+                        keep
+                    });
+                    for upstream in cancelled {
+                        client.forget_once(upstream);
+                    }
+                }
                 inner.sessions[index].support.remove(&id);
                 inner.sessions[index].first_load.remove(&id);
                 inner.sessions[index].resume.remove(&id);
@@ -11351,7 +11681,12 @@ impl Db {
             SyncMessage::CheckAllowed { id, action, acting } => {
                 // As for a commit: a trusted link may ask for a session it
                 // vouches for; a session link only for its own.
-                let result = match commit_who(policy, &acting) {
+                let result = match commit_who(policy, &acting).and_then(|who| {
+                    self.inner
+                        .borrow()
+                        .check_acts_pinned(index, policy, who)
+                        .map(|()| who)
+                }) {
                     Ok(who) => {
                         let identity = match who {
                             Who::Session(author) => Some(author),
@@ -11417,7 +11752,7 @@ impl Db {
                         &prepared.binding,
                         include_deleted,
                         &view,
-                        at,
+                        at.is_none(),
                     );
                     let client = inner.client.as_mut().expect("client");
                     client.outbox.push(SyncMessage::Read {
@@ -11444,7 +11779,7 @@ impl Db {
                         &prepared.binding,
                         include_deleted,
                         &view,
-                        at,
+                        at.is_none(),
                     );
                     let client = inner.client.as_mut().expect("client");
                     client.answers.insert(upstream, None);
@@ -11466,6 +11801,7 @@ impl Db {
                         ask,
                         strict,
                         until: wait.and_then(wait_until),
+                        _deadline_guard: None,
                         message: SyncMessage::Read {
                             id,
                             query,
@@ -11510,7 +11846,7 @@ impl Db {
                     },
                     ..ReadOpts::default()
                 };
-                let viewed = match ReadSpec::of(&opts, &inner) {
+                let viewed = match ReadSpec::of(&opts, &inner, db.governance.clone()) {
                     // A session's read is served as this store holds it.
                     Ok(viewed) => ReadSpec {
                         position: Position::Current,
@@ -11526,6 +11862,7 @@ impl Db {
                     }
                 };
                 let read = ReadSpec {
+                    governance: viewed.governance,
                     position: Position::Current,
                     cut: viewed.cut.or(pinned.map(Cut::at)),
                     include_deleted,
@@ -11688,6 +12025,14 @@ impl Db {
                         }
                     }
                 }
+                // A one-shot read can also deliver an accepted version before
+                // its receipt, including a tombstone alongside its history.
+                seqs.extend(
+                    images
+                        .iter()
+                        .filter(|image| image.at.accepted())
+                        .map(|image| image.at.seq),
+                );
                 let mut tx_ids = inner.tx_ids(&seqs)?;
                 tx_ids.extend(named);
                 let through = at.unwrap_or_else(|| inner.served_through());
@@ -11721,6 +12066,16 @@ impl Db {
                 ops,
                 acting,
             } => {
+                let provenance = self.local_submission_for(
+                    index,
+                    &SyncMessage::Commit {
+                        id,
+                        clock,
+                        kind: kind.clone(),
+                        ops: ops.clone(),
+                        acting: acting.clone(),
+                    },
+                )?;
                 let (node, tx) = (*id.node.as_bytes(), id.time.0);
                 // A commit keeps its writer's id at every hop: a link may
                 // send one only as a node its identity writes as. A
@@ -11794,6 +12149,10 @@ impl Db {
                     None => match commit_who(policy, &acting)
                         .map_err(|error| (error, Vec::new()))
                         .and_then(|who| {
+                            self.inner
+                                .borrow()
+                                .check_acts_pinned(index, policy, who)
+                                .map_err(|error| (error, Vec::new()))?;
                             let (ops, mut roots) = db
                                 .resolve_deltas(policy, ops)
                                 .map_err(|error| (error, Vec::new()))?;
@@ -11809,7 +12168,16 @@ impl Db {
                             };
                             let vouched = vouched(policy, who, acting);
                             self.with_claims(vouched, || {
-                                db.authorize_commit(who, kind, ops, (node, tx), clock, possession)
+                                db.authorize_commit(
+                                    who,
+                                    policy,
+                                    kind,
+                                    ops,
+                                    (node, tx),
+                                    clock,
+                                    possession,
+                                    provenance.as_deref(),
+                                )
                             })
                         }) {
                         // The accepted commit recorded its fate atomically.
@@ -11857,6 +12225,7 @@ impl Db {
                     _ => None,
                 };
                 let session = &mut inner.sessions[index];
+                session.local_submission = None;
                 if result.is_ok() {
                     session
                         .committed
@@ -12246,11 +12615,13 @@ impl Db {
     fn authorize_commit(
         &self,
         who: Who,
+        identity: Option<AuthorSubject>,
         mut kind: WireKind,
         ops: Vec<WireOp>,
         id: ([u8; 16], u64),
         clock: u64,
         possession: crate::large::Possession,
+        provenance: Option<&[Option<SubmissionProvenance>]>,
     ) -> Result<(Vec<RowKey>, Vec<Echoable>), (Error, Vec<RowKey>)> {
         // A clock past what this store counts (its own plus the offset
         // bound) is held there: the commit stores, relays and orders at the
@@ -12265,10 +12636,10 @@ impl Db {
             .collect();
         // A trusted backend's session batch validates reads under the same
         // session as its writes, not under the transport's SYSTEM privilege.
-        let identity = match who {
+        let identity = identity.or(match who {
             Who::Session(author) => Some(author),
             Who::Local | Who::Attributed(_) => None,
-        };
+        });
         let ops: Vec<StagedOp> = match ops.into_iter().map(from_wire).collect::<Result<_, _>>() {
             Ok(ops) => ops,
             Err(error) => return Err((error, Vec::new())),
@@ -12317,6 +12688,9 @@ impl Db {
             own,
         } = &kind
         {
+            // Reads are validated by the policies the session read by: its
+            // bundle's when it is pinned to one, not the store's current ones.
+            let policies = self.view_policies();
             let inner = self.inner();
             // The sender's own commits its snapshot included, by local seq
             // and where each settled here (earlier on this connection, so
@@ -12350,9 +12724,10 @@ impl Db {
             }
             for read in reads {
                 // A read is evaluated in the version it was made in.
-                let Some(schema) =
-                    inner.governed(crate::ids::SchemaVersionId::from_bytes(read.version))
-                else {
+                let Some(schema) = inner.governed_by(
+                    crate::ids::SchemaVersionId::from_bytes(read.version),
+                    policies.clone(),
+                ) else {
                     return Err((schema_version_not_deployed(), mentioned(&inner)));
                 };
                 let prepared = PreparedQuery {
@@ -12365,7 +12740,7 @@ impl Db {
                 };
                 let spec = ReadSpec {
                     include_deleted: read.include_deleted,
-                    ..ReadSpec::default()
+                    ..ReadSpec::new(self.governance.clone())
                 };
                 let now: Vec<([u8; 16], Option<Pos>)> = inner
                     .read_versions(&prepared, identity, &spec)
@@ -12540,7 +12915,7 @@ impl Db {
         // The authority keeps what each version was built on (INV-HIST-21);
         // a relay passes the bases on instead.
         let finished = if relay {
-            self.record_stored_upload(
+            self.record_stored_upload_with_provenance(
                 ops.clone(),
                 seq,
                 upload,
@@ -12549,6 +12924,8 @@ impl Db {
                     clock,
                     bases,
                 }),
+                provenance,
+                None,
             )
         } else {
             Ok(())
@@ -12943,7 +13320,7 @@ impl Db {
         poll_fn(|_| {
             let read = {
                 let inner = self.inner();
-                ReadSpec::of(&opts, &inner).and_then(|mut spec| {
+                ReadSpec::of(&opts, &inner, self.governance.clone()).and_then(|mut spec| {
                     // It reads as far as the answer it fetched settled.
                     if let Some(at) = fetched
                         && spec.position == Position::Known
@@ -13024,18 +13401,23 @@ impl Db {
                 .read_deadlines
                 .iter()
                 .filter_map(Weak::upgrade)
-                .any(|deadline| *deadline <= now)
+                .any(|deadline| deadline.at <= now)
         };
         self.schedule_read_deadlines();
         // A newly installed hook missed the old timer. Request one drive turn
         // so expired reads can settle, without rearming them on every tick.
         if expired {
             self.schedule_pending_tick();
+        } else {
+            self.flush_pending_tick();
         }
     }
 
-    pub(crate) fn read_deadline(&self, at: Option<Instant>) -> Option<Rc<Instant>> {
-        let deadline = at.map(Rc::new)?;
+    pub(crate) fn read_deadline(&self, at: Option<Instant>) -> Option<Rc<ReadDeadline>> {
+        let deadline = Rc::new(ReadDeadline {
+            at: at?,
+            waker: RefCell::new(None),
+        });
         self.inner
             .borrow_mut()
             .read_deadlines
@@ -13044,7 +13426,7 @@ impl Db {
         Some(deadline)
     }
 
-    pub(crate) fn read_attempt_deadline(&self) -> Option<Rc<Instant>> {
+    pub(crate) fn read_attempt_deadline(&self) -> Option<Rc<ReadDeadline>> {
         let link = self.link_hint()?.get();
         self.read_deadline(
             (link.hint == RemoteLinkHint::Attempting)
@@ -13053,9 +13435,42 @@ impl Db {
     }
 
     pub(crate) fn schedule_pending_tick(&self) {
-        let scheduler = self.inner.borrow().scheduler.clone();
+        self.inner.3.set(true);
+        self.flush_pending_tick();
+    }
+
+    /// Dropping a read inside a coverage callback can hold Inner's borrow.
+    /// Defer only the wake notification; Store owns the existing cancellation
+    /// queue. The surrounding read poll or tick flushes after releasing Inner.
+    pub(crate) fn flush_pending_tick(&self) {
+        if !self.inner.3.get() {
+            return;
+        }
+        let scheduler = {
+            let Ok(mut inner) = self.inner.0.try_borrow_mut() else {
+                return;
+            };
+            self.inner.flush_cancelled_fetches(&mut inner);
+            inner.scheduler.clone()
+        };
+        self.inner.3.set(false);
         if let Some(scheduler) = scheduler {
             scheduler.schedule_tick(TickUrgency::Immediate);
+        }
+    }
+
+    pub(crate) fn wake_read_deadlines(&self) {
+        let wakers: Vec<_> = {
+            let inner = self.inner.borrow();
+            inner
+                .read_deadlines
+                .iter()
+                .filter_map(Weak::upgrade)
+                .filter_map(|guard| guard.waker.borrow_mut().take())
+                .collect()
+        };
+        for waker in wakers {
+            waker.wake();
         }
     }
 
@@ -13070,8 +13485,8 @@ impl Db {
                 let Some(deadline) = weak.upgrade() else {
                     return false;
                 };
-                if *deadline > now {
-                    next = Some(next.map_or(*deadline, |at: Instant| at.min(*deadline)));
+                if deadline.at > now {
+                    next = Some(next.map_or(deadline.at, |at: Instant| at.min(deadline.at)));
                 }
                 // Keep live guards even after their original wake expires:
                 // the host may restart a connection attempt while they wait.
@@ -13345,3 +13760,15 @@ mod tests {
         assert!(joiner.push(&parts[1]).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "nested_policy_dependencies_tests.rs"]
+mod nested_policy_dependencies_tests;
+
+#[cfg(test)]
+#[path = "executing_handle_policy_context_tests.rs"]
+mod executing_handle_policy_context_tests;
+
+#[cfg(test)]
+#[path = "governance_composition_tests.rs"]
+mod governance_composition_tests;

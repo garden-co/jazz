@@ -145,7 +145,7 @@ describe("dev catalogue push behavior", () => {
               activeSchemaHash: kind === "initial" ? null : hash,
             }),
           );
-        expect(input.endsWith("/admin/deploy")).toBe(true);
+        expect(input.endsWith("/admin/bundles")).toBe(true);
         body = JSON.parse(String(init?.body));
         return new Response(
           JSON.stringify({

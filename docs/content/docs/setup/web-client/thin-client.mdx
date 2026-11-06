@@ -11,9 +11,9 @@ description: "A small browser client that talks to your server, with no local da
 
 The default web client: about 86 KB gzipped, no Wasm, no local storage. The server runs every query under the signed-in session's policies and sends finished rows; writes commit on the server.
 
-## Dev plugins
+## Bundler config
 
-- The same bundler plugins as the [local-first client](/docs/setup/web-client/local-first-client#dev-plugins): they start a local Jazz server, auto-push `schema.ts` and `permissions.ts`, and inject the app ID and server URL as env vars
+- The same plain bundler config as the [local-first client](/docs/setup/web-client/local-first-client#bundler-config); no plugin is needed
 
 ## Wasm loading
 
