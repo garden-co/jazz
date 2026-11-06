@@ -191,6 +191,84 @@ describe("browser session", () => {
     stopStates();
   }, 60_000);
 
+  it("shows the thin Db's own committed writes in local-first reads after the upgrade", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const kept = db(session);
+    await kept.insert(app.notes, { text: "thin" }).wait({ tier: "global" });
+
+    // No live query covers it: only the hand-off reads it into the local-first Db.
+    await kept.upgradeToLocalFirst(loadLocalFirst);
+    expect((await kept.all(app.notes, { tier: "local-first" })).map((row) => row.text)).toEqual([
+      "thin",
+    ]);
+  }, 60_000);
+
+  it("shows a thin write answered after the upgrade in local-first reads once it is global", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const kept = db(session);
+    await kept.disconnect();
+    const write = kept.insert(app.notes, { text: "late" });
+    await kept.upgradeToLocalFirst(loadLocalFirst);
+    await kept.reconnect();
+
+    await write.wait({ tier: "global" });
+    expect((await kept.all(app.notes, { tier: "local-first" })).map((row) => row.text)).toEqual([
+      "late",
+    ]);
+  }, 60_000);
+
+  it("shows a streamed thin write in local-first reads after the upgrade", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const kept = db(session);
+    async function* chunks(): AsyncGenerator<string> {
+      yield "streamed ";
+      yield "text";
+    }
+    const written = await kept.insertStreaming(app.notes, { text: chunks() });
+    await written.wait({ tier: "global" });
+
+    await kept.upgradeToLocalFirst(loadLocalFirst);
+    expect((await kept.all(app.notes, { tier: "local-first" })).map((row) => row.text)).toEqual([
+      "streamed text",
+    ]);
+  }, 60_000);
+
+  it("upgrades with committed thin writes while the server is gone", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const kept = db(session);
+    await kept.insert(app.notes, { text: "thin" }).wait({ tier: "global" });
+    await server.stop();
+
+    // The hand-off can't read the write back: it gives up, and the upgrade
+    // goes ahead with what the device has.
+    await kept.upgradeToLocalFirst(loadLocalFirst);
+    expect(isThinDb(kept)).toBe(false);
+    await kept.insert(app.notes, { text: "local" }).wait({ tier: "local" });
+  }, 60_000);
+
+  it("resolves a thin write's global wait when its hand-off read gets no answer", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const kept = db(session);
+    await kept.disconnect();
+    const write = kept.insert(app.notes, { text: "late" });
+    // The local-first Db never hears back (another tab took its shared
+    // worker offline, its socket dropped).
+    const read = vi
+      .spyOn(Db.prototype, "prefetchRuntimeQueries")
+      .mockImplementation(() => new Promise(() => {}));
+    await kept.upgradeToLocalFirst(loadLocalFirst);
+    await kept.reconnect();
+
+    await write.wait({ tier: "global" });
+    expect(read).toHaveBeenCalled();
+    read.mockRestore();
+  }, 60_000);
+
   it("counts and uploads the thin Db's unsent writes after the upgrade", async () => {
     const server = await startServer();
     const session = await open(server, memoryStore());
@@ -347,7 +425,9 @@ describe("browser session", () => {
         const next = await createLocalFirstDb(config);
         const prefetch = next.prefetchRuntimeQueries.bind(next);
         next.prefetchRuntimeQueries = async (schema, queries) => {
-          rounds.push(queries.length);
+          // Not the hand-off of the thin write's row (an `id in` read).
+          const live = queries.filter((query) => !query.includes('"In"'));
+          if (live.length > 0) rounds.push(live.length);
           // A component mounts during the first round's read.
           late ??= kept.subscribe(app.notes.where({ text: "before" }), (rows) =>
             seen.push(rows.map((row) => row.text)),

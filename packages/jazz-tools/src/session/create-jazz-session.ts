@@ -17,6 +17,7 @@ import {
   createClient as createThinDb,
   mintLocalFirstTokenInJs,
   prefetchThinQueries,
+  handOffThinWrites,
 } from "../thin/index.js";
 import {
   setLocalFirstUpgrader,
@@ -231,6 +232,7 @@ export async function createJazzClient(config: JazzClientConfig): Promise<Browse
         const next = await openReplica(createClient, account);
         try {
           await prefetchThinQueries(current.db, next.db);
+          await handOffThinWrites(current.db, next.db);
         } catch (error) {
           await next.shutdown().catch(() => {});
           throw error;
