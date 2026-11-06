@@ -92,6 +92,8 @@ export interface ThinRuntimeOptions {
   WebSocket?: WebSocketConstructor;
   /** Delays between reconnect attempts, in ms; the last one repeats. */
   reconnectDelaysMs?: readonly number[];
+  /** How long connecting may keep failing before the link reports an outage. */
+  outageReportMs?: number;
   /**
    * The canonical author this client acts as, with its account. The server
    * admits a public session only for the account its credential is assigned to.
@@ -209,9 +211,10 @@ export class ThinRuntime implements Runtime {
   private refused = false;
   /** The connection ended for good (`fatal`, `close`). */
   private stopped = false;
-  /** Armed while not connected; reports the outage when it fires. */
-  private outageTimer?: ReturnType<typeof setTimeout>;
+  /** When connecting started failing; cleared once connected or refused. */
+  private failingSince?: number;
   private outagePublished = false;
+  private readonly outageReportMs: number;
   private nextRequestId = 1;
   private readonly oneShots = new Map<number, OneShot>();
   private nextHandle = 1;
@@ -230,6 +233,7 @@ export class ThinRuntime implements Runtime {
     this.schemaBytes = encodeSchema(schema);
     this.WebSocketImpl = options.WebSocket;
     this.reconnectDelaysMs = options.reconnectDelaysMs ?? DEFAULT_RECONNECT_DELAYS_MS;
+    this.outageReportMs = options.outageReportMs ?? OUTAGE_REPORT_MS;
     this.author = options.author;
   }
 
@@ -239,6 +243,10 @@ export class ThinRuntime implements Runtime {
     this.url = url;
     this.authJson = authJson;
     this.wanted = true;
+    // An explicit connect (a reconnect after a refusal or a terminal error)
+    // starts over, as the core link does.
+    if (!this.closed) this.stopped = false;
+    this.setRefused(false);
     this.open();
   }
 
@@ -291,10 +299,7 @@ export class ThinRuntime implements Runtime {
   private open(): void {
     if (this.closed || !this.url || this.authJson === undefined || this.carrier) return;
     clearTimeout(this.reconnectTimer);
-    this.outageTimer ??= setTimeout(() => {
-      this.outagePublished = true;
-      this.notifySyncStatus();
-    }, OUTAGE_REPORT_MS);
+    this.failingSince ??= Date.now();
     this.parts.reset();
     const carrier = new WebSocketCarrier({
       endpointUrl: this.url,
@@ -337,6 +342,8 @@ export class ThinRuntime implements Runtime {
         }
         this.attempt = 0;
         this.bound = true;
+        this.refused = false;
+        this.stopped = false;
         this.clearOutage();
         this.notifySyncStatus();
         for (const live of this.liveQueries.values()) if (live.callback) this.openLive(live);
@@ -376,14 +383,33 @@ export class ThinRuntime implements Runtime {
 
   private lost(carrier: WebSocketCarrier, error: WireError): void {
     if (this.carrier !== carrier) return;
-    this.dropConnection(new ThinConnectionLostError(`${error.code}: ${error.message}`));
     const authFailure = wireAuthFailureReason(error);
     if (authFailure) {
+      // Refused before the drop publishes, so the link never reads
+      // "connecting" in between.
+      this.clearOutage();
+      this.refused = true;
+      this.dropConnection(new ThinConnectionLostError(`${error.code}: ${error.message}`));
+      this.notifySyncStatus();
       // Nothing reconnects until the credential is renewed (`updateAuth`).
-      this.setRefused(true);
       this.authFailureCallback?.(authFailure);
       return;
     }
+    if (error.retry === "never") {
+      this.stopped = true;
+      this.clearOutage();
+    }
+    this.dropConnection(new ThinConnectionLostError(`${error.code}: ${error.message}`));
+    // An attempt that fails past the window reports the outage.
+    if (
+      !this.stopped &&
+      !this.outagePublished &&
+      this.failingSince !== undefined &&
+      Date.now() - this.failingSince >= this.outageReportMs
+    ) {
+      this.outagePublished = true;
+    }
+    this.notifySyncStatus();
     if (!this.wanted || this.closed || error.retry === "never") return;
     const delays = this.reconnectDelaysMs;
     const delay = delays[Math.min(this.attempt, delays.length - 1)] ?? 1_000;
@@ -1056,8 +1082,7 @@ export class ThinRuntime implements Runtime {
   }
 
   private clearOutage(): void {
-    clearTimeout(this.outageTimer);
-    this.outageTimer = undefined;
+    this.failingSince = undefined;
     this.outagePublished = false;
   }
 
