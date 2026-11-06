@@ -465,6 +465,47 @@ describe("thin client", () => {
     ]);
   }, 60_000);
 
+  it("does not send a write again when connect() names another credential", async () => {
+    const server = await startServer();
+    const db = await thinDb(server);
+    await db.insert(app.notes, { text: "first", done: false }).wait({ tier: "global" });
+    const runtime = db.currentRuntime() as ThinRuntime;
+    const internals = runtime as unknown as {
+      url: string;
+      authJson: string;
+      receive(carrier: unknown, piece: Uint8Array): void;
+      lost(carrier: unknown, error: { code: string; retry: string; message: string }): void;
+    };
+    const receive = internals.receive.bind(runtime);
+    let dropped = false;
+    internals.receive = (carrier, piece) => {
+      if (!dropped && isThinResponse(piece) && decodeThinResponse(piece).body.type === "written") {
+        dropped = true;
+        internals.lost(carrier, {
+          code: "websocket_closed",
+          retry: "later",
+          message: "the answer was lost",
+        });
+        // Before it reconnects, it is connected again with a credential of
+        // its own (here the same one, spelled differently).
+        runtime.connect(internals.url, JSON.stringify(JSON.parse(internals.authJson), null, 1));
+        return;
+      }
+      receive(carrier, piece);
+    };
+
+    const write = db.insert(app.notes, { text: "in flight", done: false });
+    await expect(write.wait({ tier: "global" })).rejects.toThrow();
+    expect(dropped).toBe(true);
+    expect(runtime.pendingUploadCount()).toBe(0);
+    await db.insert(app.notes, { text: "after", done: false }).wait({ tier: "global" });
+    expect((await db.all(app.notes)).map((row) => row.text).sort()).toEqual([
+      "after",
+      "first",
+      "in flight",
+    ]);
+  }, 60_000);
+
   it("gives up a write in flight when the app goes offline, so waiting for sync ends", async () => {
     const server = await startServer();
     const db = await thinDb(server);
