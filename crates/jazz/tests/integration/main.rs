@@ -207,6 +207,8 @@ mod thin_origin_writes;
 mod transaction_commit_kind;
 #[path = "../transaction_handles.rs"]
 mod transaction_handles;
+#[path = "../transaction_policy_exists.rs"]
+mod transaction_policy_exists;
 #[path = "../transaction_read_tiers.rs"]
 mod transaction_read_tiers;
 #[path = "../union_queries.rs"]

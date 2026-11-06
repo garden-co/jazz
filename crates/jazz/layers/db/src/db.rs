@@ -672,6 +672,9 @@ struct Inner {
     changed: RefCell<Vec<(String, RowUuid, Vec<u8>)>>,
     /// The write checks of the unit being applied, run at its end.
     deferred: RefCell<Option<Vec<DeferredCheck>>>,
+    /// Rows a unit's trusted writes (no write check) left behind, by stored
+    /// table: they need no evidence, so its grounding starts from them.
+    trusted_rows: RefCell<BTreeMap<String, BTreeSet<[u8; 16]>>>,
     /// The open transaction's seq and the tables it wrote.
     tx: Option<(u64, BTreeSet<String>)>,
     publications: Vec<SchemaPublication>,
@@ -1268,6 +1271,17 @@ fn denied(detail: impl std::fmt::Display) -> Error {
     )
 }
 
+/// A denial the commit's grounding found, which says so: each write passed
+/// its check when it was staged.
+fn refused_at_commit(mut error: Error) -> Error {
+    if error.is_authorization_denied() {
+        error
+            .message
+            .push_str(", on the state the whole transaction leaves behind");
+    }
+    error
+}
+
 impl Error {
     /// Whether a policy rejected the write.
     pub fn is_authorization_denied(&self) -> bool {
@@ -1585,6 +1599,7 @@ impl Db {
                 fan: fanout::Fanout::default(),
                 changed: RefCell::new(Vec::new()),
                 deferred: RefCell::new(None),
+                trusted_rows: RefCell::new(BTreeMap::new()),
                 tx: None,
                 publications: Vec::new(),
                 client: None,
@@ -5120,6 +5135,7 @@ impl Inner {
         seq: u64,
     ) -> Result<(), Error> {
         let deferred = DeferredCheck {
+            schema: self.schema.clone(),
             table: table.name.clone(),
             row,
             key: key.to_vec(),
@@ -5144,11 +5160,25 @@ impl Inner {
     /// Start a unit: write checks wait for [`Inner::finish_checks`].
     pub(crate) fn defer_checks(&self) {
         *self.deferred.borrow_mut() = Some(Vec::new());
+        self.trusted_rows.borrow_mut().clear();
+    }
+
+    /// Note a unit's write that no policy checks, so its row grounds the
+    /// unit's checked writes from the first round on.
+    fn note_trusted(&self, table: &Table, row: RowUuid) {
+        if self.deferred.borrow().is_some() {
+            self.trusted_rows
+                .borrow_mut()
+                .entry(table.stored.clone())
+                .or_default()
+                .insert(*row.0.as_bytes());
+        }
     }
 
     /// Drop a unit's pending checks (it rolled back).
     pub(crate) fn abandon_checks(&self) {
         *self.deferred.borrow_mut() = None;
+        self.trusted_rows.borrow_mut().clear();
     }
 
     /// End a unit written at `seq`: ground its writes (SPEC 7). The first
@@ -5160,16 +5190,40 @@ impl Inner {
     /// unit could have taken away is checked again against the unit's
     /// whole post-state (see [`Inner::post_state_pass`]).
     pub(crate) fn finish_checks(&self, seq: u64) -> Result<(), Error> {
-        let pending = self.deferred.borrow_mut().take().unwrap_or_default();
-        self.ground(pending, seq)
+        self.finish_checks_after(seq, BTreeMap::new())
     }
 
-    fn ground(&self, mut pending: Vec<DeferredCheck>, seq: u64) -> Result<(), Error> {
-        let schema = self.schema.clone();
+    /// [`Inner::finish_checks`] for a unit that continues writes already
+    /// grounded: `grounded` (stored table to rows) shows its end state to
+    /// the unit's checks from the first round on.
+    pub(crate) fn finish_checks_after(
+        &self,
+        seq: u64,
+        grounded: BTreeMap<String, BTreeSet<[u8; 16]>>,
+    ) -> Result<(), Error> {
+        let pending = self.deferred.borrow_mut().take().unwrap_or_default();
+        let mut grounded = grounded;
+        for (table, rows) in std::mem::take(&mut *self.trusted_rows.borrow_mut()) {
+            grounded.entry(table).or_default().extend(rows);
+        }
+        self.ground_after(pending, seq, grounded)
+    }
+
+    fn ground(&self, pending: Vec<DeferredCheck>, seq: u64) -> Result<(), Error> {
+        self.ground_after(pending, seq, BTreeMap::new())
+    }
+
+    fn ground_after(
+        &self,
+        mut pending: Vec<DeferredCheck>,
+        seq: u64,
+        mut grounded: BTreeMap<String, BTreeSet<[u8; 16]>>,
+    ) -> Result<(), Error> {
+        // Each check runs under the schema its write was staged with.
         let mut live = Vec::with_capacity(pending.len());
         let several = pending.len() > 1;
         for mut check in pending.drain(..) {
-            let table = schema.table(&check.table)?;
+            let table = check.schema.table(&check.table)?;
             if !self.is_deleted_version(table, check.row, &check.key)? {
                 // Only a unit of several writes has a post-state pass.
                 check.replaces = several
@@ -5179,7 +5233,6 @@ impl Inner {
             }
         }
         let mut pending = live;
-        let mut grounded: BTreeMap<String, BTreeSet<[u8; 16]>> = BTreeMap::new();
         // Each write with the round it passed in and the tables its policy
         // reads through the overlay.
         let mut rounds: Vec<(DeferredCheck, usize, BTreeSet<String>)> =
@@ -5197,6 +5250,7 @@ impl Inner {
             let mut passed = Vec::new();
             let mut failed = Vec::new();
             for check in pending {
+                let schema = check.schema.clone();
                 let (holds, tables) =
                     self.write_check_holds(&schema, &check, cut.clone(), &mut evidence)?;
                 if holds {
@@ -5209,7 +5263,7 @@ impl Inner {
                 return Err(write_check_denied(&failed[0]));
             }
             for (check, tables) in passed {
-                let stored = schema.table(&check.table)?.stored.clone();
+                let stored = check.schema.table(&check.table)?.stored.clone();
                 grounded
                     .entry(stored)
                     .or_default()
@@ -5222,7 +5276,7 @@ impl Inner {
             pending = failed;
             round += 1;
         }
-        self.post_state_pass(&schema, rounds, seq, &mut evidence)
+        self.post_state_pass(rounds, seq, &mut evidence)
     }
 
     /// Check `check`'s policy on the rows `cut` shows. Also returns the
@@ -5274,7 +5328,6 @@ impl Inner {
     /// wholesale. It is not charged to the evidence budget.
     fn post_state_pass(
         &self,
-        schema: &Schema,
         rounds: Vec<(DeferredCheck, usize, BTreeSet<String>)>,
         seq: u64,
         evidence: &mut EvidenceBudget,
@@ -5287,7 +5340,7 @@ impl Inner {
         let mut later: HashMap<String, (Vec<usize>, Vec<usize>)> = HashMap::new();
         let mut stored_of = Vec::with_capacity(rounds.len());
         for (check, round, _) in &rounds {
-            let stored = schema.table(&check.table)?.stored.clone();
+            let stored = check.schema.table(&check.table)?.stored.clone();
             let (written, replaced) = later
                 .entry(stored.clone())
                 .or_insert_with(|| (vec![0; last + 2], vec![0; last + 2]));
@@ -5326,7 +5379,7 @@ impl Inner {
                 let grows = match monotone.get(&key) {
                     Some(grows) => *grows,
                     None => {
-                        let grows = self.write_policy_is_monotone(schema, check)?;
+                        let grows = self.write_policy_is_monotone(&check.schema, check)?;
                         monotone.insert(key, grows);
                         grows
                     }
@@ -5346,7 +5399,10 @@ impl Inner {
                     key: check.key.clone(),
                 }),
             };
-            if !self.write_check_holds(schema, check, cut, evidence)?.0 {
+            if !self
+                .write_check_holds(&check.schema, check, cut, evidence)?
+                .0
+            {
                 return Err(write_check_denied(check));
             }
         }
@@ -6796,6 +6852,8 @@ impl Inner {
             .push((table.stored.clone(), row, key.clone()));
         if let Some(author) = self.checked(who) {
             self.write_check(table, row, &key, author, WriteCheck::Insert, seq)?;
+        } else {
+            self.note_trusted(table, row);
         }
         Ok(WriteHandle {
             row,
@@ -7036,6 +7094,8 @@ impl Inner {
                 },
                 seq,
             )?;
+        } else {
+            self.note_trusted(table, row);
         }
         Ok(WriteHandle {
             row,
@@ -7215,6 +7275,8 @@ impl Inner {
         // A restore writes an existing row back: the UPDATE policy decides.
         if let Some(author) = self.checked(who) {
             self.write_check(table, row, &key, author, WriteCheck::Restore, seq)?;
+        } else {
+            self.note_trusted(table, row);
         }
         Ok(WriteHandle {
             row,
@@ -7236,6 +7298,8 @@ enum WriteCheck {
 }
 
 struct DeferredCheck {
+    /// The schema the write was made through, which names its table.
+    schema: Rc<Schema>,
     table: String,
     row: RowUuid,
     key: Vec<u8>,
@@ -8054,6 +8118,9 @@ impl Store {
 struct Batch {
     kind: BatchKind,
     ops: Vec<(Rc<Schema>, StagedOp)>,
+    /// The rows `ops` write, by stored table: a later staged write's
+    /// evidence (see [`Db::in_overlay`]).
+    rows: BTreeMap<String, BTreeSet<[u8; 16]>>,
     /// What the batch's partial large-value updates built: descriptors
     /// derived from stored trees and the nodes consolidations prepared,
     /// trusted and stored whenever the staged writes apply.
@@ -8579,6 +8646,7 @@ impl Db {
             Batch {
                 kind,
                 ops: Vec::new(),
+                rows: BTreeMap::new(),
                 edits: LargeEdits::default(),
                 uploads: Vec::new(),
             },
@@ -8796,10 +8864,16 @@ impl Db {
             let seq = inner.fresh_seq();
             begin_savepoint(&inner.conn, "commit_batch")?;
             let mark = inner.changed.borrow().len();
+            // Each write passed its check as it was staged, with the rows
+            // staged before it as evidence. The commit grounds the unit's
+            // end state as the authority will on upload (SPEC 7), so a unit
+            // commits here exactly when the authority accepts it: a row the
+            // unit deleted is no evidence, and rows can't ground each other
+            // in a cycle.
             inner.defer_checks();
             let applied = inner
-                .apply_with_edits(ops, &batch.edits, ops.len(), seq)
-                .and_then(|()| inner.finish_checks(seq));
+                .apply_with_edits(ops, &batch.edits, 0, seq)
+                .and_then(|()| inner.finish_checks(seq).map_err(refused_at_commit));
             if let Err(error) = applied {
                 inner.abandon_checks();
                 inner.changed.borrow_mut().truncate(mark);
@@ -8854,6 +8928,20 @@ impl Db {
             .get(&id)
             .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
         let staged = batch.ops.len();
+        // A row is never evidence for its own check.
+        let staged_rows = match extra.as_deref() {
+            Some(op) => {
+                let mut rows = batch.rows.clone();
+                if let Some(row) = op.row() {
+                    let stored = &inner.schema.table(op.table())?.stored;
+                    if let Some(set) = rows.get_mut(stored) {
+                        set.remove(row.0.as_bytes());
+                    }
+                }
+                rows
+            }
+            None => BTreeMap::new(),
+        };
         let live = inner
             .overlay
             .as_ref()
@@ -8898,7 +8986,18 @@ impl Db {
         let applied = match extra {
             Some(op) => inner.counter_deltas(op).and_then(|()| {
                 let schema = inner.schema.clone();
-                inner.apply_all_checking(&[(schema, op.clone())], 0, own)
+                // The write continues the unit its batch staged so far:
+                // those writes passed their checks, so their rows are
+                // evidence for this one's (SPEC 7), as at the authority
+                // that receives the unit. The commit checks the whole unit.
+                inner.defer_checks();
+                let applied = inner
+                    .apply_all_checking(&[(schema, op.clone())], 0, own)
+                    .and_then(|()| inner.finish_checks_after(own, staged_rows));
+                if applied.is_err() {
+                    inner.abandon_checks();
+                }
+                applied
             }),
             None => Ok(()),
         };
@@ -9004,12 +9103,19 @@ impl Db {
             .map_err(|error| self.serializable_write_conflict(id, &op, error))?;
         let mut inner = self.inner.staging();
         let schema = self.view.clone().unwrap_or_else(|| inner.owner.clone());
-        inner
-            .batches
-            .get_mut(&id)
-            .expect("validated")
-            .ops
-            .push((schema, op));
+        let stored = match op.row() {
+            Some(row) => Some((schema.table(op.table())?.stored.clone(), row)),
+            None => None,
+        };
+        let batch = inner.batches.get_mut(&id).expect("validated");
+        if let Some((table, row)) = stored {
+            batch
+                .rows
+                .entry(table)
+                .or_default()
+                .insert(*row.0.as_bytes());
+        }
+        batch.ops.push((schema, op));
         Ok(())
     }
 
