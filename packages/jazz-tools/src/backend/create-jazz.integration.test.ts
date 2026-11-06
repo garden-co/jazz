@@ -704,6 +704,20 @@ describe("createJazz", () => {
     expect(upgrades).toBe(reconnected);
   }, 60_000);
 
+  it("answers the client's socket probe as it answers the socket, origin check included", async () => {
+    const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz, { sockets: true });
+    const probe = (headers: Record<string, string>) =>
+      fetch(`${origin}/jazz/apps/${jazz.appId}/ws`, { method: "POST", headers });
+    // This host upgrades: retry the socket.
+    const same = await probe({ origin });
+    expect(same.status).toBe(426);
+    expect(same.headers.get("x-jazz-stream")).toBeNull();
+    // A page whose origin the socket is refused for hears so.
+    expect((await probe({ origin: "http://elsewhere.test" })).status).toBe(403);
+  });
+
   it("refuses local-first guests unless authenticate accepts them", async () => {
     const jazz = await createJazz({
       app,

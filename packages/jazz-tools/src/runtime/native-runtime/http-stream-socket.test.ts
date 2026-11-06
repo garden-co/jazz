@@ -84,7 +84,7 @@ describe("same-origin socket fallback", () => {
     const url = "ws://app.test/jazz/apps/a1/ws";
     const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const target = String(input);
-      if (init?.method === "GET" && target === "http://app.test/jazz/apps/a1/ws") {
+      if (init?.method === "POST" && target === "http://app.test/jazz/apps/a1/ws") {
         return new Response("use the stream", { status: 426, headers: { "x-jazz-stream": "1" } });
       }
       if (init?.method === "POST" && target === streamUrlForSocketUrl(url)) {
@@ -102,7 +102,9 @@ describe("same-origin socket fallback", () => {
     const next = new Socket(url);
     expect(await outcome(next)).toBe("open");
     next.close();
-    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "GET")).toHaveLength(1);
+    expect(
+      fetchMock.mock.calls.filter(([input]) => String(input) === "http://app.test/jazz/apps/a1/ws"),
+    ).toHaveLength(1);
   });
 
   it("switches to the HTTP stream when upgrades never get through to a backend that upgrades", async () => {
@@ -110,7 +112,7 @@ describe("same-origin socket fallback", () => {
     const url = "ws://behind-proxy.test/jazz/apps/a1/ws";
     const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const target = String(input);
-      if (init?.method === "GET" && target === "http://behind-proxy.test/jazz/apps/a1/ws") {
+      if (init?.method === "POST" && target === "http://behind-proxy.test/jazz/apps/a1/ws") {
         return new Response("Upgrade to a WebSocket", { status: 426 });
       }
       if (init?.method === "POST" && target === streamUrlForSocketUrl(url)) {
@@ -157,6 +159,38 @@ describe("same-origin socket fallback", () => {
     warn.mockRestore();
   });
 
+  it("starts the count again when the backend is down or refuses the origin in between", async () => {
+    const url = "ws://between.test/jazz/apps/a1/ws";
+    const answers: Array<() => Response> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => answers.shift()!()),
+    );
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const Socket = sameOriginWebSocketConstructor(failingNative());
+    const fail = async (answer: () => Response) => {
+      answers.push(answer);
+      expect(await outcome(new Socket(url))).toBe("closed");
+    };
+    const upgrades = () => new Response("Upgrade to a WebSocket", { status: 426 });
+    // Two failures, then a restart (503), then two more: never three in a row.
+    await fail(upgrades);
+    await fail(upgrades);
+    await fail(() => new Response("Jazz is unavailable", { status: 503 }));
+    await fail(upgrades);
+    await fail(upgrades);
+    // An origin the backend refuses (a proxy that rewrites Host) is said as
+    // such, once, and isn't counted as upgrades not getting through.
+    await fail(() => new Response("origin not allowed", { status: 403 }));
+    await fail(() => new Response("origin not allowed", { status: 403 }));
+    await fail(upgrades);
+    await fail(upgrades);
+    expect(warn.mock.calls.flat()).toEqual([
+      expect.stringMatching(/refuses this page's origin \(403\)/),
+    ]);
+    warn.mockRestore();
+  });
+
   it("fails as a socket when the endpoint is not a createJazz backend", async () => {
     // A same-origin proxy to a sync server: no stream marker on the socket path.
     const fetchMock = vi.fn(
@@ -170,7 +204,10 @@ describe("same-origin socket fallback", () => {
     expect(await outcome(new Socket(url))).toBe("closed");
     // Not remembered: the next session tries a native socket again.
     expect(await outcome(new Socket(url))).toBe("closed");
-    expect(fetchMock.mock.calls.every(([, init]) => init?.method === "GET")).toBe(true);
+    // Only probes of the socket path: no stream was tried.
+    expect(
+      fetchMock.mock.calls.every(([input]) => String(input) === "http://proxy.test/apps/a1/ws"),
+    ).toBe(true);
   });
 
   it("fails as a socket when the backend can't be reached at all", async () => {

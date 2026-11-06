@@ -250,14 +250,25 @@ export const UPGRADE_FAILURES_BEFORE_STREAM = 3;
 /** Header on createJazz's 426 for a socket path (see `createJazz`). */
 const STREAM_AVAILABLE_HEADER = "x-jazz-stream";
 
-/** What a plain request for a socket path says about the endpoint. */
-async function probeSocketPath(url: string): Promise<"stream" | "upgrades" | "unknown"> {
+/** Endpoints already warned that the backend refuses this page's origin. */
+const refusedOrigins = new Set<string>();
+
+/**
+ * What a plain request for a socket path says about the endpoint. A POST,
+ * so the browser sends the page's Origin and the backend checks it as it
+ * checks the socket's: a refused origin fails the socket too, and is not a
+ * proxy's doing.
+ */
+async function probeSocketPath(
+  url: string,
+): Promise<"stream" | "upgrades" | "refused" | "unknown"> {
   try {
     const response = await fetch(url.replace(/^ws/, "http"), {
-      method: "GET",
+      method: "POST",
       credentials: "same-origin",
     });
     void response.body?.cancel().catch(() => undefined);
+    if (response.status === 403) return "refused";
     if (response.status !== 426) return "unknown";
     return response.headers.get(STREAM_AVAILABLE_HEADER) === "1" ? "stream" : "upgrades";
   } catch {
@@ -269,13 +280,24 @@ async function probeSocketPath(url: string): Promise<"stream" | "upgrades" | "un
 async function servesStreamInstead(url: string): Promise<boolean> {
   const answer = await probeSocketPath(url);
   if (answer === "stream") return true;
-  if (answer !== "upgrades") return false;
+  if (answer !== "upgrades") {
+    // Not a backend that answered and upgrades (down, restarting, or
+    // refusing this origin): the failures are no longer in a row.
+    failedUpgrades.delete(url);
+    if (answer === "refused" && !refusedOrigins.has(url)) {
+      refusedOrigins.add(url);
+      console.warn(
+        `jazz: the backend at ${url} refuses this page's origin (403). If a proxy rewrites the Host header, set the backend's publicUrl or allowedOrigins.`,
+      );
+    }
+    return false;
+  }
   const failures = (failedUpgrades.get(url) ?? 0) + 1;
   failedUpgrades.set(url, failures);
   if (failures < UPGRADE_FAILURES_BEFORE_STREAM) return false;
   failedUpgrades.delete(url);
   console.warn(
-    `jazz: ${failures} WebSockets in a row to ${url} failed, although the backend answers and upgrades them: something in between (a proxy or dev server) doesn't pass WebSocket upgrades on. Syncing over the HTTP stream instead.`,
+    `jazz: ${failures} WebSockets in a row to ${url} failed, although the backend answers and upgrades them: something in between (a proxy or dev server) doesn't pass WebSocket upgrades on. Syncing over the HTTP stream instead, for as long as this page is open.`,
   );
   return true;
 }
