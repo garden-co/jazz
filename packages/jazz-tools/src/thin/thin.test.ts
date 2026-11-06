@@ -221,6 +221,49 @@ describe("thin client", () => {
     );
   }, 60_000);
 
+  it("upgrades with the server down while a thin write waits for its answer", async () => {
+    const server = await startServer();
+    const secret = formatAuthSecret(new Uint8Array(32).fill(8));
+    const thin = await thinDb(server, secret);
+    await thin.all(app.notes);
+    const config = await localAccountConfig(server.appId, server.url, secret);
+    await server.stop();
+    // Never answered: the server is gone.
+    const unanswered = thin.insert(app.notes, { text: "on the thin client", done: false });
+    void unanswered.wait({ tier: "global" }).catch(() => {});
+
+    // The thin Db's last uploads don't hold the upgrade.
+    const local = await upgradeToLocalFirst(thin, () => createLocalFirstDb(config));
+    opened.push(local);
+    expect(() => thin.insert(app.notes, { text: "too late", done: false })).toThrow(
+      /shutting down or closed/,
+    );
+    const { value: written } = local.insert(app.notes, { text: "after", done: false });
+    expect((await local.all(app.notes, { tier: "local-first" })).map((row) => row.id)).toContain(
+      written.id,
+    );
+    // Still waiting for the server, as it would until the page closes.
+    thin.abortGracefulShutdown();
+  }, 60_000);
+
+  it("hands off the rows of confirmed inserts and updates, not of deletes", async () => {
+    const server = await startServer();
+    const db = await thinDb(server);
+    const kept = db.insert(app.notes, { text: "kept", done: false });
+    const gone = db.insert(app.notes, { text: "gone", done: false });
+    await Promise.all([kept.wait({ tier: "global" }), gone.wait({ tier: "global" })]);
+    const runtime = db.currentRuntime() as ThinRuntime;
+    const handedOff: string[] = [];
+    const confirmed = runtime.handOffWrittenRows(async (rows) => {
+      handedOff.push(...rows.map((row) => row.id));
+    });
+    expect(confirmed.map((row) => row.id).sort()).toEqual([kept.value.id, gone.value.id].sort());
+
+    await db.update(app.notes, kept.value.id, { done: true }).wait({ tier: "global" });
+    await db.delete(app.notes, gone.value.id).wait({ tier: "global" });
+    expect(handedOff).toEqual([kept.value.id]);
+  });
+
   it("upgrades to local-first with the app's live queries already loaded", async () => {
     const server = await startServer();
     const secret = formatAuthSecret(new Uint8Array(32).fill(5));

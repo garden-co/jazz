@@ -1370,12 +1370,15 @@ type WriteTarget = {
   updatedAtMs: number;
 };
 
-/** The main-branch row `op` writes, if any. */
+/**
+ * The main-branch row `op` writes, if any, to hand off. Not a delete: a read
+ * of a deleted row brings nothing back.
+ */
 function writtenRow(
   context: WriteTarget,
   op: Extract<ThinOp, { transaction?: string }>,
 ): WrittenRow | undefined {
-  if (context.branchView) return undefined;
+  if (context.branchView || op.type === "delete") return undefined;
   if (op.type === "insert") {
     const rowId = (op.options as { rowId?: Uint8Array }).rowId;
     return rowId ? { table: op.table, id: formatUuid(rowId) } : undefined;
