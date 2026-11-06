@@ -67,6 +67,18 @@ See [Declarative Permissions](/docs/schemas/policies) for more on `exists.where`
   ../examples/docs/todo-client-localfirst-react/src/group-permissions-snippets.tsx#group-remove-member
 </include>
 
+### What a removed member still sees
+
+- **Online** (thin client, or local-first while connected): the workspace's documents drop out of
+  their live queries right away.
+- **Offline local-first:** the rows already on their device stay readable, across reloads too,
+  until they reconnect. Within about a second of reconnecting they are removed from the device.
+  Writes they queued meanwhile are rejected and reverted.
+- `clearOnSignOut` doesn't help here: a removed member isn't signed out.
+
+Anything they read before removal they may have copied; removing access stops future reads, not
+past ones.
+
 ## Querying documents
 
 <include cwd lang="tsx" meta='title="WorkspaceDocuments.tsx"'>

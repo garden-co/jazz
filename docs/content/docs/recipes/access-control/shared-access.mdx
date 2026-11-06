@@ -41,6 +41,8 @@ To share a todo, insert a row into `todoShares`.
 ## Revoking access
 
 Delete the share row to revoke access. The server will stop syncing the todo to the former recipient.
+A recipient who is offline keeps their cached copy until they reconnect; see
+[What a removed member still sees](/docs/recipes/access-control/group-permissions#what-a-removed-member-still-sees).
 
 <include cwd lang="ts">
   ../examples/docs/todo-client-localfirst-react/src/shared-access-snippets.tsx#shared-revoke

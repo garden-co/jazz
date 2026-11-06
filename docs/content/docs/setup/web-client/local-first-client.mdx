@@ -59,7 +59,9 @@ page reloads.
 The `import()` stays in your code, so the Wasm engine (about 3 MB gzipped, 8.7 MB uncompressed)
 downloads only when the client upgrades. After the first render, local storage keeps filling for a
 few seconds. Writes made on the thin client before the upgrade are kept offline only when a query
-the client subscribes to covers them. To
+the client subscribes to covers them. The local-first chunk and Wasm load lazily, so when you deploy
+a new build, keep the previous builds' hashed assets available for a while: tabs still open on the
+old build fetch them when they upgrade. To
 upgrade only on demand, call `useDb().upgradeToLocalFirst(() => import("jazz-tools/local-first"))`
 instead; see [Upgrading to local-first](/docs/setup/web-client/thin-client#upgrading-to-local-first).
 

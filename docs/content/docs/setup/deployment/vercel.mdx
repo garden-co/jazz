@@ -25,7 +25,8 @@ Use the `vercel()` store:
 
 ```ts title="jazz.server.ts"
 import { createJazz, vercel } from "jazz-tools/backend";
-import { app, permissions } from "./schema";
+import { app } from "./schema";
+import permissions from "./permissions";
 
 export const jazz = createJazz({
   app,

@@ -87,6 +87,15 @@ Inside a TypeScript transaction:
 | `all(...)`                                  | A promise for all matching rows, including staged changes |
 | `one(...)`                                  | A promise for the first matching row, or `null`           |
 
+To point one new row at another in the same transaction, use the staged row's `id`:
+
+```ts
+const project = tx.insert(app.projects, { name: "Launch" });
+tx.insert(app.todos, { title: "Write the post", projectId: project.id });
+```
+
+`insert` assigns the id itself: an `id` in the values fails with "Unknown column id".
+
 Use the `tx` object for every read and write that belongs to the transaction. A query made through
 the outer `db` does not read the transaction's staged changes.
 

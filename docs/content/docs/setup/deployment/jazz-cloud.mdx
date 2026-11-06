@@ -31,7 +31,8 @@ Then point `createJazz` at Jazz Cloud with the `remote()` store:
 
 ```ts title="jazz.server.ts"
 import { createJazz, remote } from "jazz-tools/backend";
-import { app, permissions } from "./schema";
+import { app } from "./schema";
+import permissions from "./permissions";
 
 export const jazz = createJazz({
   app,

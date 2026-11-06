@@ -41,6 +41,9 @@ In practice, this lets you:
    ```
 
    This creates an initial snapshot of your schema in `migrations/snapshots/`. No migration file is created yet because there is no previous schema to diff against.
+   Run it before you add `import { migrations } from "./migrations"` to `schema.ts` (see
+   [Shipping migrations with your app](#shipping-migrations-with-your-app)): with the import in
+   place and no snapshot yet, it fails with "defineApp needs the app's migrations".
 
 2. **Edit `schema.ts`**&hairsp;—&hairsp;change the data shape as needed.
 3. **Validate locally**&hairsp;—&hairsp;optionally run `pnpm dlx jazz-tools@alpha validate` to surface
@@ -59,8 +62,12 @@ In practice, this lets you:
 6. **Deploy your main backend**&hairsp;—&hairsp;restart it locally, or deploy it as usual. When it
    starts, `createJazz` sends the schema, permissions and migrations your code imports to its store
    as one bundle. There is no separate deploy or push command. If the bundle has no migration path
-   from the schema already in the store, the backend refuses to start with an error naming the
-   missing migration. First deployments and permission-only changes need no migration.
+   from the schema already in the store, `jazz.ready()` (and so the backend's first request)
+   rejects with an error naming the missing migration, which usually crashes the process at
+   startup. First deployments and permission-only changes need no migration.
+
+   With several instances, roll out to one first and check it starts before replacing the rest,
+   and keep the previous version ready to roll back to.
 
    Each deployment's sessions run under that deployment's own bundle, so two deployments can run
    side by side, and rolling back your backend rolls back its permissions too.
@@ -163,7 +170,7 @@ export default m.defineMigration({
 - `m.add.<type>({ default })` adds a column (`string`, `int`, `bigint`, `boolean`, `timestamp` and
   the other column types). The default fills it for rows written under the older schema.
 - `m.drop.<type>({ backwardsDefault })` drops a column; older clients read `backwardsDefault`.
-- `m.renameFrom("oldName")` renames a column of the same type.
+- `m.renameFrom("oldName")` renames a column of the same type. Values carry over.
 - `renameTables`, `createTables` and `dropTables` cover tables that exist on only one side.
 
 After editing a stub, run `jazz-tools validate` (and your type checker): it rejects a migration that
@@ -174,6 +181,8 @@ doesn't cover every change, while a stub with a `TODO` left in it can still pass
 - **Changing a column's type, or the variants of an enum.** The CLI refuses them. Adding a column
   under a new name and dropping the old one works, but it does not carry values over: every row
   gets the new column's default, with no warning. There is no value-mapping step yet.
+- **Making an optional column required.** There's no step for it yet, and adding a required column
+  while dropping the optional one resets every row to the default, as above.
 - **Changing indexes** (`indexOnly`, `compositeIndex`). `migrations create` writes no migration for
   them, and the backend then refuses to start with "migration history has disconnected roots".
 
