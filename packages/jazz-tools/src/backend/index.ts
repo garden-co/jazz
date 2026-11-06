@@ -5,6 +5,7 @@ export {
   type BackendSchemaSource,
 } from "./create-jazz-context.js";
 export { isRequestAuthenticationError, RequestAuthenticationError } from "./request-auth.js";
+export { isNoJazzAccountError, NoJazzAccountError } from "./no-account-error.js";
 export type { WasmSchema } from "../drivers/types.js";
 export type { PublicSession } from "../runtime/context.js";
 export { Db, type QueryBuilder, type QueryOptions, type TableProxy } from "../runtime/db.js";

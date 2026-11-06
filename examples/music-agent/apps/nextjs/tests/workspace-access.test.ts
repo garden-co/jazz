@@ -76,11 +76,8 @@ async function signIn(email: string, name: string) {
   const { backendJazzClient } = await import("../src/lib/backend-jazz-client");
   const jazz = await backendJazzClient();
   const session = await auth.api.getSession({ headers: new Headers({ cookie }) });
-  const account = await jazz.accountFor(
-    new Request(`${origin}/api/bootstrap`, { headers: { cookie } }),
-  );
-  if (!account) throw new Error(`the app's Jazz resolves no account for ${email}`);
-
+  // The browser's sign-in gives the user their Jazz account; the app's Jazz
+  // then resolves the same account for their session.
   const { createJazzClient } = await import("jazz-tools/backend");
   const browser = await createJazzClient({
     appId: server.appId,
@@ -93,6 +90,10 @@ async function signIn(email: string, name: string) {
   await browser.loginWithBackend();
   const { client, status, error } = browser.getSnapshot();
   if (status !== "ready") throw error ?? new Error(status);
+  const account = await jazz.accountFor(
+    new Request(`${origin}/api/bootstrap`, { headers: { cookie } }),
+  );
+  if (!account) throw new Error(`the app's Jazz resolves no account for ${email}`);
   expect(client!.session!.user!.account).toBe(account);
   return { db: client!.db, accountId: account, userId: session!.user.id };
 }

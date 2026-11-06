@@ -138,7 +138,8 @@ describe("createJazz, opened on first use", () => {
       authenticate: as("alice"),
     });
     cleanups.push(() => first.close());
-    const alice = await first.accountFor(request);
+    const alice = await first.createAccountFor("alice");
+    await expect(first.accountFor(request)).resolves.toBe(alice);
     const appId = first.appId;
 
     // A hot reload evaluates the module again: the same store, new options.
@@ -151,7 +152,8 @@ describe("createJazz, opened on first use", () => {
     });
     expect(reloaded).toBe(first);
     expect(reloaded.basePath).toBe("/api/jazz");
-    const bob = await reloaded.accountFor(request);
+    const bob = await reloaded.createAccountFor("bob");
+    await expect(reloaded.accountFor(request)).resolves.toBe(bob);
     expect(bob).not.toBe(alice);
     expect(reloaded.appId).toBe(appId);
     // The backend's own db moved to the new session and still works.
@@ -221,7 +223,7 @@ describe("createJazz, opened on first use", () => {
     const [ready, rows, account, other] = await Promise.all([
       jazz.ready(),
       jazz.db.all(app.todos.where({ owner })),
-      jazz.accountFor(request),
+      jazz.createAccountFor("a"),
       createJazz({ app, permissions, store: sqlite({ path }), authenticate: as("a") }).ready(),
     ]);
     expect(other).toBe(ready);
@@ -252,8 +254,8 @@ describe("createJazz, opened on first use", () => {
     });
     cleanups.push(() => jazz.close());
     const owner = randomUUID();
+    const user = await jazz.createAccountFor("a");
     const userDb = await jazz.forReqUser(request);
-    const user = (await jazz.accountFor(request))!;
     const inFlight = jazz.db.insert(app.todos, { title: "in flight", owner });
 
     // A hot reload rebuilds equal permissions: the same bundle, the same session.

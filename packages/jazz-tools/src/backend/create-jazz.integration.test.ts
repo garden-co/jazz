@@ -214,9 +214,21 @@ describe("createJazz", () => {
     // The backend's own db sees the row; a request scope sees only its user's rows.
     const seen = await jazz.db.all(app.todos.where({ id: row.id }));
     expect(seen.map((todo) => todo.title)).toEqual(["from alice"]);
-    const asBob = await jazz.forReqUser(
-      new Request("http://app/x", { headers: { "x-test-user": "bob" } }),
-    );
+    // Bob never signed in: looking him up or acting as him makes no account.
+    const bobRequest = () => new Request("http://app/x", { headers: { "x-test-user": "bob" } });
+    await expect(jazz.accountFor(bobRequest())).resolves.toBeNull();
+    await expect(jazz.forReqUser(bobRequest())).rejects.toMatchObject({
+      name: "NoJazzAccountError",
+      code: "no_account",
+      userId: "bob",
+    });
+    await expect(jazz.withAttribution(bobRequest())).rejects.toMatchObject({ code: "no_account" });
+    await expect(jazz.accountFor(bobRequest())).resolves.toBeNull();
+    // The backend creates his account on purpose, and then acts as him.
+    const bobAccount = await jazz.createAccountFor("bob");
+    await expect(jazz.createAccountFor("bob")).resolves.toBe(bobAccount);
+    await expect(jazz.accountFor(bobRequest())).resolves.toBe(bobAccount);
+    const asBob = await jazz.forReqUser(bobRequest());
     expect(await asBob.all(app.todos)).toEqual([]);
     // API routes can name the request's account without a client credential.
     await expect(
@@ -265,11 +277,13 @@ describe("createJazz", () => {
             .sign(privateKey)}`,
         },
       });
-    const account = await jazz.accountFor(await bearer("user_01"));
+    // The token names the user; they have no account until one is made.
+    await expect(jazz.accountFor(await bearer("user_01"))).resolves.toBeNull();
+    const account = await jazz.createAccountFor("user_01");
     expect(account).toEqual(expect.any(String));
     // A fresh token for the same user opens the same account.
     await expect(jazz.accountFor(await bearer("user_01"))).resolves.toBe(account);
-    await expect(jazz.accountFor(await bearer("user_02"))).resolves.not.toBe(account);
+    await expect(jazz.accountFor(await bearer("user_02"))).resolves.toBeNull();
     await expect(jazz.accountFor(new Request("http://app/x"))).resolves.toBeNull();
   }, 60_000);
 
@@ -867,6 +881,13 @@ describe("createJazz", () => {
       expect(answer.account).toBeNull();
       expect(answer.identity).toEqual({ issuer: "jazz:backend", subject: "alice" });
     }
+    // Nor do the backend's own lookups and requests for her (V9): an API
+    // route that asks for her account, or acts as her, before her browser's
+    // guest links leaves the link open.
+    const asAlice = () => new Request("http://app/x", { headers: { "x-test-user": "alice" } });
+    await expect(jazz.accountFor(asAlice())).resolves.toBeNull();
+    await expect(jazz.forReqUser(asAlice())).rejects.toMatchObject({ code: "no_account" });
+    await expect(jazz.withAttribution(asAlice())).rejects.toMatchObject({ code: "no_account" });
     // So the guest's link to alice still goes through, and the answer names
     // the guest's account from then on.
     const secret = generateSecret();
@@ -881,6 +902,8 @@ describe("createJazz", () => {
     const { account } = (await linked.json()) as { account: string };
     const after = (await (await post("backend-user", "alice")).json()) as { account: string };
     expect(after.account).toBe(account);
+    await expect(jazz.accountFor(asAlice())).resolves.toBe(account);
+    await expect(jazz.forReqUser(asAlice())).resolves.toBeDefined();
     // A user who signed in has an account; a GET is refused.
     await post("backend-sign-in", "bob");
     expect(
@@ -1455,9 +1478,11 @@ describe("createJazz", () => {
     expect((await asAlice.all(app.todos)).map((todo) => todo.title)).toEqual([
       "through the backend",
     ]);
-    const asBob = await other.forReqUser(
-      new Request("http://app/x", { headers: { "x-test-user": "bob" } }),
-    );
+    // An account one instance creates is the account every instance finds.
+    const bobAccount = await jazz.createAccountFor("bob");
+    const bobRequest = new Request("http://app/x", { headers: { "x-test-user": "bob" } });
+    await expect(other.accountFor(bobRequest)).resolves.toBe(bobAccount);
+    const asBob = await other.forReqUser(bobRequest);
     expect(await asBob.all(app.todos)).toEqual([]);
 
     // A guest whose client names no app: the backend vouches for the

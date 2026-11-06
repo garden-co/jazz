@@ -50,6 +50,8 @@ describe("JazzBackend Effect layer", () => {
     try {
       const backendLayer = JazzBackend.layerJazz(server.jazz);
       const clientLayer = Jazz.layer(await localAccountConfig(server.appId, server.url));
+      // The reader is a user the backend serves without a client of their own.
+      await server.jazz.createAccountFor("effect-reader");
       const headers = { authorization: `Bearer ${server.bearer("effect-reader")}` };
       const request = () => new Request("http://localhost/posts", { headers });
 
@@ -108,6 +110,7 @@ describe("JazzBackend Effect layer", () => {
     try {
       const backendLayer = JazzBackend.layerJazz(server.jazz);
       const users = ["diarist-a", "diarist-b"];
+      for (const user of users) await server.jazz.createAccountFor(user);
       const requests = users.map(
         (user) =>
           new Request("http://localhost/diary", {
