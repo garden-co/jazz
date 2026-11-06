@@ -28,6 +28,12 @@ export declare class JazzCore {
    * each message for the client and, last, the close.
    */
   openSocket(headers: Array<Array<string>>, onEvent: (err: Error | null, event: JazzCoreSocketEvent) => void): JazzCoreSocket
+  /**
+   * Start a sync session for a client in this process. Unlike
+   * `openSocket` it has no handshake deadline: the client's Hello waits on
+   * this event loop, which synchronous work can hold for seconds.
+   */
+  openInProcessSocket(onEvent: (err: Error | null, event: JazzCoreSocketEvent) => void): JazzCoreSocket
   /** Close every session and the storage. */
   close(): Promise<void>
 }
