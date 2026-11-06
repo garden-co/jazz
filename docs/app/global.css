@@ -222,6 +222,15 @@ h6 {
 .home-diagram {
   font-family: var(--font-family-code);
 }
+/* Only the text takes the pointer, so a label under a wire or inside a box
+   can always be selected (and a preview comment attached to it). */
+.home-diagram :is(rect, path, line, circle, polyline, polygon) {
+  pointer-events: none;
+}
+.home-diagram text {
+  pointer-events: auto;
+  user-select: text;
+}
 .home-diagram .dg-stroke-ink {
   stroke: var(--color-text-primary);
 }
