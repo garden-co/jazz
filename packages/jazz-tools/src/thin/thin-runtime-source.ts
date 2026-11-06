@@ -16,6 +16,8 @@ import {
 } from "../runtime/runtime-source.js";
 import { ANONYMOUS_ISSUER, LOCAL_FIRST_ISSUER, mintSelfSignedToken } from "./self-signed-token.js";
 import { ThinRuntime, type ThinRuntimeOptions } from "./thin-runtime.js";
+import { accountConfigBearer } from "../accounts/config-capability.js";
+import { bearerWebSocket } from "../runtime/credentialed-transport.js";
 
 /**
  * Runtime source for thin clients: no WASM to load, no worker, no local
@@ -60,8 +62,18 @@ export class ThinRuntimeSource extends RuntimeSource<DbConfig> {
     const author = session
       ? canonicalAuthorSubject(session.issuer, session.user_id, session.account_id)
       : undefined;
+    // A user the app's backend signed in with its bearer (a host without
+    // cookies): the sync socket carries it, as a browser's carries the cookie.
+    const bearer =
+      config.cookieSession && config.accountId ? accountConfigBearer(config) : undefined;
+    const webSocket =
+      this.options.WebSocket ?? (bearer ? bearerWebSocket(config.serverUrl!, bearer) : undefined);
     return JazzClient.connectWithRuntime(
-      new ThinRuntime(schema, { ...this.options, ...(author ? { author } : {}) }),
+      new ThinRuntime(schema, {
+        ...this.options,
+        ...(webSocket ? { WebSocket: webSocket } : {}),
+        ...(author ? { author } : {}),
+      }),
       context,
       runtimeOptions,
     );
