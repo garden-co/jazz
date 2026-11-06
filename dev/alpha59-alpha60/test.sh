@@ -47,6 +47,12 @@ wait "$holder" || true
 grep -q '"unsupported_by_sqlite":\[\]' "$work/census.json"
 
 (cd "$root" && CARGO_TARGET_DIR="$t60" cargo test --release -p jazz-cli --lib alpha59_alpha60)
+# The import refuses another spelling of the app id than alpha.59 served.
+if "${import[@]}" import --dump "$work/dump" --data-dir "$work/wrong-app" --app-id "${app^^}" 2>"$work/wrong-app.err"; then
+  echo "the import took another app id" >&2
+  exit 1
+fi
+grep -q "is not this dump's app" "$work/wrong-app.err"
 "${import[@]}" import --dump "$work/dump" --data-dir "$work/a60" --app-id "$app" |
   tee "$work/import.json"
 # user-1, user-2 and user-9 link as createJazz users; revoked user-3 does not.
@@ -66,7 +72,22 @@ grep -q '"deleted_rows_dropping_content_written_while_deleted":1' "$work/import.
 # No version was refused: the v1 project keeps `paused`, which v2 dropped.
 grep -q '"versions_skipped_rejected":0' "$work/import.json"
 grep -q '"versions_keeping_a_removed_enum_variant":1' "$work/import.json"
+# The active bundle's alpha.59 session.user.account and
+# session.user.identity.subject come over under their new names.
+grep -q '"permission_session_paths_renamed":3' "$work/import.json"
 "${import[@]}" verify --dump "$work/dump" --data-dir "$work/a60" --app-id "$app"
+# A backend holding the dir's lock makes verify refuse.
+python3 -c 'import fcntl, sys, time; f = open(sys.argv[1], "a+"); fcntl.flock(f, fcntl.LOCK_EX); print("locked", flush=True); time.sleep(60)' \
+  "$work/a60/jazz.lock" >"$work/a60-lock.out" &
+holder=$!
+for _ in $(seq 1 50); do grep -q locked "$work/a60-lock.out" && break; sleep 0.1; done
+if "${import[@]}" verify --dump "$work/dump" --data-dir "$work/a60" --app-id "$app" >/dev/null 2>"$work/held.err"; then
+  echo "verify ran against a held lock" >&2
+  exit 1
+fi
+grep -q "stop the backend before verifying" "$work/held.err"
+kill "$holder"
+wait "$holder" || true
 # verify checks the id the import kept.
 if "${import[@]}" verify --dump "$work/dump" --data-dir "$work/a60" --app-id "${app^^}" 2>"$work/wrong-id.err"; then
   echo "verify passed with another app id" >&2
