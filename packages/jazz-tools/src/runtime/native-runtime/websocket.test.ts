@@ -5,7 +5,9 @@ import type { BrowserWebSocket } from "./websocket.js";
 import { PostcardReader, PostcardWriter } from "./native-codec.js";
 import {
   CLIENT_WIRE_FEATURES,
+  FEATURE_HEARTBEAT,
   FEATURE_PAYLOAD_ZSTD,
+  HEARTBEAT_SILENCE_MS,
   MAX_WIRE_PROTOCOL_VERSION,
   MIN_WIRE_PROTOCOL_VERSION,
   WIRE_PROTOCOL_VERSION,
@@ -18,6 +20,7 @@ import {
   encodeWebSocketFrameBatch,
   isWireHello,
   isWireError,
+  isSocketDropWireError,
   peerIdentityForWebSocketAuth,
   policyClaimsForAdmittedWebSocket,
 } from "./websocket.js";
@@ -963,6 +966,152 @@ describe("websocket frame carrier", () => {
     const unknownRetry = encodeWireError(6, 4, "future retry");
     expect(() => isWireError(unknownRetry)).toThrow("unknown WireRetry discriminant 4");
     expect(() => decodeWireError(unknownRetry)).toThrow("unknown WireRetry discriminant 4");
+  });
+
+  describe("heartbeat", () => {
+    function heartbeatCarrier() {
+      // Records what the carrier sends; the test plays the server.
+      class SilentServerSocket extends MessageWebSocket {
+        sent: Uint8Array[] = [];
+        override send(data: Uint8Array | string): void {
+          if (data instanceof Uint8Array) this.sent.push(data);
+        }
+      }
+      let socket: SilentServerSocket | undefined;
+      const frames: Uint8Array[] = [];
+      const terminals: unknown[] = [];
+      const carrier = new WebSocketCarrier({
+        endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
+        peerIdentity: new Uint8Array(16),
+        onFrame: (frame) => frames.push(frame),
+        onTerminal: (error) => terminals.push(error),
+        WebSocket: class extends SilentServerSocket {
+          constructor(url: string) {
+            super(url, (created) => {
+              socket = created as SilentServerSocket;
+            });
+          }
+        },
+      });
+      return { carrier, socket: socket!, frames, terminals };
+    }
+    const heartbeat = encodeWebSocketFrameBatch([Uint8Array.of(7)]);
+
+    it("asks every server for a heartbeat, and keeps it from the runtime above", async () => {
+      vi.useFakeTimers();
+      try {
+        const { carrier, socket, frames, terminals } = heartbeatCarrier();
+        await vi.advanceTimersByTimeAsync(0);
+        const hello = decodeWebSocketFrameBatch(socket.sent.at(-1)!)[0]!;
+        const reader = new PostcardReader(hello);
+        reader.u64();
+        reader.u64();
+        reader.u64();
+        expect(reader.u64()).toBe(CLIENT_WIRE_FEATURES | FEATURE_HEARTBEAT);
+
+        socket.emitMessage(
+          encodeWebSocketFrameBatch([
+            encodeServerHello(1n, WIRE_PROTOCOL_VERSION, {
+              features: CLIENT_WIRE_FEATURES | FEATURE_HEARTBEAT,
+            }),
+          ]),
+        );
+        // The runtime above never hears of the feature or its frames.
+        await expect(carrier.ready()).resolves.toMatchObject({ features: CLIENT_WIRE_FEATURES });
+        for (let beat = 0; beat < 10; beat += 1) {
+          await vi.advanceTimersByTimeAsync(20_000);
+          socket.emitMessage(heartbeat);
+        }
+        await vi.advanceTimersByTimeAsync(0);
+        expect(frames).toEqual([]);
+        expect(terminals).toEqual([]);
+        expect(socket.closed).toBe(false);
+        carrier.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("gives a heartbeat link up once the server goes silent", async () => {
+      vi.useFakeTimers();
+      try {
+        const { socket, terminals } = heartbeatCarrier();
+        await vi.advanceTimersByTimeAsync(0);
+        socket.emitMessage(
+          encodeWebSocketFrameBatch([
+            encodeServerHello(1n, WIRE_PROTOCOL_VERSION, {
+              features: CLIENT_WIRE_FEATURES | FEATURE_HEARTBEAT,
+            }),
+          ]),
+        );
+        await vi.advanceTimersByTimeAsync(20_000);
+        socket.emitMessage(heartbeat);
+        // Then nothing at all, as from a half-open TCP link. Past the limit
+        // the silence is confirmed a moment later.
+        await vi.advanceTimersByTimeAsync(HEARTBEAT_SILENCE_MS);
+        expect(terminals).toEqual([]);
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(terminals).toEqual([
+          expect.objectContaining({ code: "websocket_silent", retry: "later" }),
+        ]);
+        expect(socket.closed).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("keeps a link whose held-back messages arrive once the silence is noticed", async () => {
+      vi.useFakeTimers();
+      try {
+        const { carrier, socket, terminals } = heartbeatCarrier();
+        await vi.advanceTimersByTimeAsync(0);
+        socket.emitMessage(
+          encodeWebSocketFrameBatch([
+            encodeServerHello(1n, WIRE_PROTOCOL_VERSION, {
+              features: CLIENT_WIRE_FEATURES | FEATURE_HEARTBEAT,
+            }),
+          ]),
+        );
+        // A frozen page: its timer fires first, then the heartbeats queued
+        // meanwhile are delivered.
+        await vi.advanceTimersByTimeAsync(HEARTBEAT_SILENCE_MS);
+        socket.emitMessage(heartbeat);
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(terminals).toEqual([]);
+        expect(socket.closed).toBe(false);
+        carrier.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("classes a silent link as a network drop, which clients retry", () => {
+      expect(isSocketDropWireError({ code: "websocket_silent", retry: "later", message: "" })).toBe(
+        true,
+      );
+      expect(isSocketDropWireError({ code: "websocket_closed", retry: "later", message: "" })).toBe(
+        true,
+      );
+      expect(isSocketDropWireError({ code: "protocol_error", retry: "never", message: "" })).toBe(
+        false,
+      );
+    });
+
+    it("never times out a server that sends no heartbeat", async () => {
+      vi.useFakeTimers();
+      try {
+        const { carrier, socket, terminals } = heartbeatCarrier();
+        await vi.advanceTimersByTimeAsync(0);
+        socket.emitMessage(encodeWebSocketFrameBatch([encodeServerHello(1n)]));
+        await carrier.ready();
+        await vi.advanceTimersByTimeAsync(10 * HEARTBEAT_SILENCE_MS);
+        expect(terminals).toEqual([]);
+        expect(socket.closed).toBe(false);
+        carrier.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   it("surfaces structured wire error frames without forwarding them as payload frames", async () => {
