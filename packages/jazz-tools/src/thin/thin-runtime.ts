@@ -189,6 +189,7 @@ type Write = {
 
 /** A row a thin write touched. */
 export type WrittenRow = { table: string; id: string };
+
 /**
  * How long the connection may keep failing before the link reports an
  * outage, as the core link does: a short blip never shows as offline.
@@ -1090,13 +1091,10 @@ export class ThinRuntime implements Runtime {
    * once the server confirms it, before that write's waits resolve. `read`
    * must give up on its own (offline, a timeout); a failure is ignored.
    * Returns the rows of the writes the server already confirmed, for the
-   * caller to read. `undefined` stops the hand-off (a failed upgrade).
+   * caller to read.
    */
-  handOffWrittenRows(
-    read: ((rows: readonly WrittenRow[]) => Promise<void>) | undefined,
-  ): readonly WrittenRow[] {
+  handOffWrittenRows(read: (rows: readonly WrittenRow[]) => Promise<void>): readonly WrittenRow[] {
     this.writtenRowsReader = read;
-    if (!read) return [];
     return [...this.writes.values()]
       .filter((write) => write.confirmed)
       .flatMap((write) => write.rows);
@@ -1126,6 +1124,11 @@ export class ThinRuntime implements Runtime {
     if (this.stopped) return;
     this.stopped = true;
     this.notifySyncStatus();
+  }
+
+  /** @internal Stop handing rows to `read` (its upgrade failed), unless another reader took over. */
+  stopHandingOffWrittenRows(read: (rows: readonly WrittenRow[]) => Promise<void>): void {
+    if (this.writtenRowsReader === read) this.writtenRowsReader = undefined;
   }
 
   /** How many writes still wait for the server's answer. */

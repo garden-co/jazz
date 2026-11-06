@@ -163,7 +163,7 @@ export async function handOffThinWrites(thin: Db, next: Db): Promise<void> {
     );
   const committed = runtime.handOffWrittenRows(read);
   // A failed or superseded upgrade shuts `next` down: nothing to hand to.
-  next.onShutdown(() => runtime.handOffWrittenRows(undefined));
+  next.onShutdown(() => runtime.stopHandingOffWrittenRows(read));
   if (committed.length > 0) await read(committed);
 }
 
