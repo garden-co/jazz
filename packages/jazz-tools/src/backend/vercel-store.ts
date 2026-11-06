@@ -8,7 +8,7 @@
 // Wake handling is adapted from garden-co/infra's v2 sync proxy (ADR 0004).
 
 import { createHash, randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import type { JazzCoreSocketEvent } from "jazz-napi";
 import {
   connectedBlobStore,
@@ -36,7 +36,8 @@ export interface VercelStoreOptions {
   /**
    * Sandbox name. Defaults to `jazz-<VERCEL_PROJECT_ID>-production` for
    * production and `jazz-<VERCEL_PROJECT_ID>-preview-<branch>-<hash>` for
-   * each Git branch's previews.
+   * each Git branch's previews. Required for a preview deployment without
+   * a Git branch (from the CLI outside a Git checkout, or through the API).
    */
   name?: string;
   /**
@@ -71,7 +72,9 @@ export interface VercelStoreOptions {
   /**
    * Where the core comes from: an npm tarball of
    * `@garden-co/jazz-napi-linux-x64-gnu`, the Node addon the Sandbox runs
-   * it with. Defaults to the registry's tarball of the installed version.
+   * it with. Defaults to the registry's tarball of the installed version;
+   * set it for a version that isn't on npm. A download that fails is
+   * reported by the function, and the Sandbox is stopped.
    */
   coreTarballUrl?: string;
   /** Vercel credentials for scripts outside a Vercel function. Defaults to the function's OIDC token. */
@@ -160,6 +163,13 @@ const NOT_LISTENING_RECYCLE_MS = 12_000;
 // How long a wake is trusted before the next request checks again.
 const ENSURE_FRESH_MS = 10_000;
 const KEEPALIVE_MS = 30_000;
+
+// After a start that can't succeed, requests fail fast for this long
+// instead of each waking the Sandbox into the same failure.
+const START_FAILURE_HOLD_MS = 30_000;
+
+/** A core start that gave up (the start script said why); retrying won't help. */
+class CoreStartError extends Error {}
 
 const isWakeConflict = (error: unknown) => /\b409\b|already attached|conflict/i.test(String(error));
 
@@ -255,6 +265,15 @@ run=${q(`${root}/tmp`)}
 # Starts are serialized; the server itself runs without the lock.
 exec 9>"$run/jazz.lock"
 flock 9
+# A start that can't succeed says why in $run/jazz.error, which the
+# function reads and reports instead of waiting for a server that won't come.
+rm -f "$run/jazz.error"
+fail() {
+  echo "jazz: $1" >&2
+  printf '%s\n' "$1" > "$run/jazz.error"
+  exit 1
+}
+trap 'fail "the start script failed at line $LINENO"' ERR
 # Semver order: GNU sort -V with "~" sorts a prerelease before its release.
 newer() {
   [ "$1" != "$2" ] && [ "$(printf '%s\\n%s\\n' "\${1/-/\\~}" "\${2/-/\\~}" | sort -V | tail -1)" = "\${1/-/\\~}" ]
@@ -265,16 +284,14 @@ trust=${q(trustLine)}
 # workload never retargets it.
 pinned=$(cat "$data/trust" 2>/dev/null || true)
 if [ -n "$pinned" ] && [ "$pinned" != "$trust" ]; then
-  echo "jazz: this core trusts $pinned; not retargeting it to $trust (to re-pin after a rename, delete $data/trust)" >&2
-  exit 1
+  fail "this core trusts $pinned; not retargeting it to $trust (to re-pin after a rename, delete $data/trust)"
 fi
 [ -n "$pinned" ] || { printf '%s\\n' "$trust" > "$data/trust.tmp" && mv "$data/trust.tmp" "$data/trust"; }
 highest=$(cat "$data/version" 2>/dev/null || true)
 if [ -n "$highest" ] && newer "$highest" "$version"; then
   # A newer deployment owns this Drive: run its core, never ours.
   if [ ! -s "$data/bin/jazz-napi-$highest.node" ]; then
-    echo "jazz: $highest owns this Drive but its core is missing; not starting $version" >&2
-    exit 1
+    fail "$highest owns this Drive but its core is missing; not starting $version"
   fi
   version=$highest
 fi
@@ -283,9 +300,13 @@ addon=$data/bin/jazz-napi-$version.node
 if [ ! -s "$addon" ]; then
   mkdir -p "$data/bin"
   # The Sandbox image has node but no curl.
-  node -e 'fetch(process.argv[1]).then(async (r) => { if (!r.ok) throw new Error(r.status); process.stdout.write(Buffer.from(await r.arrayBuffer())); })' ${q(tarballUrl)} \\
-    | tar xz -O ${CORE_ADDON} > "$addon.tmp"
-  [ -s "$addon.tmp" ] || { echo "jazz: the core download for $version was empty" >&2; exit 1; }
+  url=${q(tarballUrl)}
+  if ! node -e 'fetch(process.argv[1]).then(async (r) => { if (!r.ok) throw new Error("HTTP " + r.status); process.stdout.write(Buffer.from(await r.arrayBuffer())); }).catch((e) => { console.error(e.message); process.exit(1); })' "$url" 2>"$run/download.err" \\
+    | tar xz -O ${CORE_ADDON} 2>>"$run/download.err" > "$addon.tmp"; then
+    rm -f "$addon.tmp"
+    fail "could not download the core for $version from $url ($(head -c 300 "$run/download.err" | tr '\n' ' ')); set vercel({ coreTarballUrl }) if this version isn't on npm"
+  fi
+  [ -s "$addon.tmp" ] || fail "the core download for $version from $url was empty"
   mv "$addon.tmp" "$addon"
 fi
 # The pid file may be stale (a resumed snapshot): trust it only if that
@@ -502,8 +523,16 @@ export function defaultCoreName(project: string, env: Record<string, string | un
   // Project ids are mixed case with an underscore; names stay [a-z0-9-].
   const safe = (part: string) => part.toLowerCase().replace(/[^a-z0-9]+/g, "-");
   if (target !== "preview") return `jazz-${safe(project)}-${safe(target)}`;
-  // CLI deploys have no branch; they share one preview core.
-  const branch = env.VERCEL_GIT_COMMIT_REF ?? "cli";
+  // Deploys from the CLI outside a Git checkout, or through the API, have an
+  // empty branch. They'd all share one core, so ask for a name instead.
+  const branch = env.VERCEL_GIT_COMMIT_REF;
+  if (!branch) {
+    throw new Error(
+      "vercel(): this preview deployment has no Git branch (VERCEL_GIT_COMMIT_REF is empty, " +
+        "as for deploys from the CLI outside a Git checkout or through the API); " +
+        "pass vercel({ name }) to choose its core",
+    );
+  }
   const slug = branch
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
@@ -513,11 +542,14 @@ export function defaultCoreName(project: string, env: Record<string, string | un
   return `jazz-${safe(project)}-preview-${slug}-${hash}`;
 }
 
-async function installedVersion(): Promise<string> {
-  const packageJson = JSON.parse(
-    await readFile(new URL("../../package.json", import.meta.url), "utf8"),
-  ) as { version: string };
-  return packageJson.version;
+/**
+ * The installed jazz-tools version. Read through `require` of the package's
+ * own export, not `readFile(new URL(…, import.meta.url))`: webpack (Next 15)
+ * rewrites `new URL(…, import.meta.url)` into an asset URL that `fs` refuses,
+ * while it bundles a required JSON file as is.
+ */
+function installedVersion(): string {
+  return (createRequire(import.meta.url)("jazz-tools/package.json") as { version: string }).version;
 }
 
 export interface OpenVercelCoreOptions {
@@ -538,7 +570,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
     ((await import(/* @vite-ignore */ "@vercel/sandbox" as string).catch(() => {
       throw new Error("vercel() needs the @vercel/sandbox package: npm install @vercel/sandbox");
     })) as SandboxSdk);
-  const version = params.version ?? (await installedVersion());
+  const version = params.version ?? installedVersion();
   const tarballUrl =
     options.coreTarballUrl ??
     `https://registry.npmjs.org/@garden-co/jazz-napi-linux-x64-gnu/-/jazz-napi-linux-x64-gnu-${version}.tgz`;
@@ -577,6 +609,23 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
       args: ["-lc", `exec bash ${path} >>/data/server.log 2>&1`],
       detached: true,
     });
+  };
+
+  /**
+   * Why the last start in `sbx` gave up, if it did (see `fail` in the start
+   * script). Such a start never comes up on its own, so the wake stops the
+   * Sandbox rather than keep it awake retrying.
+   */
+  const startError = async (sbx: SandboxHandle) =>
+    (await sbx.readFileToBuffer({ path: "/tmp/jazz.error" }).catch(() => null))
+      ?.toString("utf8")
+      .trim() || undefined;
+
+  const giveUp = async (sbx: SandboxHandle, why: string): Promise<never> => {
+    await sbx.stop().catch(() => {});
+    throw new CoreStartError(
+      `vercel(): core ${name} could not start: ${why} (log: /data/server.log)`,
+    );
   };
 
   /** The server version running in `sbx`, if any. */
@@ -674,6 +723,8 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
       const healthT0 = performance.now();
       while (!ok && sbx && performance.now() < deadline) {
         ok = await healthy(base, 5_000, healthFails);
+        const why = ok ? undefined : await startError(sbx);
+        if (why) await giveUp(sbx, why);
         const notListening = Object.keys(healthFails).some((k) =>
           k.includes("SANDBOX_NOT_LISTENING"),
         );
@@ -717,6 +768,10 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
           if (now && !newerVersion(version, now) && (await healthy(base, 1_000, healthFails))) {
             return { sbx, base };
           }
+          // The older core stays up for the deployments still using it.
+          const why = await startError(sbx);
+          if (why)
+            throw new CoreStartError(`vercel(): core ${name} could not start ${version}: ${why}`);
           await sleep(250);
         }
       }
@@ -734,10 +789,13 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   let pending: Promise<NonNullable<typeof live>> | undefined;
   let lastActivity = Date.now();
   let sockets = 0;
+  let failed: { at: number; error: CoreStartError } | undefined;
 
   const ensure = (): Promise<NonNullable<typeof live>> => {
     lastActivity = Date.now();
     if (live && Date.now() - live.checkedAt < ENSURE_FRESH_MS) return Promise.resolve(live);
+    if (failed && Date.now() - failed.at < START_FAILURE_HOLD_MS)
+      return Promise.reject(failed.error);
     pending ??= (async () => {
       try {
         if (live && (await getRunning())) {
@@ -765,7 +823,11 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
           checkedAt: Date.now(),
         };
         if (replaced) void replaced.close().catch(() => {});
+        failed = undefined;
         return live;
+      } catch (error) {
+        if (error instanceof CoreStartError) failed = { at: Date.now(), error };
+        throw error;
       } finally {
         pending = undefined;
       }

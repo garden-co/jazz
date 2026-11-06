@@ -218,6 +218,27 @@ describe.skipIf(process.platform !== "linux")("vercel() start script", () => {
     expect(read("data/version")).toBe("1.0.0");
   });
 
+  it("says why a core can't be downloaded, for the function to report", async () => {
+    expect(await start("2.0.0", "http://127.0.0.1:9/missing.tgz")).toBe(1);
+    const error = read("tmp/jazz.error")!;
+    expect(error).toContain(
+      "could not download the core for 2.0.0 from http://127.0.0.1:9/missing.tgz",
+    );
+    expect(error).toContain("coreTarballUrl");
+    expect(existsSync(join(root, "data/bin/jazz-napi-2.0.0.node.tmp"))).toBe(false);
+    // A later start that succeeds clears it.
+    installFake("2.0.0");
+    expect(await start("2.0.0")).toBe("running");
+    expect(read("tmp/jazz.error")).toBeUndefined();
+  });
+
+  it("says why it won't run an older core than the Drive's", async () => {
+    installFake("1.0.0");
+    writeFileSync(join(root, "data/version"), "9.0.0\n");
+    expect(await start("1.0.0")).toBe(1);
+    expect(read("tmp/jazz.error")).toMatch(/9\.0\.0 owns this Drive but its core is missing/);
+  });
+
   it("ignores a stale pid file that names another process", async () => {
     installFake("1.0.0");
     const bystander = spawn("sleep", ["30"], { stdio: "ignore" });

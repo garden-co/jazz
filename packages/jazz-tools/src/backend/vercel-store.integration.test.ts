@@ -76,7 +76,7 @@ async function startTrustedCore(appId: string) {
  * `@vercel/sandbox` standing in for Vercel: one Sandbox whose port routes to a
  * local jazz-tools server, and whose Drive holds that server's app id.
  */
-function fakeVercel(core: { appId: string; url: string }) {
+function fakeVercel(core: { appId: string; url: string }, startError?: string) {
   const calls: string[] = [];
   const state = {
     exists: false,
@@ -92,7 +92,8 @@ function fakeVercel(core: { appId: string; url: string }) {
     get status() {
       return state.status;
     },
-    domain: () => core.url,
+    // A core that never starts listens nowhere.
+    domain: () => (startError ? "http://127.0.0.1:9" : core.url),
     currentSession: () => ({
       startedAt: state.startedAt,
       timeout: state.timeout,
@@ -109,8 +110,12 @@ function fakeVercel(core: { appId: string; url: string }) {
       const pinned = files.get("/data/trust")?.toString().trim();
       if (pinned && pinned !== trust) return;
       files.set("/data/trust", Buffer.from(`${trust}\n`));
-      if (!state.running || newerVersion(version, state.running)) state.running = version;
       calls.push(`start ${version}`);
+      if (startError) {
+        files.set("/tmp/jazz.error", Buffer.from(`${startError}\n`));
+        return;
+      }
+      if (!state.running || newerVersion(version, state.running)) state.running = version;
     },
     writeFiles: async (written) => {
       for (const file of written) files.set(file.path, file.content);
@@ -122,6 +127,7 @@ function fakeVercel(core: { appId: string; url: string }) {
           : null
         : (files.get(path) ?? null),
     stop: async () => {
+      calls.push("stop");
       state.status = "stopped";
     },
   });
@@ -162,6 +168,7 @@ function onVercel(env: Record<string, string>) {
     VERCEL: process.env.VERCEL,
     VERCEL_ENV: process.env.VERCEL_ENV,
     VERCEL_PROJECT_ID: process.env.VERCEL_PROJECT_ID,
+    VERCEL_GIT_COMMIT_REF: process.env.VERCEL_GIT_COMMIT_REF,
   };
   Object.assign(process.env, env);
   cleanups.push(async () => {
@@ -177,7 +184,12 @@ describe("vercel() store", () => {
     const appId = randomUUID();
     const core = await startTrustedCore(appId);
     const fake = fakeVercel({ ...core, appId });
-    onVercel({ VERCEL: "1", VERCEL_ENV: "preview", VERCEL_PROJECT_ID: "prj_test" });
+    onVercel({
+      VERCEL: "1",
+      VERCEL_ENV: "preview",
+      VERCEL_PROJECT_ID: "prj_test",
+      VERCEL_GIT_COMMIT_REF: "main",
+    });
 
     const jazz = await createJazz({
       app,
@@ -185,7 +197,10 @@ describe("vercel() store", () => {
       store: vercel({ sdk: fake.sdk, backendCredential: core.credential }),
     }).ready();
     cleanups.push(() => jazz.close());
-    const name = defaultCoreName("prj_test", { VERCEL_ENV: "preview" });
+    const name = defaultCoreName("prj_test", {
+      VERCEL_ENV: "preview",
+      VERCEL_GIT_COMMIT_REF: "main",
+    });
     expect(fake.calls.slice(0, 2)).toEqual([`drive ${name}-data`, `create ${name}`]);
     expect(fake.calls[2]).toMatch(/^start /);
     const scripts = [...fake.files.keys()].filter((path) => path.startsWith("/tmp/jazz-start-"));
@@ -272,7 +287,12 @@ describe("vercel() store", () => {
     const fake = fakeVercel(core);
     Object.assign(fake.state, { exists: true, drive: true });
     fake.files.set("/data/trust", Buffer.from(`${core.issuer} ${AUDIENCE} ${SUBJECT}\n`));
-    onVercel({ VERCEL: "1", VERCEL_ENV: "preview", VERCEL_PROJECT_ID: "prj_test" });
+    onVercel({
+      VERCEL: "1",
+      VERCEL_ENV: "preview",
+      VERCEL_PROJECT_ID: "prj_test",
+      VERCEL_GIT_COMMIT_REF: "main",
+    });
     const preview = () => oidcToken(core.issuer, "owner:garden-co:project:app:environment:preview");
     const started = Date.now();
     await expect(
@@ -286,7 +306,12 @@ describe("vercel() store", () => {
   }, 60_000);
 
   it("refuses a token for another environment than the deployment's", async () => {
-    onVercel({ VERCEL: "1", VERCEL_ENV: "preview", VERCEL_PROJECT_ID: "prj_test" });
+    onVercel({
+      VERCEL: "1",
+      VERCEL_ENV: "preview",
+      VERCEL_PROJECT_ID: "prj_test",
+      VERCEL_GIT_COMMIT_REF: "main",
+    });
     const fake = fakeVercel({ appId: randomUUID(), url: "http://unused.invalid" });
     process.env.VERCEL_OIDC_TOKEN = oidcToken("https://oidc.vercel.com/garden-co");
     cleanups.push(async () => {
@@ -297,6 +322,29 @@ describe("vercel() store", () => {
     ).rejects.toThrow(/preview deployment's OIDC token is for .*environment:production/);
     expect(fake.calls).toEqual([]);
   }, 60_000);
+
+  it("reports a core that can't start, stops its Sandbox, and doesn't retry at once", async () => {
+    const appId = randomUUID();
+    const core = await startTrustedCore(appId);
+    const fake = fakeVercel(
+      { ...core, appId },
+      "could not download the core for 1.2.3 from https://registry.example/core.tgz (HTTP 404)",
+    );
+    onVercel({ VERCEL: "1", VERCEL_ENV: "production", VERCEL_PROJECT_ID: "prj_test" });
+    const t0 = Date.now();
+    const opening = createJazz({
+      app,
+      permissions,
+      store: vercel({ sdk: fake.sdk, backendCredential: core.credential }),
+    }).ready();
+    await expect(opening).rejects.toThrow(
+      /core jazz-prj-test-production could not start: could not download the core for 1\.2\.3 .*HTTP 404/,
+    );
+    // Reported within one health round, not after the minute-long wake deadline.
+    expect(Date.now() - t0).toBeLessThan(15_000);
+    expect(fake.state.status).toBe("stopped");
+    expect(fake.calls.filter((call) => call.startsWith("start "))).toHaveLength(2);
+  }, 30_000);
 
   it("resumes a stopped Sandbox instead of creating another", async () => {
     const appId = randomUUID();
@@ -372,6 +420,19 @@ describe("vercel() store", () => {
     expect(main).toBe("jazz-prj-1-production");
     expect(a).toMatch(/^jazz-prj-1-preview-feat-a-[0-9a-f]{8}$/);
     expect(new Set([main, a, b]).size).toBe(3);
+  });
+
+  it("asks for a name when a preview deployment has no Git branch", () => {
+    // Deploys through the API, or from the CLI outside a Git checkout, run
+    // with an empty branch; they must not all share one core.
+    for (const ref of ["", undefined]) {
+      expect(() =>
+        defaultCoreName("prj_1", { VERCEL_ENV: "preview", VERCEL_GIT_COMMIT_REF: ref }),
+      ).toThrow(/no Git branch.*vercel\(\{ name \}\)/);
+    }
+    expect(defaultCoreName("prj_1", { VERCEL_ENV: "production", VERCEL_GIT_COMMIT_REF: "" })).toBe(
+      "jazz-prj-1-production",
+    );
   });
 
   it("uses the cloud core only in production and preview deployments", () => {
