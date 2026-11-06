@@ -23,6 +23,7 @@ import { readCorrectnessArtifactSnapshot } from "../../dev/artifacts/test-artifa
 import {
   jazzAppFront,
   jazzAppUser,
+  jazzAppSignOut,
   jazzAppRequest,
   jazzServerInfo,
   stopJazzServerByUrl,
@@ -234,6 +235,7 @@ export default defineConfig({
         jazzAppFront: async (_context, coreUrl, app) => jazzAppFront(coreUrl, app),
         jazzAppUser: async (_context, frontUrl, userId, claims) =>
           jazzAppUser(frontUrl, userId, claims),
+        jazzAppSignOut: async (_context, frontUrl, userUrl) => jazzAppSignOut(frontUrl, userUrl),
         jazzAppRequest: async (_context, url, init) => jazzAppRequest(url, init),
         jazzServerStop: async (_context, serverUrl) => stopJazzServerByUrl(serverUrl),
         jazzServerTransportControlCreate: async (_context, serverUrl) =>
