@@ -9,7 +9,7 @@ This is an absolutely massive release
 
 ## Based on SQLite for orders of magnitude better performance
 
-Over the course of the v2 alpha, Jazz’s internal architecture has become simpler and simpler. Two weeks ago, we realized it had become simple enough that we could base Jazz on the venerable SQLite instead of rolling our own low-level database engine. We were able to ship this in just under a week, passing all tests with about 200k fewer lines of code.
+Over the course of the v2 alpha, Jazz’s internal architecture has become simpler and simpler. Two weeks ago, we realized it had become simple enough that we could base Jazz on the venerable SQLite instead of rolling our own low-level database engine. We were able to ship this in just under a week, passing all tests with about 350k fewer lines of code.
 
 This involves a simpler version of IVM that strikes a much better tradeoff between one-shot reads and live subscriptions and benefits from the decades of optimization that have gone into SQLite.
 
@@ -46,13 +46,13 @@ Please see the [full release notes](https://github.com/garden-co/jazz/releases/t
 
 **For apps that haven't had a backend at all yet** like some static client apps and React Native apps, this means you need to deploy a very slim backend to proxy Jazz. We're happy to help!
 
-Otherwise, this is a mostly API-compatible release, but breaks the sync protocol, so you’ll have to update your server and clients together. The storage format changes, too, but we’re providing a migration script and Jazz Cloud dashboard button to trial the migration and then run it for real, with opportunity to roll back, but no backwards migration.
+Otherwise, the APIs for queries and writes are unchanged, but setup, auth and deployment change, and the sync protocol breaks, so you’ll have to update your server, backend and clients together. The storage format changes, too, but we’re providing migration binaries for self-hosted servers and a Jazz Cloud dashboard button to trial the migration and then run it for real, with opportunity to roll back, but no backwards migration.
 
-## Introducing an alternative ~87KB "thin" client
+## A new ~87KB "thin" client, now the default
 
-We are introducing **an alternative "thin" client for webapps** that isn't local-first. This is designed for pages that need very small bundle sizes. Since it doesn't ship any WASM or SQLite, it's only ~87KB gzipped (compared to the full local-first client, which is now down to ~1MB gzipped).
+We are introducing **a "thin" client for webapps** that isn't local-first, and it is now what `<JazzProvider>` opens by default. It is designed for pages that need very small bundle sizes. Since it doesn't ship any WASM or SQLite, it's only ~87KB gzipped (compared to the full local-first client, which is now down to ~1MB gzipped).
 
-The thin client supports most APIs in exactly the same way. You can mix and match thin and local-first clients in different parts of your app (like landing pages and logged-in views) and can even lazily upgrade the thin client into the local-first client on a page without interruption of the user experience!
+The thin client supports most APIs in exactly the same way. To go local-first, pass `client={() => import("jazz-tools/local-first")}` to the provider. You can mix and match thin and local-first clients in different parts of your app (like landing pages and logged-in views) and can even lazily upgrade the thin client into the local-first client on a page without interruption of the user experience!
 
 See the new [thin client docs](/docs/setup/web-client/thin-client) and [local-first client docs](/docs/setup/web-client/local-first-client) for more details
 
