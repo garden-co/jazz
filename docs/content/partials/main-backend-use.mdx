@@ -69,6 +69,9 @@ Once a user has an account, a guest can no longer link to them, so don't call `c
 a sign-up flow whose browser may hold a local-first guest. To tell the error apart, use
 `isNoJazzAccountError(error)` from `jazz-tools/backend`.
 
+A browser whose user no longer has an account on the core, for example after a reset dev store or
+on a new core, signs in again when sync refuses it, instead of reconnecting forever.
+
 ## Backend clients
 
 Other trusted machines, such as a job runner, a worker on another cloud or a partner's service,

@@ -99,9 +99,10 @@ scoped one. Your main backend's API routes see the
 same identity, so `jazz.forReqUser(request)` and `jazz.accountFor(request)` work for requests that
 carry the token as `Authorization: Bearer …`.
 
-A scoped client acts for an existing account: the user it names needs a Jazz account first, from a
-client sign-in or `jazz.createAccountFor(userId)` in your main backend. Connecting does not create
-one. A trusted client uses the system identity and needs no user account.
+A scoped client's user gets an account when the client first signs in, like any client sign-in.
+Before that, `accountFor` and `forReqUser` in your API routes find no account for that user; call
+`jazz.createAccountFor(userId)` in your main backend if a route needs it earlier. A trusted client
+uses the system identity and needs no user account.
 
 ## Machines without an OIDC token
 

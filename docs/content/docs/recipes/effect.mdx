@@ -115,6 +115,12 @@ listTodos.pipe(JazzBackend.forCurrentReqUser());
 listTodos.pipe(JazzBackend.asAuthority);
 ```
 
+For a user with no Jazz account yet, `JazzBackend.forReqUser`, `forCurrentReqUser` and
+`withAttribution` fail with a `JazzNoAccount` error (`{ userId, operation }`, exported from
+`jazz-tools/effect/backend`), which you can handle with `Effect.catchTag("JazzNoAccount", …)`.
+`JazzBackend.createAccountFor(userId)` creates the account, or returns the existing one's id; see
+[Users without an account](/docs/setup/deployment/own-server#users-without-an-account).
+
 Provide `JazzBackend.layer(createJazzOptions)` once for the whole server (or
 `JazzBackend.layerJazz(jazz)` for a Jazz you already created). Because handlers only depend on
 `Jazz`, the same code runs in the browser against `Jazz.layer`, and in tests against an in-memory
