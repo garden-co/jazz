@@ -1724,6 +1724,49 @@ describe("createJazz", () => {
     expect((await asAlice.one(shared.notes.where({ id: note.id })))?.body).toBe("alice");
   }, 60_000);
 
+  it("refuses a row the backend holds but the session may not read as it refuses a missing one", async () => {
+    const appId = randomUUID();
+    const core = await startLocalJazzServer({ appId, inMemory: true });
+    cleanups.push(() => core.stop());
+    const owned = s.definePermissions(app, ({ policy, session }) => {
+      policy.todos.allowRead.where({ owner: session.user });
+      policy.todos.allowUpdate.where({ owner: session.user });
+      policy.todos.allowDelete.where({ owner: session.user });
+    });
+    const jazz = await createJazz({
+      app,
+      permissions: owned,
+      store: remote({ url: core.url, appId, secret: core.adminSecret }),
+      authenticate,
+    }).ready();
+    cleanups.push(() => jazz.close());
+    await jazz.createAccountFor("bob");
+    // The backend's own writes: it holds both rows, live and deleted.
+    const hidden = await jazz.db
+      .insert(app.todos, { title: "alice's", owner: randomUUID() })
+      .wait({ tier: "global" });
+    const gone = await jazz.db
+      .insert(app.todos, { title: "alice's, deleted", owner: randomUUID() })
+      .wait({ tier: "global" });
+    await jazz.db.delete(app.todos, gone.id).wait({ tier: "global" });
+    const bob = await jazz.forReqUser(
+      new Request("http://app/x", { headers: { "x-test-user": "bob" } }),
+    );
+    const refusal = async (id: string) => {
+      try {
+        await bob.update(app.todos, id, { title: "bob's" }).wait({ tier: "global" });
+      } catch (error) {
+        const { message, code } = error as Error & { code?: string };
+        return { message, code };
+      }
+      throw new Error("expected the update to be refused");
+    };
+    const missing = await refusal(randomUUID());
+    expect(missing.code).toBe("permission_denied");
+    expect(await refusal(hidden.id)).toEqual(missing);
+    expect(await refusal(gone.id)).toEqual(missing);
+  }, 60_000);
+
   it("runs a sqlite store as the alpha.59 app its import kept", async () => {
     const dir = await mkdtemp(join(tmpdir(), "jazz-imported-"));
     cleanups.push(() => rm(dir, { recursive: true, force: true }));

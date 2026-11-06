@@ -71,7 +71,7 @@ import {
   unwrapValue,
 } from "./row-transformer.js";
 import { getOwnerPreparation, runAfterPreparation, WritePreparation } from "./write-preparation.js";
-import { nativeCoreErrorCode } from "./native-runtime/native-error-code.js";
+import { nativeCoreErrorCode, unreadableTargetError } from "./native-runtime/native-error-code.js";
 import { writeRow } from "./write-row.js";
 import {
   ComputedReadState,
@@ -3546,13 +3546,7 @@ export class Db {
             (rows) => {
               // As the authority answers: a missing row and one the session
               // may not read are refused alike, with the denial's code.
-              if (rows.length === 0)
-                throw Object.assign(
-                  new Error(
-                    `Update failed: WriteError("authorization_denied: read policy denied UPDATE on table ${table._table}: the row does not exist or the session may not read it")`,
-                  ),
-                  { code: "permission_denied" },
-                );
+              if (rows.length === 0) throw unreadableTargetError("Update", table._table);
               return submit(record);
             },
           );
