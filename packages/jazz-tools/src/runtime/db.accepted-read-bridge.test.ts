@@ -14,6 +14,7 @@ import { createAccountDbWithRuntimeSource } from "../accounts/context.js";
 import { DefaultRuntimeSource } from "./default-runtime-source.js";
 import type { RuntimeClientContext } from "./runtime-source.js";
 import type { JazzClient } from "./client.js";
+import { nativeCoreErrorCode } from "./native-runtime/native-error-code.js";
 
 const app = s.defineApp({ notes: s.table({ body: s.string() }, {}) }, { migrations: "none" });
 const permissions = definePermissions(app, ({ policy }) => {
@@ -341,7 +342,7 @@ it("keeps the public own snapshot separate from accepted evidence for the actual
       () => undefined,
       (error: unknown) => error,
     );
-    expect(failure).toMatchObject({ nativeCoreErrorCode: "not_observed" });
+    expect(nativeCoreErrorCode(failure)).toBe("not_observed");
     expect(String(failure)).toContain("ordinary reads of unsettled own commits");
     await tx.rollback();
   } finally {
