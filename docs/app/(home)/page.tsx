@@ -356,9 +356,9 @@ export default function HomePage() {
               <span className="block">that syncs</span>
             </Heading>
             <Text as="p" display="block" className="max-w-[40em] text-xl leading-relaxed">
-              Jazz is a relational database that runs inside your backend, with live queries and
-              permissions built in. Query it from your server, or straight from your frontend with
-              thin or local-first clients.
+              Jazz is a relational database that runs inside your backend, with live queries,
+              permissions and collaboration features built in. Query it from your server, or
+              straight from your frontend with thin or local-first clients.
             </Text>
           </div>
         </div>
