@@ -2060,6 +2060,44 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
   }
 
   /**
+   * A trusted backend client asks for a user's session, to act for them
+   * (`client.forUser`): the account `forReqUser` would act as for a request
+   * of theirs. Never creates an account (see `createAccountFor`). Anyone but
+   * a trusted machine gets what `admitBackendClient` gives them.
+   */
+  async function backendClientUserSession(request: Request): Promise<Response> {
+    const client = await backendClients.resolve(request);
+    if (client === null) return new Response("Not found", { status: 404 });
+    if (client === "refused" || client.kind !== "backend") {
+      return new Response("not a trusted backend client", { status: 401 });
+    }
+    if (request.method !== "POST") return new Response(null, { status: 405 });
+    let userId: unknown;
+    try {
+      ({ userId } = (await request.json()) as { userId?: unknown });
+    } catch {
+      return new Response("expected a JSON body", { status: 400 });
+    }
+    if (typeof userId !== "string" || userId === "") {
+      return new Response("userId must be a non-empty string", { status: 400 });
+    }
+    let account: string | null;
+    try {
+      account = await existingAccountOf(userId);
+    } catch (error) {
+      // The core refuses this identity (it was revoked): say so, as
+      // `backendUser` does, rather than fail as a server error.
+      if ((error as { status?: number }).status === 403)
+        return Response.json({ code: "identity_not_authorized" }, { status: 403 });
+      throw error;
+    }
+    const noStore = { "Cache-Control": "no-store" };
+    if (account === null)
+      return Response.json({ code: "no_account" }, { status: 404, headers: noStore });
+    return Response.json({ account, issuer }, { headers: noStore });
+  }
+
+  /**
    * The endpoint URLs a browser may have named this backend by, as its client
    * scope (see `clientScope`): the page's origin when it is one this backend
    * serves, and this request's own host, each with `basePath`.
@@ -2198,6 +2236,9 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     }
     if (/^\/apps\/[^/]+\/backend\/admit$/.test(path)) {
       return admitBackendClient(request);
+    }
+    if (/^\/apps\/[^/]+\/backend\/user-session$/.test(path)) {
+      return backendClientUserSession(request);
     }
     if (/^\/apps\/[^/]+\/accounts\/backend-link$/.test(path)) {
       return backendLink(request);

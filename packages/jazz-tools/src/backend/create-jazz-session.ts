@@ -28,6 +28,7 @@ import { JazzClient as RuntimeClient } from "../runtime/client.js";
 import { resolveClientInternalSessionSync } from "../runtime/client-session.js";
 import type { AppContext, PublicSession, Session } from "../runtime/context.js";
 import type { Db } from "../runtime/db.js";
+import { NoJazzAccountError } from "./no-account-error.js";
 import {
   getTrustedReservedSession,
   setTrustedReservedSession,
@@ -93,7 +94,35 @@ type OpenJazzSessionConfig = Omit<JazzClientConfig, "initial"> & {
 
 export interface JazzClient extends SharedJazzClient {
   flush(): void;
+  /**
+   * The database as `userId`, on a trusted backend client (one the main
+   * backend trusts with `trustWorkload(..., as: "backend")`): what the main
+   * backend's `jazz.forReqUser(request)` gives for a request of theirs.
+   * `userId` is the id the main backend's `authenticate` names the user by.
+   * Writes carry the user's identity and are checked against their
+   * permissions.
+   *
+   * `claims` are the session claims those permissions see, and only these:
+   * the main backend's `authenticate` is not asked (there is no request of
+   * the user's), so a policy that reads claims sees what you pass, `{}` when
+   * you pass none. A trusted machine already has backend authority, so this
+   * grants it nothing it lacks.
+   *
+   * Throws a {@link NoJazzAccountError} (`code: "no_account"`) for a user
+   * who has no account yet: the main backend's `jazz.createAccountFor`
+   * creates one, and an `Error` with `status: 403` for a user whose identity
+   * was revoked. Any other client throws: a scoped machine already acts as
+   * its own user, and the main backend itself uses `jazz.forReqUser`.
+   */
+  forUser(userId: string, options?: { claims?: Record<string, unknown> }): Promise<Db>;
 }
+
+const notTrusted = (where: string) => () =>
+  Promise.reject(
+    new Error(
+      `forUser() is only on a trusted backend client (trustWorkload as "backend"); ${where}`,
+    ),
+  );
 
 function uuidBytes(uuid: string): Uint8Array {
   return Uint8Array.from(Buffer.from(uuid.replaceAll("-", ""), "hex"));
@@ -447,6 +476,7 @@ export async function openJazzSession(
           flush() {
             source.flush();
           },
+          forUser: notTrusted("this client acts as its own user"),
         });
       }
       let memoryClock: BackendNodeClock | undefined;
@@ -493,6 +523,7 @@ export async function openJazzSession(
         if (closed) throw new Error("Backend client is closed");
         getBackendAuth(account, registry);
       };
+      const userSessionUrl = `${registry.slice(0, -"/accounts".length)}/backend/user-session`;
       const backendClient = attachSubscriptionStore(
         {
           db,
@@ -500,6 +531,52 @@ export async function openJazzSession(
             assertActive();
             context.flush();
           },
+          // Only a trusted machine: the main backend's own client acts for a
+          // user through `jazz.forReqUser`.
+          forUser: !transport
+            ? notTrusted("on the main backend, use jazz.forReqUser(request)")
+            : async (userId: string, options?: { claims?: Record<string, unknown> }) => {
+                assertActive();
+                if (typeof userId !== "string" || userId === "")
+                  throw new Error(
+                    "forUser: pass the user's id, as the main backend's authenticate names it",
+                  );
+                const response = await transport.fetch(userSessionUrl, {
+                  method: "POST",
+                  headers: { "content-type": "application/json" },
+                  body: JSON.stringify({ userId }),
+                });
+                if (response.status === 404) {
+                  const body = (await response.json().catch(() => null)) as {
+                    code?: unknown;
+                  } | null;
+                  if (body?.code === "no_account") throw new NoJazzAccountError(userId, "forUser");
+                }
+                if (!response.ok) {
+                  const reason =
+                    response.status === 403
+                      ? ` (identity_not_authorized: ${userId} was revoked)`
+                      : "";
+                  throw Object.assign(
+                    new Error(`forUser: the main backend answered ${response.status}${reason}`),
+                    { status: response.status },
+                  );
+                }
+                const { account, issuer } = (await response.json().catch(() => ({}))) as {
+                  account?: unknown;
+                  issuer?: unknown;
+                };
+                if (typeof account !== "string" || typeof issuer !== "string")
+                  throw new Error("forUser: the main backend's answer names no account");
+                assertActive();
+                return context.forSession({
+                  account_id: account,
+                  issuer,
+                  user_id: userId,
+                  claims: { ...options?.claims },
+                  authMode: "external",
+                });
+              },
           get session(): PublicSession | null {
             return client.session;
           },
