@@ -78,6 +78,11 @@ path = "tests/client_restart_integration.rs"
 required-features = ["test"]
 
 [[test]]
+name = "server_soak"
+path = "tests/server_soak.rs"
+required-features = ["test"]
+
+[[test]]
 name = "heap_sampler"
 path = "tests/heap_sampler.rs"
 
