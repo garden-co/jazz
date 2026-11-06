@@ -396,7 +396,17 @@ export class BrowserConnectionManager extends ConnectionManager {
   }
 
   async deleteClientStorage(): Promise<void> {
+    // A reset already in progress (e.g. another tab deleted the shared
+    // storage) has detached this Db's client and connection; it is the
+    // delete, so wait for it rather than reopening mid-reset.
+    if (this.storageReset) return this.storageReset;
+    // A Db that hasn't read or written yet has no worker connection, and
+    // without one there would be nothing to delete through: open it, as the
+    // direct manager opens its client, so the delete reaches the storage.
+    if (!this.connection && !this.getCurrentClient()) this.getClient({});
     await this.connectionReady;
+    if (!this.connection)
+      throw new Error("deleteClientStorage(): the browser worker is not connected");
     await this.connection?.deleteStorage();
     await this.storageReset;
   }

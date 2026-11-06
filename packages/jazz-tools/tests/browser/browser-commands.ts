@@ -12,6 +12,8 @@ export interface JazzServerBrowserCommands {
     app: { schema: WasmSchema; permissions: CompiledPermissionsMap; pageOrigin: string },
   ): Promise<string>;
   jazzAppUser(frontUrl: string, userId: string, claims?: Record<string, unknown>): Promise<string>;
+  /** Optional: only configs whose tests sign users out register it. */
+  jazzAppSignOut?(frontUrl: string, userUrl: string): Promise<void>;
   /** Optional: only configs whose tests write as the backend register it. */
   jazzAppBackendInsert?(
     frontUrl: string,
