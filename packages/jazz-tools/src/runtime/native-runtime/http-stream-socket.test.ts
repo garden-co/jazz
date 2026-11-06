@@ -248,8 +248,9 @@ describe("same-origin socket fallback", () => {
     // is not taken.
     const late = new Socket(url);
     const events: string[] = [];
-    for (const type of ["open", "message", "close"])
-      late.addEventListener(type, () => events.push(type));
+    late.addEventListener("open", () => events.push("open"));
+    late.addEventListener("message", () => events.push("message"));
+    late.addEventListener("close", () => events.push("close"));
     await vi.advanceTimersByTimeAsync(SOCKET_OPEN_DEADLINE_MS);
     natives[1]!.fire("open");
     natives[1]!.fire("message", { data: "late" });
