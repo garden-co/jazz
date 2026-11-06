@@ -155,17 +155,24 @@ describe("createDb in-memory driver", () => {
     const transformed: s.App<s.Schema<typeof transformedSchema>> = s.defineApp(transformedSchema, {
       migrations: "none",
     });
-    db = await createDb({
-      ...(await localAccountConfig("in-memory-text-edit-refusals-test")),
-      driver: { type: "memory" },
-    });
-    const { value: page } = db.insert(texts.pages, { body: "Hello" });
+    // A Db holds one schema: each app below gets its own.
+    const open = async (name: string) => {
+      await db?.shutdown();
+      db = await createDb({
+        ...(await localAccountConfig(`in-memory-text-edit-refusals-${name}`)),
+        driver: { type: "memory" },
+      });
+      return db;
+    };
+    await open("texts");
+    const { value: page } = db!.insert(texts.pages, { body: "Hello" });
     // A value to edit from, but no text to write.
     expect(() => db!.update(texts.pages, page.id, {}, { editedFrom: { body: "Hello" } })).toThrow(
       'a string replacement for "body"',
     );
     // A column that does not merge text.
-    const { value: note } = db.insert(largeValues.documents, {
+    await open("plain");
+    const { value: note } = db!.insert(largeValues.documents, {
       payload: new Uint8Array(),
       body: "Hello",
       metadata: {},
@@ -183,7 +190,8 @@ describe("createDb in-memory driver", () => {
           .wait({ tier: "local" }))(),
     ).rejects.toThrow();
     // A column with a transform.
-    const { value: other } = db.insert(transformed.pages, { body: "Hello" });
+    await open("transformed");
+    const { value: other } = db!.insert(transformed.pages, { body: "Hello" });
     expect(() =>
       db!.update(
         transformed.pages,
