@@ -250,6 +250,19 @@ impl JazzCoreSocket {
         peer.as_ref().is_some_and(|peer| peer.send(data.to_vec()))
     }
 
+    /// `send`, resolving once the session has read enough of the messages
+    /// before it. A host that awaits it before reading more from its client
+    /// holds a fast client back instead of queueing all it sends.
+    #[napi(js_name = "sendWithRoom")]
+    pub async fn send_with_room(&self, data: Uint8Array) -> bool {
+        let bytes = data.to_vec();
+        let peer = self.peer.lock().expect("socket lock").clone();
+        match peer {
+            Some(peer) => peer.send_with_room(bytes).await,
+            None => false,
+        }
+    }
+
     /// The client's socket closed.
     #[napi]
     pub fn close(&self) {
