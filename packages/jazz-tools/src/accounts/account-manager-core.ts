@@ -15,6 +15,22 @@ export async function createAccountManagerWithMinter(
   mintToken: LocalFirstTokenMinter,
   options: { rememberBackendUser?: boolean } = {},
 ) {
+  if (config.bearer !== undefined) {
+    if (typeof config.bearer !== "function")
+      throw new Error("bearer must be a function that returns the app's token (or null)");
+    if (sendsCookies())
+      throw new Error(
+        "bearer is not supported yet in a browser page or worker: its sync connection can't carry the token. There the app's backend names the user by its cookie; leave bearer out.",
+      );
+    // React Native's WebSocket takes headers in another argument: its own
+    // entry sends the bearer on the native sync connection.
+    if ((globalThis as { navigator?: { product?: string } }).navigator?.product === "ReactNative")
+      throw new Error(
+        "bearer from jazz-tools/client is not supported on React Native: use createAccountManager from jazz-tools/react-native or jazz-tools/expo, whose bearer the native sync connection sends.",
+      );
+    if (config.serverUrl === null)
+      throw new Error("bearer signs in through the app's backend: a device-only client has none");
+  }
   const registry = clientRegistryUrl(config);
   const scope = clientScope({ ...config, serverUrl: resolvedServerUrl(config) });
   const store = config.store ?? browserAccountStore(registry, config.env ?? "dev");
@@ -24,7 +40,12 @@ export async function createAccountManagerWithMinter(
     store,
     mintToken,
     fetch:
-      config.serverUrl === null ? deviceOnlyFetch : sendsCookies() ? config.fetch : cookielessFetch,
+      config.serverUrl === null
+        ? deviceOnlyFetch
+        : sendsCookies() || config.bearer
+          ? config.fetch
+          : cookielessFetch,
+    bearer: config.bearer,
     rememberBackendUser: options.rememberBackendUser,
   });
 }
@@ -80,12 +101,12 @@ function sendsCookies(): boolean {
 
 /**
  * @internal What sign-in requests of a host without cookies get (Node, Deno,
- * Bun, a CLI): a clear refusal, naming the hosts that sign in with a bearer.
+ * Bun, a CLI) without a bearer: a clear refusal, naming `bearer`.
  */
 export const cookielessFetch: typeof fetch = () =>
   Promise.reject(
     new Error(
-      "loginWithBackend and linkWithBackend need a browser: the app's backend names the signed-in user by the cookie a browser sends on Jazz's sync connection, and this host sends none. Signing in with a bearer token instead is supported on React Native (bearer on createAccountManager from jazz-tools/react-native or jazz-tools/expo) and not yet on other hosts. A server acts for its users through jazz-tools/backend (jazz.forReqUser).",
+      "loginWithBackend and linkWithBackend need a browser: the app's backend names the signed-in user by the cookie a browser sends on Jazz's sync connection, and this host sends none. Pass the app's token as bearer instead (on createJazzClient or createAccountManager; from jazz-tools/react-native or jazz-tools/expo on React Native). A server acts for its users through jazz-tools/backend (jazz.forReqUser).",
     ),
   );
 
