@@ -1329,6 +1329,17 @@ impl WasmDb {
             .map_err(host_error)
     }
 
+    /// Open the actual replica owner with ordinary reads and separate evidence.
+    #[wasm_bindgen(js_name = beginClientEvidenceTransaction)]
+    pub fn begin_client_evidence_transaction(
+        &self,
+        open_transaction_id: String,
+    ) -> Result<(), JsValue> {
+        self.binding()?
+            .begin_client_evidence_transaction(&open_transaction_id)
+            .map_err(host_error)
+    }
+
     /// Commit an owner-wide transaction by id.
     #[wasm_bindgen(js_name = commitTransaction)]
     pub fn commit_transaction(

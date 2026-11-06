@@ -1,5 +1,6 @@
 import {
   validateAcceptedReadTimeout,
+  isAcceptedReadCapability,
   type AcceptedRows,
   type TransactionReadCapability,
 } from "./accepted-read.js";
@@ -1262,7 +1263,7 @@ export class JazzClient {
   ): OpenTransactionId {
     if (
       readCapability !== undefined &&
-      (readCapability !== "accepted-evidence" ||
+      (!isAcceptedReadCapability(readCapability) ||
         kind !== "serializable" ||
         attribution !== undefined ||
         !this.runtime.queryAccepted)
@@ -1270,6 +1271,8 @@ export class JazzClient {
       throw new Error(
         "Accepted evidence requires a supported session-bound serializable transaction",
       );
+    if (readCapability === "client-accepted-evidence" && session !== undefined)
+      throw new Error("Own-client evidence cannot select a session");
     const id = reservedId ?? createOpenTransactionId();
     if (prerequisite) {
       const context =

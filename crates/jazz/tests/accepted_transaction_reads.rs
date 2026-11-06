@@ -905,3 +905,252 @@ fn mixed_scope_failure_wakes_pending_read_without_traffic() {
     assert_eq!(error.code, ErrorCode::WriteRejected);
     REENTER.with(|db| *db.borrow_mut() = None);
 }
+
+/// Alice’s replica-local SELECT is not a delegated session SELECT. Keep the actual
+/// public-begin pending-own snapshot, without relabelling it as authority data.
+#[test]
+fn client_evidence_keeps_the_ordinary_begin_snapshot_and_refuses_pending_own_relabelling() {
+    let client = open(7, alice(), false, true);
+    seed(&client, 1, alice(), "a");
+    // The existing bound-session contract is unchanged: absent claims deny.
+    let bound = begin(&client);
+    assert!(
+        block_on(client.tx_ref(bound).all_prepared_at(
+            &query(&client),
+            false,
+            None,
+            ReadTier::LocalOnly,
+        ))
+        .unwrap()
+        .is_empty()
+    );
+    client.abandon_transaction_handle(bound).unwrap();
+
+    let id = OpenTransactionId::new();
+    block_on(client.begin_client_evidence_transaction(id)).unwrap();
+    seed(&client, 2, alice(), "a");
+    assert_eq!(
+        block_on(client.tx_ref(id).all_prepared_at(
+            &query(&client),
+            false,
+            None,
+            ReadTier::LocalOnly,
+        ))
+        .unwrap()
+        .len(),
+        1,
+        "only the own write committed before begin is visible"
+    );
+    assert_eq!(
+        block_on(
+            client
+                .accepted_transaction_query(id, query(&client), false, 1000,)
+                .unwrap()
+        )
+        .unwrap_err()
+        .code,
+        ErrorCode::NotObserved
+    );
+    assert!(block_on(client.commit_serializable_handle(id)).is_err());
+}
+
+/// Alice’s same-batch accepted predicates remain genuine authority reads. A point
+/// read can also see this batch's own staged row without local session policy.
+#[test]
+fn client_evidence_stages_and_reads_ordinary_rows_after_an_accepted_prefix() {
+    let (server, client) = pair();
+    seed(&server, 1, alice(), "a");
+    let id = OpenTransactionId::new();
+    block_on(client.begin_client_evidence_transaction(id)).unwrap();
+    let accepted = drive(
+        &[&client, &server],
+        client
+            .accepted_transaction_query(id, query(&client), false, 1000)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(bodies(&accepted), ["note1"]);
+    let row = RowUuid::from_bytes([42; 16]);
+    block_on(
+        client.tx_ref(id).insert(
+            "notes",
+            [
+                ("body".into(), Value::String("staged".into())),
+                ("owner".into(), Value::Uuid(alice().account_id().unwrap().0)),
+                ("token".into(), Value::String("a".into())),
+            ]
+            .into(),
+            jazz::db::InsertOptions {
+                row_id: Some(row),
+                ..Default::default()
+            },
+        ),
+    )
+    .unwrap();
+    let point = client
+        .prepare_query(&Query::from("notes").filter(eq(col("id"), lit(Value::Uuid(row.0)))))
+        .unwrap();
+    assert_eq!(
+        block_on(
+            client
+                .tx_ref(id)
+                .all_prepared_at(&point, false, None, ReadTier::LocalOnly,)
+        )
+        .unwrap()
+        .len(),
+        1
+    );
+    let receipt = block_on(client.commit_serializable_handle(id)).unwrap();
+    drive(
+        &[&client, &server],
+        client.wait_for_transaction(receipt.0, DurabilityTier::Global),
+    )
+    .unwrap();
+    assert_eq!(
+        block_on(server.all(&query(&server), Default::default()))
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+/// Alice cannot use client mode as an authority/backend escape or upgrade an
+/// already opened handle. Existing ordinary/explicit session modes are intact.
+#[test]
+fn client_evidence_refuses_authorities_and_late_upgrade() {
+    for author in [alice(), AuthorSubject::SYSTEM] {
+        let authority = open(9, author, true, false);
+        let id = OpenTransactionId::new();
+        assert!(block_on(authority.begin_client_evidence_transaction(id)).is_err());
+        assert!(block_on(authority.commit_serializable_handle(id)).is_err());
+    }
+    let client = open(7, alice(), false, false);
+    let id = OpenTransactionId::new();
+    block_on(client.begin_serializable(id)).unwrap();
+    assert!(block_on(client.begin_client_evidence_transaction(id)).is_err());
+    assert!(
+        client
+            .accepted_transaction_query(id, query(&client), false, 1000)
+            .is_err()
+    );
+    client.abandon_transaction_handle(id).unwrap();
+}
+
+/// Alice’s live scope checks still reject credential drift; the implicit client mode
+/// cannot smuggle a selected reader or cached explicit claim scope into it.
+#[test]
+fn client_evidence_refuses_session_selection_and_live_claim_drift() {
+    let (server, client) = pair();
+    let id = OpenTransactionId::new();
+    block_on(client.begin_client_evidence_transaction(id)).unwrap();
+    let explicit = query(&client).with_identity_claims(alice(), claims("frozen"));
+    assert!(
+        client
+            .accepted_transaction_query(id, explicit, false, 1000)
+            .is_err()
+    );
+    assert!(
+        block_on(client.tx_ref(id).all_prepared_at(
+            &query(&client),
+            false,
+            Some(alice()),
+            ReadTier::LocalOnly,
+        ))
+        .is_err()
+    );
+    let accepted = drive(
+        &[&client, &server],
+        client
+            .accepted_transaction_query(id, query(&client), false, 1000)
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(accepted.evidence.is_empty());
+    client.set_identity_claims(alice(), claims("changed"));
+    assert!(block_on(client.commit_serializable_handle(id)).is_err());
+}
+
+/// Alice’s replica-local view never supplies completeness. Empty accepted
+/// predicates still reach the authority and catch a later inserted phantom.
+#[test]
+fn client_evidence_empty_predicate_still_refuses_an_authority_phantom() {
+    let (server, client) = pair();
+    let id = OpenTransactionId::new();
+    block_on(client.begin_client_evidence_transaction(id)).unwrap();
+    let accepted = drive(
+        &[&client, &server],
+        client
+            .accepted_transaction_query(id, query(&client), false, 1000)
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(accepted.evidence.is_empty());
+    seed(&server, 1, alice(), "a");
+    let receipt = block_on(client.commit_serializable_handle(id)).unwrap();
+    crate::common::assert_serialization_conflict(
+        &drive(
+            &[&client, &server],
+            client.wait_for_transaction(receipt.0, DurabilityTier::Global),
+        )
+        .unwrap_err(),
+    );
+}
+
+/// Bob’s authority rechecks SELECT under its current policies for Alice too;
+/// an old accepted reply cannot preserve a revoked policy at Global commit.
+#[test]
+fn client_evidence_does_not_preserve_revoked_authority_select() {
+    let (server, client) = pair();
+    seed(&server, 1, alice(), "a");
+    let id = OpenTransactionId::new();
+    block_on(client.begin_client_evidence_transaction(id)).unwrap();
+    let accepted = drive(
+        &[&client, &server],
+        client
+            .accepted_transaction_query(id, query(&client), false, 1000)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(bodies(&accepted), ["note1"]);
+    block_on(server.activate_schema(schema(true))).unwrap();
+    let receipt = block_on(client.commit_serializable_handle(id)).unwrap();
+    crate::common::assert_serialization_conflict(
+        &drive(
+            &[&client, &server],
+            client.wait_for_transaction(receipt.0, DurabilityTier::Global),
+        )
+        .unwrap_err(),
+    );
+}
+
+/// Changing Alice’s actual owner role invalidates this capability before any
+/// subsequent read, write or commit can use its earlier replica admission.
+#[test]
+fn client_evidence_refuses_an_owner_role_change() {
+    let client = open(7, alice(), false, false);
+    let id = OpenTransactionId::new();
+    block_on(client.begin_client_evidence_transaction(id)).unwrap();
+    client.set_authority();
+    assert!(block_on(client.tx_ref(id).all_prepared(&query(&client))).is_err());
+    assert!(
+        block_on(
+            client.tx_ref(id).insert(
+                "notes",
+                [
+                    ("body".into(), Value::String("must not publish".into())),
+                    ("owner".into(), Value::Uuid(alice().account_id().unwrap().0)),
+                    ("token".into(), Value::String("a".into())),
+                ]
+                .into(),
+                Default::default()
+            )
+        )
+        .is_err()
+    );
+    assert!(block_on(client.commit_serializable_handle(id)).is_err());
+    assert!(
+        block_on(client.all(&query(&client), Default::default()))
+            .unwrap()
+            .is_empty()
+    );
+}

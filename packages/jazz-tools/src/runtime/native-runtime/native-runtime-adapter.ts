@@ -1,5 +1,6 @@
 import {
   validateAcceptedReadTimeout,
+  isAcceptedReadCapability,
   type AcceptedRows,
   type TransactionReadCapability,
 } from "../accepted-read.js";
@@ -282,6 +283,8 @@ type NativeDb = {
     attribution?: Uint8Array,
     acceptedEvidence?: boolean,
   ): void;
+  /** Actual replica owner, with ordinary reads and separate accepted evidence. */
+  beginClientEvidenceTransaction?(openTransactionId: string): void;
   acceptedRead?(
     query: Uint8Array,
     openTransactionId: OpenTransactionId,
@@ -2310,7 +2313,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const attribution = this.backendAttribution(sessionJson);
     if (
       readCapability !== undefined &&
-      (readCapability !== "accepted-evidence" ||
+      (!isAcceptedReadCapability(readCapability) ||
         kind !== "serializable" ||
         attribution ||
         !this.db.acceptedRead ||
@@ -2319,15 +2322,30 @@ export class NativeRuntimeAdapter implements Runtime {
       throw new Error(
         "Accepted evidence requires a supported session-bound serializable transaction",
       );
+    const ownClientEvidence = readCapability === "client-accepted-evidence";
+    if (
+      ownClientEvidence &&
+      (session ||
+        this.trustedBackend ||
+        this.readAuthorizationHost === "trusted-serving" ||
+        !this.db.beginClientEvidenceTransaction)
+    )
+      throw new Error("Own-client evidence requires a supported implicit replica owner");
     if (!readCapability) this.applySessionClaims(session);
     // The native core binds a serializable transaction's identity at begin. Keep
     // the trusted-serving subject here so every staged operation and its
     // commit are authorized as that one subject.
-    const identity = readCapability ? session?.identity : this.trustedWriteIdentity(session);
+    const identity = ownClientEvidence
+      ? this.peerIdentity.slice()
+      : readCapability
+        ? session?.identity
+        : this.trustedWriteIdentity(session);
     const admission = attribution ? undefined : identity;
     // Rust resolves an implicit peer from the actual opening DbIdentity.
     // Ordinary calls keep their prior four-argument admission contract.
-    if (readCapability) {
+    if (ownClientEvidence) {
+      this.db.beginClientEvidenceTransaction!(id);
+    } else if (readCapability) {
       this.db.beginTransaction(id, kind, admission, attribution, true);
       try {
         this.applySessionClaims(session, true);
@@ -2492,7 +2510,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (
       !pending ||
       pending.kind !== "serializable" ||
-      pending.readCapability !== "accepted-evidence" ||
+      !isAcceptedReadCapability(pending.readCapability) ||
       !this.db.acceptedRead
     )
       throw new Error("Accepted evidence was not selected before transaction opening");
@@ -2502,14 +2520,18 @@ export class NativeRuntimeAdapter implements Runtime {
     const session = readSession(sessionJson);
     if (session?.backendAuthority)
       throw new Error("Accepted evidence requires an explicit session");
+    if (pending.readCapability === "client-accepted-evidence" && session)
+      throw new Error("Own-client evidence cannot select a read session");
     const boundSession = session ?? pending.requestSession;
     const read = this.db.acceptedRead(
       nativeQueryInput(queryJson, this.schema),
       openTransactionId,
       queryIncludesDeleted(queryJson),
       timeoutMs,
-      boundSession?.identity ?? pending.identity,
-      boundSession?.claims,
+      pending.readCapability === "client-accepted-evidence"
+        ? undefined
+        : (boundSession?.identity ?? pending.identity),
+      pending.readCapability === "client-accepted-evidence" ? undefined : boundSession?.claims,
     );
     // Existing read cancellation and owner close/discard machinery owns this.
     const decoded = decodeAcceptedRead(await this.awaitNativeRead(read));
@@ -3483,12 +3505,12 @@ export class NativeRuntimeAdapter implements Runtime {
   ): Uint8Array | undefined {
     const id = txIdFromContext(writeContext);
     const pending = id ? this.pendingTxs.get(id) : undefined;
-    if (pending?.readCapability === "accepted-evidence") {
+    if (isAcceptedReadCapability(pending?.readCapability)) {
       // Admission registered the explicit scope once. A staged write must not
       // restore its cached claims over a revocation observed by the core.
       const identity = session?.identity ?? this.peerIdentity;
-      this.assertTransactionWriteIdentity(pending, identity);
-      return identity;
+      this.assertTransactionWriteIdentity(pending!, identity);
+      return pending!.readCapability === "client-accepted-evidence" ? undefined : identity;
     }
     this.applySessionClaims(session);
     return this.trustedWriteIdentity(session);
@@ -3606,7 +3628,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this.closed || this.ownerRuntime.closed) throw new Error("Native runtime is closed");
     // Accepted admission registered its scope once. Ordinary reads in that
     // batch must observe live claims, never reinstall their cached session.
-    if (pendingTx?.readCapability === "accepted-evidence") return;
+    if (isAcceptedReadCapability(pendingTx?.readCapability)) return;
     if (!session || session.backendAuthority || this.readAuthorizationHost === "trusted-serving")
       return;
     if (canonicalJson(session.claims) === this.clientSessionClaimsKey) return;
@@ -3788,7 +3810,7 @@ export class NativeRuntimeAdapter implements Runtime {
     pending: PendingTx,
     identity: Uint8Array | undefined,
   ): void {
-    if (pending.readCapability === "accepted-evidence") {
+    if (isAcceptedReadCapability(pending.readCapability)) {
       const bound = pending.identity ?? this.peerIdentity;
       const effective = identity ?? this.peerIdentity;
       if (!sameBytes(bound, effective)) {

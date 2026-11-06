@@ -1727,6 +1727,15 @@ impl NapiDb {
             .map_err(host_error)?)
     }
 
+    /// Open the actual replica owner with ordinary reads and separate evidence.
+    #[napi(js_name = "beginClientEvidenceTransaction")]
+    pub fn begin_client_evidence_transaction(&self, open_transaction_id: String) -> js::Result<()> {
+        Ok(self
+            .binding()?
+            .begin_client_evidence_transaction(&open_transaction_id)
+            .map_err(host_error)?)
+    }
+
     /// Commit an owner-wide transaction by id and optional kind.
     #[napi(js_name = "commitTransaction")]
     pub fn commit_transaction(

@@ -1197,6 +1197,24 @@ impl Binding {
         Ok(())
     }
 
+    /// Open only this unprivileged replica's actual owner. No caller-selected
+    /// session, attribution or late capability upgrade is accepted here.
+    pub fn begin_client_evidence_transaction(&self, id: &str) -> HostResult<()> {
+        if self.trusted_backend
+            || matches!(
+                self.author,
+                AuthorSubject::System | AuthorSubject::SystemAt(_)
+            )
+        {
+            return Err("own-client evidence is unavailable to a backend".into());
+        }
+        block_on(
+            self.db
+                .begin_client_evidence_transaction(open_transaction(id)?),
+        )?;
+        Ok(())
+    }
+
     /// Commit an owner-wide transaction (`kind` defaults to mergeable).
     pub fn commit_transaction(&self, id: &str, kind: Option<&str>) -> HostResult<Write> {
         let id = open_transaction(id)?;
@@ -1506,9 +1524,16 @@ impl Binding {
     ) -> HostResult<HostFuture<Vec<u8>>> {
         let timeout_ms = checked_u64(timeout_ms, "timeoutMs")?;
         let id = open_transaction(open_transaction_id)?;
-        let bound = self.transaction_reader(id, author)?.ok_or_else(|| {
-            not_supported("accepted evidence without an explicitly bound session")
-        })?;
+        let bound = if let Some(owner) = self.db.client_evidence_author(id)? {
+            if author.is_some() || claims.is_some() {
+                return Err("own-client evidence cannot select a session or frozen claims".into());
+            }
+            owner
+        } else {
+            self.transaction_reader(id, author)?.ok_or_else(|| {
+                not_supported("accepted evidence without an explicitly bound session")
+            })?
+        };
         let query: Query = postcard::from_bytes(&query)
             .map_err(|error| HostError::Argument(format!("undecodable query: {error}")))?;
         let mut prepared = self.db.prepare_query(&query)?;

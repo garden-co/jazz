@@ -1,5 +1,10 @@
 /** @internal Opt in during creation, before the existing core batch opens. */
-export type TransactionReadCapability = "accepted-evidence";
+export type TransactionReadCapability = "accepted-evidence" | "client-accepted-evidence";
+
+/** @internal Both modes retain the same accepted cut/read-set/lifetime guards. */
+export function isAcceptedReadCapability(value: unknown): value is TransactionReadCapability {
+  return value === "accepted-evidence" || value === "client-accepted-evidence";
+}
 
 /** @internal Authority coordinates stay exact across JavaScript's boundary. */
 export type AcceptedVersion = { transactionId: string; position: string };
