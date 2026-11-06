@@ -1,3 +1,4 @@
+import type { AppBearer } from "../accounts/enrollment.js";
 import type { BrowserWebSocket, WebSocketConstructor } from "./native-runtime/websocket.js";
 
 /** A backend client's credential: its workload's OIDC token, or how to get a fresh one. */
@@ -41,8 +42,49 @@ export function credentialedTransport(
   if (typeof Base !== "function") throw new Error("Jazz: this platform has no WebSocket");
   return {
     fetch: credentialedFetch,
-    WebSocket: lazySocket(Base, (url) => (forOrigin(url) ? token() : null)),
+    WebSocket: lazySocket(
+      Base,
+      (url) => (forOrigin(url) ? token() : null),
+      "the backend client's credential",
+    ),
   };
+}
+
+/** A `fetch` that sends the app's bearer as `Authorization: Bearer`, read afresh each time. */
+export function bearerFetch(bearer: AppBearer, base?: typeof fetch): typeof fetch {
+  return (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const request = new Request(input, init);
+    const token = await bearer();
+    if (token) request.headers.set("authorization", `Bearer ${token}`);
+    return (base ?? globalThis.fetch)(request);
+  }) as typeof fetch;
+}
+
+/**
+ * A `WebSocket` that sends the app's bearer as `Authorization: Bearer` to
+ * `serverUrl`'s origin (and nowhere else), read afresh for every socket: a
+ * host without cookies (Node, Deno, a CLI) whose user the app's backend
+ * signed in with that bearer. A null bearer (signed out) opens without one.
+ */
+export function bearerWebSocket(
+  serverUrl: string,
+  bearer: AppBearer,
+  Base: unknown = (globalThis as { WebSocket?: unknown }).WebSocket,
+): WebSocketConstructor {
+  const origin = new URL(serverUrl.replace(/^ws/, "http")).origin;
+  if (typeof Base !== "function") throw new Error("Jazz: this platform has no WebSocket");
+  return lazySocket(
+    Base as new (url: string, options?: { headers?: Record<string, string> }) => BrowserWebSocket,
+    (url) => {
+      try {
+        if (new URL(url.replace(/^ws/, "http")).origin !== origin) return null;
+      } catch {
+        return null;
+      }
+      return Promise.resolve(bearer());
+    },
+    "the app's bearer",
+  );
 }
 
 type Listener = (event?: unknown) => void;
@@ -53,7 +95,8 @@ type Listener = (event?: unknown) => void;
  */
 function lazySocket(
   Base: new (url: string, options?: { headers?: Record<string, string> }) => BrowserWebSocket,
-  tokenFor: (url: string) => Promise<string> | null,
+  tokenFor: (url: string) => Promise<string | null> | null,
+  what: string,
 ): WebSocketConstructor {
   return class LazySocket {
     private type: "arraybuffer" | "blob" = "arraybuffer";
@@ -70,12 +113,16 @@ function lazySocket(
       pending.then(
         (token) => {
           if (this.closed) return;
-          this.attach(new Base(url, { headers: { authorization: `Bearer ${token}` } }));
+          this.attach(
+            token
+              ? new Base(url, { headers: { authorization: `Bearer ${token}` } })
+              : new Base(url),
+          );
         },
         (error: unknown) => {
           if (this.closed) return;
           this.closed = true;
-          console.error("Jazz: the backend client's credential failed", error);
+          console.error(`Jazz: ${what} failed`, error);
           this.emit("error", error);
           this.emit("close", { code: 1006, reason: "credential unavailable" });
         },

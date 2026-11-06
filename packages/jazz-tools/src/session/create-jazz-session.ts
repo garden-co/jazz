@@ -6,6 +6,7 @@ import {
 } from "../accounts/account-manager-core.js";
 import { attachSubscriptionStore, getSubscriptionStore } from "../subscription-store-internal.js";
 import type { ShutdownOptions } from "../runtime/db.js";
+import { bearerFetch } from "../runtime/credentialed-transport.js";
 import {
   createRegisteredJazzClient,
   type CreateAccountDb,
@@ -102,6 +103,7 @@ export async function createJazzClient(config: JazzClientConfig): Promise<Browse
     // keeps only cloneable data (db.getConfig()).
     store: _store,
     fetch: _fetch,
+    bearer,
     ...clientConfig
   } = { ...config, serverUrl };
   const accounts = await createAccountManagerWithMinter(
@@ -183,6 +185,8 @@ export async function createJazzClient(config: JazzClientConfig): Promise<Browse
       registry,
       events: browserBackendWatchEvents(`jazz-account:${registry}`),
       linkGuest: linkGuestOnSignUp,
+      // Without cookies, the bearer is what names the user to the backend.
+      ...(bearer ? { fetch: bearerFetch(bearer, config.fetch) } : {}),
     }),
   });
   if (loadLocalFirst) upgradeInBackground(session, loadLocalFirst);
