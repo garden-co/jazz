@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { AccountManager, type AccountHandle, type AccountIdentity } from "../accounts/state.js";
 import { AccountAuthError } from "../accounts/registry-client.js";
-import { watchBackendUser } from "./backend-watch.js";
+import { watchBackendUser, type BackendUser } from "./backend-watch.js";
 import { followUser } from "./follow-user.js";
 import { createJazzSessionOwner } from "./state.js";
 
@@ -62,7 +62,7 @@ async function setup(
   let focus: (() => void) | undefined;
   const posts = vi.fn();
   let otherTab: (() => void) | undefined;
-  const probe = vi.fn(async (): Promise<AccountIdentity | null> => {
+  const probe = vi.fn(async (): Promise<BackendUser | null> => {
     if (options.noBackend) throw new AccountAuthError("not_found", 404);
     return backendUser?.identity ?? null;
   });
