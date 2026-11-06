@@ -71,6 +71,7 @@ import {
   unwrapValue,
 } from "./row-transformer.js";
 import { getOwnerPreparation, runAfterPreparation, WritePreparation } from "./write-preparation.js";
+import { nativeCoreErrorCode } from "./native-runtime/native-error-code.js";
 import { writeRow } from "./write-row.js";
 import {
   ComputedReadState,
@@ -1498,6 +1499,26 @@ function transformInputColumns(
 }
 
 const noWriteDependencies: readonly string[] = [];
+
+/** Read one row by id so this replica holds it before a write stages against it. */
+function loadRow(
+  client: JazzClient,
+  table: TableProxy<any, any>,
+  id: string,
+  session: Session | undefined,
+  branch: NonNullable<ReturnType<typeof normalizeViewOptions>>["branch"],
+): Promise<unknown[]> {
+  const built = JSON.stringify({
+    table: table._table,
+    conditions: [{ column: "id", op: "eq", value: id }],
+    limit: 1,
+  });
+  return client.queryInternal(
+    translateQuery(built, table._schema),
+    (branch ? { branch } : {}),
+    session,
+  );
+}
 
 function missingWriteDependencies(
   table: TableProxy<any, any>,
@@ -3494,8 +3515,28 @@ export class Db {
               context?.attribution,
             );
       };
-      if (missing.length === 0)
-        return submit(table._columnTransforms ? transformInputColumns(table, data, { id }) : data);
+      if (missing.length === 0) {
+        const record = table._columnTransforms ? transformInputColumns(table, data, { id }) : data;
+        if (operation !== "Update") return submit(record);
+        try {
+          return submit(record);
+        } catch (error) {
+          // An update stages against the row's current cells. When this
+          // replica has not loaded the row yet (a fresh process, another
+          // instance), read it through the caller's session and stage again;
+          // later writes wait behind this one, so their order holds.
+          if (nativeCoreErrorCode(error) !== "not_observed") throw error;
+          return loadRow(client, table, id, context?.readSession, normalized?.branch).then(
+            (rows) => {
+              if (rows.length === 0)
+                throw new Error(
+                  `update on table ${table._table}: row ${id} does not exist or this session cannot read it`,
+                );
+              return submit(record);
+            },
+          );
+        }
+      }
       const transaction = client.beginTransaction(
         "mergeable",
         context?.writeSession,

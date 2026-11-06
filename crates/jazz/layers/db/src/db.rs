@@ -6683,13 +6683,13 @@ impl Inner {
 
     /// Read-for-write (SPEC 7, INV-RLS-20): a session may update or upsert
     /// only a row it may read, and omitted cells must not be merged blind.
-    /// A replica acting for a session (a backend's request) refuses an
-    /// update at once when it holds the row hidden from that session: the
-    /// update merges into the session's view of the row. So it does an
-    /// upsert under a read policy decided by the row alone. An upsert under
-    /// a policy that reads other rows is the authority's to decide, as on
-    /// upload: the replica may lack the rows that grant access, and the
-    /// write's waits report the refusal.
+    /// A replica acting for a session (a backend's request) refuses at once
+    /// when the row's read policy is decided by the row alone. Under a
+    /// policy that reads other rows the decision is the authority's, as on
+    /// upload: the replica may lack the rows that grant access (a fresh
+    /// process has loaded none), and the write's waits report a refusal.
+    /// The session's own reads on the replica stay filtered meanwhile, so
+    /// deferring discloses nothing.
     fn authorize_patch(
         &self,
         table: &Table,
@@ -6699,7 +6699,6 @@ impl Inner {
         verb: &str,
     ) -> Result<(), Error> {
         let conclusive = self.client.is_none()
-            || verb != "UPSERT"
             || !table
                 .policy(Operation::Select)
                 .is_some_and(policy_reads_other_rows);

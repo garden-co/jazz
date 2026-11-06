@@ -1608,6 +1608,53 @@ describe("createJazz", () => {
     expect(rows.map((todo) => todo.title)).toEqual(["kept"]);
   }, 60_000);
 
+  it("updates a row without reading it first after a restart", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jazz-embedded-"));
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    const editable = s.definePermissions(app, ({ policy, session }) => {
+      policy.todos.allowRead.where({ owner: session.user });
+      policy.todos.allowInsert.where({ owner: session.user });
+      policy.todos.allowUpdate.where({ owner: session.user });
+      policy.todos.allowDelete.never();
+    });
+    const open = () =>
+      createJazz({
+        app,
+        permissions: editable,
+        store: sqlite({ path: dir }),
+        authenticate,
+      }).ready();
+    const alice = () => new Request("http://app/x", { headers: { "x-test-user": "alice" } });
+
+    const first = await open();
+    const owner = await first.createAccountFor("alice");
+    const row = await (
+      await first.forReqUser(alice())
+    )
+      .insert(app.todos, { title: "draft", owner })
+      .wait({ tier: "global" });
+    await first.close();
+
+    // A REST PATCH in a fresh process: nothing has read the row here yet.
+    const second = await open();
+    cleanups.push(() => second.close());
+    const asAlice = await second.forReqUser(alice());
+    await asAlice.update(app.todos, row.id, { title: "edited" }).wait({ tier: "global" });
+    expect((await asAlice.one(app.todos.where({ id: row.id })))?.title).toBe("edited");
+    await second.close();
+
+    // The backend's own db too, and a write right behind it keeps its order.
+    const third = await open();
+    cleanups.push(() => third.close());
+    third.db.update(app.todos, row.id, { title: "first" });
+    await third.db.update(app.todos, row.id, { title: "second" }).wait({ tier: "global" });
+    expect((await third.db.one(app.todos.where({ id: row.id })))?.title).toBe("second");
+    // A row the read cannot find is refused as missing.
+    await expect(
+      third.db.update(app.todos, randomUUID(), { title: "nope" }).wait({ tier: "global" }),
+    ).rejects.toThrow(/does not exist or this session cannot read it/);
+  }, 60_000);
+
   it("runs a sqlite store as the alpha.59 app its import kept", async () => {
     const dir = await mkdtemp(join(tmpdir(), "jazz-imported-"));
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
