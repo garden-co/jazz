@@ -315,6 +315,26 @@ describe("thin client", () => {
     stop();
   }, 60_000);
 
+  it("reports its link: connected, then offline once an outage lasts", async () => {
+    const server = await startServer();
+    const db = await thinDb(server);
+    await db.insert(app.notes, { text: "first", done: false }).wait({ tier: "global" });
+    expect(db.getSyncStatus().link).toEqual({ state: "connected" });
+    const links: string[] = [];
+    db.onSyncStatusChange(({ link }) =>
+      links.push(link.state === "offline" ? `offline ${link.reason}` : link.state),
+    );
+
+    // The server goes away: a short blip reads as connecting, a lasting
+    // outage as offline.
+    await server.stop();
+    await expect.poll(() => db.getSyncStatus().link.state, { timeout: 5_000 }).toBe("connecting");
+    await expect
+      .poll(() => db.getSyncStatus().link, { timeout: 20_000 })
+      .toEqual({ state: "offline", reason: "network", retrying: true });
+    expect(links).toEqual(["connecting", "offline network"]);
+  }, 60_000);
+
   it("gives up a write in flight when the app goes offline, so waiting for sync ends", async () => {
     const server = await startServer();
     const db = await thinDb(server);
