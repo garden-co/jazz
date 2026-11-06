@@ -3,6 +3,8 @@ import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
 import { createDb as createLocalFirstDb } from "../runtime/default-create-db.js";
 import { isThinDb, type LocalFirstLoader } from "../runtime/local-first-upgrade.js";
+import { DbReplacedError } from "../runtime/db-replaced-error.js";
+import type { Db } from "../runtime/db.js";
 import type { AccountStore } from "../accounts/persistence.js";
 import { startTestJazz, type TestJazz } from "../testing/index.js";
 import { createJazzClient, type BrowserJazzSession } from "./create-jazz-session.js";
@@ -112,6 +114,53 @@ describe("browser session", () => {
     expect((await local.all(app.notes)).map((row) => row.text).sort()).toEqual(["after", "before"]);
     // A local-first Db has nothing left to upgrade.
     await expect(local.upgradeToLocalFirst(loadLocalFirst)).resolves.toBeUndefined();
+  }, 60_000);
+
+  it("ends a kept Db's queries loudly once the upgrade replaces it", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const thin = db(session);
+    await thin.insert(app.notes, { text: "before" }).wait({ tier: "global" });
+    const errors: Error[] = [];
+    thin.subscribe(app.notes, { onUpdate: () => {}, onError: (error) => errors.push(error) });
+
+    await thin.upgradeToLocalFirst(loadLocalFirst);
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toBeInstanceOf(DbReplacedError);
+    expect(errors[0]!.message).toMatch(/upgraded to the local-first client/);
+    expect(errors[0]!.message).toMatch(
+      /session\.getSnapshot\(\)\.client inside session\.subscribe/,
+    );
+    expect(() => thin.insert(app.notes, { text: "lost" })).toThrow(DbReplacedError);
+    expect(() => thin.subscribe(app.notes, () => {})).toThrow(DbReplacedError);
+    expect(() => thin.onMutationError(() => {})).toThrow(DbReplacedError);
+  }, 60_000);
+
+  it("keeps a query live across the upgrade when it follows the session", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    await db(session).insert(app.notes, { text: "before" }).wait({ tier: "global" });
+    const seen: string[][] = [];
+    let current: Db | undefined;
+    let stop: (() => void) | undefined;
+    const follow = () => {
+      const next = session.getSnapshot().client?.db;
+      if (next === current) return;
+      stop?.();
+      current = next;
+      stop = next?.subscribe(app.notes, (rows) => seen.push(rows.map((row) => row.text)));
+    };
+    session.subscribe(follow);
+    follow();
+    await expect.poll(() => seen.at(-1), { timeout: 10_000 }).toEqual(["before"]);
+
+    await db(session).upgradeToLocalFirst(loadLocalFirst);
+    await db(session).insert(app.notes, { text: "after" }).wait({ tier: "global" });
+    await expect
+      .poll(() => seen.at(-1)?.slice().sort(), { timeout: 10_000 })
+      .toEqual(["after", "before"]);
+    stop?.();
   }, 60_000);
 
   it("upgrades in the background with a client loader, and remembers it", async () => {

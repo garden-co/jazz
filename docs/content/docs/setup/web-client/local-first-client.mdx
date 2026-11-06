@@ -143,6 +143,20 @@ A Jazz session owns account selection and its current client. Give it the app co
     <include cwd lang="ts" meta='title="app.ts"'>
       ../examples/docs/todo-client-localfirst-ts/src/auth-snippets.ts#auth-localfirst-ts
     </include>
+
+    The session replaces its `Db` when it upgrades to the local-first client, and when the user signs in, signs out or switches accounts. Don't keep `session.getSnapshot().client.db` in a variable: a replaced `Db` ends its live queries with a `DbReplacedError` and throws it on writes. Subscribe through the session instead, and read the current `Db` for each write:
+
+    <include cwd lang="ts" meta='title="app.ts"'>
+      ../examples/docs/todo-client-localfirst-ts/src/main.ts#follow-session-ts
+    </include>
+
+    ```ts
+    const stop = followDb(session, (db) => db.subscribe(app.todos, renderTodos));
+    session.getSnapshot().client!.db.insert(app.todos, { title: "Buy milk", done: false });
+    ```
+
+    The framework providers do this for you.
+
   </Tab>
 </Tabs>
 

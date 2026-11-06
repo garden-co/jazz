@@ -8,6 +8,7 @@ import {
 import { createListeners, toError } from "../runtime/util.js";
 import type { Db } from "../runtime/db.js";
 import { isThinDb } from "../runtime/local-first-upgrade.js";
+import type { DbReplacedReason } from "../runtime/db-replaced-error.js";
 
 export interface SessionClient {
   shutdown(options?: { waitForSync?: boolean }): Promise<void>;
@@ -15,6 +16,7 @@ export interface SessionClient {
 /** A client whose database can wipe its local storage (`clearOnSignOut`). */
 type WipeableClient = {
   db?: {
+    markReplaced?(reason: DbReplacedReason): void;
     waitForSync?(options?: { timeoutMs?: number }): Promise<void>;
     deleteClientStorage?(): Promise<void>;
   };
@@ -207,6 +209,9 @@ export async function createJazzSessionOwner<
         } else {
           await client.shutdown({ waitForSync: true });
         }
+        // Code that kept this client's Db learns it is gone, instead of
+        // its queries going quiet.
+        (client as WipeableClient).db?.markReplaced?.("signed-out");
         client = undefined;
       }
     } catch (cause) {
@@ -381,6 +386,9 @@ export async function createJazzSessionOwner<
     }
     client = next;
     publish({ status: "ready", account: selected, client: next });
+    // Code that kept the old Db learns it is gone, instead of its queries
+    // going quiet. Framework providers follow the session, not the old Db.
+    (current as WipeableClient).db?.markReplaced?.("upgraded");
     // Children re-render onto the new client first; the old one finishes
     // uploading its writes before it stops. The swap is done either way: a
     // slow or failing shutdown of the old client neither holds nor fails it.

@@ -133,6 +133,7 @@ import {
 } from "./connection-manager/index.js";
 import { toError } from "./util.js";
 import { upgradeDbToLocalFirst, type LocalFirstLoader } from "./local-first-upgrade.js";
+import { DbReplacedError, type DbReplacedReason } from "./db-replaced-error.js";
 
 type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
 type AnyRuntimeSource = RuntimeSource<any>;
@@ -2342,6 +2343,10 @@ export class Db {
   private readonly localFirstRenewals = new AuthRenewalBackoff();
   private localFirstRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private shutdownPromise: Promise<void> | null = null;
+  /** Set once the session that owned this Db moved on to another one. */
+  private replaced: DbReplacedError | null = null;
+  /** Ends each live subscription with a terminal error. */
+  private readonly liveSubscriptionEnders = new Set<(error: Error) => void>();
   private readonly shutdownAbort = new AbortController();
   private syncStatusSnapshot: SyncStatus | null = null;
   private readonly activeQuerySubscriptionTraces = new Map<
@@ -2795,6 +2800,7 @@ export class Db {
    * @returns an unsubscribe callback
    */
   onMutationError(listener: (event: MutationErrorEvent) => void): () => void {
+    if (this.replaced) throw this.replaced;
     this.mutationErrorListeners.add(listener);
     while (this.pendingMutationErrorEvents.length > 0) {
       listener(this.pendingMutationErrorEvents.shift()!);
@@ -3712,6 +3718,7 @@ export class Db {
   ): SubscriptionHandle {
     const { onDelta, onError } =
       typeof callbacks === "function" ? { onDelta: callbacks, onError: undefined } : callbacks;
+    if (this.replaced) throw this.replaced;
     // Constructing a browser follower starts its init handshake. Do that before
     // asking whether this is a newly attaching peer.
     const client = this.getClient(query._schema);
@@ -3789,6 +3796,7 @@ export class Db {
         subscription.predecessor = null;
       }
       readyAbort.abort();
+      this.liveSubscriptionEnders.delete(endLive);
       this.unregisterActiveQuerySubscriptionTrace(traceId);
       manager.clear();
       notifyTerminalError(terminalError);
@@ -3944,6 +3952,7 @@ export class Db {
     const unsubscribe = () => {
       if (unsubscribed) return;
       unsubscribed = true;
+      this.liveSubscriptionEnders.delete(endLive);
       deliveryReady = false;
       bufferedDeltas.length = 0;
       readyAbort.abort();
@@ -3984,6 +3993,10 @@ export class Db {
     // and public Db.subscribe callers are not required to consume it.
     if (ready) void ready.catch(() => undefined);
     const initialSubscription = createSubscriptionGeneration();
+    const endLive = (error: Error) => {
+      if (activeSubscription !== null) terminalizeSubscription(activeSubscription, error);
+    };
+    this.liveSubscriptionEnders.add(endLive);
     // The native maintained stream owns both the opening snapshot and later
     // changes. Do not fabricate an empty opening or race it with a one-shot
     // cache read: that snapshot may be older than deltas already delivered.
@@ -4005,6 +4018,20 @@ export class Db {
     const handle = unsubscribe as SubscriptionHandle;
     if (ready) Object.defineProperty(handle, "ready", { value: ready });
     return handle;
+  }
+
+  /**
+   * @internal The session that owned this Db replaced it. Its live queries
+   * end with a {@link DbReplacedError} naming the fix, and its reads, writes
+   * and listeners throw it, so code that kept the handle fails loudly instead
+   * of going silent.
+   */
+  markReplaced(reason: DbReplacedReason): void {
+    if (this.replaced) return;
+    const error = new DbReplacedError(reason);
+    this.replaced = error;
+    for (const end of Array.from(this.liveSubscriptionEnders)) end(error);
+    this.liveSubscriptionEnders.clear();
   }
 
   /**
@@ -4033,6 +4060,7 @@ export class Db {
   }
 
   protected assertOpen(): void {
+    if (this.replaced) throw this.replaced;
     if (this.shutdownPromise) {
       throw new Error("Cannot operate on a Db that is shutting down or closed.");
     }
