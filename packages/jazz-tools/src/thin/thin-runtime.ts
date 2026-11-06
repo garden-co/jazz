@@ -396,6 +396,8 @@ export class ThinRuntime implements Runtime {
       return;
     }
     if (error.retry === "never") {
+      // Stopped for good, as `fatal`: only an explicit connect starts over.
+      this.wanted = false;
       this.stopped = true;
       this.clearOutage();
     }

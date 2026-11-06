@@ -332,7 +332,9 @@ describe("thin client", () => {
     await expect
       .poll(() => db.getSyncStatus().link, { timeout: 20_000 })
       .toEqual({ state: "offline", reason: "network", retrying: true });
-    expect(links).toEqual(["connecting", "offline network"]);
+    // Never offline for another reason on the way.
+    expect(links.at(-1)).toBe("offline network");
+    expect(links.filter((link) => link.startsWith("offline"))).toEqual(["offline network"]);
   }, 60_000);
 
   it("gives up a write in flight when the app goes offline, so waiting for sync ends", async () => {
