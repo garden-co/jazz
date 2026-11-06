@@ -262,6 +262,14 @@ const LOCAL_FIRST_GUEST = Object.freeze({
   kind: "jazz:local-first-guest",
 }) as unknown as LocalFirstGuest;
 
+/** `request` without the credentials a browser sends with it (its cookies, an `Authorization` header). */
+function withoutCredentials(request: Request): Request {
+  const headers = new Headers(request.headers);
+  headers.delete("cookie");
+  headers.delete("authorization");
+  return new Request(request.url, { method: request.method, headers });
+}
+
 /**
  * Let this request through as a local-first guest, when it comes from one.
  * Guests are refused unless `authenticate` returns this: a guest has no user
@@ -279,6 +287,12 @@ const LOCAL_FIRST_GUEST = Object.freeze({
  *
  * For a request that is not a guest's, it means the same as `null`: no one
  * is signed in.
+ *
+ * A guest's request may also carry a user's cookie: someone signed in (or
+ * up) on that browser, and the guest still uploads its writes before it
+ * links to them. Jazz then asks `authenticate` about the request without its
+ * cookies and `Authorization` header, so the guest is let in as it would be
+ * on its own.
  */
 export function acceptLocalFirstAuth(_request: Request): LocalFirstGuest {
   return LOCAL_FIRST_GUEST;
@@ -1253,7 +1267,15 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
   /** Whether the app lets `request` in as a local-first guest (`acceptLocalFirstAuth`). */
   let warnedGuestsOff = false;
   async function acceptsGuest(request: Request): Promise<boolean> {
-    if ((await askAuthenticate(request)) === LOCAL_FIRST_GUEST) return true;
+    const answer = await askAuthenticate(request);
+    if (answer === LOCAL_FIRST_GUEST) return true;
+    // A user is signed in on this browser too: one who just signed up, whose
+    // guest still uploads its writes before it links to them. A guest is
+    // bound to its own key, never to that user, and whether the app lets
+    // guests in doesn't depend on who else is signed in: ask as the request
+    // would be without the user's credentials.
+    if (answer && (await askAuthenticate(withoutCredentials(request))) === LOCAL_FIRST_GUEST)
+      return true;
     if (!warnedGuestsOff) {
       warnedGuestsOff = true;
       console.warn(
