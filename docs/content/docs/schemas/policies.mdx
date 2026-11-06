@@ -321,9 +321,23 @@ starts with the reason, such as `authorization_denied: …`. Use
 `db.onMutationError(...)` as a fallback for rejections without an active wait;
 see [Handling mutation errors](/docs/writing/writing-data#handling-mutation-errors).
 A backend connected to Jazz Cloud doesn't refuse a session's write up front either: the cloud
-decides it, and a denial arrives through `wait(...)` with the same `permission_denied` code. Only a
-store with no authority above it, such as a client with `serverUrl: null` or a backend on its own
-storage, refuses a denied write at once.
+decides it, and a denial arrives through `wait(...)` with the same `permission_denied` code. A store
+with no authority above it, such as a client with `serverUrl: null` or a backend on its own
+storage, refuses some denied writes at once (the write call throws), and accepts others, such as a
+denied update of a row it holds, then rejects them through `wait(...)`. So in backend code, await every write
+and handle both:
+
+```ts
+try {
+  await db.update(app.deals, dealId, { stage: "won" }).wait({ tier: "global" });
+} catch (error) {
+  // permission_denied, thrown by update() or by wait()
+}
+```
+
+In Node, a write's rejected `wait()` that nothing awaits or catches is an unhandled rejection, which
+ends the process.
+
 An empty query result can also mean that read permissions filtered out rows.
 
 As the app developer, check your own configuration:

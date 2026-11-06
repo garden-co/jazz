@@ -41,9 +41,6 @@ In practice, this lets you:
    ```
 
    This creates an initial snapshot of your schema in `migrations/snapshots/`. No migration file is created yet because there is no previous schema to diff against.
-   Run it before you add `import { migrations } from "./migrations"` to `schema.ts` (see
-   [Shipping migrations with your app](#shipping-migrations-with-your-app)): with the import in
-   place and no snapshot yet, it fails with "defineApp needs the app's migrations".
 
 2. **Edit `schema.ts`**&hairsp;—&hairsp;change the data shape as needed.
 3. **Validate locally**&hairsp;—&hairsp;optionally run `npx jazz-tools validate` to surface
@@ -95,6 +92,9 @@ added one always conflicts there: take either side, then run `validate` to regen
 before they first sync, so a client never has to rename or reshape stored data later. A client
 whose schema version is missing from the bundle refuses to open with an error telling you to
 regenerate it.
+
+Index changes (`indexOnly`, `compositeIndex`) don't need a migration either: they change how
+rows are found, not the rows, so the backend deploys them as they are.
 
 Permission-only changes in `permissions.ts` don't need a migration; they go live when your main
 backend restarts with them. See [Declarative Permissions](/docs/schemas/policies) for details.
@@ -199,9 +199,6 @@ one, have your app write both, and copy existing values with a
 [backend job](/docs/setup/backend-client). Once every row is copied and no client still needs the old
 shape, drop the old column in a later release. Keep the copy job in the release before the drop:
 once a release drops a column, code on that release can no longer read it.
-
-- **Changing indexes** (`indexOnly`, `compositeIndex`). `migrations create` writes no migration for
-  them, and the backend then refuses to start with "migration history has disconnected roots".
 
 ## Adding relations to existing UUID columns
 
