@@ -492,6 +492,7 @@ pub struct SchemaPublication {
 
 struct Inner {
     conn: Connection,
+    retired: bool,
     scheduler: Option<Rc<dyn TickScheduler>>,
     read_deadlines: Vec<Weak<sync::ReadDeadline>>,
     /// One-way, owner-wide fence for new application mutations during close.
@@ -1448,6 +1449,7 @@ impl Db {
             governance: Governance::CurrentOwner,
             inner: Rc::new(Store::new(Inner {
                 conn,
+                retired: false,
                 scheduler: None,
                 read_deadlines: Vec::new(),
                 mutation_admission_closed: false,
@@ -1734,6 +1736,7 @@ impl Db {
     }
 
     pub async fn tick(&self) -> Result<(), Error> {
+        self.ensure_storage_owner_active()?;
         #[cfg(any(test, feature = "testing"))]
         if let Some(code) = self.inner().failing_ticks.pop_front() {
             return Err(Error::new(code, "a tick failure injected by a test"));
@@ -1778,6 +1781,9 @@ impl Db {
         if any && fetched.is_ok() {
             fetched = self.sync_tick();
         }
+        // A fetch may have yielded while the physical owner retired. Do
+        // not dispatch the following puts/deletes for that owner.
+        self.ensure_storage_owner_active()?;
         let done = io.run(&*store).await;
         let applied = self.end_chunk_io(&chunks, done);
         fetched.and(applied)
@@ -1789,6 +1795,7 @@ impl Db {
     /// to back with [`Self::finish_chunk_io`]; a batch dropped instead ends
     /// there, and its work goes to the next one.
     pub fn take_chunk_io(&self) -> Result<Option<crate::chunk_store::ChunkIo>, Error> {
+        self.ensure_storage_owner_active()?;
         let chunks = self.inner().chunks.clone();
         if !chunks.host_io() {
             return Err(not_host_run());
@@ -1806,6 +1813,7 @@ impl Db {
     /// returned once the rest are applied. A batch this store did not hand
     /// out, or not the one out now, is refused.
     pub fn finish_chunk_io(&self, done: crate::chunk_store::ChunkIoDone) -> Result<(), Error> {
+        self.ensure_storage_owner_active()?;
         let chunks = self.inner().chunks.clone();
         if !chunks.host_io() {
             return Err(not_host_run());
@@ -1861,6 +1869,9 @@ impl Db {
         chunks: &crate::large::Chunks,
         mut done: crate::chunk_store::ChunkIoDone,
     ) -> Result<(), Error> {
+        // Shared by host completion and the asynchronous tick pump.
+        // Refuse before installing fetched cache bytes or retrying reads.
+        self.ensure_storage_owner_active()?;
         let lease = done.io.lease.take();
         let applied = self.apply_chunk_io(chunks, done);
         if let Some(mut lease) = lease {
@@ -1954,6 +1965,7 @@ impl Db {
         let done = crate::chunk_store::ChunkIo::unleased(wanted)
             .run(store)
             .await;
+        self.ensure_storage_owner_active()?;
         let mut first = None;
         self.install_fetched(chunks, &done.io.fetch, done.fetched, &mut first);
         first.map_or(Ok(()), Err)
@@ -2126,6 +2138,32 @@ impl Db {
     pub async fn close(&self) -> Result<(), Error> {
         self.retire_local_observation_capabilities();
         self.tick().await
+    }
+
+    /// Revoke the owner connection before releasing its external storage lease.
+    /// Retained views, streams and transports may still own Db clones, but none
+    /// may read or write this file after retirement. SQLite's authorizer also
+    /// expires statements already in the preparation cache. This is a one-way
+    /// runtime fence, not a stored application policy.
+    pub fn retire_storage_owner(&self) -> Result<(), Error> {
+        self.retire_local_observation_capabilities();
+        let mut inner = self.inner();
+        inner
+            .conn
+            .authorizer(Some(|_: rusqlite::hooks::AuthContext<'_>| {
+                rusqlite::hooks::Authorization::Deny
+            }))
+            .map_err(storage)?;
+        inner.retired = true;
+        Ok(())
+    }
+
+    pub(crate) fn ensure_storage_owner_active(&self) -> Result<(), Error> {
+        if self.inner.borrow().retired {
+            Err(Error::new(ErrorCode::Storage, "storage owner is retired"))
+        } else {
+            Ok(())
+        }
     }
 
     /// Permanently stop admitting application row mutations in this runtime
@@ -9228,5 +9266,158 @@ fn migration_path(
     match walk(migrations, target, &admitted, &mut visiting) {
         Some(path) if path.len() > 1 || !path[0].1.is_empty() => path,
         _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod storage_owner_chunk_tests {
+    use super::*;
+    use crate::chunk_store::{ChunkStore, NodeKey, StoreFuture};
+    use bytes::Bytes;
+
+    struct NoIo;
+    impl ChunkStore for NoIo {
+        fn put<'a>(&'a self, _: &'a NodeKey, _: &'a [u8]) -> StoreFuture<'a, ()> {
+            Box::pin(async { panic!("no external I/O in this completion test") })
+        }
+        fn get<'a>(&'a self, _: &'a NodeKey) -> StoreFuture<'a, Option<Bytes>> {
+            Box::pin(async { panic!("no external I/O in this completion test") })
+        }
+        fn delete<'a>(&'a self, _: &'a NodeKey) -> StoreFuture<'a, ()> {
+            Box::pin(async { panic!("no external I/O in this completion test") })
+        }
+    }
+
+    /// Alice's late result cannot populate a retired cache, even when SQLite
+    /// later rejects completion. White-box because a retired public read must
+    /// itself refuse and therefore cannot reveal an accidental cache install.
+    /// Bob's live-owner control installs the same authenticated chunk bytes.
+    #[test]
+    fn retired_owner_chunk_completion_does_not_install_cache() {
+        use jazz_types::large_values::{self as lv, LargeValueKind, chunks::ChunkRequest};
+        for retired in [false, true] {
+            let db = crate::options::block_on(Db::open(
+                DbConfig::new(
+                    JazzSchema::new(&jazz_model::model::public_schema::Schema::new()).unwrap(),
+                    DbIdentity {
+                        node: crate::ids::NodeUuid::from_bytes([72; 16]),
+                        author: AuthorSubject::SYSTEM,
+                    },
+                )
+                .with_chunk_store(Arc::new(NoIo))
+                .with_host_chunk_io(),
+            ))
+            .unwrap();
+            let chunks = db.inner().chunks.clone();
+            let prepared =
+                lv::prepare(LargeValueKind::String, b"a fetched chunk held by the host").unwrap();
+            assert!(chunks.value_bytes(&prepared.value_ref).is_err());
+            let mut io = db.take_chunk_io().unwrap().unwrap();
+            // Isolate the completion/cache boundary with real hash-verified
+            // prepared chunks; public fetch admission is covered separately.
+            io.fetch = prepared
+                .staged_chunks
+                .iter()
+                .map(|c| ChunkRequest {
+                    object_hash: c.node_ref.object_hash.0,
+                })
+                .collect();
+            let answers = prepared
+                .staged_chunks
+                .iter()
+                .map(|c| Ok(Some(Bytes::from(c.encoded.clone()))))
+                .collect();
+            let done = io.done(answers, Vec::new(), Vec::new()).unwrap();
+            if retired {
+                db.retire_storage_owner().unwrap();
+            }
+            let result = db.finish_chunk_io(done);
+            if retired {
+                assert!(
+                    chunks.value_bytes(&prepared.value_ref).is_err(),
+                    "retired owner installed fetched cache bytes"
+                );
+                assert_eq!(result.unwrap_err().code, ErrorCode::Storage);
+            } else {
+                result.unwrap();
+                assert_eq!(
+                    chunks.value_bytes(&prepared.value_ref).unwrap(),
+                    b"a fetched chunk held by the host"
+                );
+            }
+            assert!(
+                chunks.outstanding().is_none(),
+                "lease cleanup still completes"
+            );
+        }
+    }
+
+    /// Alice retires while a direct read awaits object-store bytes. Inspect
+    /// the cache internally because the public retired read must itself fail.
+    #[test]
+    fn retired_owner_inflight_fetch_does_not_install_cache() {
+        use jazz_types::large_values::{self as lv, LargeValueKind, chunks::ChunkRequest};
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
+        struct Reply(Vec<Bytes>);
+        impl ChunkStore for Reply {
+            fn put<'a>(&'a self, _: &'a NodeKey, _: &'a [u8]) -> StoreFuture<'a, ()> {
+                panic!("fetch only")
+            }
+            fn delete<'a>(&'a self, _: &'a NodeKey) -> StoreFuture<'a, ()> {
+                panic!("fetch only")
+            }
+            fn get<'a>(&'a self, key: &'a NodeKey) -> StoreFuture<'a, Option<Bytes>> {
+                let bytes = self
+                    .0
+                    .iter()
+                    .find(|bytes| lv::object_hash(bytes).0 == key.hash)
+                    .cloned();
+                let mut yielded = false;
+                Box::pin(std::future::poll_fn(move |cx| {
+                    if !yielded {
+                        yielded = true;
+                        cx.waker().wake_by_ref();
+                        Poll::Pending
+                    } else {
+                        Poll::Ready(Ok(bytes.clone()))
+                    }
+                }))
+            }
+        }
+        let db = block_on(Db::open(DbConfig::new(
+            JazzSchema::new(&jazz_model::model::public_schema::Schema::new()).unwrap(),
+            DbIdentity {
+                node: crate::ids::NodeUuid::from_bytes([75; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        )))
+        .unwrap();
+        let chunks = db.inner().chunks.clone();
+        let prepared = lv::prepare(LargeValueKind::String, b"late direct fetch").unwrap();
+        let store = Reply(
+            prepared
+                .staged_chunks
+                .iter()
+                .map(|c| Bytes::from(c.encoded.clone()))
+                .collect(),
+        );
+        let wanted = prepared
+            .staged_chunks
+            .iter()
+            .map(|c| ChunkRequest {
+                object_hash: c.node_ref.object_hash.0,
+            })
+            .collect();
+        let mut fetch = Box::pin(db.fetch_from(&chunks, &store, wanted));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(fetch.as_mut().poll(&mut cx).is_pending());
+        db.retire_storage_owner().unwrap();
+        let result = block_on(fetch);
+        assert!(
+            chunks.value_bytes(&prepared.value_ref).is_err(),
+            "inflight read installed bytes after retirement"
+        );
+        assert_eq!(result.unwrap_err().code, ErrorCode::Storage);
     }
 }
