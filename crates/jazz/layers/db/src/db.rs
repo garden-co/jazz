@@ -733,7 +733,7 @@ pub struct FileOptions {
     /// Page cache bound per connection, in KiB.
     pub cache_kib: u64,
     /// SQLite VFS the file lives on (`None`: the platform default). Browser
-    /// builds register theirs (IndexedDB, OPFS) before opening.
+    /// builds register theirs (IndexedDB) before opening.
     pub vfs: Option<&'static str>,
     pub journal: Journal,
     /// Page size a new file is created with (`None`: SQLite's default). A
@@ -747,7 +747,7 @@ pub enum Journal {
     /// Write-ahead log: readers never block the writer.
     #[default]
     Wal,
-    /// Rollback journal, for VFSes without shared memory (OPFS). The page
+    /// Rollback journal, for VFSes without shared memory. The page
     /// cache never spills mid-transaction, so the large-value reader
     /// connection sees only committed pages even when the VFS's locks are
     /// no-ops.
