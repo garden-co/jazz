@@ -348,9 +348,10 @@ function Nested({
   /** Title in the detail size, for narrow boxes with a long name. */
   small?: boolean;
 }) {
-  const pad = w < 70 ? 5 : w < 90 ? 8 : 12;
+  // A small title (narrow boxes) centres its four lines with even padding.
+  const pad = small ? 8 : w < 90 ? 8 : 12;
   const step = small ? 13 : 18;
-  const titleY = small ? y + 20 : y + 23;
+  const titleY = small ? y + 18 : y + 23;
   return (
     <g>
       <Frame x={x} y={y} w={w} h={h} tone="ink" />
@@ -359,11 +360,11 @@ function Nested({
         y={titleY}
         lines={title}
         step={step}
-        className={small ? "dg-detail dg-fill-ink" : "dg-title dg-fill-ink"}
+        className={small ? "dg-detail dg-small dg-fill-ink" : "dg-title dg-fill-ink"}
       />
       <Lines
         x={x + pad}
-        y={titleY + title.length * step + 8}
+        y={titleY + title.length * step + (small ? 7 : 8)}
         lines={inner}
         step={16}
         className="dg-detail dg-fill-blue"
@@ -449,7 +450,7 @@ function cycleDelay(count: number, turn: number, col: number): string {
  * laid over the diagram) lands in the space left for it at the top left.
  */
 export const DEPLOYMENT_LAYOUT = {
-  width: 560,
+  width: 552,
   height: 582,
   switcher: { x: 16, y: 32, w: 256, h: 76 },
 };
@@ -458,32 +459,37 @@ export const DEPLOYMENT_LAYOUT = {
  * Fig. 1: where Jazz runs, drawn narrow enough for a phone. Your own platform
  * on top (room for the scenario switcher, the large-value store, then the
  * shards), your backend with the jazz core and its /jazz mount behind your
- * auth, then three clients: the traditional one, a thin client (web page,
- * backend worker, agent VM in turn) and a local-first one (web app, native
- * app in turn). Sync goes through your auth into the mount; the dashed
- * large-value reads come down the right edge. In this figure blue marks
+ * auth, then three clients, getting simpler to the right: the traditional
+ * one, a local-first one (web app, native app in turn) and a thin client (web
+ * page, backend worker, agent VM in turn). Sync goes through your auth into
+ * the mount; the dashed large-value reads come down one lane on the right that
+ * branches to the core and the Jazz clients. In this figure blue marks
  * Jazz's own parts and mint your auth.
  */
 export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }) {
   const { label, runtime, shard, store } = deploymentScenarios[scenario];
   const { width: W, height: H, switcher } = DEPLOYMENT_LAYOUT;
-  const storeBox = { x: 284, y: 32, w: 260, h: 76 };
+  const storeBox = { x: 284, y: 32, w: 252, h: 76 };
   const shardRow = { x: 16, y: 120, w: 484, h: 80 };
   const backend = { x: 16, y: 240, w: 484 };
   const backendBottom = 368;
   const authH = 24;
-  // The jazz core above, its mounted sync endpoint below the divider.
-  const jazz = { x: 224, y: 252, w: 264, h: 104, divider: 304 };
   const api = { x: 32, y: 312, w: 180, h: 44 };
-  const cw = 168;
-  const colX = [16, 196, 376];
+  // The jazz core above, its mounted /jazz route below the divider, level
+  // with the normal API route.
+  const jazz = { x: 224, y: 252, w: 264, h: 104, divider: api.y };
+  const cw = 164;
+  const colX = [16, 192, 368];
+  // The one large-value lane, right of your backend.
+  const lane = 512;
   const center = (col: number) => colX[col] + cw / 2;
   const rowY = 456;
-  const clientH = H - rowY - 6;
-  // The traditional client stays; the thin and local-first slots take
+  // Shorter to the right, as each kind of client does less itself.
+  const clientH = [H - rowY - 6, 106, 76];
+  // The traditional client stays; the local-first and thin slots take
   // turns between their kinds of client.
-  const slots = [[clients[0]], [clients[1], clients[4], clients[5]], [clients[2], clients[3]]];
-  const gap = shard.count > 4 ? 6 : 10;
+  const slots = [[clients[0]], [clients[2], clients[3]], [clients[1], clients[4], clients[5]]];
+  const gap = shard.count > 4 ? 4 : 10;
   const sw = (shardRow.w - gap * (shard.count - 1)) / shard.count;
   const shardXs = Array.from({ length: shard.count }, (_, i) => shardRow.x + i * (sw + gap));
   const coreMid = (jazz.y + jazz.divider) / 2;
@@ -495,7 +501,7 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
   const local = { y: 188, h: 44, sqlite: { x: 224, w: 124 }, files: { x: 364, w: 124 } };
   return (
     <Diagram viewBox={`0 0 ${W} ${H}`} label={label}>
-      <rect x={4} y={4} width={552} height={394} rx={4} className="dg-cloud" />
+      <rect x={4} y={4} width={W - 8} height={394} rx={4} className="dg-cloud" />
       <Label x={switcher.x} y={22} tone="ink">
         Your own cloud:
       </Label>
@@ -522,17 +528,6 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
               start
             />
           ))}
-          {/* Jazz clients still read large values from the files directly. */}
-          <Wire
-            points={[
-              [local.files.x + local.files.w, local.y + local.h / 2],
-              [530, local.y + local.h / 2],
-              [530, rowY],
-            ]}
-            tone="blue"
-            dashed
-            start
-          />
         </g>
       ) : (
         <g>
@@ -564,39 +559,37 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
               tone="blue"
             />
           ))}
-          {/* The store reaches the core around the right of the shards. */}
+          {/* One large-value lane: from the store down the right, into the
+              core, and on to the Jazz clients, which read large values
+              directly. */}
           <Wire
             points={[
-              [516, storeBox.y + storeBox.h],
-              [516, coreMid],
+              [lane, storeBox.y + storeBox.h],
+              [lane, rowY],
+            ]}
+            tone="blue"
+            dashed
+            start
+          />
+          <Wire
+            points={[
+              [lane, coreMid],
               [jazz.x + jazz.w, coreMid],
             ]}
             tone="blue"
             dashed
-            start
           />
-          {/* Jazz clients read large values from the store directly, down the
-          right edge beside the core's own store wire. */}
           <Wire
             points={[
-              [530, storeBox.y + storeBox.h],
-              [530, rowY],
+              [lane, 442],
+              [colX[1] + cw - 16, 442],
+              [colX[1] + cw - 16, rowY],
             ]}
             tone="blue"
             dashed
-            start
           />
         </g>
       )}
-      <Wire
-        points={[
-          [530, 442],
-          [colX[1] + cw - 16, 442],
-          [colX[1] + cw - 16, rowY],
-        ]}
-        tone="blue"
-        dashed
-      />
       <Frame x={jazz.x} y={jazz.y} w={jazz.w} h={jazz.h} tone="blue" />
       <line
         x1={jazz.x}
@@ -619,7 +612,7 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
         textAnchor="middle"
         className="dg-title dg-fill-blue"
       >
-        mounted /jazz sync endpoint
+        mounted /jazz route
       </text>
       <Box {...api} title="normal API route" center />
       <Wire
@@ -666,7 +659,11 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
       <Lines
         x={(center(1) + center(2)) / 2}
         y={414}
-        lines={["efficient realtime sync", "+ direct blob streaming"]}
+        lines={
+          single
+            ? ["efficient realtime sync"]
+            : ["efficient realtime sync", "+ direct blob streaming"]
+        }
         step={14}
         anchor="middle"
         className="dg-label dg-fill-blue"
@@ -684,7 +681,7 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
               kinds.length > 1 ? { animationDelay: cycleDelay(kinds.length, turn, col) } : undefined
             }
           >
-            <ClientBox x={colX[col]} y={rowY} w={cw} h={clientH} client={client} />
+            <ClientBox x={colX[col]} y={rowY} w={cw} h={clientH[col]} client={client} />
           </g>
         )),
       )}
