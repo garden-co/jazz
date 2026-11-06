@@ -473,7 +473,7 @@ fn held(db: &Path) -> Result<bool, String> {
             std::io::Error::last_os_error()
         ));
     }
-    Ok(i32::from(lock.l_type) != libc::F_UNLCK)
+    Ok(i32::from(lock.l_type) != i32::from(libc::F_UNLCK))
 }
 
 fn copy_dir(from: &Path, to: &Path) -> Result<(), String> {
