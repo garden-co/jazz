@@ -92,7 +92,14 @@ pub enum DeploymentError {
     },
     #[error("migration graph contains a cycle; blocked schemas: {}", display_hashes(.schemas, ", "))]
     Cycle { schemas: Vec<SchemaHash> },
-    #[error("migration history has disconnected roots: {}. Add migrations connecting these histories to one common root before deploying", display_hashes(.roots, ", "))]
+    #[error(
+        "migration history has disconnected roots: {}. No migration connects these schema versions. \
+         Run `jazz-tools migrations create --name <name>` to write the missing migration and add it \
+         to migrations/index.ts, then deploy again. If one of them is \
+         a version your store already runs that migrations/snapshots has no snapshot of, check out \
+         that schema.ts and run `jazz-tools migrations create` to snapshot it first",
+        display_hashes(.roots, ", ")
+    )]
     DisconnectedGraph { roots: Vec<SchemaHash> },
     #[error("migration paths disagree: {} and {}", display_hashes(.first, " -> "), display_hashes(.second, " -> "))]
     ConflictingPaths {
