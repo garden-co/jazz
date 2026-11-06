@@ -63,6 +63,23 @@ const nativeSourceFingerprint = createHash("sha256")
   )
   .digest("hex");
 
+// Every Mach-O object in the XCFramework must load on the oldest iOS an
+// application may target. The build script pins it for both rustc and the
+// C/assembly objects cc-rs compiles (ring, SQLite); without the pin cc-rs used
+// the Xcode SDK version (rc.3 shipped 25 objects with minos 18.5).
+const buildScript = readFileSync(
+  join(root, "crates/jazz-rn/scripts/build-relay-artifacts.sh"),
+  "utf8",
+);
+const iosDeploymentTarget = /^\s*export IPHONEOS_DEPLOYMENT_TARGET=(\d+)\.(\d+)$/m.exec(
+  buildScript,
+);
+if (!iosDeploymentTarget)
+  throw new Error("build-relay-artifacts.sh must export a fixed IPHONEOS_DEPLOYMENT_TARGET");
+const iosMinimumOs = (Number(iosDeploymentTarget[1]) << 16) | (Number(iosDeploymentTarget[2]) << 8);
+const formatMachOVersion = (version) =>
+  `${version >>> 16}.${(version >>> 8) & 0xff}${version & 0xff ? `.${version & 0xff}` : ""}`;
+
 const targets = {
   android: {
     root: join(packageRoot, "android/src/main/jniLibs"),
@@ -178,13 +195,17 @@ function parseXmlPlist(xml) {
   return plist;
 }
 
-function staticLibraryArchitectures(file) {
+function staticLibraryContents(file) {
   // Static libraries are archives rather than directly executable objects, so
   // `file` alone cannot prove an npm package contains the intended ABI. Parse
   // their object headers directly; this must work while validating an iOS
   // package from the Linux assembly runner too.
   const bytes = readFileSync(file);
   const architectures = new Set();
+  // Minimum OS of each Mach-O object (LC_BUILD_VERSION or the older
+  // LC_VERSION_MIN_IPHONEOS/LC_VERSION_MIN_IPHONESIMULATOR), by archive member.
+  const machOMinimumOs = [];
+  let currentMember = file;
   const addElfArchitecture = (offset) => {
     if (
       offset + 20 > bytes.length ||
@@ -204,6 +225,22 @@ function staticLibraryArchitectures(file) {
       throw new Error(`fat Mach-O slice CPU does not match its payload in ${file}`);
     if (cpu === 0x0100000c) architectures.add("arm64");
     else if (cpu === 0x01000007) architectures.add("x86_64");
+    const header = 32;
+    const commandCount = offset + header <= end ? bytes.readUInt32LE(offset + 16) : 0;
+    let command = offset + header;
+    let minos;
+    for (let index = 0; index < commandCount; index += 1) {
+      if (command + 8 > end) throw new Error(`malformed Mach-O load commands in ${file}`);
+      const kind = bytes.readUInt32LE(command);
+      const size = bytes.readUInt32LE(command + 4);
+      if (size < 8 || command + size > end)
+        throw new Error(`malformed Mach-O load commands in ${file}`);
+      if (kind === 0x32 && size >= 16) minos = bytes.readUInt32LE(command + 12);
+      else if ((kind === 0x25 || kind === 0x2f) && size >= 16)
+        minos = bytes.readUInt32LE(command + 8);
+      command += size;
+    }
+    machOMinimumOs.push({ member: currentMember, minos });
     return true;
   };
   const addFatMachOArchitectures = (offset, end = bytes.length) => {
@@ -261,6 +298,10 @@ function staticLibraryArchitectures(file) {
       const bsdNameLength = /^#1\/(\d+)$/.exec(memberName)?.[1];
       const object = bsdNameLength === undefined ? payload : payload + Number(bsdNameLength);
       if (object > payload + size) throw new Error(`malformed BSD static-library member ${file}`);
+      currentMember =
+        bsdNameLength === undefined
+          ? memberName.replace(/\/$/, "")
+          : bytes.subarray(payload, object).toString("utf8").split("\0", 1)[0];
       addElfArchitecture(object);
       if (addMachOArchitecture(object, payload + size, expectedCpu) && expectedCpu !== undefined)
         hasExpectedMachO = true;
@@ -283,11 +324,11 @@ function staticLibraryArchitectures(file) {
   }
   if (architectures.size === 0)
     throw new Error(`could not determine static-library architecture for ${file}`);
-  return architectures;
+  return { architectures, machOMinimumOs };
 }
 
 function requireArchitectures(file, expected, label) {
-  const actual = staticLibraryArchitectures(file);
+  const actual = staticLibraryContents(file).architectures;
   for (const architecture of expected) {
     if (!actual.has(architecture))
       throw new Error(
@@ -344,6 +385,24 @@ function verifyIosSlices(expected) {
     ["arm64", "x86_64"],
     "iOS simulator relay static library",
   );
+  for (const [role, library] of libraries) {
+    const objects = staticLibraryContents(library).machOMinimumOs;
+    const unversioned = objects.filter(({ minos }) => minos === undefined);
+    if (unversioned.length > 0)
+      throw new Error(
+        `iOS ${role} relay static library has objects without a minimum iOS version: ${unversioned
+          .map(({ member }) => member)
+          .join(", ")}`,
+      );
+    const tooNew = objects.filter(({ minos }) => minos > iosMinimumOs);
+    if (tooNew.length > 0)
+      throw new Error(
+        `iOS ${role} relay static library has ${tooNew.length} objects built for a newer iOS than ${formatMachOVersion(iosMinimumOs)}: ${tooNew
+          .slice(0, 5)
+          .map(({ member, minos }) => `${member} (${formatMachOVersion(minos)})`)
+          .join(", ")}${tooNew.length > 5 ? ", ..." : ""}`,
+      );
+  }
 }
 
 function filesUnder(root, directory = root) {
