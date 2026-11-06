@@ -11,7 +11,7 @@ don't follow Classic examples (`co.map`, `CoValue`, `Group`) from memory or the 
    with your app. It works best on serverless platforms like Vercel; Cloudflare support is coming.
    You don't need to deploy to start: locally, Jazz uses a SQLite file.
    Default: Vercel for a Next.js app, your own server otherwise.
-   See /docs/setup/deployment, /docs/setup/deployment/vercel, /docs/setup/deployment/own-server
+   See /docs/setup/deployment/vercel, /docs/setup/deployment/own-server
 2. **What auth provider or library should be used?** Jazz is unopinionated here: it hooks into
    however your backend already does auth, including roles and claims from your identity provider,
    which policies can check directly.
@@ -21,6 +21,9 @@ don't follow Classic examples (`co.map`, `CoValue`, `Group`) from memory or the 
 3. **Which backend framework should be used?** Next.js, Hono, Express / Node, Bun or Effect. Each
    setup page has a tab per framework.
    Default: what the project already has; for a new app, Next.js.
+   For a separate frontend dev server (React + Vite, say), run Jazz in your backend and proxy
+   `/jazz` to it with WebSockets on (Vite: `server.proxy["/jazz"] = { target, ws: true }`), plus
+   your auth routes; see /docs/setup/deployment/own-server#a-separate-frontend-dev-server
 4. **Should Jazz only be used through traditional API routes, or would this app benefit from
    simpler state management by accessing Jazz directly from the frontend?** This choice is cheap
    to change later: a screen moves from thin to local-first with the same schema, queries and

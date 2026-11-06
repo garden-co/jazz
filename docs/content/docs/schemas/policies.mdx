@@ -37,7 +37,7 @@ We can define permissions in `permissions.ts`:
 <Callout type="info">
   Write your permissions policies in `permissions.ts` next to `schema.ts`. By default Jazz looks for both files at your project root — except in SvelteKit projects, where they should live in `src/lib/` (the standard location for shared app code).
 
-Run `pnpm dlx jazz-tools@alpha validate` before publishing to surface missing table or operation grants that will deny access. You do not need to write a schema migration to update permissions policies. Updated policies go live when your main backend restarts or deploys with them.
+Run `npx jazz-tools validate` before publishing to surface missing table or operation grants that will deny access. You do not need to write a schema migration to update permissions policies. Updated policies go live when your main backend restarts or deploys with them.
 
 </Callout>
 
@@ -103,6 +103,12 @@ When your backend's `authenticate` returns claims, `session.where(...)` lets you
 <include cwd lang="ts" meta='title="permissions.ts"'>
   ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-session-claims-ts
 </include>
+
+A claim can also be the value a row is compared with, for example rows of the user's organization:
+
+```ts
+policy.projects.allowRead.where({ orgId: session.claims["org"] });
+```
 
 ### Inherited access (`allowedTo.*`)
 
@@ -318,7 +324,7 @@ An empty query result can also mean that read permissions filtered out rows.
 
 As the app developer, check your own configuration:
 
-1. Run `pnpm dlx jazz-tools@alpha validate` and check that every required table
+1. Run `npx jazz-tools validate` and check that every required table
    and operation has an explicit grant. For updates and upserts that update an
    existing row, also check the required read permission.
 2. Check that the grants match the authenticated session and the relevant row

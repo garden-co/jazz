@@ -91,7 +91,7 @@ Some bundlers and runtimes cannot automatically resolve Jazz's Wasm and worker a
 
 An app has no cookie for your backend, so it hands Jazz its own token instead. Pass `bearer`, a
 function that returns the token your app holds for its backend (or `null` when signed out), next
-to `serverUrl`. Jazz sends it as `Authorization: Bearer …` when it signs in and on the device's sync
+to `serverUrl` in `createAccountManager` from `jazz-tools/react-native` (or `jazz-tools/expo`). Jazz sends it as `Authorization: Bearer …` when it signs in and on the device's sync
 connection, so your backend's `authenticate` reads that header instead of a cookie.
 
 After your own sign-in, call `loginWithBackend()` for the user's own account, or

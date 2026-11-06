@@ -37,7 +37,7 @@ In practice, this lets you:
 1. If this is the first migration you are creating, run:
 
    ```bash
-   pnpm dlx jazz-tools@alpha migrations create
+   npx jazz-tools migrations create
    ```
 
    This creates an initial snapshot of your schema in `migrations/snapshots/`. No migration file is created yet because there is no previous schema to diff against.
@@ -46,13 +46,13 @@ In practice, this lets you:
    place and no snapshot yet, it fails with "defineApp needs the app's migrations".
 
 2. **Edit `schema.ts`**&hairsp;—&hairsp;change the data shape as needed.
-3. **Validate locally**&hairsp;—&hairsp;optionally run `pnpm dlx jazz-tools@alpha validate` to surface
+3. **Validate locally**&hairsp;—&hairsp;optionally run `npx jazz-tools validate` to surface
    any policy diagnostics without publishing. Your main backend runs the same checks when it starts;
    `validate` is most useful as a fast check before you deploy, or in CI.
 4. **Create a migration stub for the updated schema**&hairsp;—&hairsp;run:
 
    ```bash
-   pnpm dlx jazz-tools@alpha migrations create --name <your-migration-name>
+   npx jazz-tools migrations create --name <your-migration-name>
    ```
 
    By default, Jazz diffs the latest committed snapshot in `migrations/snapshots/` against the
@@ -255,8 +255,8 @@ Original tasks ┤                             ├──→ Due dates + prioriti
 Use the hashes shown by `migrations graph`:
 
 ```bash
-pnpm dlx jazz-tools@alpha migrations create <appId> --fromHash <due-dates-hash> --name add-priority-to-due-dates
-pnpm dlx jazz-tools@alpha migrations create <appId> --fromHash <priorities-hash> --name add-due-date-to-priorities
+npx jazz-tools migrations create <appId> --fromHash <due-dates-hash> --name add-priority-to-due-dates
+npx jazz-tools migrations create <appId> --fromHash <priorities-hash> --name add-due-date-to-priorities
 ```
 
 Both commands use the current `schema.ts` as their destination. Review the generated migrations:
@@ -282,7 +282,7 @@ store; against a backend's own `sqlite()` store it fails with a 404. The same ho
 `--fromHash` and `--toHash` below when the hash isn't saved locally.
 
 ```sh
-pnpm dlx jazz-tools@alpha migrations graph <appId> --server-url <url> --admin-secret <secret>
+npx jazz-tools migrations graph <appId> --server-url <url> --admin-secret <secret>
 ```
 
 The graph includes all schemas and migrations present in the server and locally. Schemas and migrations that exist only on the server or locally are labelled accordingly.
@@ -296,8 +296,8 @@ no local snapshot, it starts from the latest bundle's schema.
 Use explicit schema hashes to choose different endpoints, for example when connecting schemas developed on separate branches:
 
 ```bash
-pnpm dlx jazz-tools@alpha migrations create <appId> --fromHash <fromHash>
-pnpm dlx jazz-tools@alpha migrations create <appId> --fromHash <fromHash> --toHash <toHash>
+npx jazz-tools migrations create <appId> --fromHash <fromHash>
+npx jazz-tools migrations create <appId> --fromHash <fromHash> --toHash <toHash>
 ```
 
 `--toHash` defaults to the current local schema. When a requested hash is not already saved locally, Jazz resolves it from the
@@ -311,12 +311,12 @@ Use `schema compile` when working on a non-TypeScript Jazz application that need
 You don't need to run it as part of the normal migration workflow: `migrations create` saves
 the required snapshots, and your main backend compiles the schema when it starts.
 
-`pnpm dlx jazz-tools@alpha schema compile` prints the compiled schema as JSON to stdout. It
+`npx jazz-tools schema compile` prints the compiled schema as JSON to stdout. It
 also saves a snapshot of the schema in the local snapshot directory.
 
 ```bash
-pnpm dlx jazz-tools@alpha schema compile
-pnpm dlx jazz-tools@alpha schema compile --schema-dir ./packages/app
+npx jazz-tools schema compile
+npx jazz-tools schema compile --schema-dir ./packages/app
 ```
 
 The command compiles the current local `schema.ts`. To create migrations against a historical

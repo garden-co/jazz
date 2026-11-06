@@ -9,11 +9,40 @@ No JWT plugin, JWKS or bearer tokens are involved.
 
 ## Server
 
-<include cwd lang="ts" meta='title="jazz.server.ts"'>
-  ../examples/auth-betterauth-chat/src/docs/recipe-server-snippet.ts#betterauth-server
-</include>
+```ts title="jazz.server.ts"
+import { betterAuth } from "better-auth";
+import { createJazz, sqlite } from "jazz-tools/backend";
+import { app } from "./schema";
+import permissions from "./permissions";
 
-Mount Jazz under `/jazz` next to Better Auth's own handler (see [Main Backend](/docs/setup/deployment/own-server)).
+export const auth = betterAuth({
+  // database: your own, or Jazz itself (see "Store Better Auth's tables in Jazz" below)
+  emailAndPassword: { enabled: true },
+});
+
+export const jazz = createJazz({
+  app,
+  permissions,
+  store: sqlite({ path: "./data/jazz" }),
+  // The Better Auth session cookie decides who the user is.
+  authenticate: async (request) => {
+    const session = await auth.api.getSession({ headers: request.headers });
+    return session ? { userId: session.user.id } : null;
+  },
+});
+```
+
+Mount Jazz under `/jazz` next to Better Auth's own handler, which serves `/api/auth/*` by default.
+In Next.js:
+
+```ts title="app/api/auth/[...all]/route.ts"
+import { toNextJsHandler } from "better-auth/next-js";
+import { auth } from "@/jazz.server";
+
+export const { GET, POST } = toNextJsHandler(auth);
+```
+
+For the `/jazz` route and other frameworks, see [Your Own Server](/docs/setup/deployment/own-server).
 Pass anything your policies need, such as the `admin` plugin's role, as `claims`.
 
 ### Act as the signed-in user
@@ -36,9 +65,11 @@ This keeps the signed-in user's policies and authorship without switching your m
 
 The plain Better Auth client is enough:
 
-<include cwd lang="ts" meta='title="src/lib/auth-client.ts"'>
-  ../examples/auth-betterauth-chat/src/lib/auth-client.ts#betterauth-client
-</include>
+```ts title="src/lib/auth-client.ts"
+import { createAuthClient } from "better-auth/react";
+
+export const authClient = createAuthClient();
+```
 
 ## Connecting to Jazz
 
@@ -175,7 +206,7 @@ export default {
 After adding both files, validate the merged schema and permissions:
 
 ```bash
-pnpm dlx jazz-tools@alpha validate
+npx jazz-tools validate
 ```
 
 ### Use Jazz as the database
@@ -184,7 +215,7 @@ Create Jazz in your backend ([Main Backend](/docs/setup/deployment/own-server)),
 
 ```ts title="auth.ts"
 import { betterAuth } from "better-auth";
-import { createJazz, remote } from "jazz-tools/backend";
+import { createJazz, sqlite } from "jazz-tools/backend";
 import { jazzAdapter } from "jazz-tools/better-auth-adapter";
 import { app } from "./schema";
 import permissions from "./permissions";
@@ -193,11 +224,7 @@ import { authOptions } from "./auth-options";
 export const jazz = createJazz({
   app,
   permissions,
-  store: remote({
-    appId: process.env.JAZZ_APP_ID!,
-    url: process.env.JAZZ_SERVER_URL!,
-    secret: process.env.JAZZ_ADMIN_SECRET!, // the app's admin secret
-  }),
+  store: sqlite({ path: "./data/jazz" }), // or vercel() / remote(), as for any backend
   authenticate: async (request) => {
     const session = await auth.api.getSession({ headers: request.headers });
     return session ? { userId: session.user.id } : null;

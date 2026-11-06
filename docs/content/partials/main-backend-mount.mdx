@@ -75,6 +75,18 @@
     const db = await jazz.forReqUser(request);
     ```
 
+    Express 5 turns an error thrown in a route into a 500 HTML page. Map signed-out requests to a
+    401 with an error handler after your routes:
+
+    ```ts
+    import { isRequestAuthenticationError } from "jazz-tools/backend";
+
+    api.use((err: unknown, req: express.Request, res: express.Response, next: express.NextFunction) => {
+      if (isRequestAuthenticationError(err)) return res.sendStatus(401);
+      next(err);
+    });
+    ```
+
     On Fastify, mount Jazz in an `onRequest` hook, not a route: a route rejects sign-in's empty JSON
     body with a 400 before your handler runs. For URLs under `jazz.basePath`, call `reply.hijack()`,
     then `jazz.nodeHandler(request.raw, reply.raw)`.

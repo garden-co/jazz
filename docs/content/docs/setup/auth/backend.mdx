@@ -107,6 +107,12 @@ const jazz = await createJazzClient({});
 supabase.auth.onAuthStateChange(() => void jazz.reauthenticate());
 ```
 
+## In React Native
+
+An app has no cookie for your backend, so it passes its own token as `bearer`, which Jazz sends
+as `Authorization: Bearer …`; your `authenticate` reads that header. See
+[Sign in through your backend](/docs/setup/react-native#sign-in-through-your-backend).
+
 ## The session
 
 Once signed in, every context has a read-only session. `session.user` is the account and
@@ -158,8 +164,13 @@ export const app = s.defineApp(
   { todos: s.table({ title: s.string(), owner_id: s.uuid() }, {}) },
   { migrations },
 );
+```
 
-export const permissions = s.definePermissions(app, ({ policy, session }) => {
+```ts title="permissions.ts"
+import { schema as s } from "jazz-tools";
+import { app } from "./schema";
+
+export default s.definePermissions(app, ({ policy, session }) => {
   policy.todos.allowRead.where({ owner_id: session.user });
   policy.todos.allowInsert.where({ owner_id: session.user });
 });

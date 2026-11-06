@@ -43,7 +43,8 @@ mount it under `/jazz`:
 
 ```ts title="jazz.server.ts"
 import { createJazz, sqlite } from "jazz-tools/backend";
-import { app, permissions } from "./schema";
+import { app } from "./schema";
+import permissions from "./permissions";
 
 export const jazz = createJazz({
   app,

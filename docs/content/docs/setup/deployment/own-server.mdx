@@ -82,6 +82,28 @@ is no way to erase them yet. Expect blob storage to only grow.
 
 <include>../../../partials/main-backend-mount.mdx</include>
 
+### A separate frontend dev server
+
+When the frontend runs on its own dev server (Vite, say) and the backend on another port, proxy
+`/jazz` and your auth routes to the backend so the browser stays on one origin, with WebSockets
+on:
+
+```ts title="vite.config.ts"
+import { defineConfig } from "vite";
+
+export default defineConfig({
+  server: {
+    proxy: {
+      "/jazz": { target: "http://localhost:3000", ws: true },
+      "/api/auth": { target: "http://localhost:3000" },
+    },
+  },
+});
+```
+
+In production, serve the built frontend from the same origin as the backend (or put both behind
+one proxy that passes WebSocket upgrades through).
+
 ## Deploy it
 
 That's the whole deployment:

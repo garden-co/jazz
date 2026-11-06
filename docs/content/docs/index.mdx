@@ -15,9 +15,14 @@ export const app = s.defineApp(
   { todos: s.table({ title: s.string(), done: s.boolean() }, {}) },
   { migrations },
 );
+```
+
+```ts title="permissions.ts"
+import { schema as s } from "jazz-tools";
+import { app } from "./schema";
 
 // Each user sees and edits only the todos they created
-export const permissions = s.definePermissions(app, ({ policy, session }) => {
+export default s.definePermissions(app, ({ policy, session }) => {
   const isCreator = { $createdBy: session.user };
   policy.todos.allowRead.where(isCreator);
   policy.todos.allowInsert.where(isCreator);
@@ -31,7 +36,8 @@ Jazz runs inside your backend: no separate database server and no deploy step. T
 ```ts title="server.ts"
 import { Hono } from "hono";
 import { createJazz, sqlite } from "jazz-tools/backend";
-import { app, permissions } from "./schema";
+import { app } from "./schema";
+import permissions from "./permissions";
 
 const jazz = createJazz({
   app,
