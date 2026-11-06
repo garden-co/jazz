@@ -255,51 +255,54 @@ export type DeploymentScenario = "vercel" | "cloudflare" | "aws" | "server";
 
 type Platform = {
   label: string;
-  /** Your backend's runtime, after "your backend". */
-  runtime: string;
+  /** Your backend's runtime, under "Your Backend". */
+  runtime: string[];
   /** The account the dashed boundary names; none for your own machine. */
   account?: string;
   /** Above the shard row. */
   scaling: string;
-  shard: { title: string; detail?: string; count: number };
-  store: { title: string };
+  /** Each shard: the platform's box title lines, and the Jazz box inside. */
+  shard: { title: string[]; inner: string[]; count: number };
+  store: string;
 };
+
+const LARGE_VALUES = ["jazz large value chunks", "(blobs, streams, JSON, richtext)"];
 
 const deploymentScenarios: Record<DeploymentScenario, Platform> = {
   vercel: {
     label:
-      "On Vercel, everything stays in your Vercel account: Jazz shards live in Vercel Sandboxes that start on demand and hibernate when idle, large values in Vercel Blob, and the Jazz core runs inside your backend's functions behind your own auth. Web pages, web and native apps, backend workers and agents live-sync with it over /jazz, while traditional clients call your API routes.",
-    runtime: "vercel functions",
-    account: "your vercel account",
+      "On Vercel, everything stays in your Vercel account: jazz SQLite shards in Vercel Sandboxes, auto-scaling and hibernating, jazz large value chunks in Vercel Blobs, and the jazz core in your backend's Vercel functions, next to your normal API routes and behind your auth. Web pages, web apps, native apps, backend workers and agent VMs get efficient realtime sync through the mounted /jazz sync endpoint; traditional clients make manual HTTP requests and streaming.",
+    runtime: ["(Vercel functions)"],
+    account: "Your vercel account",
     scaling: "auto-scaling and hibernating",
-    shard: { title: "sandbox", count: 4 },
-    store: { title: "vercel blob" },
+    shard: { title: ["Vercel", "Sandbox"], inner: ["jazz SQLite", "shard"], count: 4 },
+    store: "Vercel Blobs",
   },
   cloudflare: {
     label:
-      "On Cloudflare, coming soon: everything stays in your Cloudflare account. Jazz shards live in Durable Objects with their own SQLite, hibernating when idle, large values in R2, and the Jazz core runs inside your Worker behind your own auth. Clients live-sync with it over /jazz, while traditional clients call your API routes.",
-    runtime: "cloudflare workers",
-    account: "your cloudflare account",
+      "On Cloudflare, coming soon: everything stays in your Cloudflare account: jazz shards in Durable Objects with their own SQLite, auto-scaling and hibernating, jazz large value chunks in R2, and the jazz core in your backend's Workers, next to your normal API routes and behind your auth. Clients get efficient realtime sync through the mounted /jazz sync endpoint; traditional clients make manual HTTP requests and streaming.",
+    runtime: ["(CF Workers)"],
+    account: "Your Cloudflare account",
     scaling: "auto-scaling and hibernating",
-    shard: { title: "durable obj", count: 5 },
-    store: { title: "r2" },
+    shard: { title: ["CF DO", "SQLite"], inner: ["jazz", "shard"], count: 7 },
+    store: "R2",
   },
   aws: {
     label:
-      "On AWS, everything stays in your AWS account. Jazz shards run on long-running EC2 instances that you scale yourself, large values in S3, and the Jazz core runs inside your Lambda backend behind your own auth. Clients live-sync with it over /jazz, while traditional clients call your API routes.",
-    runtime: "aws lambda",
-    account: "your aws account",
+      "On AWS, everything stays in your AWS account: jazz SQLite shards on EC2 instances, manually scaled and long running, jazz large value chunks in S3, and the jazz core in your backend on AWS Lambda, next to your normal API routes and behind your auth. Clients get efficient realtime sync through the mounted /jazz sync endpoint; traditional clients make manual HTTP requests and streaming.",
+    runtime: ["(AWS Lambda)"],
+    account: "Your AWS account",
     scaling: "manually scaled, long running",
-    shard: { title: "ec2 instance", detail: "sqlite on its disk", count: 2 },
-    store: { title: "s3" },
+    shard: { title: ["EC2 instance"], inner: ["jazz SQLite", "shard"], count: 2 },
+    store: "S3",
   },
   server: {
     label:
-      "On your own server or laptop: one backend process holds Jazz's SQLite and its large values in local files, with the Jazz core behind your own auth. Web pages, web and native apps, backend workers and agents live-sync with it over /jazz, while traditional clients call your API routes.",
-    runtime: "your server or laptop",
+      "On a local machine or your own server: your backend holds local SQLite and local files with the jazz large value chunks, and the jazz core next to your normal API routes, behind your auth. Clients get efficient realtime sync through the mounted /jazz sync endpoint; traditional clients make manual HTTP requests and streaming.",
+    runtime: ["(local machine", "or your server)"],
     scaling: "",
-    shard: { title: "sqlite()", count: 1 },
-    store: { title: "files()" },
+    shard: { title: [], inner: [], count: 0 },
+    store: "local files",
   },
 };
 
@@ -310,84 +313,201 @@ export const deploymentScenarioNames: Record<DeploymentScenario, string> = {
   server: "Your own server",
 };
 
-const clientBoxes: { title: string; lines: (string | { text: string; tone: Tone })[] }[] = [
-  { title: "traditional", lines: ["your own requests", "and state"] },
-  { title: "web page", lines: [{ text: "thin client", tone: "blue" }] },
+/** Lines of text from `y`, `step` apart, in one style. */
+function Lines({
+  x,
+  y,
+  lines,
+  className,
+  step = 18,
+  anchor,
+}: {
+  x: number;
+  y: number;
+  lines: string[];
+  className: string;
+  step?: number;
+  anchor?: "middle";
+}) {
+  return (
+    <text x={x} y={y} textAnchor={anchor} className={className}>
+      {lines.map((line, index) => (
+        <tspan key={line} x={x} dy={index === 0 ? 0 : step}>
+          {line}
+        </tspan>
+      ))}
+    </text>
+  );
+}
+
+/** A platform box (ink, titled) holding Jazz's part (a blue box) inside. */
+function Nested({
+  x,
+  y,
+  w,
+  h,
+  title,
+  inner,
+  innerY,
+}: {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  title: string[];
+  inner: string[];
+  innerY: number;
+}) {
+  const pad = w < 90 ? 6 : 10;
+  return (
+    <g>
+      <Frame x={x} y={y} w={w} h={h} tone="ink" />
+      <Lines x={x + pad} y={y + 22} lines={title} className="dg-title dg-fill-ink" />
+      <Frame x={x + pad} y={innerY} w={w - 2 * pad} h={y + h - pad - innerY} tone="blue" />
+      <Lines
+        x={x + pad + 8}
+        y={innerY + 19}
+        lines={inner}
+        step={16}
+        className="dg-detail dg-fill-blue"
+      />
+    </g>
+  );
+}
+
+type Client = { name: string[]; inner: string[]; tone: Tone };
+
+const clients: Client[] = [
   {
-    title: "web app",
-    lines: [{ text: "local-first", tone: "blue" }, "sqlite in indexeddb"],
+    name: ["traditional", "client"],
+    inner: ["your own", "request &", "state", "handling"],
+    tone: "ink",
   },
-  { title: "native app", lines: [{ text: "local-first", tone: "blue" }, "native sqlite"] },
-  { title: "backend worker", lines: [{ text: "thin client", tone: "blue" }] },
-  { title: "agent vm", lines: [{ text: "thin client", tone: "blue" }] },
+  { name: ["web page"], inner: ["thin jazz client"], tone: "blue" },
+  {
+    name: ["web app"],
+    inner: ["local-first", "jazz client", "(SQLite on", "indexeddb)"],
+    tone: "blue",
+  },
+  {
+    name: ["native app"],
+    inner: ["local-first", "jazz client", "(native SQLite)"],
+    tone: "blue",
+  },
+  { name: ["backend worker"], inner: ["thin jazz client"], tone: "blue" },
+  { name: ["agent VM"], inner: ["thin jazz client"], tone: "blue" },
 ];
+
+/** A client: its Jazz client (or your own code) in a box on top, its name below. */
+function ClientBox({
+  x,
+  y,
+  w,
+  h,
+  client,
+}: {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  client: Client;
+}) {
+  const innerH = 14 + client.inner.length * 16;
+  // The box fits its contents, as in the print sketches.
+  const boxH = Math.min(h, 10 + innerH + 18 + client.name.length * 20);
+  return (
+    <g>
+      <Frame x={x} y={y} w={w} h={boxH} tone="ink" />
+      <Frame x={x + 8} y={y + 10} w={w - 16} h={innerH} tone={client.tone} />
+      <Lines
+        x={x + 16}
+        y={y + 29}
+        lines={client.inner}
+        step={16}
+        className={`dg-detail dg-fill-${client.tone}`}
+      />
+      <Lines
+        x={x + w / 2}
+        y={y + 10 + innerH + 30}
+        lines={client.name}
+        anchor="middle"
+        className="dg-title dg-fill-ink"
+      />
+    </g>
+  );
+}
 
 /**
  * Fig. 1: where Jazz runs. Your platform account on top (shards and the
- * large-value store), your backend with the Jazz core and its /jazz
- * mount behind your auth in the middle, every kind of client at the bottom.
+ * large-value store), your backend with the jazz core and its /jazz mount
+ * behind your auth in the middle, every kind of client at the bottom.
  * In this figure blue marks Jazz's own parts and mint your auth.
  */
 export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }) {
   const { label, runtime, account, scaling, shard, store } = deploymentScenarios[scenario];
   const local = !account;
-  // Columns: shards and the store on top, the backend below them.
-  const rowY = 40;
-  const rowH = 82;
+  const rowY = 36;
+  const rowH = 112;
+  const innerY = rowY + 50;
   const shardArea = { x: 20, w: 560 };
   const storeBox = { x: 600, w: 340 };
-  const backend = { x: 20, y: local ? 12 : 162, w: 880 };
-  const backendBottom = 296;
+  const backend = { x: 20, y: local ? 12 : 188, w: 880 };
+  const backendBottom = 332;
   const authH = 26;
-  const coordinator = { x: 300, y: 178, w: 584, h: 50 };
-  const mount = { x: 300, y: 236, w: 584, h: 44 };
-  const api = { x: 36, y: 236, w: 248, h: 44 };
+  const core = { x: 300, y: 204, w: 584, h: 50 };
+  const mount = { x: 300, y: 262, w: 584, h: 46 };
+  const api = { x: 36, y: 262, w: 248, h: 46 };
   const syncY = backendBottom + authH;
-  const clientY = 452;
-  const clientH = 96;
+  const busY = 470;
+  const clientY = 484;
+  const clientH = 148;
   const cw = 148;
   const cx = (index: number) => 8 + index * 158 + cw / 2;
   const gap = 10;
-  const sw = (shardArea.w - gap * (shard.count - 1)) / shard.count;
+  const sw = shard.count ? (shardArea.w - gap * (shard.count - 1)) / shard.count : 0;
   const shardXs = Array.from({ length: shard.count }, (_, i) => shardArea.x + i * (sw + gap));
-  // Local: one sqlite box and the files box side by side inside the backend.
   const localBoxes = [
     { x: 300, w: 288 },
     { x: 596, w: 288 },
   ];
-  // Where each synced client's wire lands on the /jazz mount, and the height
-  // its elbow turns at, chosen so the wires never cross.
+  // Where each synced client's wire lands under the /jazz mount, and the
+  // height its elbow turns at, chosen so the wires never cross.
   const syncTargets = [
-    { tx: 380, turn: 372 },
-    { tx: 490, turn: 384 },
-    { tx: 600, turn: 396 },
+    { tx: 380, turn: 396 },
+    { tx: 490, turn: 408 },
+    { tx: 600, turn: 420 },
     { tx: cx(4), turn: 0 },
-    { tx: 840, turn: 372 },
+    { tx: 840, turn: 396 },
   ];
   return (
-    <Diagram viewBox="0 0 956 600" label={label}>
-      {account ? <rect x={6} y={6} width={944} height={352} rx={2} className="dg-region" /> : null}
+    <Diagram viewBox="0 0 956 640" label={label}>
+      {account ? <rect x={6} y={6} width={944} height={386} rx={2} className="dg-region" /> : null}
       <Frame x={backend.x} y={backend.y} w={backend.w} h={backendBottom - backend.y} tone="ink" />
+      <Lines
+        x={backend.x + 16}
+        y={backend.y + 26}
+        lines={["Your Backend", ...runtime]}
+        step={20}
+        className="dg-title dg-fill-ink"
+      />
       {account ? (
         <g>
-          <Label x={shardArea.x} y={28} tone="blue">
+          <Label x={shardArea.x} y={26} tone="blue">
             {scaling}
           </Label>
-          <Label x={938} y={28} tone="muted" anchor="end">
+          <Label x={938} y={26} tone="ink" anchor="end">
             {account}
           </Label>
           {shardXs.map((x) => (
-            <Box
+            <Nested
               key={x}
               x={x}
               y={rowY}
               w={sw}
               h={rowH}
               title={shard.title}
-              lines={[
-                { text: "jazz shard", tone: "blue" },
-                ...(shard.detail ? [shard.detail] : []),
-              ]}
+              inner={shard.inner}
+              innerY={innerY}
             />
           ))}
           {shardXs.map((x, index) => (
@@ -395,44 +515,42 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
               key={`w${x}`}
               points={[
                 [x + sw / 2, rowY + rowH],
-                [x + sw / 2, 142],
-                [520, 142],
-                [520, coordinator.y],
+                [x + sw / 2, 168],
+                [520, 168],
+                [520, core.y],
               ]}
               start
               end={index === 0}
               tone="blue"
             />
           ))}
-          <Box
+          <Nested
             x={storeBox.x}
             y={rowY}
             w={storeBox.w}
             h={rowH}
-            title={store.title}
-            lines={[
-              { text: "jazz large values", tone: "blue" },
-              "blobs · streams · json · rich text",
-            ]}
+            title={[store]}
+            inner={LARGE_VALUES}
+            innerY={innerY}
           />
           <Wire
             points={[
               [storeBox.x + 200, rowY + rowH],
-              [storeBox.x + 200, coordinator.y],
+              [storeBox.x + 200, core.y],
             ]}
             tone="blue"
             dashed
             start
           />
-          {/* Coming soon: clients read large values from the store directly. */}
+          {/* Clients read large values from the store directly. */}
           <Wire
             points={[
               [storeBox.x + storeBox.w - 16, rowY + rowH],
-              [storeBox.x + storeBox.w - 16, 430],
-              [cx(1) + 40, 430],
+              [storeBox.x + storeBox.w - 16, busY],
+              [cx(1) + 40, busY],
               [cx(1) + 40, clientY],
             ]}
-            tone="periwinkle"
+            tone="blue"
             dashed
             start
           />
@@ -440,62 +558,55 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
             <Wire
               key={`d${index}`}
               points={[
-                [cx(index) + 40, 430],
+                [cx(index) + 40, busY],
                 [cx(index) + 40, clientY],
               ]}
-              tone="periwinkle"
+              tone="blue"
               dashed
             />
           ))}
         </g>
-      ) : null}
-      <text x={backend.x + 16} y={backend.y + 26} className="dg-title dg-fill-ink">
-        your backend
-        <tspan x={backend.x + 16} dy={18} className="dg-detail">
-          {runtime}
-        </tspan>
-      </text>
-      {local ? (
+      ) : (
         <g>
-          {localBoxes.map((box, index) => (
-            <Box
-              key={box.x}
-              x={box.x}
-              y={rowY}
-              w={box.w}
-              h={rowH}
-              title={index === 0 ? "local sqlite" : "local files"}
-              lines={
-                index === 0
-                  ? ["a directory on its disk"]
-                  : [
-                      { text: "jazz large values", tone: "blue" },
-                      "blobs · streams · json · rich text",
-                    ]
-              }
-            />
-          ))}
+          <Box
+            x={localBoxes[0].x}
+            y={rowY}
+            w={localBoxes[0].w}
+            h={rowH}
+            tone="blue"
+            title="local SQLite"
+            center
+          />
+          <Box
+            x={localBoxes[1].x}
+            y={rowY}
+            w={localBoxes[1].w}
+            h={rowH}
+            tone="blue"
+            title="local files"
+            lines={LARGE_VALUES.map((text) => ({ text, tone: "blue" as const }))}
+          />
           {localBoxes.map((box) => (
             <Wire
               key={`l${box.x}`}
               points={[
                 [box.x + box.w / 2, rowY + rowH],
-                [box.x + box.w / 2, coordinator.y],
+                [box.x + box.w / 2, core.y],
               ]}
               tone="blue"
               start
             />
           ))}
         </g>
-      ) : null}
-      <Box {...coordinator} tone="blue" title="jazz core" center />
+      )}
+      <Box {...core} tone="blue" title="jazz core" center />
       <Box {...mount} tone="blue" title="mounted /jazz sync endpoint" center />
-      <Box {...api} title="your api routes" center />
+      <Box {...api} title="normal API route" center />
       <Wire
         points={[
-          [api.x + api.w / 2, api.y],
-          [api.x + api.w / 2, coordinator.y + coordinator.h / 2],
-          [coordinator.x, coordinator.y + coordinator.h / 2],
+          [api.x + api.w - 40, api.y],
+          [api.x + api.w - 40, core.y + core.h / 2],
+          [core.x, core.y + core.h / 2],
         ]}
         tone="blue"
         start
@@ -513,9 +624,13 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
         ]}
         start
       />
-      <Label x={cx(0) + 10} y={404}>
-        requests · streams
-      </Label>
+      <Lines
+        x={cx(0) + 10}
+        y={414}
+        lines={["manual http", "requests &", "streaming"]}
+        step={16}
+        className="dg-label dg-fill-ink"
+      />
       {syncTargets.map(({ tx, turn }, index) => {
         const x = cx(index + 1);
         const points: Point[] =
@@ -532,28 +647,23 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
               ];
         return <Wire key={x} points={points} tone="blue" start />;
       })}
-      <Label x={cx(1) + 10} y={400} tone="blue">
-        efficient
-      </Label>
-      <Label x={cx(1) + 10} y={414} tone="blue">
-        realtime sync
-      </Label>
-      {clientBoxes.map((client, index) => (
-        <Box
-          key={client.title}
+      <Lines
+        x={cx(1) + 10}
+        y={436}
+        lines={["efficient", "realtime sync"]}
+        step={16}
+        className="dg-label dg-fill-blue"
+      />
+      {clients.map((client, index) => (
+        <ClientBox
+          key={client.name.join(" ")}
           x={8 + index * 158}
           y={clientY}
           w={cw}
           h={clientH}
-          title={client.title}
-          lines={client.lines}
+          client={client}
         />
       ))}
-      {account ? (
-        <Label x={8} y={590} tone="periwinkle">
-          dashed: clients read large values straight from the store
-        </Label>
-      ) : null}
     </Diagram>
   );
 }
