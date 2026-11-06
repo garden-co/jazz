@@ -308,6 +308,23 @@ describe("thin client", () => {
     await db.waitForSync({ timeoutMs: 1_000 });
   }, 60_000);
 
+  it("waits for sync past a rejected write the app already had", async () => {
+    const server = await startServer();
+    const db = await thinDb(server);
+    const other = await thinDb(server);
+    const theirs = await other
+      .insert(app.notes, { text: "theirs", done: false })
+      .wait({ tier: "global" });
+    // Only the row's creator may update it: the server rejects this.
+    await expect(
+      db.update(app.notes, theirs.id, { done: true }).wait({ tier: "global" }),
+    ).rejects.toThrow();
+    await expect(db.waitForSync({ timeoutMs: 5_000 })).resolves.toBeUndefined();
+
+    await db.insert(app.notes, { text: "mine", done: false }).wait({ tier: "global" });
+    await expect(db.waitForSync({ timeoutMs: 5_000 })).resolves.toBeUndefined();
+  }, 60_000);
+
   it("fails a transaction its connection took with it, and nothing else", async () => {
     const server = await startServer();
     const db = await thinDb(server);

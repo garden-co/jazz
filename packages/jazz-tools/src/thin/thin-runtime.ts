@@ -171,6 +171,8 @@ type Write = {
   observed: boolean;
   /** The server confirmed it. */
   committed: boolean;
+  /** It settled: committed, rejected, or given up with its fate unknown. */
+  answered: boolean;
 };
 
 /** Committed writes kept for later waits on them. */
@@ -369,8 +371,9 @@ export class ThinRuntime implements Runtime {
       if (!oneShot.sent) continue;
       this.oneShots.delete(id);
       if (error) oneShot.reject(error);
-      // An explicit disconnect leaves reads waiting, but a sent write is never
-      // sent again: it may have committed, so it ends with its fate unknown.
+      // A sent write is never sent again after an explicit disconnect: it may
+      // have committed, so it ends with its fate unknown. (A sent read is
+      // dropped unanswered, as before.)
       else if (oneShot.write) oneShot.reject(new ThinConnectionLostError());
     }
   }
@@ -969,7 +972,11 @@ export class ThinRuntime implements Runtime {
     _tier?: string,
     options: { throughOutage?: boolean; signal?: AbortSignal } = {},
   ): Promise<void> {
-    const dones = [...this.writes.values()].map((write) => write.done);
+    // Only writes still waiting for their answer, like a local-first client:
+    // a rejection the app already had doesn't fail every later wait.
+    const dones = [...this.writes.values()]
+      .filter((write) => !write.answered)
+      .map((write) => write.done);
     // Waiting for sync fails on the server's rejection. A write whose
     // connection ended unanswered is not rejected, and the shutdown drain
     // only waits for every write to be answered.
@@ -1003,6 +1010,7 @@ export class ThinRuntime implements Runtime {
     const write: Write = {
       observed: false,
       committed: false,
+      answered: false,
       done: Promise.resolve(),
     };
     const { answer, oneShot } = this.requestWith(op);
@@ -1050,6 +1058,7 @@ export class ThinRuntime implements Runtime {
     void write.done
       .catch(() => undefined)
       .then(() => {
+        write.answered = true;
         this.unanswered--;
         this.notifySyncStatus();
       });
