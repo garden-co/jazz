@@ -1,11 +1,13 @@
 import { acceptedDeviceTransaction } from "./accepted-membership.js";
 import type { AccountStore } from "../accounts/persistence.js";
 import type { WasmSchema } from "../drivers/types.js";
+import { encryptedSchemas } from "./encrypted-schema.js";
 import { accountRegistry, exportLocalFirstSecret } from "../accounts/enrollment.js";
 import { parseAuthSecret } from "../runtime/auth-secret-codec.js";
 import { openRecoveryMaterial, protectRecoveryMaterial } from "./recovery-protection.js";
 import { E2eeRecoveryError, RecoveryCandidateError } from "./recovery-error.js";
 import { recoveryMaterialRootId } from "./recovery-format.js";
+import { E2eeDataError } from "./data-error.js";
 import type { AccountHandle } from "../accounts/state.js";
 import {
   beginDbTransactionAfter,
@@ -26,8 +28,10 @@ import { deviceRequestApp, deviceRequestSchema } from "./device-requests.js";
 import type { DeviceTables } from "./device-requests.js";
 import { encodeEnvelope } from "./envelope.js";
 import type { CryptoMechanism } from "./envelope.js";
-import { DeviceKeyLifetime, localDevice } from "./local-device.js";
+import { DeviceKeyLifetime, localDevice, retainedLocalDevice } from "./local-device.js";
 import type { LocalDeviceProvider } from "./local-device.js";
+import { E2eeHistoryUnavailable } from "./history-reader.js";
+import { RetainedContentCache } from "./retained-content-cache.js";
 import { firstAccountEpoch } from "./first-epoch.js";
 import { DeviceApproval } from "./device-approval.js";
 import {
@@ -40,11 +44,11 @@ import type { GroupRecoveryPath } from "./group-lifecycle.js";
 import { groupSchema, type GroupMember, type GroupTables } from "./groups.js";
 import { Spaces } from "./space-lifecycle.js";
 import type { SpaceDataPreparation, SpaceRecoveryPath } from "./space-lifecycle.js";
-import { spaceSchema, type SpaceTables } from "./spaces.js";
-import type { DeviceSigner, JazzCrypto, KeyEnvelope } from "./types.js";
+import { spaceSchema, type SpaceTables, type SpaceRoot } from "./spaces.js";
+import type { CellCipher, DeviceSigner, JazzCrypto, KeyEnvelope } from "./types.js";
 
 export type E2eeConfig = {
-  /** Explicit application including the lifecycle managed tables. */
+  /** Application returned by defineApp; encrypted apps include managed bindings automatically. */
   app?: DeviceTables | { readonly wasmSchema: WasmSchema };
   /** Dedicated local key storage. Do not reuse the account-selection store value. */
   store: AccountStore;
@@ -61,6 +65,36 @@ export type DeviceInfo = Readonly<{
 }>;
 
 const contexts = new WeakMap<Db, E2ee>();
+const startupPreparers = new WeakMap<Db, () => Promise<void>>();
+
+/** @internal Encrypted application factories finish readiness before exposing the Db. */
+export async function prepareE2eeStartup(db: Db): Promise<void> {
+  const schema = configuredSchemas.get(db);
+  if (schema && encryptedSchemas.has(schema)) await startupPreparers.get(db)!();
+}
+const cellCrypto = new WeakMap<Db, () => Promise<{ cipher: CellCipher; application: string }>>();
+
+/** @internal Common cell framing owns identity selection, not the crypto adapter. */
+export async function cellCryptoForDb(
+  db: Db,
+): Promise<{ cipher: CellCipher; application: string }> {
+  e2eeForDb(db);
+  return cellCrypto.get(db)!();
+}
+const configuredSchemas = new WeakMap<Db, WasmSchema>();
+/** @internal The configured application can bind a cold transaction's schema. */
+export function e2eeSchemaForDb(db: Db): WasmSchema | undefined {
+  return configuredSchemas.get(db);
+}
+type BorrowSpaceKeys = <T, Init>(
+  scope: TableProxy<T, Init>,
+  identifier: string,
+  use: Parameters<Spaces["withKeys"]>[2],
+  includeHistory?: boolean,
+  contentRead?: boolean,
+) => ReturnType<Spaces["withKeys"]>;
+const currentSpaceKeys = new WeakMap<Db, BorrowSpaceKeys>();
+const retainedCaches = new WeakMap<Db, () => Promise<RetainedContentCache | undefined>>();
 
 const initialSpacePreparers = new WeakMap<Db, Spaces["prepareInitial"]>();
 const initialSpaceAuthorityPreparers = new WeakMap<Db, Spaces["prepareInitialAuthority"]>();
@@ -73,6 +107,103 @@ const initialSpacePrerequisites = new WeakMap<
   Db,
   (recipientIds?: readonly string[]) => Promise<void>
 >();
+
+/** @internal Cell operations borrow a verified key; never exported by the public API. */
+export async function withSpaceKeys<T, Init>(
+  db: Db,
+  scope: TableProxy<T, Init>,
+  identifier: string,
+  use: Parameters<Spaces["withKeys"]>[2],
+  includeHistory = false,
+): Promise<void> {
+  return borrowSpaceKeys(db, scope, identifier, use, includeHistory, false);
+}
+
+/** @internal Only decryption may use a prior online-validated private key offline. */
+export async function withContentSpaceKeys<T, Init>(
+  db: Db,
+  scope: TableProxy<T, Init>,
+  identifier: string,
+  use: Parameters<Spaces["withKeys"]>[2],
+  includeHistory = true,
+): Promise<void> {
+  return borrowSpaceKeys(db, scope, identifier, use, includeHistory, true);
+}
+
+async function borrowSpaceKeys<T, Init>(
+  db: Db,
+  scope: TableProxy<T, Init>,
+  identifier: string,
+  use: Parameters<Spaces["withKeys"]>[2],
+  includeHistory: boolean,
+  contentRead: boolean,
+): Promise<void> {
+  e2eeForDb(db);
+  let callbackFailure: { error: unknown } | undefined;
+  const operation: typeof use = async (...args) => {
+    try {
+      await use(...args);
+    } catch (error) {
+      callbackFailure = { error };
+      throw error;
+    }
+  };
+  const state = await currentSpaceKeys.get(db)!(
+    scope,
+    identifier,
+    operation,
+    includeHistory,
+    contentRead,
+  ).catch((error: unknown) => {
+    // Key adapters can include secret material in their exceptions.
+    // The operation owns its own crypto diagnostics and ordinary runtime errors.
+    if (error instanceof E2eeDataError || (callbackFailure && callbackFailure.error === error))
+      throw error;
+    throw new E2eeDataError("key-unavailable");
+  });
+  if (state.state !== "ready") {
+    throw new E2eeDataError(
+      state.state === "refused"
+        ? "key-not-shared"
+        : state.state === "maintenance-required"
+          ? "maintenance-required"
+          : "key-unavailable",
+    );
+  }
+}
+
+/** @internal Cached catalogue IDs bind content only, never structural freshness. */
+export async function contentIdentitiesForDb(
+  db: Db,
+  table: TableProxy<unknown, unknown>,
+  column: string,
+  root: Readonly<SpaceRoot>,
+): Promise<{ table: string; column: string }> {
+  e2eeForDb(db);
+  const cache = await retainedCaches.get(db)!();
+  if (await db.e2eeIsExplicitlyOffline()) {
+    try {
+      if (!cache) throw new E2eeHistoryUnavailable("Missing private content cache");
+      return cache.identities(root, table._table, column);
+    } catch {
+      throw new E2eeDataError("key-unavailable");
+    }
+  }
+  const tableId = await db.tableIdentity(table);
+  const columnId = await db.columnIdentity(table, column);
+  if (!tableId || !columnId) throw new E2eeDataError("key-unavailable");
+  cache?.rememberIdentities(root, table._table, column, tableId, columnId);
+  return { table: tableId, column: columnId };
+}
+
+/** @internal Finish initial-space maintenance only after the actual Global wait. */
+export async function retainCommittedSpaceContent(
+  db: Db,
+  roots: readonly { root: Readonly<SpaceRoot>; scopeTable: string }[],
+): Promise<void> {
+  const e2ee = e2eeForDb(db);
+  for (const { root, scopeTable } of roots) await e2ee.retainCommittedContent(root, scopeTable);
+}
 
 /** @internal Cold recipient discovery precedes the immutable transaction snapshot. */
 export function beginInitialSpaceTransaction(
@@ -88,6 +219,23 @@ export function beginInitialSpaceTransaction(
     },
     "accepted-evidence",
   );
+  registerInitialSpaceAuthority(db, transaction, recipients);
+  return transaction;
+}
+
+/** @internal Register before the automatic compiler stages its first scope row. */
+export function registerInitialSpaceAuthority(
+  db: Db,
+  transaction: Transaction<"serializable">,
+  recipientIds?: readonly string[],
+): void {
+  const recipients = recipientIds?.slice();
+  const previous = initialAuthorityMemos.get(transaction);
+  if (previous) {
+    if (previous.recipients !== JSON.stringify(recipients ?? null))
+      throw new Error("Initial space recipients changed after authority registration");
+    return;
+  }
   const memo: InitialAuthorityMemo = new WeakMap();
   initialAuthorityMemos.set(transaction, {
     recipients: JSON.stringify(recipients ?? null),
@@ -113,7 +261,6 @@ export function beginInitialSpaceTransaction(
   });
   // The registered queue owns this error and poisons commit if the prefix fails.
   preparing.catch(() => {});
-  return transaction;
 }
 
 /** @internal Not exported from the package API; used by transaction preparation. */
@@ -129,29 +276,10 @@ export async function prepareInitialSpaceForTransaction<T, Init>(
   const ownScopeInsert = transactionHasRegisteredInsert(tx, scope, identifier);
   try {
     await prepareDbTransaction(tx, async (prepared) => {
-      const authority = initialAuthorityMemos.get(tx);
-      if (!authority) throw new Error("Initial space authority was not registered before staging");
-      if (authority.recipients !== JSON.stringify(recipients ?? null))
-        throw new Error("Initial space recipients changed after authority registration");
-      const memo = authority.reads;
-      await prepareInitialSpaceRows(
+      await prepareRegisteredInitialSpaceRows(
         db,
-        {
-          ...prepared,
-          async readAccepted<T>(query: QueryBuilder<T>): Promise<AcceptedRows<T>> {
-            prepared.assertActive();
-            const result = memo.get(query._schema)?.get(query._build());
-            // A no-write preparation can still request a real same-cut scope
-            // predicate. After any staged operation the existing core guard
-            // rejects an uncaptured read; never synthesize a cached answer.
-            if (!result) return prepared.readAccepted(query);
-            // These are exact responses from this transaction's authority
-            // prefix, not local-cache evidence or a later independent cut.
-            const reply = await Promise.resolve(structuredClone(result) as AcceptedRows<T>);
-            prepared.assertActive();
-            return reply;
-          },
-        },
+        tx,
+        prepared,
         scope,
         identifier,
         prepareData,
@@ -167,6 +295,48 @@ export async function prepareInitialSpaceForTransaction<T, Init>(
     }
     throw error;
   }
+}
+
+/** @internal Reuse the same exact pre-write predicates inside registered preparation. */
+export async function prepareRegisteredInitialSpaceRows<T, Init>(
+  db: Db,
+  transaction: Transaction<"serializable">,
+  prepared: PreparedTransactionScope,
+  scope: TableProxy<T, Init>,
+  identifier: string,
+  prepareData: SpaceDataPreparation,
+  recipients?: readonly string[],
+  ownScopeInsert = false,
+): Promise<void> {
+  const authority = initialAuthorityMemos.get(transaction);
+  if (!authority) throw new Error("Initial space authority was not registered before staging");
+  if (authority.recipients !== JSON.stringify(recipients ?? null))
+    throw new Error("Initial space recipients changed after authority registration");
+  const memo = authority.reads;
+  await prepareInitialSpaceRows(
+    db,
+    {
+      ...prepared,
+      async readAccepted<T>(query: QueryBuilder<T>): Promise<AcceptedRows<T>> {
+        prepared.assertActive();
+        const result = memo.get(query._schema)?.get(query._build());
+        // A no-write preparation can still request a real same-cut scope
+        // predicate. After any staged operation the existing core guard
+        // rejects an uncaptured read; never synthesize a cached answer.
+        if (!result) return prepared.readAccepted(query);
+        // These are exact responses from this transaction's authority
+        // prefix, not local-cache evidence or a later independent cut.
+        const reply = await Promise.resolve(structuredClone(result) as AcceptedRows<T>);
+        prepared.assertActive();
+        return reply;
+      },
+    },
+    scope,
+    identifier,
+    prepareData,
+    recipients,
+    ownScopeInsert,
+  );
 }
 
 /** @internal Reuses an already-prepared transaction; never queues behind itself. */
@@ -226,7 +396,10 @@ export class E2ee {
   private spaceLifecycle: Spaces | undefined;
   private closed = false;
   private readonly deviceKeys = new DeviceKeyLifetime();
-  private preparation: Promise<void> | undefined;
+  private preparation: Promise<boolean> | undefined;
+  private locallyPrepared = false;
+  private contentCache: RetainedContentCache | undefined;
+  private currentDeviceId: string | undefined;
   private readonly scope: string;
   private readonly app: DeviceTables;
   readonly groups = {
@@ -235,7 +408,9 @@ export class E2ee {
     remove: (groupId: string, member: GroupMember): { wait(): Promise<void> } => {
       const completion = (async () => {
         await this.prepare();
-        return this.requireGroups().remove(groupId, member);
+        const result = await this.requireGroups().remove(groupId, member);
+        await this.contentCache?.clearContent();
+        return result;
       })();
       completion.catch(() => {});
       return { wait: () => completion };
@@ -267,7 +442,10 @@ export class E2ee {
     ): { wait(): Promise<void> } => {
       const completion = (async () => {
         await this.prepare();
-        return this.requireSpaces().revoke(scope, identifier, recipientId);
+        const result = await this.requireSpaces().revoke(scope, identifier, recipientId);
+        if (recipientId === this.account.id)
+          await this.contentCache?.denySpace(scope._table, identifier);
+        return result;
       })();
       completion.catch(() => {});
       return { wait: () => completion };
@@ -286,12 +464,48 @@ export class E2ee {
     },
   };
 
+  /**
+   * Scope readiness concerns usable content keys. Explicitly offline, ready
+   * means only retained, previously validated content can be decrypted; it
+   * does not certify current membership, absent revocation or write authority.
+   * Group membership readiness always requires online accepted validation.
+   */
   async explain<T, Init>(
     target: { groupId: string } | { scope: TableProxy<T, Init>; identifier: string },
   ) {
+    if (await this.db.e2eeIsExplicitlyOffline()) {
+      if (!("scope" in target))
+        throw new E2eeHistoryUnavailable("Offline content does not certify group membership");
+      const cache = await this.prepareRetainedContent();
+      const available = await cache.withKeys(target.scope, target.identifier, async () => {});
+      return available
+        ? { state: "ready" as const }
+        : { state: "unavailable" as const, reason: "retained-content-unavailable" };
+    }
     await this.prepare();
-    if ("scope" in target) return this.requireSpaces().explain(target.scope, target.identifier);
+    if ("scope" in target) {
+      const state = await this.requireSpaces().explain(target.scope, target.identifier);
+      if (state.state === "ready" && this.contentCache)
+        return currentSpaceKeys.get(this.db)!(
+          target.scope,
+          target.identifier,
+          async () => {},
+          true,
+        );
+      if (state.reason === "device-not-active") await this.contentCache?.denyDevice();
+      else if (state.state === "refused" || state.state === "maintenance-required")
+        await this.contentCache?.denySpace(target.scope._table, target.identifier);
+      return state;
+    }
     return this.requireGroups().explain(target.groupId);
+  }
+
+  /** @internal Only invoked after the compiler's actual Global acceptance floor. */
+  async retainCommittedContent(root: Readonly<SpaceRoot>, scopeTable: string): Promise<void> {
+    const schema = configuredSchemas.get(this.db);
+    if (!schema || !this.contentCache) return;
+    const scope = new TypedTableQueryBuilder(scopeTable, schema);
+    await this.explain({ scope, identifier: root.identifier });
   }
 
   private requireSpaces(): Spaces {
@@ -514,9 +728,25 @@ export class E2ee {
   readonly devices = {
     list: async (): Promise<DeviceInfo[]> => {
       await this.prepare();
-      const { approved, verified, revoked } = await this.approval!.deviceStates();
-      const rows = await this.db.all(this.app.__e2ee_device_requests, { tier: "remote" });
+      const requests = this.app.__e2ee_device_requests.where({
+        "$createdBy.account": this.account.id,
+      });
+      const {
+        state: { approved, verified, revoked },
+        rows,
+      } = {
+        state: await this.approval!.deviceStates(),
+        rows: await this.db.all(requests, { tier: "remote" }),
+      };
       this.assertOpen();
+      if (this.currentDeviceId && revoked.has(this.currentDeviceId))
+        await this.contentCache?.denyDevice();
+      else if (
+        this.currentDeviceId &&
+        approved.has(this.currentDeviceId) &&
+        verified.has(this.currentDeviceId)
+      )
+        await this.contentCache?.retainDevice();
       return rows.map((row) => ({
         id: row.id,
         state: revoked.has(row.id) ? "revoked" : approved.has(row.id) ? "active" : "pending",
@@ -538,6 +768,7 @@ export class E2ee {
       const completion = (async () => {
         await this.prepare();
         await this.approval!.revoke(deviceId);
+        if (deviceId === this.currentDeviceId) await this.contentCache?.denyDevice();
       })();
       completion.catch(() => {});
       return { wait: () => completion };
@@ -581,7 +812,64 @@ export class E2ee {
       }
     }
     this.app = tables as DeviceTables;
+    configuredSchemas.set(db, this.app.__e2ee_device_requests._schema);
     this.scope = JSON.stringify([accountRegistry(account), env, account.id]);
+    startupPreparers.set(db, async () => {
+      if (await this.prepareRequest(true)) return;
+      await this.prepare();
+    });
+    db.onE2eeReconnect(() => {
+      this.preparation = undefined;
+    });
+    let cellCipher: Promise<CellCipher> | undefined;
+    cellCrypto.set(db, async () => {
+      this.assertOpen();
+      cellCipher ??= this.config.crypto?.cellCipher
+        ? Promise.resolve(this.config.crypto.cellCipher)
+        : import("./browser.js").then((module) => module.createBrowserCellCipher());
+      const cipher = await cellCipher;
+      this.assertOpen();
+      return { cipher, application: JSON.stringify([accountRegistry(this.account), this.env]) };
+    });
+    retainedCaches.set(db, async () => {
+      if (await db.e2eeIsExplicitlyOffline()) return this.prepareRetainedContent();
+      await this.prepare();
+      return this.contentCache;
+    });
+    currentSpaceKeys.set(db, async (scope, identifier, use, includeHistory, contentRead) => {
+      if (await db.e2eeIsExplicitlyOffline()) {
+        if (!contentRead)
+          throw new E2eeHistoryUnavailable(
+            "Retained content does not authorise an encrypted write",
+          );
+        const cache = await this.prepareRetainedContent();
+        const available = await cache.withKeys(scope, identifier, use);
+        return available
+          ? { state: "ready" }
+          : { state: "unavailable", reason: "retained-content-unavailable" };
+      }
+      await this.prepare();
+      const cache = this.contentCache;
+      const revision = await cache?.revision();
+      const state = await this.requireSpaces().withKeys(
+        scope,
+        identifier,
+        async (secret, root) => {
+          await use(secret, root);
+          if (cache && revision !== undefined) {
+            // Space key access already completed its accepted device/recipient
+            // predicate checks and Global wait. This marker is content-only.
+            await cache.retainDevice();
+            await cache.retainSpace(scope._table, root, secret, revision);
+          }
+        },
+        includeHistory,
+      );
+      if (state.reason === "device-not-active") await cache?.denyDevice();
+      else if (state.state === "refused" || state.state === "maintenance-required")
+        await cache?.denySpace(scope._table, identifier);
+      return state;
+    });
     initialSpacePrerequisites.set(db, async (recipientIds) => {
       await this.prepare();
       await this.requireSpaces().warmInitialRecipients(recipientIds);
@@ -608,6 +896,15 @@ export class E2ee {
 
   private async prepare(): Promise<void> {
     this.assertOpen();
+    if (this.approval?.isKnownRevoked()) {
+      await this.contentCache?.denyDevice();
+      throw new E2eeHistoryUnavailable("E2EE device is revoked");
+    }
+    if (await this.db.e2eeIsExplicitlyOffline()) {
+      throw new E2eeHistoryUnavailable(
+        "Online authority is required; private offline keys are content-only",
+      );
+    }
     await (this.preparation ??= this.prepareRequest().catch((error) => {
       this.preparation = undefined;
       throw error;
@@ -615,7 +912,20 @@ export class E2ee {
     this.assertOpen();
   }
 
-  private async prepareRequest(): Promise<void> {
+  private async prepareRetainedContent(): Promise<RetainedContentCache> {
+    this.assertOpen();
+    if ((!this.locallyPrepared || !this.contentCache) && !(await this.prepareRequest(true)))
+      throw new E2eeHistoryUnavailable("Missing retained E2EE content readiness");
+    if (this.approval?.isKnownRevoked()) {
+      await this.contentCache?.denyDevice();
+      throw new E2eeHistoryUnavailable("Retained content owner is revoked");
+    }
+    if (!this.contentCache || !(await this.contentCache.available()))
+      throw new E2eeHistoryUnavailable("Missing bound retained E2EE content");
+    return this.contentCache;
+  }
+
+  private async prepareRequest(retainedOnly = false): Promise<boolean> {
     const envelope =
       this.config.crypto?.keyEnvelope ??
       (await (await import("./browser.js")).createBrowserKeyEnvelope());
@@ -624,7 +934,7 @@ export class E2ee {
       this.config.crypto?.deviceSigner ??
       (await (await import("./browser.js")).createBrowserDeviceSigner());
     encodeEnvelope(signer.mechanism, new Uint8Array());
-    const device = await localDevice(
+    const device = await (retainedOnly ? retainedLocalDevice : localDevice)(
       this.config.store,
       this.scope,
       envelope,
@@ -632,12 +942,14 @@ export class E2ee {
       this.deviceKeys,
       () => this.assertOpen(),
     );
+    if (!device) return false;
+    this.currentDeviceId = device.id;
     try {
       this.assertOpen();
       const requests = this.app.__e2ee_device_requests;
       // Once online preparation starts, complete it or reject so it can retry.
       // A later disconnect must not cache skipped enrolment as successful.
-      {
+      if (!retainedOnly) {
         const query = requests.where({ id: device.id });
         let row = await this.db.one(query, { tier: "remote" });
         if (!row) {
@@ -707,100 +1019,128 @@ export class E2ee {
           this.app,
         );
       }
-      // Reconnection enrols once without adding another responder or key owner.
-      if (this.approval) return;
-      this.assertOpen();
-      const retainedKey = this.deviceKeys.own(device.privateKey.slice());
-      let retainedSigningKey: Uint8Array | undefined;
-      try {
-        const signingKey = this.deviceKeys.own(device.signing.privateKey.slice());
-        retainedSigningKey = signingKey;
-        const provider: LocalDeviceProvider = {
-          id: device.id,
-          load: async () => {
-            this.assertOpen();
-            const privateKey = this.deviceKeys.own(retainedKey.slice());
-            try {
-              return {
-                ...device,
-                privateKey,
-                signing: {
-                  ...device.signing,
-                  privateKey: this.deviceKeys.own(signingKey.slice()),
-                },
-              };
-            } catch (error) {
-              this.deviceKeys.release(privateKey);
-              throw error;
-            }
-          },
-          release: (loaded) => {
-            this.deviceKeys.release(loaded.privateKey);
-            this.deviceKeys.release(loaded.signing.privateKey);
-          },
-        };
-        this.approval = new DeviceApproval(
-          this.db,
-          this.account.id,
-          this.scope,
-          envelope,
-          signer,
-          () => this.assertOpen(),
-          this.app,
-          provider,
-        );
-        if ("__e2ee_groups" in this.app && "__e2ee_group_deliveries" in this.app) {
-          this.groupLifecycle = new Groups(
+      // Reconnection reuses its existing responder and key owner.
+      if (!this.approval) {
+        this.assertOpen();
+        const retainedKey = this.deviceKeys.own(device.privateKey.slice());
+        let retainedSigningKey: Uint8Array | undefined;
+        try {
+          const signingKey = this.deviceKeys.own(device.signing.privateKey.slice());
+          retainedSigningKey = signingKey;
+          const provider: LocalDeviceProvider = {
+            id: device.id,
+            load: async () => {
+              this.assertOpen();
+              const privateKey = this.deviceKeys.own(retainedKey.slice());
+              try {
+                return {
+                  ...device,
+                  privateKey,
+                  signing: {
+                    ...device.signing,
+                    privateKey: this.deviceKeys.own(signingKey.slice()),
+                  },
+                };
+              } catch (error) {
+                this.deviceKeys.release(privateKey);
+                throw error;
+              }
+            },
+            release: (loaded) => {
+              this.deviceKeys.release(loaded.privateKey);
+              this.deviceKeys.release(loaded.signing.privateKey);
+            },
+          };
+          this.approval = new DeviceApproval(
             this.db,
             this.account.id,
             this.scope,
-            this.app as DeviceTables & GroupTables,
             envelope,
             signer,
             () => this.assertOpen(),
-            (accountId) => JSON.stringify([accountRegistry(this.account), this.env, accountId]),
-            {
-              id: provider.id,
-              store: this.config.store,
-              isKnownRevoked: () => this.approval!.isKnownRevoked(),
-              load: provider.load,
-              release: provider.release,
-              keyLifetime: this.deviceKeys,
-              states: (transaction) => this.approval!.deviceStates(transaction),
-            },
+            this.app,
+            provider,
           );
+          if ("__e2ee_groups" in this.app && "__e2ee_group_deliveries" in this.app) {
+            this.groupLifecycle = new Groups(
+              this.db,
+              this.account.id,
+              this.scope,
+              this.app as DeviceTables & GroupTables,
+              envelope,
+              signer,
+              () => this.assertOpen(),
+              (accountId) => JSON.stringify([accountRegistry(this.account), this.env, accountId]),
+              {
+                id: provider.id,
+                store: this.config.store,
+                isKnownRevoked: () => this.approval!.isKnownRevoked(),
+                load: provider.load,
+                release: provider.release,
+                keyLifetime: this.deviceKeys,
+                states: (transaction) => this.approval!.deviceStates(transaction),
+              },
+            );
+          }
+          if (
+            "__e2ee_spaces" in this.app &&
+            "__e2ee_space_grants" in this.app &&
+            "__e2ee_space_successors" in this.app &&
+            "__e2ee_space_deliveries" in this.app
+          ) {
+            this.spaceLifecycle = new Spaces(
+              this.db,
+              this.account.id,
+              this.app as DeviceTables & SpaceTables,
+              envelope,
+              signer,
+              (accountId) => JSON.stringify([accountRegistry(this.account), this.env, accountId]),
+              () => this.assertOpen(),
+              {
+                id: provider.id,
+                store: this.config.store,
+                isKnownRevoked: () => this.approval!.isKnownRevoked(),
+                load: provider.load,
+                release: provider.release,
+                keyLifetime: this.deviceKeys,
+                states: (transaction) => this.approval!.deviceStates(transaction),
+              },
+              this.groupLifecycle,
+            );
+            const schema = configuredSchemas.get(this.db)!;
+            if (encryptedSchemas.has(schema))
+              this.contentCache = new RetainedContentCache(
+                this.db,
+                this.config.store,
+                this.scope,
+                schema,
+                this.app as DeviceTables & SpaceTables,
+                provider,
+                this.deviceKeys,
+                envelope,
+                signer,
+                () => this.assertOpen(),
+              );
+          }
+        } catch (error) {
+          this.deviceKeys.release(retainedKey);
+          if (retainedSigningKey) this.deviceKeys.release(retainedSigningKey);
+          throw error;
         }
-        if (
-          "__e2ee_spaces" in this.app &&
-          "__e2ee_space_grants" in this.app &&
-          "__e2ee_space_successors" in this.app &&
-          "__e2ee_space_deliveries" in this.app
-        ) {
-          this.spaceLifecycle = new Spaces(
-            this.db,
-            this.account.id,
-            this.app as DeviceTables & SpaceTables,
-            envelope,
-            signer,
-            (accountId) => JSON.stringify([accountRegistry(this.account), this.env, accountId]),
-            () => this.assertOpen(),
-            {
-              id: provider.id,
-              store: this.config.store,
-              isKnownRevoked: () => this.approval!.isKnownRevoked(),
-              load: provider.load,
-              release: provider.release,
-              keyLifetime: this.deviceKeys,
-              states: (transaction) => this.approval!.deviceStates(transaction),
-            },
-            this.groupLifecycle,
-          );
-        }
-      } catch (error) {
-        this.deviceKeys.release(retainedKey);
-        if (retainedSigningKey) this.deviceKeys.release(retainedSigningKey);
-        throw error;
       }
+      if (retainedOnly) {
+        this.locallyPrepared = !!this.contentCache && (await this.contentCache.available());
+        return this.locallyPrepared;
+      }
+      if (this.contentCache) {
+        const state = await this.approval.deviceStates();
+        if (state.revoked.has(device.id)) await this.contentCache.denyDevice();
+        else if (state.active.has(device.id) && state.verified.has(device.id))
+          await this.contentCache.retainDevice();
+      }
+      this.locallyPrepared = true;
+      this.approval.startResponder();
+      return true;
     } finally {
       this.deviceKeys.release(device.privateKey);
       this.deviceKeys.release(device.signing.privateKey);
