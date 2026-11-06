@@ -148,8 +148,9 @@ const testJazz: TestJazz = await startTestJazz({ app, permissions });
   which stands in for their browser's session cookie, and your permissions see `userId` and
   `claims` as the signed-in user. Pass its `serverUrl` to `createJazzClient` and call
   `loginWithBackend()`, as below.
-- **Native clients** that send `Authorization: Bearer` use `testJazz.bearer(userId, claims)` as
-  their token against `testJazz.url`.
+- **Clients that send `Authorization: Bearer`** (React Native, Node, a CLI) use
+  `testJazz.bearer(userId, claims)` as their token against `testJazz.url`, for example
+  `bearer: () => token` on `createJazzClient`.
 - `testJazz.jazz` is the app's `Jazz` handle, for `forReqUser`, `db` and the rest of your backend
   code.
 - `await testJazz.stop()` stops everything it started.

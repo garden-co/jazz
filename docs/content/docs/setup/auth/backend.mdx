@@ -113,6 +113,32 @@ An app has no cookie for your backend, so it passes its own token as `bearer`, w
 as `Authorization: Bearer …`; your `authenticate` reads that header. See
 [Sign in through your backend](/docs/setup/react-native#sign-in-through-your-backend).
 
+## In Node, Deno, Bun or a CLI
+
+A host without cookies passes your app's own token for your backend as `bearer`, a function that
+returns the token or `null` while no one is signed in. Jazz calls it each time it needs the token
+and sends it as `Authorization: Bearer …` when signing in or linking through your backend, when it
+checks who is signed in, and on its sync connections, thin and local-first. Your `authenticate`
+reads that header.
+
+```ts title="cli.ts"
+import { createJazzClient } from "jazz-tools/client";
+import { loadSavedToken } from "./token-store";
+
+const jazz = await createJazzClient({
+  serverUrl: "https://my-app.com/jazz",
+  bearer: () => loadSavedToken(), // your app's session token, or null when signed out
+});
+```
+
+After your own sign-in or sign-out, call `jazz.reauthenticate()` so Jazz asks your backend again.
+Sync connections carry the token only to your app's own origin.
+
+`bearer` is refused in a browser page or worker, where your backend's cookie names the user; leave
+it out there. It is also refused on React Native, which takes it on `createAccountManager` instead
+([see above](#in-react-native)), and on a client with `serverUrl: null`, which never talks to a backend. Without
+`bearer`, `loginWithBackend` on a host without cookies fails with an error saying so.
+
 ## The session
 
 Once signed in, every context has a read-only session. `session.user` is the account and
