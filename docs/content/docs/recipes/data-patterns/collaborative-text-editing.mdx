@@ -79,9 +79,14 @@ function NoteBody({ note }: { note: { id: string; body: string } }) {
   // Writes not yet seen back from the subscription, oldest first.
   const pending = useRef<string[]>([]);
   useEffect(() => {
+    // Our latest write coming back: caught up.
+    if (note.body === pending.current.at(-1)) {
+      pending.current = [];
+      return;
+    }
     const at = pending.current.indexOf(note.body);
     if (at >= 0) {
-      // One of our own writes coming back: nothing new to show.
+      // An earlier one of our own writes: nothing new to show.
       pending.current.splice(0, at + 1);
       return;
     }
@@ -105,7 +110,7 @@ function NoteBody({ note }: { note: { id: string; body: string } }) {
 }
 ```
 
-Showing a merged value this way moves the cursor to the end; an editor that applies it as a
+Render it with `key={note.id}`, so that its state starts over for each note. Showing a merged value this way moves the cursor to the end; an editor that applies it as a
 change keeps it in place (see below). An editor that mounted before the row loaded must not name
 `""`: it would add the whole text again.
 
