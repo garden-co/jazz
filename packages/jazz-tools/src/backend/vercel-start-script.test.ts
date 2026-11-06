@@ -11,7 +11,54 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { startScript } from "./vercel-store.js";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
+import { DOWNLOAD_CORE, startScript } from "./vercel-store.js";
+
+// The downloader the start script runs, in this machine's Node: a 4xx is
+// permanent, a 5xx or a network error transient.
+describe("vercel() core download", () => {
+  it("tells permanent failures from transient ones", async () => {
+    const server = createServer((request, response) => {
+      response.statusCode = request.url === "/gone.tgz" ? 404 : 503;
+      response.end();
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const dir = mkdtempSync(join(tmpdir(), "jazz-download-"));
+    const download = async (url: string) => {
+      const kindFile = join(dir, `kind-${Math.random()}`);
+      const child = spawn(process.execPath, ["-e", DOWNLOAD_CORE, url, kindFile]);
+      let stderr = "";
+      child.stderr.on("data", (chunk) => (stderr += chunk));
+      const code = await new Promise((resolve) => child.on("exit", resolve));
+      return { code, kind: readFileSync(kindFile, "utf8"), stderr: stderr.trim() };
+    };
+    try {
+      expect(await download(`${base}/gone.tgz`)).toEqual({
+        code: 1,
+        kind: "permanent",
+        stderr: "HTTP 404",
+      });
+      expect(await download(`${base}/busy.tgz`)).toEqual({
+        code: 1,
+        kind: "transient",
+        stderr: "HTTP 503",
+      });
+      const closed = createServer();
+      await new Promise<void>((resolve) => closed.listen(0, "127.0.0.1", resolve));
+      const port = (closed.address() as AddressInfo).port;
+      await new Promise((resolve) => closed.close(resolve));
+      const refused = await download(`http://127.0.0.1:${port}/core.tgz`);
+      expect(refused).toMatchObject({ code: 1, kind: "transient" });
+      // The cause, not just "fetch failed".
+      expect(refused.stderr).toContain("ECONNREFUSED");
+    } finally {
+      server.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 // The start script as it runs in a Sandbox, against a fake `node` on PATH:
 // it fails every download and, given a core addon, logs the core's version,
@@ -29,7 +76,8 @@ describe.skipIf(process.platform !== "linux")("vercel() start script", () => {
       join(root, "fakebin/node"),
       [
         "#!/bin/bash",
-        'if [[ "$2" == *fetch* ]]; then exit 1; fi',
+        // A "flaky" URL fails like a network error; any other like a 404.
+        'if [[ "$2" == *fetch* ]]; then [[ "$3" == *flaky* ]] && printf transient > "$4"; exit 1; fi',
         "trap 'exit 0' TERM",
         'version=$(basename "$3" .node); version=${version#jazz-napi-}',
         `echo "$version $4 \${S3_BUCKET_NAME:-} $5" >> ${join(root, "servers.log")}`,
@@ -218,25 +266,37 @@ describe.skipIf(process.platform !== "linux")("vercel() start script", () => {
     expect(read("data/version")).toBe("1.0.0");
   });
 
-  it("says why a core can't be downloaded, for the function to report", async () => {
+  it("says why a core can't be downloaded, and whether retrying can help", async () => {
     expect(await start("2.0.0", "http://127.0.0.1:9/missing.tgz")).toBe(1);
-    const error = read("tmp/jazz.error")!;
-    expect(error).toContain(
-      "could not download the core for 2.0.0 from http://127.0.0.1:9/missing.tgz",
+    const error = read("tmp/jazz-2.0.0.error")!;
+    expect(error).toMatch(
+      /^permanent: could not download the core for 2\.0\.0 from http:\/\/127\.0\.0\.1:9\/missing\.tgz/,
     );
     expect(error).toContain("coreTarballUrl");
     expect(existsSync(join(root, "data/bin/jazz-napi-2.0.0.node.tmp"))).toBe(false);
+    expect(await start("2.0.0", "http://127.0.0.1:9/flaky.tgz")).toBe(1);
+    expect(read("tmp/jazz-2.0.0.error")).toMatch(/^transient: could not download/);
     // A later start that succeeds clears it.
     installFake("2.0.0");
     expect(await start("2.0.0")).toBe("running");
-    expect(read("tmp/jazz.error")).toBeUndefined();
+    expect(read("tmp/jazz-2.0.0.error")).toBeUndefined();
+  });
+
+  it("keeps each version's start failure to itself", async () => {
+    expect(await start("2.0.0", "http://127.0.0.1:9/missing.tgz")).toBe(1);
+    installFake("1.0.0");
+    expect(await start("1.0.0")).toBe("running");
+    expect(read("tmp/jazz-2.0.0.error")).toMatch(/^permanent:/);
+    expect(read("tmp/jazz-1.0.0.error")).toBeUndefined();
   });
 
   it("says why it won't run an older core than the Drive's", async () => {
     installFake("1.0.0");
     writeFileSync(join(root, "data/version"), "9.0.0\n");
     expect(await start("1.0.0")).toBe(1);
-    expect(read("tmp/jazz.error")).toMatch(/9\.0\.0 owns this Drive but its core is missing/);
+    expect(read("tmp/jazz-1.0.0.error")).toMatch(
+      /^permanent: 9\.0\.0 owns this Drive but its core is missing/,
+    );
   });
 
   it("ignores a stale pid file that names another process", async () => {

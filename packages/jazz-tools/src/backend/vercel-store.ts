@@ -72,9 +72,10 @@ export interface VercelStoreOptions {
   /**
    * Where the core comes from: an npm tarball of
    * `@garden-co/jazz-napi-linux-x64-gnu`, the Node addon the Sandbox runs
-   * it with. Defaults to the registry's tarball of the installed version;
-   * set it for a version that isn't on npm. A download that fails is
-   * reported by the function, and the Sandbox is stopped.
+   * it with. Defaults to the registry's tarball of the installed version
+   * (for a release candidate, the tarball attached to its GitHub release);
+   * set it for a build that is neither. A download that fails is reported
+   * by the function.
    */
   coreTarballUrl?: string;
   /** Vercel credentials for scripts outside a Vercel function. Defaults to the function's OIDC token. */
@@ -222,6 +223,22 @@ export function newerVersion(a: string, b: string): boolean {
   return false;
 }
 
+/**
+ * Writes the tarball at argv[1] to stdout (the Sandbox image has node but
+ * no curl). On failure it says why on stderr, and writes to the file at
+ * argv[2] whether retrying can help: a 4xx is permanent; a network error or
+ * a 5xx is transient.
+ *
+ * @internal
+ */
+export const DOWNLOAD_CORE =
+  "const [url, kindFile] = process.argv.slice(1);" +
+  " const fail = (kind, why) => { require('node:fs').writeFileSync(kindFile, kind); console.error(why); process.exit(1); };" +
+  " fetch(url).then(async (r) => {" +
+  " if (!r.ok) return fail(r.status >= 400 && r.status < 500 ? 'permanent' : 'transient', 'HTTP ' + r.status);" +
+  " process.stdout.write(Buffer.from(await r.arrayBuffer()));" +
+  " }).catch((e) => fail('transient', e.message + (e.cause ? ': ' + (e.cause.code || e.cause.message) : '')));";
+
 /** The addon's file in its npm tarball. */
 const CORE_ADDON = "package/jazz-napi.linux-x64-gnu.node";
 
@@ -265,33 +282,36 @@ run=${q(`${root}/tmp`)}
 # Starts are serialized; the server itself runs without the lock.
 exec 9>"$run/jazz.lock"
 flock 9
-# A start that can't succeed says why in $run/jazz.error, which the
-# function reads and reports instead of waiting for a server that won't come.
-rm -f "$run/jazz.error"
-fail() {
-  echo "jazz: $1" >&2
-  printf '%s\n' "$1" > "$run/jazz.error"
-  exit 1
-}
-trap 'fail "the start script failed at line $LINENO"' ERR
 # Semver order: GNU sort -V with "~" sorts a prerelease before its release.
 newer() {
   [ "$1" != "$2" ] && [ "$(printf '%s\\n%s\\n' "\${1/-/\\~}" "\${2/-/\\~}" | sort -V | tail -1)" = "\${1/-/\\~}" ]
 }
 version=${q(version)}
 trust=${q(trustLine)}
+# A start that gives up says why in this version's error file, which the
+# function reads and reports instead of waiting for a server that won't
+# come: "permanent: …" when retrying can't help (the function then stops
+# the Sandbox), "transient: …" when a later start may succeed.
+error_file="$run/jazz-$version.error"
+rm -f "$error_file"
+fail() {
+  echo "jazz: $2" >&2
+  printf '%s: %s\\n' "$1" "$2" > "$error_file"
+  exit 1
+}
+trap 'fail transient "the start script failed at line $LINENO"' ERR
 # The first start pins the workload this core trusts; a start for another
 # workload never retargets it.
 pinned=$(cat "$data/trust" 2>/dev/null || true)
 if [ -n "$pinned" ] && [ "$pinned" != "$trust" ]; then
-  fail "this core trusts $pinned; not retargeting it to $trust (to re-pin after a rename, delete $data/trust)"
+  fail permanent "this core trusts $pinned; not retargeting it to $trust (to re-pin after a rename, delete $data/trust)"
 fi
 [ -n "$pinned" ] || { printf '%s\\n' "$trust" > "$data/trust.tmp" && mv "$data/trust.tmp" "$data/trust"; }
 highest=$(cat "$data/version" 2>/dev/null || true)
 if [ -n "$highest" ] && newer "$highest" "$version"; then
   # A newer deployment owns this Drive: run its core, never ours.
   if [ ! -s "$data/bin/jazz-napi-$highest.node" ]; then
-    fail "$highest owns this Drive but its core is missing; not starting $version"
+    fail permanent "$highest owns this Drive but its core is missing; not starting $version"
   fi
   version=$highest
 fi
@@ -299,14 +319,15 @@ addon=$data/bin/jazz-napi-$version.node
 # Fetch before stopping anything, so a failed download leaves the old core up.
 if [ ! -s "$addon" ]; then
   mkdir -p "$data/bin"
-  # The Sandbox image has node but no curl.
   url=${q(tarballUrl)}
-  if ! node -e 'fetch(process.argv[1]).then(async (r) => { if (!r.ok) throw new Error("HTTP " + r.status); process.stdout.write(Buffer.from(await r.arrayBuffer())); }).catch((e) => { console.error(e.message); process.exit(1); })' "$url" 2>"$run/download.err" \\
+  rm -f "$run/download.kind"
+  if ! node -e ${q(DOWNLOAD_CORE)} "$url" "$run/download.kind" 2>"$run/download.err" \\
     | tar xz -O ${CORE_ADDON} 2>>"$run/download.err" > "$addon.tmp"; then
     rm -f "$addon.tmp"
-    fail "could not download the core for $version from $url ($(head -c 300 "$run/download.err" | tr '\n' ' ')); set vercel({ coreTarballUrl }) if this version isn't on npm"
+    # No kind: the download arrived but isn't the core's tarball.
+    fail "$(cat "$run/download.kind" 2>/dev/null || echo permanent)" "could not download the core for $version from $url ($(head -c 300 "$run/download.err" | tr '\\n' ' ')); set vercel({ coreTarballUrl }) to a tarball of @garden-co/jazz-napi-linux-x64-gnu for this version"
   fi
-  [ -s "$addon.tmp" ] || fail "the core download for $version from $url was empty"
+  [ -s "$addon.tmp" ] || fail permanent "the core download for $version from $url was empty"
   mv "$addon.tmp" "$addon"
 fi
 # The pid file may be stale (a resumed snapshot): trust it only if that
@@ -543,6 +564,19 @@ export function defaultCoreName(project: string, env: Record<string, string | un
 }
 
 /**
+ * The core addon's tarball for a jazz-tools version: npm's for a published
+ * version, the GitHub release asset for a release candidate (rc builds are
+ * attached to their release and never reach npm).
+ */
+export function defaultCoreTarballUrl(version: string): string {
+  const name = "jazz-napi-linux-x64-gnu";
+  if (/^2\.0\.0-alpha\.[0-9]+-rc\.[0-9]+$/.test(version)) {
+    return `https://github.com/garden-co/jazz/releases/download/v${version}/garden-co-${name}-${version}.tgz`;
+  }
+  return `https://registry.npmjs.org/@garden-co/${name}/-/${name}-${version}.tgz`;
+}
+
+/**
  * The installed jazz-tools version. Read through `require` of the package's
  * own export, not `readFile(new URL(…, import.meta.url))`: webpack (Next 15)
  * rewrites `new URL(…, import.meta.url)` into an asset URL that `fs` refuses,
@@ -571,9 +605,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
       throw new Error("vercel() needs the @vercel/sandbox package: npm install @vercel/sandbox");
     })) as SandboxSdk);
   const version = params.version ?? installedVersion();
-  const tarballUrl =
-    options.coreTarballUrl ??
-    `https://registry.npmjs.org/@garden-co/jazz-napi-linux-x64-gnu/-/jazz-napi-linux-x64-gnu-${version}.tgz`;
+  const tarballUrl = options.coreTarballUrl ?? defaultCoreTarballUrl(version);
   const project = options.credentials?.projectId ?? env.VERCEL_PROJECT_ID;
   if (!options.name && !project) {
     throw new Error(
@@ -612,17 +644,31 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   };
 
   /**
-   * Why the last start in `sbx` gave up, if it did (see `fail` in the start
-   * script). Such a start never comes up on its own, so the wake stops the
-   * Sandbox rather than keep it awake retrying.
+   * Why this version's last start in `sbx` gave up, if it did (see `fail` in
+   * the start script). A permanent cause never comes up on its own; a
+   * transient one may on the next start.
    */
-  const startError = async (sbx: SandboxHandle) =>
-    (await sbx.readFileToBuffer({ path: "/tmp/jazz.error" }).catch(() => null))
+  const startError = async (sbx: SandboxHandle) => {
+    const text = (
+      await sbx.readFileToBuffer({ path: `/tmp/jazz-${version}.error` }).catch(() => null)
+    )
       ?.toString("utf8")
-      .trim() || undefined;
+      .trim();
+    const match = text ? /^(permanent|transient): (.*)$/s.exec(text) : null;
+    return match ? { permanent: match[1] === "permanent", why: match[2]! } : undefined;
+  };
 
+  /**
+   * Stop the Sandbox rather than keep it awake retrying a start that can't
+   * succeed. Other instances may be watching the same Sandbox: only the
+   * session this one saw fail is stopped, never a newer one.
+   */
   const giveUp = async (sbx: SandboxHandle, why: string): Promise<never> => {
-    await sbx.stop().catch(() => {});
+    const watched = sbx.currentSession().startedAt.getTime();
+    const now = await getRunning();
+    if (now && now.currentSession().startedAt.getTime() === watched) {
+      await now.stop().catch(() => {});
+    }
     throw new CoreStartError(
       `vercel(): core ${name} could not start: ${why} (log: /data/server.log)`,
     );
@@ -691,6 +737,8 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
     const healthFails: Record<string, number> = {};
     let recycled = false;
     let restarted = false;
+    /** The last transient start failure, for the error if the wake times out. */
+    let lastTransient: string | undefined;
     let sbx = await getRunning();
     for (;;) {
       while (!sbx) {
@@ -723,8 +771,9 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
       const healthT0 = performance.now();
       while (!ok && sbx && performance.now() < deadline) {
         ok = await healthy(base, 5_000, healthFails);
-        const why = ok ? undefined : await startError(sbx);
-        if (why) await giveUp(sbx, why);
+        const failure = ok ? undefined : await startError(sbx);
+        if (failure?.permanent) await giveUp(sbx, failure.why);
+        if (failure) lastTransient = failure.why;
         const notListening = Object.keys(healthFails).some((k) =>
           k.includes("SANDBOX_NOT_LISTENING"),
         );
@@ -769,15 +818,25 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
             return { sbx, base };
           }
           // The older core stays up for the deployments still using it.
-          const why = await startError(sbx);
-          if (why)
-            throw new CoreStartError(`vercel(): core ${name} could not start ${version}: ${why}`);
+          const failure = await startError(sbx);
+          if (failure?.permanent) {
+            throw new CoreStartError(
+              `vercel(): core ${name} could not start ${version}: ${failure.why}`,
+            );
+          }
+          if (failure) {
+            // A later start may succeed: try again.
+            lastTransient = failure.why;
+            await startServer(sbx);
+            await sleep(1_000);
+          }
           await sleep(250);
         }
       }
       if (performance.now() > deadline) {
         throw new Error(
-          `vercel(): core ${name} did not become healthy in ${since(t0)} ms (${JSON.stringify(healthFails)})`,
+          `vercel(): core ${name} did not become healthy in ${since(t0)} ms (${JSON.stringify(healthFails)})` +
+            (lastTransient ? `; its last start failed: ${lastTransient}` : ""),
         );
       }
     }

@@ -8,6 +8,7 @@ import { createJazz, vercel } from "./index.js";
 import {
   defaultCoreName,
   newerVersion,
+  openVercelCore,
   onVercelDeployment,
   onVercelHost,
   refuseOtherEnvironment,
@@ -76,7 +77,7 @@ async function startTrustedCore(appId: string) {
  * `@vercel/sandbox` standing in for Vercel: one Sandbox whose port routes to a
  * local jazz-tools server, and whose Drive holds that server's app id.
  */
-function fakeVercel(core: { appId: string; url: string }, startError?: string) {
+function fakeVercel(core: { appId: string; url: string }) {
   const calls: string[] = [];
   const state = {
     exists: false,
@@ -86,14 +87,19 @@ function fakeVercel(core: { appId: string; url: string }, startError?: string) {
     timeout: 300_000,
     /** What the core runs; a start script switches it to its own version. */
     running: undefined as string | undefined,
+    /** The next `times` starts give up like the start script's `fail`. */
+    failStarts: undefined as
+      | { kind: "permanent" | "transient"; why: string; times: number }
+      | undefined,
+    /** Whether the last start gave up (its core then listens nowhere). */
+    failing: false,
   };
   const files = new Map<string, Buffer>([["/data/app-id", Buffer.from(`${core.appId}\n`)]]);
   const handle = (): SandboxHandle => ({
     get status() {
       return state.status;
     },
-    // A core that never starts listens nowhere.
-    domain: () => (startError ? "http://127.0.0.1:9" : core.url),
+    domain: () => (state.failing ? "http://127.0.0.1:9" : core.url),
     currentSession: () => ({
       startedAt: state.startedAt,
       timeout: state.timeout,
@@ -111,10 +117,15 @@ function fakeVercel(core: { appId: string; url: string }, startError?: string) {
       if (pinned && pinned !== trust) return;
       files.set("/data/trust", Buffer.from(`${trust}\n`));
       calls.push(`start ${version}`);
-      if (startError) {
-        files.set("/tmp/jazz.error", Buffer.from(`${startError}\n`));
+      const errorFile = `/tmp/jazz-${version}.error`;
+      files.delete(errorFile);
+      if (state.failStarts && state.failStarts.times > 0) {
+        state.failStarts.times--;
+        state.failing = true;
+        files.set(errorFile, Buffer.from(`${state.failStarts.kind}: ${state.failStarts.why}\n`));
         return;
       }
+      state.failing = false;
       if (!state.running || newerVersion(version, state.running)) state.running = version;
     },
     writeFiles: async (written) => {
@@ -323,28 +334,63 @@ describe("vercel() store", () => {
     expect(fake.calls).toEqual([]);
   }, 60_000);
 
-  it("reports a core that can't start, stops its Sandbox, and doesn't retry at once", async () => {
+  it("stops the Sandbox of a core that can't start, and holds off retrying", async () => {
     const appId = randomUUID();
     const core = await startTrustedCore(appId);
-    const fake = fakeVercel(
-      { ...core, appId },
-      "could not download the core for 1.2.3 from https://registry.example/core.tgz (HTTP 404)",
-    );
-    onVercel({ VERCEL: "1", VERCEL_ENV: "production", VERCEL_PROJECT_ID: "prj_test" });
+    const fake = fakeVercel({ ...core, appId });
+    const opened = await openVercelCore({
+      options: { sdk: fake.sdk, backendCredential: core.credential, name: "jazz-test" },
+      openRemote: ({ url }) =>
+        ({ serverUrl: url, handle: async () => ({}), close: async () => {} }) as never,
+      version: "1.2.3",
+      env: { VERCEL_ENV: "production" },
+    });
+    cleanups.push(() => opened.close());
+
+    // The core stops (idle), and its next start can never succeed.
+    fake.state.status = "stopped";
+    fake.state.failStarts = {
+      kind: "permanent",
+      why: "could not download the core for 1.2.3 from https://registry.example/core.tgz (HTTP 404)",
+      times: Infinity,
+    };
+    // Past the window in which a wake is trusted without a check.
+    await new Promise((resolve) => setTimeout(resolve, 10_500));
     const t0 = Date.now();
-    const opening = createJazz({
-      app,
-      permissions,
-      store: vercel({ sdk: fake.sdk, backendCredential: core.credential }),
-    }).ready();
-    await expect(opening).rejects.toThrow(
-      /core jazz-prj-test-production could not start: could not download the core for 1\.2\.3 .*HTTP 404/,
+    await expect(opened.handle("GET", "/health", {}, undefined)).rejects.toThrow(
+      /core jazz-test could not start: could not download the core for 1\.2\.3 .*HTTP 404/,
     );
-    // Reported within one health round, not after the minute-long wake deadline.
+    // Reported within one health round, not after the minute-long wake deadline,
+    // and the Sandbox isn't kept awake.
     expect(Date.now() - t0).toBeLessThan(15_000);
     expect(fake.state.status).toBe("stopped");
-    expect(fake.calls.filter((call) => call.startsWith("start "))).toHaveLength(2);
-  }, 30_000);
+    // The next request fails at once, without waking the Sandbox again.
+    const calls = fake.calls.length;
+    await expect(opened.handle("GET", "/health", {}, undefined)).rejects.toThrow(/could not start/);
+    expect(fake.calls.length).toBe(calls);
+  }, 60_000);
+
+  it("retries a start that failed for a transient reason, and keeps the Sandbox", async () => {
+    const appId = randomUUID();
+    const core = await startTrustedCore(appId);
+    const fake = fakeVercel({ ...core, appId });
+    fake.state.failStarts = {
+      kind: "transient",
+      why: "could not download the core for 1.2.3 from https://registry.example/core.tgz (fetch failed: ECONNRESET)",
+      times: 2,
+    };
+    const opened = await openVercelCore({
+      options: { sdk: fake.sdk, backendCredential: core.credential, name: "jazz-test" },
+      openRemote: ({ url }) =>
+        ({ serverUrl: url, handle: async () => ({}), close: async () => {} }) as never,
+      version: "1.2.3",
+      env: { VERCEL_ENV: "production" },
+    });
+    cleanups.push(() => opened.close());
+    expect(fake.state.status).toBe("running");
+    expect(fake.calls).not.toContain("stop");
+    expect(fake.calls.filter((call) => call.startsWith("start ")).length).toBeGreaterThanOrEqual(3);
+  }, 60_000);
 
   it("resumes a stopped Sandbox instead of creating another", async () => {
     const appId = randomUUID();
@@ -420,6 +466,27 @@ describe("vercel() store", () => {
     expect(main).toBe("jazz-prj-1-production");
     expect(a).toMatch(/^jazz-prj-1-preview-feat-a-[0-9a-f]{8}$/);
     expect(new Set([main, a, b]).size).toBe(3);
+  });
+
+  it("reports a preview without a Git branch when it opens, not when createJazz is called", async () => {
+    const appId = randomUUID();
+    const core = await startTrustedCore(appId);
+    const fake = fakeVercel({ ...core, appId });
+    onVercel({
+      VERCEL: "1",
+      VERCEL_ENV: "preview",
+      VERCEL_PROJECT_ID: "prj_test",
+      VERCEL_GIT_COMMIT_REF: "",
+    });
+    // A module may call createJazz at its top level (and `next build` loads it).
+    const jazz = createJazz({
+      app,
+      permissions,
+      store: vercel({ sdk: fake.sdk, backendCredential: core.credential }),
+    });
+    cleanups.push(() => jazz.close());
+    await expect(jazz.ready()).rejects.toThrow(/no Git branch/);
+    expect(fake.calls).toEqual([]);
   });
 
   it("asks for a name when a preview deployment has no Git branch", () => {
