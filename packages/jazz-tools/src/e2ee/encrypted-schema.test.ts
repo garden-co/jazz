@@ -53,11 +53,14 @@ it.each(["before", "after"])(
       order === "before"
         ? notes.encrypted({ space: "projectId" }).indexOnly(["projectId"]).branchBy("projectId")
         : notes.indexOnly(["projectId"]).branchBy("projectId").encrypted({ space: "projectId" });
-    const app = s.defineApp({
-      projects: s.table({ title: s.string() }, { notes: s.reverse("notes", "project") }),
-      people: s.table({ name: s.string() }, {}),
-      notes: encrypted,
-    });
+    const app = s.defineApp(
+      {
+        projects: s.table({ title: s.string() }, { notes: s.reverse("notes", "project") }),
+        people: s.table({ name: s.string() }, {}),
+        notes: encrypted,
+      },
+      { migrations: "none" },
+    );
 
     // References must remain usable UUID storage, while unrelated UUID data
     // is encrypted just like text when the encrypted columns are omitted.

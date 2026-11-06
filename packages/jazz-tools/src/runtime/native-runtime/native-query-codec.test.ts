@@ -2,7 +2,12 @@ import { readFileSync } from "node:fs";
 
 import { describe, expect, it } from "vitest";
 
-import { queryWithPredicates, type QueryArraySubquery, type QueryOrder } from "./native-codec.js";
+import {
+  queryWithPredicates,
+  type QueryArraySubquery,
+  type QueryOrder,
+  type QueryPartialSelect,
+} from "./native-codec.js";
 
 type NativeQueryCodecFixture = {
   cases: Array<{ name: string; query_hex: string }>;
@@ -19,23 +24,37 @@ describe("native query codec", () => {
             case: "message",
             payload: {
               op: "All",
-              predicates: [{ column: "level", op: "Eq", value: { type: "Integer", value: 2 } }],
+              predicates: [
+                {
+                  column: "level",
+                  op: "Eq",
+                  value: { type: "Integer", value: 2 },
+                },
+              ],
             },
           },
         ]),
       ),
     ).toBe(
-      "066576656e7473010b00056576656e74076d65737361676500010300056c6576656c030f0400000000000000000000000000",
+      "066576656e7473010b00056576656e74076d65737361676500010300056c6576656c030f040000000000000000000000000000",
     );
   });
 
-  it("pins forward, reverse, nested, projected, and required relation query layouts", () => {
+  it("pins forward, reverse, nested, projected, required and partial query layouts", () => {
     const fixture = nativeQueryCodecFixture();
-    for (const [name, table, arraySubqueries, select, orderBy, relation] of queryCases()) {
+    for (const [name, table, arraySubqueries, select, orderBy, relation, partial] of queryCases()) {
       const expected = fixture.cases.find((candidate) => candidate.name === name);
       expect(expected, `${name} fixture is present`).toBeDefined();
       expect(
-        bytesToHex(queryWithPredicates(table, [], { arraySubqueries, select, orderBy, relation })),
+        bytesToHex(
+          queryWithPredicates(table, [], {
+            arraySubqueries,
+            select,
+            orderBy,
+            relation,
+            partial,
+          }),
+        ),
       ).toBe(expected!.query_hex);
     }
   });
@@ -68,9 +87,31 @@ describe("native query codec", () => {
 });
 
 function queryCases(): Array<
-  [string, string, QueryArraySubquery[], string[] | undefined, QueryOrder[], unknown?]
+  [
+    string,
+    string,
+    QueryArraySubquery[],
+    string[] | undefined,
+    QueryOrder[],
+    unknown?,
+    QueryPartialSelect[]?,
+  ]
 > {
   return [
+    [
+      "partial_selects_bytes_text_json",
+      "documents",
+      [],
+      ["payload", "body", "title", "metadata"],
+      [],
+      undefined,
+      [
+        { column: "payload", kind: "bytes", from: 70_001, to: 70_005 },
+        { column: "body", kind: "text_utf16", from: 300, to: 302 },
+        { column: "title", kind: "text_utf8", from: 4, to: 9 },
+        { column: "metadata", kind: "json_pointer", at: "/nested/answer" },
+      ],
+    ],
     [
       "forward_include_projected_optional",
       "accounts",
@@ -98,7 +139,13 @@ function queryCases(): Array<
           table: "members",
           innerColumn: "group_id",
           outerColumn: "id",
-          filters: [{ column: "state", op: "Eq", value: { type: "Text", value: "active" } }],
+          filters: [
+            {
+              column: "state",
+              op: "Eq",
+              value: { type: "Text", value: "active" },
+            },
+          ],
           select: ["name"],
           limit: 4,
           requirement: "AtLeastOne",
@@ -144,7 +191,10 @@ function queryCases(): Array<
           input: {
             Union: {
               inputs: [
-                { label: "first", input: { TableScan: { table: "todos", alias: "left" } } },
+                {
+                  label: "first",
+                  input: { TableScan: { table: "todos", alias: "left" } },
+                },
                 {
                   label: "second",
                   input: {
@@ -154,7 +204,12 @@ function queryCases(): Array<
                         Cmp: {
                           left: { scope: "todos", column: "metadata" },
                           op: "Eq",
-                          right: { Literal: { type: "Json", value: { nested: [true, null, 7] } } },
+                          right: {
+                            Literal: {
+                              type: "Json",
+                              value: { nested: [true, null, 7] },
+                            },
+                          },
                         },
                       },
                     },

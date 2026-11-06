@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
@@ -10,17 +11,20 @@ import { createNativeCrypto } from "./native.js";
 it.skipIf(process.env.JAZZ_E2EE_HISTORY_PERF !== "1")(
   "measures native historical equality search at a fixed encrypted row count",
   async () => {
-    const app = s.defineApp({
-      ...deviceRequestSchema,
-      ...spaceSchema,
-      projects: s.table({ title: s.string() }, {}),
-      notes: s
-        .table(
-          { projectId: s.uuid(), title: s.string(), position: s.float() },
-          { project: s.rel("projects", "projectId") },
-        )
-        .encrypted({ space: "projectId", columns: ["title"], indexes: { title: "equality" } }),
-    });
+    const app = s.defineApp(
+      {
+        ...deviceRequestSchema,
+        ...spaceSchema,
+        projects: s.table({ title: s.string() }, {}),
+        notes: s
+          .table(
+            { projectId: s.uuid(), title: s.string(), position: s.float() },
+            { project: s.rel("projects", "projectId") },
+          )
+          .encrypted({ space: "projectId", columns: ["title"], indexes: { title: "equality" } }),
+      },
+      { migrations: "none" },
+    );
     const policies = definePermissions(app, ({ policy, session }) => {
       policy.projects.allowRead.always();
       policy.projects.allowInsert.always();
@@ -56,7 +60,7 @@ it.skipIf(process.env.JAZZ_E2EE_HISTORY_PERF !== "1")(
         },
       };
     };
-    const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+    let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
     const sessions: Awaited<ReturnType<typeof createJazzSession>>[] = [];
     const crypto = await createNativeCrypto();
     let tokens = 0;
@@ -86,6 +90,7 @@ it.skipIf(process.env.JAZZ_E2EE_HISTORY_PERF !== "1")(
         schema: app,
         permissions,
       });
+      server = await frontE2eeCore(server, { schema: app, permissions: permissions });
       for (let index = 0; index < 2; index++) {
         sessions.push(
           await createJazzSession({

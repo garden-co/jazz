@@ -1,5 +1,6 @@
 import { schema as s } from "jazz-tools";
 import { schema as betterAuthSchema } from "./schema-better-auth/schema";
+import { migrations } from "./migrations";
 
 /** Token hues used by the generated product illustrations. */
 export const HUES = [
@@ -172,7 +173,7 @@ const schema = {
 };
 
 type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema);
+export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
 
 export type Category = s.RowOf<typeof app.categories>;
 export type Product = s.RowOf<typeof app.products>;

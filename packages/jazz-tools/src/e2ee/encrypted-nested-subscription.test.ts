@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
@@ -9,21 +10,24 @@ import { spaceSchema } from "./spaces.js";
 import { createBrowserCrypto } from "./browser.js";
 
 async function createFixture() {
-  const app = s.defineApp({
-    ...deviceRequestSchema,
-    ...spaceSchema,
-    projects: s.table({ title: s.string() }, {}),
-    folders: s.table(
-      { title: s.string() },
-      { notesViaFolder: s.reverse("notes", "folderRelation") },
-    ),
-    notes: s
-      .table(
-        { projectId: s.uuid(), folder: s.uuid(), title: s.string() },
-        { project: s.rel("projects", "projectId"), folderRelation: s.rel("folders", "folder") },
-      )
-      .encrypted({ space: "projectId", columns: ["title"] }),
-  });
+  const app = s.defineApp(
+    {
+      ...deviceRequestSchema,
+      ...spaceSchema,
+      projects: s.table({ title: s.string() }, {}),
+      folders: s.table(
+        { title: s.string() },
+        { notesViaFolder: s.reverse("notes", "folderRelation") },
+      ),
+      notes: s
+        .table(
+          { projectId: s.uuid(), folder: s.uuid(), title: s.string() },
+          { project: s.rel("projects", "projectId"), folderRelation: s.rel("folders", "folder") },
+        )
+        .encrypted({ space: "projectId", columns: ["title"] }),
+    },
+    { migrations: "none" },
+  );
   const policies = definePermissions(app, ({ policy, session }) => {
     policy.projects.allowRead.always();
     policy.projects.allowInsert.always();
@@ -42,7 +46,7 @@ async function createFixture() {
     policy.__e2ee_space_successors.allowRead.always();
     policy.__e2ee_space_successors.allowInsert.where({ authorAccountId: session.user.account });
   });
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Awaited<ReturnType<typeof createDb>>[] = [];
   const store = () => {
     let value: string | null = null;
@@ -72,6 +76,10 @@ async function createFixture() {
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
+      schema: app,
+      permissions: { ...deviceRequestPermissions, ...policies },
+    });
+    server = await frontE2eeCore(server, {
       schema: app,
       permissions: { ...deviceRequestPermissions, ...policies },
     });

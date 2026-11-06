@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
@@ -10,16 +11,19 @@ import { createBrowserCrypto } from "./browser.js";
 it.each(["removed", "retained"] as const)(
   "revalidates the newest frontier after an older child fails decryption (%s)",
   async (child) => {
-    const app = s.defineApp({
-      projects: s.table({ title: s.string() }, {}),
-      folders: s.table({ title: s.string() }, { notes: s.reverse("notes", "folder") }),
-      notes: s
-        .table(
-          { projectId: s.uuid(), folderId: s.uuid(), body: s.string() },
-          { project: s.rel("projects", "projectId"), folder: s.rel("folders", "folderId") },
-        )
-        .encrypted({ space: "projectId", columns: ["body"] }),
-    });
+    const app = s.defineApp(
+      {
+        projects: s.table({ title: s.string() }, {}),
+        folders: s.table({ title: s.string() }, { notes: s.reverse("notes", "folder") }),
+        notes: s
+          .table(
+            { projectId: s.uuid(), folderId: s.uuid(), body: s.string() },
+            { project: s.rel("projects", "projectId"), folder: s.rel("folders", "folderId") },
+          )
+          .encrypted({ space: "projectId", columns: ["body"] }),
+      },
+      { migrations: "none" },
+    );
     const permissions = definePermissions(app, ({ policy, session }) => {
       policy.projects.allowRead.always();
       policy.projects.allowInsert.always();
@@ -39,7 +43,7 @@ it.each(["removed", "retained"] as const)(
       policy.__e2ee_space_successors.allowRead.always();
       policy.__e2ee_space_successors.allowInsert.where({ authorAccountId: session.user.account });
     });
-    const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+    let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
     let db: Db | undefined;
     let stop: (() => void) | undefined;
     let stopPlain: (() => void) | undefined;
@@ -59,6 +63,7 @@ it.each(["removed", "retained"] as const)(
         schema: app,
         permissions,
       });
+      server = await frontE2eeCore(server, { schema: app, permissions: permissions });
       const adapters = await createBrowserCrypto();
       db = await createDb({
         ...(await localAccountConfig(server.appId, server.url)),

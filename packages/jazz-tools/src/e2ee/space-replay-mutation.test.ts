@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
@@ -24,12 +25,15 @@ const store = (initial: string | null = null) => {
 };
 
 async function fixture() {
-  const app = s.defineApp({
-    ...deviceRequestSchema,
-    ...groupSchema,
-    ...spaceSchema,
-    projects: s.table({ title: s.string() }, {}),
-  });
+  const app = s.defineApp(
+    {
+      ...deviceRequestSchema,
+      ...groupSchema,
+      ...spaceSchema,
+      projects: s.table({ title: s.string() }, {}),
+    },
+    { migrations: "none" },
+  );
   const policies = definePermissions(app, ({ policy, session }) => {
     policy.projects.allowRead.always();
     policy.projects.allowInsert.always();
@@ -52,13 +56,17 @@ async function fixture() {
     policy.__e2ee_group_repairs.allowRead.always();
     policy.__e2ee_group_repairs.allowInsert.where({ accountId: session.user.account });
   });
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Db[] = [];
   try {
     await deploy({
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
+      schema: app,
+      permissions: { ...deviceRequestPermissions, ...policies },
+    });
+    server = await frontE2eeCore(server, {
       schema: app,
       permissions: { ...deviceRequestPermissions, ...policies },
     });

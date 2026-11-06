@@ -1,8 +1,11 @@
 import { sha256 } from "@noble/hashes/sha2.js";
-import { serializableE2eeTransaction } from "../runtime/db.js";
-import type { Db, TableProxy, E2eeTransactionScope, QueryBuilder } from "../runtime/db.js";
-import { observeE2eeHistory, type E2eeHistoryReader } from "./history-reader.js";
-import type { RowSettlement } from "../runtime/client.js";
+import {
+  acceptedDeviceTransaction as acceptedSpaceTransaction,
+  acceptedContentPositions,
+} from "./accepted-membership.js";
+import type { AcceptedDeviceTransactionScope } from "./accepted-membership.js";
+import type { Db, TableProxy, QueryBuilder } from "../runtime/db.js";
+import type { AcceptedRows, AcceptedRowEvidence } from "../runtime/accepted-read.js";
 import type { AccountStore } from "../accounts/persistence.js";
 import { sameSnapshotValue } from "./public-snapshot.js";
 import { decodeRecoveryMaterial, type DecodedRecoveryMaterial } from "./recovery-format.js";
@@ -42,6 +45,23 @@ import {
   spaceDeliveryBytes,
 } from "./space-format.js";
 
+/** Project content order only after the paired accepted response is checked. */
+type SpaceContentOrigin = AcceptedRowEvidence & { position: string };
+async function readSpaceRows<T extends { id: string }>(
+  tx: AcceptedDeviceTransactionScope,
+  query: QueryBuilder<T>,
+): Promise<{ rows: T[]; contentOrigins: SpaceContentOrigin[] }> {
+  const result = await tx.readAccepted(query);
+  const positions = acceptedContentPositions(result);
+  return {
+    rows: result.rows,
+    contentOrigins: result.evidence.map((entry) => ({
+      ...entry,
+      position: positions.get(entry.rowId)!.toString(),
+    })),
+  };
+}
+
 type DeviceState = {
   active: Set<string>;
   epochId: string;
@@ -50,9 +70,9 @@ type DeviceState = {
 export type SpaceDataPreparation = (
   key: Uint8Array,
   root: SpaceRoot,
-  tx: E2eeTransactionScope,
+  tx: AcceptedDeviceTransactionScope,
 ) => Promise<void>;
-type Settled<T> = { rows: T[]; settlements: RowSettlement[] };
+type Settled<T> = { rows: T[]; contentOrigins: SpaceContentOrigin[] };
 type Address = { scopeId: string; identifier: string };
 // An identity mismatch, malformed transcript or checked signature mismatch invalidates a root.
 // Missing authority/history and operational failures must not be silently discarded.
@@ -69,7 +89,9 @@ const recoverySnapshotBatchSize = 8;
 function isTransactionConflict(error: unknown): boolean {
   return (
     (error instanceof PersistedWriteRejectedError &&
-      (error.code === "exclusive_conflict" || error.code === "transaction_conflict")) ||
+      (error.code === "exclusive_conflict" ||
+        error.code === "transaction_conflict" ||
+        error.code === "serialization_conflict")) ||
     (error instanceof Error && error.message.startsWith("(transaction_conflict):"))
   );
 }
@@ -112,14 +134,14 @@ type SpaceState = {
   state: "ready" | "refused" | "unavailable" | "maintenance-required";
   reason?: string;
 };
-// Settlements are internal read metadata, never passed to crypto adapters.
+// Validated paired origins are internal read metadata, never passed to crypto adapters.
 // Each table wrapper owns its index, even when row IDs overlap across tables.
 const positions = new WeakMap<Settled<unknown>, Map<string, string>>();
 function positionOf<T>(snapshot: Settled<T>, id: string): string | undefined {
   let index = positions.get(snapshot);
   if (!index) {
     index = new Map();
-    for (const entry of snapshot.settlements) {
+    for (const entry of snapshot.contentOrigins) {
       if (!index.has(entry.rowId)) index.set(entry.rowId, entry.position);
     }
     positions.set(snapshot, index);
@@ -179,7 +201,7 @@ export class Spaces {
       load(): Promise<LocalDevice>;
       release(device: LocalDevice): void;
       readonly keyLifetime: DeviceKeyLifetime;
-      states(tx?: E2eeHistoryReader): Promise<DeviceState>;
+      states(tx?: AcceptedDeviceTransactionScope): Promise<DeviceState>;
     },
     private readonly groups?: Groups,
   ) {}
@@ -218,13 +240,14 @@ export class Spaces {
   }> {
     await prefetchPublicMembershipHistory(this.db, this.accountId, this.tables);
     await this.groups?.warmMembership({ accountId: this.accountId });
-    const read = await serializableE2eeTransaction(this.db, async (tx) => {
+    const read = await acceptedSpaceTransaction(this.db, async (tx) => {
       const device = requireActiveDevice ? await this.requireDevice().states(tx) : undefined;
       const own =
         device?.publicHistory ??
         (await readPublicMembershipHistory(tx, this.accountId, this.tables));
       // Deleted grants seed discovery only; live replay still proves membership.
-      const direct = await tx.allSettledForE2ee(
+      const direct = await readSpaceRows(
+        tx,
         this.tables.__e2ee_space_grants.includeDeleted().where({
           recipientKind: "account",
           recipientId: this.accountId,
@@ -240,7 +263,8 @@ export class Spaces {
         // Keep the empty predicate covered too; never widen an empty group scope.
         let start = 0;
         do {
-          const grants = await tx.allSettledForE2ee(
+          const grants = await readSpaceRows(
+            tx,
             this.tables.__e2ee_space_grants.includeDeleted().where({
               recipientKind: "group",
               recipientId: { in: groupIds.slice(start, start + recoveryIdBatchSize) },
@@ -253,7 +277,8 @@ export class Spaces {
       const ids = [...spaceIds];
       const roots: SpaceRoot[] = [];
       for (let start = 0; start < ids.length; start += recoveryIdBatchSize) {
-        const found = await tx.allSettledForE2ee(
+        const found = await readSpaceRows(
+          tx,
           this.tables.__e2ee_spaces.where({
             id: { in: ids.slice(start, start + recoveryIdBatchSize) },
           }),
@@ -305,32 +330,32 @@ export class Spaces {
               recoveryRootId,
             });
       if (query) await this.db.all(query, { tier: "remote" });
-      const read = await serializableE2eeTransaction(this.db, async (tx) => {
+      const read = await acceptedSpaceTransaction(this.db, async (tx) => {
         const device = restore ? await this.requireDevice().states(tx) : undefined;
         const own =
           device?.publicHistory ??
           (await readPublicMembershipHistory(tx, this.accountId, this.tables));
-        const reads = new Map<string, Promise<Settled<{ id: string }>>>();
-        const reader: E2eeTransactionScope = {
+        const reads = new Map<string, Promise<AcceptedRows<{ id: string }>>>();
+        const reader: AcceptedDeviceTransactionScope = {
           kind: tx.kind,
           all: tx.all.bind(tx),
           one: tx.one.bind(tx),
           insert: tx.insert.bind(tx),
           upsert: tx.upsert.bind(tx),
-          allSettledForE2ee<T extends { id: string }>(query: QueryBuilder<T>): Promise<Settled<T>> {
+          readAccepted<T>(query: QueryBuilder<T>): Promise<AcceptedRows<T>> {
             const key = query._build();
             let result = reads.get(key);
             if (!result) {
-              result = tx.allSettledForE2ee(query);
+              result = tx.readAccepted(query) as Promise<AcceptedRows<{ id: string }>>;
               reads.set(key, result);
             }
-            return result as Promise<Settled<T>>;
+            return result as Promise<AcceptedRows<T>>;
           },
         };
         const [roots, grants, successors] = await Promise.all([
-          tx.allSettledForE2ee(this.tables.__e2ee_spaces.where({ id: { in: ids } })),
-          tx.allSettledForE2ee(this.tables.__e2ee_space_grants.where(selector)),
-          tx.allSettledForE2ee(this.tables.__e2ee_space_successors.where(selector)),
+          readSpaceRows(tx, this.tables.__e2ee_spaces.where({ id: { in: ids } })),
+          readSpaceRows(tx, this.tables.__e2ee_space_grants.where(selector)),
+          readSpaceRows(tx, this.tables.__e2ee_space_successors.where(selector)),
         ]);
         const select = <T extends { id: string }>(
           records: Settled<T>,
@@ -338,7 +363,10 @@ export class Spaces {
         ): Settled<T> => {
           const rows = records.rows.filter(matches);
           const ids = new Set(rows.map((row) => row.id));
-          return { rows, settlements: records.settlements.filter((row) => ids.has(row.rowId)) };
+          return {
+            rows,
+            contentOrigins: records.contentOrigins.filter((row) => ids.has(row.rowId)),
+          };
         };
         const spaces: { observed: SpaceRoot; snapshot: Snapshot }[] = [];
         for (const root of observed) {
@@ -353,8 +381,8 @@ export class Spaces {
           });
         }
         const recovery: Settled<SpaceRecoveryDelivery> = query
-          ? await tx.allSettledForE2ee(query)
-          : { rows: [], settlements: [] };
+          ? await readSpaceRows(tx, query)
+          : { rows: [], contentOrigins: [] };
         return { own, device, spaces, recovery };
       });
       const accepted = await read.wait({ tier: "global" });
@@ -383,7 +411,7 @@ export class Spaces {
           this.assertOpen();
           const recovery = {
             rows: batch.recovery.rows.filter((row) => row.spaceId === observed.id),
-            settlements: batch.recovery.settlements,
+            contentOrigins: batch.recovery.contentOrigins,
           };
           const state = await this.recoveryState(snapshot, observed);
           if (!state || state.sealed || !state.members.has(this.accountId)) continue;
@@ -547,7 +575,7 @@ export class Spaces {
           this.assertOpen();
           const recovery = {
             rows: batch.recovery.rows.filter((row) => row.spaceId === observed.id),
-            settlements: batch.recovery.settlements,
+            contentOrigins: batch.recovery.contentOrigins,
           };
           const state = await this.recoveryState(snapshot, observed);
           if (!state || state.sealed || !state.members.has(this.accountId)) continue;
@@ -615,7 +643,7 @@ export class Spaces {
     try {
       const secret = runtimeRandomBytes(32);
       try {
-        const proposal = await serializableE2eeTransaction(this.db, async (tx) => {
+        const proposal = await acceptedSpaceTransaction(this.db, async (tx) => {
           return this.stageInitial(tx, scope, identifier, [recipientId], address, device, secret);
         });
         const accepted = await proposal.wait({ tier: "global" });
@@ -638,13 +666,26 @@ export class Spaces {
     await this.groups?.warmMembership({ groupIds: ids });
   }
 
+  /** Capture membership predicates before the caller stages its new scope row. */
+  async prepareInitialAuthority(
+    tx: AcceptedDeviceTransactionScope,
+    recipientIds: readonly string[] = [this.accountId],
+  ): Promise<void> {
+    const ids = initialRecipientIds(recipientIds);
+    const state = await this.requireDevice().states(tx);
+    await this.groups?.readMembership(tx, { groupIds: ids }, state.publicHistory);
+    for (const id of ids)
+      if (id !== this.accountId) await readPublicMembershipHistory(tx, id, this.tables);
+  }
+
   /** Internal preparation only: the caller owns the enclosing transaction and acceptance. */
   async prepareInitial<T, Init>(
-    tx: E2eeTransactionScope,
+    tx: AcceptedDeviceTransactionScope,
     scope: TableProxy<T, Init>,
     identifier: string,
     prepareData: SpaceDataPreparation,
     recipientIds: readonly string[] = [this.accountId],
+    ownScopeInsert = false,
   ): Promise<void> {
     if (tx.kind !== "serializable")
       throw new Error("E2EE initialisation requires an exclusive transaction");
@@ -661,6 +702,7 @@ export class Spaces {
           address,
           device,
           secret,
+          ownScopeInsert,
         );
         await prepareData(secret, root, tx);
         this.assertOpen();
@@ -673,20 +715,21 @@ export class Spaces {
   }
 
   private async stageInitial<T, Init>(
-    tx: E2eeTransactionScope,
+    tx: AcceptedDeviceTransactionScope,
     scope: TableProxy<T, Init>,
     identifier: string,
     recipientIds: readonly string[],
     address: Address,
     device: LocalDevice,
     secret: Uint8Array,
+    ownScopeInsert = false,
   ): Promise<SpaceRoot> {
     const rootId = spaceRootId(address);
     const roots = this.tables.__e2ee_spaces.where({ id: rootId });
     if (
-      await tx.one(this.tables.__e2ee_spaces.includeDeleted().where({ id: rootId }), {
-        tier: "remote",
-      })
+      !ownScopeInsert &&
+      (await readSpaceRows(tx, this.tables.__e2ee_spaces.includeDeleted().where({ id: rootId })))
+        .rows.length
     )
       throw new Error("E2EE space already exists");
     const state = await this.requireDevice().states(tx);
@@ -734,7 +777,11 @@ export class Spaces {
     const scopeRow = new TypedTableQueryBuilder(scope._table, scope._schema)
       .where({ id: identifier })
       .select("id");
-    if (!(await tx.one(scopeRow, { tier: "local-first" })))
+    // A registered insert is this transaction's own intent, never accepted
+    // evidence. Its normal write failure poisons the enclosing atomic commit.
+    // Every existing scope instead needs an actual same-cut authority predicate.
+    const scopeExists = ownScopeInsert || (await readSpaceRows(tx, scopeRow)).rows[0];
+    if (!scopeExists)
       throw new Error("Explicit space initialisation requires an existing scope row");
     if (await tx.one(roots, { tier: "local-first" })) throw new Error("E2EE space already exists");
     const root = {
@@ -821,7 +868,7 @@ export class Spaces {
   }
 
   private async readSnapshot(
-    tx: E2eeHistoryReader,
+    tx: AcceptedDeviceTransactionScope,
     address: Address,
     id: string,
     extraAccounts: string[] = [],
@@ -842,7 +889,7 @@ export class Spaces {
   }
 
   private async readRecords(
-    tx: E2eeHistoryReader,
+    tx: AcceptedDeviceTransactionScope,
     address: Address,
     id: string,
     ownHistory: PublicMembershipHistory,
@@ -854,14 +901,13 @@ export class Spaces {
   ): Promise<Snapshot> {
     const [roots, grants, deliveries, successors] = await Promise.all([
       prepared?.roots ??
-        tx.allSettledForE2ee(this.tables.__e2ee_spaces.where({ id: spaceRootId(address) })),
-      prepared?.grants ??
-        tx.allSettledForE2ee(this.tables.__e2ee_space_grants.where({ spaceId: id })),
+        readSpaceRows(tx, this.tables.__e2ee_spaces.where({ id: spaceRootId(address) })),
+      prepared?.grants ?? readSpaceRows(tx, this.tables.__e2ee_space_grants.where({ spaceId: id })),
       includeDeliveries
-        ? tx.allSettledForE2ee(this.tables.__e2ee_space_deliveries.where({ spaceId: id }))
-        : { rows: [], settlements: [] },
+        ? readSpaceRows(tx, this.tables.__e2ee_space_deliveries.where({ spaceId: id }))
+        : { rows: [], contentOrigins: [] },
       prepared?.successors ??
-        tx.allSettledForE2ee(this.tables.__e2ee_space_successors.where({ spaceId: id })),
+        readSpaceRows(tx, this.tables.__e2ee_space_successors.where({ spaceId: id })),
     ]);
     const histories = new Map([[this.accountId, ownHistory]]);
     const groupIds = this.groupHistoryIds(grants.rows, extraAccounts);
@@ -949,7 +995,7 @@ export class Spaces {
     await this.warm(observed, [recipientId]);
     const device = await this.loadDevice();
     try {
-      const proposal = await serializableE2eeTransaction(this.db, async (tx) => {
+      const proposal = await acceptedSpaceTransaction(this.db, async (tx) => {
         // Envelopes do not establish membership authority. Reading them here
         // would make background delivery unnecessarily conflict with a grant.
         const snapshot = await this.readSnapshot(tx, address, observed.id, [recipientId], false);
@@ -1460,7 +1506,7 @@ export class Spaces {
     return this.explainAddress(address);
   }
 
-  /** Package-internal key access backed by authority coverage or accepted local history. */
+  /** Package-internal key access, always backed by a completed authority read. */
   async withKeys<T, Init>(
     scope: TableProxy<T, Init>,
     identifier: string,
@@ -1496,18 +1542,17 @@ export class Spaces {
   ): Promise<SpaceState> {
     this.assertOpen();
     if (this.device?.isKnownRevoked()) return { state: "refused", reason: "device-not-active" };
-    const offline = await this.db.e2eeIsExplicitlyOffline();
-    const rootQuery = this.tables.__e2ee_spaces.where({ id: spaceRootId(address) });
-    const observed = offline
-      ? (await observeE2eeHistory(this.db, (reader) => reader.allSettledForE2ee(rootQuery))).rows[0]
-      : await this.db.one(rootQuery, { tier: "remote" });
+    const observed = await this.db.one(
+      this.tables.__e2ee_spaces.where({ id: spaceRootId(address) }),
+      { tier: "remote" },
+    );
     if (!observed) return { state: "unavailable", reason: "space-not-found" };
-    if (!offline) await this.warm(observed);
+    await this.warm(observed);
     const device = await this.loadDevice();
     let secret: Uint8Array | undefined;
     try {
       const maintenance =
-        !use && !offline && !includeHistory
+        !use && !includeHistory
           ? await this.readMaintenanceSnapshot(address, observed.id, device)
           : undefined;
       let snapshot =
@@ -1530,13 +1575,7 @@ export class Spaces {
       if (!snapshot.roots.rows.length)
         return { state: "unavailable", reason: "space-not-accepted" };
       let state = await this.validate(snapshot, address);
-      if (
-        !offline &&
-        !state.groupsReady &&
-        !state.sealed &&
-        state.members.has(this.accountId) &&
-        this.groups
-      ) {
+      if (!state.groupsReady && !state.sealed && state.members.has(this.accountId) && this.groups) {
         for (const id of state.groupRecipients.keys()) {
           const group = state.graph.get(id);
           if (group?.rotationRequired && !group.sealed && group.members.has(this.accountId))
@@ -1568,13 +1607,12 @@ export class Spaces {
       if (!secret) return { state: "unavailable", reason: "space-key-not-delivered" };
       try {
         if (state.rotationRequired) {
-          if (offline) return { state: "maintenance-required", reason: "recipient-removed" };
           await this.rotate(address, keyRoot, secret, device);
           return this.explainAddress(address, use, includeHistory, conflicts);
         }
         // A verified key read need not wait for envelopes for other devices.
         // Explicit maintenance still delivers and revalidates its changed history.
-        if (!use && !offline) {
+        if (!use) {
           const delivered = await this.deliver(address, keyRoot, secret, device);
           // A read-only delivery transaction already accepted fresh authority.
           // Writes require another snapshot so newly published keys are included.
@@ -1611,7 +1649,7 @@ export class Spaces {
       let inspecting = false;
       let deliveryStarted = false;
       try {
-        const transaction = await serializableE2eeTransaction(this.db, async (tx) => {
+        const transaction = await acceptedSpaceTransaction(this.db, async (tx) => {
           const snapshot = await this.readSnapshot(tx, address, id);
           const prepared = await (async () => {
             if (!snapshot.state.active.has(device.id) || !snapshot.roots.rows.length) return;
@@ -1777,11 +1815,9 @@ export class Spaces {
   }
 
   private async readAcceptedSnapshot(address: Address, id: string) {
-    if (await this.db.e2eeIsExplicitlyOffline())
-      return observeE2eeHistory(this.db, (reader) => this.readSnapshot(reader, address, id));
     for (let attempt = 0; ; attempt++) {
       try {
-        const read = await serializableE2eeTransaction(this.db, (tx) =>
+        const read = await acceptedSpaceTransaction(this.db, (tx) =>
           this.readSnapshot(tx, address, id),
         );
         const snapshot = await read.wait({ tier: "global" });
@@ -1801,7 +1837,7 @@ export class Spaces {
   ) {
     const secret = runtimeRandomBytes(32);
     try {
-      const proposal = await serializableE2eeTransaction(this.db, async (tx) => {
+      const proposal = await acceptedSpaceTransaction(this.db, async (tx) => {
         const snapshot = await this.readSnapshot(tx, address, expected.id);
         const state = await this.validate(snapshot, address);
         if (state.keyRoot.epochId !== expected.epochId || state.root.id !== expected.id)
@@ -2022,7 +2058,7 @@ export class Spaces {
     secret: Uint8Array,
     device: LocalDevice,
   ) {
-    const delivery = await serializableE2eeTransaction(this.db, async (tx) =>
+    const delivery = await acceptedSpaceTransaction(this.db, async (tx) =>
       this.prepareDelivery(
         tx,
         await this.readSnapshot(tx, address, expected.id),
@@ -2038,14 +2074,14 @@ export class Spaces {
   }
 
   private async prepareDelivery(
-    tx: E2eeTransactionScope,
+    tx: AcceptedDeviceTransactionScope,
     snapshot: Snapshot & { state: DeviceState },
     address: Address,
     expected: SpaceRoot,
     secret: Uint8Array,
     device: LocalDevice,
   ) {
-    let wrote = false;
+    const writes: (() => void)[] = [];
     const { root, keyRoot, members, rotationRequired, position } = await this.validate(
       snapshot,
       address,
@@ -2084,7 +2120,8 @@ export class Spaces {
       if (recipients.epochId !== recipientEpochId)
         throw new Error("E2EE space recipient epoch changed");
       if (recipients.recoveryRoots.length) {
-        const recovery = await tx.allSettledForE2ee(
+        const recovery = await readSpaceRows(
+          tx,
           this.tables.__e2ee_space_recovery_deliveries.where({
             spaceId: root.id,
             recipientAccountId,
@@ -2139,12 +2176,13 @@ export class Spaces {
           );
           this.assertOpen();
           const { id, ...values } = row;
-          wrote = true;
-          tx.insert(
-            this.tables.__e2ee_space_recovery_deliveries,
-            { ...values, envelope, signature },
-            { id },
-          );
+          writes.push(() => {
+            tx.insert(
+              this.tables.__e2ee_space_recovery_deliveries,
+              { ...values, envelope, signature },
+              { id },
+            );
+          });
         }
       }
       for (const recipientDeviceId of recipients.active) {
@@ -2181,11 +2219,20 @@ export class Spaces {
         );
         this.assertOpen();
         const { id, ...values } = row;
-        wrote = true;
-        tx.insert(this.tables.__e2ee_space_deliveries, { ...values, envelope, signature }, { id });
+        writes.push(() => {
+          tx.insert(
+            this.tables.__e2ee_space_deliveries,
+            { ...values, envelope, signature },
+            { id },
+          );
+        });
       }
     }
-    return wrote ? undefined : snapshot;
+    // Keep every recovery predicate, including empty coverage, in this batch's
+    // accepted read set before any recipient's envelope physically stages.
+    this.assertOpen();
+    for (const write of writes) write();
+    return writes.length ? undefined : snapshot;
   }
 
   private async confirm(

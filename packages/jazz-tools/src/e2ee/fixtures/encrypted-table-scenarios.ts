@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./app.js";
 import { expect } from "vitest";
 import { Buffer } from "node:buffer";
 import { schema as s } from "../../schema-namespace.js";
@@ -15,6 +16,9 @@ export type EncryptedTableScenario =
   | "immediate"
   | "after-yield"
   | "plaintext-first"
+  | "plaintext-first-undeclared"
+  | "declaration-recipients-fixed"
+  | "plaintext-only-offline"
   | "transaction-read"
   | "projections"
   | "equality-index"
@@ -34,40 +38,45 @@ export type EncryptedTableScenario =
 export async function runEncryptedTableScenario(timing: EncryptedTableScenario) {
   // Value-type equality tests own their separate schema. These scenarios only
   // need the lifecycle tables and the relations used by projection checks.
-  const app = s.defineApp({
-    ...deviceRequestSchema,
-    ...spaceSchema,
-    projects: s.table(
-      { title: s.string() },
-      {
-        linkedNotesViaProject: s.reverse("linkedNotes", "projectRelation"),
-        notesViaProject: s.reverse("notes", "project"),
-      },
-    ),
-    events: s.table({ message: s.string() }, {}),
-    linkedNotes: s
-      .table(
-        { project: s.uuid(), title: s.string() },
-        { projectRelation: s.rel("projects", "project") },
-      )
-      .encrypted({ space: "project", columns: ["title"] }),
-    notes: s
-      .table(
+  const app = s.defineApp(
+    {
+      ...deviceRequestSchema,
+      ...spaceSchema,
+      projects: s.table(
+        { title: s.string() },
         {
-          projectId: s.uuid(),
-          title: s.string(),
-          done: s.boolean(),
-          payload: s.bytes(),
+          linkedNotesViaProject: s.reverse("linkedNotes", "projectRelation"),
+          notesViaProject: s.reverse("notes", "project"),
         },
-        { project: s.rel("projects", "projectId") },
-      )
-      .encrypted({
-        space: "projectId",
-        columns: ["title", "payload"],
-        ...(timing.startsWith("equality-") ? { indexes: { title: "equality" as const } } : {}),
-        ...(timing === "equality-owned-bytes" ? { indexes: { payload: "equality" as const } } : {}),
-      }),
-  });
+      ),
+      events: s.table({ message: s.string() }, {}),
+      linkedNotes: s
+        .table(
+          { project: s.uuid(), title: s.string() },
+          { projectRelation: s.rel("projects", "project") },
+        )
+        .encrypted({ space: "project", columns: ["title"] }),
+      notes: s
+        .table(
+          {
+            projectId: s.uuid(),
+            title: s.string(),
+            done: s.boolean(),
+            payload: s.bytes(),
+          },
+          { project: s.rel("projects", "projectId") },
+        )
+        .encrypted({
+          space: "projectId",
+          columns: ["title", "payload"],
+          ...(timing.startsWith("equality-") ? { indexes: { title: "equality" as const } } : {}),
+          ...(timing === "equality-owned-bytes"
+            ? { indexes: { payload: "equality" as const } }
+            : {}),
+        }),
+    },
+    { migrations: "none" },
+  );
   const policies = definePermissions(app, ({ policy, session }) => {
     policy.projects.allowRead.always();
     policy.events.allowRead.always();
@@ -89,13 +98,17 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
     policy.__e2ee_space_deliveries.allowRead.always();
     policy.__e2ee_space_deliveries.allowInsert.where({ senderAccountId: session.user.account });
   });
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
   try {
     await deploy({
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
+      schema: app,
+      permissions: { ...deviceRequestPermissions, ...policies },
+    });
+    server = await frontE2eeCore(server, {
       schema: app,
       permissions: { ...deviceRequestPermissions, ...policies },
     });
@@ -289,6 +302,45 @@ export async function runEncryptedTableScenario(timing: EncryptedTableScenario) 
       expect(await db.all(app.__e2ee_space_grants, { tier: "remote" })).toHaveLength(1);
     }
     const tx = db.beginSerializableTransaction();
+    if (timing === "declaration-recipients-fixed") {
+      // Explicit empty recipients refuse instead of becoming the creator default.
+      expect(() => tx.prepareEncryptedScope(app.projects, { initialRecipients: [] })).toThrow(
+        "Initial E2EE recipients must be a non-empty set of IDs",
+      );
+      const recipients = [account.account.id];
+      tx.prepareEncryptedScope(app.projects, { initialRecipients: recipients });
+      recipients.push(globalThis.crypto.randomUUID());
+      // The declaration owns a copy and requires the same exact recipient set.
+      expect(() =>
+        tx.prepareEncryptedScope(app.projects, { initialRecipients: [account.account.id] }),
+      ).not.toThrow();
+      expect(() => tx.prepareEncryptedScope(app.projects)).toThrow(
+        "Initial space recipients changed after authority registration",
+      );
+      await tx.rollback();
+      return;
+    }
+    if (timing === "plaintext-only-offline") {
+      await server.stop();
+      const event = tx.insert(app.events, { message: "Offline ordinary write" });
+      await tx.commit().wait({ tier: "local" });
+      expect(await db.one(app.events.where({ id: event.id }), { tier: "local-first" })).toEqual(
+        event,
+      );
+      expect(encrypted).toBe(0);
+      return;
+    }
+    if (timing === "plaintext-first-undeclared") {
+      const event = tx.insert(app.events, { message: "Must roll back together" });
+      tx.insert(app.projects, { title: "Undeclared" });
+      await expect(tx.commit().wait({ tier: "global" })).rejects.toThrow(
+        "tx.prepareEncryptedScope(scopeTable, { initialRecipients: recipients })",
+      );
+      await tx.rollback();
+      expect(await db.one(app.events.where({ id: event.id }), { tier: "remote" })).toBeNull();
+      return;
+    }
+    if (timing === "plaintext-first") tx.prepareEncryptedScope(app.projects);
     const event =
       timing === "plaintext-first"
         ? tx.insert(app.events, { message: "Created together" })

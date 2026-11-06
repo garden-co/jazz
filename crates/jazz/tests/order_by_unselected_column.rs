@@ -1,4 +1,3 @@
-// Ported verbatim from crates/jazz/tests; only the Db facade imports are swapped.
 //! Ordering by a column that the query's `select` projects away (#3495).
 //!
 //! SQL semantics: an order key orders the result whether or not it is
@@ -6,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-mod common;
+use crate::common;
 
 use jazz::block_on;
 use jazz::db::CurrentRow;
@@ -91,20 +90,14 @@ fn by_rank(direction: OrderDirection) -> Query {
 /// Titles in result order. Also checks that the unselected order key is not
 /// returned.
 fn titles(rows: impl IntoIterator<Item = CurrentRow>) -> Vec<String> {
-    let schema = schema();
-    let table = schema
-        .tables()
-        .iter()
-        .find(|table| table.name.as_str() == "tasks")
-        .expect("tasks table");
     rows.into_iter()
         .map(|row| {
             assert_eq!(
-                row.cell(table, "rank"),
+                row.cell("rank"),
                 None,
                 "an unselected order key must not be returned"
             );
-            match row.cell(table, "title") {
+            match row.cell("title") {
                 Some(Value::String(title)) => title,
                 other => panic!("expected a title, got {other:?}"),
             }
@@ -247,18 +240,32 @@ fn subscription_orders_by_an_unselected_column() {
     }
 }
 
-/// A read with an include (array subquery) must not return the unselected
-/// order key either. Ordering such reads by an unselected column is tracked
-/// separately in #3503; this pins only that the key does not leak.
+/// A read with an include (array subquery) orders by the unselected key
+/// and does not return it (#3503), in both directions and through the
+/// bindings' read entry point.
 #[test]
-fn include_read_does_not_return_the_unselected_order_key() {
+fn include_read_orders_by_the_unselected_key_without_returning_it() {
     let db = seeded_db();
-    let query = by_rank(OrderDirection::Asc)
-        .array_subquery(ArraySubquery::new("notes", "notes", "task_id", "id").select(["body"]));
-    let prepared = db.prepare_query(&query).expect("prepare query");
-    let mut read = titles(block_on(db.all(&prepared, local())).expect("read"));
-    read.sort();
-    assert_eq!(read, ["a", "b", "c", "d"]);
+    for (direction, expected) in [
+        (OrderDirection::Asc, ["a", "b", "c", "d"]),
+        (OrderDirection::Desc, ["d", "c", "b", "a"]),
+    ] {
+        let query = by_rank(direction)
+            .array_subquery(ArraySubquery::new("notes", "notes", "task_id", "id").select(["body"]));
+        let prepared = db.prepare_query(&query).expect("prepare query");
+        let read = titles(block_on(db.all(&prepared, local())).expect("read"));
+        assert_eq!(read, expected, "{direction:?}");
+        let bytes = postcard::to_allocvec(&query).expect("encode query");
+        let rows = match block_on(db.all_serialized_query(&bytes, local(), None, None, None))
+            .expect("serialized read")
+        {
+            jazz::db::SerializedReadResult::Relation(snapshot) => {
+                snapshot.rows[..snapshot.root_count].to_vec()
+            }
+            jazz::db::SerializedReadResult::Rows(rows) => rows,
+        };
+        assert_eq!(titles(rows), expected, "{direction:?} through the bindings");
+    }
 }
 
 /// Alice reads one metric through prepared queries. Non-null scalar double
@@ -592,4 +599,86 @@ fn float_literal_comparisons_match_numeric_order() {
         failures.is_empty(),
         "prepared float predicates must preserve numeric semantics: {failures:#?}"
     );
+}
+
+/// Rows that tie on every order key come in row-id order, in the direction
+/// of the last key: a newest-first read lists tied rows by descending id, so
+/// a declared index (which ends in `id`) serves the whole order in one scan.
+/// Reads and maintained subscriptions agree, also for a row added later.
+#[test]
+fn ties_break_by_row_id_in_the_last_keys_direction() {
+    let db = open_db();
+    for (byte, title) in [(2u8, "two"), (1, "one"), (3, "three")] {
+        block_on(db.insert(
+            "tasks",
+            task_cells(title, 7),
+            InsertOptions {
+                row_id: Some(RowUuid::from_bytes([byte; 16])),
+                ..Default::default()
+            },
+        ))
+        .expect("insert task");
+    }
+    // Each pass adds a fourth tied row with a higher id, then deletes it.
+    for (direction, four, expected) in [
+        (
+            OrderDirection::Asc,
+            4u8,
+            vec!["one", "two", "three", "four"],
+        ),
+        (OrderDirection::Desc, 5, vec!["four", "three", "two", "one"]),
+    ] {
+        let query = by_rank(direction);
+        let read: Vec<_> = expected.iter().copied().filter(|t| *t != "four").collect();
+        assert_eq!(read_titles(&db, &query), read, "{direction:?} read");
+
+        let prepared = db.prepare_query(&query).expect("prepare query");
+        let mut subscription = block_on(db.subscribe(&prepared, local())).expect("subscribe");
+        let Some(SubscriptionEvent::Delta {
+            reset: true,
+            mut added,
+            ..
+        }) = block_on(subscription.next_event())
+        else {
+            panic!("expected an initial reset");
+        };
+        added.sort_by_key(|row| row.index);
+        assert_eq!(
+            titles(added.into_iter().map(|row| row.row)),
+            read,
+            "{direction:?} subscription"
+        );
+
+        let four = RowUuid::from_bytes([four; 16]);
+        block_on(db.insert(
+            "tasks",
+            task_cells("four", 7),
+            InsertOptions {
+                row_id: Some(four),
+                ..Default::default()
+            },
+        ))
+        .expect("insert tied task");
+        let Some(SubscriptionEvent::Delta { added, .. }) = block_on(subscription.next_event())
+        else {
+            panic!("expected a delta for the tied insert");
+        };
+        let index = added
+            .iter()
+            .find(|row| row.row.row_uuid() == four)
+            .expect("the tied row is added")
+            .index;
+        let position = expected.iter().position(|t| *t == "four").unwrap();
+        assert_eq!(
+            index as usize, position,
+            "{direction:?} subscription insert"
+        );
+        assert_eq!(
+            read_titles(&db, &query),
+            expected,
+            "{direction:?} read after insert"
+        );
+
+        block_on(db.delete("tasks", four, Default::default())).expect("delete tied task");
+    }
 }

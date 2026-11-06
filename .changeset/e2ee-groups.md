@@ -11,8 +11,8 @@ Export the group schema and topology-permission helpers from `jazz-tools/e2ee`.
 Reject historically ineligible authors without breaking unrelated groups, allow
 interrupted recovery to reuse an identical staged key, and propagate historical
 verification failures instead of reporting them as unusable recovery deliveries.
-Group authority observations use the current global tier rather than the
-retired edge query tier.
+Group authority uses paired accepted state/content observations and explicit
+Global transaction confirmation; a read tier alone is not membership authority.
 Group operations reuse session-owned device keys and scoped private-store
 decoding. Optional group tables remain available in schema-only application
 configuration.
@@ -31,7 +31,7 @@ operational errors.
 
 Batch scoped topology reads instead of reopening root and epoch queries for
 every visited group. Drain bounded UUID-input chunks without limiting graph
-coverage or weakening exclusive acceptance.
+coverage or weakening serializable acceptance.
 
 Verify newly created group recovery coverage without restaging the creator's
 already-ready keys or repeating delivery maintenance. Preserve required-group

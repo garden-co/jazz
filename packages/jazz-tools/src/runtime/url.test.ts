@@ -1,10 +1,11 @@
 import { describe, it, expect } from "vitest";
 import { appScopedUrl, httpUrlToWs } from "./url.js";
+import { accountAppId } from "../accounts/local-first.js";
 
 describe("appScopedUrl", () => {
   it("trims the server url, preserves any base path, and normalizes the app-scoped path", () => {
-    expect(appScopedUrl(" https://api.example.com/base/ ", "my app", "/admin/deploy")).toBe(
-      "https://api.example.com/base/apps/my%20app/admin/deploy",
+    expect(appScopedUrl(" https://api.example.com/base/ ", "my app", "/admin/bundles")).toBe(
+      "https://api.example.com/base/apps/my%20app/admin/bundles",
     );
   });
 
@@ -16,6 +17,12 @@ describe("appScopedUrl", () => {
 });
 
 describe("httpUrlToWs", () => {
+  it("names an endpoint-scoped client's app by its scope's id", () => {
+    expect(httpUrlToWs("https://app.example.com/jazz", "https://app.example.com/jazz")).toBe(
+      `wss://app.example.com/jazz/apps/${accountAppId("https://app.example.com/jazz")}/ws`,
+    );
+  });
+
   it("http → ws and appends app-scoped /ws", () => {
     expect(httpUrlToWs("http://localhost:4000", "xyz")).toBe("ws://localhost:4000/apps/xyz/ws");
   });

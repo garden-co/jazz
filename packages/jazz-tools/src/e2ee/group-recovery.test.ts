@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
@@ -9,7 +10,7 @@ import { groupSchema } from "./groups.js";
 import { createBrowserKeyEnvelope } from "./browser.js";
 
 it("retries interrupted read-only group recovery past a malformed candidate", async () => {
-  const app = s.defineApp({ ...deviceRequestSchema, ...groupSchema });
+  const app = s.defineApp({ ...deviceRequestSchema, ...groupSchema }, { migrations: "none" });
   const policies = definePermissions(app, ({ policy, session, allOf }) => {
     const authenticated = session.where({ authMode: { in: ["local-first", "external"] } });
     policy.__e2ee_groups.allowRead.where(authenticated);
@@ -32,7 +33,7 @@ it("retries interrupted read-only group recovery past a malformed candidate", as
     policy.__e2ee_group_successors.allowRead.where(authenticated);
     policy.__e2ee_group_successors.allowInsert.where({ authorAccountId: session.user.account });
   });
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Awaited<ReturnType<typeof createDb>>[] = [];
   const store = () => {
     let saved: string | null = null;
@@ -50,6 +51,10 @@ it("retries interrupted read-only group recovery past a malformed candidate", as
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
+      schema: app,
+      permissions: { ...deviceRequestPermissions, ...policies },
+    });
+    server = await frontE2eeCore(server, {
       schema: app,
       permissions: { ...deviceRequestPermissions, ...policies },
     });

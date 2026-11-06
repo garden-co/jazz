@@ -10,14 +10,17 @@ vi.mock("../../contexts/devtools-context.js", () => ({
   useDevtoolsContext: () => mockUseDevtoolsContext(),
 }));
 
-const bigintDefaultApp = s.defineApp({
-  metrics: s.table(
-    {
-      largeCount: s.bigint().default(9007199254740993n),
-    },
-    {},
-  ),
-});
+const bigintDefaultApp = s.defineApp(
+  {
+    metrics: s.table(
+      {
+        largeCount: s.bigint().default(9007199254740993n),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+);
 
 describe("TableSchemaDefinition", () => {
   beforeEach(() => {
@@ -36,13 +39,10 @@ describe("TableSchemaDefinition", () => {
           columns: [{ name: "id", column_type: { type: "Uuid" }, nullable: false }],
         },
       },
-      storedPermissions: {
-        head: {
-          schemaHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          version: 3,
-          parentBundleObjectId: "11111111-1111-1111-1111-111111111111",
-          bundleObjectId: "22222222-2222-2222-2222-222222222222",
-        },
+      bundle: {
+        bundle: "b".repeat(64),
+        schemaHash: "a".repeat(64),
+        publishedAt: 1,
         permissions: {
           users: {
             select: {
@@ -72,7 +72,7 @@ describe("TableSchemaDefinition", () => {
     mockUseDevtoolsContext.mockReturnValue({
       runtime: "overlay",
       wasmSchema: bigintDefaultApp.wasmSchema,
-      storedPermissions: null,
+      bundle: null,
     });
 
     render(
@@ -87,7 +87,7 @@ describe("TableSchemaDefinition", () => {
     expect(screen.getByText(/"value":\s*"9007199254740993"/)).not.toBeNull();
   });
 
-  it("shows an empty state when no permissions head has been published", () => {
+  it("shows an empty state when no bundle has been published for the schema", () => {
     mockUseDevtoolsContext.mockReturnValue({
       runtime: "standalone",
       wasmSchema: {
@@ -95,10 +95,7 @@ describe("TableSchemaDefinition", () => {
           columns: [{ name: "id", column_type: { type: "Uuid" }, nullable: false }],
         },
       },
-      storedPermissions: {
-        head: null,
-        permissions: null,
-      },
+      bundle: null,
     });
 
     render(
@@ -109,9 +106,7 @@ describe("TableSchemaDefinition", () => {
       </MemoryRouter>,
     );
 
-    expect(
-      screen.getByText("No published sync-server permissions found for this app."),
-    ).not.toBeNull();
+    expect(screen.getByText("No published bundle found for this schema.")).not.toBeNull();
   });
 
   it("shows a table-specific empty state when the current table has no stored permissions", () => {
@@ -122,13 +117,10 @@ describe("TableSchemaDefinition", () => {
           columns: [{ name: "id", column_type: { type: "Uuid" }, nullable: false }],
         },
       },
-      storedPermissions: {
-        head: {
-          schemaHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          version: 3,
-          parentBundleObjectId: null,
-          bundleObjectId: "22222222-2222-2222-2222-222222222222",
-        },
+      bundle: {
+        bundle: "b".repeat(64),
+        schemaHash: "a".repeat(64),
+        publishedAt: 1,
         permissions: {
           projects: {
             select: {
@@ -160,13 +152,10 @@ describe("TableSchemaDefinition", () => {
           columns: [{ name: "id", column_type: { type: "Uuid" }, nullable: false }],
         },
       },
-      storedPermissions: {
-        head: {
-          schemaHash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-          version: 3,
-          parentBundleObjectId: null,
-          bundleObjectId: "22222222-2222-2222-2222-222222222222",
-        },
+      bundle: {
+        bundle: "b".repeat(64),
+        schemaHash: "a".repeat(64),
+        publishedAt: 1,
         permissions: {
           users: {
             select: {

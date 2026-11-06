@@ -32,3 +32,11 @@ Encrypted equality reads reuse the fresh accepted epoch history observed while
 decrypting candidates. Empty results still validate history independently, and
 batch reads retain their final authority recheck. Epoch changes rebuild the
 query tokens and retry, preserving the existing key lifetime and validation.
+
+Use `tx.prepareEncryptedScope(scopeTable, { initialRecipients })` before the first
+write when a serializable transaction writes plaintext before creating an
+encrypted scope. The declaration reads real authority evidence in the same
+transaction; omitted recipients keep the creator default and an explicit empty
+list is rejected rather than replaced by the default. Late undeclared scope
+creation reports the required call;
+ordinary transactions without a scope declaration do no extra online work.

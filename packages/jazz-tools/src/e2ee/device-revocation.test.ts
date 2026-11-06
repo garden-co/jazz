@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
@@ -8,7 +9,7 @@ import { recoveryRootBytes } from "./recovery-format.js";
 import { deviceRequestApp, deviceRequestPermissions } from "./device-requests.js";
 
 it("rejects racing recovery registration, retries rotation and retains independent recovery", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Awaited<ReturnType<typeof createDb>>[] = [];
   const delivered: { recipient: Uint8Array; secret: Uint8Array }[] = [];
   try {
@@ -16,6 +17,10 @@ it("rejects racing recovery registration, retries rotation and retains independe
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
+      schema: deviceRequestApp,
+      permissions: deviceRequestPermissions,
+    });
+    server = await frontE2eeCore(server, {
       schema: deviceRequestApp,
       permissions: deviceRequestPermissions,
     });

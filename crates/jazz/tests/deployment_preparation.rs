@@ -1,4 +1,3 @@
-// Ported verbatim from crates/jazz/tests; only the Db facade imports are swapped.
 use std::collections::HashMap;
 
 use jazz::tools::deployment::{
@@ -76,7 +75,6 @@ fn initial_and_permission_only_deployments_replace_embedded_permissions() {
     assert!(prepared.migrations().is_empty());
     let stored = DeploymentCatalogue {
         schemas: vec![schema.clone()],
-        active_schema_hash: Some(SchemaHash::compute(&schema)),
         ..Default::default()
     };
     let mut update = request(&schema, &[], vec![]);
@@ -103,7 +101,6 @@ fn equivalent_diamond_combines_stored_and_submitted_history_in_any_order() {
     let stored = DeploymentCatalogue {
         schemas: vec![base.clone(), left.clone()],
         migrations: vec![first.clone()],
-        active_schema_hash: Some(SchemaHash::compute(&left)),
     };
     let mut update = request(
         &merged,
@@ -140,40 +137,6 @@ fn equivalent_diamond_combines_stored_and_submitted_history_in_any_order() {
         SchemaHash::compute(&merged)
     );
     assert_eq!(actual.active_schema().public_schema(), &merged);
-}
-
-#[test]
-fn sibling_path_cannot_deploy_without_forward_convergence_from_the_authored_branch() {
-    // Same graph as merged_schema_via_sibling_path_defaults_reintroduced_column_without_erasing_source:
-    // left -> base -> right -> merged is a read path, not an eligible deployment.
-    let base = schema(&[]);
-    let left = schema(&["a"]);
-    let right = schema(&["b"]);
-    let merged = schema(&["a", "b"]);
-    let stored = DeploymentCatalogue {
-        schemas: vec![base.clone(), left.clone()],
-        migrations: vec![migration(&base, &left, vec![add("a")])],
-        active_schema_hash: Some(SchemaHash::compute(&left)),
-    };
-    let error = prepare_deployment(
-        &stored,
-        request(
-            &merged,
-            &[right.clone(), merged.clone()],
-            vec![
-                migration(&base, &right, vec![add("b")]),
-                migration(&right, &merged, vec![add("a")]),
-            ],
-        ),
-    )
-    .unwrap_err();
-    assert_eq!(
-        error,
-        DeploymentError::UnreachableTarget {
-            target: SchemaHash::compute(&merged),
-            active: SchemaHash::compute(&left),
-        }
-    );
 }
 
 #[test]
@@ -263,7 +226,6 @@ fn allows_backward_activation_but_rejects_cycles_and_disconnected_stored_schemas
     let stored = DeploymentCatalogue {
         schemas: vec![base.clone(), next.clone()],
         migrations: vec![edge.clone()],
-        active_schema_hash: Some(SchemaHash::compute(&next)),
     };
     prepare_deployment(&stored, request(&base, &[], vec![])).unwrap();
     let reverse = Lens::new(edge.target_hash, edge.source_hash, edge.backward.clone());
@@ -293,7 +255,6 @@ fn rejects_missing_artifacts_bad_hashes_and_conflicting_migrations() {
     let stored = DeploymentCatalogue {
         schemas: vec![base.clone(), next.clone()],
         migrations: vec![edge.clone()],
-        active_schema_hash: Some(SchemaHash::compute(&base)),
     };
     assert!(matches!(
         prepare_deployment(

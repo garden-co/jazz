@@ -1,3 +1,5 @@
+import { frontE2eeCore } from "./fixtures/app.js";
+import { exportLocalFirstSecret } from "../accounts/enrollment.js";
 import { expect, it } from "vitest";
 import { createBrowserCrypto } from "./browser.js";
 import { schema as s } from "../schema-namespace.js";
@@ -7,18 +9,21 @@ import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
 
 it("automatically isolates private device records and keeps group, space and row authority independent", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
-  const alice = await localAccountConfig(server.appId, server.url);
-  const bob = await localAccountConfig(server.appId, server.url);
-  const app = s.defineApp({
-    projects: s.table({ title: s.string() }, {}),
-    notes: s
-      .table(
-        { projectId: s.uuid(), ownerId: s.uuid(), title: s.string() },
-        { project: s.rel("projects", "projectId") },
-      )
-      .encrypted({ space: "projectId", columns: ["title"] }),
-  });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let alice = await localAccountConfig(server.appId, server.url);
+  let bob = await localAccountConfig(server.appId, server.url);
+  const app = s.defineApp(
+    {
+      projects: s.table({ title: s.string() }, {}),
+      notes: s
+        .table(
+          { projectId: s.uuid(), ownerId: s.uuid(), title: s.string() },
+          { project: s.rel("projects", "projectId") },
+        )
+        .encrypted({ space: "projectId", columns: ["title"] }),
+    },
+    { migrations: "none" },
+  );
   const policies = definePermissions(app, ({ policy, session, allOf }) => {
     const authenticated = session.where({ authMode: { in: ["local-first", "external"] } });
     policy.__e2ee_groups.allowInsert.where({ accountId: session.user.account });
@@ -68,6 +73,17 @@ it("automatically isolates private device records and keeps group, space and row
       schema: app,
       permissions: policies,
     });
+    server = await frontE2eeCore(server, { schema: app, permissions: policies });
+    const registeredAliceId = alice.account.id;
+    alice = await localAccountConfig(
+      server.appId,
+      server.url,
+      exportLocalFirstSecret(alice.account),
+    );
+    expect(alice.account.id).toBe(registeredAliceId);
+    const registeredBobId = bob.account.id;
+    bob = await localAccountConfig(server.appId, server.url, exportLocalFirstSecret(bob.account));
+    expect(bob.account.id).toBe(registeredBobId);
     const creator = await createDb({ ...alice, e2ee: { app, store: store() } });
     clients.push(creator);
     const crypto = await createBrowserCrypto();

@@ -89,7 +89,7 @@ function record(cell, check, status, detail = {}) {
 }
 
 const FIXTURE_SCHEMA = `import {schema as s} from 'jazz-tools';
-export const app=s.defineApp({docs:s.table({label:s.string(),body:s.string(),author:s.string()},{})});
+export const app=s.defineApp({docs:s.table({label:s.string(),body:s.string(),author:s.string()},{})},{migrations:"none"});
 export default app;
 `;
 const FIXTURE_PERMISSIONS = `import {schema as s} from 'jazz-tools';
@@ -251,24 +251,46 @@ async function deploy(cell, dir, server, deployer) {
   mkdirSync(fixture);
   writeFileSync(join(fixture, "schema.ts"), FIXTURE_SCHEMA);
   writeFileSync(join(fixture, "permissions.ts"), FIXTURE_PERMISSIONS);
-  const r = await run(
-    dir,
-    process.execPath,
-    [
-      deployer.cliJs,
-      "deploy",
-      server.ctx.appId,
-      "--schema-dir",
-      fixture,
-      "--server-url",
-      server.url,
-    ],
-    `deploy-${deployer.key}.log`,
-    { JAZZ_ADMIN_SECRET: server.ctx.adminSecret },
-    deployer.project,
-  ).finally(() => rmSync(fixture, { recursive: true, force: true }));
-  if (r.code !== 0)
-    throw new Error(`deploy with ${deployer.key} CLI failed: ${r.log.slice(-2000)}`);
+  const env = { JAZZ_ADMIN_SECRET: server.ctx.adminSecret };
+  try {
+    let r = await run(
+      dir,
+      process.execPath,
+      [
+        deployer.cliJs,
+        "deploy",
+        server.ctx.appId,
+        "--schema-dir",
+        fixture,
+        "--server-url",
+        server.url,
+      ],
+      `deploy-${deployer.key}.log`,
+      env,
+      deployer.project,
+    );
+    // Releases after `jazz-tools deploy` was removed publish through
+    // createJazz; drive their catalogue deploy directly against the bare core.
+    if (r.code !== 0 && r.log.includes("`jazz-tools deploy` was removed"))
+      r = await run(
+        dir,
+        process.execPath,
+        [
+          join(ownDir, "deploy-fixture.mjs"),
+          dirname(dirname(deployer.cliJs)),
+          server.ctx.appId,
+          fixture,
+          server.url,
+        ],
+        `deploy-${deployer.key}-catalogue.log`,
+        env,
+        deployer.project,
+      );
+    if (r.code !== 0)
+      throw new Error(`deploy with ${deployer.key} jazz-tools failed: ${r.log.slice(-2000)}`);
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
 }
 
 function newCell(name) {

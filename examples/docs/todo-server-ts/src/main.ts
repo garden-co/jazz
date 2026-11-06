@@ -77,7 +77,12 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
   const jwksUrl = config.jwksUrl ?? process.env.JAZZ_JWKS_URL?.trim();
   const jwtPublicKey = config.jwtPublicKey ?? process.env.JAZZ_JWT_PUBLIC_KEY?.trim();
   const allowLocalFirstAuth =
-    config.allowLocalFirstAuth ?? process.env.JAZZ_ALLOW_LOCAL_FIRST_AUTH !== "false";
+    config.allowLocalFirstAuth ??
+    (process.env.JAZZ_ALLOW_LOCAL_FIRST_AUTH === undefined
+      ? undefined
+      : ["true", "1", "yes", "on", "y"].includes(
+          process.env.JAZZ_ALLOW_LOCAL_FIRST_AUTH.trim().toLowerCase(),
+        ));
   const writeTier = serverUrl ? "global" : "local";
 
   if (!serverUrl || !backendSecret) {
@@ -110,6 +115,20 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
   // Create Express app
   const app = express();
   app.use(express.json());
+
+  // Sign in: the first call with a verified identity provisions its Jazz
+  // account for this app; other routes only log existing accounts in.
+  app.post("/sign-in", async (req: Request, res: Response) => {
+    const userDb = await client
+      .forRequest(req, { account: "login-or-register" })
+      .catch(() => undefined);
+    const account = userDb?.getAuthState().session?.user.account;
+    if (!account) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+    res.json({ account });
+  });
 
   // Track active SSE connections for live updates
   const sseConnections = new Set<Response>();

@@ -40,7 +40,7 @@ import { setBrowserFollowerProbeTimingForTest } from "../../src/runtime/native-r
 import { createOpenTransactionId } from "../../src/runtime/client.js";
 import { loadWasmModule } from "../../src/runtime/wasm-loader.js";
 import { createBrowserStorageOwner } from "../../src/runtime/browser-worker-config.js";
-import { getJazzServerJwtForUser } from "./testing-server.js";
+import { jazzAppUser } from "./testing-server.js";
 import {
   createRemoteBrowserDb,
   deleteRemoteBrowserIndexedDbAndWaitForReload,
@@ -1058,25 +1058,46 @@ describe("SharedWorker bridge with IndexedDB", () => {
   // 2. Insert + local query through worker bridge
   // -------------------------------------------------------------------------
 
-  it("inserts and queries multiple rows through the optimistic foreground", async () => {
+  it("inserts a row and queries it back", async () => {
     const db = track(
       await createDb({
         appId: "test-app",
         driver: { type: "persistent", dbName: uniqueDbName("insert-query") },
       }),
     );
-    const { value: first } = db.insert(todos, { title: "Task A", done: false });
-    expect(first.id).toBeTruthy();
-    expect(typeof first.id).toBe("string");
-    await expect(db.all(allTodos)).resolves.toEqual([
-      expect.objectContaining({ id: first.id, title: "Task A", done: false }),
-    ]);
 
+    // Insert (sync — runs on main-thread in-memory runtime)
+    const {
+      value: { id },
+    } = db.insert(todos, { title: "Buy milk", done: false });
+    expect(id).toBeTruthy();
+    expect(typeof id).toBe("string");
+
+    // Query (async — runs on main-thread runtime)
+    const results = await db.all(allTodos);
+    expect(results.length).toBe(1);
+    expect(results[0].id).toBe(id);
+    expect(results[0].title).toBe("Buy milk");
+    expect(results[0].done).toBe(false);
+  });
+
+  it("inserts multiple rows and queries all", async () => {
+    const db = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName: uniqueDbName("multi-insert") },
+      }),
+    );
+
+    db.insert(todos, { title: "Task A", done: false });
     db.insert(todos, { title: "Task B", done: true });
     db.insert(todos, { title: "Task C", done: false });
-    const rows = await db.all(allTodos);
-    expect(rows).toHaveLength(3);
-    expect(rows.map((row) => row.title).sort()).toEqual(["Task A", "Task B", "Task C"]);
+
+    const results = await db.all(allTodos);
+    expect(results.length).toBe(3);
+
+    const titles = results.map((r) => r.title).sort();
+    expect(titles).toEqual(["Task A", "Task B", "Task C"]);
   });
 
   it("sync insert before bridge init is persisted after init completes", async () => {
@@ -1120,35 +1141,91 @@ describe("SharedWorker bridge with IndexedDB", () => {
   // 3. Update + delete through worker bridge
   // -------------------------------------------------------------------------
 
-  it("updates and deletes rows optimistically and durably through the worker bridge", async () => {
+  it("updates a row", async () => {
     const db = track(
       await createDb({
         appId: "test-app",
-        driver: { type: "persistent", dbName: uniqueDbName("update-delete") },
+        driver: { type: "persistent", dbName: uniqueDbName("update") },
       }),
     );
 
-    // Foreground reads must reflect writes before the caller awaits durability.
-    const { value: optimistic } = db.insert(todos, { title: "Original", done: false });
-    const optimisticUpdate = db.update(todos, optimistic.id, { done: true });
-    expect(optimisticUpdate).toMatchObject({ wait: expect.any(Function) });
-    await expect(db.all(allTodos)).resolves.toEqual([
-      expect.objectContaining({ id: optimistic.id, title: "Original", done: true }),
-    ]);
-    const optimisticDelete = db.delete(todos, optimistic.id);
-    expect(optimisticDelete).toMatchObject({ wait: expect.any(Function) });
-    await expect(db.all(allTodos)).resolves.toEqual([]);
+    const { value: inserted } = db.insert(todos, {
+      title: "Original",
+      done: false,
+    });
+    const { id } = inserted;
+    const result = db.update(todos, id, { done: true });
+    expect(result).toMatchObject({
+      wait: expect.any(Function),
+    });
 
-    // Local-tier reads separately verify the durable worker acknowledgements.
-    const durable = await db
-      .insert(todos, { title: "Durable", done: false })
+    const results = await db.all(allTodos);
+    expect(results.length).toBe(1);
+    expect(results[0].title).toBe("Original");
+    expect(results[0].done).toBe(true);
+  });
+
+  it("updates a row durably", async () => {
+    const db = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName: uniqueDbName("update-durable") },
+      }),
+    );
+
+    const { id } = await db
+      .insert(todos, { title: "Original", done: false })
       .wait({ tier: "local" });
-    await db.update(todos, durable.id, { done: true }).wait({ tier: "local" });
-    await expect(db.all(allTodos, { tier: "local-first" })).resolves.toEqual([
-      expect.objectContaining({ id: durable.id, title: "Durable", done: true }),
-    ]);
-    await db.delete(todos, durable.id).wait({ tier: "local" });
-    await expect(db.all(allTodos, { tier: "local-first" })).resolves.toEqual([]);
+
+    const updateHandle = db.update(todos, id, { done: true });
+    await updateHandle.wait({ tier: "local" });
+
+    const results = await db.all(allTodos, { tier: "local-first" });
+    expect(results.length).toBe(1);
+    expect(results[0].done).toBe(true);
+  });
+
+  it("deletes a row", async () => {
+    const db = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName: uniqueDbName("delete") },
+      }),
+    );
+
+    const { value: inserted } = db.insert(todos, {
+      title: "Ephemeral",
+      done: false,
+    });
+    const { id } = inserted;
+    expect((await db.all(allTodos)).length).toBe(1);
+
+    const result = db.delete(todos, id);
+    expect(result).toMatchObject({
+      wait: expect.any(Function),
+    });
+    const results = await db.all(allTodos);
+    expect(results.length).toBe(0);
+  });
+
+  it("deletes a row durably", async () => {
+    const db = track(
+      await createDb({
+        appId: "test-app",
+        driver: { type: "persistent", dbName: uniqueDbName("delete-durable") },
+      }),
+    );
+
+    const { id } = await db
+      .insert(todos, { title: "Ephemeral", done: false })
+      .wait({ tier: "local" });
+    expect((await db.all(allTodos, { tier: "local-first" })).length).toBe(1);
+
+    const deleteHandle = db.delete(todos, id);
+    await deleteHandle.wait({ tier: "local" });
+
+    const results = await db.all(allTodos, { tier: "local-first" });
+    expect(results.length).toBe(0);
   });
 
   it("deletes IndexedDB storage for the current namespace and keeps the same Db usable", async () => {
@@ -1388,18 +1465,11 @@ describe("SharedWorker bridge with IndexedDB", () => {
 
     const dbName = uniqueDbName("catalogue-current-schema-rehydrate");
     const testingServer = await publishCatalogueSchemaFamily("catalogue-current-schema-rehydrate");
-    const jwtToken = await getJazzServerJwtForUser(
-      "catalogue-current-schema-rehydrate",
-      undefined,
-      testingServer.appId,
-    );
+    const user = await jazzAppUser(testingServer, "catalogue-current-schema-rehydrate");
 
     const seeded = track(
       await createDb({
-        appId: testingServer.appId,
-        serverUrl: testingServer.serverUrl,
-        jwtToken,
-        registerJwt: true,
+        ...user,
         driver: { type: "persistent", dbName },
       }),
     );
@@ -1426,10 +1496,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
 
     const reopened = track(
       await createDb({
-        appId: testingServer.appId,
-        serverUrl: testingServer.serverUrl,
-        jwtToken,
-        registerJwt: true,
+        ...user,
         driver: { type: "persistent", dbName },
       }),
     );
@@ -1445,10 +1512,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
 
     const remote = track(
       await createDb({
-        appId: testingServer.appId,
-        serverUrl: testingServer.serverUrl,
-        jwtToken,
-        registerJwt: true,
+        ...user,
         driver: { type: "persistent", dbName: uniqueDbName("catalogue-remote-authority") },
       }),
     );

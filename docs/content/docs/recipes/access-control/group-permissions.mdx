@@ -33,7 +33,7 @@ Three tables: the workspace itself, a members join table that records each user'
 - **Bootstrap insert**: the second branch of `allowInsert` lets the workspace creator add themselves as the first admin&hairsp;—&hairsp;otherwise `isAdmin` would block everyone, since there are no members yet.
 - **Leave on your own**: members can delete their own membership row regardless of role. Admins can remove anyone.
 
-See [Permissions](/docs/auth/permissions) for more on `exists.where`, `anyOf`, `allOf`, and `$createdBy`.
+See [Permissions](/docs/schemas/policies) for more on `exists.where`, `anyOf`, `allOf`, and `$createdBy`.
 
 ## Creating a workspace
 

@@ -63,11 +63,22 @@ async function listenForDeployRequest(): Promise<{ server: Server; url: string }
 const schemaImportPath = join(packageRoot, "dist", "index.js");
 
 describe("jazz-tools wrapper", () => {
-  it.each(["--help", "-h"])("shows deploy help before required arguments (%s)", (flag) => {
-    const help = execFileSync(process.execPath, [wrapper, "deploy", flag], { encoding: "utf8" });
-    expect(help).toContain("deploy <appId>");
+  it.each(["--help", "-h"])("shows migrations help before required arguments (%s)", (flag) => {
+    const help = execFileSync(process.execPath, [wrapper, "migrations", flag], {
+      encoding: "utf8",
+    });
+    expect(help).toContain("migrations graph");
     expect(help).toContain("--server-url");
     expect(help).toContain("--admin-secret");
+    expect(help).not.toMatch(/^\s+deploy\b/m);
+  });
+
+  it("explains that createJazz replaced the deploy command", async () => {
+    const result = await runWrapper(["deploy", "my-app"]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("`jazz-tools deploy` was removed");
+    expect(result.stderr).toContain("createJazz");
   });
 
   it("does not advertise the removed documentation MCP server", () => {
@@ -88,23 +99,34 @@ describe("jazz-tools wrapper", () => {
     },
   );
   it.each([
-    ["before command", ["--env-file", ".env.staging", "deploy", "explicit-wrapper-app"]],
-    ["after command", ["deploy", "--env-file", ".env.staging", "explicit-wrapper-app"]],
-    ["equals before command", ["--env-file=.env.staging", "deploy", "explicit-wrapper-app"]],
-  ] as const)("loads an explicit env file and routes deploy (%s)", async (_label, args) => {
-    const root = await mkdtemp(join(tmpdir(), "jazz-tools-wrapper-env-file-"));
-    const { server, url } = await listenForDeployRequest();
-    let resolveClose!: () => void;
-    let rejectClose!: (reason?: unknown) => void;
-    const close = new Promise<void>((resolvePromise, rejectPromise) => {
-      resolveClose = resolvePromise;
-      rejectClose = rejectPromise;
-    });
+    [
+      "before command",
+      ["--env-file", ".env.staging", "migrations", "graph", "explicit-wrapper-app"],
+    ],
+    [
+      "after command",
+      ["migrations", "graph", "--env-file", ".env.staging", "explicit-wrapper-app"],
+    ],
+    [
+      "equals before command",
+      ["--env-file=.env.staging", "migrations", "graph", "explicit-wrapper-app"],
+    ],
+  ] as const)(
+    "loads an explicit env file and routes migrations graph (%s)",
+    async (_label, args) => {
+      const root = await mkdtemp(join(tmpdir(), "jazz-tools-wrapper-env-file-"));
+      const { server, url } = await listenForDeployRequest();
+      let resolveClose!: () => void;
+      let rejectClose!: (reason?: unknown) => void;
+      const close = new Promise<void>((resolvePromise, rejectPromise) => {
+        resolveClose = resolvePromise;
+        rejectClose = rejectPromise;
+      });
 
-    try {
-      await writeFile(
-        join(root, "schema.ts"),
-        `
+      try {
+        await writeFile(
+          join(root, "schema.ts"),
+          `
 import { schema as s } from ${JSON.stringify(schemaImportPath)};
 
 const schema = {
@@ -114,12 +136,12 @@ const schema = {
 };
 
 type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema);
+export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
 `,
-      );
-      await writeFile(
-        join(root, "permissions.ts"),
-        `
+        );
+        await writeFile(
+          join(root, "permissions.ts"),
+          `
 import { schema as s } from ${JSON.stringify(schemaImportPath)};
 import { app } from "./schema.js";
 
@@ -128,29 +150,31 @@ export default s.definePermissions(app, ({ policy }) => {
   policy.todos.allowInsert.always();
 });
 `,
-      );
-      await writeFile(
-        join(root, ".env.staging"),
-        [`JAZZ_SERVER_URL=${url}`, "JAZZ_ADMIN_SECRET=staging-secret", ""].join("\n"),
-      );
-      const env: NodeJS.ProcessEnv = { ...process.env, JAZZ_ADMIN_SECRET: "real-secret" };
-      delete env.JAZZ_APP_ID;
-      delete env.JAZZ_SERVER_URL;
+        );
+        await writeFile(
+          join(root, ".env.staging"),
+          [`JAZZ_SERVER_URL=${url}`, "JAZZ_ADMIN_SECRET=staging-secret", ""].join("\n"),
+        );
+        const env: NodeJS.ProcessEnv = { ...process.env, JAZZ_ADMIN_SECRET: "real-secret" };
+        delete env.JAZZ_APP_ID;
+        delete env.JAZZ_SERVER_URL;
 
-      const result = await runWrapper(args, { cwd: root, env });
+        const result = await runWrapper(args, { cwd: root, env });
 
-      expect(result.status).toBe(1);
-      expect(result.stdout).toContain(`Loaded current schema from ${join(root, "schema.ts")}.`);
-      expect(result.stderr).toContain("request=/apps/explicit-wrapper-app/admin/migrations/graph");
-      expect(result.stderr).toContain("secret=real-secret");
-      expect(result.stderr).not.toContain("Missing app ID");
-      expect(result.stdout).not.toContain("Jazz distributed database CLI");
-    } finally {
-      server.close((error) => (error ? rejectClose(error) : resolveClose()));
-      await close;
-      await rm(root, { recursive: true, force: true });
-    }
-  });
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain(
+          "request=/apps/explicit-wrapper-app/admin/migrations/graph",
+        );
+        expect(result.stderr).toContain("secret=real-secret");
+        expect(result.stderr).not.toContain("Missing app ID");
+        expect(result.stdout).not.toContain("Jazz distributed database CLI");
+      } finally {
+        server.close((error) => (error ? rejectClose(error) : resolveClose()));
+        await close;
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   it.each([
     ["--rust-bin followed by --help", ["--rust-bin", "--help"]],

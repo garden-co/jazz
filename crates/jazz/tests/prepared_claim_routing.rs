@@ -1,4 +1,3 @@
-// Ported verbatim from crates/jazz/tests; only the Db facade imports are swapped.
 use std::collections::BTreeMap;
 
 use jazz::block_on;
@@ -1205,14 +1204,9 @@ fn prepared_binding_reprepares_claim_routing_after_schema_change() {
     )
     .expect("valid migration lens");
     let publication = db
-        .author_schema_lineage_publication(
-            v2.clone(),
-            lens,
-            Vec::<String>::new(),
-            Vec::<String>::new(),
-        )
+        .author_schema_lineage_publication(v2.clone(), lens)
         .expect("authority authors v1-to-v2 lineage");
-    block_on(db.publish_schema_with_lens(1, publication)).expect("publish v1-to-v2 lineage");
+    block_on(db.publish_schema_with_lens(publication)).expect("publish v1-to-v2 lineage");
     block_on(db.activate_catalogue_schema_for_test(CurrentWriteSchema {
         revision: 1,
         schema: v2.id,
@@ -1250,7 +1244,7 @@ fn prepared_binding_reprepares_claim_routing_after_schema_change() {
     assert_eq!(projected[0].cell_at(2), Some(Value::U64(0)));
     assert_eq!(
         db.read(&prepared_team_v1)
-            .expect("invalidate stale v1 Groove handle after catalogue rebuild")
+            .expect("invalidate stale v1 handle after catalogue rebuild")
             .into_iter()
             .map(|row| row.row_uuid())
             .collect::<Vec<_>>(),
@@ -1331,14 +1325,9 @@ fn rebuilt_subscription_drop_releases_rehydrated_handle_without_touching_peer() 
     )
     .expect("valid migration lens");
     let publication = db
-        .author_schema_lineage_publication(
-            v2.clone(),
-            lens,
-            Vec::<String>::new(),
-            Vec::<String>::new(),
-        )
+        .author_schema_lineage_publication(v2.clone(), lens)
         .expect("authority authors v1-to-v2 lineage");
-    block_on(db.publish_schema_with_lens(1, publication)).expect("publish v1-to-v2 lineage");
+    block_on(db.publish_schema_with_lens(publication)).expect("publish v1-to-v2 lineage");
     block_on(db.activate_catalogue_schema_for_test(CurrentWriteSchema {
         revision: 1,
         schema: v2.id,
@@ -1374,13 +1363,13 @@ fn rebuilt_subscription_drop_releases_rehydrated_handle_without_touching_peer() 
         Some(SubscriptionEvent::Delta { updated, .. })
             if updated.iter().any(|output| output.row_uuid() == row(0x42))
     ));
-    assert_eq!(db.active_groove_subscriptions_for_test(), 2);
+    assert_eq!(db.runtime_stats_for_test().active_subscriptions, 2);
 
     drop(stream_a);
     // Stream Drop is deliberately non-blocking. The successor runtime handle
     // must be retired by the next node owner turn, without touching Bob's.
     block_on(db.tick()).expect("drain A finalization after runtime rebuild");
-    assert_eq!(db.active_groove_subscriptions_for_test(), 1);
+    assert_eq!(db.runtime_stats_for_test().active_subscriptions, 1);
     block_on(db.insert(
         DOCUMENTS,
         BTreeMap::from([
@@ -1400,7 +1389,7 @@ fn rebuilt_subscription_drop_releases_rehydrated_handle_without_touching_peer() 
 }
 
 #[test]
-/// A prepared join owned by Alice survives a catalogue-driven Groove rebuild.
+/// A prepared join owned by Alice survives a catalogue-driven rebuild.
 ///
 /// Alice publishes a compatible schema lineage after preparing the v1 join;
 /// the test then occupies the rebuilt runtime with a distinct v2 handle before
@@ -1479,14 +1468,9 @@ fn prepared_join_handle_recompiles_after_catalogue_runtime_rebuild() {
     )
     .expect("valid migration lens");
     let publication = db
-        .author_schema_lineage_publication(
-            v2.clone(),
-            lens,
-            Vec::<String>::new(),
-            Vec::<String>::new(),
-        )
+        .author_schema_lineage_publication(v2.clone(), lens)
         .expect("authority authors v1-to-v2 lineage");
-    block_on(db.publish_schema_with_lens(1, publication)).expect("publish v2 with lineage lens");
+    block_on(db.publish_schema_with_lens(publication)).expect("publish v2 with lineage lens");
     block_on(db.activate_catalogue_schema_for_test(CurrentWriteSchema {
         revision: 1,
         schema: v2.id,

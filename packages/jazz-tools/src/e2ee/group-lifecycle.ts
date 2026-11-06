@@ -1,7 +1,10 @@
-import { serializableE2eeTransaction } from "../runtime/db.js";
-import type { Db, E2eeTransactionScope } from "../runtime/db.js";
-import { observeE2eeHistory, type E2eeHistoryReader } from "./history-reader.js";
-import type { RowSettlement } from "../runtime/client.js";
+import {
+  acceptedDeviceTransaction as acceptedGroupTransaction,
+  acceptedContentPositions,
+} from "./accepted-membership.js";
+import type { Db, QueryBuilder } from "../runtime/db.js";
+import type { AcceptedDeviceTransactionScope } from "./accepted-membership.js";
+import type { AcceptedRowEvidence } from "../runtime/accepted-read.js";
 import { PersistedWriteRejectedError } from "../runtime/client.js";
 import type { AccountStore } from "../accounts/persistence.js";
 import { runtimeRandomBytes } from "../runtime/runtime-entropy.js";
@@ -47,6 +50,24 @@ import {
   groupSuccessorContext,
 } from "./group-successor.js";
 
+/** Content order is projected only after validating each paired authority response. */
+type GroupContentOrigin = AcceptedRowEvidence & { position: string };
+
+async function readGroupRows<T extends { id: string }>(
+  tx: AcceptedDeviceTransactionScope,
+  query: QueryBuilder<T>,
+): Promise<{ rows: T[]; contentOrigins: GroupContentOrigin[] }> {
+  const result = await tx.readAccepted(query);
+  const positions = acceptedContentPositions(result);
+  return {
+    rows: result.rows,
+    contentOrigins: result.evidence.map((entry) => ({
+      ...entry,
+      position: positions.get(entry.rowId)!.toString(),
+    })),
+  };
+}
+
 type GroupKey = Pick<
   GroupRoot,
   "id" | "accountId" | "epochId" | "mechanism" | "version" | "verification"
@@ -59,7 +80,7 @@ type GroupDevice = {
   load(): Promise<LocalDevice>;
   release(device: LocalDevice): void;
   readonly keyLifetime: DeviceKeyLifetime;
-  states(transaction?: E2eeHistoryReader): Promise<{
+  states(transaction?: AcceptedDeviceTransactionScope): Promise<{
     active: Set<string>;
     epochId: string;
     publicHistory: PublicMembershipHistory;
@@ -74,14 +95,14 @@ export type GroupRecoveryPath = { groupId: string; epochId: string } & (
 );
 /** Public history captured for an explicit scope; authenticated replay grants membership. */
 export type GroupMembershipSnapshot = {
-  roots: { rows: GroupRoot[]; settlements: RowSettlement[] };
-  records: { rows: GroupMembership[]; settlements: RowSettlement[] };
-  successors: { rows: GroupSuccessor[]; settlements: RowSettlement[] };
+  roots: { rows: GroupRoot[]; contentOrigins: GroupContentOrigin[] };
+  records: { rows: GroupMembership[]; contentOrigins: GroupContentOrigin[] };
+  successors: { rows: GroupSuccessor[]; contentOrigins: GroupContentOrigin[] };
   histories: Map<string, PublicMembershipHistory>;
 };
 
 type MembershipSnapshot = GroupMembershipSnapshot & {
-  targetRoots: { rows: GroupRoot[]; settlements: RowSettlement[] };
+  targetRoots: { rows: GroupRoot[]; contentOrigins: GroupContentOrigin[] };
 };
 
 type GroupState = {
@@ -143,7 +164,7 @@ export class Groups {
   private loadDevice(): Promise<LocalDevice> {
     return this.requireDevice().load();
   }
-  private deviceStates(transaction?: E2eeHistoryReader) {
+  private deviceStates(transaction?: AcceptedDeviceTransactionScope) {
     return this.requireDevice().states(transaction);
   }
 
@@ -159,11 +180,11 @@ export class Groups {
         this.warmMembership({ accountId: this.accountId }),
         this.db.all(query, { tier: "remote" }),
       ]);
-      const read = await serializableE2eeTransaction(this.db, async (tx) => {
+      const read = await acceptedGroupTransaction(this.db, async (tx) => {
         const own = await readPublicMembershipHistory(tx, this.accountId, this.tables);
         const [group, deliveries] = await Promise.all([
           this.readMembership(tx, { accountId: this.accountId }, own),
-          tx.allSettledForE2ee(query),
+          readGroupRows(tx, query),
         ]);
         return { own, group, deliveries };
       });
@@ -180,7 +201,7 @@ export class Groups {
           paths.push({ ...path, validation: "unavailable", reason: "maintenance-required" });
           continue;
         }
-        const position = snapshot.group.roots.settlements.find(
+        const position = snapshot.group.roots.contentOrigins.find(
           (entry) => entry.rowId === id,
         )?.position;
         if (position === undefined) throw new Error("Missing E2EE group authority coverage");
@@ -240,7 +261,7 @@ export class Groups {
     position: string,
     epochId: string,
     group: GroupMembershipSnapshot,
-    deliveries: { rows: GroupRecoveryDelivery[]; settlements: RowSettlement[] },
+    deliveries: { rows: GroupRecoveryDelivery[]; contentOrigins: GroupContentOrigin[] },
     material: DecodedRecoveryMaterial,
   ): Promise<Uint8Array | undefined> {
     for (const row of deliveries.rows) {
@@ -251,7 +272,7 @@ export class Groups {
         row.recoveryRootId !== material.rootId
       )
         continue;
-      const at = deliveries.settlements.find((entry) => entry.rowId === row.id)?.position;
+      const at = deliveries.contentOrigins.find((entry) => entry.rowId === row.id)?.position;
       if (!(await this.acceptedDelivery(root, position, group, row, at))) continue;
       const context = groupRecoveryContext(this.accountContext(root.accountId), row);
       let secret: Uint8Array | undefined;
@@ -280,7 +301,7 @@ export class Groups {
   /** Backfill effective memberships, including inherited paths, then verify recovery. */
   async protectRecovery(value: string): Promise<void> {
     await this.warmMembership({ accountId: this.accountId });
-    const read = await serializableE2eeTransaction(this.db, async (tx) => {
+    const read = await acceptedGroupTransaction(this.db, async (tx) => {
       const own = await this.deviceStates(tx);
       return {
         own,
@@ -319,7 +340,7 @@ export class Groups {
     try {
       device = await this.loadDevice();
       await this.warmMembership({ accountId: this.accountId });
-      const discovery = await serializableE2eeTransaction(this.db, async (tx) => {
+      const discovery = await acceptedGroupTransaction(this.db, async (tx) => {
         const own = await this.deviceStates(tx);
         return {
           own,
@@ -347,7 +368,7 @@ export class Groups {
         );
         if (!observedRoots.length) continue;
         await this.warmMembership({ groupIds: batchIds });
-        const read = await serializableE2eeTransaction(this.db, async (tx) => {
+        const read = await acceptedGroupTransaction(this.db, async (tx) => {
           const own = await this.deviceStates(tx);
           const group = await this.readMembership(tx, { groupIds: batchIds }, own.publicHistory);
           // Keep observed creators in the covered read set if a root changes.
@@ -360,7 +381,8 @@ export class Groups {
           return {
             own,
             group,
-            deliveries: await tx.allSettledForE2ee(
+            deliveries: await readGroupRows(
+              tx,
               this.tables.__e2ee_group_recovery_deliveries.where({
                 groupId: { in: batchIds },
                 recipientAccountId: this.accountId,
@@ -383,7 +405,9 @@ export class Groups {
           if (!membership || membership.sealed || !membership.members.has(this.accountId)) continue;
           const roots = {
             rows: snapshot.group.roots.rows.filter((row) => row.id === id),
-            settlements: snapshot.group.roots.settlements.filter((entry) => entry.rowId === id),
+            contentOrigins: snapshot.group.roots.contentOrigins.filter(
+              (entry) => entry.rowId === id,
+            ),
           };
           if (roots.rows[0]?.accountId !== observed.accountId)
             throw new Error("E2EE group creator changed");
@@ -472,7 +496,7 @@ export class Groups {
     });
     const device = await this.loadDevice();
     try {
-      const proposal = await serializableE2eeTransaction(this.db, async (tx) => {
+      const proposal = await acceptedGroupTransaction(this.db, async (tx) => {
         const author = await this.deviceStates(tx);
         if (!author.active.has(device.id))
           throw new Error("An active device must author group membership changes");
@@ -555,7 +579,7 @@ export class Groups {
         this.assertOpen,
         this.requireDevice().keyLifetime,
       );
-      const proposal = await serializableE2eeTransaction(this.db, async (tx) => {
+      const proposal = await acceptedGroupTransaction(this.db, async (tx) => {
         const membership = await this.deviceStates(tx);
         if (!membership.active.has(device.id))
           throw new Error("An approved active device must create the group");
@@ -592,25 +616,14 @@ export class Groups {
   async explain(id: string): Promise<GroupState> {
     this.assertOpen();
     if (this.device?.isKnownRevoked()) return { state: "refused", reason: "device-not-active" };
-    const offline = await this.db.e2eeIsExplicitlyOffline();
-    const rootQuery = this.tables.__e2ee_groups.where({ id });
-    const observed = offline
-      ? (await observeE2eeHistory(this.db, (reader) => reader.allSettledForE2ee(rootQuery))).rows[0]
-      : await this.db.one(rootQuery, { tier: "remote" });
+    const observed = await this.db.one(this.tables.__e2ee_groups.where({ id }), { tier: "remote" });
     if (!observed) return { state: "unavailable", reason: "group-not-found" };
-    if (!offline) await this.warmMembership({ groupIds: [observed.id] });
+    await this.warmMembership({ groupIds: [observed.id] });
     const device = await this.loadDevice();
     try {
-      if (!offline)
-        await this.db.all(this.tables.__e2ee_group_deliveries.where({ groupId: id }), {
-          tier: "remote",
-        });
-      if (offline) {
-        const snapshot = await observeE2eeHistory(this.db, (tx) =>
-          this.readInspectionSnapshot(tx, observed),
-        );
-        return (await this.inspectSnapshot(snapshot, observed, device, true))!;
-      }
+      await this.db.all(this.tables.__e2ee_group_deliveries.where({ groupId: id }), {
+        tier: "remote",
+      });
       // Observations can suppress duplicate envelopes, but never authorise them.
       // Keep them outside the publication predicate so concurrent deliveries
       // do not conflict with a valid independently prepared delivery.
@@ -622,9 +635,9 @@ export class Groups {
         result: GroupState | undefined;
       };
       try {
-        const transaction = await serializableE2eeTransaction(this.db, async (tx) => {
+        const transaction = await acceptedGroupTransaction(this.db, async (tx) => {
           const snapshot = await this.readInspectionSnapshot(tx, observed, observations.deliveries);
-          const result = await this.inspectSnapshot(snapshot, observed, device, false, {
+          const result = await this.inspectSnapshot(snapshot, observed, device, {
             deliver: async (expected, secret) => {
               await this.prepareDelivery(tx, expected, secret, device, observations, snapshot);
               delivered = expected;
@@ -647,12 +660,12 @@ export class Groups {
         // A denied publication cannot deny a previously usable key. Establish
         // a fresh accepted snapshot before using the existing denial handling.
         delivered = undefined;
-        const fallback = await serializableE2eeTransaction(this.db, async (tx) => {
+        const fallback = await acceptedGroupTransaction(this.db, async (tx) => {
           const snapshot = await this.readInspectionSnapshot(tx, observed);
           // Delivery was denied, but key confirmation can itself race with
           // revocation. Keep even this read-only fallback inside fresh authority
           // coverage and wait for its global acceptance before reporting ready.
-          const result = await this.inspectSnapshot(snapshot, observed, device, false, {
+          const result = await this.inspectSnapshot(snapshot, observed, device, {
             deliver: async () => {},
             unavailable: (expected, failed, error) => {
               unavailable = { expected, failed, error };
@@ -669,7 +682,7 @@ export class Groups {
         throw unavailable.error;
       }
       if (!accepted.result)
-        return (await this.inspectSnapshot(accepted.snapshot, observed, device, false))!;
+        return (await this.inspectSnapshot(accepted.snapshot, observed, device))!;
       if (delivered) {
         try {
           await this.clearDeliveredStaging(delivered);
@@ -685,9 +698,9 @@ export class Groups {
   }
 
   private async readInspectionSnapshot(
-    tx: E2eeHistoryReader,
+    tx: AcceptedDeviceTransactionScope,
     observed: GroupRoot,
-    deliveries?: { rows: GroupDelivery[]; settlements: RowSettlement[] },
+    deliveries?: { rows: GroupDelivery[]; contentOrigins: GroupContentOrigin[] },
   ) {
     const state = await this.deviceStates(tx);
     const group = await this.readGroupMembership(tx, observed, state.publicHistory);
@@ -695,7 +708,8 @@ export class Groups {
       roots: group.targetRoots,
       deliveries:
         deliveries ??
-        (await tx.allSettledForE2ee(
+        (await readGroupRows(
+          tx,
           this.tables.__e2ee_group_deliveries.where({ groupId: observed.id }),
         )),
       history: state.publicHistory,
@@ -708,7 +722,6 @@ export class Groups {
     snapshot: Awaited<ReturnType<Groups["readInspectionSnapshot"]>>,
     observed: GroupRoot,
     device: LocalDevice,
-    offline: boolean,
     maintenance?: {
       deliver(expected: GroupKey, secret: Uint8Array): Promise<void>;
       unavailable(expected: GroupKey, failed: string[], error: unknown): void;
@@ -733,8 +746,6 @@ export class Groups {
     );
     if (sealed) return { state: "refused", reason: "group-sealed" };
     if (!members.has(this.accountId)) return { state: "refused", reason: "not-a-group-member" };
-    if (offline && rotationRequired)
-      return { state: "maintenance-required", reason: "recipient-removed" };
     if (maintenance && rotationRequired) return undefined;
     const staged = await loadStagedGroupKey(
       this.store,
@@ -753,7 +764,7 @@ export class Groups {
           await this.confirmHistory(root, position, snapshot.group, staged.secret);
           try {
             if (rotationRequired) await this.rotate(keyRoot, staged.secret, device);
-            else if (!offline)
+            else
               await (maintenance
                 ? maintenance.deliver(keyRoot, staged.secret)
                 : this.deliver(keyRoot, staged.secret, device, snapshot.deliveries));
@@ -791,7 +802,7 @@ export class Groups {
           await this.confirmHistory(root, position, snapshot.group, payload);
           try {
             if (rotationRequired) await this.rotate(keyRoot, payload, device);
-            else if (!offline)
+            else
               await (maintenance
                 ? maintenance.deliver(keyRoot, payload)
                 : this.deliver(keyRoot, payload, device, snapshot.deliveries));
@@ -822,7 +833,7 @@ export class Groups {
         delivery.epochId !== keyRoot.epochId
       )
         continue;
-      const deliveryPosition = snapshot.deliveries.settlements.find(
+      const deliveryPosition = snapshot.deliveries.contentOrigins.find(
         (entry) => entry.rowId === delivery.id,
       )?.position;
       if (
@@ -843,7 +854,7 @@ export class Groups {
           usable = true;
           try {
             if (rotationRequired) await this.rotate(keyRoot, payload, device);
-            else if (!offline)
+            else
               await (maintenance
                 ? maintenance.deliver(keyRoot, payload)
                 : this.deliver(keyRoot, payload, device, snapshot.deliveries));
@@ -877,8 +888,7 @@ export class Groups {
         maintenance.unavailable(keyRoot, failedDeliveries, candidateFailure.error);
         return undefined;
       }
-      if (!offline && failedDeliveries.length)
-        await this.requestRepair(keyRoot, device, failedDeliveries);
+      if (failedDeliveries.length) await this.requestRepair(keyRoot, device, failedDeliveries);
       throw candidateFailure.error;
     }
     return { state: "unavailable", reason: "group-key-pending" };
@@ -888,7 +898,7 @@ export class Groups {
     await this.warmMembership({ groupIds: [expected.id] });
     const secret = runtimeRandomBytes(32);
     try {
-      const proposal = await serializableE2eeTransaction(this.db, async (tx) => {
+      const proposal = await acceptedGroupTransaction(this.db, async (tx) => {
         const own = await this.deviceStates(tx);
         const group = await this.readGroupMembership(tx, expected, own.publicHistory);
         const roots = group.targetRoots;
@@ -982,7 +992,7 @@ export class Groups {
     expected: GroupKey,
     secret: Uint8Array,
     device: LocalDevice,
-    preparedDeliveries?: { rows: GroupDelivery[]; settlements: RowSettlement[] },
+    preparedDeliveries?: { rows: GroupDelivery[]; contentOrigins: GroupContentOrigin[] },
   ) {
     if (!preparedDeliveries) {
       await this.warmMembership({ groupIds: [expected.id] });
@@ -992,7 +1002,7 @@ export class Groups {
     }
     const observations = await this.readDeliveryObservations(expected.id, preparedDeliveries);
     try {
-      const delivery = await serializableE2eeTransaction(this.db, async (tx) => {
+      const delivery = await acceptedGroupTransaction(this.db, async (tx) => {
         const state = await this.deviceStates(tx);
         const group = await this.readGroupMembership(tx, expected, state.publicHistory);
         await this.prepareDelivery(tx, expected, secret, device, observations, { state, group });
@@ -1007,18 +1017,19 @@ export class Groups {
 
   private async readDeliveryObservations(
     id: string,
-    preparedDeliveries?: { rows: GroupDelivery[]; settlements: RowSettlement[] },
+    preparedDeliveries?: { rows: GroupDelivery[]; contentOrigins: GroupContentOrigin[] },
   ) {
     await this.db.all(this.tables.__e2ee_group_repairs.where({ groupId: id }), { tier: "remote" });
     await this.db.all(this.tables.__e2ee_group_recovery_deliveries.where({ groupId: id }), {
       tier: "remote",
     });
-    const prior = await serializableE2eeTransaction(this.db, async (tx) => ({
+    const prior = await acceptedGroupTransaction(this.db, async (tx) => ({
       deliveries:
         preparedDeliveries ??
-        (await tx.allSettledForE2ee(this.tables.__e2ee_group_deliveries.where({ groupId: id }))),
-      repairs: await tx.allSettledForE2ee(this.tables.__e2ee_group_repairs.where({ groupId: id })),
-      recovery: await tx.allSettledForE2ee(
+        (await readGroupRows(tx, this.tables.__e2ee_group_deliveries.where({ groupId: id }))),
+      repairs: await readGroupRows(tx, this.tables.__e2ee_group_repairs.where({ groupId: id })),
+      recovery: await readGroupRows(
+        tx,
         this.tables.__e2ee_group_recovery_deliveries.where({ groupId: id }),
       ),
     }));
@@ -1026,7 +1037,7 @@ export class Groups {
   }
 
   private async prepareDelivery(
-    tx: E2eeTransactionScope,
+    tx: AcceptedDeviceTransactionScope,
     expected: GroupKey,
     secret: Uint8Array,
     device: LocalDevice,
@@ -1057,14 +1068,14 @@ export class Groups {
     const delivered = new Set<string>();
     const rejected = new Set<string>();
     for (const request of repairs.rows) {
-      const at = repairs.settlements.find((entry) => entry.rowId === request.id)?.position;
+      const at = repairs.contentOrigins.find((entry) => entry.rowId === request.id)?.position;
       if (await this.acceptedRepair(root, position, group, request, at, existing))
         rejected.add(request.deliveryId);
     }
     for (const row of existing.rows) {
       if (row.epochId !== keyRoot.epochId) continue;
       if (rejected.has(row.id)) continue;
-      const at = existing.settlements.find((entry) => entry.rowId === row.id)?.position;
+      const at = existing.contentOrigins.find((entry) => entry.rowId === row.id)?.position;
       if (!(await this.acceptedDelivery(root, position, group, row, at))) continue;
       if (row.recipientAccountId === this.accountId && row.recipientDeviceId === device.id) {
         const context = groupDeliveryContext(this.accountContext(root.accountId), keyRoot, row);
@@ -1111,7 +1122,7 @@ export class Groups {
             row.recoveryRootId !== recoveryRoot.id
           )
             continue;
-          const at = recovery.settlements.find((entry) => entry.rowId === row.id)?.position;
+          const at = recovery.contentOrigins.find((entry) => entry.rowId === row.id)?.position;
           if (await this.acceptedDelivery(root, position, group, row, at)) {
             delivered = true;
             break;
@@ -1235,7 +1246,7 @@ export class Groups {
     await this.db.all(this.tables.__e2ee_group_repairs.where({ groupId: expected.id }), {
       tier: "remote",
     });
-    const proposal = await serializableE2eeTransaction(this.db, async (tx) => {
+    const proposal = await acceptedGroupTransaction(this.db, async (tx) => {
       const own = await this.deviceStates(tx);
       const group = await this.readGroupMembership(tx, expected, own.publicHistory);
       const roots = group.targetRoots;
@@ -1255,15 +1266,17 @@ export class Groups {
       if (rotationRequired) throw new Error("E2EE group requires rotation after removal");
       if (!own.active.has(device.id) || members.get(this.accountId) !== own.epochId)
         throw new Error("E2EE repair requires an active group member device");
-      const deliveries = await tx.allSettledForE2ee(
+      const deliveries = await readGroupRows(
+        tx,
         this.tables.__e2ee_group_deliveries.where({ groupId: root.id }),
       );
-      const repairs = await tx.allSettledForE2ee(
+      const repairs = await readGroupRows(
+        tx,
         this.tables.__e2ee_group_repairs.where({ groupId: root.id }),
       );
       for (const deliveryId of failed) {
         const delivery = deliveries.rows.find((row) => row.id === deliveryId);
-        const at = deliveries.settlements.find((entry) => entry.rowId === deliveryId)?.position;
+        const at = deliveries.contentOrigins.find((entry) => entry.rowId === deliveryId)?.position;
         if (
           !delivery ||
           delivery.recipientAccountId !== this.accountId ||
@@ -1274,7 +1287,7 @@ export class Groups {
         let requested = false;
         for (const request of repairs.rows) {
           if (request.deliveryId !== deliveryId) continue;
-          const requestAt = repairs.settlements.find(
+          const requestAt = repairs.contentOrigins.find(
             (entry) => entry.rowId === request.id,
           )?.position;
           if (await this.acceptedRepair(root, position, group, request, requestAt, deliveries)) {
@@ -1310,12 +1323,12 @@ export class Groups {
     group: GroupMembershipSnapshot,
     request: GroupRepair,
     at: string | undefined,
-    deliveries: { rows: GroupDelivery[]; settlements: RowSettlement[] },
+    deliveries: { rows: GroupDelivery[]; contentOrigins: GroupContentOrigin[] },
   ): Promise<boolean> {
     if (request.groupId !== root.id) return false;
     if (at === undefined) throw new Error("Missing E2EE repair authority coverage");
     const delivery = deliveries.rows.find((row) => row.id === request.deliveryId);
-    const deliveredAt = deliveries.settlements.find(
+    const deliveredAt = deliveries.contentOrigins.find(
       (entry) => entry.rowId === request.deliveryId,
     )?.position;
     if (
@@ -1440,42 +1453,67 @@ export class Groups {
     return this.verifySigner(senderHistory, delivery.senderDeviceId, bytes, delivery.signature);
   }
 
-  /** Explicit-scope coherent reader; authority transactions must be accepted globally. */
+  /** Explicit-scope snapshot; its serializable transaction must be accepted globally. */
   async readMembership(
-    tx: E2eeHistoryReader,
+    tx: AcceptedDeviceTransactionScope,
     scope: GroupHistoryScope,
     ownHistory: PublicMembershipHistory,
   ): Promise<GroupMembershipSnapshot> {
-    const rootSettlements = new Map<string, RowSettlement>();
-    const memberSettlements = new Map<string, RowSettlement>();
-    const successorSettlements = new Map<string, RowSettlement>();
-    const capture = async <T>(
-      read: Promise<{ rows: T[]; settlements: RowSettlement[] }>,
-      settlements: Map<string, RowSettlement>,
+    const rootSettlements = new Map<string, GroupContentOrigin>();
+    const memberSettlements = new Map<string, GroupContentOrigin>();
+    const successorSettlements = new Map<string, GroupContentOrigin>();
+    const rootRows = new Map<string, GroupRoot>();
+    const memberRows = new Map<string, GroupMembership>();
+    const successorRows = new Map<string, GroupSuccessor>();
+    const capture = async <T extends { id: string }>(
+      read: Promise<{ rows: T[]; contentOrigins: GroupContentOrigin[] }>,
+      contentOrigins: Map<string, GroupContentOrigin>,
+      capturedRows: Map<string, T>,
     ): Promise<T[]> => {
       const result = await read;
-      for (const entry of result.settlements) settlements.set(entry.rowId, entry);
+      for (const row of result.rows) {
+        const previous = capturedRows.get(row.id);
+        if (previous && !sameSnapshotValue(previous, row))
+          throw new Error("Conflicting E2EE group authority rows");
+        capturedRows.set(row.id, row);
+      }
+      for (const entry of result.contentOrigins) {
+        const previous = contentOrigins.get(entry.rowId);
+        if (previous && !sameSnapshotValue(previous, entry))
+          throw new Error("Conflicting E2EE group authority evidence");
+        contentOrigins.set(entry.rowId, entry);
+      }
       return result.rows;
     };
     const rows = await collectGroupHistory(scope, {
       roots: (selector) =>
-        capture(tx.allSettledForE2ee(this.tables.__e2ee_groups.where(selector)), rootSettlements),
+        capture(
+          readGroupRows(tx, this.tables.__e2ee_groups.where(selector)),
+          rootSettlements,
+          rootRows,
+        ),
       members: (selector) =>
         capture(
-          tx.allSettledForE2ee(this.tables.__e2ee_group_membership.where(selector)),
+          readGroupRows(tx, this.tables.__e2ee_group_membership.where(selector)),
           memberSettlements,
+          memberRows,
         ),
       successors: (groupIds) =>
         capture(
-          tx.allSettledForE2ee(
+          readGroupRows(
+            tx,
             this.tables.__e2ee_group_successors.where({ groupId: { in: groupIds } }),
           ),
           successorSettlements,
+          successorRows,
         ),
     });
-    const roots = { rows: rows.roots, settlements: [...rootSettlements.values()] };
-    const records = { rows: rows.records, settlements: [...memberSettlements.values()] };
-    const successors = { rows: rows.successors, settlements: [...successorSettlements.values()] };
+    const roots = { rows: rows.roots, contentOrigins: [...rootSettlements.values()] };
+    const records = { rows: rows.records, contentOrigins: [...memberSettlements.values()] };
+    const successors = {
+      rows: rows.successors,
+      contentOrigins: [...successorSettlements.values()],
+    };
     const accounts = new Set<string>("accountId" in scope ? [scope.accountId] : []);
     for (const group of roots.rows) accounts.add(group.accountId);
     for (const row of records.rows) {
@@ -1496,7 +1534,7 @@ export class Groups {
   }
 
   private async readGroupMembership(
-    tx: E2eeHistoryReader,
+    tx: AcceptedDeviceTransactionScope,
     root: Pick<GroupRoot, "id" | "accountId">,
     ownHistory: PublicMembershipHistory,
     relatedGroupId?: string,
@@ -1514,7 +1552,7 @@ export class Groups {
       );
     const targetRoots = {
       rows: snapshot.roots.rows.filter((row) => row.id === root.id),
-      settlements: snapshot.roots.settlements.filter((entry) => entry.rowId === root.id),
+      contentOrigins: snapshot.roots.contentOrigins.filter((entry) => entry.rowId === root.id),
     };
     return { ...snapshot, targetRoots };
   }
@@ -1654,12 +1692,12 @@ export class Groups {
   }
 
   private async acceptedRoot(
-    roots: { rows: GroupRoot[]; settlements: RowSettlement[] },
+    roots: { rows: GroupRoot[]; contentOrigins: GroupContentOrigin[] },
     history: PublicMembershipHistory,
   ) {
     const root = roots.rows[0];
     if (!root || roots.rows.length !== 1) throw new Error("Invalid accepted E2EE group root");
-    const position = roots.settlements.find((entry) => entry.rowId === root.id)?.position;
+    const position = roots.contentOrigins.find((entry) => entry.rowId === root.id)?.position;
     if (!position) throw new Error("Missing E2EE group authority coverage");
     const initial = await replayAccountMembership(
       historyBefore(history, BigInt(position)),

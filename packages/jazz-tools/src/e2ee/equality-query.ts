@@ -3,8 +3,8 @@ import type { ColumnType } from "../drivers/types.js";
 import { normalizeBuiltQuery } from "../runtime/query-builder-shape.js";
 import { resolveSelectedColumns } from "../runtime/select-projection.js";
 import { toWriteRecord } from "../runtime/value-converter.js";
-import { toTimestampMs } from "../runtime/query-adapter.js";
-import { formatUuid, parseUuid } from "../runtime/uuid.js";
+import { toTimestampMs, translateQuery } from "../runtime/query-adapter.js";
+import { formatUuid, parseUuidBytes } from "../runtime/hex.js";
 import { TypedTableQueryBuilder } from "../typed-app.js";
 import { encryptedSchemas, equalityIndexColumn } from "./encrypted-schema.js";
 import { equalityToken, equalityValue } from "./equality-data.js";
@@ -98,7 +98,9 @@ export async function prepareEqualityQuery(
   );
   if (typeof scopeCondition?.value !== "string")
     throw new Error("Encrypted equality queries require a plaintext space constraint");
-  const scopeIdentifier = formatUuid(parseUuid(scopeCondition.value));
+  const scopeBytes = parseUuidBytes(scopeCondition.value);
+  if (!scopeBytes) throw new Error(`invalid uuid ${scopeCondition.value}`);
+  const scopeIdentifier = formatUuid(scopeBytes);
   const table = new TypedTableQueryBuilder(built.table, query._schema);
   const scope = new TypedTableQueryBuilder(declaration.scope, query._schema);
   const values = predicates.map((predicate) => {
@@ -157,7 +159,7 @@ export async function prepareEqualityQuery(
     current.size === epochs.size && [...current].every((epoch) => epochs.has(epoch));
   return {
     matchesEpochs,
-    json: JSON.stringify(physical),
+    json: translateQuery(JSON.stringify(physical), query._schema),
     space: { scope: declaration.scope, identifier: scopeIdentifier },
     async isCurrent() {
       // This key belongs to the atomic transaction, not published history yet.

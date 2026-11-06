@@ -1,11 +1,11 @@
-//! Flat joins on SQLite (`Query::flat_join`): one output row per matching
+//! Flat joins (`Query::flat_join`): one output row per matching
 //! tuple of the root and each joined source, every source live and read
 //! policy filtered, cells qualified as `<source>.<column>`. A row's
 //! occurrence is its root id followed by its joined rows, and maintained
 //! results add, remove and replace by that occurrence (SPEC 6.4.1). Synced
-//! reads ship each occurrence's joined rows. Not ported from Jazz.
+//! reads ship each occurrence's joined rows.
 
-mod common;
+use crate::common;
 
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;
@@ -313,7 +313,9 @@ fn synced_flat_join_ships_joined_rows() {
     let client = open(schema(None), 1);
     let (client_side, server_side) = duplex();
     let _ = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+    server
+        .accept_subscriber(server_side, AuthorSubject::SYSTEM)
+        .unwrap();
 
     let prepared = client.prepare_query(&by_author()).unwrap();
     let _stream = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();
@@ -370,7 +372,7 @@ fn flat_join_with_history_lists_every_version() {
     assert!(error_of(&db, &unbounded).contains("without a bounded row access path"));
 }
 
-/// A synced history join ships the versions and their origins.
+/// A synced history join ships the versions and their tx ids.
 #[test]
 fn synced_flat_join_with_history_ships_versions() {
     let server = open(schema(None), 0);
@@ -385,7 +387,9 @@ fn synced_flat_join_with_history_ships_versions() {
     let client = open(schema(None), 1);
     let (client_side, server_side) = duplex();
     let _ = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+    server
+        .accept_subscriber(server_side, AuthorSubject::SYSTEM)
+        .unwrap();
     let query = Query::from("posts")
         .flat_join("history.posts", "posts.id", "history.posts.id")
         .filter(eq(col("posts.id"), lit(Value::Uuid(post(1).0))));
@@ -406,7 +410,9 @@ fn synced_flat_join_with_history_ships_versions() {
     let writer = open(schema(None), 3);
     let (client_side, server_side) = duplex();
     let _ = block_on(writer.connect_upstream(client_side));
-    server.accept_subscriber(server_side, AuthorSubject::for_test_bytes([0xb0; 16]));
+    server
+        .accept_subscriber(server_side, AuthorSubject::for_test_bytes([0xb0; 16]))
+        .unwrap();
     let posts = writer.prepare_query(&Query::from("posts")).unwrap();
     let _held = block_on(writer.subscribe(&posts, ReadOpts::default())).unwrap();
     pump(&server, &writer);
@@ -421,7 +427,9 @@ fn synced_flat_join_with_history_ships_versions() {
     let fresh = open(schema(None), 2);
     let (client_side, server_side) = duplex();
     let _ = block_on(fresh.connect_upstream(client_side));
-    server.accept_subscriber(server_side, AuthorSubject::for_test_bytes([0xa1; 16]));
+    server
+        .accept_subscriber(server_side, AuthorSubject::for_test_bytes([0xa1; 16]))
+        .unwrap();
     let posts = fresh.prepare_query(&Query::from("posts")).unwrap();
     let _ready = block_on(fresh.subscribe(&posts, ReadOpts::default())).unwrap();
     pump(&server, &fresh);
@@ -431,16 +439,7 @@ fn synced_flat_join_with_history_ships_versions() {
         ..ReadOpts::default()
     };
     let bytes = postcard::to_allocvec(&query).unwrap();
-    let read = fresh.all_serialized_query(
-        &bytes,
-        remote,
-        None,
-        None,
-        None,
-        false,
-        || false,
-        |attachment| fresh.detach_query(attachment),
-    );
+    let read = fresh.all_serialized_query(&bytes, remote, None, None, None);
     let mut read = std::pin::pin!(read);
     let mut context = std::task::Context::from_waker(std::task::Waker::noop());
     let rows = loop {

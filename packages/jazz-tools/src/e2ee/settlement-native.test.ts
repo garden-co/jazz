@@ -1,116 +1,108 @@
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
-import { createJazzSession, type JazzClient } from "../backend/create-jazz-session.js";
 import { createDb } from "../runtime/default-create-db.js";
-import { deploy, startLocalJazzServer } from "../testing/index.js";
-import type { JazzSession } from "../session/state.js";
+import {
+  beginDbTransactionAfter,
+  readAcceptedTransactionRows,
+  type Db,
+  type QueryBuilder,
+} from "../runtime/db.js";
+import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
+import { startTestJazz } from "../testing/index.js";
+import { nativeCoreErrorCode } from "../runtime/native-runtime/native-error-code.js";
 
-it("reads authority-ordered WASM proposals through the native Node binding", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
-  const app = s.defineApp({ proposals: s.table({ value: s.string() }, {}) });
+async function fixture(ownOnly = false) {
+  const app = s.defineApp(
+    { proposals: s.table({ value: s.string() }, {}) },
+    { migrations: "none" },
+  );
   const permissions = definePermissions(app, ({ policy, session }) => {
-    policy.proposals.allowRead.where({ "$createdBy.account": session.user.account });
-    policy.proposals.allowInsert.where({ "$createdBy.account": session.user.account });
-    policy.proposals.allowUpdate.never();
-    policy.proposals.allowDelete.never();
+    if (ownOnly) {
+      policy.proposals.allowRead.where({ "$createdBy.account": session.user.account });
+      policy.proposals.allowInsert.where({ "$createdBy.account": session.user.account });
+      policy.proposals.allowUpdate.never();
+      policy.proposals.allowDelete.never();
+    } else {
+      policy.proposals.allowRead.always();
+      policy.proposals.allowInsert.always();
+      policy.proposals.allowUpdate.always();
+      policy.proposals.allowDelete.always();
+    }
   });
-  let owner: Awaited<ReturnType<typeof createJazzSession>> | undefined;
+  const server = await startTestJazz({
+    app,
+    permissions,
+    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+  });
+  const config = await localAccountConfig(server.appId, server.url);
+  const db = await createDb(config);
+  return { app, server, config, db };
+}
+
+async function accepted<T>(db: Db, query: QueryBuilder<T>) {
+  const tx = beginDbTransactionAfter(db, async () => {}, "client-accepted-evidence");
+  let commitAttempted = false;
+  try {
+    const snapshot = await readAcceptedTransactionRows(tx, query, 10_000);
+    commitAttempted = true;
+    await tx.commit().wait({ tier: "global", timeoutMs: 10_000 });
+    return snapshot;
+  } finally {
+    if (!commitAttempted) await tx.rollback();
+  }
+}
+
+it("reads authority-ordered E2EE proposals through the public native SDK", async () => {
+  const { app, server, config, db: reader } = await fixture(true);
   let writer: Awaited<ReturnType<typeof createDb>> | undefined;
   try {
-    await deploy({
-      serverUrl: server.url,
-      appId: server.appId,
-      adminSecret: server.adminSecret,
-      schema: app,
-      permissions,
-    });
-    owner = await createJazzSession({
-      appId: server.appId,
-      serverUrl: server.url,
-      app,
-      permissions,
-      driver: { type: "memory" },
-      initial: "local-first",
-    });
-    const reader = owner.getSnapshot().client!.db;
-    writer = await createDb({
-      appId: server.appId,
-      serverUrl: server.url,
-      account: owner.getSnapshot().account!,
-      driver: { type: "memory" },
-    });
+    writer = await createDb(config);
     const first = writer.insert(app.proposals, { value: "first" });
     await first.wait({ tier: "global" });
     const second = writer.insert(app.proposals, { value: "second" });
     await second.wait({ tier: "global" });
     const ordinary = await reader.all(app.proposals, { tier: "remote" });
     expect(ordinary).toHaveLength(2);
-    const read = await reader.serializableTransaction((tx) => tx.allSettledForE2ee(app.proposals));
-    const snapshot = await read.wait({ tier: "global" });
+    const snapshot = await accepted(reader, app.proposals);
     expect(snapshot.rows).toEqual(ordinary);
-    const byId = new Map(snapshot.settlements.map((entry) => [entry.rowId, entry]));
+    const byId = new Map(snapshot.evidence.map((entry) => [entry.rowId, entry]));
     expect(byId.size).toBe(2);
     const earlier = byId.get(first.value.id)!;
     const later = byId.get(second.value.id)!;
-    expect(earlier.transactionId).not.toBe(later.transactionId);
-    expect(BigInt(later.position)).toBeGreaterThan(BigInt(earlier.position));
+    expect(earlier.content.transactionId).toBe(await first.txId);
+    expect(later.content.transactionId).toBe(await second.txId);
+    expect(earlier.state).toEqual(earlier.content);
+    expect(later.state).toEqual(later.content);
+    expect(later.content.transactionId).not.toBe(earlier.content.transactionId);
+    expect(BigInt(later.content.position)).toBeGreaterThan(BigInt(earlier.content.position));
   } finally {
     await writer?.shutdown();
-    await owner?.close();
+    await reader.shutdown();
     await server.stop();
   }
-}, 30_000);
+}, 60_000);
 
 it.each(["update", "upsert", "delete"] as const)(
-  "keeps content settlement separate from a later %s",
+  "keeps accepted content origin separate from a later %s",
   async (operation) => {
-    const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
-    const app = s.defineApp({ proposals: s.table({ value: s.string() }, {}) });
-    const permissions = definePermissions(app, ({ policy }) => {
-      policy.proposals.allowRead.always();
-      policy.proposals.allowInsert.always();
-      policy.proposals.allowUpdate.always();
-      policy.proposals.allowDelete.always();
-    });
-    let owner: JazzSession<JazzClient> | undefined;
+    const { app, server, db } = await fixture();
     try {
-      await deploy({
-        serverUrl: server.url,
-        appId: server.appId,
-        adminSecret: server.adminSecret,
-        schema: app,
-        permissions,
-      });
-      owner = await createJazzSession({
-        appId: server.appId,
-        serverUrl: server.url,
-        app,
-        permissions,
-        driver: { type: "memory" },
-        initial: "local-first",
-      });
-      const db = owner.getSnapshot().client!.db;
       const original = db.insert(app.proposals, { value: "accepted content" });
       await original.wait({ tier: "global" });
-      const baseline = await (
-        await db.serializableTransaction((tx) => tx.allSettledForE2ee(app.proposals))
-      ).wait({ tier: "global" });
+      const baseline = await accepted(db, app.proposals);
       expect(baseline.rows).toEqual([original.value]);
-      expect(baseline.settlements[0]!.transactionId).toBe(await original.txId);
+      expect(baseline.evidence[0]!.content.transactionId).toBe(await original.txId);
       if (operation === "delete") {
         const deletion = db.delete(app.proposals, original.value.id);
         await deletion.wait({ tier: "global" });
-        const snapshot = await (
-          await db.serializableTransaction((tx) =>
-            tx.allSettledForE2ee(app.proposals.includeDeleted()),
-          )
-        ).wait({ tier: "global" });
+        const snapshot = await accepted(db, app.proposals.includeDeleted());
         expect(snapshot.rows).toEqual([original.value]);
-        expect(snapshot.settlements).toEqual(baseline.settlements);
-        expect(snapshot.settlements[0]!.transactionId).not.toBe(await deletion.txId);
+        expect(snapshot.evidence[0]!.content).toEqual(baseline.evidence[0]!.content);
+        expect(snapshot.evidence[0]!.state.transactionId).toBe(await deletion.txId);
+        expect(snapshot.evidence[0]!.content.transactionId).not.toBe(await deletion.txId);
       } else {
-        const tx = db.beginSerializableTransaction();
+        const tx = beginDbTransactionAfter(db, async () => {}, "client-accepted-evidence");
         try {
           if (operation === "update")
             tx.update(app.proposals, original.value.id, { value: "provisional content" });
@@ -118,19 +110,29 @@ it.each(["update", "upsert", "delete"] as const)(
           expect(await tx.all(app.proposals, { tier: "local-first" })).toEqual([
             { id: original.value.id, value: "provisional content" },
           ]);
-          await expect(tx.allSettledForE2ee(app.proposals)).rejects.toThrow();
+          const failure: unknown = await readAcceptedTransactionRows(
+            tx,
+            app.proposals,
+            10_000,
+          ).then(
+            () => undefined,
+            (error: unknown) => error,
+          );
+          expect(nativeCoreErrorCode(failure)).toBe("not_observed");
+          expect(String(failure)).toContain(
+            "accepted reads cannot substitute already staged content",
+          );
         } finally {
           await tx.rollback();
         }
-        const unchanged = await (
-          await db.serializableTransaction((read) => read.allSettledForE2ee(app.proposals))
-        ).wait({ tier: "global" });
-        expect(unchanged).toEqual(baseline);
+        const unchanged = await accepted(db, app.proposals);
+        expect(unchanged.rows).toEqual(baseline.rows);
+        expect(unchanged.evidence).toEqual(baseline.evidence);
       }
     } finally {
-      await owner?.close();
+      await db.shutdown();
       await server.stop();
     }
   },
-  30_000,
+  60_000,
 );

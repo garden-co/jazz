@@ -23,7 +23,7 @@ Invariant digest:
 - `INV-TX-5`: Core MUST park a commit unit authored under a schema version it does not yet know, with no fate, seq or visible rows, parking a resent copy only once, and MUST decide it exactly once after that schema arrives. Linear history has no version parents, so a unit has no parent prerequisites.
 - `INV-TX-6`: A write MUST carry the base of the row image it was made over (ch. 4 §4.6). Core orders writes by its own seq, never by writer clocks: a write overrides every value accepted before it whatever its clock, and Core does not reject a write because the writer's clock is behind.
 - `INV-TX-7`: A commit unit whose `tx_id.time.physical_ms()` exceeds the authority admission clock by more than `SKEW_TOLERANCE_MS` MUST be rejected as `RejectionReason::ClientClockTooFarAhead` and MUST NOT leave visible version rows.
-- `INV-TX-8`: When Core rejects a transaction, its effects MUST leave the originating node's local view as soon as the rejection is applied, while the node's other pending writes, including edits to the same row, MUST stay visible and settle by their own fates. Rejection does not cascade: no other transaction is rejected because of it.
+- `INV-TX-8`: When Core rejects a transaction, its effects MUST leave the originating node's local view as soon as the rejection is applied, while the node's other pending writes, including edits to the same row, MUST stay visible and settle by their own fates. Rejection cascades only to writes built on the rejected one (`INV-HIST-20`): no other transaction is rejected because of it.
 - `INV-TX-9`: Originating nodes MUST retain rejected local payloads in retry storage and remove the rejected versions from normal history; non-origin authorities MUST NOT retain foreign rejected retry payloads.
 - `INV-TX-10`: Applying a fate update MUST NOT move `global_time` backward and MUST update `durability` only monotonically upward.
 - `INV-TX-11`: Accepted core commits MUST receive a strictly increasing authority-minted `GlobalTime`; the accepted transaction, global-current maintenance, and core `committed_global_time` MUST become durable atomically before publication, and the fate MUST report `DurabilityTier::Global`.
@@ -415,92 +415,6 @@ transaction as `SerializationConflict`; neither case may be treated as evidence
 that a row is absent. Supporting ambiguous name reuse would require additional
 read-set identity information.
 
-#### Authority-settled observations and portable identities
-
-The internal `allSettledForE2ee` read returns row bodies and authority metadata
-from the same covered exclusive read. Each row has exactly one settlement:
-its row UUID, committed transaction ID and authority position. The position
-belongs to the returned content version, not to the row's creation time.
-Only `Accepted` transactions with an explicit `Global` receipt qualify.
-Ordinary reads retain their existing row codec and do not perform settlement
-lookups. Projection/relation results that are not stored rows are refused by
-the settlement boundary.
-
-Row evaluation and content-settlement capture retain the same node lock, so
-incoming history cannot replace a content witness between the two operations.
-A returned row with staged content writes is refused rather than paired with
-an earlier version's acceptance. Deletion-register updates do not replace the
-content transaction or position; ordinary `$updatedBy` and `$updatedAt`
-provenance continues to describe the latest logical-row update.
-
-Row settlement is not query completeness. Callers may use a covered snapshot
-as authoritative history only after that exclusive transaction's explicit
-`wait({ tier: "global" })` succeeds. For example, two rows authored atomically
-share one transaction and position; a later proposal has a later position,
-irrespective of UUID ordering. A proposal arriving after the read invalidates
-the exclusive snapshot instead of silently extending it. Empty history also
-requires coverage and acceptance. An explicit global wait never falls back to
-local durability when no authority is configured; omitted wait options retain
-the existing offline behavior.
-
-Prepared exclusive scopes perform the same schema admission as ordinary
-transactions before writes or read decoding. While a commit drains, operations
-continue through the scope's bound preparation I/O rather than ordinary owner I/O.
-
-`observeE2eeHistory` is weaker: it hydrates local inputs, freezes a fresh
-read-only exclusive snapshot, excludes its pending local prefix and unsettled
-dots, and rolls the observation back. The returned accepted observations do
-not prove that the history is complete or current and cannot alone activate
-membership. This is an observation API, not an offline accepted-history cache.
-
-`catalogue_table_identity`, `table_identity` and `column_identity` expose the
-accepted catalogue's portable table lineage and column epoch UUIDs. Pending
-schema proposals and unknown names have no accepted identity. Compatible
-renames retain identity; a fixed schema view retains its own names while the
-owner follows the current write schema. These operations neither allocate an
-identity nor grant permission to read rows. High-level online identity reads
-cover the catalogue without requesting row bodies; offline/local-only identity
-reads supply candidates, not proof of current membership.
-
-Every online identity lookup obtains fresh global coverage through a zero-row
-query validated against the admitted opened schema, then resolves the identity
-in the owner or fixed view. A rename or removal from the current schema can
-therefore return absence without querying a nonexistent current table. A table
-UUID is not a reusable catalogue-freshness receipt, including after reconnect.
-Coverage preserves the effective reader and claims, bounds initial schema
-admission by the read deadline, and releases its attachment on cancellation.
-It returns no row bodies or application results, but the authority can still
-perform the existing source and policy evaluation work on each lookup.
-
-The native/WASM identity binding is exactly 16 UUID bytes in RFC UUID byte
-order, or zero bytes for absence. JavaScript renders the bytes as a lowercase
-hyphenated UUID; local table/column aliases never cross this boundary.
-The existing `runtime-descriptor.test.ts` UUID corpus fixes the byte sequence
-`00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f` as
-`00010203-0405-0607-0809-0a0b0c0d0e0f`, including a nonzero typed-array offset.
-The **settled-row binding frame v1** is an in-process frame, not a durable or
-network format: four little-endian bytes containing the UTF-8 JSON metadata
-length, those bytes, then the unchanged encoded row batches. Metadata is an
-array of `{rowId, transactionId, position}` records. `position` is a decimal
-u64 string, never a JavaScript number. JSON property order is not authoritative.
-The empty corpus is `02 00 00 00 5b 5d 00`. Metadata-only reads omit the length
-and row payload. No serializer's default UUID or integer representation defines
-this contract.
-
-Regressions cover authority ordering and snapshot conflicts
-(`settlement-snapshot.test.ts`), Node and browser parity
-(`settlement-native.test.ts`, `e2ee-settlement.server.test.ts`), staged-content
-refusal and independent deletion provenance, accepted identity across a real-server
-rename and reconnect (`scope-identity-native.test.ts`), authored-but-unaccepted
-schema-ID lookup (`catalogue.rs::catalogue_table_identity_requires_accepted_schema_publication`),
-fresh clients, denied row access and persistent browser-worker identity refresh
-(`e2ee-scope-identity.server.test.ts`), and the binding byte corpus
-(`wasm-settled-rows.test.ts`). Validation receipts remain specific to their source
-and runtime. Release-level qualification and limitations remain tracked in
-[#3125](https://github.com/garden-co/jazz/issues/3125).
-Encryption, lifecycle authoring and automatic managed schemas are unchanged
-by this substrate.
-
 ### 3.8 Rejection and cascade
 
 Rejection records the authority's decision without keeping rejected foreign
@@ -508,8 +422,10 @@ versions in the normal data path. At an authority that did not author the
 versions, rejection is audit-only: the rejected versions do not remain in normal
 history or current visibility.
 
-Rejection does not cascade. Linear history has no version parents, so no other
-transaction depends on a rejected one. On the originating node the rejected
+Rejection cascades only along bases. Linear history has no version parents, so
+the only transactions that depend on a rejected one are writes built on it,
+whose images carried its values: those are rejected too (`predecessor_rejected`,
+ch. 4 §4.6), and every other transaction is decided on its own. On the originating node the rejected
 transaction's effects leave the local view as soon as the rejection is
 applied: the pending overlay is refolded without it, while the node's other
 pending writes, including edits to the same row, stay visible and settle by

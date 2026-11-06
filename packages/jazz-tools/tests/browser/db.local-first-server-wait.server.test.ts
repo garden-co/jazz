@@ -2,9 +2,16 @@ import { afterEach, expect, it } from "vitest";
 import { generateAuthSecret, schema, ReadTier } from "../../src/index.js";
 import { deploy } from "../../src/dev/catalogue.js";
 import { TestCleanup, createBrowserTestDb, uniqueDbName, waitForCondition } from "./support.js";
-import { getJazzServerInfo, createJazzServerTransportControl } from "./testing-server.js";
+import {
+  createJazzServerTransportControl,
+  getJazzServerInfo,
+  startJazzApp,
+} from "./testing-server.js";
 
-const app = schema.defineApp({ entries: schema.table({ title: schema.string() }, {}) });
+const app = schema.defineApp(
+  { entries: schema.table({ title: schema.string() }, {}) },
+  { migrations: "none" },
+);
 const permissions = schema.definePermissions(app, ({ policy }) => [
   policy.entries.allowRead.always(),
   policy.entries.allowInsert.always(),
@@ -16,10 +23,16 @@ afterEach(async () => {
 });
 
 it("shows local rows at the deadline when a live server has not answered", async () => {
-  const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
-    uniqueDbName("local-first-server-wait-deadline"),
+  const {
+    appId,
+    serverUrl: coreUrl,
+    adminSecret,
+  } = await getJazzServerInfo(uniqueDbName("local-first-server-wait-deadline"));
+  await deploy({ appId, serverUrl: coreUrl, adminSecret, schema: app.wasmSchema, permissions });
+  const { serverUrl } = await startJazzApp(
+    { appId, serverUrl: coreUrl, adminSecret },
+    { schema: app.wasmSchema, permissions },
   );
-  await deploy({ appId, serverUrl, adminSecret, schema: app.wasmSchema, permissions });
   const transport = await createJazzServerTransportControl(serverUrl);
   try {
     const writer = ctx.track(

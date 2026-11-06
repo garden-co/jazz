@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { createDb } from "../runtime/default-create-db.js";
 import type { Db } from "../runtime/db.js";
@@ -6,13 +7,17 @@ import { deploy, startLocalJazzServer } from "../testing/index.js";
 import { deviceRequestApp, deviceRequestPermissions } from "./device-requests.js";
 
 it("keeps device administration and immutable recovery roots account-scoped", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Db[] = [];
   try {
     await deploy({
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
+      schema: deviceRequestApp,
+      permissions: deviceRequestPermissions,
+    });
+    server = await frontE2eeCore(server, {
       schema: deviceRequestApp,
       permissions: deviceRequestPermissions,
     });
@@ -97,13 +102,17 @@ it("keeps device administration and immutable recovery roots account-scoped", as
 }, 30_000);
 
 it("keeps enrolment requests private to their verified author account and immutable", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Db[] = [];
   try {
     await deploy({
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
+      schema: deviceRequestApp,
+      permissions: deviceRequestPermissions,
+    });
+    server = await frontE2eeCore(server, {
       schema: deviceRequestApp,
       permissions: deviceRequestPermissions,
     });
@@ -182,27 +191,39 @@ it("keeps enrolment requests private to their verified author account and immuta
         version: 1,
         challenge: new Uint8Array(32).fill(4),
       };
-      for (const replace of [
-        () => client.insert(requests, replacement, { id: request.id }),
-        () => client.upsert(requests, request.id, replacement),
-        () => client.restore(requests, request.id, replacement),
-      ]) {
-        await expect(async () => replace().wait({ tier: "global" })).rejects.toThrow(
-          /already exists|authorization|policy denied|not deleted|not_deleted|conflict/i,
-        );
+      for (const [operation, replace] of [
+        ["insert", () => client.insert(requests, replacement, { id: request.id })],
+        ["upsert", () => client.upsert(requests, request.id, replacement)],
+        ["restore", () => client.restore(requests, request.id, replacement)],
+      ] as const) {
+        if (client === bob && operation === "restore") {
+          // A private target absent from Bob's replica is refused before any restore write.
+          await expect(async () => replace().wait({ tier: "global" })).rejects.toThrow(
+            "NotObserved: RESTORE on table __e2ee_device_requests",
+          );
+        } else {
+          await expect(async () => replace().wait({ tier: "global" })).rejects.toThrow(
+            /already exists|authorization|policy denied|not deleted|not_deleted|conflict/i,
+          );
+        }
       }
-      await expect(
+      const update = async () =>
         client
           .update(requests, request.id, {
             publicKey: new Uint8Array(32).fill(3),
           })
-          .wait({ tier: "global" }),
+          .wait({ tier: "global" });
+      if (client === bob)
+        await expect(update).rejects.toThrow("NotObserved: UPDATE on table __e2ee_device_requests");
+      else await expect(update).rejects.toThrow();
+      await expect(async () =>
+        client.delete(requests, request.id).wait({ tier: "global" }),
       ).rejects.toThrow();
-      await expect(client.delete(requests, request.id).wait({ tier: "global" })).rejects.toThrow();
     }
     await expect(
       alice.one(requests.where({ id: request.id }), { tier: "remote" }),
     ).resolves.toEqual(request);
+    await expect(bob.all(requests, { tier: "remote" })).resolves.toEqual([]);
   } finally {
     await Promise.all(clients.map((client) => client.shutdown()));
     await server.stop();

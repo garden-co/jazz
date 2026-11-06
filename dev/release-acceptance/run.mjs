@@ -245,7 +245,7 @@ try {
   mkdirSync(fixture);
   writeFileSync(
     join(fixture, "schema.ts"),
-    `import {schema as s} from 'jazz-tools';\nexport const app=s.defineApp({docs:s.table({label:s.string(),body:s.string(),metadata:s.json()},{}),denied:s.table({value:s.string()},{})});\nexport default app;\n`,
+    `import {schema as s} from 'jazz-tools';\nexport const app=s.defineApp({docs:s.table({label:s.string(),body:s.string(),metadata:s.json()},{}),denied:s.table({value:s.string()},{})},{migrations:"none"});\nexport default app;\n`,
   );
   writeFileSync(
     join(fixture, "permissions.ts"),
@@ -253,10 +253,11 @@ try {
   );
   const cliJS = join(dirname(require.resolve("jazz-tools")), "cli.js");
   await command(process.execPath, [cliJS, "validate", "--schema-dir", fixture], "validate.log");
+  // Publishing twice proves a repeated deployment is a no-op.
   for (const attempt of [1, 2])
     await command(
       process.execPath,
-      [cliJS, "deploy", c.appId, "--schema-dir", fixture, "--server-url", c.serverUrl],
+      [join(ownDir, "deploy-fixture.mjs"), dirname(dirname(cliJS)), c.appId, fixture, c.serverUrl],
       `deploy-${attempt}.log`,
       { JAZZ_ADMIN_SECRET: c.adminSecret },
     );
@@ -279,7 +280,6 @@ try {
       "local CLI validation/deploy, ordinary CRUD, backend/deny-read, large values, offline pending persistence and restart",
   });
   for (const gate of [
-    "npm-create-scaffold",
     "external-jwt-and-negative-auth",
     "denied-write",
     "deterministic-in-flight-cancellation",
