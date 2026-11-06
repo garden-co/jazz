@@ -109,60 +109,6 @@ impl LargeValueUpdate {
     }
 }
 
-/// The text edits this store wrote to one text-merge column of one row.
-///
-/// An edit names the value it was made from, but an editor that takes that
-/// value from a subscription can name one a few of its own keystrokes old:
-/// the subscription lags its own writes. Merged from there, those
-/// keystrokes would apply twice. An editor shows its own writes as it makes
-/// them, so when the named value is one its own writes already edited past
-/// (an earlier write, or the value an earlier edit was made from), the edit
-/// was made from its latest write.
-#[derive(Debug, Default)]
-pub(crate) struct OwnTextEdits {
-    /// The latest text written.
-    last: Option<String>,
-    /// Hashes of the values edited past, newest last.
-    earlier: std::collections::VecDeque<u64>,
-}
-
-impl OwnTextEdits {
-    /// Rows remembered at most; past it the memory starts over, and an edit
-    /// is merged from the value it names.
-    pub(crate) const MAX_ROWS: usize = 256;
-    /// Values edited past remembered per row.
-    const EARLIER: usize = 128;
-
-    fn hash(text: &str) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        text.hash(&mut hasher);
-        hasher.finish()
-    }
-
-    /// The value an edit naming `edited_from` was made from.
-    pub(crate) fn base(&self, edited_from: &str) -> String {
-        match &self.last {
-            Some(last) if self.earlier.contains(&Self::hash(edited_from)) => last.clone(),
-            _ => edited_from.to_owned(),
-        }
-    }
-
-    /// Records an edit from `edited_from` that wrote `text`.
-    pub(crate) fn wrote(&mut self, edited_from: &str, text: String) {
-        let previous = self.last.replace(text);
-        for past in previous.as_deref().into_iter().chain([edited_from]) {
-            if Some(past) == self.last.as_deref() {
-                continue;
-            }
-            if self.earlier.len() == Self::EARLIER {
-                self.earlier.pop_front();
-            }
-            self.earlier.push_back(Self::hash(past));
-        }
-    }
-}
-
 /// One byte-coordinate edit.
 #[derive(Clone)]
 pub(crate) enum Edit {
@@ -1656,30 +1602,17 @@ impl Inner {
                     } else {
                         String::new()
                     };
-                    let key = (table.to_owned(), row, column.clone());
-                    // An edit from the value held has nothing unseen to
-                    // merge, whoever wrote that value last.
-                    let base = if current == edited_from {
-                        edited_from.clone()
+                    let value = if current == edited_from {
+                        text
                     } else {
-                        self.own_text_edits
-                            .get(&key)
-                            .map_or(edited_from.clone(), |own| own.base(&edited_from))
+                        jazz_text::merge3_within(
+                            format,
+                            &edited_from,
+                            &current,
+                            &text,
+                            self.merge_budget,
+                        )
                     };
-                    let value = if current == base {
-                        text.clone()
-                    } else {
-                        jazz_text::merge3_within(format, &base, &current, &text, self.merge_budget)
-                    };
-                    if self.own_text_edits.len() >= OwnTextEdits::MAX_ROWS
-                        && !self.own_text_edits.contains_key(&key)
-                    {
-                        self.own_text_edits.clear();
-                    }
-                    self.own_text_edits
-                        .entry(key)
-                        .or_default()
-                        .wrote(&edited_from, text);
                     Value::String(value)
                 }
             };

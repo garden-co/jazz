@@ -692,14 +692,6 @@ impl Editor {
         .unwrap();
         self.seen = self.text.clone();
     }
-
-    /// Types `c` as a controlled textarea whose edits name the value its
-    /// subscription last delivered, which lags its own keystrokes.
-    fn type_char_named_from_render(&mut self, db: &Db, c: char) {
-        let rendered = self.seen.clone();
-        self.type_char(db, c);
-        self.seen = rendered;
-    }
 }
 
 /// Two editors typing at once, a keystroke each per round; with `lag`,
@@ -776,56 +768,59 @@ fn two_people_typing_at_one_spot_keep_every_character() {
     }
 }
 
-/// An editor whose edits name the value it last rendered, a few of its own
-/// keystrokes behind, types each character once: the store knows those
-/// values are ones its own writes already edited past.
+/// Someone deletes what this editor just typed and goes on typing; the
+/// editor, showing the value from before its keystroke again, types into
+/// it. Its edit names that value, which it did show, and keeps the other
+/// person's text.
 #[test]
-fn edits_named_from_a_lagging_render_apply_once() {
-    for start in ["Hello world", "x".repeat(6 * 1024).as_str()] {
-        let db = block_on(Db::open(config(0x61))).unwrap();
-        insert(&db, start);
-        let mut editor = Editor::new(start, start.len());
-        for (i, c) in ". And more".chars().enumerate() {
-            editor.type_char_named_from_render(&db, c);
-            if i % 4 == 3 {
-                editor.refresh(body(&db));
-            }
+fn an_edit_from_a_value_that_came_back_keeps_the_other_writer() {
+    for (start, typed, back, then, edit, merged) in [
+        (
+            "Hello",
+            "Hello!",
+            "Hello",
+            "Hello there, friend",
+            "Why Hello",
+            "Why Hello there, friend",
+        ),
+        ("", "hi", "", "Bob", "Z", "BobZ"),
+    ] {
+        let server = block_on(Db::open(config(0x64))).unwrap();
+        let mut da = connect(block_on(Db::open(config(0x95))).unwrap(), &server);
+        let mut db = connect(block_on(Db::open(config(0x96))).unwrap(), &server);
+        insert(&da.db, start);
+        settle(&server, &mut [&mut da, &mut db]);
+        let mut alice = Editor::new(start, start.len());
+        for c in typed[start.len()..].chars() {
+            alice.type_char(&da.db, c);
         }
-        assert_eq!(body(&db), format!("{start}. And more"));
+        settle(&server, &mut [&mut da, &mut db]);
+        write_whole(&db.db, back);
+        settle(&server, &mut [&mut da, &mut db]);
+        alice.refresh(body(&da.db));
+        assert_eq!(alice.text, back);
+        write_whole(&db.db, then);
+        settle(&server, &mut [&mut da, &mut db]);
+        // Alice's store holds Bob's text; her editor still shows `back`.
+        alice.cursor = 0;
+        for c in edit[..edit.len() - back.len()].chars() {
+            alice.type_char(&da.db, c);
+        }
+        settle(&server, &mut [&mut da, &mut db]);
+        assert_eq!(body(&server), merged, "from {start:?}");
     }
 }
 
-/// The same, while someone else types elsewhere in the value: their text
-/// is merged in once, and so is every own keystroke.
+/// Two editors over one column through one store each name the value they
+/// showed, and both keep their text.
 #[test]
-fn edits_named_from_a_lagging_render_keep_the_other_writer() {
-    let server = block_on(Db::open(config(0x62))).unwrap();
-    let mut da = connect(block_on(Db::open(config(0x93))).unwrap(), &server);
-    let mut db = connect(block_on(Db::open(config(0x94))).unwrap(), &server);
-    let start = "Start here.\n\nSecond paragraph.";
-    insert(&da.db, start);
-    settle(&server, &mut [&mut da, &mut db]);
-    let mut ea = Editor::new(start, 11);
-    let mut eb = Editor::new(start, 13);
-    let (a, b) = (" Alice was here.", "Bob says hi. ");
-    for i in 0..a.len().max(b.len()) {
-        if let Some(c) = a.chars().nth(i) {
-            ea.type_char_named_from_render(&da.db, c);
-        }
-        if let Some(c) = b.chars().nth(i) {
-            eb.type_char(&db.db, c);
-        }
-        settle(&server, &mut [&mut da, &mut db]);
-        if i % 3 == 2 {
-            ea.refresh(body(&da.db));
-            eb.refresh(body(&db.db));
-        }
-    }
-    settle(&server, &mut [&mut da, &mut db]);
-    assert_eq!(
-        body(&server),
-        "Start here. Alice was here.\n\nBob says hi. Second paragraph."
-    );
+fn two_editors_through_one_store_keep_both_edits() {
+    let db = block_on(Db::open(config(0x65))).unwrap();
+    insert(&db, "abc");
+    let (mut one, mut two) = (Editor::new("abc", 3), Editor::new("abc", 3));
+    one.type_char(&db, 'X');
+    two.type_char(&db, 'Y');
+    assert_eq!(body(&db), "abcXY");
 }
 
 /// An edit from the value the store holds is written as it is, even when

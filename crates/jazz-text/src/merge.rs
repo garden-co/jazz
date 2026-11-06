@@ -242,7 +242,9 @@ fn graphemes(word: &str) -> Vec<&str> {
 /// [`grapheme_tail`] keeps. Scripts whose words join letters with spacing
 /// vowel signs or viramas (Devanagari, Arabic, Hebrew points, ...) are
 /// never cut: a word typed into from both sides there merges whole, as a
-/// replaced word does.
+/// replaced word does. So does a word holding any other character the
+/// tokenizer keeps inside words (an emoji, or `’` in `don’t`): safe, if
+/// coarser than cutting it.
 fn cuttable(word: &str) -> bool {
     word.chars().all(|c| {
         let n = c as u32;

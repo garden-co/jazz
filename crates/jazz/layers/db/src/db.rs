@@ -616,9 +616,6 @@ struct Inner {
     /// The diff steps a text merge may take ([`jazz_text::MERGE_WORK_BUDGET`]
     /// unless a test lowers it).
     merge_budget: u64,
-    /// By (table, row, column): the text edits this store wrote, to read
-    /// which value an edit was made from (see [`large_ops::OwnTextEdits`]).
-    pub(crate) own_text_edits: HashMap<(String, RowUuid, String), large_ops::OwnTextEdits>,
     /// Interned author codes (see [`Inner::author_code`]), cached both ways.
     authors: RefCell<AuthorCodes>,
     /// By stored table and whether into its history: the columns the last
@@ -1526,7 +1523,6 @@ impl Db {
                 own_order: HashMap::new(),
                 clock_for_test: None,
                 merge_budget: jazz_text::MERGE_WORK_BUDGET,
-                own_text_edits: HashMap::new(),
                 authors: RefCell::new(AuthorCodes::default()),
                 image_inserts: RefCell::default(),
                 current_batch: RefCell::default(),

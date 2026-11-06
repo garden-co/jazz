@@ -144,8 +144,8 @@ and is not applied again, so a retried increment counts once (`INV-EDGE-16`).
 
 Text-merging columns merge concurrent edits to one string. The text
 strategies (`MergeStrategy::Text`, `Markdown`, `Html`; `text`, `markdown`
-and `html` in the DSL) are opt-in and may be declared only on non-nullable
-string columns (`INV-HIST-24`). The column stores a plain string, inline or
+and `html` in the DSL) are opt-in and may be declared only on string
+columns, nullable or not (`INV-HIST-24`). The column stores a plain string, inline or
 as a large value (ch. 19), and a write to it travels as its plain value.
 Only Core merges concurrent writes; replicas apply a pending text write as
 sent, like any patched cell, until Core's image arrives.
@@ -159,12 +159,10 @@ before writing it: held the column's current value (NULL read as the empty
 string), base the value it was edited from, incoming the edit's text, by
 the same merge as Core's, and writes the result as an ordinary write over
 the value it holds. Edited from the value it holds, the text is written as
-is. An editor that names a value from a subscription can name one a few of
-its own keystrokes old; so when the named value is one the store's own
-edits of that column of that row already edited past (an earlier edit's
-text or the value it was made from, among the last 128 of up to 256 rows
-per store), the base is the store's latest edit instead, and each keystroke
-applies once. The store decides only the value it sends: Core sequences it
+is. The named value must be the one the editor showed or last wrote: the
+store keeps no memory of earlier edits to guess from, so an edit named from
+a value that lags the editor's own keystrokes (a subscription a render
+behind) applies those keystrokes again. The store decides only the value it sends: Core sequences it
 like any write, so replicas cannot diverge. A text edit of a column that
 does not merge text is refused with a schema error. Branch views refuse
 text edits explicitly as not supported yet, as they do `applyDiffs`

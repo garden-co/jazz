@@ -66,17 +66,28 @@ editor last showed, it is merged over the newer value instead:
 db.update(app.notes, noteId, { body: nextBody }, { editedFrom: { body: shownBody } });
 ```
 
-`shownBody` is the value the editor last displayed or wrote; after the write, it is `nextBody`. For a
-plain `<textarea>`, keep the text in local state and edit from it:
+`shownBody` is the value the editor last displayed or wrote; after the write, it is `nextBody`. It
+must be exactly that: not the value a subscription delivers, which can lag a keystroke or two
+behind your own writes, and would then apply those keystrokes again. For a plain `<textarea>`,
+track it next to the editor's own state:
 
 ```tsx
 function NoteBody({ note }: { note: { id: string; body: string } }) {
   const [text, setText] = useState(note.body);
-  const written = useRef(new Set<string>());
+  // The value the editor last showed or wrote, which each write edits.
+  const shown = useRef(note.body);
+  // Writes not yet seen back from the subscription, oldest first.
+  const pending = useRef<string[]>([]);
   useEffect(() => {
-    // Our own writes come back; any other value is a merge to show.
-    if (written.current.has(note.body)) return;
-    written.current.clear();
+    const at = pending.current.indexOf(note.body);
+    if (at >= 0) {
+      // One of our own writes coming back: nothing new to show.
+      pending.current.splice(0, at + 1);
+      return;
+    }
+    // A merged value: show it, and edit from it.
+    pending.current = [];
+    shown.current = note.body;
     setText(note.body);
   }, [note.body]);
   return (
@@ -84,8 +95,9 @@ function NoteBody({ note }: { note: { id: string; body: string } }) {
       value={text}
       onChange={(event) => {
         const next = event.target.value;
-        db.update(app.notes, note.id, { body: next }, { editedFrom: { body: text } });
-        written.current.add(next);
+        db.update(app.notes, note.id, { body: next }, { editedFrom: { body: shown.current } });
+        shown.current = next;
+        pending.current.push(next);
         setText(next);
       }}
     />
@@ -94,11 +106,8 @@ function NoteBody({ note }: { note: { id: string; body: string } }) {
 ```
 
 Showing a merged value this way moves the cursor to the end; an editor that applies it as a
-change keeps it in place (see below). If an editor names a value from its subscription that lags a
-few of its own keystrokes, the store recognizes a value its own writes already edited past and
-merges from its latest write instead, so no keystroke applies twice. What
-`editedFrom` must never name is a value the editor did not show: an editor that mounted before the
-row loaded and passes `""` would add the whole text again.
+change keeps it in place (see below). An editor that mounted before the row loaded must not name
+`""`: it would add the whole text again.
 
 `editedFrom` is not supported yet in branch views, on a column with its own transform, or (on a
 backend) for a write as a user outside a transaction; those writes throw. `upsert` does not take
