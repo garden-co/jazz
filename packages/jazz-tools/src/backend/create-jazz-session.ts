@@ -210,7 +210,81 @@ function memoryAccountStore(): AccountStore {
 export async function createJazzClient(input: JazzClientConfig): Promise<JazzSession<JazzClient>> {
   if (input.initial !== undefined && input.initial !== "local-first")
     throw new Error('createJazzClient: initial is "local-first" or left out');
-  return openJazzSession(input);
+  const session = await openJazzSession(input);
+  return Object.freeze({ ...session, close: () => closeAfterUploads(session) });
+}
+
+/** How long a backend client's `close()` waits for its writes to reach the server. */
+export const CLOSE_WAITS_FOR_UPLOADS_MS = 10_000;
+
+/**
+ * A backend client's `close()`: its writes live only in this process (or
+ * its driver) until the server accepts them, and a script's last act is
+ * usually to close, so it waits up to `CLOSE_WAITS_FOR_UPLOADS_MS` for them
+ * first. Writes the server rejects are reported as they always are
+ * (`db.onMutationError`, their `wait()`). If some never reached it (the
+ * server is down, or refused this client), it still closes, then rejects,
+ * saying how many were lost, instead of dropping them quietly.
+ */
+async function closeAfterUploads(session: JazzSession<JazzClient>): Promise<void> {
+  const db = session.getSnapshot().client?.db;
+  let lost: { pending: number; why?: unknown } | undefined;
+  if (db) {
+    // The shutdown a local-first client makes: its writes upload first.
+    const uploaded = db.shutdown({ waitForSync: true }).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    let timer: ReturnType<typeof setInterval> | undefined;
+    const deadline = Date.now() + CLOSE_WAITS_FOR_UPLOADS_MS;
+    const gaveUp = new Promise<string>((resolve) => {
+      timer = setInterval(() => {
+        const link = syncLink(db);
+        // Refused for good (or no server to send to): waiting changes nothing.
+        if (link?.state === "offline" && !link.retrying)
+          resolve(`the server refused this client (${link.reason})`);
+        else if (Date.now() >= deadline) {
+          resolve(`the server didn't accept them within ${CLOSE_WAITS_FOR_UPLOADS_MS / 1000}s`);
+        }
+      }, 50);
+    });
+    const outcome = await Promise.race([uploaded.then((error) => ({ error })), gaveUp]);
+    clearInterval(timer);
+    if (typeof outcome === "string") {
+      lost = { pending: pendingUploads(db), why: outcome };
+      db.abortGracefulShutdown();
+      await uploaded;
+    } else if (outcome.error !== undefined) {
+      lost = { pending: pendingUploads(db), why: outcome.error };
+    }
+  }
+  await session.close();
+  if (lost && lost.pending > 0) throw lostOnClose(lost.pending, lost.why);
+}
+
+function syncLink(db: Db) {
+  try {
+    return db.getSyncStatus().link;
+  } catch {
+    return undefined;
+  }
+}
+
+function pendingUploads(db: Db | undefined): number {
+  try {
+    return db?.getSyncStatus().pendingUploads ?? 0;
+  } catch {
+    // A db already shutting down has nothing left to upload.
+    return 0;
+  }
+}
+
+function lostOnClose(pending: number, why: unknown): Error {
+  const reason = why instanceof Error ? why.message : String(why);
+  return new Error(
+    `createJazzClient: closed with ${pending} write${pending === 1 ? "" : "s"} the server never accepted, which are lost: ${reason}. Await \`db.waitForSync()\` before close() to handle this yourself.`,
+    why instanceof Error ? { cause: why } : undefined,
+  );
 }
 
 /**

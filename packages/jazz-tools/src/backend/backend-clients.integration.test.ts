@@ -441,3 +441,47 @@ describe("trusted backend clients", () => {
     expect(code).toBe(1008);
   });
 });
+
+describe("a backend client's close()", () => {
+  it("uploads the writes it holds first", async () => {
+    const { jazz, appId, origin } = await appWith([
+      trustWorkload({ issuer, audience: AUDIENCE, claims: { sub: "importer" }, as: "backend" }),
+    ]);
+    const session = await createJazzClient({
+      appId,
+      app,
+      permissions,
+      serverUrl: `${origin}/jazz`,
+      driver: { type: "memory" },
+      credential: () => sign({ sub: "importer" }),
+    });
+    const { client } = session.getSnapshot();
+    const owner = randomUUID();
+    // A script's import: writes, none waited for, then close() and exit.
+    for (let i = 0; i < 200; i++) client!.db.insert(app.todos, { title: `row ${i}`, owner });
+    await session.close();
+    expect(await jazz.db.all(app.todos.where({ owner }))).toHaveLength(200);
+  }, 60_000);
+
+  it("closes a guest the backend refused, saying the writes it couldn't upload are lost", async () => {
+    const { appId, origin } = await appWith([]);
+    const session = await createJazzClient({
+      appId,
+      app,
+      permissions,
+      serverUrl: `${origin}/jazz`,
+      driver: { type: "memory" },
+      initial: "local-first",
+    });
+    const { client } = session.getSnapshot();
+    const me = client!.session!.user!;
+    client!.db.insert(app.todos, { title: "kept nowhere", owner: me });
+    const started = Date.now();
+    await expect(session.close()).rejects.toThrow(
+      /closed with 1 write the server never accepted, which are lost/,
+    );
+    // Refused for good: no point waiting out the deadline.
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(session.getSnapshot().status).toBe("closed");
+  }, 30_000);
+});
