@@ -73,6 +73,7 @@ export {
   type VercelBlobStore,
 } from "./blobs.js";
 import { isSameAdmission, recheckEvery } from "./session-recheck.js";
+import { RequestAuthenticationError } from "./request-auth.js";
 
 /** Where the core keeps its data. */
 export type JazzStore =
@@ -968,6 +969,17 @@ function openRemoteCore(
           onEvent(null, { kind: "message", data });
         });
         ws.addEventListener("close", (event) => finish(event.code, event.reason));
+        // A socket that never connects (the core is down or restarting) can
+        // report only the error, and stay CONNECTING: without this, the link
+        // waits on it forever instead of retrying.
+        ws.addEventListener("error", () => {
+          finish(1006, "connection to the core failed");
+          try {
+            ws?.close();
+          } catch {
+            // Already closing.
+          }
+        });
       })
       // A failing credential hook, or a socket that can't even be created.
       .catch((error: unknown) =>
@@ -1013,6 +1025,16 @@ function openRemoteCore(
     }),
   });
   return core;
+}
+
+/**
+ * A request `authenticate` names no user for: what an app answers with 401.
+ * (A throwing `authenticate` passes its own error through instead.)
+ */
+function signedOut(operation: string): RequestAuthenticationError {
+  return new RequestAuthenticationError(`${operation}: the request has no signed-in user`, {
+    code: "signed_out",
+  });
 }
 
 /** How long `close()` waits for pending writes to reach the core. */
@@ -2187,19 +2209,44 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       for (const item of Array.isArray(value) ? value : [value]) headers.append(name, item);
     }
     const hasBody = req.method !== "GET" && req.method !== "HEAD";
+    // A body parser mounted before nodeHandler (express.json(), express.raw())
+    // has read the stream already: its buffer is the body, or nothing is.
+    const parsed = (req as { body?: unknown }).body;
+    let body: BodyInit | undefined;
+    if (hasBody && req.readableEnded) {
+      if (!(parsed instanceof Uint8Array)) {
+        throw new Error(
+          "jazz: the request body was already read by another handler; mount jazz.nodeHandler before body parsers such as express.json()",
+        );
+      }
+      body = parsed as BodyInit;
+    } else if (hasBody) {
+      body = req as unknown as BodyInit;
+    }
     return new Request(`http://${host}${req.url ?? "/"}`, {
       method: req.method,
       headers,
-      ...(hasBody ? { body: req as unknown as BodyInit, duplex: "half" } : {}),
+      ...(body === undefined ? {} : { body, duplex: "half" }),
     } as RequestInit);
   }
 
   function nodeHandler(req: IncomingMessage, res: ServerResponse, next?: () => void): void {
-    const request = nodeRequest(req);
-    if (innerPath(request) === null) {
+    // Only Jazz's own paths: a request for the app passes on untouched, its
+    // body unread, whatever read it before.
+    const { pathname } = new URL(req.url ?? "/", "http://localhost");
+    if (pathname !== basePath && !pathname.startsWith(`${basePath}/`)) {
       if (next) return next();
       res.statusCode = 404;
       res.end();
+      return;
+    }
+    let request: Request;
+    try {
+      request = nodeRequest(req);
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : error);
+      res.statusCode = 500;
+      res.end("Internal error");
       return;
     }
     void handle(request).then(
@@ -2273,12 +2320,12 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     linkIdentity,
     async forReqUser(request) {
       const user = await authenticate(request);
-      if (!user) throw new Error("forReqUser: the request has no signed-in user");
+      if (!user) throw signedOut("forReqUser");
       return backendDbForSession(backend, await sessionFor(user));
     },
     async withAttribution(request) {
       const user = await authenticate(request);
-      if (!user) throw new Error("withAttribution: the request has no signed-in user");
+      if (!user) throw signedOut("withAttribution");
       return backendDbAttributedTo(backend, await sessionFor(user));
     },
     async accountFor(request) {
