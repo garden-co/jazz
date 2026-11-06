@@ -427,10 +427,6 @@ export default function HomePage() {
               />
             </Figure>
           </div>
-          <Text as="p" display="block" color="secondary" className="mt-6">
-            Backends on Next.js, Hono, Express, Bun and Effect. Clients for React, Vue, Svelte,
-            Solid, React Native and plain TypeScript. <AppLink href="/docs">Get started</AppLink>
-          </Text>
         </div>
       </section>
 
