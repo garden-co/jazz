@@ -100,11 +100,18 @@ export interface JazzClient extends SharedJazzClient {
    * backend's `jazz.forReqUser(request)` gives for a request of theirs.
    * `userId` is the id the main backend's `authenticate` names the user by.
    * Writes carry the user's identity and are checked against their
-   * permissions; `claims` are the session claims those permissions see.
+   * permissions.
+   *
+   * `claims` are the session claims those permissions see, and only these:
+   * the main backend's `authenticate` is not asked (there is no request of
+   * the user's), so a policy that reads claims sees what you pass, `{}` when
+   * you pass none. A trusted machine already has backend authority, so this
+   * grants it nothing it lacks.
    *
    * Throws a {@link NoJazzAccountError} (`code: "no_account"`) for a user
    * who has no account yet: the main backend's `jazz.createAccountFor`
-   * creates one. Any other client throws: a scoped machine already acts as
+   * creates one, and an `Error` with `status: 403` for a user whose identity
+   * was revoked. Any other client throws: a scoped machine already acts as
    * its own user, and the main backend itself uses `jazz.forReqUser`.
    */
   forUser(userId: string, options?: { claims?: Record<string, unknown> }): Promise<Db>;
@@ -408,15 +415,21 @@ export async function openJazzSession(
                   if (body?.code === "no_account") throw new NoJazzAccountError(userId, "forUser");
                 }
                 if (!response.ok) {
+                  const reason =
+                    response.status === 403
+                      ? ` (identity_not_authorized: ${userId} was revoked)`
+                      : "";
                   throw Object.assign(
-                    new Error(`forUser: the main backend answered ${response.status}`),
+                    new Error(`forUser: the main backend answered ${response.status}${reason}`),
                     { status: response.status },
                   );
                 }
-                const { account, issuer } = (await response.json()) as {
-                  account: string;
-                  issuer: string;
+                const { account, issuer } = (await response.json().catch(() => ({}))) as {
+                  account?: unknown;
+                  issuer?: unknown;
                 };
+                if (typeof account !== "string" || typeof issuer !== "string")
+                  throw new Error("forUser: the main backend's answer names no account");
                 assertActive();
                 return context.forSession({
                   account_id: account,

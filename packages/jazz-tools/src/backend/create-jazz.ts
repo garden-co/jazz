@@ -2059,9 +2059,20 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     if (typeof userId !== "string" || userId === "") {
       return new Response("userId must be a non-empty string", { status: 400 });
     }
-    const account = await existingAccountOf(userId);
-    if (account === null) return Response.json({ code: "no_account" }, { status: 404 });
-    return Response.json({ account, issuer, userId });
+    let account: string | null;
+    try {
+      account = await existingAccountOf(userId);
+    } catch (error) {
+      // The core refuses this identity (it was revoked): say so, as
+      // `backendUser` does, rather than fail as a server error.
+      if ((error as { status?: number }).status === 403)
+        return Response.json({ code: "identity_not_authorized" }, { status: 403 });
+      throw error;
+    }
+    const noStore = { "Cache-Control": "no-store" };
+    if (account === null)
+      return Response.json({ code: "no_account" }, { status: 404, headers: noStore });
+    return Response.json({ account, issuer }, { headers: noStore });
   }
 
   /**

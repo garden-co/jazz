@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { exportJWK, generateKeyPair, SignJWT, type JWTPayload } from "jose";
+import { startLocalJazzServer } from "../dev/dev-server.js";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
 import {
@@ -9,6 +10,7 @@ import {
   createJazzClient,
   isNoJazzAccountError,
   memory,
+  remote,
   trustWorkload,
   type Jazz,
 } from "./index.js";
@@ -439,7 +441,10 @@ describe("trusted backend clients", () => {
       .insert(app.todos, { title: "as bob", owner: bob })
       .wait({ tier: "global" });
     const [written] = await jazz.db.all(app.todos.where({ id: row.id }).select("$createdBy"));
-    expect(written?.$createdBy).toMatchObject({ account: bob });
+    expect(written?.$createdBy).toMatchObject({
+      account: bob,
+      identity: { issuer: "jazz:backend", subject: "bob" },
+    });
     await expect(client!.forUser("")).rejects.toThrow(/pass the user's id/);
   });
 
@@ -455,7 +460,20 @@ describe("trusted backend clients", () => {
         headers: { "content-type": "application/json", ...headers },
         body: JSON.stringify({ userId: "alice" }),
       });
-    expect((await ask({ authorization: `Bearer ${await sign({ sub: "ops" })}` })).status).toBe(200);
+    const answer = await ask({ authorization: `Bearer ${await sign({ sub: "ops" })}` });
+    expect(answer.status).toBe(200);
+    expect(answer.headers.get("cache-control")).toBe("no-store");
+    expect(await answer.json()).toEqual({
+      account: await jazz.createAccountFor("alice"),
+      issuer: "jazz:backend",
+    });
+    // Only a POST with a user's id.
+    const ops = { authorization: `Bearer ${await sign({ sub: "ops" })}` };
+    const url = `${origin}/jazz/apps/${appId}/backend/user-session`;
+    expect((await fetch(url, { headers: ops })).status).toBe(405);
+    for (const body of ["not json", JSON.stringify({}), JSON.stringify({ userId: "" })]) {
+      expect((await fetch(url, { method: "POST", headers: ops, body })).status).toBe(400);
+    }
     // A scoped machine, a browser with the app's own session, and no one.
     expect((await ask({ authorization: `Bearer ${await sign({ sub: "worker" })}` })).status).toBe(
       401,
@@ -477,6 +495,53 @@ describe("trusted backend clients", () => {
       /only on a trusted backend client/,
     );
   });
+
+  it("refuses to act for a user whose identity was revoked", async () => {
+    const appId = randomUUID();
+    const core = await startLocalJazzServer({ appId, inMemory: true });
+    cleanups.push(() => core.stop());
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: remote({ url: core.url, appId, secret: core.adminSecret }),
+      authenticate,
+      backendClients: [
+        trustWorkload({ issuer, audience: AUDIENCE, claims: { sub: "ops" }, as: "backend" }),
+      ],
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz);
+    const alice = { issuer: "jazz:backend", subject: "alice" };
+    const admin = (operation: string, body: unknown) =>
+      fetch(`${core.url}/apps/${appId}/admin/accounts/${operation}`, {
+        method: "POST",
+        headers: { "X-Jazz-Admin-Secret": core.adminSecret, "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    expect((await admin("login-or-register", { identity: alice })).status).toBe(200);
+    expect((await admin("revoke", { approver: alice, target: alice })).status).toBe(204);
+
+    const answer = await fetch(`${origin}/jazz/apps/${appId}/backend/user-session`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${await sign({ sub: "ops" })}` },
+      body: JSON.stringify({ userId: "alice" }),
+    });
+    expect(answer.status).toBe(403);
+    expect(await answer.json()).toEqual({ code: "identity_not_authorized" });
+    const session = await createJazzClient({
+      appId,
+      app,
+      permissions,
+      serverUrl: `${origin}/jazz`,
+      driver: { type: "memory" },
+      credential: () => sign({ sub: "ops" }),
+    });
+    cleanups.push(() => session.close());
+    await expect(session.getSnapshot().client!.forUser("alice")).rejects.toMatchObject({
+      status: 403,
+      message: expect.stringMatching(/identity_not_authorized/),
+    });
+  }, 60_000);
 
   it("a key outage is a 503, never read as a refusal", async () => {
     const { appId, origin } = await appWith([
