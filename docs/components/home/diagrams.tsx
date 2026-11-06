@@ -500,7 +500,7 @@ export function PermissionsDiagram() {
         cellTone={() => "blue"}
       />
       <Label x={16} y={214} tone="muted">
-        one plan · rows you may not read never leave the cloud
+        one plan · rows a user may not read never leave your backend
       </Label>
     </Diagram>
   );
