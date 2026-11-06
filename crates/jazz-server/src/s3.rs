@@ -12,6 +12,7 @@
 //! thread, or a host's chunk I/O thread), so no caller needs a reactor.
 
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -199,6 +200,9 @@ const REFRESH_EARLY: Duration = Duration::from_secs(5 * 60);
 const ASSUMED_FOR: Duration = Duration::from_secs(60 * 60);
 /// An operation that takes longer fails, and is retried in a later batch.
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long startup waits for the claim ([`S3ChunkStore::check_at_startup`])
+/// before starting anyway.
+const STARTUP_CHECK_TIMEOUT: Duration = Duration::from_secs(15);
 /// A failed role assumption answers every operation for this long, so a
 /// batch asks STS once, not once per operation.
 const ASSUME_FAILURE_HOLD: Duration = Duration::from_secs(5);
@@ -235,6 +239,10 @@ struct Inner {
     /// The last claim that failed, and when: it answers every operation
     /// for a while, as a failed role assumption does.
     claim_failed: Mutex<Option<(Instant, String)>>,
+    /// Set once the bucket refused a request for good: a 4xx other than a
+    /// missing object, a timeout or a throttle (wrong keys, a policy that
+    /// forbids it, a prefix another store owns). Retrying never helps.
+    refused: std::sync::atomic::AtomicBool,
     /// The region requests are signed for: [`S3Options::region`], until
     /// AWS answers that the bucket is in another (on Vercel `AWS_REGION`
     /// is the function's own region, not necessarily the bucket's).
@@ -287,6 +295,7 @@ impl S3ChunkStore {
                 owner,
                 claimed: tokio::sync::OnceCell::new(),
                 claim_failed: Mutex::new(None),
+                refused: std::sync::atomic::AtomicBool::new(false),
             }),
             runtime: Some(runtime),
         }
@@ -318,6 +327,44 @@ impl S3ChunkStore {
 
     pub fn options(&self) -> &S3Options {
         &self.inner.options
+    }
+
+    /// At startup, with static keys: check the store's claims now and fail
+    /// if the bucket refused them for good (wrong keys, a policy that
+    /// forbids the prefix, a prefix another store owns), so a server never
+    /// runs with large values that can only stay on its own disk. A bucket
+    /// that is unreachable, failing or slow (network, 5xx, over
+    /// [`STARTUP_CHECK_TIMEOUT`]) is only logged: the store retries.
+    pub async fn check_at_startup(&self) -> Result<(), String> {
+        if !matches!(self.inner.options.credentials, S3Credentials::Static(_)) {
+            return Ok(());
+        }
+        let inner = Arc::clone(&self.inner);
+        let checked = self
+            .spawn(async move {
+                match tokio::time::timeout(STARTUP_CHECK_TIMEOUT, inner.claim()).await {
+                    Ok(Err(error)) if inner.refused.load(Ordering::Relaxed) => Err(error),
+                    Ok(Err(error)) => {
+                        tracing::warn!(%error, "s3 blobs: the large-value store is not reachable yet; starting anyway and retrying");
+                        Ok(())
+                    }
+                    Ok(Ok(())) => Ok(()),
+                    Err(_) => {
+                        tracing::warn!(
+                            "s3 blobs: the large-value store did not answer within {}s; starting anyway and retrying",
+                            STARTUP_CHECK_TIMEOUT.as_secs()
+                        );
+                        Ok(())
+                    }
+                }
+            })
+            .await;
+        checked.map_err(|error| {
+            format!(
+                "{}. Check the S3 credentials and bucket policy.",
+                error.message
+            )
+        })
     }
 
     /// Run `op` on the store's runtime and await it from any executor.
@@ -645,6 +692,7 @@ impl Inner {
         let claimed = self.claimed
             .get_or_try_init(|| async {
                 let refused = |other: &str| {
+                    self.refused.store(true, Ordering::Relaxed);
                     format!(
                         "s3 blobs: {} belongs to store {other}, not this one ({}); give each store its own bucket or prefix",
                         self.options.describe(),
@@ -741,6 +789,7 @@ impl Inner {
             return Ok(());
         };
         let unreachable_marker = || {
+            self.refused.store(true, Ordering::Relaxed);
             format!(
                 "s3 blobs: cannot claim bucket {bucket} for the {environment} environment: \
                  the credentials may not read or write s3://{bucket}/{ENVIRONMENT_OBJECT}. \
@@ -750,6 +799,7 @@ impl Inner {
             )
         };
         let refused = |other: &str| {
+            self.refused.store(true, Ordering::Relaxed);
             format!(
                 "s3 blobs: bucket {} serves the {other} environment, not {environment}; \
                  give each environment its own bucket",
@@ -927,6 +977,15 @@ impl Inner {
             "ExpiredToken" | "InvalidToken" | "TokenRefreshRequired"
         ) {
             self.drop_keys().await;
+        } else if status.is_client_error()
+            && !matches!(
+                status,
+                reqwest::StatusCode::NOT_FOUND
+                    | reqwest::StatusCode::REQUEST_TIMEOUT
+                    | reqwest::StatusCode::TOO_MANY_REQUESTS
+            )
+        {
+            self.refused.store(true, Ordering::Relaxed);
         }
         let message = xml_field(body, "Message").unwrap_or_default();
         format!("s3 blobs: {what} {name}: {status} {code} {message}")

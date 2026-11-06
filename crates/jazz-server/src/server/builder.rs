@@ -224,7 +224,14 @@ impl ServerBuilder {
 
         // One store per app: the catalogue and the account registry are host
         // tables in the file the runtime's rows live in, all on its thread.
-        let (storage_config, blob_store_record) = self.build_core_server_shell_storage_config()?;
+        let ShellStorage {
+            config: storage_config,
+            record: blob_store_record,
+            s3,
+        } = self.build_core_server_shell_storage_config()?;
+        if let Some(s3) = s3 {
+            s3.check_at_startup().await?;
+        }
         let store = AppStore::open(&storage_config)?;
         // Only a store that opened is recorded as having moved its blobs.
         if let Some(record) = blob_store_record {
@@ -325,13 +332,14 @@ impl ServerBuilder {
         Ok(Some(store.start_runtime(schema, role, dynamic)?))
     }
 
-    /// The storage to open, and the blob-store record to write once it has
-    /// opened (if it changes).
-    fn build_core_server_shell_storage_config(
-        &self,
-    ) -> Result<(StorageConfig, Option<BlobStoreRecord>), String> {
+    /// The storage to open ([`ShellStorage`]).
+    fn build_core_server_shell_storage_config(&self) -> Result<ShellStorage, String> {
         match &self.storage_backend {
-            StorageBackend::InMemory => Ok((StorageConfig::InMemory, None)),
+            StorageBackend::InMemory => Ok(ShellStorage {
+                config: StorageConfig::InMemory,
+                record: None,
+                s3: None,
+            }),
             StorageBackend::Persistent { path } => {
                 std::fs::create_dir_all(path)
                     .map_err(|e| format!("failed to create data dir '{}': {e}", path.display()))?;
@@ -350,6 +358,7 @@ impl ServerBuilder {
                     blobs => blobs.clone(),
                 };
                 let plan = plan_blob_store(path, &blobs)?;
+                let mut s3 = None;
                 let config = match (&plan.blob_dir, &blobs) {
                     (Some(dir), _) => {
                         claim_blob_dir(path, dir)?;
@@ -357,10 +366,14 @@ impl ServerBuilder {
                     }
                     (None, BlobStore::S3(options)) => {
                         warn_on_distant_bucket(options);
-                        let store = crate::s3::S3ChunkStore::new(options.clone(), store_id(path)?)?;
+                        let store = Arc::new(crate::s3::S3ChunkStore::new(
+                            options.clone(),
+                            store_id(path)?,
+                        )?);
+                        s3 = Some(Arc::clone(&store));
                         StorageConfig::data_dir(path).with_blobs(crate::runtime::Blobs::Network(
                             crate::runtime::NetworkChunkStore {
-                                store: Arc::new(store),
+                                store,
                                 name: options.describe(),
                             },
                         ))
@@ -379,7 +392,11 @@ impl ServerBuilder {
                     }
                     (None, _) => StorageConfig::data_dir(path),
                 };
-                Ok((config, plan.record))
+                Ok(ShellStorage {
+                    config,
+                    record: plan.record,
+                    s3,
+                })
             }
         }
     }
@@ -388,6 +405,14 @@ impl ServerBuilder {
     fn local_durability_tier(&self) -> DurabilityTier {
         DurabilityTier::Global
     }
+}
+
+/// The storage a server opens, the blob-store record to write once it has
+/// opened (if it changes), and the S3 store to check before it opens.
+struct ShellStorage {
+    config: StorageConfig,
+    record: Option<BlobStoreRecord>,
+    s3: Option<Arc<crate::s3::S3ChunkStore>>,
 }
 
 /// Where a data directory's large values go, and the record of that choice
@@ -979,6 +1004,54 @@ mod tests {
             recorded.push(marker);
         }
         assert_ne!(recorded[0], recorded[1]);
+    }
+
+    /// A server whose bucket refuses its keys does not start: its large
+    /// values could only ever stay on its own disk. One whose bucket is
+    /// failing or unreachable starts, and the store retries.
+    #[test]
+    fn a_bucket_that_refuses_the_keys_stops_startup() {
+        use std::sync::atomic::Ordering;
+        let bucket = crate::s3::mock::MockS3::start();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let start = |options: crate::s3::S3Options| {
+            let data_dir = tempfile::TempDir::new().expect("temp data dir");
+            let built = rt.block_on(
+                ServerBuilder::new(AppId::from_name("s3-startup-check"))
+                    .with_storage(StorageBackend::Persistent {
+                        path: data_dir.path().to_path_buf(),
+                    })
+                    .with_blob_store(BlobStore::S3(options))
+                    .build(),
+            );
+            match built {
+                Ok(server) => {
+                    rt.block_on(server.shutdown());
+                    Ok(())
+                }
+                Err(error) => Err(error),
+            }
+        };
+        let mut wrong = bucket.options("app/");
+        wrong.credentials = crate::s3::S3Credentials::Static(crate::s3::Keys {
+            access_key_id: "AKIAWRONG".to_owned(),
+            secret_access_key: "nope".to_owned(),
+            session_token: None,
+        });
+        let error = start(wrong).expect_err("wrong keys refuse to start");
+        assert!(error.contains("InvalidAccessKeyId"), "{error}");
+        assert!(error.contains("Check the S3 credentials"), "{error}");
+
+        start(bucket.options("app/")).expect("the right keys start");
+
+        bucket.state.failing.store(true, Ordering::Relaxed);
+        start(bucket.options("other/")).expect("a failing bucket still starts");
+        bucket.state.failing.store(false, Ordering::Relaxed);
+
+        // Another store's prefix is refused for good too.
+        let owned = bucket.options("app/");
+        let error = start(owned).expect_err("another store's prefix refuses to start");
+        assert!(error.contains("belongs to store"), "{error}");
     }
 
     /// A Blob store's default prefix is the data dir's own too.
