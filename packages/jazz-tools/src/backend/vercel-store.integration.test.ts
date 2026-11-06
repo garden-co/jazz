@@ -368,7 +368,7 @@ describe("vercel() store", () => {
     // Past the window in which a wake is trusted without a check.
     await new Promise((resolve) => setTimeout(resolve, 10_500));
     const t0 = Date.now();
-    await expect(opened.handle("GET", "/health", {}, undefined)).rejects.toThrow(
+    await expect(opened.handle("GET", "/health", [], new Uint8Array())).rejects.toThrow(
       /core jazz-test could not start: could not download the core for 1\.2\.3 .*HTTP 404/,
     );
     // Reported within one health round, not after the minute-long wake deadline,
@@ -377,7 +377,9 @@ describe("vercel() store", () => {
     expect(fake.state.status).toBe("stopped");
     // The next request fails at once, without waking the Sandbox again.
     const calls = fake.calls.length;
-    await expect(opened.handle("GET", "/health", {}, undefined)).rejects.toThrow(/could not start/);
+    await expect(opened.handle("GET", "/health", [], new Uint8Array())).rejects.toThrow(
+      /could not start/,
+    );
     expect(fake.calls.length).toBe(calls);
   }, 60_000);
 
