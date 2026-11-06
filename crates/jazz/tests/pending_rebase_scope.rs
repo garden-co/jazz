@@ -14,11 +14,12 @@ use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, InsertOptions, SyncMessage, Transport, TransportError, Upstream,
-    block_on,
+    Db, DbConfig, DbIdentity, ExactWriteTarget, InsertOptions, ReadOpts, SyncMessage, Transport,
+    TransportError, UpdateOptions, Upstream, WriteTarget, block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::model::transaction::OpenTransactionId;
+use jazz::protocol::{BranchSelector, BranchViewBase};
 use jazz::query::Query;
 use jazz::records::Value;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
@@ -31,6 +32,14 @@ fn open(node: u8, author: AuthorSubject) -> Db {
             .table(
                 TableSchemaBuilder::new("docs")
                     .column("title", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column("branch_id", ColumnType::Uuid)
+                    .column("title", ColumnType::Text)
+                    .column("body", ColumnType::Text)
+                    .branch_by("branch_id")
                     .policies(allow_all_policies()),
             )
             .build(),
@@ -247,10 +256,10 @@ fn settling_a_commit_replays_only_the_commits_sharing_its_rows() {
     while link.held() > 0 {
         link.release_one(&client);
     }
-    let replayed = client.replayed_commits();
-    assert!(
-        replayed < u64::from(WRITES),
-        "settling {WRITES} unrelated commits replayed {replayed} commits"
+    assert_eq!(
+        client.replayed_commits(),
+        0,
+        "no pending commit shared a row with a settled one"
     );
     let mine: Vec<(u16, &str)> = (0..WRITES).map(|n| (n, "mine")).collect();
     assert_eq!(titles(&client), expect(&mine));
@@ -353,4 +362,107 @@ fn a_refused_commit_drops_from_every_row_it_linked() {
         titles(&server),
         expect(&[(4, "s4"), (5, "theirs"), (6, "s6")])
     );
+}
+
+fn branch(n: u8) -> BranchSelector {
+    BranchSelector::new([("branch_id", Value::Uuid(uuid::Uuid::from_bytes([n; 16])))])
+}
+
+/// The todo `n` as a draft-over-main view shows it: its title and body.
+fn draft_todo(db: &Db, n: u16) -> (String, String) {
+    let prepared = db.prepare_query(&Query::from("todos")).unwrap();
+    let rows = block_on(db.all(
+        &prepared,
+        ReadOpts::default().branch_view(branch(2), Some(BranchViewBase::Current(branch(1)))),
+    ))
+    .unwrap();
+    let todo = rows
+        .iter()
+        .find(|r| r.row_uuid() == row(n))
+        .expect("the todo");
+    let text = |column: &str| match todo.cell(column) {
+        Some(Value::String(text)) => text,
+        other => panic!("{column} {other:?}"),
+    };
+    (text("title"), text("body"))
+}
+
+/// A write through a branch view copies the row from its base branch.
+/// When the base row changes under it, the pending write replays over
+/// the new base, even though nothing pending writes the base row and
+/// the fate that follows is another commit's.
+#[test]
+fn a_pending_branch_view_write_replays_over_its_base_when_the_base_changes() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let a = open(1, user(1));
+    let a_link = connect(&server, &a, user(1));
+    let _live = subscribe(&a);
+    let prepared = a.prepare_query(&Query::from("todos")).unwrap();
+    let _todos = block_on(a.subscribe(
+        &prepared,
+        ReadOpts::default().branch_view(branch(2), Some(BranchViewBase::Current(branch(1)))),
+    ))
+    .unwrap();
+    block_on(server.insert(
+        "todos",
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("main".to_owned())),
+            ("body".to_owned(), Value::String("old body".to_owned())),
+        ]),
+        InsertOptions {
+            row_id: Some(row(7)),
+            target: ExactWriteTarget::Branch(branch(1)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    pump(&server, &[&a]);
+    assert_eq!(draft_todo(&a, 7), ("main".into(), "old body".into()));
+
+    a_link.hold_fates();
+    // The server changes main's body before a's draft write reaches it.
+    block_on(server.update(
+        "todos",
+        row(7),
+        BTreeMap::from([("body".to_owned(), Value::String("new body".to_owned()))]),
+        UpdateOptions {
+            target: WriteTarget::BranchView {
+                head: branch(1),
+                base: None,
+            },
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    block_on(a.update(
+        "todos",
+        row(7),
+        title("draft"),
+        UpdateOptions {
+            target: WriteTarget::BranchView {
+                head: branch(2),
+                base: Some(BranchViewBase::Current(branch(1))),
+            },
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    insert(&a, 8, "unrelated");
+    assert_eq!(draft_todo(&a, 7), ("draft".into(), "old body".into()));
+    // Main's new version reaches a before the server has seen a's write.
+    block_on(server.tick()).unwrap();
+    block_on(a.tick()).unwrap();
+    assert_eq!(
+        draft_todo(&a, 7),
+        ("draft".into(), "new body".into()),
+        "the draft copies main as it now is"
+    );
+    pump(&server, &[&a]);
+
+    while a_link.held() > 0 {
+        a_link.release_one(&a);
+        assert_eq!(draft_todo(&a, 7), ("draft".into(), "new body".into()));
+    }
+    pump(&server, &[&a]);
+    assert_eq!(draft_todo(&server, 7), ("draft".into(), "new body".into()));
 }

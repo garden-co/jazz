@@ -1595,6 +1595,10 @@ impl Expected {
 struct PendingQueue {
     commits: BTreeMap<u64, Pending>,
     by_row: HashMap<RowKey, BTreeSet<u64>>,
+    /// The pending txs writing any branch of a row: a write through a
+    /// branch view copies the row from its base branch, so a commit
+    /// depends on every branch of the rows it writes.
+    by_id: HashMap<(String, RowUuid), BTreeSet<u64>>,
 }
 
 impl PendingQueue {
@@ -1616,22 +1620,31 @@ impl PendingQueue {
     }
 
     fn push(&mut self, pending: Pending) {
-        // A local seq names one commit.
-        self.remove(pending.tx);
+        debug_assert!(
+            !self.commits.contains_key(&pending.tx),
+            "a local seq names one commit"
+        );
         for row in &pending.rows {
             self.by_row
                 .entry(row.clone())
+                .or_default()
+                .insert(pending.tx);
+            self.by_id
+                .entry((row.0.clone(), row.1))
                 .or_default()
                 .insert(pending.tx);
         }
         self.commits.insert(pending.tx, pending);
     }
 
-    /// Take back the commit just pushed.
-    fn pop(&mut self) {
-        if let Some((_, pending)) = self.commits.pop_last() {
-            self.unindex(&pending);
-        }
+    /// Take back commit `tx`, just pushed.
+    fn pop(&mut self, tx: u64) {
+        debug_assert_eq!(
+            self.commits.last_key_value().map(|(&last, _)| last),
+            Some(tx),
+            "the commit just pushed is the newest"
+        );
+        self.remove(tx);
     }
 
     fn remove(&mut self, tx: u64) {
@@ -1648,7 +1661,22 @@ impl PendingQueue {
                     self.by_row.remove(row);
                 }
             }
+            let id = (row.0.clone(), row.1);
+            if let Some(txs) = self.by_id.get_mut(&id) {
+                txs.remove(&pending.tx);
+                if txs.is_empty() {
+                    self.by_id.remove(&id);
+                }
+            }
         }
+    }
+
+    /// The pending txs writing any branch of `row`'s row.
+    fn on_id(&self, row: &RowKey) -> impl Iterator<Item = &u64> {
+        self.by_id
+            .get(&(row.0.clone(), row.1))
+            .into_iter()
+            .flatten()
     }
 
     fn get_mut(&mut self, tx: u64) -> Option<&mut Pending> {
@@ -1673,9 +1701,11 @@ impl PendingQueue {
         self.by_row.get(row).and_then(|txs| txs.last().copied())
     }
 
-    /// `rows`, with every row a pending commit writing one of them also
-    /// writes, until no commit links one more: what replays together when
-    /// any of `rows` is restored (see [`Db::rebase`]).
+    /// `rows`, with every row a pending commit writing any branch of one
+    /// of them also writes, until no commit links one more: what replays
+    /// together when any of `rows` is restored (see [`Db::rebase`]). A
+    /// write that shares a row with every other (a counter every commit
+    /// bumps) links them all, and they all replay.
     fn linked(&self, rows: impl IntoIterator<Item = RowKey>) -> HashSet<RowKey> {
         let mut linked = HashSet::new();
         let mut visited = HashSet::new();
@@ -1684,7 +1714,7 @@ impl PendingQueue {
             if !linked.insert(row.clone()) {
                 continue;
             }
-            for tx in self.by_row.get(&row).into_iter().flatten() {
+            for tx in self.on_id(&row) {
                 if !visited.insert(*tx) {
                     continue;
                 }
@@ -1712,12 +1742,11 @@ impl PendingQueue {
             })
     }
 
-    /// The pending commits writing any of `rows`.
+    /// The pending commits writing any branch of one of `rows`.
     fn writing<'a>(&'a self, rows: &HashSet<RowKey>) -> impl Iterator<Item = &'a Pending> {
         let txs: BTreeSet<u64> = rows
             .iter()
-            .filter_map(|row| self.by_row.get(row))
-            .flatten()
+            .flat_map(|row| self.on_id(row))
             .copied()
             .collect();
         txs.into_iter()
@@ -7593,7 +7622,7 @@ impl Db {
                 if let Err(error) = persisted {
                     let client = inner.client.as_mut().expect("client");
                     client.unsent.pop();
-                    client.pending.pop();
+                    client.pending.pop(seq);
                     for key in &added {
                         client.baselines.remove(key);
                     }
@@ -8502,7 +8531,11 @@ impl Db {
                                     RowUuid::from_bytes(image.id),
                                     image.key.clone(),
                                 );
-                                if inner.receive_image(image)? {
+                                // An image under a pending write's baseline,
+                                // or of a branch a pending write through a
+                                // branch view copied its row from.
+                                let overlaid = inner.receive_image(image)?;
+                                if overlaid || inner.pending_on_row(&row_key) {
                                     rebase = true;
                                     if let Some(changed) = changed.as_mut() {
                                         changed.insert(row_key);
@@ -8525,7 +8558,10 @@ impl Db {
                         }
                         let row = RowUuid::from_bytes(id);
                         let held = inner.current_image(&table, row, &key)?.is_some();
-                        if inner.receive_eviction(&table, row, &key)? {
+                        let row_key = (table.clone(), row, key.clone());
+                        if inner.receive_eviction(&table, row, &key)?
+                            || inner.pending_on_row(&row_key)
+                        {
                             rebase = true;
                             if let Some(changed) = changed.as_mut() {
                                 changed.insert((table.clone(), row, key.clone()));
@@ -9131,13 +9167,15 @@ impl Db {
 
     /// Restore overlaid rows to their upstream baselines and replay the
     /// pending transactions, in order, over them: every overlaid row, or,
-    /// with `changed`, the rows whose baseline or pending commits changed
-    /// and the rows linked to them by a pending commit
-    /// ([`PendingQueue::linked`]). A replay writes only the rows its
-    /// commit wrote, so a row no replayed commit writes and whose baseline
-    /// stayed would come out of the replay as it went in: leaving it
-    /// keeps settling a write proportional to the rows it touches, not to
-    /// every write still pending.
+    /// with `changed`, the rows whose baseline, pending commits or (for a
+    /// write through a branch view) base branch changed, and the rows
+    /// linked to them by a pending commit ([`PendingQueue::linked`]). A
+    /// replay writes only the rows its commit wrote and reads only other
+    /// branches of them, so a row no replayed commit writes, whose
+    /// baseline and base branches stayed, would come out of the replay as
+    /// it went in (but for its local `$updatedAt` stamp): leaving it keeps
+    /// settling a write proportional to the rows it touches, not to every
+    /// write still pending.
     fn rebase(&self, changed: Option<HashSet<RowKey>>) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
         let Some(client) = inner.client.as_mut() else {
@@ -9977,6 +10015,13 @@ impl Inner {
             }
         }
         Ok(())
+    }
+
+    /// Whether a pending commit writes any branch of `row`'s row.
+    fn pending_on_row(&self, row: &RowKey) -> bool {
+        self.client
+            .as_ref()
+            .is_some_and(|client| client.pending.on_id(row).next().is_some())
     }
 
     fn receive_image(&mut self, mut image: Image) -> Result<bool, Error> {
