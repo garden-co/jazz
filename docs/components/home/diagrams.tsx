@@ -340,7 +340,7 @@ function Lines({
   );
 }
 
-/** A platform box (ink, titled) holding Jazz's part (a blue box) inside. */
+/** A platform box: its title, then Jazz's part in blue below it. */
 function Nested({
   x,
   y,
@@ -348,7 +348,6 @@ function Nested({
   h,
   title,
   inner,
-  innerY,
 }: {
   x: number;
   y: number;
@@ -356,17 +355,15 @@ function Nested({
   h: number;
   title: string[];
   inner: string[];
-  innerY: number;
 }) {
-  const pad = w < 90 ? 6 : 10;
+  const pad = w < 90 ? 8 : 12;
   return (
     <g>
       <Frame x={x} y={y} w={w} h={h} tone="ink" />
-      <Lines x={x + pad} y={y + 22} lines={title} className="dg-title dg-fill-ink" />
-      <Frame x={x + pad} y={innerY} w={w - 2 * pad} h={y + h - pad - innerY} tone="blue" />
+      <Lines x={x + pad} y={y + 23} lines={title} className="dg-title dg-fill-ink" />
       <Lines
-        x={x + pad + 8}
-        y={innerY + 19}
+        x={x + pad}
+        y={y + 23 + title.length * 18 + 8}
         lines={inner}
         step={16}
         className="dg-detail dg-fill-blue"
@@ -380,7 +377,7 @@ type Client = { name: string[]; inner: string[]; tone: Tone };
 const clients: Client[] = [
   {
     name: ["traditional", "client"],
-    inner: ["your own", "request &", "state", "handling"],
+    inner: ["your own request", "& state handling"],
     tone: "ink",
   },
   { name: ["web page"], inner: ["thin jazz client"], tone: "blue" },
@@ -398,7 +395,7 @@ const clients: Client[] = [
   { name: ["agent VM"], inner: ["thin jazz client"], tone: "blue" },
 ];
 
-/** A client: its Jazz client (or your own code) in a box on top, its name below. */
+/** A client: its name, then its Jazz client (or your own code) below. */
 function ClientBox({
   x,
   y,
@@ -412,26 +409,16 @@ function ClientBox({
   h: number;
   client: Client;
 }) {
-  const innerH = 14 + client.inner.length * 16;
-  // The box fits its contents, as in the print sketches.
-  const boxH = Math.min(h, 10 + innerH + 18 + client.name.length * 20);
   return (
     <g>
-      <Frame x={x} y={y} w={w} h={boxH} tone="ink" />
-      <Frame x={x + 8} y={y + 10} w={w - 16} h={innerH} tone={client.tone} />
+      <Frame x={x} y={y} w={w} h={h} tone="ink" />
+      <Lines x={x + 12} y={y + 23} lines={client.name} className="dg-title dg-fill-ink" />
       <Lines
-        x={x + 16}
-        y={y + 29}
+        x={x + 12}
+        y={y + 23 + client.name.length * 18 + 8}
         lines={client.inner}
         step={16}
-        className={`dg-detail dg-fill-${client.tone}`}
-      />
-      <Lines
-        x={x + w / 2}
-        y={y + 10 + innerH + 30}
-        lines={client.name}
-        anchor="middle"
-        className="dg-title dg-fill-ink"
+        className={client.tone === "blue" ? "dg-detail dg-fill-blue" : "dg-detail"}
       />
     </g>
   );
@@ -447,8 +434,7 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
   const { label, runtime, account, scaling, shard, store } = deploymentScenarios[scenario];
   const local = !account;
   const rowY = 36;
-  const rowH = 112;
-  const innerY = rowY + 50;
+  const rowH = 104;
   const shardArea = { x: 20, w: 560 };
   const storeBox = { x: 600, w: 340 };
   const backend = { x: 20, y: local ? 12 : 188, w: 880 };
@@ -460,7 +446,7 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
   const syncY = backendBottom + authH;
   const busY = 470;
   const clientY = 484;
-  const clientH = 148;
+  const clientH = 124;
   const cw = 148;
   const cx = (index: number) => 8 + index * 158 + cw / 2;
   const gap = 10;
@@ -480,7 +466,7 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
     { tx: 840, turn: 396 },
   ];
   return (
-    <Diagram viewBox="0 0 956 640" label={label}>
+    <Diagram viewBox="0 0 956 616" label={label}>
       {account ? <rect x={6} y={6} width={944} height={386} rx={2} className="dg-region" /> : null}
       <Frame x={backend.x} y={backend.y} w={backend.w} h={backendBottom - backend.y} tone="ink" />
       <Lines
@@ -507,7 +493,6 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
               h={rowH}
               title={shard.title}
               inner={shard.inner}
-              innerY={innerY}
             />
           ))}
           {shardXs.map((x, index) => (
@@ -531,7 +516,6 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
             h={rowH}
             title={[store]}
             inner={LARGE_VALUES}
-            innerY={innerY}
           />
           <Wire
             points={[
