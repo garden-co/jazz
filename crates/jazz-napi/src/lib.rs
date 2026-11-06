@@ -2099,9 +2099,15 @@ fn parse_jazz_server_start_options(options: JsonValue) -> napi::Result<JazzServe
 /// is given, else to stderr ([`init_server_logs`]).
 pub(crate) fn init_jazz_server_telemetry(collector_url: Option<&str>) {
     let Some(collector_url) = collector_url else {
-        init_server_logs();
+        init_server_logs("warn");
         return;
     };
+    if tracing::dispatcher::has_been_set() {
+        tracing::warn!(
+            "telemetry: this process already reports its logs elsewhere; the collector at {collector_url} gets none"
+        );
+        return;
+    }
     jazz_otel::init_process_tracing_with_endpoint_once(
         "jazz-server",
         collector_url,
@@ -2109,19 +2115,24 @@ pub(crate) fn init_jazz_server_telemetry(collector_url: Option<&str>) {
     );
 }
 
-/// Print the server's logs (Jazz's at `info` and up, others' errors, more
-/// with `RUST_LOG`) to stderr, unless the process already reports
-/// elsewhere. Without it, a server inside a Node process says nothing: a
-/// blob store refusing its credentials, or a failing upload, goes
-/// unnoticed.
-pub(crate) fn init_server_logs() {
+/// Print Jazz's logs at `level` and up to stderr (`RUST_LOG` replaces the
+/// filter), unless the process already reports elsewhere. Without it, a
+/// server inside a Node process says nothing: a blob store refusing its
+/// credentials, or a failing upload, goes unnoticed. An in-process core
+/// passes `warn`, to stay quiet in the app's own output; a served core
+/// passes `info`, as the standalone server logs.
+pub(crate) fn init_server_logs(level: &str) {
+    use std::io::IsTerminal;
+    let filter = match std::env::var("RUST_LOG") {
+        Ok(directives) if !directives.trim().is_empty() => {
+            tracing_subscriber::EnvFilter::new(directives)
+        }
+        _ => tracing_subscriber::EnvFilter::new(format!("error,jazz={level}")),
+    };
     let _ = tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("jazz=info".parse().expect("static directive"))
-                .add_directive("jazz_tools=info".parse().expect("static directive")),
-        )
+        .with_ansi(std::io::stderr().is_terminal())
+        .with_env_filter(filter)
         .try_init();
 }
 

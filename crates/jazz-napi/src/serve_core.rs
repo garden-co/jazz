@@ -181,7 +181,7 @@ pub fn serve_core(options: JsonValue) -> Result<ServedCore> {
         trusted_workload,
         ..Default::default()
     };
-    crate::init_server_logs();
+    crate::init_server_logs("info");
     let (stop, stop_requested) = tokio::sync::watch::channel(false);
     let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
     napi::bindgen_prelude::spawn(async move {

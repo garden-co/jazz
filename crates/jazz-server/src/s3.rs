@@ -12,7 +12,6 @@
 //! thread, or a host's chunk I/O thread), so no caller needs a reactor.
 
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -201,8 +200,8 @@ const ASSUMED_FOR: Duration = Duration::from_secs(60 * 60);
 /// An operation that takes longer fails, and is retried in a later batch.
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long startup waits for the claim ([`S3ChunkStore::check_at_startup`])
-/// before starting anyway.
-const STARTUP_CHECK_TIMEOUT: Duration = Duration::from_secs(15);
+/// before starting anyway: short, as it delays every cold start.
+const STARTUP_CHECK_TIMEOUT: Duration = Duration::from_secs(3);
 /// A failed role assumption answers every operation for this long, so a
 /// batch asks STS once, not once per operation.
 const ASSUME_FAILURE_HOLD: Duration = Duration::from_secs(5);
@@ -239,10 +238,13 @@ struct Inner {
     /// The last claim that failed, and when: it answers every operation
     /// for a while, as a failed role assumption does.
     claim_failed: Mutex<Option<(Instant, String)>>,
-    /// Set once the bucket refused a request for good: a 4xx other than a
-    /// missing object, a timeout or a throttle (wrong keys, a policy that
-    /// forbids it, a prefix another store owns). Retrying never helps.
-    refused: std::sync::atomic::AtomicBool,
+    /// Set once the bucket refused a request for good, with what to fix:
+    /// a 4xx other than a missing object, a timeout, a throttle or a
+    /// conditional-write race (wrong keys, a policy that forbids it, no
+    /// such bucket, a prefix another store owns). Retrying never helps.
+    /// Any operation may set it; only the startup check reads it
+    /// ([`S3ChunkStore::check_at_startup`]), right after a claim.
+    refused: Mutex<Option<&'static str>>,
     /// The region requests are signed for: [`S3Options::region`], until
     /// AWS answers that the bucket is in another (on Vercel `AWS_REGION`
     /// is the function's own region, not necessarily the bucket's).
@@ -295,7 +297,7 @@ impl S3ChunkStore {
                 owner,
                 claimed: tokio::sync::OnceCell::new(),
                 claim_failed: Mutex::new(None),
-                refused: std::sync::atomic::AtomicBool::new(false),
+                refused: Mutex::new(None),
             }),
             runtime: Some(runtime),
         }
@@ -342,13 +344,21 @@ impl S3ChunkStore {
         let inner = Arc::clone(&self.inner);
         // A join handle, not `spawn`'s future: hosts await `build` on a
         // multi-threaded runtime, so this future must be `Send`.
-        let checked = self
+        self
             .runtime
             .as_ref()
             .expect("the runtime lives as long as the store")
             .spawn(async move {
                 match tokio::time::timeout(STARTUP_CHECK_TIMEOUT, inner.claim()).await {
-                    Ok(Err(error)) if inner.refused.load(Ordering::Relaxed) => Err(error),
+                    Ok(Err(error)) if inner.refusal().is_some() => {
+                        let hint = inner.refusal().unwrap_or_default();
+                        let at = inner.options.describe();
+                        Err(if hint.is_empty() {
+                            format!("{error} ({at})")
+                        } else {
+                            format!("{error} ({at}); {hint}")
+                        })
+                    }
                     Ok(Err(error)) => {
                         tracing::warn!(%error, "s3 blobs: the large-value store is not reachable yet; starting anyway and retrying");
                         Ok(())
@@ -364,8 +374,7 @@ impl S3ChunkStore {
                 }
             })
             .await
-            .map_err(|error| format!("s3 blobs: startup check failed: {error}"))?;
-        checked.map_err(|error| format!("{error}. Check the S3 credentials and bucket policy."))
+            .map_err(|error| format!("s3 blobs: startup check failed: {error}"))?
     }
 
     /// Run `op` on the store's runtime and await it from any executor.
@@ -679,6 +688,15 @@ impl Inner {
             .map_err(|error| format!("s3 blobs: {}", error.without_url()))
     }
 
+    /// Record that the bucket refused a request for good, with what to fix.
+    fn refuse(&self, hint: &'static str) {
+        *self.refused.lock().expect("refusal") = Some(hint);
+    }
+
+    fn refusal(&self) -> Option<&'static str> {
+        *self.refused.lock().expect("refusal")
+    }
+
     /// Check (once per process) that this store owns the prefix, claiming
     /// it if no store does yet.
     async fn claim(&self) -> Result<(), String> {
@@ -693,7 +711,7 @@ impl Inner {
         let claimed = self.claimed
             .get_or_try_init(|| async {
                 let refused = |other: &str| {
-                    self.refused.store(true, Ordering::Relaxed);
+                    self.refuse("");
                     format!(
                         "s3 blobs: {} belongs to store {other}, not this one ({}); give each store its own bucket or prefix",
                         self.options.describe(),
@@ -769,7 +787,9 @@ impl Inner {
             ));
         }
         let body = response.text().await.unwrap_or_default();
-        if status == reqwest::StatusCode::NOT_FOUND {
+        if status == reqwest::StatusCode::NOT_FOUND
+            && xml_field(&body, "Code").as_deref() != Some("NoSuchBucket")
+        {
             return Ok(Marker::Missing);
         }
         if status == reqwest::StatusCode::FORBIDDEN
@@ -790,7 +810,7 @@ impl Inner {
             return Ok(());
         };
         let unreachable_marker = || {
-            self.refused.store(true, Ordering::Relaxed);
+            self.refuse("");
             format!(
                 "s3 blobs: cannot claim bucket {bucket} for the {environment} environment: \
                  the credentials may not read or write s3://{bucket}/{ENVIRONMENT_OBJECT}. \
@@ -800,7 +820,7 @@ impl Inner {
             )
         };
         let refused = |other: &str| {
-            self.refused.store(true, Ordering::Relaxed);
+            self.refuse("");
             format!(
                 "s3 blobs: bucket {} serves the {other} environment, not {environment}; \
                  give each environment its own bucket",
@@ -978,19 +998,43 @@ impl Inner {
             "ExpiredToken" | "InvalidToken" | "TokenRefreshRequired"
         ) {
             self.drop_keys().await;
-        } else if status.is_client_error()
-            && !matches!(
-                status,
-                reqwest::StatusCode::NOT_FOUND
-                    | reqwest::StatusCode::REQUEST_TIMEOUT
-                    | reqwest::StatusCode::TOO_MANY_REQUESTS
-            )
-        {
-            self.refused.store(true, Ordering::Relaxed);
+        } else if let Some(hint) = refusal_hint(status, &code) {
+            self.refuse(hint);
         }
         let message = xml_field(body, "Message").unwrap_or_default();
         format!("s3 blobs: {what} {name}: {status} {code} {message}")
     }
+}
+
+/// What to fix when the bucket answered `status` with error `code` for
+/// good; `None` when a later try may succeed (a missing object, a timeout,
+/// a throttle, a conditional write racing another instance's).
+fn refusal_hint(status: reqwest::StatusCode, code: &str) -> Option<&'static str> {
+    use reqwest::StatusCode;
+    if code == "NoSuchBucket" {
+        return Some("check the bucket name and region");
+    }
+    if !status.is_client_error()
+        || matches!(
+            status,
+            StatusCode::NOT_FOUND
+                | StatusCode::REQUEST_TIMEOUT
+                | StatusCode::CONFLICT
+                | StatusCode::TOO_MANY_REQUESTS
+        )
+    {
+        return None;
+    }
+    Some(match code {
+        "InvalidAccessKeyId" | "SignatureDoesNotMatch" | "InvalidToken" => {
+            "check the S3 access key and secret"
+        }
+        "RequestTimeTooSkewed" => "check this host's clock",
+        "AccessDenied" | "AllAccessDisabled" => {
+            "check the bucket policy: the keys need s3:GetObject and s3:PutObject on the prefix"
+        }
+        _ => "check the S3 credentials and bucket settings",
+    })
 }
 
 /// A response body of at most `limit` bytes.
@@ -1632,6 +1676,10 @@ pub(crate) mod mock {
         pub calls: Calls,
         /// Every request fails with 503 while set.
         pub failing: AtomicBool,
+        /// Every request answers 404 NoSuchBucket while set.
+        pub no_bucket: AtomicBool,
+        /// Requests answer only once this is unset.
+        pub stalled: AtomicBool,
         /// A missing key answers 403 AccessDenied, as without s3:ListBucket.
         pub deny_missing: AtomicBool,
         /// Set: the keys may only touch objects under this prefix (an IAM
@@ -1762,6 +1810,12 @@ pub(crate) mod mock {
         state.calls.requests.fetch_add(1, Ordering::Relaxed);
         if state.failing.load(Ordering::Relaxed) {
             return error(StatusCode::SERVICE_UNAVAILABLE, "SlowDown");
+        }
+        while state.stalled.load(Ordering::Relaxed) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        if state.no_bucket.load(Ordering::Relaxed) && parts.uri.path() != "/sts" {
+            return error(StatusCode::NOT_FOUND, "NoSuchBucket");
         }
         if parts.uri.path() == "/sts" {
             return sts(state, &parts, &body);

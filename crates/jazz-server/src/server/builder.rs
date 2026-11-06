@@ -230,7 +230,9 @@ impl ServerBuilder {
             s3,
         } = self.build_core_server_shell_storage_config()?;
         if let Some(s3) = s3 {
-            s3.check_at_startup().await?;
+            s3.check_at_startup()
+                .await
+                .map_err(|error| format!("app {}: {error}", self.app_id))?;
         }
         let store = AppStore::open(&storage_config)?;
         // Only a store that opened is recorded as having moved its blobs.
@@ -1040,7 +1042,14 @@ mod tests {
         });
         let error = start(wrong).expect_err("wrong keys refuse to start");
         assert!(error.contains("InvalidAccessKeyId"), "{error}");
-        assert!(error.contains("Check the S3 credentials"), "{error}");
+        assert!(
+            error.contains("check the S3 access key and secret"),
+            "{error}"
+        );
+        assert!(
+            error.contains(&AppId::from_name("s3-startup-check").to_string()),
+            "the error names the app: {error}"
+        );
 
         start(bucket.options("app/")).expect("the right keys start");
 
@@ -1052,6 +1061,40 @@ mod tests {
         let owned = bucket.options("app/");
         let error = start(owned).expect_err("another store's prefix refuses to start");
         assert!(error.contains("belongs to store"), "{error}");
+
+        // A bucket that does not exist is refused for good, with a hint.
+        bucket.state.no_bucket.store(true, Ordering::Relaxed);
+        let error =
+            start(bucket.options("missing/")).expect_err("a missing bucket refuses to start");
+        assert!(error.contains("NoSuchBucket"), "{error}");
+        assert!(
+            error.contains("check the bucket name and region"),
+            "{error}"
+        );
+        bucket.state.no_bucket.store(false, Ordering::Relaxed);
+
+        // A bucket that does not answer only delays startup, by at most the
+        // check's budget.
+        bucket.state.stalled.store(true, Ordering::Relaxed);
+        let data_dir = tempfile::TempDir::new().expect("temp data dir");
+        let began = std::time::Instant::now();
+        let server = rt
+            .block_on(
+                ServerBuilder::new(AppId::from_name("s3-startup-check"))
+                    .with_storage(StorageBackend::Persistent {
+                        path: data_dir.path().to_path_buf(),
+                    })
+                    .with_blob_store(BlobStore::S3(bucket.options("slow/")))
+                    .build(),
+            )
+            .expect("a bucket that does not answer still starts");
+        assert!(
+            began.elapsed() < std::time::Duration::from_secs(10),
+            "startup waited {:?}",
+            began.elapsed()
+        );
+        bucket.state.stalled.store(false, Ordering::Relaxed);
+        rt.block_on(server.shutdown());
     }
 
     /// A Blob store's default prefix is the data dir's own too.
