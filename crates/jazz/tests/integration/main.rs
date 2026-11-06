@@ -93,6 +93,8 @@ mod order_by_unselected_column;
 mod parameterized_subscription_routing;
 #[path = "../pending_commit_reopen.rs"]
 mod pending_commit_reopen;
+#[path = "../pending_rebase_scope.rs"]
+mod pending_rebase_scope;
 #[path = "../permission_advice.rs"]
 mod permission_advice;
 #[path = "../policy_activation.rs"]
