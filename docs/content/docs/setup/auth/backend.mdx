@@ -284,6 +284,11 @@ On a computer several people use, such as a family laptop or a library terminal:
   5 seconds for pending writes to upload; writes still unsynced then are lost. For now the wipe
   runs when your page signs out and calls `reauthenticate()`; a sign-out Jazz notices another way
   (another tab, an expired session) closes the account without wiping it.
+- **Sign the old user out before you sign the next one in.** The wait for pending writes covers only
+  writes the server still accepts: once your session cookie names the new user, nothing can upload
+  the old user's writes. So a user switch while offline drops the old user's unsynced writes from
+  other tabs when sync returns. If that matters, sign out first (your sign-out, then
+  `reauthenticate()`), and set the new user's cookie only after that.
 - **Pass `linkGuestOnSignUp: false`**, so a guest left on the device by someone else isn't linked
   to the next person who signs up. See [Guests and linking](#guests-and-linking).
 - **Keep personal data out of `userId` and claims.** Every reader of a user's rows sees
@@ -303,6 +308,9 @@ When the user changes, Jazz hides the old client, waits for your components to d
 down gracefully with its writes synced, and only then signs in and opens the new client.
 
 - If the sync barrier fails, the old client stays usable and nothing changes.
+- The barrier uploads only what the server still accepts as the old user. Once the session cookie
+  names the new user, the old user's unsynced writes, including other tabs', can't upload any more;
+  see [Shared devices](#shared-devices).
 - If sign-in fails after shutdown, Jazz reopens the previous account when it can.
 - If sign-in succeeds but the new client fails to start, the new account stays selected and
   `retry()` retries startup without asking your backend again.
