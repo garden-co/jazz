@@ -10,7 +10,14 @@ const parse = (markdown: string) => defaultMarkdownParser.parse(markdown);
  * between `‹` and `›`), recording what it writes. */
 function editor(marked: string) {
   const written: string[] = [];
-  const plugin = markdownSync({ parse, onChange: (markdown) => written.push(markdown) });
+  const editedFrom: string[] = [];
+  const plugin = markdownSync({
+    parse,
+    onChange: (markdown, change) => {
+      written.push(markdown);
+      editedFrom.push(change.editedFrom);
+    },
+  });
   const markdown = marked.replace(/[‸‹›]/g, "");
   let state = EditorState.create({ doc: parse(markdown), plugins: [plugin] });
   const at = (marker: string) => {
@@ -28,6 +35,7 @@ function editor(marked: string) {
   const view = plugin.spec.view!({ state } as never);
   return {
     written,
+    editedFrom,
     get state() {
       return state;
     },
@@ -73,6 +81,15 @@ describe("markdownSync", () => {
     const ed = editor("Hello‸");
     ed.local((s) => s.tr.insertText(" world"));
     expect(ed.written).toEqual(["Hello world"]);
+  });
+
+  it("says which value each write edits: the last one written or shown", () => {
+    const ed = editor("Hello‸");
+    ed.local((s) => s.tr.insertText("!"));
+    ed.remote("Hello! and more");
+    ed.local((s) => s.tr.insertText("?"));
+    expect(ed.written).toEqual(["Hello!", "Hello! and more?"]);
+    expect(ed.editedFrom).toEqual(["Hello", "Hello! and more"]);
   });
 
   it("types into an empty paragraph as plain text", () => {

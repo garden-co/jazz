@@ -1939,7 +1939,9 @@ export class JazzClient {
     branch?: BranchView,
   ): MutationResult {
     if (branch) {
-      throw new Error("Partial-value updates are not yet supported in branch views.");
+      throw new Error(
+        "Partial-value updates (applyDiffs, editedFrom) are not yet supported in branch views.",
+      );
     }
     const writeContext = this.writeContext(session, attribution, openTransactionId, { updatedAt });
     if (!this.runtime.updateLargeValues) {
