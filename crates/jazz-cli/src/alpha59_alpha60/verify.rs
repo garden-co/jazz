@@ -28,7 +28,7 @@ use jazz_alpha59_alpha60_dump as dump;
 use jazz_server::server::alpha59_alpha60::{
     migrate_import_active_permissions, migrate_import_login,
 };
-use jazz_server::{ServerBuilder, ServerState, StorageBackend};
+use jazz_server::{BlobStore, ServerBuilder, ServerState, StorageBackend};
 use serde_json::{Value as Json, json};
 
 use super::active::{ToHead, Translated};
@@ -148,8 +148,51 @@ impl Report {
     }
 }
 
+/// The import keeps `--app-id` beside the data exactly as given; verify
+/// checks against the same id.
+fn check_app_id(data_dir: &std::path::Path, app_id: &str) -> Result<(), String> {
+    let path = data_dir.join("app-id");
+    let kept =
+        std::fs::read_to_string(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+    let kept = kept.trim_end_matches('\n');
+    if kept != app_id {
+        return Err(format!(
+            "--app-id {app_id} is not the id {} was imported with ({kept})",
+            data_dir.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Where the data dir keeps its large values: in `jazz.sqlite` as the
+/// import writes them, or in files once a backend's first start moved them
+/// there. A remote store would need its credentials, so verify reads it
+/// only before that first start.
+fn blob_store(data_dir: &std::path::Path) -> Result<BlobStore, String> {
+    let marker = data_dir.join("blob-store");
+    let recorded = match std::fs::read_to_string(&marker) {
+        Ok(recorded) => recorded.trim_end_matches('\n').to_owned(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BlobStore::Sqlite),
+        Err(error) => return Err(format!("{}: {error}", marker.display())),
+    };
+    match recorded.as_str() {
+        "sqlite" => Ok(BlobStore::Sqlite),
+        "files" => Ok(BlobStore::Files { dir: None }),
+        other => match other.strip_prefix("files ") {
+            Some(dir) => Ok(BlobStore::Files {
+                dir: Some(data_dir.join(dir)),
+            }),
+            None => Err(format!(
+                "{} keeps its large values in {other}: verify reads them only from the data dir, so run it before the backend's first start",
+                data_dir.display()
+            )),
+        },
+    }
+}
+
 pub async fn verify(args: &Args) -> Result<Json, String> {
-    let file = std::fs::File::open(&args.dump).map_err(err)?;
+    let file = std::fs::File::open(&args.dump)
+        .map_err(|error| format!("{}: {error}", args.dump.display()))?;
     let (mut reader, _) = dump::Reader::open(std::io::BufReader::new(file)).map_err(err)?;
     let mut runtime_schemas = Vec::new();
     let mut runtime_lenses = Vec::new();
@@ -234,7 +277,8 @@ pub async fn verify(args: &Args) -> Result<Json, String> {
     let mut stored_versions: HashMap<RowKey, dump::Version> = HashMap::new();
     if !wanted.is_empty() {
         let to_head = to_head.as_ref().expect("rows imply a head");
-        let file = std::fs::File::open(&args.dump).map_err(err)?;
+        let file = std::fs::File::open(&args.dump)
+            .map_err(|error| format!("{}: {error}", args.dump.display()))?;
         let (mut reader, _) = dump::Reader::open(std::io::BufReader::new(file)).map_err(err)?;
         while let Some(record) = reader.next_record().map_err(err)? {
             let dump::Record::Version(version) = record else {
@@ -328,10 +372,12 @@ pub async fn verify(args: &Args) -> Result<Json, String> {
         );
     }
 
+    check_app_id(&args.data_dir, &args.app_id_text)?;
     let built = ServerBuilder::new(args.app_id)
         .with_storage(StorageBackend::Persistent {
             path: args.data_dir.clone(),
         })
+        .with_blob_store(blob_store(&args.data_dir)?)
         .build()
         .await?;
     let state = built.state.clone();
@@ -605,6 +651,39 @@ fn canonical(author: &AuthorSubject) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verify_refuses_another_app_id_than_the_import_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = "0a590000-0000-4000-8000-000000000059";
+        std::fs::write(dir.path().join("app-id"), format!("{id}\n")).unwrap();
+        check_app_id(dir.path(), id).unwrap();
+        let refused = check_app_id(dir.path(), &id.to_uppercase()).unwrap_err();
+        assert!(refused.contains("is not the id"), "{refused}");
+    }
+
+    #[test]
+    fn verify_reads_large_values_where_the_backend_moved_them() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(matches!(blob_store(dir.path()), Ok(BlobStore::Sqlite)));
+        let marker = dir.path().join("blob-store");
+        std::fs::write(&marker, "files\n").unwrap();
+        assert!(matches!(
+            blob_store(dir.path()),
+            Ok(BlobStore::Files { dir: None })
+        ));
+        std::fs::write(&marker, "files values\n").unwrap();
+        assert!(matches!(
+            blob_store(dir.path()),
+            Ok(BlobStore::Files { dir: Some(at) }) if at == dir.path().join("values")
+        ));
+        std::fs::write(&marker, "s3 bucket/prefix\n").unwrap();
+        let refused = blob_store(dir.path()).err().unwrap();
+        assert!(
+            refused.contains("before the backend's first start"),
+            "{refused}"
+        );
+    }
 
     fn key() -> RowKey {
         ("notes".to_owned(), [1; 16])
