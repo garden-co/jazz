@@ -6784,9 +6784,13 @@ impl Inner {
     /// Only the authority decides it, with the other write policies. A
     /// replica acting for a session (a backend's request) stages the write
     /// and its waits report the authority's refusal: the replica may lack
-    /// the rows that grant access (a fresh process has loaded none), and
-    /// the session's own reads on the replica stay filtered meanwhile, so
-    /// staging discloses nothing.
+    /// the rows that grant access (a fresh process has loaded none).
+    /// Until the authority answers, the staged version is judged by the
+    /// read policy like any other: a session's local read of a hidden row
+    /// it patched a policy column of can show the row's other cells. A
+    /// `Remote` read leaves pending versions out (it is settled-only on a
+    /// replica), so it shows only accepted rows under their own policy;
+    /// that is a backend's default read.
     fn authorize_patch(
         &self,
         table: &Table,
