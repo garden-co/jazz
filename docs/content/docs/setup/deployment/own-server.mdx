@@ -29,6 +29,11 @@ export const jazz = createJazz({
 
 <include>../../../partials/main-backend-config.mdx</include>
 
+The examples on this page are ES modules and use top-level `await`, so the backend package needs
+`"type": "module"` (or `.mts` files). In a CommonJS package, such as an Expo app's, a default import
+like `permissions` arrives as `{ default }`, and `createJazz` fails with "permissions.ts defines
+permissions for unknown table(s): default". Run the backend from its own ESM package instead.
+
 ### Large values
 
 Large values, such as files and long streams, are stored in chunks. Rows and the chunk index always
@@ -100,6 +105,12 @@ export default defineConfig({
   },
 });
 ```
+
+With Better Auth, add the dev server's origin to `trustedOrigins`, or sign-in answers
+`403 INVALID_ORIGIN` (see [Better Auth](/docs/setup/auth/better-auth#behind-a-dev-server-proxy)).
+
+Keep `ws: true` on: a proxy that leaves the WebSocket upgrade hanging costs about 20 seconds on
+every page load before the client falls back to an HTTP stream.
 
 In production, serve the built frontend from the same origin as the backend (or put both behind
 one proxy that passes WebSocket upgrades through).

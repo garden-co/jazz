@@ -11,10 +11,10 @@ commit on the server.
 
 ## Connect
 
-The thin client is what you get with no choice made: `JazzProvider` in React, or `createJazzClient`
-from `jazz-tools/client`, without a `client` loader.
+The thin client is what you get with no choice made: `JazzProvider` in React, Vue or Svelte, or
+`createJazzClient` from `jazz-tools/client`, without a `client` loader.
 
-<Tabs groupId="jazz-framework" items={["React", "TypeScript"]} persist updateAnchor>
+<Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "TypeScript"]} persist updateAnchor>
   <Tab value="React">
     ```tsx title="App.tsx"
     import { JazzProvider } from "jazz-tools/react";
@@ -42,6 +42,41 @@ from `jazz-tools/client`, without a `client` loader.
 
     Server components and route handlers read through
     [`jazz.forReqUser`](/docs/setup/deployment/own-server#user-scoped-use) instead.
+
+  </Tab>
+  <Tab value="Vue">
+    ```vue title="App.vue"
+    <script setup lang="ts">
+    import { JazzProvider } from "jazz-tools/vue";
+    </script>
+
+    <template>
+      <JazzProvider>
+        <TodoApp />
+        <template #signedOut><SignIn /></template>
+      </JazzProvider>
+    </template>
+    ```
+
+    After your own sign-in, call `reauthenticate()` from `useJazzAuth()` (from `jazz-tools/vue`).
+    See [Framework Patterns](/docs/reference/framework-patterns) for the other Vue APIs.
+
+  </Tab>
+  <Tab value="Svelte">
+    ```svelte title="App.svelte"
+    <script lang="ts">
+      import { JazzProvider } from "jazz-tools/svelte";
+    </script>
+
+    <JazzProvider>
+      <TodoApp />
+      {#snippet signedOut()}<SignIn />{/snippet}
+    </JazzProvider>
+    ```
+
+    After your own sign-in, call `reauthenticate()` on `useJazzAuth()` (from `jazz-tools/svelte`,
+    called during component setup). In SvelteKit, render the provider only in the browser; see
+    [Framework Patterns](/docs/reference/framework-patterns) for that and the other Svelte APIs.
 
   </Tab>
   <Tab value="TypeScript">
@@ -83,14 +118,36 @@ Each is an explicit "not supported" error:
 - no streaming inside a transaction
 - text edits with `editedFrom` on merge text columns are rejected (`NotObserved`) for now; use the
   local-first client for [collaborative text editing](/docs/recipes/data-patterns/collaborative-text-editing)
-- a write in flight when the socket drops is rejected with `ThinConnectionLostError` (from
-  `jazz-tools/thin`) and not retried; it may or may not have committed, so read before you retry
-- `getSyncStatus()` and `useSyncStatus()` stay on `connecting` for now
+- pending writes live in memory only: a write the server hasn't answered yet is lost if the page
+  reloads or closes (see [Pending writes](#pending-writes) below)
 - a single write, and a single answer to a query, can be at most 32 MiB. The client refuses a
   larger write itself; the server answers a larger result with a `TooLarge` error for that query
   alone (ending a live query) and keeps the session. So one very large row fails every query that
   includes it, until paging large answers arrives with streaming reads
 - no admin secret in the browser
+
+## Pending writes
+
+When the socket drops, the client reconnects on its own and resends any write the server hadn't
+answered. Standalone inserts, updates, upserts, deletes and restores carry a key the server
+deduplicates by, so a resend lands exactly once. `getSyncStatus()` and `useSyncStatus()` show
+whether the client is connected and how many writes still wait for an answer.
+
+A write ends with `ThinConnectionLostError` (from `jazz-tools/thin`) only when the connection ends
+for good while it waits: after `reauthenticate()` signs in someone else, after `disconnect()`, or
+when the client closes. It may or may not have committed, so read before you retry. A transaction
+in flight when the socket drops ends the same way.
+
+Pending writes are kept in memory, not on disk. To warn before the user leaves with unsent
+changes:
+
+```ts
+window.addEventListener("beforeunload", (event) => {
+  if (db.getSyncStatus().pendingUploads > 0) event.preventDefault();
+});
+```
+
+For writes that survive a reload, [upgrade to local-first](#upgrading-to-local-first).
 
 ## Upgrading to local-first
 

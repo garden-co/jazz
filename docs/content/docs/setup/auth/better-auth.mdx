@@ -63,12 +63,27 @@ This keeps the signed-in user's policies and authorship without switching your m
 
 ## Client
 
-The plain Better Auth client is enough:
+The plain Better Auth client is enough. Import it from your framework's entry:
+`better-auth/react`, `better-auth/vue`, `better-auth/svelte`, or `better-auth/client` for plain
+TypeScript.
 
 ```ts title="src/lib/auth-client.ts"
-import { createAuthClient } from "better-auth/react";
+import { createAuthClient } from "better-auth/react"; // or "better-auth/vue", "better-auth/svelte"
 
 export const authClient = createAuthClient();
+```
+
+### Behind a dev server proxy
+
+When a separate frontend dev server (Vite, say) proxies `/api/auth` and `/jazz` to your backend,
+Better Auth sees requests from the dev server's origin and answers `403 INVALID_ORIGIN`. Add that
+origin to `trustedOrigins`:
+
+```ts
+export const auth = betterAuth({
+  trustedOrigins: ["http://localhost:5173"],
+  // ...
+});
 ```
 
 ## Connecting to Jazz

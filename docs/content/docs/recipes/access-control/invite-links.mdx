@@ -88,6 +88,9 @@ The `jazz` referenced below is your app's Jazz, from `createJazz`&hairsp;—&hai
   ../examples/docs/todo-server-ts/src/invite-snippets.ts#invite-redeem-route
 </include>
 
+Inside a transaction, `tx.insert(...)` returns the new row itself, not the `{ value, wait }` that
+`db.insert(...)` returns outside one: the write is confirmed when the transaction commits.
+
 <Accordions type="single">
 <Accordion title="Single-use, expiring, or role-scoped codes">
 

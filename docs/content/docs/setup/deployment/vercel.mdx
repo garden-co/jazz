@@ -188,7 +188,8 @@ app's core is refused.
 - A redeploy on the same `jazz-tools` version doesn't disturb connected clients. Deploying a newer
   `jazz-tools` restarts the core on that version, which briefly drops open sockets; clients
   reconnect. An older deployment that is still running never moves the core back.
-- A thin client's write that is in flight while its socket reconnects can fail with
-  `ThinConnectionLostError` and is not retried. Local-first writes are not affected.
+- A thin client resends unanswered writes after its socket reconnects, and each lands once; a
+  transaction in flight at the drop ends with `ThinConnectionLostError`. See
+  [Pending writes](/docs/setup/web-client/thin-client#pending-writes).
 - `vercel()` needs Next.js 16 for now: under Next 15's webpack build, every request fails with
   "Cannot find module 'jazz-tools/package.json'".

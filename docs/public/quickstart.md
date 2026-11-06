@@ -15,10 +15,12 @@
    /docs/setup/auth/custom, /docs/setup/auth/local-first
 3. **Which backend framework should be used?** Next.js, Hono, Express / Node, Bun or Effect. Each
    setup page has a tab per framework.
-   Default: what the project already has; for a new app, Next.js.
+   Default: what the project already has; for a new app, Next.js with React, or Hono or Express
+   plus Vite with Vue or Svelte.
    For a separate frontend dev server (React + Vite, say), run Jazz in your backend and proxy
    `/jazz` to it with WebSockets on (Vite: `server.proxy["/jazz"] = { target, ws: true }`), plus
-   your auth routes; see /docs/setup/deployment/own-server#a-separate-frontend-dev-server
+   your auth routes (Better Auth also needs the dev origin in `trustedOrigins`); see
+   /docs/setup/deployment/own-server#a-separate-frontend-dev-server
 4. **Should Jazz only be used through traditional API routes, or would this app benefit from
    simpler state management by accessing Jazz directly from the frontend?** This choice is cheap
    to change later: a screen moves from thin to local-first with the same schema, queries and

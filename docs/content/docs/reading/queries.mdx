@@ -61,6 +61,11 @@ See [Filters & Sorting](/docs/reading/filters-and-sorting) for the full list of 
 
 In browsers and React Native, queries and subscriptions read local-first by default: their first result waits briefly (up to 5 seconds) for the server while the client is online, and shows local data at once when it is offline. After that, local writes show instantly and remote updates stream in as they arrive. When you need a stronger guarantee for the first result, pass a `tier` option to fetch data from a different tier before returning.
 
+In Node (a backend client, a script or a test) with a `serverUrl`, a read that names no tier is
+`"remote"`: it waits for the server, and rejects while the server is unreachable. Catch that
+rejection, since an uncaught one ends a Node process, or pass `tier: "local-first"` to read local
+data.
+
 <DurabilityTiersTable />
 
 For background on how data flows between tiers, see [How Sync Works](/docs/recipes/local-first/how-sync-works#infrastructure-tiers).

@@ -337,7 +337,7 @@ restart. In the browser, each tab counts only the transactions it committed itse
 recovered after a reload, or written by another tab, are uploaded by the shared worker and are not
 counted, and `db.waitForSync()` does not wait for them.
 
-The framework bindings expose the same object: `useSyncStatus()` in React and React Native (the
+The framework bindings expose the same object: `useSyncStatus()` in React and React Native (from `jazz-tools/react-native`, also in Expo apps; the
 object), in Solid (an accessor) and in Vue (a ref), and `syncStatus()` in Svelte (a store, read as
 `$status`). The Effect layer has a `syncStatus` stream.
 
@@ -386,10 +386,14 @@ A mutation can fail when you call it or while you wait:
 
 Use `db.onMutationError(...)` as a fallback for rejected mutations without an active `wait(...)`.
 Its event is not an `Error`: read `event.code` and `event.reason`, not `.message`.
-An event with code `outcome_unknown` is not a rejection: the connection ended before the server
-answered, and the write may have been applied. Read the row again before you revert or retry it.
 This includes mutations you did not wait for and mutations whose wait finished before a later
 rejection arrived.
+
+An event with code `outcome_unknown` is not a rejection: the thin client's connection ended for
+good before the server answered (after `reauthenticate()` signed in someone else, `disconnect()` or
+`close()`), and the write may have been applied. Read the row again before you revert or retry it.
+An ordinary dropped socket doesn't cause this, since the thin client resends unanswered writes when
+it reconnects.
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
   <Tab value="TypeScript">
