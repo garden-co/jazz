@@ -842,3 +842,76 @@ fn an_edit_from_the_held_value_is_written_as_is() {
     }
     assert_eq!(body(&db), "Bring the keys");
 }
+
+/// Two or three people typing at the same spot, with keystrokes, sync
+/// steps and renders in a random order (as in a browser: several
+/// keystrokes before a round trip, renders whenever a value arrives):
+/// every character typed is kept, in the order each person typed it, and
+/// everyone ends with the same text.
+#[test]
+fn same_spot_typing_in_any_order_keeps_every_character() {
+    // Letters, letters with spaces, and digits (a number anchors no diff).
+    let typed = ["abcdefghijklmnopqrst", "ABCD EFGH IJKL MNOP", "0123456789"];
+    // Short (inline), and over the 4 KiB threshold (chunked).
+    let long = format!("{}\n\n", text(6 * 1024, 31));
+    for (intro, people, seeds) in [("", 2usize, 30u64), ("", 3, 30), (long.as_str(), 2, 8)] {
+        let start = format!("{intro}-- --");
+        let at = intro.len() + 3;
+        for seed in 1..=seeds {
+            let server = block_on(Db::open(config(0x70))).unwrap();
+            let mut devices: Vec<Device> = (0..people)
+                .map(|n| connect(block_on(Db::open(config(0x97 + n as u8))).unwrap(), &server))
+                .collect();
+            insert(&devices[0].db, &start);
+            settle(&server, &mut devices.iter_mut().collect::<Vec<_>>());
+            let mut editors: Vec<Editor> = (0..people).map(|_| Editor::new(&start, at)).collect();
+            let mut next = vec![0usize; people];
+            let mut state = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
+            let mut roll = |n: u64| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state % n
+            };
+            while (0..people).any(|who| next[who] < typed[who].chars().count()) {
+                let who = roll(people as u64) as usize;
+                let device = &devices[who];
+                match roll(4) {
+                    0 | 1 if next[who] < typed[who].chars().count() => {
+                        let c = typed[who].chars().nth(next[who]).unwrap();
+                        editors[who].type_char(&device.db, c);
+                        next[who] += 1;
+                    }
+                    2 => block_on(device.db.tick()).unwrap(),
+                    _ => {
+                        block_on(server.tick()).unwrap();
+                        editors[who].refresh(body(&device.db));
+                    }
+                }
+            }
+            settle(&server, &mut devices.iter_mut().collect::<Vec<_>>());
+            let merged = body(&server);
+            for (editor, device) in editors.iter_mut().zip(&devices) {
+                editor.refresh(body(&device.db));
+                assert_eq!(
+                    editor.text,
+                    merged,
+                    "{people} people, {} bytes, seed {seed}",
+                    start.len()
+                );
+            }
+            for word in &typed[..people] {
+                let mine: String = merged[intro.len()..]
+                    .chars()
+                    .filter(|c| *c != ' ' && word.contains(*c))
+                    .collect();
+                assert_eq!(
+                    mine,
+                    word.replace(' ', ""),
+                    "{people} people, {} bytes, seed {seed}: {merged:?}",
+                    start.len()
+                );
+            }
+        }
+    }
+}

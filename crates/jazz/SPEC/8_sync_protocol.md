@@ -70,6 +70,7 @@ source of truth and names each invariant's tests):
 - `INV-SYNC-52`: A replica MUST upload each commit's ops by stored names, as the schema view that wrote them stores them, keeping it pending while offline; a server MUST refuse a commit naming a stored table or column of a version it has not deployed, at once, with reason `schema_version_not_deployed`.
 - `INV-SYNC-53`: The authority MUST NOT name a writer's own row as written (instead of shipping it) unless the commit applied unmerged over the very version the writer built on and that version is still current (§8.3); every other row ships, and a writer whose image differs from the digest asks for the row whole.
 - `INV-SYNC-54`: An authority MUST mint its namespace when it is opened as the authority and keep it in its store. A replica that keeps another namespace than its upstream's MUST refuse that link with `AuthorityChanged`, upload nothing to it, fail its remote reads and its `Global` waits on writes still pending with that error, and keep its local rows and pending writes; only a new link tries again (§8.10).
+- `INV-SYNC-55`: A store whose file writes complete after its commits return MUST NOT tell a session a commit is in the store (`Stored`, or its own acceptance) until a persist covering that commit succeeded.
 - `INV-TX-2`, `INV-TX-11`, `INV-TX-23`: commit, seq and relay rules (ch. 3).
 - `INV-WIRE-1`, `INV-WIRE-2`: exact postcard frames and Hello version negotiation (§8.1.1).
 
@@ -183,6 +184,19 @@ The sync frames are pinned by `crates/jazz/fixtures/sqlite_sync_wire_v1.json`,
 which every shipped artifact (native, NAPI, WASM) validates
 (`jazz::sync_wire_corpus`). The corpus may be re-pinned until alpha.60 ships;
 after that, a layout change needs a compatibility write-up.
+
+A server pings every link every 20 s and drops one that sent nothing for
+60 s. The WebSocket API shows neither pings nor partial messages, so a
+client that advertises `FEATURE_HEARTBEAT` also gets a `WireFrame::Heartbeat`
+(tag 7, no body, no answer) with each ping. Such a client gives a link up,
+and reconnects, once nothing at all, heartbeat included, arrived for 120 s:
+a half-open TCP link or a stalled proxy then ends instead of showing
+`connected` while nothing moves. A heartbeat queues behind the message being
+sent, so 120 s also bounds the slowest link a whole 2 MiB message survives
+(about 18 KB/s). The TypeScript carrier (browsers, Node, workers) asks for
+it on every link and drops the frame before the runtime sees it. The native
+Rust transport (NAPI `remote()`, React Native) does not ask yet and has no
+silence timeout of its own.
 
 In-process links (a worker and its tab, tests) carry `SyncMessage` values
 directly (`sync::duplex`); a byte link frames them with postcard
@@ -972,6 +986,16 @@ retryable `Backpressure` error, releasing its room. These budgets bound
 what the server holds of incoming requests; answers waiting for a client
 that does not read are not bounded yet (#4865).
 
+A read or row write that needs large-value bytes held only in a network
+chunk store (`s3()`, Vercel Blob; after a restart, say) never fetches them
+on the store thread, which serves every session. The request is parked: the
+store's fetch lane reads the bytes beside the store thread, with its
+backoff, and the parked request runs again on the tick after they land.
+Until then it keeps its admitted room, so that session's later requests wait
+behind it, in order, while other sessions are served as usual. A fetch that
+fails answers the request with its `Storage` error, and later reads of
+those bytes are refused with it at once until the fetch backoff ends.
+
 - A thin session is served as its admitted identity and claims, exactly as a
   sync session with that admission is (§8.6): reads see what its policies let
   it see, and writes are admitted and authorized as `WriteIdentity::Session`.
@@ -998,6 +1022,33 @@ that does not read are not bounded yet (#4865).
   row and the server seq of the version they left; the write is globally
   durable when the answer arrives. A client-chosen row id is honored on
   insert.
+- A standalone `Insert`, `Update`, `Upsert`, `Delete` or `Restore` may name a
+  `writeKey` option, `{ node: <32 hex digits>, seq }`: the client's own id
+  for it, a node the client picks and that node's counter, in the order the
+  client makes its writes. The server makes the write as a commit whose
+  writer is derived from the session's author and the client's node
+  (`origin_node`, an RFC 9562 version-8 node with a fixed tag), at the client's counter
+  (`Db::write_as_origin`): every server derives the same writer, and no
+  other author can name it. No session commits as such a node. The
+  authority records the commit's fate under it; a replica uploads it under
+  it, which the authority dedups like any resent commit (§8.2), and never
+  infers from pruned entries (a client's commits reach it through any
+  server, so out of order). A write that fails, or makes no commit, records
+  nothing, and the next commit does not inherit its id. A write whose key
+  the store already knows for the same author is not made again: it answers
+  `Written` with seq 0, or the first one's refusal as uploaded through a
+  replica. In .60 the authority keeps these dedupe entries and never prunes them;
+  a bounded resend window is planned for .61 (#4961). The authority does not record its own refusal: a resend of a
+  write it refused runs again, against current state. On a replica, seq 0
+  can answer a write still pending upstream. An insert with a key names its
+  `rowId`; a staged write names no key. So a client resends a keyed write
+  its connection left unanswered, in order, on its next connection, through
+  whichever server of the authority it reaches, under the same credential.
+  The TypeScript thin client does, with one node per runtime; a write left
+  unanswered when the credential changes ends with its outcome unknown, as
+  the new one may name another user. `UpdateLargeValues` and streams take
+  no key: one their connection left unanswered ends with its outcome
+  unknown.
 - `Begin` opens a mergeable or serializable transaction under a
   client-chosen open-transaction id, owned by that session. A write naming it
   is staged and answered `Staged`; a refusal while staging is kept and

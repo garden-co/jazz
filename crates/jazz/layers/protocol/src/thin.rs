@@ -281,7 +281,8 @@ pub enum ThinBody {
     Written {
         /// The written row.
         row: [u8; 16],
-        /// The server sequence number of the row version it left.
+        /// The server sequence number of the row version it left; 0 for a
+        /// resend under a `writeKey` the server already wrote (SPEC 8 §8.14).
         seq: u64,
     },
     /// The request failed. Ends a live query.

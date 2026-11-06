@@ -296,4 +296,43 @@ describe("browser session against the app's backend", () => {
     await client.db.insert(app.todos, { title: "second", owner }).wait({ tier: "global" });
     await session.close();
   }, 60_000);
+
+  // Node, Deno, a CLI: no cookie carries the backend's session on the sync
+  // connection, so a backend sign-in would report ready and never sync.
+  it("refuses a backend sign-in on a host that sends no cookies, before any request", async () => {
+    const requests: string[] = [];
+    const session = await createJazzClient({
+      serverUrl: "http://127.0.0.1:9/jazz",
+      store: memoryStore(),
+      driver: { type: "memory" },
+      fetch: async (input) => {
+        requests.push(String(input));
+        return new Response(null, { status: 500 });
+      },
+    });
+    cleanups.push(() => session.close());
+
+    const refusal = /need a browser.*jazz-tools\/react-native or jazz-tools\/expo/;
+    await expect(session.loginWithBackend()).rejects.toThrow(refusal);
+    expect(requests).toEqual([]);
+    expect(session.getSnapshot().status).not.toBe("ready");
+
+    // A guest can't sign up through the backend here either.
+    const guest = await createJazzClient({
+      serverUrl: "http://127.0.0.1:9/jazz",
+      store: memoryStore(),
+      driver: { type: "memory" },
+      initial: "local-first",
+      client: async () => ({ createClient: createLocalFirstDb }),
+      fetch: async (input) => {
+        requests.push(String(input));
+        return new Response(null, { status: 500 });
+      },
+    });
+    cleanups.push(() => guest.close());
+    const account = guest.getSnapshot().account;
+    await expect(guest.linkWithBackend()).rejects.toThrow(refusal);
+    expect(requests).toEqual([]);
+    expect(guest.getSnapshot().account).toBe(account);
+  });
 });

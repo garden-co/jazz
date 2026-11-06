@@ -34,7 +34,7 @@ import { CONNECTED, CONNECTING, offlineLink, type LinkStatus } from "../runtime/
 import { streamingChunks } from "../runtime/streaming-source.js";
 import { runtimeRandomBytes } from "../runtime/runtime-entropy.js";
 import { writeRow } from "../runtime/write-row.js";
-import { formatUuid } from "../runtime/hex.js";
+import { bytesToHex, formatUuid } from "../runtime/hex.js";
 import { canonicalAuthorSubject } from "../runtime/author-id.js";
 import type { Session } from "../runtime/context.js";
 import {
@@ -143,7 +143,22 @@ type OneShot = {
   sent: boolean;
   /** A write: its fate is unknown once its connection ends unanswered. */
   write?: boolean;
+  /** A write under a `writeKey`: sent again on the next connection when its
+   * connection ends unanswered, since the server answers a resend with the
+   * first one's outcome instead of writing again. */
+  resendable?: boolean;
+  /** Sent once and waiting to go out again (see `resendable`). */
+  resending?: boolean;
 };
+
+/** Standalone writes the server dedups by their `writeKey` (SPEC 8 §8.14). */
+const RESENDABLE_WRITES = new Set<ThinOp["type"]>([
+  "insert",
+  "update",
+  "upsert",
+  "delete",
+  "restore",
+]);
 
 type LiveQuery = {
   /** The runtime query as the client gave it, for {@link ThinRuntime.liveQueryJsons}. */
@@ -230,6 +245,12 @@ export class ThinRuntime implements Runtime {
   private readonly liveQueries = new Map<number, LiveQuery>();
   private readonly liveByRequest = new Map<number, number>();
   private readonly writes = new Map<string, Write>();
+  /** This runtime's writer node: with {@link nextWriteSeq}, each write's
+   * `writeKey`. The server commits the write under a node it derives from
+   * this one and the session's author, so one node serves every identity
+   * the runtime writes as. */
+  private readonly writerNode = bytesToHex(runtimeRandomBytes(16));
+  private nextWriteSeq = 1;
   /** Writes the server has not answered yet. */
   private unanswered = 0;
   private readonly syncStatusListeners = new Set<() => void>();
@@ -270,10 +291,13 @@ export class ThinRuntime implements Runtime {
   updateAuth(authJson: string): void {
     this.authJson = authJson;
     this.setRefused(false);
+    // The new credential may name another user (a cookie session names
+    // none here), as whom a sent write must not be made: one that may have
+    // been made ends with its fate unknown, as it did before resends.
+    this.dropConnection(new ThinConnectionLostError());
     if (!this.wanted) return;
     // The server binds a connection to the credential it opened with: a new
     // one takes a new connection.
-    this.dropConnection(new ThinConnectionLostError());
     this.open();
   }
 
@@ -392,13 +416,15 @@ export class ThinRuntime implements Runtime {
 
   private lost(carrier: WebSocketCarrier, error: WireError): void {
     if (this.carrier !== carrier) return;
+    const lostError = new ThinConnectionLostError(`${error.code}: ${error.message}`);
     const authFailure = wireAuthFailureReason(error);
     if (authFailure) {
       // Refused before the drop publishes, so the link never reads
       // "connecting" in between.
       this.clearOutage();
       this.refused = true;
-      this.dropConnection(new ThinConnectionLostError(`${error.code}: ${error.message}`));
+      // Writes left unanswered wait for the renewed credential's connection.
+      this.dropConnection(lostError, this.wanted && !this.closed && error.retry !== "never");
       this.notifySyncStatus();
       // Nothing reconnects until the credential is renewed (`updateAuth`).
       this.authFailureCallback?.(authFailure);
@@ -410,7 +436,7 @@ export class ThinRuntime implements Runtime {
       this.stopped = true;
       this.clearOutage();
     }
-    this.dropConnection(new ThinConnectionLostError(`${error.code}: ${error.message}`));
+    this.dropConnection(lostError, this.wanted && !this.closed);
     // An attempt that fails past the window reports the outage.
     if (
       !this.stopped &&
@@ -428,8 +454,10 @@ export class ThinRuntime implements Runtime {
     this.reconnectTimer = setTimeout(() => this.open(), delay);
   }
 
-  /** Close the connection; requests already sent fail with `error`, live queries reopen later. */
-  private dropConnection(error: Error | undefined): void {
+  /** Close the connection; requests already sent fail with `error`, live queries reopen later.
+   * With `resend`, a write under a `writeKey` the connection left unanswered
+   * waits for the next connection instead, and goes out again in order. */
+  private dropConnection(error: Error | undefined, resend = false): void {
     clearTimeout(this.reconnectTimer);
     const carrier = this.carrier;
     this.carrier = undefined;
@@ -461,8 +489,14 @@ export class ThinRuntime implements Runtime {
         oneShot.reject(new ThinTransactionLostError(transaction));
         continue;
       }
-      // Requests not sent yet wait for the next connection.
-      if (!oneShot.sent) continue;
+      // Requests not sent yet wait for the next connection, and so does a
+      // write sent once, unless this drop ends its resends.
+      if (!oneShot.sent && !(oneShot.resending && !resend)) continue;
+      if (oneShot.sent && resend && oneShot.resendable) {
+        oneShot.sent = false;
+        oneShot.resending = true;
+        continue;
+      }
       this.oneShots.delete(id);
       if (error) oneShot.reject(error);
       // A sent write is never sent again after an explicit disconnect: it may
@@ -1197,8 +1231,21 @@ export class ThinRuntime implements Runtime {
       rows,
       done: Promise.resolve(),
     };
-    const { answer, oneShot } = this.requestWith(op);
-    if (oneShot) oneShot.write = true;
+    // A standalone write goes under this runtime's next write id, so it can
+    // be sent again after a lost answer. Ids follow the order writes are
+    // made in, which is the order they reach the server, resent or not.
+    const resendable = RESENDABLE_WRITES.has(op.type) && "options" in op;
+    const sent = resendable
+      ? {
+          ...op,
+          options: { ...op.options, writeKey: { node: this.writerNode, seq: this.nextWriteSeq++ } },
+        }
+      : op;
+    const { answer, oneShot } = this.requestWith(sent as ThinOp);
+    if (oneShot) {
+      oneShot.write = true;
+      oneShot.resendable = resendable;
+    }
     write.done = answer.then(
       async (body) => {
         if (body.type !== "written") throw new Error(`unexpected answer to a write: ${body.type}`);
