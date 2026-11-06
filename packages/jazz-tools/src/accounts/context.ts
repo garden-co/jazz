@@ -1,7 +1,7 @@
 import { clientScope } from "../runtime/client-scope.js";
 import { PlatformURL } from "../runtime/platform-url.js";
 import { resolveServerUrl } from "../runtime/url.js";
-import { attachE2ee, type E2eeConfig } from "../e2ee/lifecycle.js";
+import { attachE2ee, prepareE2eeStartup, type E2eeConfig } from "../e2ee/lifecycle.js";
 import { admitAccountConfig } from "./config-capability.js";
 import type { AccountHandle } from "./state.js";
 import {
@@ -225,6 +225,8 @@ export async function createAccountDbWithRuntimeSource(
       unsubscribe();
     });
     if (jwtToken) schedule(jwtToken);
+    await prepareE2eeStartup(opened);
+    if (invalidated) throw new AccountAuthError("account_logged_out");
     return opened;
   } catch (error) {
     // Return a lease the runtime never received before tearing it down.
