@@ -20,7 +20,8 @@ import { DOWNLOAD_CORE, startScript } from "./vercel-store.js";
 describe("vercel() core download", () => {
   it("tells permanent failures from transient ones", async () => {
     const server = createServer((request, response) => {
-      response.statusCode = request.url === "/gone.tgz" ? 404 : 503;
+      response.statusCode =
+        request.url === "/gone.tgz" ? 404 : request.url === "/slow-down.tgz" ? 429 : 503;
       response.end();
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -44,6 +45,11 @@ describe("vercel() core download", () => {
         code: 1,
         kind: "transient",
         stderr: "HTTP 503",
+      });
+      expect(await download(`${base}/slow-down.tgz`)).toEqual({
+        code: 1,
+        kind: "transient",
+        stderr: "HTTP 429",
       });
       const closed = createServer();
       await new Promise<void>((resolve) => closed.listen(0, "127.0.0.1", resolve));
@@ -270,12 +276,12 @@ describe.skipIf(process.platform !== "linux")("vercel() start script", () => {
     expect(await start("2.0.0", "http://127.0.0.1:9/missing.tgz")).toBe(1);
     const error = read("tmp/jazz-2.0.0.error")!;
     expect(error).toMatch(
-      /^permanent: could not download the core for 2\.0\.0 from http:\/\/127\.0\.0\.1:9\/missing\.tgz/,
+      /^start-[\d.]+ permanent: could not download the core for 2\.0\.0 from http:\/\/127\.0\.0\.1:9\/missing\.tgz/,
     );
     expect(error).toContain("coreTarballUrl");
     expect(existsSync(join(root, "data/bin/jazz-napi-2.0.0.node.tmp"))).toBe(false);
     expect(await start("2.0.0", "http://127.0.0.1:9/flaky.tgz")).toBe(1);
-    expect(read("tmp/jazz-2.0.0.error")).toMatch(/^transient: could not download/);
+    expect(read("tmp/jazz-2.0.0.error")).toMatch(/^\S+ transient: could not download/);
     // A later start that succeeds clears it.
     installFake("2.0.0");
     expect(await start("2.0.0")).toBe("running");
@@ -286,7 +292,7 @@ describe.skipIf(process.platform !== "linux")("vercel() start script", () => {
     expect(await start("2.0.0", "http://127.0.0.1:9/missing.tgz")).toBe(1);
     installFake("1.0.0");
     expect(await start("1.0.0")).toBe("running");
-    expect(read("tmp/jazz-2.0.0.error")).toMatch(/^permanent:/);
+    expect(read("tmp/jazz-2.0.0.error")).toMatch(/^\S+ permanent:/);
     expect(read("tmp/jazz-1.0.0.error")).toBeUndefined();
   });
 
@@ -295,7 +301,7 @@ describe.skipIf(process.platform !== "linux")("vercel() start script", () => {
     writeFileSync(join(root, "data/version"), "9.0.0\n");
     expect(await start("1.0.0")).toBe(1);
     expect(read("tmp/jazz-1.0.0.error")).toMatch(
-      /^permanent: 9\.0\.0 owns this Drive but its core is missing/,
+      /^\S+ permanent: 9\.0\.0 owns this Drive but its core is missing/,
     );
   });
 

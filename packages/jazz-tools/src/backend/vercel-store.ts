@@ -226,8 +226,8 @@ export function newerVersion(a: string, b: string): boolean {
 /**
  * Writes the tarball at argv[1] to stdout (the Sandbox image has node but
  * no curl). On failure it says why on stderr, and writes to the file at
- * argv[2] whether retrying can help: a 4xx is permanent; a network error or
- * a 5xx is transient.
+ * argv[2] whether retrying can help: a 4xx is permanent, except 408, 425
+ * and 429; those, a 5xx and a network error are transient.
  *
  * @internal
  */
@@ -235,7 +235,7 @@ export const DOWNLOAD_CORE =
   "const [url, kindFile] = process.argv.slice(1);" +
   " const fail = (kind, why) => { require('node:fs').writeFileSync(kindFile, kind); console.error(why); process.exit(1); };" +
   " fetch(url).then(async (r) => {" +
-  " if (!r.ok) return fail(r.status >= 400 && r.status < 500 ? 'permanent' : 'transient', 'HTTP ' + r.status);" +
+  " if (!r.ok) return fail(r.status >= 400 && r.status < 500 && ![408, 425, 429].includes(r.status) ? 'permanent' : 'transient', 'HTTP ' + r.status);" +
   " process.stdout.write(Buffer.from(await r.arrayBuffer()));" +
   " }).catch((e) => fail('transient', e.message + (e.cause ? ': ' + (e.cause.code || e.cause.message) : '')));";
 
@@ -276,6 +276,9 @@ export function startScript(
   return `#!/bin/bash
 # Written by jazz-tools' vercel() store for each server start.
 set -euo pipefail
+# The function names each start by its script's file name, and trusts only
+# an error file that names one of its own starts (never a stale one).
+start_id=$(basename "$0" .sh)
 rm -f "$0"
 data=${q(`${root}/data`)}
 run=${q(`${root}/tmp`)}
@@ -290,13 +293,13 @@ version=${q(version)}
 trust=${q(trustLine)}
 # A start that gives up says why in this version's error file, which the
 # function reads and reports instead of waiting for a server that won't
-# come: "permanent: …" when retrying can't help (the function then stops
-# the Sandbox), "transient: …" when a later start may succeed.
+# come: "<start id> permanent: …" when retrying can't help (the function then stops
+# the Sandbox), "<start id> transient: …" when a later start may succeed.
 error_file="$run/jazz-$version.error"
 rm -f "$error_file"
 fail() {
   echo "jazz: $2" >&2
-  printf '%s: %s\\n' "$1" "$2" > "$error_file"
+  printf '%s %s: %s\\n' "$start_id" "$1" "$2" > "$error_file"
   exit 1
 }
 trap 'fail transient "the start script failed at line $LINENO"' ERR
@@ -631,10 +634,15 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   }
   const script = Buffer.from(startScript(version, tarballUrl, trust, blobs));
 
+  /** This instance's recent starts, by id (its script's file name). */
+  const starts: string[] = [];
   const startServer = async (sbx: SandboxHandle) => {
     // A fresh path each time: bash reads a script as it runs, so one that is
     // running must never be rewritten.
-    const path = `/tmp/jazz-start-${randomUUID()}.sh`;
+    const id = `jazz-start-${randomUUID()}`;
+    starts.push(id);
+    if (starts.length > 20) starts.shift();
+    const path = `/tmp/${id}.sh`;
     await sbx.writeFiles([{ path, content: script }]);
     await sbx.runCommand({
       cmd: "bash",
@@ -644,9 +652,11 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   };
 
   /**
-   * Why this version's last start in `sbx` gave up, if it did (see `fail` in
-   * the start script). A permanent cause never comes up on its own; a
-   * transient one may on the next start.
+   * Why this version's last start in `sbx` gave up, if it was one of this
+   * instance's starts (see `fail` in the start script); a file left by an
+   * earlier session or another instance is never read as this one's. A
+   * permanent cause never comes up on its own; a transient one may on the
+   * next start.
    */
   const startError = async (sbx: SandboxHandle) => {
     const text = (
@@ -654,19 +664,27 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
     )
       ?.toString("utf8")
       .trim();
-    const match = text ? /^(permanent|transient): (.*)$/s.exec(text) : null;
-    return match ? { permanent: match[1] === "permanent", why: match[2]! } : undefined;
+    const match = text ? /^(\S+) (permanent|transient): (.*)$/s.exec(text) : null;
+    if (!match || !starts.includes(match[1]!)) return undefined;
+    return { permanent: match[2] === "permanent", why: match[3]! };
   };
 
   /**
    * Stop the Sandbox rather than keep it awake retrying a start that can't
    * succeed. Other instances may be watching the same Sandbox: only the
-   * session this one saw fail is stopped, never a newer one.
+   * session this one saw fail is stopped, never a newer one, and never one
+   * where another version's core is running or starting (an older
+   * deployment's, still in use).
    */
   const giveUp = async (sbx: SandboxHandle, why: string): Promise<never> => {
     const watched = sbx.currentSession().startedAt.getTime();
     const now = await getRunning();
-    if (now && now.currentSession().startedAt.getTime() === watched) {
+    const other = now ? await runningVersion(now) : undefined;
+    if (
+      now &&
+      now.currentSession().startedAt.getTime() === watched &&
+      (!other || other === version)
+    ) {
       await now.stop().catch(() => {});
     }
     throw new CoreStartError(

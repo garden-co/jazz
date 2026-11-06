@@ -93,6 +93,8 @@ function fakeVercel(core: { appId: string; url: string }) {
       | undefined,
     /** Whether the last start gave up (its core then listens nowhere). */
     failing: false,
+    /** The next `slowStarts` starts haven't run yet when the function looks. */
+    slowStarts: 0,
   };
   const files = new Map<string, Buffer>([["/data/app-id", Buffer.from(`${core.appId}\n`)]]);
   const handle = (): SandboxHandle => ({
@@ -109,7 +111,9 @@ function fakeVercel(core: { appId: string; url: string }) {
       },
     }),
     runCommand: async ({ args }) => {
-      const script = files.get(/exec bash (\S+)/.exec(args.at(-1)!)![1]!)!.toString();
+      const scriptPath = /exec bash (\S+)/.exec(args.at(-1)!)![1]!;
+      const script = files.get(scriptPath)!.toString();
+      const startId = scriptPath.replace(/^.*\//, "").replace(/\.sh$/, "");
       const version = /^version='(.*)'$/m.exec(script)![1]!;
       // Like the real script: the first start pins the trust, others don't move it.
       const trust = /^trust='(.*)'$/m.exec(script)![1]!;
@@ -117,12 +121,19 @@ function fakeVercel(core: { appId: string; url: string }) {
       if (pinned && pinned !== trust) return;
       files.set("/data/trust", Buffer.from(`${trust}\n`));
       calls.push(`start ${version}`);
+      if (state.slowStarts > 0) {
+        state.slowStarts--;
+        return;
+      }
       const errorFile = `/tmp/jazz-${version}.error`;
       files.delete(errorFile);
       if (state.failStarts && state.failStarts.times > 0) {
         state.failStarts.times--;
         state.failing = true;
-        files.set(errorFile, Buffer.from(`${state.failStarts.kind}: ${state.failStarts.why}\n`));
+        files.set(
+          errorFile,
+          Buffer.from(`${startId} ${state.failStarts.kind}: ${state.failStarts.why}\n`),
+        );
         return;
       }
       state.failing = false;
@@ -368,6 +379,31 @@ describe("vercel() store", () => {
     const calls = fake.calls.length;
     await expect(opened.handle("GET", "/health", {}, undefined)).rejects.toThrow(/could not start/);
     expect(fake.calls.length).toBe(calls);
+  }, 60_000);
+
+  it("never reads an error file it didn't cause as its start's failure", async () => {
+    const appId = randomUUID();
+    const core = await startTrustedCore(appId);
+    const fake = fakeVercel({ ...core, appId });
+    // Left by an earlier session's start (say, before the URL was fixed),
+    // and not yet removed by this session's start script.
+    fake.files.set(
+      "/tmp/jazz-1.2.3.error",
+      Buffer.from("jazz-start-earlier permanent: could not download the core (HTTP 404)\n"),
+    );
+    fake.state.failing = true;
+    // This session's first starts come up slowly: the stale file is still
+    // there while the core isn't listening yet.
+    fake.state.slowStarts = 2;
+    const opened = await openVercelCore({
+      options: { sdk: fake.sdk, backendCredential: core.credential, name: "jazz-test" },
+      openRemote: ({ url }) =>
+        ({ serverUrl: url, handle: async () => ({}), close: async () => {} }) as never,
+      version: "1.2.3",
+      env: { VERCEL_ENV: "production" },
+    });
+    cleanups.push(() => opened.close());
+    expect(fake.calls).not.toContain("stop");
   }, 60_000);
 
   it("retries a start that failed for a transient reason, and keeps the Sandbox", async () => {
