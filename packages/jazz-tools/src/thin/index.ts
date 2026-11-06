@@ -25,6 +25,7 @@ import type { WasmSchema } from "../drivers/types.js";
 export { ThinRuntimeSource } from "./thin-runtime-source.js";
 export {
   ThinConnectionLostError,
+  ThinRequestNotSentError,
   ThinTransactionLostError,
   ThinRemoteError,
   type ThinRuntimeOptions,
@@ -60,9 +61,15 @@ export async function createClient(config: ThinDbConfig): Promise<Db> {
  * subscribed to are read into the new `Db` from the server first, so its live
  * queries answer from local data straight away. Queries subscribed during
  * that read are read too, for up to 3 rounds; one subscribed later opens on
- * the new `Db` with what it has locally. Then the thin `Db` waits for
- * its writes and shuts down. The app swaps the returned `Db` in where it held
- * the thin one.
+ * the new `Db` with what it has locally. The thin `Db` then refuses new work
+ * and closes once its writes are answered, in the background: the returned
+ * `Db` doesn't wait for them, so a server that is down doesn't hold the
+ * upgrade (those writes stay in the thin client's memory until it is back,
+ * and are lost if the page closes first). Shutting the returned `Db` down
+ * (a sign-out) stops that wait and closes the thin runtime, dropping what it
+ * still holds. A read the app made on the thin `Db` that never reached the
+ * server ends with `ThinRequestNotSentError`: read again on the returned
+ * `Db`. The app swaps the returned `Db` in where it held the thin one.
  *
  * This is for a thin `Db` the app opened itself with {@link createClient}.
  * Under a Jazz provider or `createJazzClient`, call the `Db` method
@@ -70,7 +77,7 @@ export async function createClient(config: ThinDbConfig): Promise<Db> {
  * session upgrades in place, so the app keeps the same `Db`.
  */
 export async function upgradeToLocalFirst(thin: Db, open: () => Promise<Db>): Promise<Db> {
-  thinRuntimeOf(thin);
+  const runtime = thinRuntimeOf(thin);
   const next = await open();
   try {
     await prefetchThinQueries(thin, next);
@@ -79,7 +86,15 @@ export async function upgradeToLocalFirst(thin: Db, open: () => Promise<Db>): Pr
     await next.shutdown();
     throw error;
   }
-  await thin.shutdown({ waitForSync: true });
+  // The thin Db's last writes upload in the background, then it closes: with
+  // the server down, waiting for them would hold the upgrade until it is
+  // back. Shutting `next` down ends the wait, and the thin runtime closes.
+  runtime?.endUnsentReads();
+  next.onShutdown(() => thin.abortGracefulShutdown());
+  void thin
+    .shutdown({ waitForSync: true })
+    .catch(() => thin.shutdown())
+    .catch(() => {});
   return next;
 }
 
@@ -151,8 +166,10 @@ const HAND_OFF_READ_MS = 5_000;
  *
  * Not handed off, also left to sync: a delete (a read of a deleted row
  * brings nothing back, and only a local store that already held the row,
- * another tab's, can show it), and writes older than the last
- * 1,024 the thin runtime keeps.
+ * another tab's, can show it), a write that ended with its fate unknown (a
+ * `ThinConnectionLostError`: it may have committed, but the server never
+ * confirmed it, so a local-first read shows it only once `next` syncs it),
+ * and writes older than the last 1,024 the thin runtime keeps.
  */
 export async function handOffThinWrites(thin: Db, next: Db): Promise<void> {
   const runtime = thinRuntimeOf(thin);

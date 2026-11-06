@@ -125,6 +125,18 @@ export class ThinConnectionLostError extends Error {
 }
 
 /**
+ * The request never reached the server: a write didn't commit. The thin
+ * runtime ended it before a connection could carry it (it closed, or its Db
+ * handed over to the local-first one).
+ */
+export class ThinRequestNotSentError extends Error {
+  constructor(message = "the request never reached the Jazz server", options?: ErrorOptions) {
+    super(message, options);
+    this.name = "ThinRequestNotSentError";
+  }
+}
+
+/**
  * The server ends a thin connection's open transactions with it (on a
  * reconnect, including the one a credential renewal takes): their staged
  * writes are gone, and the transaction can only be started again.
@@ -338,9 +350,17 @@ export class ThinRuntime implements Runtime {
     this.closed = true;
     this.wanted = false;
     this.stop();
-    this.dropConnection(
-      new ThinConnectionLostError("the thin runtime is closed", {
-        cause: new RuntimeClosedError("the thin runtime is closed"),
+    const closed = new ThinConnectionLostError("the thin runtime is closed", {
+      cause: new RuntimeClosedError("the thin runtime is closed"),
+    });
+    this.dropConnection(closed);
+    // Nothing connects again: a request not sent yet ends too (a write
+    // waiting to go out again with its fate unknown), so a read the app made
+    // while the server was down asks the Db's successor instead.
+    this.endWaitingRequests(
+      closed,
+      new ThinRequestNotSentError("the thin runtime closed before sending the request", {
+        cause: closed.cause,
       }),
     );
     for (const live of this.liveQueries.values()) live.callback = undefined;
@@ -449,10 +469,10 @@ export class ThinRuntime implements Runtime {
       return;
     }
     if (error.retry === "never") {
-      // Stopped for good, as `fatal`: only an explicit connect starts over.
-      this.wanted = false;
-      this.stopped = true;
-      this.clearOutage();
+      // Stopped for good, as `fatal`: only an explicit connect starts over,
+      // and requests waiting for a connection end now.
+      this.fatal(lostError);
+      return;
     }
     this.dropConnection(lostError, this.wanted && !this.closed);
     // An attempt that fails past the window reports the outage.
@@ -475,7 +495,12 @@ export class ThinRuntime implements Runtime {
   /** Close the connection; requests already sent fail with `error`, live queries reopen later.
    * With `resend`, a write under a `writeKey` the connection left unanswered
    * waits for the next connection instead, and goes out again in order. */
-  private dropConnection(error: Error | undefined, resend = false): void {
+  private dropConnection(
+    error: Error | undefined,
+    resend = false,
+    /** What a sent write ends with, when not `error`: it may have committed. */
+    sentWriteError: Error | undefined = error,
+  ): void {
     clearTimeout(this.reconnectTimer);
     const carrier = this.carrier;
     this.carrier = undefined;
@@ -516,7 +541,7 @@ export class ThinRuntime implements Runtime {
         continue;
       }
       this.oneShots.delete(id);
-      if (error) oneShot.reject(error);
+      if (error) oneShot.reject(oneShot.write ? (sentWriteError ?? error) : error);
       // A sent write is never sent again after an explicit disconnect: it may
       // have committed, so it ends with its fate unknown. (A sent read is
       // dropped unanswered, as before.)
@@ -528,14 +553,54 @@ export class ThinRuntime implements Runtime {
     this.wanted = false;
     this.failure = error;
     this.stop();
-    this.dropConnection(error);
+    // A write the server may have taken ends with its fate unknown, not as
+    // the server's rejection of it.
+    this.dropConnection(error, false, unknownOutcome(error));
     // Requests not sent yet would wait for a connection that never comes.
-    for (const [id, oneShot] of this.oneShots) {
-      this.oneShots.delete(id);
-      oneShot.reject(error);
-    }
+    this.endWaitingRequests(error);
     for (const live of this.liveQueries.values()) live.callback?.(error);
   }
+
+  /**
+   * End every request still waiting for a connection. A write sent once and
+   * waiting to go out again ends with its fate unknown, as it may have
+   * committed; one never sent with {@link ThinRequestNotSentError}, as it
+   * certainly didn't. Any other request ends with `notSent`.
+   */
+  private endWaitingRequests(error: Error, notSent: Error = error): void {
+    for (const [id, oneShot] of this.oneShots) {
+      this.oneShots.delete(id);
+      if (oneShot.resending) oneShot.reject(unknownOutcome(error));
+      else if (oneShot.write && !(notSent instanceof ThinRequestNotSentError))
+        oneShot.reject(
+          new ThinRequestNotSentError(`the request never reached the server: ${error.message}`, {
+            cause: error,
+          }),
+        );
+      else oneShot.reject(notSent);
+    }
+  }
+
+  /**
+   * @internal Its Db handed over to a successor: end the reads (outside a
+   * transaction) not sent yet, and any made from now on, with
+   * {@link RuntimeClosedError} as their cause,
+   * so each asks the successor instead of waiting for this runtime's server.
+   * Writes stay, to upload once it answers.
+   */
+  endUnsentReads(): void {
+    // A read that reaches this runtime later (it was still on its way when
+    // the Db handed over) ends the same way.
+    this.handedOver = true;
+    for (const [id, oneShot] of this.oneShots) {
+      if (oneShot.sent || !endsAtHandOver(oneShot.op)) continue;
+      this.oneShots.delete(id);
+      oneShot.reject(handedOver());
+    }
+  }
+
+  /** Set by {@link endUnsentReads}. */
+  private handedOver = false;
 
   // ---- requests ---------------------------------------------------------
 
@@ -552,6 +617,8 @@ export class ThinRuntime implements Runtime {
       return {
         answer: Promise.reject(new RuntimeClosedError("the thin runtime is closed")),
       };
+    // Handed over first: the successor serves a read even after a failure here.
+    if (this.handedOver && endsAtHandOver(op)) return { answer: Promise.reject(handedOver()) };
     if (this.failure) return { answer: Promise.reject(this.failure) };
     let oneShot: OneShot | undefined;
     const answer = new Promise<ThinBody>((resolve, reject) => {
@@ -1290,7 +1357,12 @@ export class ThinRuntime implements Runtime {
           // connection ended unanswered may have committed: its fate is
           // unknown, not rejected.
           const rejected = failure instanceof ThinRemoteError;
-          const code = rejected ? failure.code : "outcome_unknown";
+          // Never sent: it certainly didn't commit.
+          const code = rejected
+            ? failure.code
+            : failure instanceof ThinRequestNotSentError
+              ? "not_sent"
+              : "outcome_unknown";
           this.mutationErrorCallback?.({
             code,
             reason: failure.message,
@@ -1359,12 +1431,15 @@ type WriteTarget = {
   updatedAtMs: number;
 };
 
-/** The main-branch row `op` writes, if any. */
+/**
+ * The main-branch row `op` writes, if any, to hand off. Not a delete: a read
+ * of a deleted row brings nothing back.
+ */
 function writtenRow(
   context: WriteTarget,
   op: Extract<ThinOp, { transaction?: string }>,
 ): WrittenRow | undefined {
-  if (context.branchView) return undefined;
+  if (context.branchView || op.type === "delete") return undefined;
   if (op.type === "insert") {
     const rowId = (op.options as { rowId?: Uint8Array }).rowId;
     return rowId ? { table: op.table, id: formatUuid(rowId) } : undefined;
@@ -1409,4 +1484,29 @@ function tooLarge(op: string, bytes: number): ThinRemoteError {
     `this ${op} is ${bytes} bytes, more than the ${MAX_THIN_MESSAGE_BYTES} a thin client ` +
       `sends in one request: write values that large with insertStreaming or updateStreaming`,
   );
+}
+
+/**
+ * A request its Db's successor serves instead once the Db hands over: a read
+ * outside a transaction (`Db.all` asks the successor again). Writes stay, to
+ * upload, and so does a snapshot capture, which has no such retry.
+ */
+function endsAtHandOver(op: ThinOp): boolean {
+  return op.type === "query" && transactionOf(op) === undefined;
+}
+
+function handedOver(): ThinRequestNotSentError {
+  return new ThinRequestNotSentError("the Db handed over to its local-first successor", {
+    cause: new RuntimeClosedError("the thin runtime handed over"),
+  });
+}
+
+/** The error for a write that may have committed before `cause` ended it. */
+function unknownOutcome(cause: Error): ThinConnectionLostError {
+  return cause instanceof ThinConnectionLostError
+    ? cause
+    : new ThinConnectionLostError(
+        `the connection ended before the server answered: ${cause.message}`,
+        { cause },
+      );
 }
