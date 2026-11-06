@@ -149,13 +149,8 @@ fn history_lists_every_accepted_version_with_its_transaction() {
         "the authority's own commits are named by their seq and its node"
     );
     let times: Vec<u64> = versions.iter().map(accepted_at).collect();
-    assert!(times.windows(2).all(|pair| pair[0] < pair[1]), "{times:?}");
-    assert!(
-        times
-            .iter()
-            .all(|at| at & ((1 << 18) - 1) == 0 && at >> 18 > 0),
-        "acceptance time is an HLC: milliseconds over a zero counter"
-    );
+    assert!(times.windows(2).all(|pair| pair[0] <= pair[1]), "{times:?}");
+    assert_eq!(times, txs.map(jazz::db::shard::hlc_ms));
 
     let newest_first = read(
         &db,
@@ -166,6 +161,193 @@ fn history_lists_every_accepted_version_with_its_transaction() {
         ReadOpts::default(),
     );
     assert_eq!(titles(&newest_first), ["third", "second"]);
+}
+
+/// Alice backfills two versions with decreasing client timestamps while the
+/// authority accepts both in one millisecond. History follows acceptance,
+/// filters and publishes milliseconds, and uses the full acceptance position
+/// to order versions within that millisecond.
+#[test]
+fn history_acceptance_uses_authority_positions_not_backfill_timestamps() {
+    const NOW: u64 = 1_790_000_000_000;
+    let db = block_on(Db::open(
+        DbConfig::new(
+            notes_schema(),
+            DbIdentity {
+                node: NodeUuid::from_bytes(NODE),
+                author: AuthorSubject::SYSTEM,
+            },
+        )
+        .with_clock(|| NOW),
+    ))
+    .unwrap();
+    let note = row(1);
+    let first = block_on(db.insert(
+        "notes",
+        title("first"),
+        jazz::db::InsertOptions {
+            row_id: Some(note),
+            updated_at_ms: Some(NOW - 1_000),
+            ..Default::default()
+        },
+    ))
+    .unwrap()
+    .mergeable_tx_id();
+    let second = block_on(db.update(
+        "notes",
+        note,
+        title("second"),
+        jazz::db::UpdateOptions {
+            updated_at_ms: Some(NOW - 2_000),
+            ..Default::default()
+        },
+    ))
+    .unwrap()
+    .mergeable_tx_id();
+    assert_eq!(
+        second,
+        first + 1,
+        "the authority advances within the same millisecond"
+    );
+    let versions = read(
+        &db,
+        &history_of(note).select(["title", "$createdAt", "$updatedAt", "$acceptedAt"]),
+        ReadOpts::default(),
+    );
+    assert_eq!(titles(&versions), ["first", "second"]);
+    let expected = [NOW, NOW];
+    assert_eq!(
+        versions.iter().map(accepted_at).collect::<Vec<_>>(),
+        expected
+    );
+    assert_eq!(
+        cell(&versions[0], "$createdAt"),
+        Some(Value::Nullable(Some(Box::new(Value::U64(NOW - 1_000)))))
+    );
+    assert_eq!(
+        cell(&versions[1], "$updatedAt"),
+        Some(Value::Nullable(Some(Box::new(Value::U64(NOW - 2_000)))))
+    );
+    for (predicate, matches) in [
+        (eq(col("$acceptedAt"), lit(Value::U64(NOW))), true),
+        (
+            jazz::query::gt(col("$acceptedAt"), lit(Value::U64(NOW))),
+            false,
+        ),
+        (
+            jazz::query::gte(col("$acceptedAt"), lit(Value::U64(NOW))),
+            true,
+        ),
+        (
+            jazz::query::lt(col("$acceptedAt"), lit(Value::U64(NOW))),
+            false,
+        ),
+        (
+            jazz::query::lte(col("$acceptedAt"), lit(Value::U64(NOW))),
+            true,
+        ),
+        (
+            jazz::query::gt(col("$acceptedAt"), lit(Value::U64(NOW - 1))),
+            true,
+        ),
+        (
+            jazz::query::lt(col("$acceptedAt"), lit(Value::U64(NOW + 1))),
+            true,
+        ),
+    ] {
+        let filtered = read(
+            &db,
+            &history_of(note).filter(predicate),
+            ReadOpts::default(),
+        );
+        assert_eq!(
+            titles(&filtered),
+            if matches {
+                vec!["first", "second"]
+            } else {
+                vec![]
+            }
+        );
+    }
+    let reverse = Query::from("history.notes")
+        .filter(eq(col("id"), lit(Value::Uuid(note.0))))
+        .order_by("$acceptedAt", OrderDirection::Desc)
+        .limit(1);
+    assert_eq!(
+        titles(&read(&db, &reverse, ReadOpts::default())),
+        ["second"]
+    );
+    let published =
+        jazz::binding_codec::decode_rows(&jazz::binding_codec::encode_rows(&versions).unwrap())
+            .unwrap();
+    for version in published.iter().flat_map(|batch| &batch.rows) {
+        assert_eq!(version.cells.get("$acceptedAt"), Some(&Value::U64(NOW)));
+    }
+}
+
+/// Alice's offline write retains its client timestamp, while server and
+/// replica history report the authority's later acceptance position.
+/// alice offline -> authority accepts -> alice receives settled history
+#[test]
+fn uploaded_history_separates_client_time_from_acceptance_time() {
+    const NOW: u64 = 1_790_000_000_000;
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let server = block_on(Db::open(
+        DbConfig::new(
+            notes_schema(),
+            DbIdentity {
+                node: NodeUuid::from_bytes([1; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        )
+        .with_clock(|| NOW),
+    ))
+    .unwrap();
+    let client = block_on(Db::open(
+        DbConfig::new(
+            notes_schema(),
+            DbIdentity {
+                node: NodeUuid::from_bytes([2; 16]),
+                author: alice,
+            },
+        )
+        .with_clock(|| NOW),
+    ))
+    .unwrap();
+    let (client_side, server_side) = duplex();
+    let _upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice).unwrap();
+    let note = row(1);
+    block_on(client.insert(
+        "notes",
+        title("offline"),
+        jazz::db::InsertOptions {
+            row_id: Some(note),
+            updated_at_ms: Some(NOW - 60_000),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    for _ in 0..6 {
+        block_on(client.tick()).unwrap();
+        block_on(server.tick()).unwrap();
+    }
+    for db in [&server, &client] {
+        let versions = read(
+            db,
+            &history_of(note).select(["title", "$createdAt", "$updatedAt", "$acceptedAt"]),
+            ReadOpts {
+                tier: ReadTier::LocalOnly,
+                ..Default::default()
+            },
+        );
+        assert_eq!(titles(&versions), ["offline"]);
+        assert_eq!(
+            cell(&versions[0], "$createdAt"),
+            Some(Value::Nullable(Some(Box::new(Value::U64(NOW - 60_000)))))
+        );
+        assert_eq!(accepted_at(&versions[0]), NOW);
+    }
 }
 
 /// History reads take an id list, filter historical values and select

@@ -151,6 +151,10 @@ is opened explicitly, but chunk caching still uses the pathless configuration;
 its memory budget and durable chunk-reader behavior require section 7. These limitations are intentional evidence for the storage and
 transaction work in the plan, not supported Jazz semantics.
 
+History's `$acceptedAt` is projected from the acceptance clock into Unix
+milliseconds before SQL filtering and result decoding. It fits the safe range;
+`_clock` preserves acceptance ordering within a millisecond.
+
 ## Validation of this refresh
 
 - Probe assertions pass on the pinned runtime, including async helper commit

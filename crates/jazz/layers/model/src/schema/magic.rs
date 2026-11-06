@@ -35,7 +35,7 @@ pub enum MagicColumn {
         /// Value within the event.
         value: ProvenanceValue,
     },
-    /// Full acceptance HLC of a historical content version.
+    /// Authority acceptance time of a historical content version in Unix milliseconds.
     AcceptedAt,
     /// Portable transaction identity of a historical content version.
     TransactionId,

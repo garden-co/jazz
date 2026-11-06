@@ -5628,43 +5628,13 @@ function coerceQueryPredicate(
             "History $acceptedAt predicates require a valid Date or integer milliseconds",
           );
         }
-        const lower = BigInt(value.value) << 18n;
-        const upper = lower + (1n << 18n) - 1n;
-        const bound = (op: "Gt" | "Gte" | "Lt" | "Lte", boundary: bigint): QueryPredicate => {
-          if (boundary < 0n || boundary > (1n << 64n) - 1n) {
-            const matches =
-              boundary < 0n ? op === "Gt" || op === "Gte" : op === "Lt" || op === "Lte";
-            return { op: matches ? "All" : "Any", predicates: [] };
-          }
-          return {
-            column: filter.column,
-            op,
-            value: { type: "U64", value: boundary },
-          };
-        };
-        switch (filter.op) {
-          case "Eq":
-            return {
-              op: "All",
-              predicates: [bound("Gte", lower), bound("Lte", upper)],
-            };
-          case "Ne":
-            return {
-              op: "Not",
-              predicate: {
-                op: "All",
-                predicates: [bound("Gte", lower), bound("Lte", upper)],
-              },
-            };
-          case "Gt":
-            return bound("Gt", upper);
-          case "Gte":
-            return bound("Gte", lower);
-          case "Lt":
-            return bound("Lt", lower);
-          case "Lte":
-            return bound("Lte", upper);
+        // Acceptance timestamps are non-negative; negative Dates cannot be
+        // encoded as U64 literals, but their comparisons have a known result.
+        if (value.value < 0) {
+          const matches = filter.op === "Ne" || filter.op === "Gt" || filter.op === "Gte";
+          return { op: matches ? "All" : "Any", predicates: [] };
         }
+        return { ...filter, value };
       }
     }
   }

@@ -152,6 +152,14 @@ Current large values use INTEGER epoch markers; the experiment's TEXT-marker
 workaround is obsolete. Preserve durable bytes; any necessary encoding change
 requires a named version, byte fixtures, and a compatibility write-up.
 
+History's `$acceptedAt` now projects the acceptance clock as Unix milliseconds
+inside `history.rs`, so filtering and results stay within the safe range.
+The full `_clock` still breaks ordering ties within a millisecond. No special
+DO conversion is needed; all backends use the same timestamp semantics.
+Validated on 2026-11-06 with 950 native integration tests (4 ignored), including
+same-millisecond history filters/order. The TypeScript history suite is blocked
+by the correctness-artifact producer (`could not read 1 clean Git inputs`).
+
 ## 7. Use one connection with bounded chunk storage
 
 Separate durability and cache budgeting from file paths. Read chunks and

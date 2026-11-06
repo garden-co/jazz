@@ -553,7 +553,7 @@ describe("TS Query API history", () => {
     },
   );
 
-  it("handles $acceptedAt dates outside the HLC range", async () => {
+  it("handles $acceptedAt dates before Unix epoch and far in the future", async () => {
     const note = await insertNote();
     const query = app.$history.notes.where({ id: note.id });
     const rows = await db.all(query);
