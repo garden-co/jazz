@@ -2618,8 +2618,8 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       return this.updateEncrypted(table, id, transformInputColumns(table, data), options, "upsert");
     }
     // `edits` is valid ordinary JSON data. Only `update`'s `applyDiffs` option interprets the
-    // descriptor-shaped DSL, so upsert must preserve that JSON shape exactly.
-    writeRecord("Upsert", table, data);
+    // descriptor-shaped DSL, so upsert must preserve that JSON shape exactly. Defer input
+    // transforms to prepareMutation, which can load dependencies in this transaction.
     const client = this.resolveClient(table._schema);
     const { openTransactionId, session, attribution } = this.requireBinding("upsert");
     this.prepareMutation(
@@ -2679,16 +2679,24 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     const previousBatch = this.encryptedUpdateBatch;
     this.encryptedUpdateBatch = undefined;
     this.bindTable(table);
-    const descriptors = lowerApplyDiffs(table, data, options?.applyDiffs);
-    const transformedData = transformInputColumns(table, data);
     const encrypted = encryptedSchemas.get(table._schema)?.tables.get(table._table);
     if (
       encrypted &&
-      (Object.hasOwn(transformedData, encrypted.space) ||
-        encrypted.columns.some((name) => Object.hasOwn(transformedData, name)))
+      (Object.hasOwn(data, encrypted.space) ||
+        encrypted.columns.some((name) => Object.hasOwn(data, name)))
     ) {
-      return this.updateEncrypted(table, id, transformedData, options, "update", previousBatch);
+      if (options?.applyDiffs !== undefined)
+        throw new Error("Encrypted updates do not support applyDiffs");
+      return this.updateEncrypted(
+        table,
+        id,
+        transformInputColumns(table, data),
+        options,
+        "update",
+        previousBatch,
+      );
     }
+    const descriptors = lowerApplyDiffs(table, data, options?.applyDiffs);
     rejectIncompleteDependencies(table, data, Object.keys(options?.applyDiffs ?? {}));
     const client = this.resolveClient(table._schema);
     const { openTransactionId, session, attribution } = this.requireBinding("update");
