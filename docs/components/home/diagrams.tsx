@@ -412,7 +412,10 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
         />
       ))}
       <Label x={xs[1] + w / 2 + 10} y={backendY + backendH + 34}>
-        live sync over /jazz, same origin
+        live sync over /jazz,
+      </Label>
+      <Label x={xs[1] + w / 2 + 10} y={backendY + backendH + 52}>
+        same origin
       </Label>
       {clients.map((client, index) => (
         <Box
