@@ -62,11 +62,21 @@ export function textFieldSync(field: TextField, options: TextFieldSyncOptions): 
   const onInput = () => {
     const text = field.value;
     if (text === base) return;
-    options.onChange(text, { editedFrom: base });
-    // Only a write that was made moves the base: after a write that threw,
-    // the next one still edits what the column holds.
+    const editedFrom = base;
+    const before = pending;
+    // Moved before the write, so that a write delivering its echo back
+    // synchronously (into apply) finds it as this field's own.
     base = text;
-    pending.push(text);
+    pending = [...pending, text];
+    try {
+      options.onChange(text, { editedFrom });
+    } catch (error) {
+      // A write that threw wasn't made: the next one still edits what the
+      // column holds.
+      base = editedFrom;
+      pending = before;
+      throw error;
+    }
     // A value held back is older than this write; the write's merge with
     // it comes next.
     held = null;
@@ -96,7 +106,9 @@ export function textFieldSync(field: TextField, options: TextFieldSyncOptions): 
     // Text typed but not written yet (its input event still to come) is
     // written now and merged over `value`; the merged value comes next.
     if (shown !== base) return onInput();
-    const echoed = pending.indexOf(value);
+    // The latest write first: when the subscription skipped values, an
+    // older write's text that comes back is more likely someone's change.
+    const echoed = value === pending.at(-1) ? pending.length - 1 : pending.indexOf(value);
     if (echoed >= 0) {
       // One of this field's own writes coming back.
       pending = pending.slice(echoed + 1);

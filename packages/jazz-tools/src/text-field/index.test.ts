@@ -141,6 +141,41 @@ describe("textFieldSync", () => {
     expect(writes).toEqual([["abc", "a"]]);
   });
 
+  it("takes a write's echo delivered synchronously from inside onChange", () => {
+    const field = document.createElement("textarea");
+    field.value = "a";
+    document.body.append(field);
+    fields.push(field);
+    const writes: string[] = [];
+    let sync: ReturnType<typeof textFieldSync> | null = null;
+    sync = textFieldSync(field, {
+      onChange: (text) => {
+        writes.push(text);
+        // A store that delivers its new value before the write returns.
+        sync!.apply(text);
+      },
+    });
+    field.value = "ab";
+    field.dispatchEvent(new Event("input"));
+    expect(writes).toEqual(["ab"]);
+    expect(field.value).toBe("ab");
+  });
+
+  it("takes its latest write's echo first when earlier writes match too", () => {
+    const { field, sync, writes, type } = setup("x");
+    field.setSelectionRange(1, 1);
+    type("a");
+    field.setRangeText("", 1, 2, "end"); // Backspace
+    field.dispatchEvent(new Event("input"));
+    type("a");
+    expect(writes.map(([text]) => text)).toEqual(["xa", "x", "xa"]);
+    // The subscription skipped to the latest value: caught up.
+    sync.apply("xa");
+    // Someone deleting the "a" is then a change, not an old echo.
+    sync.apply("x");
+    expect(field.value).toBe("x");
+  });
+
   it("syncs a single-line input too", () => {
     const field = document.createElement("input");
     field.value = "title";
