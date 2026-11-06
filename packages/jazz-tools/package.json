@@ -90,6 +90,10 @@
       "types": "./dist/prosemirror/index.d.ts",
       "default": "./dist/prosemirror/index.js"
     },
+    "./text-field": {
+      "types": "./dist/text-field/index.d.ts",
+      "default": "./dist/text-field/index.js"
+    },
     "./react-core": {
       "types": "./dist/react-core/index.d.ts",
       "default": "./dist/react-core/index.js"

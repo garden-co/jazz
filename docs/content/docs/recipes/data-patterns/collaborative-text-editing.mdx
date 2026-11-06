@@ -68,51 +68,45 @@ db.update(app.notes, noteId, { body: nextBody }, { editedFrom: { body: shownBody
 
 `shownBody` is the value the editor last displayed or wrote; after the write, it is `nextBody`. It
 must be exactly that: not the value a subscription delivers, which can lag a keystroke or two
-behind your own writes, and would then apply those keystrokes again. For a plain `<textarea>`,
-track it next to the editor's own state:
+behind your own writes, and would then apply those keystrokes again.
+
+For a plain `<textarea>` or `<input>`, `textFieldSync` from `jazz-tools/text-field` does this
+bookkeeping. It writes each change as an edit of the value the field last showed or wrote, takes
+a late echo of its own writes as nothing new, and applies merged values as a change, so the
+cursor stays with the text it was in:
 
 ```tsx
+import { useEffect, useRef, useState } from "react";
+import { useDb } from "jazz-tools/react";
+import { textFieldSync, type TextFieldSync } from "jazz-tools/text-field";
+
 function NoteBody({ note }: { note: { id: string; body: string } }) {
-  const [text, setText] = useState(note.body);
-  // The value the editor last showed or wrote, which each write edits.
-  const shown = useRef(note.body);
-  // Writes not yet seen back from the subscription, oldest first.
-  const pending = useRef<string[]>([]);
+  const db = useDb();
+  const field = useRef<HTMLTextAreaElement>(null);
+  const sync = useRef<TextFieldSync | null>(null);
+  // The field's first text, given once: React writes a changed
+  // `defaultValue` into a field nobody typed in yet, bypassing the sync.
+  const [initial] = useState(note.body);
   useEffect(() => {
-    // Our latest write coming back: caught up.
-    if (note.body === pending.current.at(-1)) {
-      pending.current = [];
-      return;
-    }
-    const at = pending.current.indexOf(note.body);
-    if (at >= 0) {
-      // An earlier one of our own writes: nothing new to show.
-      pending.current.splice(0, at + 1);
-      return;
-    }
-    // A merged value: show it, and edit from it.
-    pending.current = [];
-    shown.current = note.body;
-    setText(note.body);
-  }, [note.body]);
-  return (
-    <textarea
-      value={text}
-      onChange={(event) => {
-        const next = event.target.value;
-        db.update(app.notes, note.id, { body: next }, { editedFrom: { body: shown.current } });
-        shown.current = next;
-        pending.current.push(next);
-        setText(next);
-      }}
-    />
-  );
+    const synced = textFieldSync(field.current!, {
+      onChange: (body, { editedFrom }) =>
+        db.update(app.notes, note.id, { body }, { editedFrom: { body: editedFrom } }),
+    });
+    sync.current = synced;
+    return () => synced.destroy();
+  }, [db, note.id]);
+  useEffect(() => sync.current?.apply(note.body), [note.body]);
+  // Uncontrolled: only the sync sets the field's text.
+  return <textarea ref={field} defaultValue={initial} />;
 }
 ```
 
-Render it with `key={note.id}`, so that its state starts over for each note. Showing a merged value this way moves the cursor to the end; an editor that applies it as a
-change keeps it in place (see below). An editor that mounted before the row loaded must not name
-`""`: it would add the whole text again.
+Render it with `key={note.id}`, so that it starts over for each note. Keep the field
+uncontrolled, with a `defaultValue` that never changes: a controlled field resets its whole text
+on each merged value, which moves the cursor and can drop a keystroke typed in between. Because
+the sync sets the field's text, the browser's own undo (Ctrl+Z) does not reach past a merged
+value. An editor that mounted before the row loaded must not name `""`: it would add the whole
+text again.
 
 `editedFrom` is not supported yet in branch views, on a column with its own transform, or (on a
 backend) for a write as a user outside a transaction; those writes throw. `upsert` does not take
