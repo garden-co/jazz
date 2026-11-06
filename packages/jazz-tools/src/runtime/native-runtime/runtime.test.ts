@@ -1377,7 +1377,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         descriptors,
         JSON.stringify({ branch_view: { head: { values: {} } } }),
       ),
-    ).toThrow("Typed large-value updates are not supported in branch views.");
+    ).toThrow("are not yet supported in branch views");
     expect(() =>
       runtime.updateLargeValues(
         "todos",
@@ -1386,7 +1386,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         descriptors,
         JSON.stringify({ user_id: "00000000-0000-0000-0000-000000000009" }),
       ),
-    ).toThrow("Typed large-value updates do not yet support an attributed identity.");
+    ).toThrow("do not yet support a session or attributed identity outside a transaction");
     expect(calls).toHaveLength(1);
   });
 

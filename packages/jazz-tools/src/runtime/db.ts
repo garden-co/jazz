@@ -404,17 +404,31 @@ export interface RestoreOptions extends TimestampOverrideOptions {
 export interface UpdateOptions extends TimestampOverrideOptions {
   branch?: Branch;
   base?: BranchBase;
+}
+
+/** `update` options, with `editedFrom` for the columns `TReplacements` writes. */
+export type UpdateEditOptions<TReplacements extends object> = UpdateOptions & {
   /**
    * For text-merge columns written whole by an editor: the value each was
    * edited from, which the editor last showed or wrote. When the column
    * holds a newer value (a merge that reached this store before the editor
-   * showed it), the write is merged over it instead of undoing it.
+   * showed it), the write is merged over it instead of undoing it. A column
+   * left `undefined` here is written as usual.
    */
-  editedFrom?: { readonly [column: string]: string };
-}
+  editedFrom?: { readonly [TColumn in keyof TReplacements]?: string };
+};
 
-type TypedUpdateOptionsWithDiffs<TReplacements extends object, TDiffs> = UpdateOptions & {
+type TypedUpdateOptionsWithDiffs<
+  TReplacements extends object,
+  TDiffs,
+> = UpdateEditOptions<TReplacements> & {
   applyDiffs?: TDiffs & { [TColumn in keyof TReplacements]?: never };
+};
+
+/** The options an untyped `update` call is lowered from. */
+type LoweredUpdateOptions = UpdateOptions & {
+  applyDiffs?: object;
+  editedFrom?: { readonly [column: string]: string | undefined };
 };
 
 export interface DeleteOptions extends TimestampOverrideOptions {
@@ -781,7 +795,7 @@ function requirePageRange(from: number, to: number, column: string): void {
 function lowerUpdate(
   table: TableProxy<any, any, any, any, any>,
   data: Record<string, unknown>,
-  options: (UpdateOptions & { applyDiffs?: object }) | undefined,
+  options: LoweredUpdateOptions | undefined,
 ): { replacements: Record<string, unknown>; descriptors: WireLargeValueUpdate[] } {
   const descriptors = lowerApplyDiffs(table, data, options?.applyDiffs);
   const editedFrom = options?.editedFrom;
@@ -793,7 +807,15 @@ function lowerUpdate(
     throw new Error("update option editedFrom must be an object keyed by column name.");
   }
   const replacements = { ...data };
+  const edited: string[] = [];
   for (const [column, from] of Object.entries(editedFrom)) {
+    if (from === undefined) continue;
+    const transform = table._columnTransforms?.[column];
+    if (transform && !transform.computed) {
+      throw new Error(
+        `update option editedFrom is not supported yet on "${column}", which has a transform.`,
+      );
+    }
     const text = replacements[column];
     if (typeof text !== "string" || typeof from !== "string") {
       throw new Error(
@@ -801,20 +823,21 @@ function lowerUpdate(
       );
     }
     delete replacements[column];
+    edited.push(column);
     descriptors.push({ kind: "text_edit", column, text, edited_from: from });
   }
   rejectIncompleteDependencies(table, replacements, [
     ...Object.keys(options?.applyDiffs ?? {}),
-    ...Object.keys(editedFrom),
+    ...edited,
   ]);
   return { replacements, descriptors };
 }
 
 /** `options` without `editedFrom`, which {@link lowerUpdate} turned into descriptors. */
-function withoutEditedFrom<Options extends UpdateOptions>(options: Options | undefined) {
+function withoutEditedFrom(options: LoweredUpdateOptions | undefined) {
   if (options?.editedFrom === undefined) return options;
   const { editedFrom: _, ...rest } = options;
-  return rest as Options;
+  return rest;
 }
 
 /** Validate an `update` call's `applyDiffs` option and lower it to wire descriptors. */
@@ -2156,13 +2179,13 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     table: TableProxy<T, Init>,
     id: string,
     data: Partial<Init>,
-    options?: UpdateOptions,
+    options?: UpdateEditOptions<Partial<Init>>,
   ): void;
   update(
     table: TableProxy<any, any, any, any, any>,
     id: string,
     data: Record<string, unknown>,
-    options?: UpdateOptions & { applyDiffs?: object },
+    options?: LoweredUpdateOptions,
   ): void {
     assertWritableTable(table);
     this.bindTable(table);
@@ -3396,13 +3419,13 @@ export class Db {
     table: TableProxy<T, Init>,
     id: string,
     data: Partial<Init>,
-    options?: UpdateOptions,
+    options?: UpdateEditOptions<Partial<Init>>,
   ): WriteHandle;
   update(
     table: TableProxy<any, any, any, any, any>,
     id: string,
     data: Record<string, unknown>,
-    options?: UpdateOptions & { applyDiffs?: object },
+    options?: LoweredUpdateOptions,
   ): WriteHandle {
     assertWritableTable(table);
     const client = this.getClient(table._schema);

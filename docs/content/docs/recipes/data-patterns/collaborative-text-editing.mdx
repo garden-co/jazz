@@ -66,7 +66,43 @@ editor last showed, it is merged over the newer value instead:
 db.update(app.notes, noteId, { body: nextBody }, { editedFrom: { body: shownBody } });
 ```
 
-`shownBody` is the value the editor last displayed or wrote; after the write, it is `nextBody`.
+`shownBody` is the value the editor last displayed or wrote; after the write, it is `nextBody`. For a
+plain `<textarea>`, keep the text in local state and edit from it:
+
+```tsx
+function NoteBody({ note }: { note: { id: string; body: string } }) {
+  const [text, setText] = useState(note.body);
+  const written = useRef(new Set<string>());
+  useEffect(() => {
+    // Our own writes come back; any other value is a merge to show.
+    if (written.current.has(note.body)) return;
+    written.current.clear();
+    setText(note.body);
+  }, [note.body]);
+  return (
+    <textarea
+      value={text}
+      onChange={(event) => {
+        const next = event.target.value;
+        db.update(app.notes, note.id, { body: next }, { editedFrom: { body: text } });
+        written.current.add(next);
+        setText(next);
+      }}
+    />
+  );
+}
+```
+
+Showing a merged value this way moves the cursor to the end; an editor that applies it as a
+change keeps it in place (see below). If an editor names a value from its subscription that lags a
+few of its own keystrokes, the store recognizes a value its own writes already edited past and
+merges from its latest write instead, so no keystroke applies twice. What
+`editedFrom` must never name is a value the editor did not show: an editor that mounted before the
+row loaded and passes `""` would add the whole text again.
+
+`editedFrom` is not supported yet in branch views, on a column with its own transform, or (on a
+backend) for a write as a user outside a transaction; those writes throw. `upsert` does not take
+it.
 
 Queries, filters and permissions see the text itself. Large values work too: a long note is stored
 and synced like any other large string.
@@ -101,7 +137,9 @@ cursors.
 ## What to expect from a merge
 
 - Edits to different parts of the text all survive, and an edit both people made applies once.
-- Two insertions at the same spot both stay, the earlier one first.
+- Two insertions at the same spot both stay, the earlier one first. Two people typing into the same
+  word both keep their letters; typed at the very same spot without seeing each other's keystrokes,
+  the letters interleave (`cat` edited to `cart` and to `cast` merges to `carst`).
 - Where both people replaced the same words, the edit the server receives later wins that part.
   The other version stays in the row's history.
 - The merge keeps Markdown and HTML markup intact but is not tree-aware: it does not check that the

@@ -680,7 +680,9 @@ export class ThinRuntime implements Runtime {
     const context = this.writeTarget(writeContext, "Update");
     // Branch views have no partial-value coordinate space yet (#2087).
     if (context.branchView) {
-      throw new Error("Typed large-value updates are not supported in branch views.");
+      throw new Error(
+        "Partial-value updates (applyDiffs, editedFrom) are not yet supported in branch views.",
+      );
     }
     return this.mutate(context, {
       type: "updateLargeValues",
