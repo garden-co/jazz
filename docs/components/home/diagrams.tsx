@@ -499,8 +499,9 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
   // local files sit inside your backend, on top of the core. Everything else
   // stays where it is in the other variants.
   const single = scenario === "server";
-  const backendTop = single ? shardRow.y : backend.y;
-  const local = { y: 98, h: 76, sqlite: { x: 224, w: 124 }, files: { x: 364, w: 124 } };
+  const local = { y: 100, h: 76, sqlite: { x: 224, w: 124 }, files: { x: 364, w: 124 } };
+  // Snug around the local boxes on a single server.
+  const backendTop = single ? local.y - 12 : backend.y;
   return (
     <Diagram viewBox={`0 0 ${W} ${H}`} label={label}>
       <Label x={switcher.x} y={22} tone="ink">
@@ -617,7 +618,7 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
         textAnchor="middle"
         className="dg-title dg-fill-blue"
       >
-        jazz core
+        {single ? "jazz core" : "jazz serverless core"}
       </text>
       <text
         x={jazz.x + jazz.w / 2}
