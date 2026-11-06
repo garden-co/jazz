@@ -192,8 +192,11 @@ export default defineConfig({
         jazzServerStop: async (_context, serverUrl) => stopJazzServerByUrl(serverUrl),
         jazzServerTransportControlCreate: async (_context, serverUrl) =>
           createJazzServerTransportControl(serverUrl),
-        jazzServerTransportControlBlock: async (_context, url, direction: "both" | "inbound") =>
-          blockJazzServerTransport(url, direction),
+        jazzServerTransportControlBlock: async (
+          _context,
+          url,
+          direction: "both" | "inbound" | "sever",
+        ) => blockJazzServerTransport(url, direction),
         jazzServerTransportControlUnblock: async (_context, url) => unblockJazzServerTransport(url),
         jazzServerTransportControlStop: async (_context, proxyUrl) =>
           stopJazzServerTransportControl(proxyUrl),

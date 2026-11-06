@@ -12,7 +12,14 @@ export interface TransportControl {
   block(): void;
   /** Stop server-to-client delivery only, allowing writes to reach the server. */
   blockInbound(): void;
-  /** Resume both directions, including buffered traffic. */
+  /**
+   * An outage: drop every connection and refuse new ones (they close at
+   * once), so the client's link fails and retries, as when the server is
+   * unreachable. Buffered traffic is discarded. TS-only: the Rust
+   * TransportControl has no equivalent.
+   */
+  sever(): void;
+  /** Resume both directions, including buffered traffic, and accept connections again. */
   unblock(): void;
   stop(): Promise<void>;
 }
@@ -29,8 +36,13 @@ export async function createTransportControl(serverUrl: string): Promise<Transpo
   const queued: Array<{ destination: Socket; chunk: Buffer }> = [];
   let inboundBlocked = false;
   let outboundBlocked = false;
+  let severed = false;
 
   const server = createServer((client) => {
+    if (severed) {
+      client.destroy();
+      return;
+    }
     const target = connect(upstreamPort, upstream.hostname);
     sockets.add(client);
     sockets.add(target);
@@ -72,7 +84,14 @@ export async function createTransportControl(serverUrl: string): Promise<Transpo
     blockInbound() {
       inboundBlocked = true;
     },
+    sever() {
+      severed = true;
+      queued.length = 0;
+      for (const socket of sockets) socket.destroy();
+      sockets.clear();
+    },
     unblock() {
+      severed = false;
       for (const { destination, chunk } of queued.splice(0)) {
         if (!destination.destroyed) destination.write(chunk);
       }

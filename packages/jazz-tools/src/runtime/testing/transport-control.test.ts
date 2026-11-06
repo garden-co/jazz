@@ -84,3 +84,25 @@ it("blocks both directions on existing and new connections until unblocked", asy
     await f.stop();
   }
 });
+
+it("severs connections and refuses new ones until unblocked, as an outage", async () => {
+  const f = await fixture();
+  try {
+    const first = await f.client();
+    first.socket.write("ready;");
+    await expect.poll(first.responses).toBe("ready;");
+    f.control.sever();
+    // The live connection drops...
+    await expect.poll(() => first.socket.destroyed || first.socket.readableEnded).toBe(true);
+    // ...and a new one is closed at once.
+    const refused = connect(Number(new URL(f.control.url).port), "127.0.0.1");
+    refused.on("error", () => {});
+    await once(refused, "close");
+    f.control.unblock();
+    const after = await f.client();
+    after.socket.write("back;");
+    await expect.poll(after.responses).toBe("back;");
+  } finally {
+    await f.stop();
+  }
+});

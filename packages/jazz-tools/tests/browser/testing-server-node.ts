@@ -214,9 +214,13 @@ export async function createJazzServerTransportControl(serverUrl: string): Promi
   return control.url;
 }
 
-export function blockJazzServerTransport(url: string, direction: "both" | "inbound"): void {
+export function blockJazzServerTransport(
+  url: string,
+  direction: "both" | "inbound" | "sever",
+): void {
   const control = transportControl(url);
   if (direction === "inbound") control.blockInbound();
+  else if (direction === "sever") control.sever();
   else control.block();
 }
 

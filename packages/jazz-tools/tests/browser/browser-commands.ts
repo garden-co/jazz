@@ -26,7 +26,10 @@ export interface JazzServerBrowserCommands {
 
 export interface JazzServerTransportControlBrowserCommands {
   jazzServerTransportControlCreate(serverUrl: string): Promise<string>;
-  jazzServerTransportControlBlock(url: string, direction: "both" | "inbound"): Promise<void>;
+  jazzServerTransportControlBlock(
+    url: string,
+    direction: "both" | "inbound" | "sever",
+  ): Promise<void>;
   jazzServerTransportControlUnblock(url: string): Promise<void>;
   jazzServerTransportControlStop(proxyUrl: string): Promise<void>;
 }

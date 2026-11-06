@@ -176,6 +176,8 @@ export interface JazzServerTransportControl {
   url: string;
   block(): Promise<void>;
   blockInbound(): Promise<void>;
+  /** Drop every connection and refuse new ones until unblock: an outage. */
+  sever(): Promise<void>;
   unblock(): Promise<void>;
   stop(): Promise<void>;
 }
@@ -189,6 +191,7 @@ export async function createJazzServerTransportControl(
     url,
     block: () => commands.jazzServerTransportControlBlock(url, "both"),
     blockInbound: () => commands.jazzServerTransportControlBlock(url, "inbound"),
+    sever: () => commands.jazzServerTransportControlBlock(url, "sever"),
     unblock: () => commands.jazzServerTransportControlUnblock(url),
     stop: () => commands.jazzServerTransportControlStop(url),
   };
