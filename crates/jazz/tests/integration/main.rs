@@ -197,6 +197,8 @@ mod sync_wire_corpus;
 mod text_merge;
 #[path = "../text_splices.rs"]
 mod text_splices;
+#[path = "../thin_origin_writes.rs"]
+mod thin_origin_writes;
 #[path = "../transaction_commit_kind.rs"]
 mod transaction_commit_kind;
 #[path = "../transaction_handles.rs"]

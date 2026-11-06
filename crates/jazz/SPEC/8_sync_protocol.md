@@ -998,6 +998,22 @@ that does not read are not bounded yet (#4865).
   row and the server seq of the version they left; the write is globally
   durable when the answer arrives. A client-chosen row id is honored on
   insert.
+- A standalone `Insert`, `Update`, `Upsert`, `Delete` or `Restore` may name a
+  `writeKey` option, `{ node: <32 hex digits>, seq }`: the client's own id
+  for it, a node the client picks and that node's counter, in the order the
+  client makes its writes. The server makes the write as that writer's
+  commit (`Db::write_as_origin`): the authority records its fate under the
+  id, and a replica uploads it under the id, which the authority dedups
+  like any resent commit (§8.2). A write whose key the store already knows
+  is not made again: it answers `Written` with seq 0, or the first one's
+  refusal. The first identity to write as a node claims it; another's key
+  naming it is refused. An insert with a key names its `rowId`; a staged
+  write names no key. So a client resends a keyed write its connection
+  left unanswered, in order, on its next connection, through whichever
+  server of the authority it reaches. The TypeScript thin client does,
+  with a fresh node per runtime and per credential. `UpdateLargeValues`
+  and streams take no key: one their connection left unanswered ends with
+  its outcome unknown.
 - `Begin` opens a mergeable or serializable transaction under a
   client-chosen open-transaction id, owned by that session. A write naming it
   is staged and answered `Staged`; a refusal while staging is kept and

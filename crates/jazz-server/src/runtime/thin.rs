@@ -12,9 +12,9 @@ use jazz::binding_host::{
     insert_options, open_transaction, read_opts, restore_options, update_options, upsert_options,
 };
 use jazz::db::{
-    Db, Error, ErrorCode, LargeValueUpdate, SerializedReadResult, StreamingMutationKind,
-    StreamingValueUpload, SubscriptionEvent, SubscriptionStream, UpdateOptions, WriteHandle,
-    WriteIdentity, block_on,
+    Db, Error, ErrorCode, LargeValueUpdate, OriginWrite, SerializedReadResult,
+    StreamingMutationKind, StreamingValueUpload, SubscriptionEvent, SubscriptionStream,
+    UpdateOptions, WriteHandle, WriteIdentity, block_on,
 };
 use jazz::ids::{AuthorSubject, RowUuid, SchemaVersionId};
 use jazz::model::transaction::OpenTransactionId;
@@ -179,6 +179,61 @@ fn as_session(identity: &mut WriteIdentity, session: AuthorSubject) -> Result<()
     }
     *identity = WriteIdentity::Session(session);
     Ok(())
+}
+
+/// A standalone write's `writeKey` option: the thin client's own id for
+/// it, `{ "node": <32 hex digits>, "seq": <its counter> }` (SPEC 8 §8.14).
+/// A client that names one may resend the write after a lost answer.
+fn write_key(options: &serde_json::Value) -> Result<Option<jazz::tx::TxId>, ThinBody> {
+    let Some(key) = options.get("writeKey").filter(|key| !key.is_null()) else {
+        return Ok(None);
+    };
+    let node = key
+        .get("node")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|hex| {
+            (hex.len() == 32)
+                .then(|| {
+                    (0..16)
+                        .map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).ok())
+                        .collect::<Option<Vec<u8>>>()
+                })
+                .flatten()
+        })
+        .and_then(|bytes| <[u8; 16]>::try_from(bytes).ok());
+    let seq = key.get("seq").and_then(serde_json::Value::as_u64);
+    match (node, seq) {
+        (Some(node), Some(seq)) => Ok(Some(jazz::tx::TxId::new(
+            jazz::time::TxTime(seq),
+            jazz::ids::NodeUuid::from_bytes(node),
+        ))),
+        _ => Err(argument(
+            "writeKey names the client's node as 32 hex digits and its write's seq",
+        )),
+    }
+}
+
+/// A standalone write, as the client's own commit `key` when it names one:
+/// a resend of a write the server already made is answered as written
+/// without writing again, with `seq` 0 (SPEC 8 §8.14).
+fn written_once(
+    db: &Db,
+    key: Option<jazz::tx::TxId>,
+    author: AuthorSubject,
+    row: RowUuid,
+    write: impl AsyncFnOnce() -> Result<WriteHandle, Error>,
+) -> ThinBody {
+    let Some(key) = key else {
+        return written(block_on(write()));
+    };
+    match block_on(db.write_as_origin(key, &author, write)) {
+        Ok(OriginWrite::Written(handle)) => written(Ok(handle)),
+        Ok(OriginWrite::Repeat) => ThinBody::Written {
+            row: *row.as_bytes(),
+            seq: 0,
+        },
+        Err(error) => error_body(&error),
+    }
 }
 
 fn written(write: Result<WriteHandle, Error>) -> ThinBody {
@@ -641,8 +696,15 @@ fn serve_thin_op(
             transaction,
         } => {
             let cells = decode_cells(&cells).map_err(host_error)?;
-            let mut options = insert_options(&options_json(&options)?).map_err(host_error)?;
+            let json = options_json(&options)?;
+            let key = write_key(&json)?;
+            let mut options = insert_options(&json).map_err(host_error)?;
             as_session(&mut options.identity, identity)?;
+            if key.is_some() && transaction.is_some() {
+                return Err(argument(
+                    "a writeKey names a standalone write, not a staged one",
+                ));
+            }
             match transaction {
                 Some(transaction) => {
                     let (open, state) = session_transaction(thin, &transaction)?;
@@ -653,7 +715,18 @@ fn serve_thin_op(
                         block_on(db.tx_ref(open).insert(&table, cells, options)),
                     )
                 }
-                None => written(block_on(db.insert(&table, cells, options))),
+                None => {
+                    let row = match (key, options.row_id) {
+                        (Some(_), None) => {
+                            return Err(argument("an insert with a writeKey names its rowId"));
+                        }
+                        (_, row) => row.unwrap_or_else(|| db.next_row_id()),
+                    };
+                    options.row_id = Some(row);
+                    written_once(db, key, identity, row, async || {
+                        db.insert(&table, cells, options).await
+                    })
+                }
             }
         }
         ThinOp::Update {
@@ -665,8 +738,15 @@ fn serve_thin_op(
         } => {
             let row = RowUuid::from_bytes(row);
             let patch = decode_cells(&patch).map_err(host_error)?;
-            let mut options = update_options(&options_json(&options)?).map_err(host_error)?;
+            let json = options_json(&options)?;
+            let key = write_key(&json)?;
+            let mut options = update_options(&json).map_err(host_error)?;
             as_session(&mut options.identity, identity)?;
+            if key.is_some() && transaction.is_some() {
+                return Err(argument(
+                    "a writeKey names a standalone write, not a staged one",
+                ));
+            }
             match transaction {
                 Some(transaction) => {
                     let (open, state) = session_transaction(thin, &transaction)?;
@@ -676,7 +756,9 @@ fn serve_thin_op(
                         block_on(db.tx_ref(open).update(&table, row, patch, options)),
                     )
                 }
-                None => written(block_on(db.update(&table, row, patch, options))),
+                None => written_once(db, key, identity, row, async || {
+                    db.update(&table, row, patch, options).await
+                }),
             }
         }
         ThinOp::Upsert {
@@ -687,9 +769,16 @@ fn serve_thin_op(
             transaction,
         } => {
             let row = RowUuid::from_bytes(row);
-            let mut options = upsert_options(&options_json(&options)?).map_err(host_error)?;
+            let json = options_json(&options)?;
+            let key = write_key(&json)?;
+            let mut options = upsert_options(&json).map_err(host_error)?;
             let cells = decode_cells(&cells).map_err(host_error)?;
             as_session(&mut options.identity, identity)?;
+            if key.is_some() && transaction.is_some() {
+                return Err(argument(
+                    "a writeKey names a standalone write, not a staged one",
+                ));
+            }
             match transaction {
                 Some(transaction) => {
                     let (open, state) = session_transaction(thin, &transaction)?;
@@ -699,7 +788,9 @@ fn serve_thin_op(
                         block_on(db.tx_ref(open).upsert(&table, row, cells, options)),
                     )
                 }
-                None => written(block_on(db.upsert(&table, row, cells, options))),
+                None => written_once(db, key, identity, row, async || {
+                    db.upsert(&table, row, cells, options).await
+                }),
             }
         }
         ThinOp::Delete {
@@ -709,8 +800,15 @@ fn serve_thin_op(
             transaction,
         } => {
             let row = RowUuid::from_bytes(row);
-            let mut options = delete_options(&options_json(&options)?).map_err(host_error)?;
+            let json = options_json(&options)?;
+            let key = write_key(&json)?;
+            let mut options = delete_options(&json).map_err(host_error)?;
             as_session(&mut options.identity, identity)?;
+            if key.is_some() && transaction.is_some() {
+                return Err(argument(
+                    "a writeKey names a standalone write, not a staged one",
+                ));
+            }
             match transaction {
                 Some(transaction) => {
                     let (open, state) = session_transaction(thin, &transaction)?;
@@ -720,7 +818,9 @@ fn serve_thin_op(
                         block_on(db.tx_ref(open).delete(&table, row, options)),
                     )
                 }
-                None => written(block_on(db.delete(&table, row, options))),
+                None => written_once(db, key, identity, row, async || {
+                    db.delete(&table, row, options).await
+                }),
             }
         }
         ThinOp::Restore {
@@ -735,8 +835,15 @@ fn serve_thin_op(
                 .map(|cells| decode_cells(&cells))
                 .transpose()
                 .map_err(host_error)?;
-            let mut options = restore_options(&options_json(&options)?).map_err(host_error)?;
+            let json = options_json(&options)?;
+            let key = write_key(&json)?;
+            let mut options = restore_options(&json).map_err(host_error)?;
             as_session(&mut options.identity, identity)?;
+            if key.is_some() && transaction.is_some() {
+                return Err(argument(
+                    "a writeKey names a standalone write, not a staged one",
+                ));
+            }
             match transaction {
                 Some(transaction) => {
                     let (open, state) = session_transaction(thin, &transaction)?;
@@ -746,7 +853,9 @@ fn serve_thin_op(
                         block_on(db.tx_ref(open).restore(&table, row, cells, options)),
                     )
                 }
-                None => written(block_on(db.restore(&table, row, cells, options))),
+                None => written_once(db, key, identity, row, async || {
+                    db.restore(&table, row, cells, options).await
+                }),
             }
         }
         ThinOp::UpdateLargeValues {

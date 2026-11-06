@@ -8,6 +8,7 @@ import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { startTestJazz, type TestJazz } from "../testing/index.js";
 import { createAccountManager, createClient, upgradeToLocalFirst } from "./index.js";
 import { ThinRuntime } from "./thin-runtime.js";
+import { decodeThinResponse, isThinResponse } from "./wire.js";
 import { JazzClient } from "../runtime/client.js";
 import type { Session } from "../runtime/context.js";
 import { LOCAL_FIRST_ISSUER, mintSelfSignedToken } from "./self-signed-token.js";
@@ -313,6 +314,45 @@ describe("thin client", () => {
       .toEqual(["after", "before"]);
     expect(deliveries.every((rows) => new Set(rows).size === rows.length)).toBe(true);
     stop();
+  }, 60_000);
+
+  it("sends a write again when its answer is lost with the connection, and the server writes it once", async () => {
+    const server = await startServer();
+    const db = await thinDb(server);
+    await db.insert(app.notes, { text: "first", done: false }).wait({ tier: "global" });
+    const runtime = db.currentRuntime() as ThinRuntime;
+    // The server commits each write, but the first answer to each never
+    // arrives: its connection drops as it comes in.
+    const internals = runtime as unknown as {
+      receive(carrier: unknown, piece: Uint8Array): void;
+      lost(carrier: unknown, error: { code: string; retry: string; message: string }): void;
+    };
+    const receive = internals.receive.bind(runtime);
+    let drops = 2;
+    internals.receive = (carrier, piece) => {
+      if (drops > 0 && isThinResponse(piece) && decodeThinResponse(piece).body.type === "written") {
+        drops -= 1;
+        internals.lost(carrier, {
+          code: "websocket_closed",
+          retry: "later",
+          message: "the answer was lost",
+        });
+        return;
+      }
+      receive(carrier, piece);
+    };
+
+    const inserted = db.insert(app.notes, { text: "in flight", done: false });
+    await inserted.wait({ tier: "global" });
+    await db.update(app.notes, inserted.value.id, { done: true }).wait({ tier: "global" });
+    expect(drops).toBe(0);
+
+    const rows = await db.all(app.notes);
+    expect(rows.map((row) => [row.text, row.done]).sort()).toEqual([
+      ["first", false],
+      ["in flight", true],
+    ]);
+    expect(runtime.pendingUploadCount()).toBe(0);
   }, 60_000);
 
   it("gives up a write in flight when the app goes offline, so waiting for sync ends", async () => {

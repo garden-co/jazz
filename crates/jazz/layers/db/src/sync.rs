@@ -5768,7 +5768,46 @@ impl Inner {
     /// A local-first principal never takes a node over, so a guest's key
     /// (unexpired, or leaked) no longer writes as its node once the account
     /// has signed in.
-    fn claim_node(&self, node: [u8; 16], identity: &AuthorSubject) -> Result<bool, Error> {
+    /// What this store knows of the commit `(node, tx)` made as another
+    /// writer's: a thin client's write (see [`Db::write_as_origin`]).
+    /// `author` must be the writer the node belongs to; the first to write
+    /// as a node claims it, like a session committing as one.
+    pub(crate) fn origin_fate(
+        &self,
+        node: [u8; 16],
+        tx: u64,
+        author: &AuthorSubject,
+    ) -> Result<crate::db::OriginFate, Error> {
+        use crate::db::OriginFate;
+        if node == *self.identity.node.as_bytes() || !self.claim_node(node, author)? {
+            return Err(Error::new(
+                ErrorCode::WriteRejected,
+                "this write id names a writer node another identity writes as",
+            ));
+        }
+        if let Some(client) = &self.client
+            && client.pending.iter().any(|p| p.id == tx_id(node, tx))
+        {
+            return Ok(OriginFate::Pending);
+        }
+        if let Some(Err(error)) = self.applied_fate(node, tx)? {
+            return Ok(OriginFate::Rejected(from_wire_error(error)));
+        }
+        Ok(match self.settled(node, tx)? {
+            Some(Some(_)) => OriginFate::Accepted,
+            Some(None) => OriginFate::Rejected(Error::new(
+                ErrorCode::WriteRejected,
+                "the server rejected this write the first time it was sent",
+            )),
+            None => OriginFate::Unseen,
+        })
+    }
+
+    pub(crate) fn claim_node(
+        &self,
+        node: [u8; 16],
+        identity: &AuthorSubject,
+    ) -> Result<bool, Error> {
         let author = self.author_code(&author_key(identity))?;
         let code = self.node_code(node)?;
         self.exec(
@@ -5920,7 +5959,7 @@ impl Inner {
             .map_err(storage)
     }
 
-    fn record_fate(
+    pub(crate) fn record_fate(
         &self,
         node: [u8; 16],
         tx: u64,
@@ -6072,7 +6111,12 @@ impl Inner {
     /// Kept by the authority for every upload and by a replica for its
     /// own, so snapshots that name individual commits stay readable after
     /// they settle.
-    fn record_settled(&self, node: [u8; 16], tx: u64, at: Option<Pos>) -> Result<(), Error> {
+    pub(crate) fn record_settled(
+        &self,
+        node: [u8; 16],
+        tx: u64,
+        at: Option<Pos>,
+    ) -> Result<(), Error> {
         let code = self.node_code(node)?;
         self.exec(
             "INSERT INTO _jazz_transactions (n, tx, t) VALUES (?1, ?2, ?3) \
@@ -6098,7 +6142,7 @@ impl Inner {
     /// (`Some(None)`), or unknown here (`None`). A row with no `seq` reads as
     /// rejected: every `record_fate` is paired with a `record_settled` in the
     /// same transaction, so an accepted commit's row always has one.
-    fn settled(&self, node: [u8; 16], tx: u64) -> Result<Option<Option<Pos>>, Error> {
+    pub(crate) fn settled(&self, node: [u8; 16], tx: u64) -> Result<Option<Option<Pos>>, Error> {
         match self.conn.cached_row(
             "SELECT t.t FROM _jazz_transactions AS t JOIN _jazz_nodes AS n ON n.n = t.n \
              WHERE n.node = ?1 AND t.tx = ?2",
@@ -7426,11 +7470,16 @@ impl Db {
                 tx_id(relayed.origin.0, relayed.origin.1),
                 relayed.clock,
             ),
-            None => (
-                bases,
-                tx_id(inner.client.as_ref().expect("client").node, seq),
-                inner.commit_hlc(seq),
-            ),
+            // A commit made as another writer's (a thin client's write,
+            // see `Db::write_as_origin`) goes up under that writer's id.
+            None => {
+                let own = inner.client.as_ref().expect("client").node;
+                let (node, tx) = inner
+                    .own_order
+                    .get(&seq)
+                    .map_or((own, seq), |&(_, node, tx)| (node, tx));
+                (bases, tx_id(node, tx), inner.commit_hlc(seq))
+            }
         };
         let mut wire: Result<Vec<WireOp>, Error> = ops.iter().map(to_wire).collect();
         if let Ok(wire) = &mut wire {

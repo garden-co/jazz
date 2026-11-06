@@ -204,6 +204,26 @@ impl WriteHandle {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TxReceipt(pub u64);
 
+/// What [`Db::write_as_origin`] did.
+#[derive(Debug)]
+pub enum OriginWrite {
+    /// It wrote, as the origin's commit.
+    Written(WriteHandle),
+    /// The origin's commit was already made here, or is known to the
+    /// authority's servers: nothing was written again.
+    Repeat,
+}
+
+/// What a store knows of a commit made as another writer's.
+#[derive(Debug)]
+pub(crate) enum OriginFate {
+    Unseen,
+    /// Made here, its upload not yet decided.
+    Pending,
+    Accepted,
+    Rejected(Error),
+}
+
 impl From<TxReceipt> for u64 {
     fn from(receipt: TxReceipt) -> u64 {
         receipt.0
@@ -611,6 +631,10 @@ struct Inner {
     /// its HLC is where the commit's versions are ([`Pos::pending`]), its
     /// writer (node, tx) what history keeps them under (`_writer`).
     pub(crate) own_order: HashMap<u64, sync::Order>,
+    /// The writer id the next standalone commit takes instead of this
+    /// store's own: a thin client's id for its write (see
+    /// [`Db::write_as_origin`]).
+    pub(crate) next_origin: Option<([u8; 16], u64)>,
     /// A wall clock tests set (see `Db::set_clock_for_test`).
     clock_for_test: Option<i64>,
     /// The diff steps a text merge may take ([`jazz_text::MERGE_WORK_BUDGET`]
@@ -1521,6 +1545,7 @@ impl Db {
                 last_stamp: (0, 0),
                 hlc_last: 0,
                 own_order: HashMap::new(),
+                next_origin: None,
                 clock_for_test: None,
                 merge_budget: jazz_text::MERGE_WORK_BUDGET,
                 authors: RefCell::new(AuthorCodes::default()),
@@ -1689,6 +1714,41 @@ impl Db {
     /// own permissions.
     pub fn require_session_pins(&self) {
         self.inner.borrow_mut().pins_required = true;
+    }
+
+    /// Run `write`, one standalone write, as the commit `origin` of another
+    /// writer: a thin client's own id for its write (its node and that
+    /// node's counter, SPEC 8 §8.14). The authority records the commit's
+    /// fate under it; a replica uploads it under it. A resend of the same
+    /// `origin`, here or through another server of the same authority, is
+    /// not written again: it returns what this store knows of the first.
+    /// `author` is the session the write runs as; the first to write as a
+    /// node claims it.
+    pub async fn write_as_origin(
+        &self,
+        origin: crate::tx::TxId,
+        author: &AuthorSubject,
+        write: impl AsyncFnOnce() -> Result<WriteHandle, Error>,
+    ) -> Result<OriginWrite, Error> {
+        let (node, tx) = (*origin.node.as_bytes(), origin.time.0);
+        {
+            let inner = self.inner.borrow();
+            if inner.tx.is_some() {
+                return Err(unsupported(
+                    "a write as another writer's commit inside a transaction",
+                ));
+            }
+            match inner.origin_fate(node, tx, author)? {
+                OriginFate::Unseen => {}
+                OriginFate::Pending | OriginFate::Accepted => return Ok(OriginWrite::Repeat),
+                OriginFate::Rejected(error) => return Err(error),
+            }
+        }
+        self.inner.borrow_mut().next_origin = Some((node, tx));
+        let written = write().await;
+        // A write that made no commit leaves the next one its own.
+        self.inner.borrow_mut().next_origin = None;
+        written.map(OriginWrite::Written)
     }
 
     /// Whether this store is the global authority.
@@ -8134,12 +8194,29 @@ impl Inner {
 
     /// Give commit `seq` its HLC if it has none yet: its writes are at it,
     /// written by this store's node as tx `seq`.
-    fn stamp_commit(&mut self, seq: u64) {
-        if self.me != sync::ACCEPTED && !self.own_order.contains_key(&seq) {
-            let hlc = self.next_hlc();
-            let node = *self.identity.node.as_bytes();
-            self.own_order.insert(seq, (hlc, node, seq));
+    fn stamp_commit(&mut self, seq: u64) -> Result<(), Error> {
+        // A commit made as another writer's (a thin client's write) is
+        // kept under that writer's id: a relay uploads it so, and the
+        // authority records its fate so, so a resend of it anywhere gets
+        // that fate (SPEC 8 §8.14).
+        let origin = if self.tx.is_none() {
+            self.next_origin.take()
+        } else {
+            None
+        };
+        if self.me == sync::ACCEPTED {
+            if let Some((node, tx)) = origin {
+                self.record_fate(node, tx, &Ok(()))?;
+                self.record_settled(node, tx, Some(Pos::at(seq)))?;
+            }
+            return Ok(());
         }
+        if !self.own_order.contains_key(&seq) {
+            let hlc = self.next_hlc();
+            let (node, tx) = origin.unwrap_or((*self.identity.node.as_bytes(), seq));
+            self.own_order.insert(seq, (hlc, node, tx));
+        }
+        Ok(())
     }
 
     /// Commit `seq`'s HLC, or the one a commit begun now would take.
@@ -8195,7 +8272,7 @@ impl Inner {
         // An explicit timestamp (a backfill) stamps this write alone; the
         // clock's monotonic stamps go on.
         let at = op.updated_at_ms().map_or(at, |ms| ms as i64);
-        self.stamp_commit(seq);
+        self.stamp_commit(seq)?;
         self.writer = Some(Stamp {
             at,
             author: self.author_code(&author_key(&author))?,
