@@ -336,6 +336,13 @@ export declare function captureTextAnchor(text: string, version: number | undefi
 /** The range `start..end` (UTF-16 code units) of `text`. */
 export declare function captureTextRange(text: string, version: number | undefined | null, start: number, end: number): JsonValue
 
+/**
+ * Check an app's shipped migrations (the `ClientMigrations` JSON) leading
+ * to the schema hash `target` as a deployment to a new authority would,
+ * without opening a database. `jazz-tools validate` runs it.
+ */
+export declare function checkClientMigrations(migrations: string, target: string): void
+
 export interface DeleteOptions {
   author?: Uint8Array
   attribution?: Uint8Array
