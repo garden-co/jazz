@@ -1933,11 +1933,9 @@ fn validate_join(
         },
         JoinTarget::RowId => {
             if join.table != target_table {
-                return Err(not_ref_compatible(
+                return Err(malformed_join(
                     &join.table,
-                    &join.on_column,
-                    &target_table,
-                    None,
+                    &format!("its ids are matched where the ids of {target_table} are expected"),
                 ));
             }
         }
@@ -2164,21 +2162,20 @@ fn validate_reachable(
     let root_key_type = &ColumnType::Uuid;
     if reachable.access_row_column == "id" {
         if access.name != root.name {
-            return Err(not_ref_compatible(
+            return Err(malformed_join(
                 &reachable.access_table,
-                &reachable.access_row_column,
-                &root.name,
-                None,
+                &format!("its ids are matched where the ids of {} are expected", root.name),
             ));
         }
     } else if access.name == root.name {
         let access_column_type = planner_column_type(access, &reachable.access_row_column)?;
         if !column_types_comparable(access_column_type, root_key_type) {
-            return Err(not_ref_compatible(
+            return Err(malformed_join(
                 &reachable.access_table,
-                &reachable.access_row_column,
-                &root.name,
-                None,
+                &format!(
+                    "column {} is matched against the ids of {}, so it must be a uuid",
+                    reachable.access_row_column, root.name
+                ),
             ));
         }
     } else {
@@ -2215,11 +2212,12 @@ fn validate_reachable(
             })?,
         JoinTarget::RowId => {
             if reachable.access_team_column != "id" {
-                return Err(not_ref_compatible(
+                return Err(malformed_join(
                     &reachable.access_table,
-                    &reachable.access_team_column,
-                    &reachable.access_table,
-                    None,
+                    &format!(
+                        "a team matched by row id is read from id, not from {}",
+                        reachable.access_team_column
+                    ),
                 ));
             }
             &access.name

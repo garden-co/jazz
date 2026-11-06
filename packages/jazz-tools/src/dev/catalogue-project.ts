@@ -245,6 +245,23 @@ function stepKey(column: string): RegExp {
   return new RegExp(`^\\s*(?:${name}|"${name}"|'${name}')\\s*:`);
 }
 
+/**
+ * The lines after `lines[index]` up to the end of the block it sits in: the
+ * first later line indented less closes it. A stub's TODO sits in its
+ * table's `migrate` block, so this stops before the next table and before
+ * the `from`/`to` witnesses, which name every column.
+ */
+function tableBlockAfter(lines: readonly string[], index: number): readonly string[] {
+  const indent = (line: string) => line.length - line.trimStart().length;
+  const own = indent(lines[index]!);
+  const block: string[] = [];
+  for (const line of lines.slice(index + 1)) {
+    if (line.trim() !== "" && indent(line) < own) break;
+    block.push(line);
+  }
+  return block;
+}
+
 /** Refuse a migration file that still holds a step its stub left to fill in. */
 async function refuseUnfilledStubs(migrationsDir: string): Promise<void> {
   const files = await readdir(migrationsDir).catch(() => [] as string[]);
@@ -254,8 +271,8 @@ async function refuseUnfilledStubs(migrationsDir: string): Promise<void> {
     lines.forEach((line, index) => {
       const todo = UNFILLED_STUB_TODO.exec(line);
       // Authors often fill the step in under the comment and keep it, so
-      // only a column that no later line gives a step is unfilled.
-      if (todo && !lines.slice(index + 1).some((later) => stepKey(todo[2]!).test(later))) {
+      // only a column its table's block gives no step is unfilled.
+      if (todo && !tableBlockAfter(lines, index).some((later) => stepKey(todo[2]!).test(later))) {
         unfilled.push(`  ${join(basename(migrationsDir), file)}:${index + 1}: ${todo[1]}`);
       }
     });

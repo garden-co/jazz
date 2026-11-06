@@ -13,6 +13,8 @@ import {
 } from "./cli.js";
 import { describe, expect, it } from "vitest";
 import { createCliFixtures } from "../tests/cli/fixtures.js";
+import { renderMigrationStub } from "./dev/migrations.js";
+import { schema as s } from "./index.js";
 
 const {
   tmpBase,
@@ -286,6 +288,37 @@ describe("cli validate", () => {
       ].join("\n"),
     );
 
+    await validate({ schemaDir: root });
+  });
+
+  it("refuses a generated stub's unfilled step and accepts it once filled in", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await writeFile(join(root, "permissions.ts"), "export default {};\n");
+    await mkdir(join(root, "migrations"), { recursive: true });
+    // A real stub ends with from/to witnesses that name every column.
+    const stub = renderMigrationStub({
+      fromHash: "aaaaaaaaaaaa",
+      toHash: "bbbbbbbbbbbb",
+      fromSchema: s.defineApp({ todos: s.table({ title: s.string() }, {}) }, { migrations: "none" })
+        .wasmSchema,
+      toSchema: s.defineApp(
+        { todos: s.table({ title: s.string(), points: s.int() }, {}) },
+        { migrations: "none" },
+      ).wasmSchema,
+    });
+    const todo = '// TODO: Added required column "points" needs an explicit default.';
+    expect(stub).toContain(todo);
+    const file = join(root, "migrations", "20260101-add-points.ts");
+    await writeFile(file, stub);
+    await expect(validate({ schemaDir: root })).rejects.toThrow(
+      "A migration still has steps to fill in, so it cannot deploy:\n  migrations/20260101-add-points.ts:",
+    );
+
+    await writeFile(
+      file,
+      stub.replace(todo, `${todo}\n      "points": m.add.int({ default: 1 }),`),
+    );
     await validate({ schemaDir: root });
   });
 
