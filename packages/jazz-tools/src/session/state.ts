@@ -19,6 +19,7 @@ type WipeableClient = {
     markReplaced?(reason: DbReplacedReason): void;
     waitForSync?(options?: { timeoutMs?: number }): Promise<void>;
     deleteClientStorage?(): Promise<void>;
+    getSyncStatus?(): { pendingUploads: number };
   };
 };
 export type JazzSessionOperation =
@@ -214,6 +215,12 @@ export async function createJazzSessionOwner<
           const db = (client as WipeableClient).db;
           // Upload what the server still accepts before wiping the rest.
           await db?.waitForSync?.({ timeoutMs: 5_000 }).catch(() => {});
+          // Say what the wipe takes, as a sign-out past refused writes does.
+          const writes = db?.getSyncStatus?.().pendingUploads ?? 0;
+          if (writes > 0)
+            console.warn(
+              `Jazz signed out and wiped ${writes} write(s) that hadn't reached the server, as clearOnSignOut asks: they are gone from this device.`,
+            );
           await db?.deleteClientStorage?.();
           await client.shutdown();
         } else if (signsOut) {
@@ -449,8 +456,10 @@ type SigningOutClient = {
  * the sign-out would leave them no way out, through reloads too: it signs
  * out and says what became of those writes. A persistent client keeps them
  * on this device, under that account, and uploads them when it next opens;
- * one that keeps nothing (in memory, or thin) loses them. Any other failure
- * (an outage) may pass, so it still fails the sign-out for the app to retry.
+ * one that keeps nothing (in memory, or thin) loses them. Any refusal counts,
+ * an `expired` credential too: the user is leaving, and no one renews it once
+ * they have. Any other failure (an outage) may pass, so it still fails the
+ * sign-out for the app to retry.
  */
 async function signOutOf(client: SigningOutClient) {
   try {

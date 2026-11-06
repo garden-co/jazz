@@ -389,6 +389,35 @@ it("clearOnSignOut wipes the signed-out account's storage instead of syncing it"
   await session.close();
 });
 
+it("clearOnSignOut says how many writes its wipe takes", async () => {
+  const old = handle("old");
+  const accounts = new AccountManager(
+    {
+      createLocalFirst: () => old,
+      restoreLocalFirst: () => old,
+      logout() {},
+      loginWithBackend: async () => old,
+    },
+    old,
+  );
+  const openClient = async () => ({
+    db: {
+      // The server didn't take them within the wait (it refuses this user).
+      waitForSync: async () => Promise.reject(new Error("timed out")),
+      getSyncStatus: () => ({ pendingUploads: 3 }),
+      deleteClientStorage: async () => {},
+    },
+    shutdown: async () => {},
+  });
+  const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+  const session = await createJazzSessionOwner({ accounts, openClient, clearOnSignOut: true });
+  await session.logout();
+  expect(session.getSnapshot().status).toBe("signed-out");
+  expect(warned).toHaveBeenCalledWith(expect.stringMatching(/wiped 3 write\(s\)/));
+  warned.mockRestore();
+  await session.close();
+});
+
 it("clearOnSignOut leaves a thin client's writes to sync, as it stores nothing", async () => {
   const old = handle("old");
   const accounts = new AccountManager(
