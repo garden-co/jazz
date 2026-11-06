@@ -135,6 +135,7 @@ import {
 import { toError } from "./util.js";
 import { isThinDb, upgradeDbToLocalFirst, type LocalFirstLoader } from "./local-first-upgrade.js";
 import { DbReplacedError, type DbReplacedReason } from "./db-replaced-error.js";
+import { RuntimeClosedError } from "./runtime-closed-error.js";
 
 type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
 type AnyRuntimeSource = RuntimeSource<any>;
@@ -3872,7 +3873,15 @@ export class Db {
    * @returns Array of typed objects matching the query
    */
   async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
-    return this.allInternal(query, lowerPublicDbQueryOptions(options));
+    try {
+      return await this.allInternal(query, lowerPublicDbQueryOptions(options));
+    } catch (error) {
+      // Begun before this Db handed over to a successor, and ended by that
+      // (its own runtime closing): the successor answers it. Any other
+      // error is the read's own answer.
+      if (this.successor && isRuntimeClosed(error)) return this.current().all(query, options);
+      throw error;
+    }
   }
 
   private async allInternal<T>(
@@ -4955,4 +4964,11 @@ export function holdCredentialRenewal(db: object): () => void {
     released = true;
     credentialRenewers.set(db, (credentialRenewers.get(db) ?? 1) - 1);
   };
+}
+
+/** `error` says the runtime closed, also when a connection wrapped it as its cause. */
+function isRuntimeClosed(error: unknown): boolean {
+  for (let current = error; current instanceof Error; current = current.cause)
+    if (current instanceof RuntimeClosedError) return true;
+  return false;
 }
