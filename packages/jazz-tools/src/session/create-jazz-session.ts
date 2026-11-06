@@ -98,7 +98,10 @@ export async function createJazzClient(config: JazzClientConfig): Promise<Browse
     clearOnSignOut,
     linkGuestOnSignUp,
     client: loadLocalFirst,
+    // The account manager's own: neither is client configuration, and a Db
+    // keeps only cloneable data (db.getConfig()).
     store: _store,
+    fetch: _fetch,
     ...clientConfig
   } = { ...config, serverUrl };
   const accounts = await createAccountManagerWithMinter(
@@ -230,7 +233,15 @@ function upgradableClient(thin: JazzClient): JazzClient {
  * client straight away, on this browser's local-first account.
  */
 async function createDeviceOnlySession(config: JazzClientConfig): Promise<BrowserJazzSession> {
-  const { initial, clearOnSignOut, client: loadLocalFirst, store: _store, ...rest } = config;
+  const {
+    initial,
+    clearOnSignOut,
+    linkGuestOnSignUp: _linkGuestOnSignUp,
+    client: loadLocalFirst,
+    store: _store,
+    fetch: _fetch,
+    ...rest
+  } = config;
   if (!loadLocalFirst) {
     throw new Error(
       'serverUrl: null keeps Jazz on this device, which needs the local-first client: pass client: () => import("jazz-tools/local-first")',

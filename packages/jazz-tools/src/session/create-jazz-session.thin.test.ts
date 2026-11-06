@@ -94,6 +94,29 @@ describe("browser session", () => {
     expect((await db(session).all(app.notes)).map((row) => row.text)).toEqual(["thin"]);
   }, 60_000);
 
+  it("takes a custom sign-in fetch without putting it into the client's config", async () => {
+    // rc.3 adopter finding: the JSDoc'd `fetch` hook reached the Db config, so
+    // opening the client threw DataCloneError in db.getConfig().
+    const server = await startServer();
+    const session = await createJazzClient({
+      scope: server.appId,
+      serverUrl: server.url,
+      store: memoryStore(),
+      initial: "local-first",
+      driver: { type: "memory" },
+      fetch: (input, init) => fetch(input, init),
+    });
+    sessions.push(session);
+    expect(session.getSnapshot().status).toBe("ready");
+    expect(db(session).getConfig()).not.toHaveProperty("fetch");
+    expect(db(session).getConfig()).not.toHaveProperty("store");
+
+    await db(session).upgradeToLocalFirst(loadLocalFirst);
+    expect(isThinDb(db(session))).toBe(false);
+    expect(db(session).getConfig()).not.toHaveProperty("fetch");
+    await db(session).insert(app.notes, { text: "custom fetch" }).wait({ tier: "global" });
+  }, 60_000);
+
   it("upgrades on demand in place: the same Db keeps its live queries and takes writes", async () => {
     const server = await startServer();
     const session = await open(server, memoryStore());

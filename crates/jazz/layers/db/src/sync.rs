@@ -3279,8 +3279,8 @@ impl Inner {
     }
 
     /// The parents whose read permission rows of `table` inherit, `depth`
-    /// hops up: a replica holds the row its read rests on, as it would
-    /// had it read that row itself.
+    /// hops up, with what each parent's read rests on: a replica holds the
+    /// row its read rests on, as it would had it read that row itself.
     fn inherited_support(
         &self,
         table: &crate::values::Table,
@@ -3323,7 +3323,10 @@ impl Inner {
                 outer: table.stored_name(column).to_owned(),
                 outer_array: crate::compile::is_array(table, column),
                 inner_array: false,
-                nested: self.inherited_support(parent, depth - 1)?,
+                // The parent's read rests on its own policy's support,
+                // its correlated `EXISTS` clauses included, not just on its
+                // parents in turn.
+                nested: self.policy_support(parent, depth - 1)?,
             });
         }
         Ok(support)
