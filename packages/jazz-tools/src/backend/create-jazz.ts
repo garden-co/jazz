@@ -2297,8 +2297,8 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
   function nodeHandler(req: IncomingMessage, res: ServerResponse, next?: () => void): void {
     // Only Jazz's own paths: a request for the app passes on untouched, its
     // body unread, whatever read it before.
-    const { pathname } = new URL(req.url ?? "/", "http://localhost");
-    if (pathname !== basePath && !pathname.startsWith(`${basePath}/`)) {
+    const pathname = requestPathname(req.url);
+    if (pathname === null || (pathname !== basePath && !pathname.startsWith(`${basePath}/`))) {
       if (next) return next();
       res.statusCode = 404;
       res.end();
@@ -2845,13 +2845,39 @@ const SOCKET_PATH = /^\/apps\/[^/]+\/ws$/;
 
 /** Whether an upgrade's URL is a sync socket of this Jazz (`<basePath>/apps/<app>/ws`). */
 function isSocketUpgrade(url: string | undefined, basePath: string): boolean {
-  let pathname: string;
+  const pathname = requestPathname(url);
+  return (
+    pathname !== null &&
+    pathname.startsWith(`${basePath}/`) &&
+    SOCKET_PATH.test(pathname.slice(basePath.length))
+  );
+}
+
+/** A Node request's path, or null for one no URL can be made of: not Jazz's. */
+function requestPathname(url: string | undefined): string | null {
   try {
-    pathname = new URL(url ?? "/", "http://localhost").pathname;
+    return new URL(url ?? "/", "http://localhost").pathname;
   } catch {
-    return false;
+    return null;
   }
-  return pathname.startsWith(`${basePath}/`) && SOCKET_PATH.test(pathname.slice(basePath.length));
+}
+
+/**
+ * Whether `server` is an HTTP/2 server that can't serve HTTP/1: one without
+ * upgrades (h2c, or TLS without `allowHTTP1`). Node keeps the options under
+ * a symbol; a server that hides them is taken as able.
+ */
+function http2Only(server: object): boolean {
+  const name = server.constructor?.name;
+  if (name === "Http2Server") return true;
+  if (name !== "Http2SecureServer") return false;
+  const key = Object.getOwnPropertySymbols(server).find(
+    (symbol) => symbol.description === "options",
+  );
+  const options = key
+    ? (server as Record<symbol, { allowHTTP1?: boolean } | undefined>)[key]
+    : undefined;
+  return options !== undefined && options.allowHTTP1 !== true;
 }
 
 /**
@@ -2930,8 +2956,8 @@ function facade(entry: Entry): Jazz {
     handle,
     next: () => ({ GET: nextHandler, POST: nextHandler, DELETE: nextHandler }),
     async attach(server) {
-      // An HTTP/2 server without HTTP/1 (h2c) never sees a WebSocket upgrade.
-      if (server.constructor?.name === "Http2Server") {
+      // An HTTP/2 server without HTTP/1 never sees a WebSocket upgrade.
+      if (http2Only(server)) {
         throw new Error(
           "attach(): an HTTP/2 server has no WebSocket upgrades; pass an HTTP/1 server (or an HTTPS one with allowHTTP1), or serve Jazz with handle() alone, over its HTTP stream",
         );
@@ -2987,9 +3013,9 @@ function facade(entry: Entry): Jazz {
       const now = settledNow(entry);
       if (now) return now.nodeHandler(req, res, next);
       const prefix = basePath();
-      const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
+      const pathname = requestPathname(req.url);
       // Requests Jazz doesn't serve pass on without opening the store.
-      if (pathname !== prefix && !pathname.startsWith(`${prefix}/`)) {
+      if (pathname === null || (pathname !== prefix && !pathname.startsWith(`${prefix}/`))) {
         if (next) return next();
         res.statusCode = 404;
         res.end();

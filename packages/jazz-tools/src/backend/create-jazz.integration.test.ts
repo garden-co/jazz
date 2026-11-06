@@ -10,6 +10,7 @@ import {
 } from "node:http";
 import {
   createServer as createHttp2Server,
+  createSecureServer as createSecureHttp2Server,
   type Http2SecureServer,
   type Http2Server,
 } from "node:http2";
@@ -1985,6 +1986,32 @@ describe("createJazz", () => {
       });
     await upgrade("/jazz/apps/a/b/ws");
     await upgrade("http://[/jazz/apps/a/ws");
+    // A Host header no URL can be made of gets a 400, not a crash.
+    const badHost = await new Promise<number | undefined>((resolve, reject) => {
+      const req = httpRequest({
+        host: "127.0.0.1",
+        port: (server.address() as AddressInfo).port,
+        path: "/jazz/apps/a/ws",
+        headers: { host: "[", connection: "Upgrade", upgrade: "websocket" },
+      });
+      req.on("response", (res) => resolve(res.statusCode));
+      req.on("error", reject);
+      req.end();
+    });
+    expect(badHost).toBe(400);
+    // And a plain request with a URL like that passes on (here: 404).
+    const badUrl = await new Promise<number | undefined>((resolve, reject) => {
+      const req = httpRequest(
+        { host: "127.0.0.1", port: (server.address() as AddressInfo).port, path: "http://[/x" },
+        (res) => {
+          res.resume();
+          resolve(res.statusCode);
+        },
+      );
+      req.on("error", reject);
+      req.end();
+    });
+    expect(badUrl).toBe(404);
     expect(others).toEqual(["/_next/webpack-hmr", "/jazz/apps/a/b/ws", "http://[/jazz/apps/a/ws"]);
     // Attaching again changes nothing.
     await jazz.attach(server);
@@ -1997,6 +2024,11 @@ describe("createJazz", () => {
     cleanups.push(() => jazz.close());
     const h2 = createHttp2Server();
     await expect(jazz.attach(h2)).rejects.toThrow(/an HTTP\/2 server has no WebSocket upgrades/);
+    // Over TLS, only one that also serves HTTP/1 can upgrade.
+    await expect(jazz.attach(createSecureHttp2Server())).rejects.toThrow(
+      /an HTTP\/2 server has no WebSocket upgrades/,
+    );
+    await jazz.attach(createSecureHttp2Server({ allowHTTP1: true }));
   });
 
   it("attaches with its remote core down at start, names the core, and serves once it is up", async () => {
