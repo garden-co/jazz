@@ -6,7 +6,8 @@ import { isThinDb, type LocalFirstLoader } from "../runtime/local-first-upgrade.
 import { DbReplacedError } from "../runtime/db-replaced-error.js";
 import { Db } from "../runtime/db.js";
 import { WriteWaitTimeoutError } from "../runtime/client.js";
-import { ThinRemoteError, ThinRuntime } from "../thin/thin-runtime.js";
+import { ThinConnectionLostError, ThinRemoteError, ThinRuntime } from "../thin/thin-runtime.js";
+import { RuntimeClosedError } from "../runtime/runtime-closed-error.js";
 import type { AccountStore } from "../accounts/persistence.js";
 import { startTestJazz, type TestJazz } from "../testing/index.js";
 import { createJazzClient, type BrowserJazzSession } from "./create-jazz-session.js";
@@ -267,6 +268,44 @@ describe("browser session", () => {
     await write.wait({ tier: "global" });
     expect(read).toHaveBeenCalled();
     read.mockRestore();
+  }, 60_000);
+
+  it("answers a read the upgrade ended on the thin runtime from the local-first Db", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const kept = db(session);
+    await kept.insert(app.notes, { text: "mine" }).wait({ tier: "global" });
+    const thinRuntime = kept.currentRuntime() as ThinRuntime;
+    let upgraded!: Promise<void>;
+    // The read reaches the thin runtime just as the upgrade closes it.
+    vi.spyOn(thinRuntime, "query").mockImplementationOnce(async () => {
+      await upgraded;
+      throw new ThinConnectionLostError("the thin runtime is closed", {
+        cause: new RuntimeClosedError("the thin runtime is closed"),
+      });
+    });
+    const read = kept.one(app.notes);
+    upgraded = kept.upgradeToLocalFirst(loadLocalFirst);
+    await upgraded;
+    expect((await read)?.text).toBe("mine");
+  }, 60_000);
+
+  it("keeps a read's own error after the upgrade instead of asking the local-first Db again", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const kept = db(session);
+    await kept.insert(app.notes, { text: "mine" }).wait({ tier: "global" });
+    const thinRuntime = kept.currentRuntime() as ThinRuntime;
+    let upgraded!: Promise<void>;
+    const denied = new ThinRemoteError("permission_denied", "not yours");
+    vi.spyOn(thinRuntime, "query").mockImplementationOnce(async () => {
+      await upgraded;
+      throw denied;
+    });
+    const read = kept.all(app.notes);
+    upgraded = kept.upgradeToLocalFirst(loadLocalFirst);
+    await upgraded;
+    await expect(read).rejects.toBe(denied);
   }, 60_000);
 
   it("counts and uploads the thin Db's unsent writes after the upgrade", async () => {
