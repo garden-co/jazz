@@ -378,14 +378,20 @@ describe("createJazz", () => {
   it("leaves a body a parser read before nodeHandler to the app's routes", async () => {
     const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
     cleanups.push(() => jazz.close());
-    // What express.json() does before the app's handlers: read the stream
-    // whole and leave the result on `req.body`.
+    // What express.json() and express.text() do before the app's handlers:
+    // read the stream whole and leave the result on `req.body`.
     const parse = (req: IncomingMessage & { body?: unknown }, done: () => void) => {
       const chunks: Buffer[] = [];
       req.on("data", (chunk: Buffer) => chunks.push(chunk));
       req.on("end", () => {
         const raw = Buffer.concat(chunks);
-        req.body = req.headers["content-type"] === "application/json" ? JSON.parse(`${raw}`) : raw;
+        const type = req.headers["content-type"];
+        req.body =
+          type === "application/json"
+            ? JSON.parse(`${raw}`)
+            : type === "text/plain"
+              ? `${raw}`
+              : raw;
         done();
       });
     };
@@ -409,22 +415,98 @@ describe("createJazz", () => {
     expect(echoed.status).toBe(200);
     expect(await echoed.json()).toEqual({ got: { a: 1 } });
 
-    // A Jazz route whose body a JSON parser took fails plainly, naming the
-    // fix, instead of with a locked-stream error.
+    // A JSON body express.json() parsed serves Jazz's JSON routes as JSON:
+    // the link route gets to judge it (no proof here), not a parser error.
+    const linked = await fetch(`${origin}/jazz/apps/${jazz.appId}/accounts/backend-link`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-test-user": "alice" },
+      body: JSON.stringify({ challenge: "c", proof: "p" }),
+    });
+    expect(linked.status).toBeGreaterThanOrEqual(400);
+    expect(linked.status).toBeLessThan(500);
+    expect(await linked.text()).not.toBe("request_body_already_read");
+
+    // A Jazz route whose body another parser took (as a string) fails
+    // plainly, naming the fix, instead of with a locked-stream error.
     const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
     try {
       const taken = await fetch(`${origin}/jazz/auth/sign-in`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "text/plain" },
         body: "{}",
       });
       expect(taken.status).toBe(500);
+      // A code the browser's client reports, not a bare "Internal error".
+      expect(await taken.text()).toBe("request_body_already_read");
       expect(errors.mock.calls.flat().join(" ")).toMatch(
         /mount jazz.nodeHandler before body parsers/,
       );
     } finally {
       errors.mockRestore();
     }
+  });
+
+  it("signs a browser in behind a host's JSON body parser", async () => {
+    const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    cleanups.push(() => jazz.close());
+    const parsed: string[] = [];
+    let strict = true;
+    // What Fastify does to a JSON request (400 on an empty one), or else
+    // what express.json() does (read it whole onto `req.body`), before Jazz.
+    const server: Server = createServer((req, res) => {
+      if (req.headers["content-type"] === "application/json") {
+        const chunks: Buffer[] = [];
+        req.on("data", (chunk: Buffer) => chunks.push(chunk));
+        req.on("end", () => {
+          const raw = Buffer.concat(chunks);
+          parsed.push(req.url ?? "");
+          if (raw.length === 0 && strict) {
+            res.statusCode = 400;
+            return void res.end("FST_ERR_CTP_EMPTY_JSON_BODY");
+          }
+          (req as { body?: unknown }).body = raw.length ? JSON.parse(`${raw}`) : {};
+          jazz.nodeHandler(req, res);
+        });
+        return;
+      }
+      jazz.nodeHandler(req, res);
+    });
+    await jazz.attach(server);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    cleanups.push(
+      () =>
+        new Promise((resolve) => {
+          server.closeAllConnections();
+          server.close(resolve);
+        }),
+    );
+    const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    // Sign-in asks the backend with empty POSTs: no JSON body, no JSON type.
+    const alice = await userSession(jazz.appId, origin, "alice");
+    await alice.db
+      .insert(app.todos, { title: "signed in", owner: alice.session!.user! })
+      .wait({ tier: "global" });
+    expect(parsed).toEqual([]);
+    // A parser that read an empty JSON body whole (an older client sends
+    // one) leaves Jazz nothing to miss.
+    strict = false;
+    const read = await new Promise<number | undefined>((resolve, reject) => {
+      const req = httpRequest(
+        `${origin}/jazz/apps/${jazz.appId}/accounts/backend-user`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-test-user": "alice" },
+        },
+        (res) => {
+          res.resume();
+          resolve(res.statusCode);
+        },
+      );
+      req.on("error", reject);
+      req.end();
+    });
+    expect(read).toBe(200);
+    expect(parsed).toHaveLength(1);
   });
 
   it("signs users in with fromJWT and keeps their account and claims", async () => {
@@ -737,6 +819,48 @@ describe("createJazz", () => {
       .toMatchObject({ state: "offline", reason: "auth" });
     expect(upgrades).toBeGreaterThan(0);
     expect(await jazz.db.all(app.todos)).toEqual([]);
+  }, 30_000);
+
+  // A guest whose browser just signed up (the app set the user's cookie)
+  // reconnects before it links: its writes still upload as the guest's.
+  it("lets a guest sync while a user's cookie rides on its socket", async () => {
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      // The documented setup: the session cookie's user, else a guest.
+      authenticate: (request) => {
+        const user = /(?:^|; )sid=([^;]+)/.exec(request.headers.get("cookie") ?? "")?.[1];
+        return user ? { userId: user } : acceptLocalFirstAuth(request);
+      },
+    });
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz, { sockets: true });
+    const RealWebSocket = globalThis.WebSocket;
+    globalThis.WebSocket = class extends RealWebSocket {
+      constructor(url: string | URL, options?: { headers?: Record<string, string> }) {
+        const cookie = new URL(url).host === new URL(origin).host ? { cookie: "sid=alice" } : {};
+        super(url, { ...options, headers: { ...options?.headers, ...cookie } } as never);
+      }
+    } as typeof WebSocket;
+    cleanups.push(async () => {
+      globalThis.WebSocket = RealWebSocket;
+    });
+    const guestSession = await createJazzClient({
+      app,
+      permissions,
+      serverUrl: `${origin}/jazz`,
+      driver: { type: "memory" },
+      initial: "local-first",
+    });
+    cleanups.push(() => guestSession.close());
+    const guest = guestSession.getSnapshot().client!;
+    const row = await guest.db
+      .insert(app.todos, { title: "the guest's", owner: guest.session!.user! })
+      .wait({ tier: "global" });
+    expect((await jazz.db.all(app.todos.where({ id: row.id }))).map((t) => t.title)).toEqual([
+      "the guest's",
+    ]);
   }, 30_000);
 
   it("ends a guest's open sync session once authenticate stops accepting guests", async () => {

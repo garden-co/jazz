@@ -1,7 +1,8 @@
-import { Effect, Fiber, Layer, Stream } from "effect";
+import { Effect, Fiber, Layer, Schema, Stream } from "effect";
 import { HttpServerRequest } from "effect/http";
 import { describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
+import { createJazz, memory } from "../backend/index.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { startTestJazz } from "../testing/index.js";
 import { Jazz, JazzBackend, JazzNoAccount, JazzWriteRejected } from "./backend/index.js";
@@ -176,6 +177,49 @@ describe("JazzBackend Effect layer", () => {
       expect(seen).toEqual([["diarist-a entry"], ["diarist-b entry"]]);
     } finally {
       await server.stop();
+    }
+  }, 60_000);
+  it("leaves the request body to the handler under forCurrentReqUser", async () => {
+    const seenBodies: Array<ReadableStream | null> = [];
+    const jazz = createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate: (request) => {
+        seenBodies.push(request.body);
+        return { userId: "body-reader" };
+      },
+    });
+    try {
+      await jazz.createAccountFor("body-reader");
+      const handler = Effect.gen(function* () {
+        const body = yield* HttpServerRequest.schemaBodyJson(
+          Schema.Struct({ text: Schema.String }),
+        );
+        const created = yield* createPost(body.text);
+        return created;
+      });
+      const created = await Effect.runPromise(
+        handler.pipe(
+          JazzBackend.forCurrentReqUser(),
+          Effect.provideService(
+            HttpServerRequest.HttpServerRequest,
+            HttpServerRequest.fromWeb(
+              new Request("http://localhost/posts", {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ text: "from the body" }),
+              }),
+            ),
+          ),
+          Effect.provide(JazzBackend.layerJazz(jazz)),
+        ),
+      );
+      expect(created).toMatchObject({ _tag: "Some", value: { text: "from the body" } });
+      // authenticate decides from the method, URL and headers; the body stays unread.
+      expect(seenBodies).toEqual([null]);
+    } finally {
+      await jazz.close();
     }
   }, 60_000);
 });
