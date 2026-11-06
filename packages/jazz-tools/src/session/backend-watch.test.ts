@@ -674,6 +674,69 @@ it("signs a guest in as a user who already has an account, without linking", asy
   await session.close();
 });
 
+// A network blip as the watch signs a user in (a guest's first visit after
+// sign-in): the watch tries again once it passes, with no focus needed.
+it("tries a sign-in that failed on the network again, without waiting for focus", async () => {
+  let blip = true;
+  const loginWithBackend = vi.fn(async () => {
+    if (blip) throw new TypeError("Failed to fetch");
+    return user("alice");
+  });
+  const session = await createJazzSessionOwner({
+    accounts: new AccountManager(
+      { createLocalFirst: () => guest, loginWithBackend, logout() {} },
+      guest,
+    ),
+    openClient: async () => ({ shutdown: async () => {} }),
+  });
+  let probeFails = true;
+  const watch = watchBackendUser(
+    session,
+    async () => {
+      if (probeFails) throw new TypeError("Failed to fetch");
+      return { ...user("alice").identity, hasAccount: true };
+    },
+    { onFocus: () => () => {} },
+    { retryMs: 10 },
+  );
+  // The backend can't be asked at first, then the sign-in itself fails.
+  await settle(5);
+  probeFails = false;
+  await expect.poll(() => loginWithBackend.mock.calls.length).toBeGreaterThan(0);
+  expect(session.getSnapshot().account).toBe(guest);
+  blip = false;
+  await expect.poll(() => session.getSnapshot().account?.identity.subject).toBe("alice");
+  // Once it followed, nothing more is scheduled.
+  const calls = loginWithBackend.mock.calls.length;
+  await settle(100);
+  expect(loginWithBackend).toHaveBeenCalledTimes(calls);
+  watch.stop();
+  await session.close();
+});
+
+it("doesn't retry a sign-in the backend refused", async () => {
+  const loginWithBackend = vi.fn(async () => {
+    throw new AccountAuthError("account_registry_refused", 403);
+  });
+  const session = await createJazzSessionOwner({
+    accounts: new AccountManager(
+      { createLocalFirst: () => guest, loginWithBackend, logout() {} },
+      guest,
+    ),
+    openClient: async () => ({ shutdown: async () => {} }),
+  });
+  const watch = watchBackendUser(
+    session,
+    async () => ({ ...user("alice").identity, hasAccount: true }),
+    { onFocus: () => () => {} },
+    { retryMs: 10 },
+  );
+  await settle(100);
+  expect(loginWithBackend).toHaveBeenCalledOnce();
+  watch.stop();
+  await session.close();
+});
+
 it("an app's own linkWithBackend after sign-up joins the link the watch started", async () => {
   let signedUp = false;
   let releaseLink!: () => void;
