@@ -6208,6 +6208,181 @@ mod tests {
         ));
     }
 
+    /// A text-merge column, written by a thin client as editors do: an
+    /// `editedFrom` text edit and a splice, both lowered on the server
+    /// against the row as the session may read it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thin_text_edits_and_splices_apply_on_the_server() {
+        use jazz::thin::{ThinBody, ThinOp};
+        use jazz::tools::{ColumnDescriptor, ColumnMergeStrategy, RowDescriptor, TableName};
+        let source = Schema::from([(
+            TableName::new("notes"),
+            PublicTableSchema {
+                columns: RowDescriptor::new(vec![
+                    ColumnDescriptor::new("body", ColumnType::Text)
+                        .merge_strategy(ColumnMergeStrategy::Markdown),
+                ]),
+                indexed_columns: None,
+                composite_indexes: Vec::new(),
+                policies: public_table_policies(),
+                branch_by: Vec::new(),
+                history: Default::default(),
+            },
+        )]);
+        let state = ServerBuilder::new(AppId::random())
+            .with_auth_config(AuthConfig {
+                admin_secret: Some("admin-secret".to_owned()),
+                backend_secret: Some("backend-secret".to_owned()),
+                ..Default::default()
+            })
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await
+            .expect("build thin test state")
+            .state;
+        publish_source_bundle(&state, &source).await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let mut ws = open_thin_ws(addr, &state, alice).await;
+        bind_thin_schema(&mut ws, &source).await;
+        let cells = |columns: &[(&str, &str)]| {
+            let descriptor = jazz::records::RecordDescriptor::new(
+                columns
+                    .iter()
+                    .map(|(name, _)| (*name, jazz::records::ValueType::String)),
+            );
+            let values: Vec<CoreValue> = columns
+                .iter()
+                .map(|(_, value)| CoreValue::String((*value).to_owned()))
+                .collect();
+            let record = jazz::records::OwnedRecord::new(
+                descriptor.create(&values).expect("note record"),
+                descriptor,
+            );
+            jazz::binding_codec::encode_named_cells(&record).expect("encode note cells")
+        };
+        send_thin(
+            &mut ws,
+            1,
+            ThinOp::Insert {
+                table: "notes".to_owned(),
+                cells: cells(&[("body", "Hello")]),
+                options: Vec::new(),
+                transaction: None,
+            },
+        )
+        .await;
+        let ThinBody::Written { row, .. } = thin_answer(&mut ws, 1).await else {
+            panic!("the insert must commit");
+        };
+        const TX: &str = "0190f3e4000070008000000000000009";
+        let edit = |id: u64, mutations: serde_json::Value| ThinOp::UpdateLargeValues {
+            table: "notes".to_owned(),
+            row,
+            patch: cells(&[]),
+            mutations: serde_json::to_vec(&mutations).unwrap(),
+            updated_at_ms: None,
+            transaction: (id == 5).then(|| TX.to_owned()),
+        };
+        send_thin(
+            &mut ws,
+            2,
+            edit(
+                2,
+                serde_json::json!([{
+                    "kind": "text_edit",
+                    "column": "body",
+                    "text": "Hello world",
+                    "edited_from": "Hello",
+                }]),
+            ),
+        )
+        .await;
+        match thin_answer(&mut ws, 2).await {
+            ThinBody::Written { .. } => {}
+            other => panic!("the text edit must commit, got {other:?}"),
+        }
+        send_thin(
+            &mut ws,
+            3,
+            edit(
+                3,
+                serde_json::json!([{
+                    "kind": "splice",
+                    "column": "body",
+                    "within": { "kind": "text_utf16", "from": 11, "to": 11 },
+                    "splices": [{ "at": 0, "delete": 0, "insert": [33] }],
+                }]),
+            ),
+        )
+        .await;
+        match thin_answer(&mut ws, 3).await {
+            ThinBody::Written { .. } => {}
+            other => panic!("the splice must commit, got {other:?}"),
+        }
+        // Inside a transaction, too.
+        send_thin(
+            &mut ws,
+            4,
+            ThinOp::Begin {
+                transaction: TX.to_owned(),
+                kind: "mergeable".to_owned(),
+            },
+        )
+        .await;
+        assert_eq!(thin_answer(&mut ws, 4).await, ThinBody::Ok);
+        send_thin(
+            &mut ws,
+            5,
+            edit(
+                5,
+                serde_json::json!([{
+                    "kind": "text_edit",
+                    "column": "body",
+                    "text": "Hey world!",
+                    "edited_from": "Hello world!",
+                }]),
+            ),
+        )
+        .await;
+        match thin_answer(&mut ws, 5).await {
+            ThinBody::Staged { .. } => {}
+            other => panic!("the transaction's text edit must stage, got {other:?}"),
+        }
+        send_thin(
+            &mut ws,
+            6,
+            ThinOp::Commit {
+                transaction: TX.to_owned(),
+            },
+        )
+        .await;
+        match thin_answer(&mut ws, 6).await {
+            ThinBody::Written { .. } => {}
+            other => panic!("the transaction must commit, got {other:?}"),
+        }
+        send_thin(
+            &mut ws,
+            7,
+            ThinOp::Query {
+                query: postcard::to_allocvec(&jazz::query::Query::from("notes")).unwrap(),
+                options: remote_read(),
+                transaction: None,
+            },
+        )
+        .await;
+        let ThinBody::Rows { rows, .. } = thin_answer(&mut ws, 7).await else {
+            panic!("the query must answer rows");
+        };
+        let bodies: Vec<CoreValue> = jazz::binding_codec::decode_rows(&rows)
+            .unwrap()
+            .into_iter()
+            .flat_map(|batch| batch.rows)
+            .filter_map(|row| row.cells.get("body").cloned())
+            .collect();
+        assert_eq!(bodies, vec![CoreValue::String("Hey world!".to_owned())]);
+    }
+
     /// Large writes sent together, and small requests sent while they are
     /// queued, all get answered on the one connection: past the session's
     /// room a request waits, it does not end the session.
