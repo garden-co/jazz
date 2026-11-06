@@ -19,6 +19,7 @@ type WipeableClient = {
     markReplaced?(reason: DbReplacedReason): void;
     waitForSync?(options?: { timeoutMs?: number }): Promise<void>;
     deleteClientStorage?(): Promise<void>;
+    getSyncStatus?(): { pendingUploads: number };
   };
 };
 export type JazzSessionOperation =
@@ -214,7 +215,13 @@ export async function createJazzSessionOwner<
           const db = (client as WipeableClient).db;
           // Upload what the server still accepts before wiping the rest.
           await db?.waitForSync?.({ timeoutMs: 5_000 }).catch(() => {});
+          // Say what the wipe took, as a sign-out past refused writes does.
+          const writes = db?.getSyncStatus?.().pendingUploads ?? 0;
           await db?.deleteClientStorage?.();
+          if (writes > 0)
+            console.warn(
+              `Jazz signed out and wiped ${writes} write(s) the server hadn't confirmed, as clearOnSignOut asks. They are gone from this device; any the server did receive stay there.`,
+            );
           await client.shutdown();
         } else if (signsOut) {
           await signOutOf(client);
@@ -449,8 +456,10 @@ type SigningOutClient = {
  * the sign-out would leave them no way out, through reloads too: it signs
  * out and says what became of those writes. A persistent client keeps them
  * on this device, under that account, and uploads them when it next opens;
- * one that keeps nothing (in memory, or thin) loses them. Any other failure
- * (an outage) may pass, so it still fails the sign-out for the app to retry.
+ * one that keeps nothing (in memory, or thin) loses them. Any refusal counts,
+ * an `expired` credential too: the user is leaving, and no one renews it once
+ * they have. Any other failure (an outage) may pass, so it still fails the
+ * sign-out for the app to retry.
  */
 async function signOutOf(client: SigningOutClient) {
   try {
@@ -460,8 +469,7 @@ async function signOutOf(client: SigningOutClient) {
     if (!(cause instanceof GracefulShutdownSyncError) || !db?.getAuthState?.().error) throw cause;
     const writes = db.getSyncStatus?.().pendingUploads ?? 0;
     const kept = !isThinDb(db as Db) && db.getConfig?.().driver?.type !== "memory";
-    // Warn only about writes left behind: with none, the refusal alone failed
-    // the wait (a switch to another user, whose cookie the old socket carries).
+    // Warn only about writes left behind: with none, nothing was lost.
     if (writes > 0)
       console.warn(
         kept
