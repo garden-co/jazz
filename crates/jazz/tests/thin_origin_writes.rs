@@ -331,7 +331,7 @@ fn two_users_writing_under_one_key_through_two_servers_both_land() {
 
 /// A session's own node that reads as version 8 (alpha.59 minted nodes as
 /// raw random bytes) still commits; a session naming a thin client's
-/// writer node does not.
+/// writer node does not, even its own author's.
 #[test]
 fn only_a_thin_clients_writer_node_is_refused_to_sessions() {
     let legacy = [

@@ -12262,13 +12262,9 @@ impl Db {
                 // may send any.
                 let identity = self.inner.borrow().sessions[index].identity;
                 // No session commits as a thin client's writer node: those
-                // are the server's, derived per author (`origin_node`). A
-                // node the session already writes as stays its own, however
-                // its bytes read.
+                // are the server's, derived per author (`origin_node`).
                 if policy.is_some()
-                    && ((is_origin_node(node)
-                        && !self.inner.borrow().writes_as(node, &identity)?)
-                        || !self.inner.borrow().claim_node(node, &identity)?)
+                    && (is_origin_node(node) || !self.inner.borrow().claim_node(node, &identity)?)
                 {
                     let mut inner = self.inner.borrow_mut();
                     let through = inner.served_through();

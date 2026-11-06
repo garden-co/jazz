@@ -1005,8 +1005,7 @@ that does not read are not bounded yet (#4865).
   writer is derived from the session's author and the client's node
   (`origin_node`, an RFC 9562 version-8 node with a fixed tag), at the client's counter
   (`Db::write_as_origin`): every server derives the same writer, and no
-  other author can name it. No session commits as such a node, unless it
-  already writes as it. The
+  other author can name it. No session commits as such a node. The
   authority records the commit's fate under it; a replica uploads it under
   it, which the authority dedups like any resent commit (§8.2), and never
   infers from pruned entries (a client's commits reach it through any

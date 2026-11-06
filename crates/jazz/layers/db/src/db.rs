@@ -2959,6 +2959,10 @@ impl Db {
                     end_savepoint(&inner.conn, "w", true)?;
                     if !wrote {
                         restore(&mut inner);
+                    } else if origin.is_some() {
+                        // The client's write is made: no later commit of the
+                        // same call takes its id.
+                        inner.next_origin = None;
                     }
                     if wrote {
                         if standalone {
