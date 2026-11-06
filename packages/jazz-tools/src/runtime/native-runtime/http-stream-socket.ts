@@ -224,28 +224,82 @@ export class HttpStreamSocket extends SocketEvents implements BrowserWebSocket {
 }
 
 /**
- * Endpoints on this page known to serve the HTTP stream and not upgrade
- * sockets: a createJazz backend answered a plain request for the socket
- * path with 426 and the stream marker. Only that answer switches an
- * endpoint; a socket that fails for any other reason (a restart, a proxy to
- * a sync server that has no stream) fails as a socket would.
+ * Endpoints on this page that sync over the HTTP stream instead of a
+ * socket. Two answers to a plain request for the socket path, after a socket
+ * failed before it opened, switch an endpoint:
+ * - a createJazz backend that can't upgrade sockets: 426 with the stream marker;
+ * - a createJazz backend that does upgrade them (426, no marker), reached
+ *   this way while `UPGRADE_FAILURES_BEFORE_STREAM` sockets in a row failed:
+ *   something in between (a proxy, a dev server, a PaaS edge) doesn't pass
+ *   upgrades on.
+ * A socket that fails for any other reason (a restart, a proxy to a sync
+ * server that has no stream) fails as a socket would.
  */
 const streamEndpoints = new Set<string>();
+
+/** Sockets in a row that failed to an endpoint whose backend answers and upgrades. */
+const failedUpgrades = new Map<string, number>();
+
+/**
+ * How many failed sockets in a row, to a backend that answers and says it
+ * upgrades them, mean they never get through: past a restart or a draining
+ * instance, which fail a socket once or twice and then let it through.
+ */
+export const UPGRADE_FAILURES_BEFORE_STREAM = 3;
 
 /** Header on createJazz's 426 for a socket path (see `createJazz`). */
 const STREAM_AVAILABLE_HEADER = "x-jazz-stream";
 
-async function servesStreamInstead(url: string): Promise<boolean> {
+/** Endpoints already warned that the backend refuses this page's origin. */
+const refusedOrigins = new Set<string>();
+
+/**
+ * What a plain request for a socket path says about the endpoint. A POST,
+ * so the browser sends the page's Origin and the backend checks it as it
+ * checks the socket's: a refused origin fails the socket too, and is not a
+ * proxy's doing.
+ */
+async function probeSocketPath(
+  url: string,
+): Promise<"stream" | "upgrades" | "refused" | "unknown"> {
   try {
     const response = await fetch(url.replace(/^ws/, "http"), {
-      method: "GET",
+      method: "POST",
       credentials: "same-origin",
     });
     void response.body?.cancel().catch(() => undefined);
-    return response.status === 426 && response.headers.get(STREAM_AVAILABLE_HEADER) === "1";
+    if (response.status === 403) return "refused";
+    if (response.status !== 426) return "unknown";
+    return response.headers.get(STREAM_AVAILABLE_HEADER) === "1" ? "stream" : "upgrades";
   } catch {
+    return "unknown";
+  }
+}
+
+/** Whether a socket to `url` that just failed before opening should give way to the stream. */
+async function servesStreamInstead(url: string): Promise<boolean> {
+  const answer = await probeSocketPath(url);
+  if (answer === "stream") return true;
+  if (answer !== "upgrades") {
+    // Not a backend that answered and upgrades (down, restarting, or
+    // refusing this origin): the failures are no longer in a row.
+    failedUpgrades.delete(url);
+    if (answer === "refused" && !refusedOrigins.has(url)) {
+      refusedOrigins.add(url);
+      console.warn(
+        `jazz: the backend at ${url} refuses this page's origin (403). If a proxy rewrites the Host header, set the backend's publicUrl or allowedOrigins.`,
+      );
+    }
     return false;
   }
+  const failures = (failedUpgrades.get(url) ?? 0) + 1;
+  failedUpgrades.set(url, failures);
+  if (failures < UPGRADE_FAILURES_BEFORE_STREAM) return false;
+  failedUpgrades.delete(url);
+  console.warn(
+    `jazz: ${failures} WebSockets in a row to ${url} failed, although the backend answers and upgrades them: something in between (a proxy or dev server) doesn't pass WebSocket upgrades on. Syncing over the HTTP stream instead, for as long as this page is open.`,
+  );
+  return true;
 }
 
 /**
@@ -313,6 +367,7 @@ export function sameOriginWebSocketConstructor(native: WebSocketConstructor): We
       };
       socket.addEventListener("open", () => {
         opened = true;
+        failedUpgrades.delete(this.url);
         this.settled = true;
         this.emit("open");
       });
