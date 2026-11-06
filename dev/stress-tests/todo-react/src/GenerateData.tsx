@@ -228,7 +228,7 @@ export function GenerateData() {
   // async channel facade useDb is typed as.
   const db = useDb() as unknown as Db;
   const session = useSession();
-  const sessionUserId = session?.user.account ?? null;
+  const sessionUserId = session?.user ?? null;
 
   const [status, setStatus] = useState<Status>("idle");
   const [projectsCreated, setProjectsCreated] = useState(0);

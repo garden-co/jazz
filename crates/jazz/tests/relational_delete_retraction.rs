@@ -23,7 +23,7 @@ use common::{compile_schema, exists, outer_eq, read_and_allow_all_writes, sessio
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;
 
-const ME: [&str; 3] = ["user", "identity", "subject"];
+const ME: [&str; 2] = ["identity", "subject"];
 
 /// Games readable through a participant row naming the reader, and the
 /// participant rows readable by the participant.

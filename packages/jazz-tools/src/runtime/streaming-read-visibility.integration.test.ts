@@ -28,9 +28,9 @@ const app = s.defineApp(
 
 const permissions = s.definePermissions(app, ({ policy, session }) => {
   policy.albums.allowRead.where({});
-  policy.albums.allowInsert.where({ "$createdBy.account": session.user.account });
+  policy.albums.allowInsert.where({ "$createdBy.account": session.user });
   policy.tracks.allowRead.where({});
-  policy.tracks.allowInsert.where({ "$createdBy.account": session.user.account });
+  policy.tracks.allowInsert.where({ "$createdBy.account": session.user });
 });
 
 const listener = {

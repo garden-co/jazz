@@ -1203,7 +1203,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
 
     const dbA = track(await createDb({ ...user, driver: { type: "persistent", dbName } }));
     const dbB = track(await createDb({ ...user, driver: { type: "persistent", dbName } }));
-    const signedIn = dbA.getAuthState().session?.user.identity;
+    const signedIn = dbA.getAuthState().session?.identity;
     const invalidJwt = makeStructurallyValidJwt(userId, signedIn?.issuer);
     const signedInSession = {
       account_id: user.account.id,

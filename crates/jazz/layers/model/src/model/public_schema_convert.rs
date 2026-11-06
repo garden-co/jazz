@@ -3087,7 +3087,8 @@ fn convert_policy_predicate(
             expr,
         )?))),
         PolicyExpr::Cmp { column, op, value } => {
-            let left = Operand::Column(column.clone());
+            let column = author_session_column(table, path, column, op, value)?;
+            let left = Operand::Column(column.into_owned());
             if matches!(value, PolicyValue::Literal(Value::Null)) {
                 // Match `session_where`: equality against the public NULL
                 // literal is the ergonomic spelling of a null test.
@@ -3209,11 +3210,84 @@ fn convert_policy_operand(
     }
 }
 
+/// The column an author record compared with a session value is
+/// compared by: `$createdBy` with `session.user` by its account (every
+/// identity linked to the account matches), `$createdBy.identity` with
+/// `session.identity` as itself. Any other pairing is refused, naming the
+/// forms that compare.
+fn author_session_column<'a>(
+    table: &TableName,
+    path: &str,
+    column: &'a str,
+    op: &CmpOp,
+    value: &PolicyValue,
+) -> Result<std::borrow::Cow<'a, str>, SchemaConversionError> {
+    use std::borrow::Cow;
+    let PolicyValue::SessionRef(session) = value else {
+        return Ok(Cow::Borrowed(column));
+    };
+    let record = match column {
+        "$createdBy" | "$updatedBy" | "$deletedBy" => Some(true),
+        "$createdBy.identity" | "$updatedBy.identity" | "$deletedBy.identity" => Some(false),
+        _ => None,
+    };
+    let Some(whole) = record else {
+        return Ok(Cow::Borrowed(column));
+    };
+    if !matches!(op, CmpOp::Eq | CmpOp::Ne) {
+        return Err(err(
+            policy_path(table, path),
+            format!("an author record `{column}` only compares with Eq or Ne, not {op:?}"),
+        ));
+    }
+    let session: Vec<&str> = session.iter().map(String::as_str).collect();
+    match (whole, session.as_slice()) {
+        (true, ["user"]) => Ok(Cow::Owned(format!("{column}.account"))),
+        (false, ["identity"]) => Ok(Cow::Borrowed(column)),
+        (_, ["claims", ..]) => Ok(Cow::Borrowed(column)),
+        _ => {
+            let record = column.trim_end_matches(".identity");
+            Err(err(
+                policy_path(table, path),
+                format!(
+                    "comparing `{column}` with `session.{}`: compare `{record}` with \
+                     `session.user` (the account) or `{record}.identity` with \
+                     `session.identity` (the exact login)",
+                    session.join(".")
+                ),
+            ))
+        }
+    }
+}
+
+/// The replacement for a session path `session.user` no longer has:
+/// `session.user` is the account itself and `session.identity` the exact
+/// login.
+pub(crate) fn removed_session_path(path: &[String]) -> Option<&'static str> {
+    let parts: Vec<&str> = path.iter().map(String::as_str).collect();
+    Some(match parts.as_slice() {
+        ["user", "account"] => "session.user, which is the account",
+        ["user", "identity"] => "session.identity, the exact login",
+        ["user", "identity", "issuer"] => "session.identity.issuer",
+        ["user", "identity", "subject"] => "session.identity.subject",
+        _ => return None,
+    })
+}
+
 fn convert_session_path_operand(
     table: &TableName,
     path: &str,
     path_segments: &[String],
 ) -> Result<Operand, SchemaConversionError> {
+    if let Some(replacement) = removed_session_path(path_segments) {
+        return Err(err(
+            policy_path(table, path),
+            format!(
+                "session.{} was removed: use {replacement}",
+                path_segments.join(".")
+            ),
+        ));
+    }
     if let Some(name) = crate::query::author_claim_path_key(path_segments) {
         return Ok(Operand::Claim(name));
     }
@@ -3233,7 +3307,7 @@ fn convert_session_path_operand(
     Err(err(
         policy_path(table, path),
         format!(
-            "core schema policies only support session.user, session.authMode, and provider claims through session.claims; got session.{}",
+            "core schema policies only support session.user, session.identity, session.authMode, and provider claims through session.claims; got session.{}",
             path_segments.join(".")
         ),
     ))
@@ -4863,7 +4937,6 @@ mod tests {
                                         column: "user_id".to_owned(),
                                         op: CmpOp::Eq,
                                         value: PolicyValue::SessionRef(vec![
-                                            "user".to_owned(),
                                             "identity".to_owned(),
                                             "subject".to_owned(),
                                         ]),

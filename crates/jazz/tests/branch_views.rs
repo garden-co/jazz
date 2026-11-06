@@ -282,11 +282,7 @@ fn branch_owner_policy() -> PolicyExpr {
             PolicyExpr::Cmp {
                 column: "owner".to_owned(),
                 op: CmpOp::Eq,
-                value: PolicyValue::SessionRef(vec![
-                    "user".to_owned(),
-                    "identity".to_owned(),
-                    "subject".to_owned(),
-                ]),
+                value: PolicyValue::SessionRef(vec!["identity".to_owned(), "subject".to_owned()]),
             },
         ])),
     }
@@ -2342,11 +2338,7 @@ fn branch_history_checks_inherited_policy_evidence_in_the_branch() {
     let owner_policy = PolicyExpr::Cmp {
         column: "owner".to_owned(),
         op: CmpOp::Eq,
-        value: PolicyValue::SessionRef(vec![
-            "user".to_owned(),
-            "identity".to_owned(),
-            "subject".to_owned(),
-        ]),
+        value: PolicyValue::SessionRef(vec!["identity".to_owned(), "subject".to_owned()]),
     };
     let schema = compile_schema(
         &SchemaBuilder::new()

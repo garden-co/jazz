@@ -90,7 +90,9 @@ export function createAuthStateStore(input: ClientSessionInput, options?: AuthSt
   };
 
   const assertSamePrincipal = (nextSession: PublicSession | null): void => {
-    if (JSON.stringify(state.session?.user ?? null) !== JSON.stringify(nextSession?.user ?? null)) {
+    const principal = (session: PublicSession | null | undefined) =>
+      JSON.stringify(session ? [session.user, session.identity] : null);
+    if (principal(state.session) !== principal(nextSession)) {
       throw new Error(
         "Changing auth principal on a live client is not supported. Recreate the Db.",
       );

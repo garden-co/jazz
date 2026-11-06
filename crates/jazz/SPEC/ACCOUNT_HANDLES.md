@@ -117,8 +117,8 @@ versioned native encodings.
 Derived aggregate results have no originating write and omit author metadata;
 they do not manufacture a system author or expose a nullable author record.
 
-Accountless anonymous readers have no admitted account (`session.user.account`
-is null). Policy bindings for `user` and `user.account` are absent until an
+Accountless anonymous readers have no admitted account (`session.user`
+is null). The policy binding for `user` is absent until an
 account is admitted, so ownership checks fail closed; explicit anonymous-access policies remain
 available. An accountless ordinary principal cannot author new persisted rows.
 Rust interns the entire author structure, including account and both principal
@@ -241,8 +241,8 @@ stores the exact author identity plus a native record with `derived_v1: U8` pres
 identity-derived entries (`user` and its structured paths, `authMode`, and the
 namespaced `iss`/`sub`). Writing omits an entry only when it equals the value derived from the
 stored identity; other portable scalar bindings remain stored verbatim. The mask bits 0–7 correspond to `\0claims:iss`,
-`\0claims:sub`, `authMode`, `user`, `user.account`, `user.identity`,
-`user.identity.issuer`, and `user.identity.subject`. Reading rejects entries stored both explicitly and in the mask and reconstructs only the mask-selected entries from that
+`\0claims:sub`, `authMode`, `user`, `identity`,
+`identity.issuer`, and `identity.subject`. Reading rejects entries stored both explicitly and in the mask and reconstructs only the mask-selected entries from that
 identity before producing the policy-binding key. Partial internal bindings
 therefore remain exact; missing claims are never implicitly added. Provider
 claims named `user` remain separately namespaced and are retained.

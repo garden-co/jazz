@@ -28,7 +28,7 @@ export function CollaborativeCanvas({
   className?: string;
 }) {
   const session = useSession();
-  const userId = session?.user.account ?? null;
+  const userId = session?.user ?? null;
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRefs = useRef<Map<string, HTMLCanvasElement | null>>(new Map());
   const drawingRef = useRef(false);

@@ -36,7 +36,7 @@ export function ChatPage({ agentLabel }: { agentLabel: string }) {
 }
 
 export function MusicAgentApp({ agentLabel, userName }: { agentLabel: string; userName: string }) {
-  const account = useSession()?.user.account;
+  const account = useSession()?.user;
   const { data: artists = [], db } = useAll(app.artists);
   const { data: conversations = [] } = useAll(app.conversations.orderBy("$createdAt", "desc"));
   const [selectedId, setSelectedId] = useState<string>();

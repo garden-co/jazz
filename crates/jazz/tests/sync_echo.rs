@@ -57,7 +57,7 @@ fn config(node: u8, author: AuthorSubject) -> DbConfig {
         .column("owner", ColumnType::Text)
         .policies(read_and_allow_all_writes(session_eq(
             "owner",
-            &["user", "identity", "subject"],
+            &["identity", "subject"],
         )));
     DbConfig::new(
         compile_schema(

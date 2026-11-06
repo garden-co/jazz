@@ -93,7 +93,7 @@ async function signIn(email: string, name: string) {
   await browser.loginWithBackend();
   const { client, status, error } = browser.getSnapshot();
   if (status !== "ready") throw error ?? new Error(status);
-  expect(client!.session!.user!.account).toBe(account);
+  expect(client!.session!.user!).toBe(account);
   return { db: client!.db, accountId: account, userId: session!.user.id };
 }
 let userId: string;

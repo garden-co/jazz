@@ -37,7 +37,7 @@ type Setup =
  * server rejects part of the demo show, offer to finish it.
  */
 function useSetup(route: Route): { me?: Me; setup: Setup } {
-  const account = useSession()?.user.account;
+  const account = useSession()?.user;
   const { data: profiles, db } = useAll(account ? app.crew.where({ account }) : undefined);
   const [setup, setSetup] = useState<Setup>({ status: "loading" });
   const [attempt, setAttempt] = useState(0);

@@ -118,7 +118,7 @@ fn schema_with_membership_policy(membership_policy: Option<PublicPolicyExpr>) ->
         MEMBERSHIPS,
         vec![
             outer_eq("team", "team"),
-            session_eq("user", &["user", "identity", "subject"]),
+            session_eq("user", &["identity", "subject"]),
             session_eq("region", &["claims", "region"]),
         ],
     );
@@ -170,7 +170,6 @@ fn two_hop_seeded_policy_schema() -> JazzSchema {
                 },
                 op: RelationCmpOp::Eq,
                 right: RelationValueRef::SessionRef(vec![
-                    "user".to_owned(),
                     "identity".to_owned(),
                     "subject".to_owned(),
                 ]),
@@ -635,7 +634,7 @@ fn prepared_policy_claims_route_per_identity_and_application_binding() {
 fn prepared_policy_claim_routing_preserves_claimless_union_branches() {
     let policy = PublicPolicyExpr::Or(vec![
         text_eq("visibility", "public"),
-        session_eq("owner", &["user", "identity", "subject"]),
+        session_eq("owner", &["identity", "subject"]),
         session_eq("region", &["claims", "region"]),
     ]);
     let schema = compile_schema(
@@ -810,7 +809,7 @@ fn prepared_nested_claim_routes_keep_two_bindings_isolated_through_live_membersh
             CHAT_MEMBERS,
             vec![
                 outer_eq("chatId", "id"),
-                session_eq("userId", &["user", "identity", "subject"]),
+                session_eq("userId", &["identity", "subject"]),
             ],
         ),
     ]);
@@ -828,7 +827,7 @@ fn prepared_nested_claim_routes_keep_two_bindings_isolated_through_live_membersh
                     .column("userId", PublicColumnType::Text)
                     .policies(read_and_allow_all_writes(session_eq(
                         "userId",
-                        &["user", "identity", "subject"],
+                        &["identity", "subject"],
                     ))),
             )
             .build(),
@@ -1515,7 +1514,7 @@ fn prepared_binding_rejects_conflicting_claim_types_across_policies() {
             MEMBERSHIPS,
             vec![
                 outer_eq("team", "team"),
-                session_eq("user", &["user", "identity", "subject"]),
+                session_eq("user", &["identity", "subject"]),
             ],
         ),
     ]);

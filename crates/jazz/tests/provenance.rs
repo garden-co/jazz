@@ -623,3 +623,112 @@ fn a_first_sync_of_many_rows_keeps_every_body_and_author() {
     assert_eq!(on_server[&many(4)].1, user(2).principal_parts().1);
     assert_eq!(read(&client), on_server);
 }
+
+/// `session.user` is the account: a row written through one identity is
+/// its creator's under `$createdBy == session.user` for every identity
+/// linked to the account, and under `$createdBy.identity ==
+/// session.identity` only for the identity that wrote it. A session with
+/// no account matches no author record.
+#[test]
+fn session_user_matches_the_account_and_session_identity_the_exact_login() {
+    use jazz::tools::{CmpOp, PolicyExpr, PolicyValue};
+    let account = jazz::account_registry::AccountId(uuid::Uuid::from_bytes([0x0b; 16]));
+    let login = |subject: &str| {
+        AuthorSubject::authenticated("https://issuer.example", subject)
+            .unwrap()
+            .with_account(account)
+    };
+    let (a, b) = (login("alice-laptop"), login("alice-phone"));
+    let accountless = AuthorSubject::authenticated("https://issuer.example", "stranger").unwrap();
+    let open = |read: PolicyExpr| {
+        let schema = compile_schema(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("notes")
+                        .column("body", ColumnType::Text)
+                        .policies(common::read_and_allow_all_writes(read)),
+                )
+                .build(),
+        );
+        let db = block_on(Db::open(DbConfig::new(
+            schema,
+            DbIdentity {
+                node: NodeUuid::from_bytes([3; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        )))
+        .unwrap();
+        // Row 1 through `a`, row 2 by the system.
+        block_on(db.insert(
+            "notes",
+            body("a"),
+            InsertOptions {
+                row_id: Some(row(1)),
+                identity: WriteIdentity::Session(a),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        block_on(db.insert(
+            "notes",
+            body("b"),
+            InsertOptions {
+                row_id: Some(row(2)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        db
+    };
+    let visible = |db: &Db, who: AuthorSubject| {
+        let prepared = db.prepare_query(&Query::from("notes")).unwrap();
+        block_on(db.all_for_identity(&prepared, ReadOpts::default(), who))
+            .unwrap()
+            .len()
+    };
+    let session =
+        |path: &[&str]| PolicyValue::SessionRef(path.iter().map(|p| (*p).to_owned()).collect());
+
+    let by_account = open(PolicyExpr::Cmp {
+        column: "$createdBy".to_owned(),
+        op: CmpOp::Eq,
+        value: session(&["user"]),
+    });
+    assert_eq!(visible(&by_account, a), 1, "the identity that wrote it");
+    assert_eq!(
+        visible(&by_account, b),
+        1,
+        "a linked identity of the account"
+    );
+    assert_eq!(
+        visible(&by_account, accountless),
+        0,
+        "not the system's rows"
+    );
+
+    let by_login = open(PolicyExpr::Cmp {
+        column: "$createdBy.identity".to_owned(),
+        op: CmpOp::Eq,
+        value: session(&["identity"]),
+    });
+    assert_eq!(visible(&by_login, a), 1, "the identity that wrote it");
+    assert_eq!(visible(&by_login, b), 0, "another login of the account");
+
+    // A comparison of mismatched parts names the forms that compare.
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchemaBuilder::new("notes")
+                .column("body", ColumnType::Text)
+                .policies(common::read_and_allow_all_writes(PolicyExpr::Cmp {
+                    column: "$createdBy".to_owned(),
+                    op: CmpOp::Eq,
+                    value: session(&["identity"]),
+                })),
+        )
+        .build();
+    let error = format!("{:?}", jazz::schema::JazzSchema::new(&schema).unwrap_err());
+    assert!(
+        error.contains("`session.identity`") && error.contains("`session.user`"),
+        "{error}"
+    );
+}

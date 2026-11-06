@@ -333,7 +333,7 @@ import { schema as s } from ${JSON.stringify(importPath)};
 import { app } from ${JSON.stringify(appImportPath)};
 
 export default s.definePermissions(app, ({ policy, session }) => [
-  policy.todos.allowRead.where({ ownerId: session.user.identity.subject }),
+  policy.todos.allowRead.where({ ownerId: session.identity.subject }),
 ]);
 `;
   }
@@ -394,11 +394,11 @@ import { schema as s } from ${JSON.stringify(importPath)};
 import { app } from ${JSON.stringify(appImportPath)};
 
 export default s.definePermissions(app, ({ policy, session }) => [
-  policy.todos.allowRead.where({ ownerId: session.user.identity.subject }),
-  policy.todos.allowInsert.where({ ownerId: session.user.identity.subject }),
+  policy.todos.allowRead.where({ ownerId: session.identity.subject }),
+  policy.todos.allowInsert.where({ ownerId: session.identity.subject }),
   policy.todos.allowUpdate
-    .whereOld({ ownerId: session.user.identity.subject })
-    .whereNew({ ownerId: session.user.identity.subject }),
+    .whereOld({ ownerId: session.identity.subject })
+    .whereNew({ ownerId: session.identity.subject }),
 ]);
 `;
   }
@@ -430,7 +430,7 @@ import { schema as s } from ${JSON.stringify(importPath)};
 import { app } from ${JSON.stringify(appImportPath)};
 
 export const permissions = s.definePermissions(app, ({ policy, session }) => [
-  policy.todos.allowRead.where({ ownerId: session.user.identity.subject }),
+  policy.todos.allowRead.where({ ownerId: session.identity.subject }),
 ]);
 `;
   }

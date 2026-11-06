@@ -37,8 +37,8 @@ const app = s.defineApp(
   { migrations: "none" },
 );
 const permissions = s.definePermissions(app, ({ policy, session }) => {
-  policy.todos.allowRead.where({ owner: session.user.account });
-  policy.todos.allowInsert.where({ owner: session.user.account });
+  policy.todos.allowRead.where({ owner: session.user });
+  policy.todos.allowInsert.where({ owner: session.user });
   policy.todos.allowUpdate.never();
   policy.todos.allowDelete.never();
 });
@@ -166,7 +166,7 @@ describe("createJazz", () => {
 
     const alice = await userSession(appId, origin, "alice");
     // The client holds no Jazz credential: its identity comes from the backend.
-    expect(alice.session?.user?.identity).toEqual({
+    expect(alice.session?.identity).toEqual({
       issuer: "jazz:backend",
       subject: "alice",
     });
@@ -210,7 +210,7 @@ describe("createJazz", () => {
     fromWorker.close();
     expect(answered).toBe("message");
     const row = await alice.db
-      .insert(app.todos, { title: "from alice", owner: alice.session!.user!.account })
+      .insert(app.todos, { title: "from alice", owner: alice.session!.user! })
       .wait({ tier: "global" });
 
     // The backend's own db sees the row; a request scope sees only its user's rows.
@@ -223,7 +223,7 @@ describe("createJazz", () => {
     // API routes can name the request's account without a client credential.
     await expect(
       jazz.accountFor(new Request("http://app/x", { headers: { "x-test-user": "alice" } })),
-    ).resolves.toBe(alice.session!.user!.account);
+    ).resolves.toBe(alice.session!.user!);
     await expect(jazz.accountFor(new Request("http://app/x"))).resolves.toBeNull();
     // Server actions: backend authority, writes stamped as the request's user.
     const onBehalf = await jazz.withAttribution(
@@ -235,7 +235,7 @@ describe("createJazz", () => {
     const [withProvenance] = await jazz.db.all(
       app.todos.where({ id: stamped.id }).select("title", "$createdBy"),
     );
-    expect(withProvenance?.$createdBy).toMatchObject({ account: alice.session!.user!.account });
+    expect(withProvenance?.$createdBy).toMatchObject({ account: alice.session!.user! });
     // The user synced over a socket, not the stream fallback.
     expect(requestPaths.some((path) => path.includes("/stream"))).toBe(false);
     // This host upgrades sockets, so a failed socket isn't sent to the stream:
@@ -506,7 +506,7 @@ describe("createJazz", () => {
     const origin = await serve(jazz, { sockets: true, onUpgrade: () => upgrades++ });
     const alice = await userSession(appId, origin, "alice");
     await alice.db
-      .insert(app.todos, { title: "signed in", owner: alice.session!.user!.account })
+      .insert(app.todos, { title: "signed in", owner: alice.session!.user! })
       .wait({ tier: "global" });
 
     // Checks that still name her leave her session open.
@@ -531,7 +531,7 @@ describe("createJazz", () => {
   it("ends a user's open sync session once their claims change, so policies see the new ones", async () => {
     // Anyone reads their own todos; only an admin (a claim) may create one.
     const byRole = s.definePermissions(app, ({ policy, session }) => {
-      policy.todos.allowRead.where({ owner: session.user.account });
+      policy.todos.allowRead.where({ owner: session.user });
       policy.todos.allowInsert.where(session.where({ "claims.role": "admin" }));
       policy.todos.allowUpdate.never();
       policy.todos.allowDelete.never();
@@ -561,7 +561,7 @@ describe("createJazz", () => {
     cleanups.push(() => session.close());
     await session.loginWithBackend();
     const alice = session.getSnapshot().client!;
-    const owner = alice.session!.user!.account;
+    const owner = alice.session!.user!;
     const outcome = (write: { wait(options: { tier: "global" }): Promise<unknown> }) =>
       write.wait({ tier: "global" }).then(
         () => "accepted",
@@ -622,7 +622,7 @@ describe("createJazz", () => {
     const guest = guestSession.getSnapshot().client!;
     await guest.db.insert(app.todos, {
       title: "kept on the device",
-      owner: guest.session!.user!.account,
+      owner: guest.session!.user!,
     });
 
     // The socket is refused as an auth failure, so the client stops retrying.
@@ -654,7 +654,7 @@ describe("createJazz", () => {
     cleanups.push(() => guestSession.close());
     const guest = guestSession.getSnapshot().client!;
     await guest.db
-      .insert(app.todos, { title: "synced", owner: guest.session!.user!.account })
+      .insert(app.todos, { title: "synced", owner: guest.session!.user! })
       .wait({ tier: "global" });
 
     guestsWelcome = false;
@@ -683,7 +683,7 @@ describe("createJazz", () => {
     const origin = await serve(jazz, { sockets: true, onUpgrade: () => upgrades++ });
     const alice = await userSession(appId, origin, "alice");
     await alice.db
-      .insert(app.todos, { title: "before", owner: alice.session!.user!.account })
+      .insert(app.todos, { title: "before", owner: alice.session!.user! })
       .wait({ tier: "global" });
     const opened = upgrades;
     expiredBefore = Date.now() + 1;
@@ -691,7 +691,7 @@ describe("createJazz", () => {
     // cookies and keeps syncing.
     await expect.poll(() => upgrades, { timeout: 5_000, interval: 50 }).toBeGreaterThan(opened);
     await alice.db
-      .insert(app.todos, { title: "after", owner: alice.session!.user!.account })
+      .insert(app.todos, { title: "after", owner: alice.session!.user! })
       .wait({ tier: "global" });
     expect(alice.db.getSyncStatus().link).toEqual({ state: "connected" });
   }, 30_000);
@@ -703,7 +703,7 @@ describe("createJazz", () => {
     const origin = await serve(jazz, { sockets: true });
 
     const guest = await userSession(appId, origin, "guest-device-key");
-    const account = guest.session!.user!.account;
+    const account = guest.session!.user!;
     const row = await guest.db
       .insert(app.todos, { title: "made as a guest", owner: account })
       .wait({ tier: "global" });
@@ -714,7 +714,7 @@ describe("createJazz", () => {
     });
 
     const alice = await userSession(appId, origin, "alice");
-    expect(alice.session!.user!.account).toBe(account);
+    expect(alice.session!.user!).toBe(account);
     const seen = await alice.db.all(app.todos.where({ id: row.id }));
     expect(seen.map((todo) => todo.title)).toEqual(["made as a guest"]);
   }, 60_000);
@@ -758,11 +758,11 @@ describe("createJazz", () => {
       });
       cleanups.push(() => session.close());
       const guest = session.getSnapshot().client!;
-      const account = guest.session!.user!.account;
+      const account = guest.session!.user!;
       expect(account).toBe(
         localFirstAccountId(
           scoping === "names the app" ? appId : `${origin}/jazz`,
-          guest.session!.user!.identity.subject,
+          guest.session!.identity.subject,
         ),
       );
       const row = await guest.db
@@ -773,8 +773,8 @@ describe("createJazz", () => {
       signInAs(origin, "alice");
       await session.linkWithBackend();
       const alice = session.getSnapshot().client!;
-      expect(alice.session!.user!.account).toBe(account);
-      expect(alice.session!.user!.identity).toEqual({
+      expect(alice.session!.user!).toBe(account);
+      expect(alice.session!.identity).toEqual({
         issuer: "jazz:backend",
         subject: "alice",
       });
@@ -1264,7 +1264,7 @@ describe("createJazz", () => {
 
     const alice = await userSession(appId, origin, "alice");
     const row = await alice.db
-      .insert(app.todos, { title: "over the stream", owner: alice.session!.user!.account })
+      .insert(app.todos, { title: "over the stream", owner: alice.session!.user! })
       .wait({ tier: "global" });
     const seen = await jazz.db.all(app.todos.where({ id: row.id }));
     expect(seen.map((todo) => todo.title)).toEqual(["over the stream"]);
@@ -1294,7 +1294,7 @@ describe("createJazz", () => {
     expect(await unknown.text()).toContain("sticky routing");
     // Alice's session still works after both attempts.
     const later = await alice.db
-      .insert(app.todos, { title: "still over the stream", owner: alice.session!.user!.account })
+      .insert(app.todos, { title: "still over the stream", owner: alice.session!.user! })
       .wait({ tier: "global" });
     expect((await jazz.db.all(app.todos.where({ id: later.id }))).length).toBe(1);
   }, 60_000);
@@ -1520,7 +1520,7 @@ describe("createJazz", () => {
 
     const alice = await userSession(appId, origin, "alice");
     const row = await alice.db
-      .insert(app.todos, { title: "through the backend", owner: alice.session!.user!.account })
+      .insert(app.todos, { title: "through the backend", owner: alice.session!.user! })
       .wait({ tier: "global" });
 
     // A second backend on the same core (another instance, after a restart)
@@ -1555,7 +1555,7 @@ describe("createJazz", () => {
     cleanups.push(() => guestSession.close());
     const guest = guestSession.getSnapshot().client!;
     const made = await guest.db
-      .insert(app.todos, { title: "as a guest", owner: guest.session!.user!.account })
+      .insert(app.todos, { title: "as a guest", owner: guest.session!.user! })
       .wait({ tier: "global" });
     expect((await jazz.db.all(app.todos.where({ id: made.id }))).map((todo) => todo.title)).toEqual(
       ["as a guest"],
@@ -1667,7 +1667,7 @@ describe("createJazz", () => {
     cleanups.push(() => core.stop());
     const store = remote({ url: core.url, appId, secret: core.adminSecret });
     const noInserts = s.definePermissions(app, ({ policy, session }) => {
-      policy.todos.allowRead.where({ owner: session.user.account });
+      policy.todos.allowRead.where({ owner: session.user });
       policy.todos.allowInsert.never();
       policy.todos.allowUpdate.never();
       policy.todos.allowDelete.never();
@@ -1699,7 +1699,7 @@ describe("createJazz", () => {
     const guestRow = await guestOnCurrent.db
       .insert(app.todos, {
         title: "a guest's, by the current deployment",
-        owner: guestOnCurrent.session!.user!.account,
+        owner: guestOnCurrent.session!.user!,
       })
       .wait({ tier: "global" });
     const guestOnNewer = await guestOf(onNewer);
@@ -1707,7 +1707,7 @@ describe("createJazz", () => {
       guestOnNewer.db
         .insert(app.todos, {
           title: "a guest's, by the newer deployment",
-          owner: guestOnNewer.session!.user!.account,
+          owner: guestOnNewer.session!.user!,
         })
         .wait({ tier: "global" }),
     ).rejects.toThrow();
@@ -1716,7 +1716,7 @@ describe("createJazz", () => {
     const row = await alice.db
       .insert(app.todos, {
         title: "by the current deployment",
-        owner: alice.session!.user!.account,
+        owner: alice.session!.user!,
       })
       .wait({ tier: "global" });
     // The browser's own permissions allow the insert; the core refuses it
@@ -1724,7 +1724,7 @@ describe("createJazz", () => {
     const bob = await userSession(appId, onNewer, "bob");
     await expect(
       bob.db
-        .insert(app.todos, { title: "by the newer deployment", owner: bob.session!.user!.account })
+        .insert(app.todos, { title: "by the newer deployment", owner: bob.session!.user! })
         .wait({ tier: "global" }),
     ).rejects.toThrow();
     // The backend's own scoped writes too.
@@ -1740,7 +1740,7 @@ describe("createJazz", () => {
       new Request("http://app/x", { headers: { "x-test-user": "alice" } }),
     );
     const again = await asAlice
-      .insert(app.todos, { title: "after the rollback", owner: alice.session!.user!.account })
+      .insert(app.todos, { title: "after the rollback", owner: alice.session!.user! })
       .wait({ tier: "global" });
     expect((await rolledBack.db.all(app.todos)).map((todo) => todo.id).sort()).toEqual(
       [guestRow.id, row.id, again.id].sort(),
@@ -1759,8 +1759,8 @@ describe("createJazz", () => {
       { migrations: "none" },
     );
     const latestPermissions = s.definePermissions(latest, ({ policy, session }) => {
-      policy.todos.allowRead.where({ owner: session.user.account });
-      policy.todos.allowInsert.where({ owner: session.user.account });
+      policy.todos.allowRead.where({ owner: session.user });
+      policy.todos.allowInsert.where({ owner: session.user });
       policy.todos.allowUpdate.never();
       policy.todos.allowDelete.never();
     });
@@ -1895,7 +1895,7 @@ describe("createJazz", () => {
 
     const alice = await userSession(appId, origin, "alice");
     await alice.db
-      .insert(app.todos, { title: "vouched", owner: alice.session!.user!.account })
+      .insert(app.todos, { title: "vouched", owner: alice.session!.user! })
       .wait({ tier: "global" });
     expect(asked).toBeGreaterThan(opened);
 

@@ -16,8 +16,8 @@ const app = s.defineApp(
   { migrations: "none" },
 );
 const permissions = s.definePermissions(app, ({ policy, session }) => {
-  policy.todos.allowRead.where({ owner: session.user.account });
-  policy.todos.allowInsert.where({ owner: session.user.account });
+  policy.todos.allowRead.where({ owner: session.user });
+  policy.todos.allowInsert.where({ owner: session.user });
 });
 
 const cleanups: Array<() => Promise<unknown>> = [];
@@ -103,7 +103,7 @@ describe("browser session against the app's backend", () => {
 
     const snapshot = session.getSnapshot();
     expect(snapshot.status).toBe("ready");
-    expect(snapshot.client?.session?.user?.identity).toEqual({
+    expect(snapshot.client?.session?.identity).toEqual({
       issuer: "jazz:backend",
       subject: "alice",
     });
@@ -166,8 +166,8 @@ describe("browser session against the app's backend", () => {
     await session.loginWithBackend();
     const thin = session.getSnapshot().client!;
     expect(isThinDb(thin.db)).toBe(true);
-    expect(thin.session?.user?.identity).toEqual({ issuer: "jazz:backend", subject: "alice" });
-    const owner = thin.session!.user!.account;
+    expect(thin.session?.identity).toEqual({ issuer: "jazz:backend", subject: "alice" });
+    const owner = thin.session!.user!;
 
     await thin.db.insert(app.todos, { title: "thin", owner }).wait({ tier: "global" });
     expect((await thin.db.all(app.todos)).map((todo) => todo.title)).toEqual(["thin"]);
@@ -178,7 +178,7 @@ describe("browser session against the app's backend", () => {
       .poll(() => isThinDb(session.getSnapshot().client!.db), { timeout: 15_000 })
       .toBe(false);
     const local = session.getSnapshot().client!;
-    expect(local.session?.user?.account).toBe(owner);
+    expect(local.session?.user).toBe(owner);
     await local.db.insert(app.todos, { title: "local", owner }).wait({ tier: "global" });
     expect((await local.db.all(app.todos)).map((todo) => todo.title).sort()).toEqual([
       "local",

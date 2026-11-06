@@ -26,7 +26,7 @@ pnpm build              # Optional schema validation + production build
 
 **The invite flow** submits a membership row containing the current account ID and the supplied code. The server requires that account to match the author and checks that the chat is public, belongs to the account, or has the matching invite code. Only after the membership write settles does the handler navigate to the chat. Knowing a private chat's ID alone is insufficient to join.
 
-**Collaborative canvases** attach to a chat. Strokes are rows, synced in real time. Delete access compares `$createdBy.account` with `session.user.account`, so another linked identity on the same account retains access; the canvas component has no explicit access checks.
+**Collaborative canvases** attach to a chat. Strokes are rows, synced in real time. Delete access compares `$createdBy.account` with `session.user`, so another linked identity on the same account retains access; the canvas component has no explicit access checks.
 
 ## Schema
 

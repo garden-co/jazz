@@ -84,9 +84,11 @@ impl Session {
         self.used.set(true);
         let parts: Vec<&str> = path.iter().map(String::as_str).collect();
         Some(match parts.as_slice() {
-            ["user", "identity", "subject"] => Value::String(self.subject.clone()?),
-            ["user", "identity", "issuer"] => Value::String(self.issuer.clone()?),
-            ["user", "account"] => Value::Uuid(self.account?),
+            // `session.user` is the account; `session.identity` the exact
+            // login, shared by no other identity linked to the account.
+            ["user"] => Value::Uuid(self.account?),
+            ["identity", "subject"] => Value::String(self.subject.clone()?),
+            ["identity", "issuer"] => Value::String(self.issuer.clone()?),
             // How the identity signed in, from its issuer (as Jazz derives
             // `session.authMode`).
             ["authMode"] => Value::String(
@@ -1955,7 +1957,7 @@ impl<'a> Ctx<'a> {
                 op,
                 value: PolicyValue::SessionRef(path),
             } if crate::values::author_record(column).is_some()
-                && path.first().map(String::as_str) == Some("user") =>
+                && matches!(path.first().map(String::as_str), Some("user" | "identity")) =>
             {
                 self.author_cmp(table, alias, column, op, path, session)?
             }
@@ -3289,13 +3291,18 @@ impl Ctx<'_> {
     ) -> Result<String, Error> {
         let (_, whole) = crate::values::author_record(column).expect("author record");
         let path: Vec<&str> = path.iter().map(String::as_str).collect();
+        // An author record matches `session.user` by account alone, so
+        // every identity linked to the account matches; its identity matches
+        // `session.identity`, the exact login.
         let parts: &[&str] = match (whole, path.as_slice()) {
-            (true, ["user"]) => &["account", "identity.issuer", "identity.subject"],
-            (false, ["user", "identity"]) => &["issuer", "subject"],
+            (true, ["user"]) => &["account"],
+            (false, ["identity"]) => &["issuer", "subject"],
             _ => {
+                let record = column.trim_end_matches(".identity");
                 return Err(query_error(format!(
-                    "comparing `{column}` with `session.{}`: compare an author record \
-                     with `session.user` and its identity with `session.user.identity`",
+                    "comparing `{column}` with `session.{}`: compare `{record}` with \
+                     `session.user` (the account) or `{record}.identity` with \
+                     `session.identity` (the exact login)",
                     path.join(".")
                 )));
             }
@@ -3309,7 +3316,10 @@ impl Ctx<'_> {
                 )));
             }
         };
-        if session.system || session.subject.is_none() {
+        // An accountless session authored no row, and matching it as the
+        // system account would hand it every system-written row once only
+        // accounts are compared: it matches no author record.
+        if session.system || session.subject.is_none() || (whole && session.account.is_none()) {
             return Ok(bool_sql(negate));
         }
         let record = if whole {
@@ -3319,19 +3329,14 @@ impl Ctx<'_> {
         };
         let mut clauses = Vec::new();
         for part in parts {
-            let part = part.trim_start_matches("identity.");
-            let field = match part {
+            let field = match *part {
                 "account" => format!("{record}.account"),
                 part => format!("{record}.identity.{part}"),
             };
             let left = self.column_term(table, alias, &field)?;
-            let value = match part {
-                "account" => {
-                    Some(Value::Uuid(session.account.unwrap_or(
-                        jazz_types::account_registry::SYSTEM_ACCOUNT_ID.0,
-                    )))
-                }
-                part => session.resolve(&["user".into(), "identity".into(), part.into()]),
+            let value = match *part {
+                "account" => session.account.map(Value::Uuid),
+                part => session.resolve(&["identity".into(), part.into()]),
             };
             let right = self.present(value)?;
             clauses.push(self.cmp(CmpOp::Eq, left, right)?);
