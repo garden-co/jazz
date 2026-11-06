@@ -243,6 +243,15 @@ pub fn check_client_migrations(json: &[u8], target: &str) -> Result<(), String> 
     let mut by_hash = std::collections::HashMap::new();
     for entry in &bundle.schemas {
         let hash = parse_schema_hash(&entry.hash)?;
+        // As a deployment does: a schema must be the one its hash names.
+        let actual = SchemaHash::compute(&entry.schema);
+        if actual != hash {
+            return Err(super::DeploymentError::SchemaHashMismatch {
+                claimed: hash,
+                actual,
+            }
+            .to_string());
+        }
         schemas.push((hash, entry.schema.clone()));
         by_hash.insert(hash, &entry.schema);
     }
@@ -278,11 +287,29 @@ pub fn check_client_migrations(json: &[u8], target: &str) -> Result<(), String> 
                 .map_err(|error| format!("invalid schema {}: {error}", SchemaHash(*hash)))
         })
         .collect::<Result<std::collections::BTreeMap<_, _>, _>>()?;
-    let migrations = migrations
-        .into_iter()
-        .map(|lens| ((lens.source_hash.0, lens.target_hash.0), lens))
-        .collect();
-    super::check_lenses(&schemas, &compiled, &migrations).map_err(|error| error.to_string())
+    let mut edges = std::collections::BTreeMap::new();
+    for lens in migrations {
+        let edge = (lens.source_hash.0, lens.target_hash.0);
+        // Two migrations between the same versions must be one.
+        if let Some(previous) = edges.get(&edge)
+            && *previous != lens
+        {
+            return Err(super::DeploymentError::ConflictingMigration {
+                from: lens.source_hash,
+                to: lens.target_hash,
+            }
+            .to_string());
+        }
+        edges.insert(edge, lens);
+    }
+    let check = || -> Result<(), super::DeploymentError> {
+        super::check_lenses(&schemas, &compiled, &edges)?;
+        // Paths between two versions must agree whatever else the store
+        // holds; whether the history is one is the deploy's to judge.
+        let order = super::topological_order(&schemas, &edges)?;
+        super::validate_parallel_paths(&order, &schemas, &edges)
+    };
+    check().map_err(|error| error.to_string())
 }
 
 /// The bundle in `migrations` (JSON, see [`client_migrations`]) lowered for
