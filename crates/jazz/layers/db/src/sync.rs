@@ -1587,43 +1587,55 @@ impl Expected {
     }
 }
 
-/// A replica's unsettled commits, in commit order, with the pending txs of
-/// each row they write (so an upload finds a row's newest pending commit
-/// without scanning the queue).
+/// A replica's unsettled commits, in commit order (by local seq), with the
+/// pending txs of each row they write: an upload finds a row's newest
+/// pending commit, a fate its commit, and a rebase the commits sharing a
+/// row, without scanning the queue.
 #[derive(Default)]
 struct PendingQueue {
-    commits: Vec<Pending>,
+    commits: BTreeMap<u64, Pending>,
     by_row: HashMap<RowKey, BTreeSet<u64>>,
 }
 
-impl std::ops::Deref for PendingQueue {
-    type Target = [Pending];
-
-    fn deref(&self) -> &[Pending] {
-        &self.commits
-    }
-}
-
 impl PendingQueue {
+    /// The commits, in commit order.
+    fn iter(&self) -> impl DoubleEndedIterator<Item = &Pending> {
+        self.commits.values()
+    }
+
+    fn len(&self) -> usize {
+        self.commits.len()
+    }
+
+    fn get(&self, tx: u64) -> Option<&Pending> {
+        self.commits.get(&tx)
+    }
+
+    fn contains(&self, tx: u64) -> bool {
+        self.commits.contains_key(&tx)
+    }
+
     fn push(&mut self, pending: Pending) {
+        // A local seq names one commit.
+        self.remove(pending.tx);
         for row in &pending.rows {
             self.by_row
                 .entry(row.clone())
                 .or_default()
                 .insert(pending.tx);
         }
-        self.commits.push(pending);
+        self.commits.insert(pending.tx, pending);
     }
 
+    /// Take back the commit just pushed.
     fn pop(&mut self) {
-        if let Some(pending) = self.commits.pop() {
+        if let Some((_, pending)) = self.commits.pop_last() {
             self.unindex(&pending);
         }
     }
 
     fn remove(&mut self, tx: u64) {
-        if let Some(at) = self.commits.iter().position(|p| p.tx == tx) {
-            let pending = self.commits.remove(at);
+        if let Some(pending) = self.commits.remove(&tx) {
             self.unindex(&pending);
         }
     }
@@ -1640,12 +1652,12 @@ impl PendingQueue {
     }
 
     fn get_mut(&mut self, tx: u64) -> Option<&mut Pending> {
-        self.commits.iter_mut().find(|p| p.tx == tx)
+        self.commits.get_mut(&tx)
     }
 
     /// No commit's images can be compared with the upstream's any more.
     fn forget_expected(&mut self) {
-        for pending in &mut self.commits {
+        for pending in self.commits.values_mut() {
             pending.expected = None;
         }
     }
@@ -1653,12 +1665,103 @@ impl PendingQueue {
     /// The id pending commit `tx` uploads under: this store's own, or that
     /// of the session commit it carries.
     pub(super) fn upload_id(&self, tx: u64) -> Option<TxId> {
-        self.commits.iter().find(|p| p.tx == tx).map(|p| p.id)
+        self.commits.get(&tx).map(|p| p.id)
     }
 
     /// The newest pending commit that writes `row`.
     fn newest(&self, row: &RowKey) -> Option<u64> {
         self.by_row.get(row).and_then(|txs| txs.last().copied())
+    }
+
+    /// `rows`, with every row a pending commit writing one of them also
+    /// writes, until no commit links one more: what replays together when
+    /// any of `rows` is restored (see [`Db::rebase`]).
+    fn linked(&self, rows: impl IntoIterator<Item = RowKey>) -> HashSet<RowKey> {
+        let mut linked = HashSet::new();
+        let mut visited = HashSet::new();
+        let mut next: Vec<RowKey> = rows.into_iter().collect();
+        while let Some(row) = next.pop() {
+            if !linked.insert(row.clone()) {
+                continue;
+            }
+            for tx in self.by_row.get(&row).into_iter().flatten() {
+                if !visited.insert(*tx) {
+                    continue;
+                }
+                let pending = self.commits.get(tx).expect("indexed commit");
+                next.extend(
+                    pending
+                        .rows
+                        .iter()
+                        .filter(|row| !linked.contains(*row))
+                        .cloned(),
+                );
+            }
+        }
+        linked
+    }
+
+    /// Whether a pending commit other than `tx` that writes one of `rows`
+    /// orders after `order`.
+    fn later_on(&self, rows: &[RowKey], tx: u64, order: Order) -> bool {
+        rows.iter()
+            .filter_map(|row| self.by_row.get(row))
+            .flatten()
+            .any(|&other| {
+                other != tx && self.commits.get(&other).is_some_and(|p| p.order() > order)
+            })
+    }
+
+    /// The pending commits writing any of `rows`.
+    fn writing<'a>(&'a self, rows: &HashSet<RowKey>) -> impl Iterator<Item = &'a Pending> {
+        let txs: BTreeSet<u64> = rows
+            .iter()
+            .filter_map(|row| self.by_row.get(row))
+            .flatten()
+            .copied()
+            .collect();
+        txs.into_iter()
+            .map(|tx| self.commits.get(&tx).expect("indexed commit"))
+    }
+}
+
+/// The commits a replica sent and has no fate for, in the order it sent
+/// them, found by id: a fate drops its commit without scanning the rest.
+#[derive(Default)]
+struct SentCommits {
+    by_order: BTreeMap<u64, SyncMessage>,
+    order_of: HashMap<TxId, u64>,
+    next: u64,
+}
+
+impl SentCommits {
+    /// Note `message` sent, if it is a commit not noted already.
+    fn record(&mut self, message: &SyncMessage) {
+        let SyncMessage::Commit { id, .. } = message else {
+            return;
+        };
+        if self.order_of.contains_key(id) {
+            return;
+        }
+        self.order_of.insert(*id, self.next);
+        self.by_order.insert(self.next, message.clone());
+        self.next += 1;
+    }
+
+    /// Commit `id` has its fate.
+    fn settle(&mut self, id: &TxId) {
+        if let Some(order) = self.order_of.remove(id) {
+            self.by_order.remove(&order);
+        }
+    }
+
+    /// The commits still owed a fate, in the order they went.
+    fn in_order(&self) -> Vec<SyncMessage> {
+        self.by_order.values().cloned().collect()
+    }
+
+    fn len(&self) -> usize {
+        self.by_order.len()
     }
 }
 
@@ -1818,7 +1921,7 @@ pub(crate) struct Client {
     pending: PendingQueue,
     unsent: Vec<SyncMessage>,
     /// Commits sent but not settled, for resending after a reconnect.
-    sent: Vec<SyncMessage>,
+    sent: SentCommits,
     node: [u8; 16],
     connection: u64,
     fates: HashMap<u64, Result<(), Error>>,
@@ -4890,7 +4993,7 @@ impl Inner {
         let mut images = Vec::new();
         let mut whole = Vec::new();
         let mut mismatched = 0;
-        let Some(pending) = client.pending.iter().find(|p| p.tx == tx) else {
+        let Some(pending) = client.pending.get(tx) else {
             return Ok((images, whole, mismatched));
         };
         for written in as_written {
@@ -6564,7 +6667,7 @@ impl Inner {
             if node == me
                 && let Some(client) = &self.client
             {
-                if client.pending.iter().any(|p| p.tx == tx) {
+                if client.pending.contains(tx) {
                     cut.extra.push(self.own_rank(tx));
                     continue;
                 }
@@ -6803,7 +6906,7 @@ impl Client {
         Client {
             node,
             connection: 0,
-            sent: Vec::new(),
+            sent: SentCommits::default(),
             transport: None,
             forget_upstream: false,
             hint: Rc::new(StdCell::new(Link {
@@ -7014,7 +7117,7 @@ impl Db {
         }
         let client = inner.client.as_mut().expect("client");
         // Sent-but-unsettled commits go first, in their original order.
-        let mut resend = client.sent.clone();
+        let mut resend = client.sent.in_order();
         resend.append(&mut client.unsent);
         client.unsent = resend;
         // A new session answers nothing the old one was asked.
@@ -7502,12 +7605,10 @@ impl Db {
                 // order.
                 let client = inner.client.as_ref().expect("client");
                 let order = (clock, *id.node.as_bytes(), id.time.0);
-                let reorder = client.pending.iter().any(|p| {
-                    p.tx != seq && p.order() > order && p.rows.iter().any(|row| rows.contains(row))
-                });
+                let reorder = client.pending.later_on(&rows, seq, order);
                 drop(inner);
                 if reorder {
-                    self.rebase()?;
+                    self.rebase(Some(rows.into_iter().collect()))?;
                 }
             }
             Err(error) => {
@@ -7531,11 +7632,19 @@ impl Db {
     /// A transaction that cannot upload is rejected at once.
     fn settle_locally(&self, tx: u64) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
+        let mut rows = HashSet::new();
         if let Some(client) = inner.client.as_mut() {
+            rows.extend(
+                client
+                    .pending
+                    .get(tx)
+                    .into_iter()
+                    .flat_map(|p| p.rows.clone()),
+            );
             client.pending.remove(tx);
         }
         drop(inner);
-        self.rebase()
+        self.rebase(Some(rows))
     }
 
     /// Remote reads ship the query's rows plus its supporting rows (single
@@ -7977,7 +8086,7 @@ impl Db {
                     Poll::Ready(Ok(tx))
                 }
                 // A stranded store uploads nothing (INV-SYNC-51).
-                None if client.stranded && client.pending.iter().any(|p| p.tx == tx) => {
+                None if client.stranded && client.pending.contains(tx) => {
                     Poll::Ready(Err(stranded()))
                 }
                 // The upstream serves another authority history: nothing
@@ -7986,11 +8095,11 @@ impl Db {
                 // answered above or still waits for the relay.
                 None if tier == DurabilityTier::Global
                     && client.authority_changed().is_some()
-                    && client.pending.iter().any(|p| p.tx == tx) =>
+                    && client.pending.contains(tx) =>
                 {
                     Poll::Ready(Err(client.authority_changed().expect("guarded").clone()))
                 }
-                None if client.pending.iter().any(|p| p.tx == tx) => Poll::Pending,
+                None if client.pending.contains(tx) => Poll::Pending,
                 // Not pending and no fate: a local no-op or pre-connection commit.
                 None => Poll::Ready(Ok(tx)),
             }
@@ -8264,7 +8373,10 @@ impl Db {
     }
 
     fn client_apply(&self) -> Result<(), Error> {
+        // What a rebase restores and replays: the rows whose baseline or
+        // pending commits changed, or everything (`None`).
         let mut rebase = false;
+        let mut changed: Option<HashSet<RowKey>> = Some(HashSet::new());
         let mut answered_remotes = Vec::new();
         {
             let mut inner = self.inner.borrow_mut();
@@ -8385,8 +8497,17 @@ impl Db {
                                     RowUuid::from_bytes(image.id),
                                     &image.key,
                                 )?;
-                                let overlaid = inner.receive_image(image)?;
-                                rebase |= overlaid;
+                                let row_key = (
+                                    image.table.clone(),
+                                    RowUuid::from_bytes(image.id),
+                                    image.key.clone(),
+                                );
+                                if inner.receive_image(image)? {
+                                    rebase = true;
+                                    if let Some(changed) = changed.as_mut() {
+                                        changed.insert(row_key);
+                                    }
+                                }
                             }
                             Ok::<_, Error>(())
                         })();
@@ -8404,7 +8525,12 @@ impl Db {
                         }
                         let row = RowUuid::from_bytes(id);
                         let held = inner.current_image(&table, row, &key)?.is_some();
-                        rebase |= inner.receive_eviction(&table, row, &key)?;
+                        if inner.receive_eviction(&table, row, &key)? {
+                            rebase = true;
+                            if let Some(changed) = changed.as_mut() {
+                                changed.insert((table.clone(), row, key.clone()));
+                            }
+                        }
                         // A version still exists: it masks the base's row in
                         // branch views until an image of it arrives.
                         if hidden {
@@ -8442,7 +8568,10 @@ impl Db {
                             // Versions it took rebuilt the store's
                             // schema: its pending commits replay on top.
                             Ok(mirrored) => {
-                                rebase |= mirrored;
+                                if mirrored {
+                                    rebase = true;
+                                    changed = None;
+                                }
                                 // The authority may apply commits already
                                 // sent under a version this store just
                                 // took: what it made of them is no image
@@ -8565,7 +8694,7 @@ impl Db {
                     SyncMessage::Stored { id } => {
                         let client = inner.client.as_mut().expect("client");
                         if let Some(tx) = client.local_tx(&id)
-                            && client.pending.iter().any(|p| p.tx == tx)
+                            && client.pending.contains(tx)
                         {
                             client.stored.insert(tx);
                         }
@@ -8635,9 +8764,19 @@ impl Db {
                                     let row = RowUuid::from_bytes(image.id);
                                     (image.table.clone(), row, image.key.clone())
                                 }))?;
-                                let received = images
-                                    .into_iter()
-                                    .try_for_each(|image| inner.receive_image(image).map(drop));
+                                let received = images.into_iter().try_for_each(|image| {
+                                    let row_key = (
+                                        image.table.clone(),
+                                        RowUuid::from_bytes(image.id),
+                                        image.key.clone(),
+                                    );
+                                    if inner.receive_image(image)?
+                                        && let Some(changed) = changed.as_mut()
+                                    {
+                                        changed.insert(row_key);
+                                    }
+                                    Ok::<_, Error>(())
+                                });
                                 inner.end_current_batch();
                                 received?;
                                 *accepted_at
@@ -8660,13 +8799,14 @@ impl Db {
                         let client = inner.client.as_mut().expect("client");
                         // From the pending commit, not what was sent: a
                         // commit refused before sending was never sent.
-                        let serializable =
-                            client.pending.iter().any(|p| p.tx == tx && p.serializable);
+                        let settling = client.pending.get(tx);
+                        let serializable = settling.is_some_and(|p| p.serializable);
+                        if let (Some(changed), Some(settling)) = (changed.as_mut(), settling) {
+                            changed.extend(settling.rows.iter().cloned());
+                        }
                         client.pending.remove(tx);
                         client.stored.remove(&tx);
-                        client.sent.retain(
-                            |m| !matches!(m, SyncMessage::Commit { id: sent, .. } if *sent == id),
-                        );
+                        client.sent.settle(&id);
                         let result = result.map_err(from_wire_error);
                         // A relayed session's refusal is that session's to
                         // report, not this store's. One whose session is gone
@@ -8803,7 +8943,7 @@ impl Db {
             }
         }
         if rebase {
-            self.rebase()?;
+            self.rebase(changed)?;
             self.inner.borrow_mut().reconcile_unsettled()?;
         }
         // Results whose position moved read as of the new one.
@@ -8937,9 +9077,7 @@ impl Db {
             (commits, pushes) = kept.into_iter().unzip();
         }
         for commit in &commits {
-            if !client.sent.iter().any(|m| matches!((m, commit), (SyncMessage::Commit { id: a, .. }, SyncMessage::Commit { id: b, .. }) if a == b)) {
-                client.sent.push(commit.clone());
-            }
+            client.sent.record(commit);
         }
         // A commit names tables and columns by stored names, whichever
         // version wrote it, so no version travels with it. One naming
@@ -8991,21 +9129,38 @@ impl Db {
         self.inner.borrow_mut().fan.flush_settled();
     }
 
-    /// Restore every overlaid row to its upstream baseline and replay the
-    /// pending transactions, in order, over them.
-    fn rebase(&self) -> Result<(), Error> {
+    /// Restore overlaid rows to their upstream baselines and replay the
+    /// pending transactions, in order, over them: every overlaid row, or,
+    /// with `changed`, the rows whose baseline or pending commits changed
+    /// and the rows linked to them by a pending commit
+    /// ([`PendingQueue::linked`]). A replay writes only the rows its
+    /// commit wrote, so a row no replayed commit writes and whose baseline
+    /// stayed would come out of the replay as it went in: leaving it
+    /// keeps settling a write proportional to the rows it touches, not to
+    /// every write still pending.
+    fn rebase(&self, changed: Option<HashSet<RowKey>>) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
         let Some(client) = inner.client.as_mut() else {
             return Ok(());
         };
-        let baseline = std::mem::take(&mut client.baselines);
+        let scope = changed.map(|changed| client.pending.linked(changed));
+        let baseline: HashMap<RowKey, Option<Image>> = match &scope {
+            None => std::mem::take(&mut client.baselines),
+            Some(rows) => rows
+                .iter()
+                .filter_map(|row| Some((row.clone(), client.baselines.remove(row)?)))
+                .collect(),
+        };
+        let replaying: Vec<&Pending> = match &scope {
+            None => client.pending.iter().collect(),
+            Some(rows) => client.pending.writing(rows).collect(),
+        };
         // Unsettled versions order last-writer-wins by their commits'
         // `Order` (SPEC 8 §8.13): the pending commits replay in it, and one
         // replays on a row only over an upstream's unsettled version that
         // orders before it. Later, that version is the one the row shows.
-        let mut pending: Vec<(Order, u64, Vec<StagedOp>, Vec<RowKey>)> = client
-            .pending
-            .iter()
+        let mut pending: Vec<(Order, u64, Vec<StagedOp>, Vec<RowKey>)> = replaying
+            .into_iter()
             .map(|p| (p.order(), p.tx, p.ops.clone(), p.rows.clone()))
             .collect();
         pending.sort_by_key(|(order, ..)| *order);
@@ -9015,10 +9170,9 @@ impl Db {
             .iter()
             .filter_map(|(key, image)| Some((key, image.as_ref()?.written?)))
             .collect();
-        let keep: BTreeSet<(String, RowUuid, Vec<u8>)> = client
-            .pending
+        let keep: BTreeSet<RowKey> = pending
             .iter()
-            .flat_map(|p| p.rows.iter().cloned())
+            .flat_map(|(.., rows)| rows.iter().cloned())
             .collect();
         for ((table, row, key), image) in &baseline {
             match image {
@@ -9036,6 +9190,7 @@ impl Db {
         // that view, and nothing is renamed across an upgrade.
         let view = inner.stored_view();
         let active = std::mem::replace(&mut inner.schema, view);
+        inner.replayed_commits += pending.len() as u64;
         let replayed = pending.into_iter().try_for_each(|(order, tx, ops, rows)| {
             begin_savepoint(&inner.conn, "replay")?;
             inner.merging = true;
@@ -9106,10 +9261,9 @@ impl Db {
         inner.schema = active;
         replayed?;
         let client = inner.client.as_mut().expect("client");
-        client.baselines = baseline
-            .into_iter()
-            .filter(|(row, _)| keep.contains(row))
-            .collect();
+        client
+            .baselines
+            .extend(baseline.into_iter().filter(|(row, _)| keep.contains(row)));
         Ok(())
     }
 }
@@ -10054,6 +10208,13 @@ impl Db {
     /// cost of one round trip (SPEC 8 §8.3).
     pub fn as_written_mismatches(&self) -> u64 {
         self.inner.borrow().as_written_mismatches
+    }
+
+    /// Pending commits replayed over restored baselines since this store
+    /// opened (for tests and metrics): settling a commit replays the
+    /// pending commits sharing its rows, not every one still pending.
+    pub fn replayed_commits(&self) -> u64 {
+        self.inner.borrow().replayed_commits
     }
 
     /// Sessions currently served (for tests and metrics).
@@ -12363,7 +12524,7 @@ impl Db {
                         inner
                             .client
                             .as_ref()
-                            .is_some_and(|c| c.pending.iter().any(|p| p.tx == *tx))
+                            .is_some_and(|c| c.pending.contains(*tx))
                     });
                 if let Some(local) = upload {
                     let client = inner.client.as_mut().expect("client");
