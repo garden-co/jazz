@@ -48,9 +48,7 @@ impl StoreSpec {
         match field("backend")?.as_deref() {
             None | Some("indexeddb") => {}
             Some(other) => {
-                return Err(JsValue::from_str(&format!(
-                    "storage backend {other:?} is not supported yet (use \"indexeddb\")"
-                )));
+                return Err(crate::not_supported(&format!("storage backend {other:?}")));
             }
         }
         let path = match field("path")? {
@@ -133,4 +131,41 @@ pub(crate) async fn destroy(spec: &StoreSpec) -> Result<(), JsValue> {
         .map_err(vfs_error)?;
     // The journal of a closed database is already gone.
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    fn storage(backend: &str) -> JsValue {
+        let storage = js_sys::Object::new();
+        js_sys::Reflect::set(&storage, &"backend".into(), &backend.into()).unwrap();
+        storage.into()
+    }
+
+    #[wasm_bindgen_test]
+    fn indexeddb_is_the_only_backend() {
+        for spec in [JsValue::UNDEFINED, storage("indexeddb")] {
+            let spec = StoreSpec::from_js(&spec, "db").unwrap();
+            assert!(spec.path.starts_with("/jazz-") && spec.path.ends_with(".sqlite"));
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn other_backends_fail_with_a_coded_not_supported_error() {
+        let Err(error) = StoreSpec::from_js(&storage("opfs"), "db") else {
+            panic!("opfs must be refused");
+        };
+        let error: js_sys::Error = error.dyn_into().expect("a coded Error, not a bare string");
+        assert_eq!(
+            String::from(error.message()),
+            "Query: storage backend \"opfs\" is not supported yet"
+        );
+        let code = js_sys::Reflect::get(&error, &"code".into()).unwrap();
+        assert_eq!(
+            code.as_string().as_deref(),
+            Some(jazz::db::ErrorCode::Query.as_str())
+        );
+    }
 }
