@@ -94,7 +94,11 @@ async function setup(options: { guests?: boolean } = {}) {
   // these clients run in memory, and record which user's storage was wiped.
   const wiped: string[] = [];
   // Holds a wipe's delete until released (a slow storage teardown).
-  const hold = { wipe: undefined as Promise<void> | undefined };
+  const hold = {
+    wipe: undefined as Promise<void> | undefined,
+    // Holds a wipe's open until released (storage another tab still closes).
+    open: undefined as Promise<void> | undefined,
+  };
   const store = memoryStore();
   const open = () =>
     createJazzClient({
@@ -103,6 +107,8 @@ async function setup(options: { guests?: boolean } = {}) {
       clearOnSignOut: true,
       client: async () => ({
         createClient: async (config) => {
+          // Only a wipe opens a user the cookie doesn't name.
+          if (jar.user !== config.account.identity.subject) await hold.open;
           const db = await createLocalFirstDb({ ...config, driver: { type: "memory" } });
           db.deleteClientStorage = async () => {
             await hold.wipe;
@@ -229,14 +235,15 @@ it("lets a user who signs back in during the wipe open a fresh replica, still re
   await second.close();
 }, 60_000);
 
-it("lets go of a wipe that hangs, so the user can sign back in, and keeps it for a later load", async () => {
+it("lets go of a wipe whose open hangs, so the user can sign back in, and keeps it for a later load", async () => {
   const { jar, open, wiped, hold, storage } = await setup();
   const first = await signInLocalFirst(open);
   jar.user = null;
   await first.close();
 
-  // The storage never finishes its teardown (another tab is still closing it).
-  hold.wipe = new Promise<void>(() => {});
+  // The wipe's open never finishes (another tab is still closing the storage).
+  let opened!: () => void;
+  hold.open = new Promise<void>((resolve) => (opened = resolve));
   const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
   cleanups.push(async () => warned.mockRestore());
   const second = await open();
@@ -252,6 +259,44 @@ it("lets go of a wipe that hangs, so the user can sign back in, and keeps it for
   await second.loginWithBackend();
   expect(second.getSnapshot().client?.session?.identity.subject).toBe("alice");
   expect(wiped).toEqual([]);
+  const recorded = [...storage].find(([key]) => key.startsWith("jazz-clear-on-sign-out-v1:"));
+  expect(recorded?.[1]).toContain('"subject":"alice"');
+  // Its open finishing late wipes nothing: it was given up on.
+  opened();
+  await new Promise((resolve) => setTimeout(resolve, 1_000));
+  expect(wiped).toEqual([]);
+}, 90_000);
+
+it("holds the user's sign-in until a delete that began finishes, however late", async () => {
+  const { jar, open, wiped, hold, storage } = await setup();
+  const first = await signInLocalFirst(open);
+  jar.user = null;
+  await first.close();
+
+  // The delete starts, then outlasts the wipe's time limit.
+  let finish!: () => void;
+  hold.wipe = new Promise<void>((resolve) => (finish = resolve));
+  const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+  cleanups.push(async () => warned.mockRestore());
+  const second = await open();
+  cleanups.push(() => second.close());
+  await expect
+    .poll(() => warned.mock.calls.some(([message]) => /later load/.test(String(message))), {
+      timeout: 40_000,
+      interval: 500,
+    })
+    .toBe(true);
+  jar.user = "alice";
+  let signedIn = false;
+  const signingIn = second.loginWithBackend().then(() => (signedIn = true));
+  await new Promise((resolve) => setTimeout(resolve, 1_000));
+  expect(signedIn).toBe(false);
+  finish();
+  await signingIn;
+  expect(wiped).toEqual(["alice"]);
+  await expect
+    .poll(() => second.getSnapshot().client?.session?.identity.subject, { timeout: 15_000 })
+    .toBe("alice");
   const recorded = [...storage].find(([key]) => key.startsWith("jazz-clear-on-sign-out-v1:"));
   expect(recorded?.[1]).toContain('"subject":"alice"');
 }, 90_000);

@@ -293,6 +293,7 @@ export async function createJazzClient(config: JazzClientConfig): Promise<Browse
         // Checked and claimed in one step: an open of this account from now
         // on waits for the wipe.
         if (!stillLeftBehind(owner.account)) throw new Error("signed in again");
+        let deleting = false;
         const run = (async () => {
           // Its socket carries another user's cookie (or none), so the
           // backend refuses it: nothing of this replica uploads.
@@ -300,18 +301,24 @@ export async function createJazzClient(config: JazzClientConfig): Promise<Browse
           try {
             // Given up on while it opened: leave the replica for a later load.
             if (signal.aborted) return;
+            deleting = true;
             await client.db.deleteClientStorage();
           } finally {
             await client.shutdown();
           }
-          if (!signal.aborted) record.forget(owner.account);
+          record.forget(owner.account);
         })();
         wiping.set(owner.account, run);
-        // Given up on: let go of the lock and the account at once, so an open
-        // of it doesn't wait on a wipe that hangs.
+        // Given up on before its delete began: let go of the lock and the
+        // account at once, so an open of it doesn't wait on an open that
+        // hangs. A delete that began is waited for, however long it takes:
+        // an open of the account meanwhile would get half-wiped storage.
         const givenUp = new Promise<void>((resolve) => {
-          if (signal.aborted) resolve();
-          signal.addEventListener("abort", () => resolve(), { once: true });
+          const giveUp = () => {
+            if (!deleting) resolve();
+          };
+          if (signal.aborted) giveUp();
+          signal.addEventListener("abort", giveUp, { once: true });
         });
         try {
           await Promise.race([run, givenUp]);

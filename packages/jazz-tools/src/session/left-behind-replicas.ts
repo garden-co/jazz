@@ -139,8 +139,9 @@ export async function wipeLeftBehindReplicas(options: {
    * Wipe `owner`'s replica and forget it in the record, in one step, so an
    * open of that account waiting for the wipe records its new replica after.
    * Resolves false when it left the replica (another tab holds it open).
-   * Once `signal` aborts (the wipe took too long) it lets go of the replica
-   * at once, without forgetting it.
+   * Once `signal` aborts (the wipe took too long) before its delete began,
+   * it lets go of the replica at once, without forgetting it; a delete that
+   * began holds the replica until it settles.
    */
   wipe(owner: ReplicaOwner, signal: AbortSignal): Promise<boolean>;
 }): Promise<void> {
