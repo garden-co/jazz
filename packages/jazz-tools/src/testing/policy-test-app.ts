@@ -173,8 +173,8 @@ function asTestDb(db: Db, expect: ExpectLike): TestDb {
     },
     expectDenied: {
       value: async (callback: (db: Db) => PendingWrite) => {
-        // A write can be denied at once, as it is staged (the session may
-        // not read the row), or later by the server: both count.
+        // A write can be denied at once, as it is staged (a row this
+        // replica holds deleted), or later by the server: both count.
         let write: PendingWrite;
         try {
           write = callback(db);

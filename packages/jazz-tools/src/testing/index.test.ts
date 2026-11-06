@@ -722,7 +722,7 @@ describe("expectDenied", () => {
       authMode: "external",
     }) as const;
 
-  it("counts an update denied at once, because the user may not read the row", async () => {
+  it("counts an update the server denies, because the user may not read the row", async () => {
     const policyTestApp = await createPolicyTestApp(testApp, owned, expect);
     try {
       const todo = await policyTestApp.seed((db) =>
@@ -732,6 +732,25 @@ describe("expectDenied", () => {
           ownerId: "00000000-0000-4000-8000-000000000001",
         }),
       );
+      const bob = policyTestApp.as(session("bob", "00000000-0000-4000-8000-000000000002"));
+      // The replica stages it, and the server's refusal counts.
+      await bob.expectDenied((db) => db.update(testApp.todos, todo.id, { title: "Bob's now" }));
+    } finally {
+      await policyTestApp.shutdown();
+    }
+  }, 10_000);
+
+  it("counts an update denied at once, of a row deleted on this replica", async () => {
+    const policyTestApp = await createPolicyTestApp(testApp, owned, expect);
+    try {
+      const todo = await policyTestApp.seed((db) =>
+        db.insert(testApp.todos, {
+          title: "Alice's",
+          done: false,
+          ownerId: "00000000-0000-4000-8000-000000000001",
+        }),
+      );
+      await policyTestApp.seed((db) => db.delete(testApp.todos, todo.id));
       const bob = policyTestApp.as(session("bob", "00000000-0000-4000-8000-000000000002"));
       // The local denial carries the code a server rejection carries.
       let thrown: unknown;

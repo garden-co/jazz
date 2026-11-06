@@ -6897,10 +6897,11 @@ impl Inner {
         }
     }
 
-    /// The refusal of a write to a deleted row. A session that may read the
-    /// row is told it is deleted; one that may not, or whose read policy
-    /// only the authority can decide here, is told what it is told for a
-    /// missing row, so a tombstone reveals no more than a live row does.
+    /// The refusal of a write to a deleted row. At the authority, a session
+    /// that may read the row is told it is deleted, and one that may not is
+    /// told what it is told for a missing row, so a tombstone reveals no
+    /// more than a live row does. A replica evaluates no policy for a
+    /// session's write, so it gives every session the missing row's answer.
     fn refuse_deleted(
         &self,
         table: &Table,
@@ -6909,31 +6910,34 @@ impl Inner {
         who: &Who,
         verb: &str,
     ) -> Result<Error, Error> {
-        if let Who::Session(author) = *who {
-            let conclusive = self.client.is_none()
-                || !table
-                    .policy(Operation::Select)
-                    .is_some_and(policy_reads_other_rows);
-            if !conclusive || !self.check(table, row, key, author, Operation::Select)? {
-                return Ok(if verb == "DELETE" {
-                    delete_denied()
-                } else {
-                    unreadable_target(verb, &table.name)
-                });
-            }
+        if let Who::Session(author) = *who
+            && (self.client.is_some() || !self.check(table, row, key, author, Operation::Select)?)
+        {
+            return Ok(if verb == "DELETE" {
+                delete_denied()
+            } else {
+                unreadable_target(verb, &table.name)
+            });
         }
         Ok(row_already_deleted(row))
     }
 
     /// Read-for-write (SPEC 7, INV-RLS-20): a session may update or upsert
     /// only a row it may read, and omitted cells must not be merged blind.
-    /// A replica acting for a session (a backend's request) refuses at once
-    /// when the row's read policy is decided by the row alone. Under a
-    /// policy that reads other rows the decision is the authority's, as on
-    /// upload: the replica may lack the rows that grant access (a fresh
-    /// process has loaded none), and the write's waits report a refusal.
-    /// The session's own reads on the replica stay filtered meanwhile, so
-    /// deferring discloses nothing.
+    /// Only the authority decides it, with the other write policies. A
+    /// replica acting for a session (a backend's request) stages the write
+    /// and its waits report the authority's refusal: the replica may lack
+    /// the rows that grant access (a fresh process has loaded none).
+    /// Until the authority answers, the staged version is judged by the
+    /// read policy like any other: a patch of a column the policy reads,
+    /// on a hidden row, can show the row's other cells to a read that
+    /// includes pending versions, the writer's or another session's that
+    /// the patch names (`owner = carol`). Those are `LocalFirst` and
+    /// `LocalOnly` reads, and every read inside an open transaction, which
+    /// sees its own staged writes whatever its tier. A `Remote` read
+    /// outside a transaction leaves pending versions out (it is
+    /// settled-only on a replica), so it shows only accepted rows under
+    /// their own policy; that is a backend's default read.
     fn authorize_patch(
         &self,
         table: &Table,
@@ -6942,16 +6946,9 @@ impl Inner {
         who: &Who,
         verb: &str,
     ) -> Result<(), Error> {
-        let conclusive = self.client.is_none()
-            || !table
-                .policy(Operation::Select)
-                .is_some_and(policy_reads_other_rows);
-        if let Who::Session(author) = *who
-            && conclusive
+        if let Some(author) = self.checked(*who)
             && !self.check(table, row, key, author, Operation::Select)?
         {
-            // A replica refuses it locally as the authority would, so the
-            // caller sees one denial wherever it is decided.
             return Err(unreadable_target(verb, &table.name));
         }
         if let Some(author) = self.checked(*who)
