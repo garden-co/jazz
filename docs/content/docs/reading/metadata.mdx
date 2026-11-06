@@ -13,6 +13,10 @@ You can select and filter on Jazz's magic columns just like other columns. They 
 - `$updatedBy`&hairsp;—&hairsp;the Jazz principal that last updated the row
 - `$updatedAt`&hairsp;—&hairsp;when the row was last updated
 
+`$createdBy` and `$updatedBy` are a `RowAuthor`: `{ account, identity: { issuer, subject } }`.
+`account` is the Jazz account; `identity.subject` is the `userId` your `authenticate` returned for a
+backend sign-in.
+
 These are useful for showing authorship, when a row last changed, or building "my created items"
 views without storing duplicate ownership fields.
 

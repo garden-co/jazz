@@ -157,6 +157,11 @@ write is valid only if the data you just read has not changed in a conflicting t
 In TypeScript, `wait()` takes no durability tier for a serializable transaction. It resolves if the
 authority accepts the transaction and rejects if the authority rejects it.
 
+A conflict rejects with code `serialization_conflict` or `transaction_conflict`; treat both as "read
+again and retry". A rejection is different from a transport error, such as "websocket transport
+error" during an outage: there the transaction may still reach the authority, so check before you
+retry it.
+
 <Callout type="warn">
   The authority checks only the reads the writing client reports. That keeps honest writers from
   acting on stale data, but it is not a security boundary: a client that under-reports its reads can
