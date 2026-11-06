@@ -426,13 +426,28 @@ function ClientBox({
   );
 }
 
+/** Each client shows for this long before the next one in its slot. */
+const CYCLE_TURN_S = 6;
+
+/**
+ * The negative delay that puts a slot's `turn`th client on stage during its
+ * turn; the local-first slot runs half a turn behind the thin one, so the two
+ * never change together.
+ */
+function cycleDelay(count: number, turn: number, col: number): string {
+  const offset = col === 2 ? CYCLE_TURN_S / 2 : 0;
+  const shift = (count * CYCLE_TURN_S - turn * CYCLE_TURN_S + offset) % (count * CYCLE_TURN_S);
+  return `${-shift}s`;
+}
+
 /**
  * Fig. 1: where Jazz runs, drawn narrow enough for a phone. Your platform
  * account on top (the large-value store, then the shards), your backend with
  * the jazz core and its /jazz mount behind your auth, then a row of three
- * client slots. Each slot takes turns between two of the six kinds of client
- * (staggered, so one changes at a time), bringing its own wire along; the
- * dashed large-value reads come down the left edge.
+ * clients: the traditional one, a thin client (web page, backend worker,
+ * agent VM in turn) and a local-first one (web app, native app in turn). Sync
+ * goes through your auth into the mount; the dashed large-value reads come
+ * down the right edge.
  * In this figure blue marks Jazz's own parts and mint your auth.
  */
 export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }) {
@@ -455,11 +470,9 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
   const clientH = 120;
   // Three slots, each alternating between two clients. Slot 0 swaps the
   // traditional client (plain requests to your API) for a web page (sync).
-  const slots = [
-    [clients[0], clients[1]],
-    [clients[2], clients[4]],
-    [clients[3], clients[5]],
-  ];
+  // The traditional client stays; the thin and local-first slots take
+  // turns between their kinds of client.
+  const slots = [[clients[0]], [clients[1], clients[4], clients[5]], [clients[2], clients[3]]];
   const gap = shard.count > 4 ? 6 : 10;
   const sw = shard.count ? (shardRow.w - gap * (shard.count - 1)) / shard.count : 0;
   const shardXs = Array.from({ length: shard.count }, (_, i) => shardRow.x + i * (sw + gap));
@@ -519,41 +532,26 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
             dashed
             start
           />
-          {/* Clients read large values from the store directly (all but
-              the traditional client). */}
+          {/* Jazz clients read large values from the store directly, down
+              the right edge beside the core's own store wire. */}
           <Wire
             points={[
-              [storeBox.x, storeBox.y + storeBox.h / 2],
-              [8, storeBox.y + storeBox.h / 2],
-              [8, 470],
-              [colX[2] + 12, 470],
+              [530, storeBox.y + storeBox.h],
+              [530, rowY],
             ]}
             tone="blue"
             dashed
             start
-            end={false}
           />
-          <g className="dg-cycle dg-cycle-b">
-            <Wire
-              points={[
-                [colX[0] + 12, 470],
-                [colX[0] + 12, rowY],
-              ]}
-              tone="blue"
-              dashed
-            />
-          </g>
-          {[1, 2].map((col) => (
-            <Wire
-              key={`d${col}`}
-              points={[
-                [colX[col] + 12, 470],
-                [colX[col] + 12, rowY],
-              ]}
-              tone="blue"
-              dashed
-            />
-          ))}
+          <Wire
+            points={[
+              [530, 466],
+              [colX[1] + cw - 16, 466],
+              [colX[1] + cw - 16, rowY],
+            ]}
+            tone="blue"
+            dashed
+          />
         </g>
       ) : (
         <g>
@@ -603,61 +601,52 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
       </Label>
       {/* The traditional client makes ordinary requests (and streams) to your
           API routes; every other client keeps a live sync connection. */}
+      <Wire
+        points={[
+          [center(0), rowY],
+          [center(0), api.y + api.h],
+        ]}
+        start
+      />
+      <Lines
+        x={center(0) + 6}
+        y={432}
+        lines={["manual http", "requests &", "streaming"]}
+        step={14}
+        className="dg-label dg-fill-ink"
+      />
+      {/* Sync goes through your auth to the mounted endpoint. */}
       {[1, 2].map((col) => (
         <Wire
           key={`s${col}`}
           points={[
             [center(col), rowY],
-            [center(col), authBottom],
+            [center(col), mount.y + mount.h],
           ]}
           tone="blue"
           start
         />
       ))}
       <Lines
-        x={center(2) + 8}
-        y={440}
+        x={center(1) + 8}
+        y={432}
         lines={["efficient", "realtime", "sync"]}
         step={14}
         className="dg-label dg-fill-blue"
       />
-      {slots.map((pair, col) =>
-        pair.map((client, turn) => (
+      {slots.map((kinds, col) =>
+        kinds.map((client, turn) => (
           <g
             key={client.name.join(" ")}
-            className={`dg-cycle ${turn ? "dg-cycle-b" : "dg-cycle-a"}`}
-            style={{ animationDelay: `${col * 2}s` }}
+            className={
+              kinds.length > 1
+                ? `dg-cycle dg-cycle-${kinds.length}${turn ? " dg-cycle-rest" : ""}`
+                : undefined
+            }
+            style={
+              kinds.length > 1 ? { animationDelay: cycleDelay(kinds.length, turn, col) } : undefined
+            }
           >
-            {col === 0 && turn === 0 ? (
-              <g>
-                <Wire
-                  points={[
-                    [center(0), rowY],
-                    [center(0), api.y + api.h],
-                  ]}
-                  start
-                />
-                <Lines
-                  x={center(0) + 6}
-                  y={432}
-                  lines={["manual http", "requests &", "streaming"]}
-                  step={14}
-                  className="dg-label dg-fill-ink"
-                />
-              </g>
-            ) : null}
-            {col === 0 && turn === 1 ? (
-              <Wire
-                points={[
-                  [center(0), rowY],
-                  [center(0), 446],
-                  [240, 446],
-                  [240, authBottom],
-                ]}
-                tone="blue"
-                start
-              />
-            ) : null}
             <ClientBox x={colX[col]} y={rowY} w={cw} h={clientH} client={client} />
           </g>
         )),

@@ -231,28 +231,30 @@ h6 {
   pointer-events: auto;
   user-select: text;
 }
-/* Fig. 1's client slots: each takes turns between two clients, with a
-   short cross-fade. Hidden ones are also unselectable. */
+/* Fig. 1's client slots: a thin and a local-first slot each take turns
+   between their kinds of client, with a short cross-fade. Hidden ones are
+   also unselectable. */
 .home-diagram .dg-cycle {
-  animation-duration: 12s;
   animation-timing-function: ease-in-out;
   animation-iteration-count: infinite;
   animation-fill-mode: both;
 }
-.home-diagram .dg-cycle-a {
-  animation-name: dg-cycle-a;
+.home-diagram .dg-cycle-2 {
+  animation-name: dg-cycle-2;
+  animation-duration: 12s;
 }
-.home-diagram .dg-cycle-b {
-  animation-name: dg-cycle-b;
+.home-diagram .dg-cycle-3 {
+  animation-name: dg-cycle-3;
+  animation-duration: 18s;
 }
-@keyframes dg-cycle-a {
+@keyframes dg-cycle-2 {
   0%,
-  42% {
+  45% {
     opacity: 1;
     visibility: visible;
   }
   50%,
-  92% {
+  95% {
     opacity: 0;
     visibility: hidden;
   }
@@ -261,27 +263,27 @@ h6 {
     visibility: visible;
   }
 }
-@keyframes dg-cycle-b {
+@keyframes dg-cycle-3 {
   0%,
-  42% {
-    opacity: 0;
-    visibility: hidden;
-  }
-  50%,
-  92% {
+  30% {
     opacity: 1;
     visibility: visible;
   }
-  100% {
+  33.3%,
+  96.7% {
     opacity: 0;
     visibility: hidden;
+  }
+  100% {
+    opacity: 1;
+    visibility: visible;
   }
 }
 @media (prefers-reduced-motion: reduce) {
   .home-diagram .dg-cycle {
     animation: none;
   }
-  .home-diagram .dg-cycle-b {
+  .home-diagram .dg-cycle-rest {
     visibility: hidden;
   }
 }
