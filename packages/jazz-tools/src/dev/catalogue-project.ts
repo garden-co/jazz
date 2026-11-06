@@ -213,6 +213,7 @@ export async function validateProject(
   await validateSchemaAndPermissions(compiled.wasmSchema, compiled.permissions);
   const migrationsDir = resolvedMigrationsDir(options.schemaDir, options.migrationsDir);
   await refuseUnfilledStubs(migrationsDir);
+  await checkLocalMigrations(compiled.wasmSchema, migrationsDir);
   let retired: string[] = [];
   let schema: ValidateProjectResult["schema"];
   if (options.check) {
@@ -1641,13 +1642,25 @@ function isMigrationFile(fileName: string): boolean {
   return fileName.endsWith(".ts") && fileName !== CLIENT_MIGRATIONS_FILE;
 }
 
+type MigrationEdge = { fromHash: string; toHash: string; migration: DefinedMigration };
+
 /** Write the app's schema versions and the migrations between them. */
 async function writeClientMigrations(
   schemaFile: string,
   schemas: ReadonlyMap<string, WasmSchema>,
-  edges: ReadonlyArray<{ fromHash: string; toHash: string; migration: DefinedMigration }>,
+  edges: ReadonlyArray<MigrationEdge>,
 ): Promise<void> {
   if (!(await importsClientMigrations(schemaFile))) return;
+  const path = clientMigrationsPath(schemaFile);
+  await assertNoSymlinkComponents(dirname(path), true);
+  await writeClientMigrationsModule(path, clientMigrationsJson(schemas, edges));
+}
+
+/** The app's schema versions and migrations as JSON, as it ships them to clients. */
+function clientMigrationsJson(
+  schemas: ReadonlyMap<string, WasmSchema>,
+  edges: ReadonlyArray<MigrationEdge>,
+): string {
   const bundle = {
     // As a deployment sends them (`{ tables }`), which the bindings decode.
     schemas: [...schemas]
@@ -1662,9 +1675,7 @@ async function writeClientMigrations(
       forward: serializeForwardLenses(edge.migration.forward),
     })),
   };
-  const path = clientMigrationsPath(schemaFile);
-  await assertNoSymlinkComponents(dirname(path), true);
-  await writeClientMigrationsModule(path, JSON.stringify(bundle, runtimeSchemaJsonReplacer, 2));
+  return JSON.stringify(bundle, runtimeSchemaJsonReplacer, 2);
 }
 
 /** Where `validate` moves migrations that predate SHA-256 schema hashes. */
@@ -1867,9 +1878,38 @@ async function checkLegacyMigrations(
 async function writeLocalClientMigrations(schemaDir: string, migrationsDir: string): Promise<void> {
   const compiled = await loadCompiledSchema(schemaDir);
   if (!(await importsClientMigrations(compiled.schemaFile))) return;
+  const { schemas, edges } = await localClientMigrations(compiled.wasmSchema, migrationsDir);
+  await writeClientMigrations(compiled.schemaFile, schemas, edges);
+}
+
+/**
+ * Check the project's migrations up to `schema` as a deploy of them to a
+ * new authority would, so validate refuses what deploy would refuse.
+ */
+async function checkLocalMigrations(schema: WasmSchema, migrationsDir: string): Promise<void> {
+  const { current, schemas, edges } = await localClientMigrations(schema, migrationsDir);
+  if (schemas.size < 2) return;
+  if (typeof process === "undefined" || !process.versions?.node) return;
+  const { checkClientMigrations } = await import("jazz-napi");
+  try {
+    checkClientMigrations(clientMigrationsJson(schemas, edges), current);
+  } catch (error) {
+    throw new Error(
+      `The migrations in ${basename(migrationsDir)} would not deploy: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+}
+
+/** The snapshots and migration files in `migrationsDir`, leading to `schema`. */
+async function localClientMigrations(
+  schema: WasmSchema,
+  migrationsDir: string,
+): Promise<{ current: string; schemas: Map<string, WasmSchema>; edges: MigrationEdge[] }> {
   const current = {
-    hash: await computeSchemaHash(compiled.wasmSchema),
-    schema: compiled.wasmSchema,
+    hash: await computeSchemaHash(schema),
+    schema,
   };
   const schemas = new Map<string, WasmSchema>(
     (await new MigrationStorage(migrationsDir).listSnapshots()).map(({ hash, schema }) => [
@@ -1878,8 +1918,9 @@ async function writeLocalClientMigrations(schemaDir: string, migrationsDir: stri
     ]),
   );
   schemas.set(current.hash, current.schema);
-  const edges = [];
-  if (await pathExists(migrationsDir)) {
+  const edges: MigrationEdge[] = [];
+  // A migration joins two known versions: with one, none can, so none is loaded.
+  if (schemas.size > 1 && (await pathExists(migrationsDir))) {
     await assertNoSymlinkComponents(migrationsDir);
     for (const fileName of (await readdir(migrationsDir)).filter(isMigrationFile).sort()) {
       const migration = await loadDefinedMigration(join(migrationsDir, fileName));
@@ -1899,5 +1940,5 @@ async function writeLocalClientMigrations(schemaDir: string, migrationsDir: stri
       if (fromHash && toHash) edges.push({ fromHash, toHash, migration });
     }
   }
-  await writeClientMigrations(compiled.schemaFile, schemas, edges);
+  return { current: current.hash, schemas, edges };
 }
