@@ -28,6 +28,8 @@ export interface JazzServerTransportControlBrowserCommands {
   jazzServerTransportControlCreate(serverUrl: string): Promise<string>;
   jazzServerTransportControlBlock(url: string, direction: "both" | "inbound"): Promise<void>;
   jazzServerTransportControlUnblock(url: string): Promise<void>;
+  jazzServerTransportControlDown(url: string): Promise<void>;
+  jazzServerTransportControlUp(url: string, serverUrl?: string): Promise<void>;
   jazzServerTransportControlStop(proxyUrl: string): Promise<void>;
 }
 
@@ -36,6 +38,8 @@ export function jazzServerTransportControlBrowserCommands(): JazzServerTransport
     !hasFunction(commands, "jazzServerTransportControlCreate") ||
     !hasFunction(commands, "jazzServerTransportControlBlock") ||
     !hasFunction(commands, "jazzServerTransportControlUnblock") ||
+    !hasFunction(commands, "jazzServerTransportControlDown") ||
+    !hasFunction(commands, "jazzServerTransportControlUp") ||
     !hasFunction(commands, "jazzServerTransportControlStop")
   ) {
     throw new Error("Browser test project is missing the Jazz server transport-control commands.");
