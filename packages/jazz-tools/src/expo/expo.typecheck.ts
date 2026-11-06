@@ -1,6 +1,10 @@
 // Typecheck-only port of the deleted origin/main Expo auth tests to the v2 API.
 import {
+  createAccountManager,
   createJazzClient,
+  useAccountState,
+  useSyncStatus,
+  type SyncStatus,
   ExpoAuthSecretStore,
   expoAuthSecretStore,
   useLocalFirstAuth,
@@ -47,3 +51,9 @@ const withBearer: JazzClientConfig = {
   bearer: () => "app-token",
 };
 void createJazzClient(withBearer);
+
+// The account and sync hooks are on the Expo entry too, not only on react-native.
+declare const accounts: Awaited<ReturnType<typeof createAccountManager>>;
+export function useAccountsAndSync() {
+  return { account: useAccountState(accounts), sync: useSyncStatus() satisfies SyncStatus };
+}
