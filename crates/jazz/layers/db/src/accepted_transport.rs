@@ -222,6 +222,7 @@ impl Db {
         let db = Db {
             inner: self.inner.clone(),
             view: Some(view),
+            governance: self.session_db(index).governance,
         };
         let prepared = db
             .prepare_query_bound(&query, binding)?

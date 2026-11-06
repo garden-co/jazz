@@ -10,14 +10,9 @@ framework bindings, server-side usage, or a specific product pattern. Use this
 table to jump straight to the example that covers the technique you need.
 
 <Callout type="info">
-If you just want a bare-bones skeleton to build on, the [`starters/`](https://github.com/garden-co/jazz/tree/main/starters) folder ships minimal templates for Next.js, React, and SvelteKit, each in `localfirst`, `betterauth`, and `hybrid` flavours. You can also scaffold a new app from one of these templates with:
-
-```bash
-npm create jazz
-```
-
-Reach for the `examples/` apps below when you want to see a specific pattern worked through end-to-end.
-
+  To start a new app, run `npm create jazz`. It prints a brief for your coding agent, which sets
+  Jazz up in your project. Reach for the `examples/` apps below when you want to see a specific
+  pattern worked through end-to-end.
 </Callout>
 
 ## At a glance
@@ -29,7 +24,7 @@ Reach for the `examples/` apps below when you want to see a specific pattern wor
 | [auth-workos-chat](https://github.com/garden-co/jazz/tree/main/examples/auth-workos-chat)                           | React + Vite + WorkOS     | Hosted OAuth/SSO with no local auth server&hairsp;—&hairsp;sync server points at the WorkOS JWKS, `getAccessToken()` is passed straight to `JazzProvider`                                                                                                                               |
 | [chat-react](https://github.com/garden-co/jazz/tree/main/examples/chat-react)                                       | React + Vite              | Public vs private rooms with invite links via ephemeral `session.claims.join_code`; emoji reactions; collaborative drawing canvases; binary file attachments                                                                                                                            |
 | [cloudflare-worker-runtime-ts](https://github.com/garden-co/jazz/tree/main/examples/cloudflare-worker-runtime-ts)   | Cloudflare Workers        | Booting Jazz inside Workers by passing a precompiled `WebAssembly.Module` via `runtimeSources.wasmModule`&hairsp;—&hairsp;no browser asset URLs                                                                                                                                         |
-| [nextjs-csr-ssr](https://github.com/garden-co/jazz/tree/main/examples/nextjs-csr-ssr)                               | Next.js (App Router)      | The canonical SSR/RSC story: a Server Component reading via `jazz-tools/backend` alongside a Client Component using `jazz-tools/react` hooks, wired by `withJazz`                                                                                                                       |
+| [nextjs-csr-ssr](https://github.com/garden-co/jazz/tree/main/examples/nextjs-csr-ssr)                               | Next.js (App Router)      | The canonical SSR/RSC story: a Server Component reading via `jazz-tools/backend` alongside a Client Component using `jazz-tools/react` hooks, with plain `serverExternalPackages` config                                                                                                |
 | [todo-client-localfirst-expo](https://github.com/garden-co/jazz/tree/main/examples/todo-client-localfirst-expo)     | Expo (React Native)       | Supported alpha app: a direct New-Architecture `jazz-rn` dependency, Expo SecureStore-backed `AccountHandle`, and effect-owned `createJazzClient` persistent relay. Requires a matching development/release build; Expo Go cannot load the native module.                               |
 | [todo-client-localfirst-react](https://github.com/garden-co/jazz/tree/main/examples/todo-client-localfirst-react)   | React + Vite              | Fully client-side React app with local-first auth using a locally generated secret; `useAll` with composable `where()`, `useDb` writes, IndexedDB persistence, and the development Inspector overlay                                                                                    |
 | [todo-client-localfirst-svelte](https://github.com/garden-co/jazz/tree/main/examples/todo-client-localfirst-svelte) | Svelte 5 + Vite           | The Svelte bindings: `JazzSvelteProvider`, `QuerySubscription` live queries, `getDb` writes                                                                                                                                                                                             |

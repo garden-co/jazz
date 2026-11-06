@@ -59,23 +59,15 @@ import {
 
 export type { VercelStoreOptions } from "./vercel-store.js";
 
-/**
- * Where a store keeps the bytes of large values once they settle. Rows and
- * the chunk index stay in the database either way.
- * - `files()`: one file per chunk in a directory (the default).
- * - `"sqlite"`: inside the database file. Works, but the file grows with
- *   every large value, so it is not recommended.
- */
-export type BlobStore = { readonly kind: "files"; readonly dir?: string } | "sqlite";
-
-/**
- * Large-value bytes as files in `dir`, by default `blobs/` in the store's
- * directory. A store keeps the blob store it was first opened with; one that
- * started on `"sqlite"` may move to `files()` later.
- */
-export function files(options: { dir?: string } = {}): Extract<BlobStore, { kind: "files" }> {
-  return { kind: "files", ...(options.dir === undefined ? {} : { dir: options.dir }) };
-}
+import { files, type BlobStore } from "./blobs.js";
+export {
+  files,
+  s3,
+  vercelBlob,
+  type BlobStore,
+  type S3BlobStore,
+  type VercelBlobStore,
+} from "./blobs.js";
 
 /** Where the core keeps its data. */
 export type JazzStore =
@@ -113,8 +105,11 @@ export function sqlite(options: {
   blobs?: BlobStore;
 }): Extract<JazzStore, { kind: "sqlite" }> {
   const blobs = options.blobs ?? files();
-  if (blobs !== "sqlite" && (typeof blobs !== "object" || blobs.kind !== "files")) {
-    throw new Error('sqlite(): blobs must be files() or "sqlite"');
+  if (
+    blobs !== "sqlite" &&
+    (typeof blobs !== "object" || (blobs.kind !== "files" && blobs.kind !== "s3"))
+  ) {
+    throw new Error('sqlite(): blobs must be files(), s3() or "sqlite"');
   }
   return {
     kind: "sqlite",
@@ -201,8 +196,24 @@ export function vercel(
   return { kind: "vercel", options: rest, local: local ?? sqlite({ path: ".jazz/local" }) };
 }
 
-function blobOptions(blobs: BlobStore): { blobs: "files" | "sqlite"; blobsDir?: string } {
+function blobOptions(blobs: BlobStore): {
+  blobs: "files" | "s3" | "sqlite";
+  blobsDir?: string;
+  s3Bucket?: string;
+  s3Region?: string;
+  s3Endpoint?: string;
+  s3Prefix?: string;
+} {
   if (blobs === "sqlite") return { blobs: "sqlite" };
+  if (blobs.kind === "s3") {
+    return {
+      blobs: "s3",
+      ...(blobs.bucket === undefined ? {} : { s3Bucket: blobs.bucket }),
+      ...(blobs.region === undefined ? {} : { s3Region: blobs.region }),
+      ...(blobs.endpoint === undefined ? {} : { s3Endpoint: blobs.endpoint }),
+      ...(blobs.prefix === undefined ? {} : { s3Prefix: blobs.prefix }),
+    };
+  }
   return { blobs: "files", ...(blobs.dir === undefined ? {} : { blobsDir: blobs.dir }) };
 }
 
@@ -571,7 +582,6 @@ async function applyBundle(
       forward: edge.forward as PublishedTableLens[],
     })),
     permissions: options.permissions,
-    activate: false,
   }).catch((error: unknown) => {
     // A core without `/bundles` predates per-deployment permissions; it
     // must not be handed a deployment it would activate for every backend.
@@ -583,6 +593,7 @@ async function applyBundle(
     }
     throw error;
   });
+  // An older core answers a publish without the bundle it made.
   if (!deployed.bundle) {
     throw new Error("createJazz: the core did not publish a permissions bundle; upgrade it");
   }
@@ -1341,8 +1352,21 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
         if (ended) return false;
         chain = chain
           ? chain.then((ok) => ok && !ended && !!socket?.send(data))
-          : admit(data).catch(() => {
-              onEvent(null, { kind: "close", code: 1011, reason: "admission failed" });
+          : admit(data).catch((error: unknown) => {
+              if (!ended && isRefusal(error)) {
+                // The core refused this identity (revoked, local-first auth
+                // disabled, invalid): an auth failure the client must not
+                // retry, reported as a sign-in refusal is.
+                onEvent(null, {
+                  kind: "message",
+                  data: authFailedBatch(`session refused: ${refusalCode(error)}`),
+                });
+                onEvent(null, { kind: "close", code: 1008, reason: "sign-in refused" });
+              } else {
+                // The core is unreachable or failed (5xx), or the app's own
+                // `authenticate` threw: the client tries again later.
+                onEvent(null, { kind: "close", code: 1011, reason: "admission failed" });
+              }
               end();
               return false;
             });
@@ -1996,6 +2020,20 @@ export async function createJazz(options: CreateJazzOptions): Promise<Jazz> {
       return closing;
     },
   };
+}
+
+/** An account request the core answered with a 4xx: a refusal, not an outage. */
+function isRefusal(error: unknown): boolean {
+  const status = (error as { status?: unknown } | null)?.status;
+  // Timeouts and throttling are 4xx too, but pass.
+  if (status === 408 || status === 425 || status === 429) return false;
+  return typeof status === "number" && status >= 400 && status < 500;
+}
+
+function refusalCode(error: unknown): string {
+  const message = error instanceof Error ? error.message : "";
+  const code = /: ([a-z_]{1,80})$/.exec(message)?.[1];
+  return code ?? "refused";
 }
 
 /** A WireFrame::Error batch with code AuthFailed and retry Never. */

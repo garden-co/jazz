@@ -24,6 +24,8 @@ pnpm dev
 
 `pnpm dev` runs the server with `tsx watch` against `src/main.ts`. The HTTP API listens on a default port (see `main.ts`).
 
+The server connects to the Jazz server at `JAZZ_SERVER_URL` with `JAZZ_BACKEND_SECRET`. `JAZZ_BUNDLE` is required: set it to the bundle id that deploying the app's schema and permissions returned: the requests it serves for signed-in users are checked by that bundle's permissions.
+
 Storage is persistent by default. The CLI resolves its database path in this order:
 
 1. `--data-path <path>` (if supplied).
@@ -48,6 +50,8 @@ self-hosted production server, set `JAZZ_ALLOW_LOCAL_FIRST_AUTH=true` or pass
 
 For an external auth provider, set either `JAZZ_JWKS_URL` or `JAZZ_JWT_PUBLIC_KEY` before
 starting the server. The JWT's verified `sub` claim becomes the Jazz session's `user_id`.
+A new identity signs in once with `POST /sign-in`, which provisions its Jazz account for
+this app; the `/todos` routes only admit identities that have signed in.
 Clients never send `owner_id`; `POST /todos` always assigns the authenticated session owner.
 The `/health` endpoint remains public.
 
