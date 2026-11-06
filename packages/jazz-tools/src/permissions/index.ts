@@ -1006,6 +1006,16 @@ export function definePermissions<TApp extends AppLike>(
   app: TApp,
   factory: (ctx: PolicyContext<TApp>) => void,
 ): CompiledPermissions {
+  if (app === undefined || app === null) {
+    // What a circular import hands over: permissions.ts imports the app
+    // from schema.ts while schema.ts is still loading because it imports
+    // permissions.ts.
+    throw new Error(
+      "definePermissions(app, ...) got no app. If permissions.ts imports the app from " +
+        "schema.ts and schema.ts imports permissions.ts, the import is circular: import " +
+        "permissions.ts where you create Jazz instead of from schema.ts.",
+    );
+  }
   const tableNames = Object.entries(app)
     .filter(
       ([, value]) =>

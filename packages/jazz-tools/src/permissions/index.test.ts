@@ -2609,3 +2609,11 @@ describe("permissions DSL", () => {
     ).toThrow(/available fk columns: todoId/i);
   });
 });
+
+describe("definePermissions without an app", () => {
+  it("points at a circular schema.ts and permissions.ts import", () => {
+    expect(() => definePermissions(undefined as never, () => {})).toThrow(
+      "If permissions.ts imports the app from schema.ts and schema.ts imports permissions.ts, the import is circular",
+    );
+  });
+});
