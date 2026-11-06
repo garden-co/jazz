@@ -385,6 +385,37 @@ describe("migration stub generation", () => {
     ).not.toThrow();
   });
 
+  it("adds and drops a plain uuid column with m.add.uuid and m.drop.uuid", () => {
+    const stub = (from: Record<string, any>, to: Record<string, any>) => {
+      const source = renderMigrationStub({
+        fromHash: "aaaaaaaaaaaa",
+        toHash: "bbbbbbbbbbbb",
+        fromSchema: s.defineApp(from, { migrations: "none" }).wasmSchema,
+        toSchema: s.defineApp(to, { migrations: "none" }).wasmSchema,
+      });
+      expect(source).not.toContain("TODO_TABLE");
+      const migration = new Function(
+        "s",
+        "m",
+        source
+          .replace('import { schema as s, migration as m } from "jazz-tools";', "")
+          .replace("export default", "return"),
+      )(s, m);
+      return { source, migration };
+    };
+    const without = { records: s.table({ title: s.string() }, {}) };
+    const withId = { records: s.table({ title: s.string(), externalId: s.uuid().optional() }, {}) };
+
+    const added = stub(without, withId);
+    expect(added.source).toContain('"externalId": m.add.uuid({ default: null }),');
+    expect(added.migration.forward[0].operations).toEqual([
+      { type: "introduce", column: "externalId", sqlType: "UUID", value: null },
+    ]);
+
+    const dropped = stub(withId, without);
+    expect(dropped.source).toContain('"externalId": m.drop.uuid({ backwardsDefault: null }),');
+  });
+
   it("leaves a possible rename to the author instead of adding and dropping", () => {
     const from = { records: s.table({ title: s.string().optional(), done: s.boolean() }, {}) };
     const to = {
