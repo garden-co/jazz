@@ -1588,7 +1588,7 @@ describe("createJazz", () => {
       listeners.message!(megabyte, true);
       await Promise.resolve();
     }
-    expect(closes[0]?.[0]).toBe(1008);
+    expect(closes[0]?.[0]).toBe(1013);
     expect(closes[0]?.[1]).toContain("faster than the server takes");
   });
 

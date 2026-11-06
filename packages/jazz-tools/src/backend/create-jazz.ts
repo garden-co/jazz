@@ -545,7 +545,8 @@ export interface CoreSocket {
   /**
    * `send`, resolving once the session has read enough of the messages
    * before it, so a host that awaits it holds a fast client back. A core
-   * without it takes `send`'s word.
+   * without it takes `send`'s word. Don't call `send` while a
+   * `sendWithRoom` is pending: it can overtake the waiting message.
    */
   sendWithRoom?(data: Uint8Array): Promise<boolean>;
   close(): void;
@@ -1723,9 +1724,11 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     const deliver = (data: Uint8Array): Promise<boolean> => {
       if (ended) return Promise.resolve(false);
       if (waitingBytes + data.byteLength > MAX_WAITING_SESSION_BYTES) {
+        // 1013 (try again later): the client may come back and send at the
+        // pace this host takes.
         onEvent(null, {
           kind: "close",
-          code: 1008,
+          code: 1013,
           reason: "client sent faster than the server takes",
         });
         end();
