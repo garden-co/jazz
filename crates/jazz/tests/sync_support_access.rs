@@ -529,3 +529,91 @@ fn a_replica_holds_the_parent_its_rows_inherit_read_access_from() {
         "the room she can no longer read is evicted (INV-SYNC-14)"
     );
 }
+
+/// A read of rows that inherit read access from a parent also ships the
+/// rows the parent's own read policy consults: a replica (or a backend
+/// reading for a request's session) that never read the parent's table
+/// still answers the read (alpha.60 adopter pass V1).
+#[test]
+fn a_cold_remote_read_through_an_inherited_parent_ships_what_the_parent_policy_consults() {
+    let open = |node: u8, author: AuthorSubject| {
+        let config = DbConfig::new(
+            inherited_schema(),
+            DbIdentity {
+                node: NodeUuid::from_bytes([node; 16]),
+                author,
+            },
+        );
+        if node == 0 {
+            block_on(Db::open_history_complete(config))
+        } else {
+            block_on(Db::open(config))
+        }
+        .unwrap()
+    };
+    let server = open(0, AuthorSubject::SYSTEM);
+    let seed = |table: &str, row: RowUuid, values: BTreeMap<String, Value>| {
+        server
+            .seed_settled_mergeable_for_bootstrap(table, row, AuthorSubject::SYSTEM, values)
+            .unwrap();
+    };
+    let me = Value::String(alice().principal_parts().1);
+    seed(
+        "rooms",
+        id(1, 1),
+        cells(&[("name", Value::String("room".into()))]),
+    );
+    seed(
+        "memberships",
+        id(2, 1),
+        cells(&[("room", Value::Uuid(id(1, 1).0)), ("member", me)]),
+    );
+    seed(
+        "messages",
+        id(3, 1),
+        cells(&[
+            ("room", Value::Uuid(id(1, 1).0)),
+            ("body", Value::String("m".into())),
+        ]),
+    );
+    // A fresh replica that has read nothing yet: no rooms, no memberships.
+    let client = open(1, alice());
+    let (client_side, server_side) = duplex();
+    let _upstream = block_on(client.connect_upstream(client_side));
+    server.accept_subscriber(server_side, alice()).unwrap();
+    client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+    let bytes = postcard::to_allocvec(&Query::from("messages")).unwrap();
+    let read = client.all_serialized_query(
+        &bytes,
+        ReadOpts::for_read_tier(ReadTier::Remote),
+        None,
+        // Read for her session, as a backend reads for a request's user:
+        // the replica evaluates her read policy over what it holds.
+        Some((alice(), BTreeMap::new())),
+        None,
+    );
+    let mut read = std::pin::pin!(read);
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    let mut rows = None;
+    for _ in 0..50 {
+        if let std::task::Poll::Ready(result) = read.as_mut().poll(&mut context) {
+            let jazz::db::SerializedReadResult::Rows(answer) = result.unwrap() else {
+                panic!("the remote read answered with something other than rows");
+            };
+            rows = Some(answer.iter().map(|row| row.row_uuid()).collect::<Vec<_>>());
+            break;
+        }
+        pump(&server, &client);
+    }
+    assert_eq!(
+        rows.expect("the remote read did not answer"),
+        [id(3, 1)],
+        "the message she reads through her room's membership"
+    );
+    assert_eq!(local(&client, "rooms"), [id(1, 1)]);
+    assert_eq!(
+        local(&client, "memberships"),
+        [id(2, 1)],
+        "the membership the room's read policy consults ships too"
+    );
+}
