@@ -203,10 +203,27 @@ describe("browser session against the app's backend", () => {
     });
     cleanups.push(() => session.close());
 
-    await expect(session.loginWithBackend()).rejects.toThrow(
-      /need a browser.*React Native.*jazz-tools\/backend, with credential/,
-    );
+    const refusal = /need a browser.*jazz-tools\/react-native or jazz-tools\/expo/;
+    await expect(session.loginWithBackend()).rejects.toThrow(refusal);
     expect(requests).toEqual([]);
     expect(session.getSnapshot().status).not.toBe("ready");
+
+    // A guest can't sign up through the backend here either.
+    const guest = await createJazzClient({
+      serverUrl: "http://127.0.0.1:9/jazz",
+      store: memoryStore(),
+      driver: { type: "memory" },
+      initial: "local-first",
+      client: async () => ({ createClient: createLocalFirstDb }),
+      fetch: async (input) => {
+        requests.push(String(input));
+        return new Response(null, { status: 500 });
+      },
+    });
+    cleanups.push(() => guest.close());
+    const account = guest.getSnapshot().account;
+    await expect(guest.linkWithBackend()).rejects.toThrow(refusal);
+    expect(requests).toEqual([]);
+    expect(guest.getSnapshot().account).toBe(account);
   });
 });

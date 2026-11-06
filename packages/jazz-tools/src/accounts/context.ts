@@ -209,14 +209,19 @@ export async function createAccountDbWithRuntimeSource(
         refreshing = false;
       }
     };
-    // The refresh cycle below renews every refusal a new token can fix.
+    // The refresh cycle below renews every refusal a new token can fix. A
+    // user the backend signed in is held too, as a browser's cookie renews:
+    // createJazzClient's backend watch reconnects or signs them in again.
+    // With createAccountManager and createDb alone, nothing does, and Global
+    // waits outlast the refusal until the app reconnects.
     const releaseRenewal = holdCredentialRenewal(opened);
     const stopAuth = opened.onOwnAuthChanged((state) => {
       // A refused credential renews whatever the server called it: a
       // rotated signing key reads as "invalid" until a new token is issued.
       // A new token cannot fix an auth mode the app has turned off or a
       // revoked account identity. A user the backend signed in has no token
-      // to renew: the backend watch asks the backend again instead.
+      // to renew: a new cookie is the backend's to set, and under
+      // createJazzClient its backend watch asks the backend again.
       if (jwtToken && state.error && isRenewableAuthFailure(state.error)) renew();
     });
     opened.onShutdown(() => {

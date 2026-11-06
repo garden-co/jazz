@@ -63,11 +63,13 @@ export const deviceOnlyFetch: typeof fetch = () =>
   );
 
 /**
- * Whether this host sends the app's cookies on Jazz's sync connection, as a
- * browser page or worker does. A user the backend signs in holds no Jazz
- * credential of their own: the backend's cookie is what names them on every
- * connection, so on a host without one the session would report signed in
- * and never sync.
+ * Whether this is a browser page or worker, the hosts that send the app's
+ * cookies on Jazz's sync connection. A user the backend signs in holds no
+ * Jazz credential of their own: the backend's cookie is what names them on
+ * every connection, so on a host without one the session would report
+ * signed in and never sync. It checks for the host, not for the cookie: a
+ * DOM emulation (jsdom, happy-dom) passes, and a Node process that adds a
+ * session to its own fetch and WebSocket does not.
  */
 function sendsCookies(): boolean {
   return (
@@ -83,7 +85,7 @@ function sendsCookies(): boolean {
 export const cookielessFetch: typeof fetch = () =>
   Promise.reject(
     new Error(
-      "loginWithBackend and linkWithBackend need a browser: the app's backend names the signed-in user by the cookie a browser sends on Jazz's sync connection, and this host sends none. With a bearer token instead: on React Native, pass bearer to createAccountManager; on Node, sync through the app's backend as a backend client (createJazzClient from jazz-tools/backend, with credential). Other hosts are not supported yet.",
+      "loginWithBackend and linkWithBackend need a browser: the app's backend names the signed-in user by the cookie a browser sends on Jazz's sync connection, and this host sends none. Signing in with a bearer token instead is supported on React Native (bearer on createAccountManager from jazz-tools/react-native or jazz-tools/expo) and not yet on other hosts. A server acts for its users through jazz-tools/backend (jazz.forReqUser).",
     ),
   );
 
