@@ -112,8 +112,9 @@ Each Blob store or bucket serves one Vercel environment. A store you connect spa
 environment unless you limit it, so create one store per environment, connect each to its own
 environment only, and enable OIDC for each environment in the project's settings. A store created
 through the API or CLI is connected to production, preview and development alike; limit it in the
-store's settings in the dashboard. Jazz doesn't yet notice two environments sharing one store: a
-preview core given the production store writes into it, under the same prefix. Both `vercelBlob()` and `s3()` also take a `prefix`, by default
+store's settings in the dashboard. A core given another environment's store refuses to start, for
+example "Blob store … serves the production environment, not preview; connect a separate Blob store
+to each environment". Both `vercelBlob()` and `s3()` also take a `prefix`, by default
 `jazz/<store id>/`.
 
 Where large values go is a one-way choice. A core that started on SQLite can move to Vercel Blob
@@ -180,10 +181,13 @@ app's core is refused.
 - The Sandbox stops after 5 minutes with no requests and no connected clients; a connected
   client keeps it awake, even when idle. The next request wakes it, which took 0.6 to 1 s in our
   benchmarks and 4.2 s on a real project; requests after the wake took about 0.45 s.
-- Deploying a newer `jazz-tools` restarts the core on that version, which briefly drops open
-  sockets; clients reconnect. An older deployment that is still running never moves the core back.
-- Any redeploy can stall open tabs' sync for a while until their sockets drop and reconnect. A thin
-  client's write that is in flight at that moment fails with `ThinConnectionLostError` and is not
-  retried.
+- Vercel ends a function's WebSockets at the route's `maxDuration` (300 s by default). Just before
+  that, `jazz.next()` closes each sync socket and clients reconnect at once. To reconnect less
+  often, raise the limit in the route file with `export const maxDuration = 800;` (Pro plan).
+- A redeploy on the same `jazz-tools` version doesn't disturb connected clients. Deploying a newer
+  `jazz-tools` restarts the core on that version, which briefly drops open sockets; clients
+  reconnect. An older deployment that is still running never moves the core back.
+- A thin client's write that is in flight while its socket reconnects can fail with
+  `ThinConnectionLostError` and is not retried. Local-first writes are not affected.
 - `vercel()` needs Next.js 16 for now: under Next 15's webpack build, every request fails with
   "Cannot find module 'jazz-tools/package.json'".
