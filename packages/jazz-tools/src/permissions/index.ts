@@ -913,7 +913,12 @@ class UpdateRuleBuilder<WhereInput, Row> {
   ): Rule;
   where<const Input>(input: Input, ...guard: DirectWhereInputGuard<Input, WhereInput>): Rule;
   where(input: unknown, ..._guard: unknown[]): Rule {
-    const condition = resolveWhereInput(input, this.hasTypeColumn, this.columnTransforms);
+    const condition = resolveRuleInput(
+      `policy.${this.table}.allowUpdate.where`,
+      input,
+      this.hasTypeColumn,
+      this.columnTransforms,
+    );
     const rule: Rule = {
       table: this.table,
       action: "update",
@@ -937,7 +942,12 @@ class UpdateRuleBuilder<WhereInput, Row> {
   ): this;
   whereOld<const Input>(input: Input, ...guard: DirectWhereInputGuard<Input, WhereInput>): this;
   whereOld(input: unknown, ..._guard: unknown[]): this {
-    this.oldCondition = resolveWhereInput(input, this.hasTypeColumn, this.columnTransforms);
+    this.oldCondition = resolveRuleInput(
+      `policy.${this.table}.allowUpdate.whereOld`,
+      input,
+      this.hasTypeColumn,
+      this.columnTransforms,
+    );
     this.registerBuilder();
     return this;
   }
@@ -947,7 +957,12 @@ class UpdateRuleBuilder<WhereInput, Row> {
   ): this;
   whereNew<const Input>(input: Input, ...guard: DirectWhereInputGuard<Input, WhereInput>): this;
   whereNew(input: unknown, ..._guard: unknown[]): this {
-    this.newCondition = resolveWhereInput(input, this.hasTypeColumn, this.columnTransforms);
+    this.newCondition = resolveRuleInput(
+      `policy.${this.table}.allowUpdate.whereNew`,
+      input,
+      this.hasTypeColumn,
+      this.columnTransforms,
+    );
     this.registerBuilder();
     return this;
   }
@@ -1035,8 +1050,16 @@ export function definePermissions<TApp extends AppLike>(
     raw: rawPermissionExpression,
     allowedTo: createAllowedToContext(),
     session: createSessionContext(),
-  } as unknown as PolicyContext<TApp>;
-  factory(ctx);
+  };
+  // Removed in alpha.60; destructuring it names its replacement instead of
+  // passing `undefined` on to a rule.
+  Object.defineProperty(ctx, "isCreator", {
+    enumerable: false,
+    get() {
+      throw new Error(ISCREATOR_REMOVED);
+    },
+  });
+  factory(ctx as unknown as PolicyContext<TApp>);
   const compiled = compileRules(rules, fkReferencesByTable, relationsByTable);
   for (const [table, policies] of Object.entries(compiled)) {
     for (const operation of [policies.select, policies.insert, policies.update, policies.delete]) {
@@ -1046,6 +1069,12 @@ export function definePermissions<TApp extends AppLike>(
   }
   return compiled;
 }
+
+const ISCREATOR_REMOVED =
+  "`isCreator` was removed in alpha.60. Write the creator check out as a row condition: " +
+  '`{ $createdBy: session.user }`, or `{ "$createdBy.account": session.user.account }` to match ' +
+  "every identity linked to the account (rows imported from alpha.59 keep their old issuer and " +
+  "need this form).";
 
 function collectFkReferencesByTable(app: AppLike): Map<string, Map<string, string>> {
   const result = new Map<string, Map<string, string>>();
@@ -1149,7 +1178,12 @@ function buildTablePolicyBuilder(
   ): ActionBuilder<unknown, unknown> => {
     const builder: ActionBuilder<unknown, unknown> = {
       where: ((input: unknown) => {
-        const condition = resolveWhereInput(input, hasTypeColumn, columnTransforms);
+        const condition = resolveRuleInput(
+          `policy.${table}.allow${capitalize(action)}.where`,
+          input,
+          hasTypeColumn,
+          columnTransforms,
+        );
         return registerRule(
           clause === "using"
             ? { table, action, using: condition }
@@ -2075,6 +2109,27 @@ function normalizeWhereObject(input: unknown, hasTypeColumn?: boolean): Record<s
   return input;
 }
 
+/** {@link resolveWhereInput} for the rule `site` names, which its errors name too. */
+function resolveRuleInput(
+  site: string,
+  input: unknown,
+  hasTypeColumn: boolean,
+  columnTransforms?: ColumnTransformMap,
+): Condition {
+  try {
+    return resolveWhereInput(input, hasTypeColumn, columnTransforms);
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("Unsupported permission condition")) {
+      error.message = `${site}: ${error.message}`;
+    }
+    throw error;
+  }
+}
+
+function capitalize(word: string): string {
+  return word.charAt(0).toUpperCase() + word.slice(1);
+}
+
 function resolveWhereInput(
   input: unknown,
   hasTypeColumn: boolean,
@@ -2111,7 +2166,18 @@ function resolveWhereInput(
       where: normalizeWhereObject(input, hasTypeColumn),
     });
   }
-  throw new Error("Unsupported permission condition input.");
+  throw new Error(
+    `Unsupported permission condition input: ${describeConditionInput(input)}. A condition is a ` +
+      "where-object such as `{ owner_id: session.user.account }`, a function of the row returning " +
+      "one, `anyOf`/`allOf` of conditions, `policy.<table>.exists.where(...)`, `allowedTo.<op>(...)`, " +
+      "or `raw(...)`.",
+  );
+}
+
+function describeConditionInput(input: unknown): string {
+  if (input === null) return "null";
+  if (Array.isArray(input)) return "an array (wrap several conditions in anyOf or allOf)";
+  return typeof input === "string" ? `the string ${JSON.stringify(input)}` : String(typeof input);
 }
 
 function filtersToCondition(
