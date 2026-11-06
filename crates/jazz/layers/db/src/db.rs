@@ -6754,6 +6754,34 @@ impl Inner {
         }
     }
 
+    /// The refusal of a write to a deleted row. A session that may read the
+    /// row is told it is deleted; one that may not, or whose read policy
+    /// only the authority can decide here, is told what it is told for a
+    /// missing row, so a tombstone reveals no more than a live row does.
+    fn refuse_deleted(
+        &self,
+        table: &Table,
+        row: RowUuid,
+        key: &[u8],
+        who: &Who,
+        verb: &str,
+    ) -> Result<Error, Error> {
+        if let Who::Session(author) = *who {
+            let conclusive = self.client.is_none()
+                || !table
+                    .policy(Operation::Select)
+                    .is_some_and(policy_reads_other_rows);
+            if !conclusive || !self.check(table, row, key, author, Operation::Select)? {
+                return Ok(if verb == "DELETE" {
+                    delete_denied()
+                } else {
+                    unreadable_target(verb, &table.name)
+                });
+            }
+        }
+        Ok(row_already_deleted(row))
+    }
+
     /// Read-for-write (SPEC 7, INV-RLS-20): a session may update or upsert
     /// only a row it may read, and omitted cells must not be merged blind.
     /// A replica acting for a session (a backend's request) refuses at once
@@ -6875,9 +6903,9 @@ impl Inner {
             Located::Row {
                 deleted: true,
                 seq: current,
-                ..
+                key,
             } if !self.merging && (!upsert || current != self.own_pos(seq)) => {
-                return Err(row_already_deleted(row));
+                return Err(self.refuse_deleted(table, row, &key, &who, verb)?);
             }
             Located::Row {
                 key,
@@ -7067,7 +7095,9 @@ impl Inner {
             // A merged delete of a deleted row changes nothing: concurrent
             // deletes of one row all apply.
             Located::Row { deleted: true, .. } if self.merging => {}
-            Located::Row { deleted: true, .. } => return Err(row_already_deleted(row)),
+            Located::Row {
+                deleted: true, key, ..
+            } => return Err(self.refuse_deleted(table, row, &key, &who, "DELETE")?),
             // As for an update: a session can't tell a missing row from one
             // its DELETE policy refuses.
             _ if self.checked(who).is_some() => return Err(delete_denied()),

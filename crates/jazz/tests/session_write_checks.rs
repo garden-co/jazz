@@ -576,4 +576,14 @@ fn a_write_to_a_hidden_row_reads_as_one_to_a_missing_row() {
     assert!(hidden.is_authorization_denied(), "{}", hidden.message);
     assert_eq!(hidden.message, missing.message);
     assert!(!hidden.message.contains("RowUuid"), "{}", hidden.message);
+
+    // A hidden row's tombstone reveals no more than the live row did.
+    seed(&db, "notes", id(4, 2), &[("data", text("gone"))]);
+    block_on(db.delete("notes", id(4, 2), DeleteOptions::default())).expect("trusted delete");
+    let (deleted, missing) = (update(id(4, 2)), update(id(4, 9)));
+    assert_eq!(deleted.message, missing.message);
+    assert_eq!(deleted.reason, missing.reason);
+    let (deleted, missing) = (delete(id(4, 2)), delete(id(4, 9)));
+    assert_eq!(deleted.message, missing.message);
+    assert_eq!(deleted.reason, missing.reason);
 }
