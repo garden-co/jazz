@@ -9,7 +9,7 @@ This is an absolutely massive release that we hope makes the long wait worth it!
 
 ## Based on SQLite for orders of magnitude better performance
 
-Over the course of the v2 alpha, Jazz’s internal architecture has become simpler and simpler. Two weeks ago, we realized it had become simple enough that we could base Jazz on the venerable SQLite instead of rolling our own low-level database engine. We were able to ship this in just under a week, passing all tests with about 350k fewer lines of code. Every real alpha.59 app we've tested it on migrates to alpha.60 and verifies cleanly.
+Over the course of the v2 alpha, Jazz’s internal architecture has become simpler and simpler. Two weeks ago, we realized it had become simple enough that we could base Jazz on the venerable SQLite instead of rolling our own low-level database engine. We were able to ship this in just under a week, passing all tests with about 350k fewer lines of code. Every real alpha.59 app we've tried migrates to alpha.60 and verifies cleanly.
 
 This involves a simpler version of IVM that strikes a much better tradeoff between one-shot reads and live subscriptions and benefits from the decades of optimization that have gone into SQLite.
 
