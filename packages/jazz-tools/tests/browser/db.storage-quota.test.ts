@@ -3,27 +3,7 @@ import { generateAuthSecret } from "../../src/index.js";
 import { storageQuotaBrowserCommands } from "./browser-commands.js";
 import { createBrowserTestDb as createDb, uniqueDbName, waitForCondition } from "./support.js";
 import { todos, allTodos, useSharedWorkerBridgeHarness } from "./worker-bridge-harness.js";
-
-// The quota override is a Chromium DevTools command. It reaches IndexedDB only
-// if nothing in the browser has opened this origin's IndexedDB before, so this
-// file runs alone in its own browser (pnpm test:browser:storage-quota) and the
-// shared browser run excludes it.
-const chromium = /Chrome\//.test(navigator.userAgent);
-
-/** A title of about `bytes` that no codec shrinks. */
-function incompressible(bytes: number): string {
-  const raw = new Uint8Array(Math.ceil((bytes * 3) / 4));
-  for (let offset = 0; offset < raw.length; offset += 65536) {
-    crypto.getRandomValues(raw.subarray(offset, offset + 65536));
-  }
-  let binary = "";
-  for (const byte of raw) binary += String.fromCharCode(byte);
-  return btoa(binary);
-}
-
-async function usage(): Promise<number> {
-  return (await navigator.storage.estimate()).usage ?? 0;
-}
+import { chromium, incompressible, usage } from "./storage-quota-support.js";
 
 describe.runIf(chromium)("IndexedDB storage quota", () => {
   const { track, untrack, shutdownDbAndWorker } = useSharedWorkerBridgeHarness();
@@ -67,15 +47,16 @@ describe.runIf(chromium)("IndexedDB storage quota", () => {
         db.insert(todos, { title: "while full", done: false }).wait({ tier: "local" }),
       ).rejects.toMatchObject({ code: "storage" });
 
-      // Reopen while still full: the store is whole and holds every write
-      // that was reported saved.
+      // Close while still full, then reopen with room again: the store is
+      // whole and holds every write that was reported saved, and writes are
+      // saved again. (Opening records a node lease, so an open with no room
+      // at all is refused with code "storage"; the page store's unit tests
+      // cover that, as a cap set now would not reliably reach IndexedDB.)
       await shutdownDbAndWorker(db).catch(() => untrack(db));
+      await quota.overrideStorageQuota(origin, null);
       db = track(await createDb(config));
       const titles = (await db.all(allTodos, { tier: "local-first" })).map((row) => row.title);
       for (const title of saved) expect(titles).toContain(title);
-
-      // With room again, writes are saved again.
-      await quota.overrideStorageQuota(origin, null);
       await waitForCondition(
         async () => {
           try {
@@ -88,51 +69,6 @@ describe.runIf(chromium)("IndexedDB storage quota", () => {
         45_000,
         "writes should be saved once storage has room again",
       );
-    } finally {
-      await quota.overrideStorageQuota(origin, null);
-      await db.shutdown().catch(() => undefined);
-      untrack(db);
-    }
-  }, 120_000);
-
-  // With no further write and no wait, the worker's own retry saves what
-  // was refused once storage has room again.
-  it("saves refused writes once storage has room, without another write", async () => {
-    const quota = storageQuotaBrowserCommands();
-    const origin = location.origin;
-    const config = {
-      appId: crypto.randomUUID(),
-      secret: generateAuthSecret(),
-      driver: { type: "persistent" as const, dbName: uniqueDbName("storage-quota-retry") },
-    };
-    await quota.overrideStorageQuota(origin, (await usage()) + 4_000_000);
-    let db = track(await createDb(config));
-    try {
-      let refused: string | null = null;
-      for (let index = 0; index < 40 && refused === null; index++) {
-        const title = `${index} ${incompressible(400_000)}`;
-        await db
-          .insert(todos, { title, done: false })
-          .wait({ tier: "local" })
-          .catch(() => {
-            refused = title;
-          });
-      }
-      expect(refused, "a write past the quota is refused").not.toBeNull();
-      const full = await usage();
-
-      await quota.overrideStorageQuota(origin, null);
-      // Nothing writes or waits now: only the retry timer can save it.
-      await waitForCondition(
-        async () => (await usage()) > full + 300_000,
-        30_000,
-        "the refused write should reach IndexedDB once there is room",
-      );
-
-      await shutdownDbAndWorker(db);
-      db = track(await createDb(config));
-      const titles = (await db.all(allTodos, { tier: "local-first" })).map((row) => row.title);
-      expect(titles).toContain(refused);
     } finally {
       await quota.overrideStorageQuota(origin, null);
       await db.shutdown().catch(() => undefined);

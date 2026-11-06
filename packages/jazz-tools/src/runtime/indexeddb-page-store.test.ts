@@ -1,5 +1,5 @@
 import { acquireBrowserPhysicalDatabaseEpoch } from "./browser-physical-database-epoch.js";
-import { IDBFactory, indexedDB as fakeIndexedDb } from "fake-indexeddb";
+import { IDBFactory, IDBObjectStore, indexedDB as fakeIndexedDb } from "fake-indexeddb";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   INDEXEDDB_BTREE_DATABASE_VERSION,
@@ -16,6 +16,7 @@ import {
   INDEXEDDB_REPLICA_NODE_BYTES,
   INDEXEDDB_REPLICA_NODE_KEY,
   IndexedDbPageStore,
+  IndexedDbStorageFullError,
   UnsupportedStorageCodecsError,
 } from "./indexeddb-page-store.js";
 
@@ -559,6 +560,36 @@ describe("IndexedDbPageStore", () => {
       "Invalid IndexedDB foreground node lease handoff",
     );
     await store.retireForegroundNodeLease(continued.leaseId);
+    store.close();
+  });
+
+  it("reports a lease write refused for lack of space as a storage failure", async () => {
+    const name = databaseName();
+    const store = await IndexedDbPageStore.open(name);
+    // As a browser does when the origin is over its quota: the transaction
+    // aborts with QuotaExceededError.
+    const put = IDBObjectStore.prototype.put;
+    IDBObjectStore.prototype.put = function (
+      this: IDBObjectStore,
+      ...args: [unknown, IDBValidKey?]
+    ) {
+      const request = put.apply(this, args);
+      (this.transaction as unknown as { _abort(name: string): void })._abort("QuotaExceededError");
+      return request;
+    } as typeof put;
+    try {
+      const refused = store.acquireForegroundNodeLease();
+      await expect(refused).rejects.toBeInstanceOf(IndexedDbStorageFullError);
+      await expect(refused).rejects.toMatchObject({
+        code: "storage",
+        message: expect.stringMatching(/IndexedDB.*QuotaExceededError/),
+      });
+    } finally {
+      IDBObjectStore.prototype.put = put;
+    }
+    // With room again, leasing works.
+    const lease = await store.acquireForegroundNodeLease();
+    await store.retireForegroundNodeLease(lease.leaseId);
     store.close();
   });
 

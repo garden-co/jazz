@@ -89,13 +89,16 @@ if (!(["chromium", "firefox", "webkit"] as const).includes(browserName as never)
   throw new Error(`Unsupported JAZZ_BROWSER=${browserName}`);
 }
 const excludeRealisticBrowserBench = shouldExcludeRealisticBrowserBench();
-// A CDP quota override reaches IndexedDB only if it is set before anything in
-// the browser has opened the origin's IndexedDB, and every file here shares one
-// origin. So the quota file runs only when named, in a browser of its own
-// (see the test:browser script).
-const STORAGE_QUOTA_TEST = "tests/browser/db.storage-quota.test.ts";
-const storageQuotaTestNamed = process.argv.some((value) =>
-  value.replaceAll("\\", "/").endsWith(STORAGE_QUOTA_TEST),
+// A CDP quota override reaches IndexedDB only if nothing in the browser has
+// used the origin's IndexedDB before, and every file here shares one origin.
+// So each quota file runs only when named, in a browser of its own (see the
+// test:browser:storage-quota script).
+const STORAGE_QUOTA_TESTS = [
+  "tests/browser/db.storage-quota.test.ts",
+  "tests/browser/db.storage-quota-retry.test.ts",
+];
+const unnamedStorageQuotaTests = STORAGE_QUOTA_TESTS.filter(
+  (test) => !process.argv.some((value) => value.replaceAll("\\", "/").endsWith(test)),
 );
 const realisticBrowserBenchReportDir = resolve(__dirname, ".vitest-browser-bench");
 const sealedWasmPackage = process.env.JAZZ_CORRECTNESS_WASM_PACKAGE;
@@ -268,7 +271,7 @@ export default defineConfig({
     include: ["tests/browser/**/*.test.ts", "tests/browser/**/*.test.tsx"],
     exclude: [
       ...(excludeRealisticBrowserBench ? [REALISTIC_BROWSER_BENCH_TEST] : []),
-      ...(storageQuotaTestNamed ? [] : [STORAGE_QUOTA_TEST]),
+      ...unnamedStorageQuotaTests,
     ],
     globalSetup: ["tests/browser/global-setup.ts"],
     testTimeout: 30000,
