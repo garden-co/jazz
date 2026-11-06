@@ -2451,8 +2451,12 @@ function storeKey(store: JazzStore): string | undefined {
   if (store.kind === "sqlite") return `sqlite:${resolve(store.path)}`;
   if (store.kind === "vercel") {
     const project = store.options.credentials?.projectId ?? process.env.VERCEL_PROJECT_ID;
-    const name =
-      store.options.name ?? (project ? defaultCoreName(project, process.env) : undefined);
+    let name = store.options.name;
+    try {
+      name ??= project ? defaultCoreName(project, process.env) : undefined;
+    } catch {
+      // A preview without a branch: its open reports that, not createJazz.
+    }
     // Without a name the core is unknown: its open reports that.
     return name ? `vercel:${name}` : undefined;
   }
