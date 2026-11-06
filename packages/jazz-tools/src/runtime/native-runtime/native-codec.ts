@@ -684,9 +684,10 @@ export class PostcardWriter {
       return;
     }
     // A large value (a large-value leaf, a frame in a batch) is copied
-    // whole: pushing it byte by byte took ~80 ms per MB.
+    // whole: pushing it byte by byte took ~80 ms per MB. `new Uint8Array`
+    // copies even a Node Buffer, whose slice() would share its memory.
     this.flushChunks();
-    this.pushPart(value.slice());
+    this.pushPart(new Uint8Array(value));
   }
 
   vec(writeItem: (writer: PostcardWriter, index: number) => void, length: number): void {

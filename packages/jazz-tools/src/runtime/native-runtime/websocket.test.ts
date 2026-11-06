@@ -97,21 +97,33 @@ describe("websocket frame carrier", () => {
   });
 
   it("encodes a large frame among small ones whole, in order, and quickly", () => {
-    // A 1 MB large-value leaf used to be pushed byte by byte: ~80 ms per MB
-    // on the event loop, seconds for one upload.
     const leaf = new Uint8Array(1_000_000);
     for (let i = 0; i < leaf.length; i += 1) leaf[i] = (i * 31) & 0xff;
     const frames = [Uint8Array.from([1, 2, 3]), leaf, Uint8Array.from([4, 5])];
-    const started = performance.now();
     const batch = encodeWebSocketFrameBatch(frames);
-    const took = performance.now() - started;
     leaf[0] = 99; // the batch holds its own copy
     const decoded = decodeWebSocketFrameBatch(batch);
     expect(decoded.map((frame) => frame.byteLength)).toEqual([3, 1_000_000, 2]);
     expect(decoded[1]![0]).toBe(0);
     expect(Buffer.from(decoded[1]!.subarray(1)).equals(Buffer.from(leaf.subarray(1)))).toBe(true);
     expect([...decoded[2]!]).toEqual([4, 5]);
-    expect(took).toBeLessThan(40);
+    // A large value used to be pushed byte by byte: ~80 ms per MB on the
+    // event loop, over a second for these 16 MB. The bound leaves room for
+    // a busy runner.
+    const large = new Uint8Array(16_000_000);
+    const started = performance.now();
+    const timed = new PostcardWriter();
+    timed.bytes(large);
+    const encoded = timed.finish();
+    const took = performance.now() - started;
+    expect(encoded.byteLength).toBeGreaterThan(16_000_000);
+    expect(took).toBeLessThan(500);
+
+    // A Node Buffer is copied too, not shared.
+    const buffer = Buffer.alloc(1024, 7);
+    const fromBuffer = encodeWebSocketFrameBatch([buffer]);
+    buffer[0] = 99;
+    expect(decodeWebSocketFrameBatch(fromBuffer)[0]![0]).toBe(7);
 
     // Scalars and short strings around a large value keep their order.
     const writer = new PostcardWriter();
