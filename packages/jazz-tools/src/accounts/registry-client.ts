@@ -7,8 +7,10 @@ export class AccountAuthError extends Error {
     readonly code: string,
     /** The registry's HTTP status when it answered with an error. */
     readonly status?: number,
+    /** What the app can do about it, when the code alone doesn't say. */
+    message: string = code,
   ) {
-    super(code);
+    super(message);
     this.name = "AccountAuthError";
   }
 }
