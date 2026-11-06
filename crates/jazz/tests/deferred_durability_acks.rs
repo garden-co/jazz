@@ -172,3 +172,82 @@ fn a_relay_without_deferred_acks_acknowledges_at_once() {
         Some(tx)
     );
 }
+
+/// A worker with no server holds its tab's commits for upload, like an
+/// offline one: their acks wait for a persist too, and arrive in order.
+#[test]
+fn a_serverless_workers_acks_wait_for_a_persist() {
+    let author = AuthorSubject::for_test_bytes([0x63; 16]);
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column("title", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    );
+    let open = |node: u8| {
+        block_on(Db::open(DbConfig::new(
+            schema.clone(),
+            DbIdentity {
+                node: NodeUuid::from_bytes([node; 16]),
+                author,
+            },
+        )))
+        .unwrap()
+    };
+    let worker = open(0x70);
+    worker.set_remote_link_hint(jazz::db::RemoteLinkHint::NoServer);
+    worker.defer_durability_acks();
+    let tab = open(0x71);
+    tab.set_non_durable_client();
+    tab.set_remote_link_hint(jazz::db::RemoteLinkHint::NoServer);
+    let (client_side, server_side) = duplex();
+    block_on(tab.connect_upstream(client_side));
+    worker.accept_subscriber(server_side, author).unwrap();
+
+    let first = insert(&tab, "first");
+    let second = insert(&tab, "second");
+    tick(&[&tab, &worker, &tab]);
+    for tx in [first, second] {
+        assert!(ready(tab.wait_for_transaction(tx, DurabilityTier::Local)).is_none());
+    }
+    let point = worker.persist_point().unwrap();
+    assert!(worker.persisted(point));
+    tick(&[&worker, &tab]);
+    for tx in [first, second] {
+        assert_eq!(
+            ready(tab.wait_for_transaction(tx, DurabilityTier::Local)).map(Result::unwrap),
+            Some(tx)
+        );
+    }
+}
+
+/// A tab that goes away while its acks wait is dropped from them.
+#[test]
+fn a_persist_drops_the_acks_of_a_tab_that_went_away() {
+    let core = open(0xc0);
+    let relay = open(0x10);
+    relay.defer_durability_acks();
+    let tab = open(0x11);
+    tab.set_non_durable_client();
+    let (client_side, server_side) = duplex();
+    block_on(relay.connect_upstream(client_side));
+    core.accept_subscriber(server_side, AuthorSubject::SYSTEM)
+        .unwrap();
+    let (client_side, server_side) = duplex();
+    block_on(tab.connect_upstream(client_side));
+    let subscriber = relay
+        .accept_subscriber(server_side, AuthorSubject::SYSTEM)
+        .unwrap();
+    insert(&tab, "photo");
+    tick(&[&tab, &relay]);
+    relay.disconnect_subscriber(subscriber);
+    let point = relay.persist_point().unwrap();
+    assert!(
+        !relay.persisted(point),
+        "nothing is sent to a closed session"
+    );
+    assert_eq!(relay.persist_point(), None);
+}

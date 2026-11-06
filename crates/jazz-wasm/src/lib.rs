@@ -503,13 +503,24 @@ impl WasmDbInner {
     }
 
     /// Persist in the background while the database holds acks for
-    /// commits the store may not have written yet: after each tick, so a
-    /// tab hears its commit is `Local` once IndexedDB holds it. After a
-    /// failed persist, the next waits for its backoff.
+    /// commits the store may not have written yet (after each tick, so a
+    /// tab hears its commit is `Local` once IndexedDB holds it), and while
+    /// writing the store fails, whether or not any ack waits: commits the
+    /// worker applied itself (upstream rows) must reach IndexedDB too, and
+    /// tabs must hear when it works again. After a failed persist, the next
+    /// waits for its backoff.
     #[cfg(target_arch = "wasm32")]
     fn request_persist(&self) {
         let persist = &self.host.persist;
-        if self.host.store.borrow().is_none() || self.binding.db.persist_point().is_none() {
+        let wanted = match self.host.store.borrow().as_ref() {
+            None => false,
+            Some(store) => {
+                self.binding.db.persist_point().is_some()
+                    || persist.failure.borrow().is_some()
+                    || store.write_failed()
+            }
+        };
+        if !wanted {
             return;
         }
         if persist.running.get() {
@@ -1351,7 +1362,21 @@ impl WasmDb {
             db.defer_durability_acks();
         }
         let owner = Self::runtime_owner(Binding::new(db, identity, trusted));
-        *owner.open_inner()?.host.store.borrow_mut() = Some(store);
+        let inner = owner.open_inner()?;
+        // A commit's write failing starts the retries, whether or not an
+        // ack waits on it. Removed at close.
+        let weak = Rc::downgrade(&inner.host);
+        let binding = inner.binding.clone();
+        store.on_write_failed(Some(Rc::new(move || {
+            if let Some(host) = weak.upgrade() {
+                WasmDbInner {
+                    binding: binding.clone(),
+                    host,
+                }
+                .request_persist();
+            }
+        })));
+        *inner.host.store.borrow_mut() = Some(store);
         Ok(owner)
     }
 
@@ -1899,9 +1924,15 @@ impl WasmDb {
         future_to_promise(async move {
             if owns_runtime {
                 inner.binding.close().await.map_err(host_error)?;
-                inner.flush().await?;
+                // A last save that fails still closes the store: what it
+                // could not write stays as IndexedDB last held it (whole),
+                // and the error says so.
+                let flushed = inner.flush().await;
                 #[cfg(target_arch = "wasm32")]
-                inner.host.store.borrow_mut().take();
+                if let Some(store) = inner.host.store.borrow_mut().take() {
+                    store.on_write_failed(None);
+                }
+                flushed?;
             }
             Ok(JsValue::TRUE)
         })

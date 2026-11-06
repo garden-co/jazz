@@ -12408,11 +12408,13 @@ impl Db {
                     };
                     // A replica's own acceptance is the session's `Local`:
                     // it promises the commit is in this store. A refusal
-                    // or the authority's verdict promises nothing local.
+                    // or the authority's verdict promises nothing local,
+                    // but still follows the session's held fates, so its
+                    // fates arrive in the order its commits came.
                     if accepted && !global {
                         inner.push_durability_ack(index, fate);
                     } else {
-                        inner.sessions[index].outbox.push(fate);
+                        inner.push_after_held_acks(index, fate);
                     }
                 }
             }
@@ -13502,6 +13504,25 @@ impl Inner {
                 acks.issued += 1;
             }
             None => self.sessions[index].outbox.push(message),
+        }
+    }
+}
+
+impl Inner {
+    /// Send `message` to session `index`, or, while acks for that session
+    /// are held, hold it behind them so it does not overtake them.
+    pub(crate) fn push_after_held_acks(&mut self, index: usize, message: SyncMessage) {
+        let generation = self.sessions[index].generation;
+        let subscriber = SubscriberId {
+            slot: index,
+            generation,
+        };
+        match self.held_acks.as_mut() {
+            Some(acks) if acks.held.iter().any(|(_, to, _)| *to == subscriber) => {
+                acks.held.push_back((acks.issued, subscriber, message));
+                acks.issued += 1;
+            }
+            _ => self.sessions[index].outbox.push(message),
         }
     }
 }

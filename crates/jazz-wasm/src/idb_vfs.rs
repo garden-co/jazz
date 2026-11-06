@@ -1,10 +1,41 @@
 //! The browser worker's IndexedDB SQLite VFS.
 //!
-//! Adapted from `sqlite-wasm-vfs`'s `relaxed-idb` VFS (MIT, Copyright (c)
-//! 2024 Spxg, <https://github.com/Spxg/sqlite-wasm-rs>), itself after
-//! wa-sqlite's `IDBMirrorVFS`. The IndexedDB layout is unchanged (database
-//! named after the VFS, object store `blocks`, one record per
-//! `[path, offset]` page), so files the upstream VFS wrote open as before.
+//! Adapted from `src/relaxed_idb.rs` of `sqlite-wasm-vfs` 0.2.0
+//! (<https://github.com/Spxg/sqlite-wasm-rs>), itself after wa-sqlite's
+//! `IDBMirrorVFS`. The IndexedDB layout is unchanged (database named after
+//! the VFS, object store `blocks`, one record per `[path, offset]` page),
+//! so files the upstream VFS wrote open as before.
+//!
+//! Removed from upstream: `Preload::All`, `clear_on_init`, import, export,
+//! `clear_all`, `exists`, `list` and `count` (Jazz preloads by path and
+//! uses none of the rest), and the VFS's own test. Changed: a failed write
+//! (below), an explicit flush in place of a barrier, a hook for failed
+//! writes, and names.
+//!
+//! Upstream's licence:
+//!
+//! > MIT License
+//! >
+//! > Copyright (c) 2024 Spxg
+//! >
+//! > Permission is hereby granted, free of charge, to any person obtaining a
+//! > copy of this software and associated documentation files (the
+//! > "Software"), to deal in the Software without restriction, including
+//! > without limitation the rights to use, copy, modify, merge, publish,
+//! > distribute, sublicense, and/or sell copies of the Software, and to
+//! > permit persons to whom the Software is furnished to do so, subject to
+//! > the following conditions:
+//! >
+//! > The above copyright notice and this permission notice shall be included
+//! > in all copies or substantial portions of the Software.
+//! >
+//! > THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+//! > OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+//! > MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+//! > IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+//! > CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+//! > TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+//! > SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 //!
 //! The whole file is loaded into memory before SQLite opens it, and SQLite
 //! reads and writes that copy synchronously. Each commit queues one
@@ -27,7 +58,10 @@
 //! - **It stops the per-commit writes.** While the file's last write
 //!   failed, commits only mark pages dirty; the host retries with
 //!   [`IdbVfsUtil::flush`] (each retry rewrites everything still dirty, so
-//!   doing that on every commit of a full store would only burn time).
+//!   doing that on every commit of a full store would only burn time). A
+//!   commit's own write that fails calls the file's
+//!   [`IdbVfsUtil::on_write_failed`] hook, so the host starts retrying even
+//!   when nothing waits on a flush.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -300,6 +334,8 @@ struct IdbVfs {
     idb: Database,
     name2file: RefCell<HashMap<String, IdbFile>>,
     tx: UnboundedSender<IdbCommit>,
+    /// Per file, called when a commit's own write of it fails.
+    write_failed: RefCell<HashMap<String, std::rc::Rc<dyn Fn()>>>,
 }
 
 impl IdbVfs {
@@ -317,6 +353,7 @@ impl IdbVfs {
             idb,
             name2file: RefCell::new(HashMap::new()),
             tx,
+            write_failed: RefCell::new(HashMap::new()),
         })
     }
 
@@ -446,17 +483,21 @@ impl IdbVfs {
 
     async fn commit_loop(&self, mut rx: UnboundedReceiver<IdbCommit>) {
         while let Some(IdbCommit { op, notify }) = rx.recv().await {
-            let result = match op {
-                IdbCommitOp::Sync(file) => self.sync_db_impl(&file).await,
-                IdbCommitOp::Delete(file) => self.delete_db_impl(&file).await,
+            let (result, synced) = match op {
+                IdbCommitOp::Sync(file) => (self.sync_db_impl(&file).await, Some(file)),
+                IdbCommitOp::Delete(file) => (self.delete_db_impl(&file).await, None),
             };
             if let Some(notify) = notify {
                 // The waiter may have gone away.
                 let _ = notify.send(result);
             } else if let Err(error) = result {
-                // A per-commit write: the file now holds the error, and the
-                // host's next flush retries and reports it.
+                // A per-commit write: the file now holds the error; its
+                // host retries with a flush, which reports it.
                 tracing::warn!(%error, "IndexedDB write failed");
+                let hook = synced.and_then(|file| self.write_failed.borrow().get(&file).cloned());
+                if let Some(hook) = hook {
+                    hook();
+                }
             }
         }
     }
@@ -679,6 +720,28 @@ impl IdbVfsUtil {
     /// with why that write failed.
     pub fn flush(&self, file: &str) -> Result<WaitCommit> {
         self.pool.flush(file)
+    }
+
+    /// Call `hook` when a commit's own write of `file` fails (`None`
+    /// removes it): the host then retries with [`Self::flush`].
+    pub fn on_write_failed(&self, file: &str, hook: Option<std::rc::Rc<dyn Fn()>>) {
+        let mut hooks = self.pool.write_failed.borrow_mut();
+        match hook {
+            Some(hook) => hooks.insert(file.to_owned(), hook),
+            None => hooks.remove(file),
+        };
+    }
+
+    /// Whether `file`'s last write to IndexedDB failed (its pages wait for
+    /// a flush to retry them).
+    pub fn write_failed(&self, file: &str) -> bool {
+        matches!(
+            self.pool.name2file.borrow().get(file),
+            Some(IdbFile::Main(IdbPageFile {
+                persist_error: Some(_),
+                ..
+            }))
+        )
     }
 }
 

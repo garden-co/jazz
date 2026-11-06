@@ -112,6 +112,23 @@ impl Store {
         }
     }
 
+    /// Call `hook` when a commit's own write to the backing storage fails
+    /// (`None` removes it).
+    pub(crate) fn on_write_failed(&self, hook: Option<Rc<dyn Fn()>>) {
+        if let Store::IndexedDb(util, path) = self {
+            util.on_write_failed(path, hook);
+        }
+    }
+
+    /// Whether the last write to the backing storage failed, so commits
+    /// since wait in memory for a flush to retry them.
+    pub(crate) fn write_failed(&self) -> bool {
+        match self {
+            Store::IndexedDb(util, path) => util.write_failed(path),
+            Store::Opfs => false,
+        }
+    }
+
     /// Whether commits reach the backing storage only after they return.
     pub(crate) fn defers_writes(&self) -> bool {
         matches!(self, Store::IndexedDb(..))
