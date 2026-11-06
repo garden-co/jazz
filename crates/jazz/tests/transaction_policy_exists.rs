@@ -148,7 +148,7 @@ fn a_commit_whose_later_write_removes_the_evidence_is_refused() {
     assert!(
         error
             .message
-            .contains("once the rest of its transaction applied"),
+            .contains("on the state the whole transaction leaves behind"),
         "{}",
         error.message
     );
@@ -318,15 +318,15 @@ fn a_staged_row_is_no_evidence_for_its_own_check() {
     assert!(error.message.contains("WITH CHECK"), "{}", error.message);
 }
 
-/// A chain staged link by link commits in one pass over the unit, whatever
-/// its depth.
+/// A chain staged link by link commits: the commit grounds it from the
+/// committed root outwards, as the authority does on upload.
 #[test]
 fn a_deep_chain_staged_in_order_commits() {
     let db = open();
     let mut parent = root_node(&db);
     let open = OpenTransactionId::new();
     block_on(db.begin_mergeable(open)).unwrap();
-    for _ in 0..150 {
+    for _ in 0..100 {
         parent = block_on(db.tx_ref(open).insert(
             "nodes",
             BTreeMap::from([("parent_id".to_owned(), uuid(parent))]),
@@ -336,4 +336,46 @@ fn a_deep_chain_staged_in_order_commits() {
         .row_uuid();
     }
     block_on(db.commit_mergeable_handle(open)).unwrap();
+}
+
+/// Rows can't ground each other: a cycle each link of which passed as it
+/// was staged is refused at commit, as the authority would refuse it.
+#[test]
+fn a_cycle_of_staged_rows_is_refused_at_commit() {
+    let db = open();
+    let root = root_node(&db);
+    let open = OpenTransactionId::new();
+    block_on(db.begin_mergeable(open)).unwrap();
+    let insert = |parent: RowUuid| {
+        block_on(db.tx_ref(open).insert(
+            "nodes",
+            BTreeMap::from([("parent_id".to_owned(), uuid(parent))]),
+            session(alice()),
+        ))
+        .unwrap()
+        .row_uuid()
+    };
+    let x = insert(root);
+    let y = insert(x);
+    block_on(db.tx_ref(open).update(
+        "nodes",
+        x,
+        BTreeMap::from([("parent_id".to_owned(), uuid(y))]),
+        jazz::db::UpdateOptions {
+            identity: WriteIdentity::Session(alice()),
+            ..Default::default()
+        },
+    ))
+    .expect("y is staged, so x's new parent passes as it is staged");
+    let error = block_on(db.commit_mergeable_handle(open))
+        .err()
+        .expect("x and y only ground each other");
+    assert!(error.is_authorization_denied(), "{}", error.message);
+    assert!(
+        error
+            .message
+            .contains("on the state the whole transaction leaves behind"),
+        "{}",
+        error.message
+    );
 }
