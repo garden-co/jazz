@@ -122,7 +122,8 @@ See [Durability Tiers](/docs/reference/durability-tiers) for the meaning of `loc
 A transaction can fail at three points:
 
 1. While the callback runs, a write can throw immediately or an awaited read can reject, for
-   example because its input is invalid.
+   example because its input is invalid. An update inside a transaction needs its row read first
+   in this process (with `tx.one(...)`, say); otherwise it throws a `not_observed` error.
 2. The callback or local commit can fail. Jazz rolls back a callback transaction and rejects
    `db.transaction(...)` or `db.serializableTransaction(...)`.
 3. The authority can reject a committed transaction later. In TypeScript, `wait(...)` then rejects

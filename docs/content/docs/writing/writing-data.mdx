@@ -69,12 +69,6 @@ Every framework provides a hook to access the database handle, and query hooks r
 
 Mutations are methods on the database handle. All three take a table as their first argument.
 
-<Callout type="warn" title="Read a row before you update it">
-  In alpha.60, `update` needs the row to have been read in the same process first. In a fresh
-  process, such as a REST handler right after a deploy, an update of a row the process hasn't read
-  throws `NotObserved`. Read it first, for example with `db.one(...)`.
-</Callout>
-
 <Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
