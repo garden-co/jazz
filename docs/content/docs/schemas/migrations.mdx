@@ -86,7 +86,8 @@ import { migrations } from "./migrations";
 export const app = s.defineApp(schema, { migrations });
 ```
 
-Commit it with your schema. Clients use it to read and write data from any version, including
+Commit it with your schema. It changes with every migration, so merging two branches that each
+added one always conflicts there: take either side, then run `validate` to regenerate it. Clients use it to read and write data from any version, including
 before they first sync, so a client never has to rename or reshape stored data later. A client
 whose schema version is missing from the bundle refuses to open with an error telling you to
 regenerate it.
@@ -104,7 +105,10 @@ in reverse.
   If the diff contains ambiguities (e.g. a column was removed and a same-typed column was added,
   which could be a rename), the generated lens is marked as a **draft**. Draft lenses will fail at
   startup if they are in the path to a live schema. You need to review the draft lens and resolve
-  the ambiguity before publishing.
+  the ambiguity before publishing. Renaming an **optional** column isn't detected yet: the stub
+  drops the old column and adds the new one without marking it a draft, and once deployed the values
+  are gone. Check every stub for a drop and an add in the same table, and replace them with
+  `m.renameFrom` when you meant a rename.
 </Callout>
 
 ### Generated stub
@@ -183,6 +187,15 @@ doesn't cover every change, while a stub with a `TODO` left in it can still pass
   gets the new column's default, with no warning. There is no value-mapping step yet.
 - **Making an optional column required.** There's no step for it yet, and adding a required column
   while dropping the optional one resets every row to the default, as above.
+- **Moving data between tables.** A lens maps one table's rows; it can't copy values into another
+  table.
+
+For these, expand and contract over two releases. First add the new column or table next to the old
+one, have your app write both, and copy existing values with a
+[backend job](/docs/setup/backend-client). Once every row is copied and no client still needs the old
+shape, drop the old column in a later release. Keep the copy job in the release before the drop:
+once a release drops a column, code on that release can no longer read it.
+
 - **Changing indexes** (`indexOnly`, `compositeIndex`). `migrations create` writes no migration for
   them, and the backend then refuses to start with "migration history has disconnected roots".
 
@@ -252,6 +265,11 @@ Both commands use the current `schema.ts` as their destination. Review the gener
 - The migration from Bob's schema should preserve `priority` and introduce `dueDate`.
 
 And then deploy your main backend.
+
+<Callout type="warn">
+  In alpha.60 deploying a converged schema like this is refused at startup. Until that is fixed,
+  pick one branch and add the other branch's change as a new migration on top of it.
+</Callout>
 
 Rows written under either branch now read with both columns intact. Jazz validates that alternative forward paths agree on the values and column identities they
 preserve or introduce.

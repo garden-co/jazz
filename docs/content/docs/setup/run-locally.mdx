@@ -53,7 +53,9 @@ export const jazz = createJazz({
 });
 ```
 
-Edit `schema.ts` or `permissions.ts` and restart the dev server: Jazz applies them on start. See
+Edit `schema.ts` or `permissions.ts` and restart the dev server: Jazz applies them on start. Don't
+count on hot reload for these: Turbopack usually recovers, but webpack builds can get stuck on the
+old schema. See
 [Your Own Server](/docs/setup/deployment/own-server) for mounting it in Next.js, Hono or Express.
 
 ## How we test this page

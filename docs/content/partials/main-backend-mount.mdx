@@ -19,6 +19,20 @@
     `jazz.attach(server)` yet: Next's own upgrade handler closes the `/jazz` sockets. Leave sockets to
     the HTTP stream there.
 
+    In a server component or server action there is no `Request`. `forReqUser` only hands the
+    request to your `authenticate`, so build one from the incoming headers:
+
+    ```ts
+    import { headers } from "next/headers";
+    import { jazz } from "@/jazz.server";
+
+    const db = await jazz.forReqUser(new Request("http://localhost", { headers: await headers() }));
+    ```
+
+    Self-hosted on `sqlite()`, import `jazz.server.ts` only from the Next app itself. A custom server
+    file or a script that opens the same data directory in another process is refused (the
+    directory is locked to one process).
+
   </Tab>
   <Tab value="Hono">
     ```ts title="server.ts"
