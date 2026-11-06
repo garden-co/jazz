@@ -728,7 +728,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     // advertises thin results is answered with results, not sync.
     let negotiated = match negotiate_wire(
         &remote_hello,
-        current_wire_features() | jazz::wire::FEATURE_THIN_RESULTS,
+        current_wire_features() | jazz::wire::FEATURE_THIN_RESULTS | jazz::wire::FEATURE_HEARTBEAT,
     ) {
         Ok(negotiated) => negotiated,
         Err(error) => {
@@ -940,11 +940,16 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     // Ping on a fixed cadence and drop the link once nothing at all has
     // arrived for the idle timeout; every WebSocket client answers pings.
     let mut last_inbound = tokio::time::Instant::now();
+    let heartbeat = negotiated.features & jazz::wire::FEATURE_HEARTBEAT != 0;
     let mut keepalive = tokio::time::interval_at(
         last_inbound + WS_KEEPALIVE_PING_INTERVAL,
         WS_KEEPALIVE_PING_INTERVAL,
     );
     keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    // A sync batch read while its session's ingress budget was full: the
+    // socket is not read again until the owner has taken earlier frames.
+    let mut held: Option<(Vec<Vec<u8>>, WireAdmission)> = None;
 
     'connection: loop {
         let stall_at = thin_reader.stall_deadline();
@@ -953,7 +958,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
             _ = keepalive.tick() => {
                 // A connection waiting for room reads nothing, its peer's
                 // pongs included: that is not the peer going quiet.
-                if thin_reader.waiting() {
+                if thin_reader.waiting() || held.is_some() {
                     last_inbound = tokio::time::Instant::now();
                 }
                 if last_inbound.elapsed() >= WS_IDLE_TIMEOUT {
@@ -964,8 +969,9 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                     break;
                 }
                 // A full writer queue already proves the link is busy; the
-                // next tick pings again.
-                let _ = writer_tx.try_send(vec![Message::Ping(Default::default())]);
+                // next tick pings again. A client that cannot see pings (a
+                // browser) asked for a heartbeat frame it can see instead.
+                let _ = writer_tx.try_send(keepalive_beat(heartbeat));
             }
             _ = async {
                 if let Some(changes) = &mut account_changes { let _ = changes.changed().await; }
@@ -1049,7 +1055,20 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                 ));
                 break 'connection;
             }
-            msg = socket_reader.next(), if !thin_reader.waiting() => {
+            room = async {
+                match &mut held {
+                    Some((_, admission)) => admission.await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                let (frames, _) = held.take().expect("a held batch is waiting");
+                let received = room.and_then(|room| core_server_shell.receive_wire_frames(session, frames, room));
+                if let Err(error) = received {
+                    queue_ws_error(&writer_tx, WireError::new(WireErrorCode::Backpressure, WireRetry::Later, error));
+                    break 'connection;
+                }
+            }
+            msg = socket_reader.next(), if !thin_reader.waiting() && held.is_none() => {
                 last_inbound = tokio::time::Instant::now();
                 match msg {
                 Some(Ok(Message::Binary(bytes))) => {
@@ -1074,7 +1093,19 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                         }
                         continue;
                     }
-                    if let Err(error) = core_server_shell.receive_wire_frames(session, frames) {
+                    let bytes = frames.iter().map(Vec::len).sum::<usize>();
+                    let received = match core_server_shell.try_admit_wire_frames(session, bytes) {
+                        Ok(Some(room)) => core_server_shell.receive_wire_frames(session, frames, room),
+                        Ok(None) => {
+                            let runtime = core_server_shell.clone();
+                            held = Some((frames, Box::pin(async move {
+                                runtime.admit_wire_frames(session, bytes).await
+                            })));
+                            Ok(())
+                        }
+                        Err(error) => Err(error),
+                    };
+                    if let Err(error) = received {
                         queue_ws_error(&writer_tx, WireError::new(WireErrorCode::Backpressure, WireRetry::Later, error));
                         break 'connection;
                     }
@@ -1112,6 +1143,11 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
 const THIN_PART_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 #[cfg(test)]
 const THIN_PART_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The wait for room for a sync batch in its session's ingress budget.
+type WireAdmission = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<crate::runtime::WireIngress, String>> + Send>,
+>;
 
 type ThinAdmission = std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<crate::runtime::ThinIngress, String>> + Send>,
@@ -1259,6 +1295,19 @@ impl Drop for SocketWriterGuard {
     fn drop(&mut self) {
         self.0.abort();
     }
+}
+
+/// One keepalive tick's messages: a ping, and for a client that negotiated
+/// [`jazz::wire::FEATURE_HEARTBEAT`] a heartbeat frame it can see.
+fn keepalive_beat(heartbeat: bool) -> Vec<Message> {
+    let mut beat = vec![Message::Ping(Default::default())];
+    if heartbeat {
+        let frame = encode_frame(&WireFrame::Heartbeat).expect("a unit frame encodes");
+        let batch = jazz::wire::encode_websocket_frame_batch(&[frame])
+            .expect("a one-byte frame fits a batch");
+        beat.push(Message::Binary(batch.into()));
+    }
+    beat
 }
 
 fn queue_ws_error(writer: &mpsc::Sender<Vec<Message>>, error: WireError) {
@@ -2660,6 +2709,45 @@ mod tests {
             };
             expect_ws_server_hello(&mut ws, features).await;
         }
+    }
+
+    /// A browser cannot see WebSocket pings, so a client that asks for it
+    /// gets a heartbeat it can see; its frame is the one byte the TypeScript
+    /// carrier drops before the runtime (`WIRE_FRAME_HEARTBEAT`).
+    #[test]
+    fn keepalive_sends_a_heartbeat_only_to_a_client_that_asked() {
+        let [Message::Ping(_)] = keepalive_beat(false).as_slice() else {
+            panic!("a client without the feature gets only the ping");
+        };
+        let beat = keepalive_beat(true);
+        let [Message::Ping(_), Message::Binary(batch)] = beat.as_slice() else {
+            panic!("a heartbeat client gets the ping and one batch");
+        };
+        let frames = decode_ws_frame_batch(batch).expect("a frame batch");
+        assert_eq!(frames, vec![WireFrame::Heartbeat]);
+    }
+
+    #[tokio::test]
+    async fn websocket_negotiates_the_heartbeat_a_browser_asks_for() {
+        assert_eq!(encode_frame(&WireFrame::Heartbeat).unwrap(), vec![7]);
+        let state = make_ws_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let entry = websocket_prelude_v1_fixture()["fixtures"]
+            .as_array()
+            .expect("fixture entries")
+            .iter()
+            .find(|entry| entry["name"] == "typescript_admin_default_link")
+            .expect("the TypeScript default-link fixture")
+            .clone();
+        let (mut ws, _) = connect_async(ws_url(addr, state.app_id))
+            .await
+            .expect("connect websocket");
+        ws.send(WsMessage::Text(
+            entry["json"].as_str().unwrap().to_owned().into(),
+        ))
+        .await
+        .expect("send prelude");
+        expect_ws_server_hello(&mut ws, jazz::wire::FEATURE_HEARTBEAT).await;
     }
 
     #[tokio::test]
