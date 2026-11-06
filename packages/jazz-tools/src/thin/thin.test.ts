@@ -592,6 +592,55 @@ describe("thin client", () => {
     expect(causes(writeError)[0]).toBe("ThinRequestNotSentError");
   }, 60_000);
 
+  it("ends reads at a hand-over, also those reaching it later, but not a transaction's", async () => {
+    const server = await startServer();
+    const db = await thinDb(server);
+    await db.insert(app.notes, { text: "first", done: false }).wait({ tier: "global" });
+    const runtime = db.currentRuntime() as ThinRuntime;
+    const waiting = (runtime as unknown as { oneShots: Map<number, { op: { type: string } }> })
+      .oneShots;
+    await server.stop();
+    await expect
+      .poll(() => db.getSyncStatus().link.state, { timeout: 5_000 })
+      .not.toBe("connected");
+    // Begun while the server is down: all of it waits for a connection.
+    const tx = db.beginTransaction();
+    tx.insert(app.notes, { text: "staged", done: false });
+
+    const before = db.all(app.notes).catch((error: unknown) => error);
+    const inTransaction = tx.all(app.notes).catch((error: unknown) => error);
+    await expect
+      .poll(() => [...waiting.values()].filter((o) => o.op.type === "query").length)
+      .toBe(2);
+    runtime.endUnsentReads();
+    expect(causes(await before)).toEqual(["ThinRequestNotSentError", "RuntimeClosedError"]);
+    // A read on its way when the Db handed over ends the same way.
+    expect(causes(await db.all(app.notes).catch((error: unknown) => error))[0]).toBe(
+      "ThinRequestNotSentError",
+    );
+    // The transaction's read still waits: its successor can't serve it.
+    expect([...waiting.values()].map((o) => o.op.type)).toContain("query");
+    runtime.close();
+    // It ends only with the runtime, not at the hand-over.
+    expect(String(await inTransaction)).toMatch(/closed/);
+  }, 60_000);
+
+  it("reports a never-sent write nobody waits for as not sent", async () => {
+    const server = await startServer();
+    const db = await thinDb(server);
+    await db.insert(app.notes, { text: "first", done: false }).wait({ tier: "global" });
+    const runtime = db.currentRuntime() as ThinRuntime;
+    const codes: string[] = [];
+    db.onMutationError((event) => codes.push(event.code));
+    await server.stop();
+    await expect
+      .poll(() => db.getSyncStatus().link.state, { timeout: 5_000 })
+      .not.toBe("connected");
+    db.insert(app.notes, { text: "unsent", done: false });
+    runtime.close();
+    await expect.poll(() => codes).toEqual(["not_sent"]);
+  }, 60_000);
+
   it("ends a write waiting to go out again with its fate unknown when the runtime stops for good", async () => {
     const server = await startServer();
     const db = await thinDb(server);

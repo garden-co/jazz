@@ -567,23 +567,25 @@ export class ThinRuntime implements Runtime {
   }
 
   /**
-   * @internal Its Db handed over to a successor: end the reads not sent yet
-   * (outside a transaction), with {@link RuntimeClosedError} as their cause,
+   * @internal Its Db handed over to a successor: end the reads (outside a
+   * transaction) and snapshot captures not sent yet, and any made from now
+   * on, with {@link RuntimeClosedError} as their cause,
    * so each asks the successor instead of waiting for this runtime's server.
    * Writes stay, to upload once it answers.
    */
   endUnsentReads(): void {
+    // A read that reaches this runtime later (it was still on its way when
+    // the Db handed over) ends the same way.
+    this.handedOver = true;
     for (const [id, oneShot] of this.oneShots) {
-      if (oneShot.sent || oneShot.op.type !== "query" || transactionOf(oneShot.op) !== undefined)
-        continue;
+      if (oneShot.sent || !endsAtHandOver(oneShot.op)) continue;
       this.oneShots.delete(id);
-      oneShot.reject(
-        new ThinRequestNotSentError("the Db handed over to its local-first successor", {
-          cause: new RuntimeClosedError("the thin runtime handed over"),
-        }),
-      );
+      oneShot.reject(handedOver());
     }
   }
+
+  /** Set by {@link endUnsentReads}. */
+  private handedOver = false;
 
   // ---- requests ---------------------------------------------------------
 
@@ -601,6 +603,7 @@ export class ThinRuntime implements Runtime {
         answer: Promise.reject(new RuntimeClosedError("the thin runtime is closed")),
       };
     if (this.failure) return { answer: Promise.reject(this.failure) };
+    if (this.handedOver && endsAtHandOver(op)) return { answer: Promise.reject(handedOver()) };
     let oneShot: OneShot | undefined;
     const answer = new Promise<ThinBody>((resolve, reject) => {
       oneShot = { op, resolve, reject, sent: false };
@@ -1338,7 +1341,12 @@ export class ThinRuntime implements Runtime {
           // connection ended unanswered may have committed: its fate is
           // unknown, not rejected.
           const rejected = failure instanceof ThinRemoteError;
-          const code = rejected ? failure.code : "outcome_unknown";
+          // Never sent: it certainly didn't commit.
+          const code = rejected
+            ? failure.code
+            : failure instanceof ThinRequestNotSentError
+              ? "not_sent"
+              : "outcome_unknown";
           this.mutationErrorCallback?.({
             code,
             reason: failure.message,
@@ -1460,6 +1468,21 @@ function tooLarge(op: string, bytes: number): ThinRemoteError {
     `this ${op} is ${bytes} bytes, more than the ${MAX_THIN_MESSAGE_BYTES} a thin client ` +
       `sends in one request: write values that large with insertStreaming or updateStreaming`,
   );
+}
+
+/**
+ * A request its Db's successor serves instead once the Db hands over: a read
+ * outside a transaction, or a snapshot capture. Writes stay, to upload.
+ */
+function endsAtHandOver(op: ThinOp): boolean {
+  if (op.type === "captureSnapshot") return true;
+  return op.type === "query" && transactionOf(op) === undefined;
+}
+
+function handedOver(): ThinRequestNotSentError {
+  return new ThinRequestNotSentError("the Db handed over to its local-first successor", {
+    cause: new RuntimeClosedError("the thin runtime handed over"),
+  });
 }
 
 /** The error for a write that may have committed before `cause` ended it. */

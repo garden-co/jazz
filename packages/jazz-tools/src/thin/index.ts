@@ -25,6 +25,7 @@ import type { WasmSchema } from "../drivers/types.js";
 export { ThinRuntimeSource } from "./thin-runtime-source.js";
 export {
   ThinConnectionLostError,
+  ThinRequestNotSentError,
   ThinTransactionLostError,
   ThinRemoteError,
   type ThinRuntimeOptions,
