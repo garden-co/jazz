@@ -101,6 +101,9 @@ class SocketEvents {
   }
 }
 
+/** The most one send request carries, unless a single record is larger. */
+const MAX_SEND_BYTES = 4 * 1024 * 1024;
+
 /** One sync session over the HTTP stream transport. */
 export class HttpStreamSocket extends SocketEvents implements BrowserWebSocket {
   binaryType: "arraybuffer" | "blob" = "arraybuffer";
@@ -190,8 +193,18 @@ export class HttpStreamSocket extends SocketEvents implements BrowserWebSocket {
     this.sending = true;
     try {
       while (this.queued.length > 0 && this.readyState === 1) {
-        const body = concatBytes(this.queued);
-        this.queued = [];
+        // A bounded body per request, so the backend's pace (it answers a
+        // send once the core has taken it) holds the next one back.
+        let take = 0;
+        let bytes = 0;
+        while (
+          take < this.queued.length &&
+          (take === 0 || bytes + this.queued[take]!.byteLength <= MAX_SEND_BYTES)
+        ) {
+          bytes += this.queued[take]!.byteLength;
+          take += 1;
+        }
+        const body = concatBytes(this.queued.splice(0, take));
         const response = await fetch(`${this.streamUrl}/${encodeURIComponent(this.session.id)}`, {
           method: "POST",
           credentials: "same-origin",

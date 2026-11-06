@@ -39,6 +39,7 @@ import {
   vercel,
   type Jazz,
   type RequestAuthenticationError,
+  type WsLikeSocket,
 } from "./index.js";
 import { localFirstAccountId } from "../accounts/local-first.js";
 import {
@@ -1663,6 +1664,104 @@ describe("createJazz", () => {
       .wait({ tier: "global" });
     expect((await jazz.db.all(app.todos.where({ id: later.id }))).length).toBe(1);
   }, 60_000);
+
+  for (const sockets of [false, true]) {
+    it(`uploads more than a session takes at once over ${sockets ? "a socket" : "the HTTP stream"}, on one session`, async () => {
+      // 24 MB local-first: three times a session's 8 MiB ingress budget,
+      // sent as fast as the client can. The core reads it at its own pace;
+      // it used to drop the session, and the upload restarted forever.
+      const blobs = s.defineApp(
+        { files: s.table({ name: s.string(), owner: s.uuid(), data: s.bytes() }, {}) },
+        { migrations: "none" },
+      );
+      const blobPermissions = s.definePermissions(blobs, ({ policy, session }) => {
+        policy.files.allowRead.where({ owner: session.user });
+        policy.files.allowInsert.where({ owner: session.user });
+        policy.files.allowUpdate.never();
+        policy.files.allowDelete.never();
+      });
+      const jazz = await createJazz({
+        app: blobs,
+        permissions: blobPermissions,
+        store: memory(),
+        authenticate,
+      }).ready();
+      cleanups.push(() => jazz.close());
+      let upgrades = 0;
+      const origin = await serve(
+        jazz,
+        // A host that can't upgrade leaves the upgrade unanswered.
+        sockets ? { sockets, onUpgrade: () => (upgrades += 1) } : { sockets },
+      );
+      const previous = (globalThis as { location?: unknown }).location;
+      (globalThis as { location?: unknown }).location = {
+        host: new URL(origin).host,
+        href: `${origin}/`,
+      };
+      cleanups.push(async () => {
+        (globalThis as { location?: unknown }).location = previous;
+      });
+      signInAs(origin, "alice");
+      const session = await createJazzClient({
+        appId: jazz.appId,
+        app: blobs,
+        permissions: blobPermissions,
+        serverUrl: `${origin}/jazz`,
+        driver: { type: "memory" },
+      });
+      cleanups.push(() => session.close());
+      await session.loginWithBackend();
+      const alice = session.getSnapshot().client!;
+
+      const data = new Uint8Array(24 * 1024 * 1024);
+      for (let i = 0; i < data.length; i += 4096) data[i] = (i * 2654435761) >>> 24;
+      const row = await alice.db
+        .insert(blobs.files, { name: "big", owner: alice.session!.user!, data })
+        .wait({ tier: "global" });
+      const [seen] = await jazz.db.all(blobs.files.where({ id: row.id }));
+      expect(seen?.data.byteLength).toBe(data.byteLength);
+      expect(Buffer.from(seen!.data).equals(Buffer.from(data))).toBe(true);
+      // One session carried it all: none was dropped and opened again.
+      if (sockets) expect(upgrades).toBe(1);
+      else
+        expect(
+          requestPaths.filter((path) => path.endsWith(`/apps/${jazz.appId}/stream`)),
+        ).toHaveLength(1);
+    }, 120_000);
+  }
+
+  it("ends the session of a socket that can't pause once its client sends far ahead of the core", async () => {
+    // Sign-in never finishes, so nothing the client sends is taken.
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate: () => new Promise<never>(() => {}),
+      upgradesSockets: true,
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const listeners: Record<string, (...args: unknown[]) => void> = {};
+    const closes: Array<[number | undefined, string | undefined]> = [];
+    jazz.acceptSocket(new Request(`http://app.test/jazz/apps/${jazz.appId}/ws`), {
+      send() {},
+      close: (code, reason) => closes.push([code, reason]),
+      on(event: string, listener: (...args: never[]) => void) {
+        listeners[event] = listener as (...args: unknown[]) => void;
+      },
+    } as WsLikeSocket);
+    // A prelude stating a user's session: admission waits on authenticate.
+    listeners.message!(
+      new TextEncoder().encode(JSON.stringify({ auth: { backend_session: { user_id: "alice" } } })),
+      true,
+    );
+    const megabyte = new Uint8Array(1024 * 1024);
+    for (let sent = 0; sent < 40 && closes.length === 0; sent += 1) {
+      listeners.message!(megabyte, true);
+      await Promise.resolve();
+    }
+    expect(closes[0]?.[0]).toBe(1013);
+    expect(closes[0]?.[1]).toContain("faster than the server takes");
+  });
 
   it("sends a failed socket to the HTTP stream only through handlers that can't upgrade", async () => {
     const appId = randomUUID();
