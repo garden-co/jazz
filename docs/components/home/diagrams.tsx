@@ -299,7 +299,7 @@ export const deploymentScenarioNames: Record<DeploymentScenario, string> = {
   vercel: "Vercel",
   cloudflare: "Cloudflare (coming soon)",
   aws: "AWS",
-  server: "Your own server",
+  server: "Single server",
 };
 
 /** Lines of text from `y`, `step` apart, in one style. */
@@ -476,69 +476,106 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
   const sw = (shardRow.w - gap * (shard.count - 1)) / shard.count;
   const shardXs = Array.from({ length: shard.count }, (_, i) => shardRow.x + i * (sw + gap));
   const coreMid = (jazz.y + jazz.divider) / 2;
+  // On a single server there are no platform services: local SQLite and
+  // local files sit inside your backend, on top of the core. Everything else
+  // stays where it is in the other variants.
+  const single = scenario === "server";
+  const backendTop = single ? shardRow.y : backend.y;
+  const local = { y: 212, h: 44, sqlite: { x: 224, w: 124 }, files: { x: 364, w: 124 } };
   return (
     <Diagram viewBox={`0 0 ${W} ${H}`} label={label}>
-      <rect x={4} y={4} width={552} height={418} rx={2} className="dg-region" />
+      <rect x={4} y={4} width={552} height={418} rx={4} className="dg-cloud" />
       <Label x={switcher.x} y={22} tone="ink">
-        Your own:
+        Your own cloud:
       </Label>
-      <Frame x={backend.x} y={backend.y} w={backend.w} h={backendBottom - backend.y} tone="ink" />
+      <Frame x={backend.x} y={backendTop} w={backend.w} h={backendBottom - backendTop} tone="ink" />
       <Lines
         x={backend.x + 16}
-        y={backend.y + 24}
+        y={backendTop + 24}
         lines={["Your Backend", ...runtime]}
         step={18}
         className="dg-title dg-fill-ink"
       />
-      <Nested {...storeBox} title={[store]} inner={LARGE_VALUES} />
-      {shardXs.map((x) => (
-        <Nested
-          key={x}
-          x={x}
-          y={shardRow.y}
-          w={sw}
-          h={shardRow.h}
-          title={shard.title}
-          inner={shard.inner}
-        />
-      ))}
-      {shardXs.map((x, index) => (
-        <Wire
-          key={`w${x}`}
-          points={[
-            // A lone shard spans the row; drop straight into the core.
-            [shard.count === 1 ? 360 : x + sw / 2, shardRow.y + shardRow.h],
-            [shard.count === 1 ? 360 : x + sw / 2, 244],
-            [360, 244],
-            [360, jazz.y],
-          ]}
-          start
-          end={index === 0}
-          tone="blue"
-        />
-      ))}
-      {/* The store reaches the core around the right of the shards. */}
-      <Wire
-        points={[
-          [516, storeBox.y + storeBox.h],
-          [516, coreMid],
-          [jazz.x + jazz.w, coreMid],
-        ]}
-        tone="blue"
-        dashed
-        start
-      />
-      {/* Jazz clients read large values from the store directly, down the
+      {single ? (
+        <g>
+          <Box {...local.sqlite} y={local.y} h={local.h} tone="blue" title="local SQLite" center />
+          <Box {...local.files} y={local.y} h={local.h} tone="blue" title="local files" center />
+          {[local.sqlite, local.files].map((box) => (
+            <Wire
+              key={box.x}
+              points={[
+                [box.x + box.w / 2, local.y + local.h],
+                [box.x + box.w / 2, jazz.y],
+              ]}
+              tone="blue"
+              start
+            />
+          ))}
+          {/* Jazz clients still read large values from the files directly. */}
+          <Wire
+            points={[
+              [local.files.x + local.files.w, local.y + local.h / 2],
+              [530, local.y + local.h / 2],
+              [530, rowY],
+            ]}
+            tone="blue"
+            dashed
+            start
+          />
+        </g>
+      ) : (
+        <g>
+          <Nested {...storeBox} title={[store]} inner={LARGE_VALUES} />
+          {shardXs.map((x) => (
+            <Nested
+              key={x}
+              x={x}
+              y={shardRow.y}
+              w={sw}
+              h={shardRow.h}
+              title={shard.title}
+              inner={shard.inner}
+            />
+          ))}
+          {shardXs.map((x, index) => (
+            <Wire
+              key={`w${x}`}
+              points={[
+                // A lone shard spans the row; drop straight into the core.
+                [shard.count === 1 ? 360 : x + sw / 2, shardRow.y + shardRow.h],
+                [shard.count === 1 ? 360 : x + sw / 2, 244],
+                [360, 244],
+                [360, jazz.y],
+              ]}
+              start
+              end={index === 0}
+              tone="blue"
+            />
+          ))}
+          {/* The store reaches the core around the right of the shards. */}
+          <Wire
+            points={[
+              [516, storeBox.y + storeBox.h],
+              [516, coreMid],
+              [jazz.x + jazz.w, coreMid],
+            ]}
+            tone="blue"
+            dashed
+            start
+          />
+          {/* Jazz clients read large values from the store directly, down the
           right edge beside the core's own store wire. */}
-      <Wire
-        points={[
-          [530, storeBox.y + storeBox.h],
-          [530, rowY],
-        ]}
-        tone="blue"
-        dashed
-        start
-      />
+          <Wire
+            points={[
+              [530, storeBox.y + storeBox.h],
+              [530, rowY],
+            ]}
+            tone="blue"
+            dashed
+            start
+          />
+        </g>
+      )}
       <Wire
         points={[
           [530, 466],

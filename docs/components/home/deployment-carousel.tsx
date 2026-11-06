@@ -16,7 +16,7 @@ const shortNames: Record<DeploymentScenario, string> = {
   vercel: "Vercel",
   cloudflare: "Cloudflare",
   aws: "AWS",
-  server: "Server",
+  server: "Single Server",
 };
 
 // Place the switcher over its space in the diagram, in percentages of the
@@ -85,7 +85,7 @@ export function DeploymentCarousel() {
           </div>
         ))}
         {/* The switcher sits in the space the diagram leaves for it, under
-            "Your own:", and stays put while the diagrams cross-fade. */}
+            "Your own cloud:", and stays put while the diagrams cross-fade. */}
         <div
           className="home-carousel-tabs"
           role="tablist"

@@ -340,6 +340,11 @@ h6 {
   fill: none;
   stroke-width: 2.5;
 }
+.home-diagram .dg-cloud {
+  fill: var(--color-text-primary);
+  fill-opacity: 0.03;
+  stroke: none;
+}
 .home-diagram .dg-region {
   fill: none;
   stroke: var(--color-text-secondary);
@@ -845,9 +850,7 @@ h6 {
   display: grid;
   grid-template-columns: 1fr 1fr;
   grid-template-rows: 1fr 1fr;
-  border: 1px solid var(--color-text-primary);
-  border-radius: 2px;
-  overflow: hidden;
+  gap: 0.3em;
   /* Text in step with the diagram's 12-unit labels at any width. */
   font-family: var(--font-family-code);
   font-size: calc(12 / 560 * 100cqw);
@@ -855,24 +858,18 @@ h6 {
 .home-carousel-tab {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  gap: 0.4em;
+  gap: 0.5em;
   min-width: 0;
-  padding: 0 0.4em;
-  background-color: var(--color-background-card);
+  padding: 0 0.6em;
+  border-radius: 2px;
   color: var(--color-text-secondary);
   white-space: nowrap;
   transition:
     background-color 200ms,
     color 200ms;
 }
-.home-carousel-tab:nth-child(odd) {
-  border-right: 1px solid var(--color-text-primary);
-}
-.home-carousel-tab:nth-child(-n + 2) {
-  border-bottom: 1px solid var(--color-text-primary);
-}
 .home-carousel-tab:hover {
+  background-color: color-mix(in srgb, var(--color-text-primary) 6%, transparent);
   color: var(--color-text-primary);
 }
 .home-carousel-tab[aria-selected="true"] {
