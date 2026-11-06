@@ -5017,11 +5017,31 @@ impl Inner {
     /// unit could have taken away is checked again against the unit's
     /// whole post-state (see [`Inner::post_state_pass`]).
     pub(crate) fn finish_checks(&self, seq: u64) -> Result<(), Error> {
-        let pending = self.deferred.borrow_mut().take().unwrap_or_default();
-        self.ground(pending, seq)
+        self.finish_checks_after(seq, BTreeMap::new())
     }
 
-    fn ground(&self, mut pending: Vec<DeferredCheck>, seq: u64) -> Result<(), Error> {
+    /// [`Inner::finish_checks`] for a unit that continues writes already
+    /// grounded: `grounded` (stored table to rows) shows its end state to
+    /// the unit's checks from the first round on.
+    pub(crate) fn finish_checks_after(
+        &self,
+        seq: u64,
+        grounded: BTreeMap<String, BTreeSet<[u8; 16]>>,
+    ) -> Result<(), Error> {
+        let pending = self.deferred.borrow_mut().take().unwrap_or_default();
+        self.ground_after(pending, seq, grounded)
+    }
+
+    fn ground(&self, pending: Vec<DeferredCheck>, seq: u64) -> Result<(), Error> {
+        self.ground_after(pending, seq, BTreeMap::new())
+    }
+
+    fn ground_after(
+        &self,
+        mut pending: Vec<DeferredCheck>,
+        seq: u64,
+        mut grounded: BTreeMap<String, BTreeSet<[u8; 16]>>,
+    ) -> Result<(), Error> {
         let schema = self.schema.clone();
         let mut live = Vec::with_capacity(pending.len());
         let several = pending.len() > 1;
@@ -5036,7 +5056,6 @@ impl Inner {
             }
         }
         let mut pending = live;
-        let mut grounded: BTreeMap<String, BTreeSet<[u8; 16]>> = BTreeMap::new();
         // Each write with the round it passed in and the tables its policy
         // reads through the overlay.
         let mut rounds: Vec<(DeferredCheck, usize, BTreeSet<String>)> =
@@ -8073,6 +8092,20 @@ impl StagedOp {
     }
 }
 
+/// The rows `ops` write, by stored table.
+fn stored_rows(
+    ops: &[(Rc<Schema>, StagedOp)],
+) -> Result<BTreeMap<String, BTreeSet<[u8; 16]>>, Error> {
+    let mut rows: BTreeMap<String, BTreeSet<[u8; 16]>> = BTreeMap::new();
+    for (schema, op) in ops {
+        if let Some(row) = op.row() {
+            let stored = schema.table(op.table())?.stored.clone();
+            rows.entry(stored).or_default().insert(*row.0.as_bytes());
+        }
+    }
+    Ok(rows)
+}
+
 impl Inner {
     /// Re-apply a staged write unchecked, keeping its provenance.
     fn apply(&mut self, op: &StagedOp, seq: u64) -> Result<WriteHandle, Error> {
@@ -8610,9 +8643,13 @@ impl Db {
             let seq = inner.next_seq();
             begin_savepoint(&inner.conn, "commit_batch")?;
             let mark = inner.changed.borrow().len();
+            // Each write passed its check as it was staged; the unit's end
+            // state may still take a pass away (a row staged as evidence and
+            // deleted later), so the whole unit is checked once more, as
+            // the authority that receives it checks it.
             inner.defer_checks();
             let applied = inner
-                .apply_with_edits(ops, &batch.edits, ops.len(), seq)
+                .apply_with_edits(ops, &batch.edits, 0, seq)
                 .and_then(|()| inner.finish_checks(seq));
             if let Err(error) = applied {
                 inner.abandon_checks();
@@ -8668,6 +8705,11 @@ impl Db {
             .get(&id)
             .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
         let staged = batch.ops.len();
+        let staged_rows = if extra.is_some() {
+            stored_rows(&batch.ops)?
+        } else {
+            BTreeMap::new()
+        };
         let live = inner
             .overlay
             .as_ref()
@@ -8712,7 +8754,18 @@ impl Db {
         let applied = match extra {
             Some(op) => inner.counter_deltas(op).and_then(|()| {
                 let schema = inner.schema.clone();
-                inner.apply_all_checking(&[(schema, op.clone())], 0, own)
+                // The write continues the unit its batch staged so far:
+                // those writes passed their checks, so their rows are
+                // evidence for this one's (SPEC 7), as at the authority
+                // that receives the unit. The commit checks the whole unit.
+                inner.defer_checks();
+                let applied = inner
+                    .apply_all_checking(&[(schema, op.clone())], 0, own)
+                    .and_then(|()| inner.finish_checks_after(own, staged_rows));
+                if applied.is_err() {
+                    inner.abandon_checks();
+                }
+                applied
             }),
             None => Ok(()),
         };
