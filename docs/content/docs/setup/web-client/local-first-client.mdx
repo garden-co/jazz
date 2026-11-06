@@ -143,6 +143,20 @@ A Jazz session owns account selection and its current client. Give it the app co
     <include cwd lang="ts" meta='title="app.ts"'>
       ../examples/docs/todo-client-localfirst-ts/src/auth-snippets.ts#auth-localfirst-ts
     </include>
+
+    The background upgrade to the local-first client keeps the same `Db`: its live queries, listeners and writes carry on. If the app took the `Db` offline with `disconnect()`, it stays offline. In the browser, a local-first `Db` is offline for every tab of the app, so at the upgrade that also takes the app's other local-first tabs offline. Signing in, signing out and switching accounts do give the session a new `Db`. The old one then ends its live queries with a `DbReplacedError` and throws it on writes. Follow the session to pick up the new one, and read the current `Db` for each write:
+
+    <include cwd lang="ts" meta='title="app.ts"'>
+      ../examples/docs/todo-client-localfirst-ts/src/main.ts#follow-session-ts
+    </include>
+
+    ```ts
+    const stop = followDb(session, (db) => db.subscribe(app.todos, renderTodos));
+    session.getSnapshot().client!.db.insert(app.todos, { title: "Buy milk", done: false });
+    ```
+
+    The framework providers do this for you.
+
   </Tab>
 </Tabs>
 

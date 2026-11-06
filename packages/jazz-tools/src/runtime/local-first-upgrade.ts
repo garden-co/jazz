@@ -29,7 +29,8 @@ export function markThinDb(db: Db): void {
 
 /** @internal Whether `db` is a thin `Db`. */
 export function isThinDb(db: Db): boolean {
-  return thinDbs.has(db);
+  // A thin Db that upgraded is a handle on its local-first successor.
+  return thinDbs.has(typeof db?.current === "function" ? db.current() : db);
 }
 
 /** @internal A provider's session upgrades its thin `Db` through this. */
