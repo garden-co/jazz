@@ -73,6 +73,17 @@ export const jazz = createJazz({
 A request with no token, or with one that doesn't verify, is signed out. A JWKS that can't be
 fetched throws instead, so clients retry rather than signing out.
 
+- **Key caching:** `fromJWT` caches the JWKS for 5 minutes, so a key your provider drops keeps
+  verifying tokens until the cache expires. A token signed with a key the cache doesn't know yet
+  makes it fetch again; within 30 seconds of the last fetch it throws instead, so the client retries
+  shortly rather than signing out.
+- **Revoking a session:** once `authenticate` stops accepting a user's token, their open sync
+  sessions end at the next check (`recheckSeconds`). A tab that stays in view then shows them signed
+  out about 32 seconds after the refusal: a 30-second grace in case the refusal was a blip, plus a
+  2-second confirmation.
+- **Refreshing short-lived tokens:** store the new token where `token(request)` reads it, such as
+  your cookie, then call `reauthenticate()` so the client asks your backend again.
+
 ## How it works
 
 <Sequence
