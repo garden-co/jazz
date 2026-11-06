@@ -248,7 +248,7 @@ const features: {
   },
   {
     id: "backend",
-    title: "Slims your backend and simplifies your infra",
+    title: "Simplifies your backend and infra",
     body: (
       <>
         <p>
