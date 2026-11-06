@@ -1572,6 +1572,9 @@ pub(crate) mod mock {
         pub calls: Calls,
         /// Every request fails with 503 while set.
         pub failing: AtomicBool,
+        /// GETs of data objects (not the claim markers) answer only once
+        /// this is unset, as a bucket that stopped answering.
+        pub stall_gets: AtomicBool,
         /// A missing key answers 403 AccessDenied, as without s3:ListBucket.
         pub deny_missing: AtomicBool,
         /// Set: the keys may only touch objects under this prefix (an IAM
@@ -1702,6 +1705,11 @@ pub(crate) mod mock {
         state.calls.requests.fetch_add(1, Ordering::Relaxed);
         if state.failing.load(Ordering::Relaxed) {
             return error(StatusCode::SERVICE_UNAVAILABLE, "SlowDown");
+        }
+        if parts.method == axum::http::Method::GET && !parts.uri.path().contains("/.jazz-") {
+            while state.stall_gets.load(Ordering::Relaxed) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
         }
         if parts.uri.path() == "/sts" {
             return sts(state, &parts, &body);

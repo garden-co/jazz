@@ -11473,6 +11473,7 @@ impl Db {
         Db {
             inner: self.inner.clone(),
             view: Some(view),
+            defer_fetches: self.defer_fetches,
         }
     }
 
@@ -11490,6 +11491,7 @@ impl Db {
         Db {
             inner: self.inner.clone(),
             view,
+            defer_fetches: self.defer_fetches,
         }
     }
 
@@ -13442,29 +13444,37 @@ impl Db {
             first_load: FirstLoad::Deliver,
             ..opts
         };
+        let read = || {
+            let inner = self.inner();
+            ReadSpec::of(&opts, &inner).and_then(|mut spec| {
+                // It reads as far as the answer it fetched settled.
+                if let Some(at) = fetched
+                    && spec.position == Position::Known
+                {
+                    spec.position = Position::At(at);
+                }
+                let roots = inner.run(&prepared, identity, &spec)?;
+                inner.nest_relations(&prepared, identity, &spec, roots)
+            })
+        };
+        // Offloaded leaves are fetched from the chunk store in place. Only
+        // a client waits for chunks beyond that: a server runs this read on
+        // its store thread (a thin session's), which also runs the ticks
+        // that would deliver them, so there a wait would never end and the
+        // read is refused as missing instead.
+        let wait = |error: &Error| {
+            crate::large::is_missing(error) && self.is_client() && self.awaiting_chunks()
+        };
+        match self.fetching(read).await {
+            Err(error) if wait(&error) => {}
+            read => return read.map(result),
+        }
         // A row whose large values are still being fetched answers once
         // their chunks arrive, while the upstream that will send them is
         // connected (a reloaded tab's rows come from its relay first).
-        poll_fn(|_| {
-            let read = {
-                let inner = self.inner();
-                ReadSpec::of(&opts, &inner).and_then(|mut spec| {
-                    // It reads as far as the answer it fetched settled.
-                    if let Some(at) = fetched
-                        && spec.position == Position::Known
-                    {
-                        spec.position = Position::At(at);
-                    }
-                    let roots = inner.run(&prepared, identity, &spec)?;
-                    inner.nest_relations(&prepared, identity, &spec, roots)
-                })
-            };
-            match read {
-                Err(error) if crate::large::is_missing(&error) && self.awaiting_chunks() => {
-                    Poll::Pending
-                }
-                read => Poll::Ready(read.map(result)),
-            }
+        poll_fn(|_| match read() {
+            Err(error) if wait(&error) => Poll::Pending,
+            read => Poll::Ready(read.map(result)),
         })
         .await
     }
