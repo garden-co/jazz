@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { generateAuthSecret, schema, type Db } from "../../src/index.js";
 import { deploy } from "../../src/dev/catalogue.js";
 import { TestCleanup, createBrowserTestDb, uniqueDbName, waitForCondition } from "./support.js";
-import { getJazzServerInfo } from "./testing-server.js";
+import { getJazzServerInfo, startJazzApp } from "./testing-server.js";
 
 const app = schema.defineApp(
   {
@@ -24,10 +24,16 @@ describe("fresh subscriber first sync", () => {
   // Applying a first result of a few MB spans more than one bounded evaluation
   // turn; the host must keep driving it until the rows are published.
   it("delivers a multi-MB first result to a fresh global subscriber", async () => {
-    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
-      uniqueDbName("fresh-subscriber-first-sync"),
+    const {
+      appId,
+      serverUrl: coreUrl,
+      adminSecret,
+    } = await getJazzServerInfo(uniqueDbName("fresh-subscriber-first-sync"));
+    await deploy({ appId, serverUrl: coreUrl, adminSecret, schema: app.wasmSchema, permissions });
+    const { serverUrl } = await startJazzApp(
+      { appId, serverUrl: coreUrl, adminSecret },
+      { schema: app.wasmSchema, permissions },
     );
-    await deploy({ appId, serverUrl, adminSecret, schema: app.wasmSchema, permissions });
     const secret = generateAuthSecret();
     const open = async (label: string): Promise<Db> =>
       ctx.track(

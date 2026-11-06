@@ -58,9 +58,9 @@ and `JAZZ_ADMIN_SECRET`.
 Next app (`createJazz` in `src/lib/jazz.server.ts`, mounted at `/jazz`), and
 its `authenticate` reads that session cookie and maps the Better Auth user to
 an account; every membership, grant and assignee stores that account id. In
-the browser, `JazzProvider` takes `auth={betterAuth(authClient)}`: it follows
-the Better Auth session, signs in through the backend, and shows the sign-in
-form while signed out. The browser holds no token: server routes ask
+the browser, `JazzProvider` starts signed out and asks the backend who
+is signed in, again after the app signs in or out with Better Auth
+(`reauthenticate()`), and shows the sign-in form while signed out. The browser holds no token: server routes ask
 `jazz.accountFor(request)` who the caller is.
 
 **Atomic writes.** Anything that spans rows commits as one transaction: an

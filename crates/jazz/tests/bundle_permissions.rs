@@ -273,3 +273,98 @@ fn a_pinned_session_writes_by_its_bundle() {
     let rows = block_on(server.all(&prepared, ReadOpts::default())).unwrap();
     assert!(rows.is_empty(), "the bundle refused alice's insert");
 }
+
+/// Poll `future`, pumping `server` and `clients` between polls.
+fn drive<T>(server: &Db, clients: &[&Db], future: impl std::future::Future<Output = T>) -> T {
+    let mut future = std::pin::pin!(future);
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    for _ in 0..64 {
+        if let std::task::Poll::Ready(output) = future.as_mut().poll(&mut context) {
+            return output;
+        }
+        pump(server, clients);
+    }
+    panic!("operation did not complete");
+}
+
+/// The authority validates a pinned session's serializable reads by the
+/// session's bundle: a store whose own schema reads nothing must not see
+/// the bundle-readable rows the session read as changed.
+#[test]
+fn a_pinned_sessions_serializable_reads_validate_by_its_bundle() {
+    let (server, row) = server_with_row(
+        block_on(Db::open(config(
+            0,
+            AuthorSubject::SYSTEM,
+            PolicyExpr::False,
+        )))
+        .unwrap(),
+    );
+    let bundle = block_on(server.publish_bundle(&users(PolicyExpr::True))).unwrap();
+    let alice = AuthorSubject::for_test_bytes([0x55; 16]);
+    let (db, _keep) = pinned(&server, 1, alice, bundle);
+    pump(&server, &[&db]);
+    assert_eq!(local(&db), [row], "the bundle reads the row");
+
+    let open = jazz::tools::OpenTransactionId::new();
+    block_on(db.begin_serializable(open)).unwrap();
+    let everyone = db.prepare_query(&Query::from("users")).unwrap();
+    let read = drive(&server, &[&db], db.tx_ref(open).all_prepared(&everyone)).unwrap();
+    assert_eq!(read.len(), 1);
+    drive(
+        &server,
+        &[&db],
+        db.tx_ref(open).insert(
+            "users",
+            BTreeMap::from([("name".to_owned(), Value::String("bea".into()))]),
+            Default::default(),
+        ),
+    )
+    .unwrap();
+    let receipt = drive(&server, &[&db], db.commit_serializable_handle(open)).unwrap();
+    drive(
+        &server,
+        &[&db],
+        db.wait_for_transaction(receipt.0, jazz::tx::DurabilityTier::Global),
+    )
+    .expect("its reads still hold under its bundle");
+}
+
+#[test]
+fn a_pinned_subscription_keeps_its_bundle_when_the_schema_changes() {
+    let (server, _row) = server_with_row(
+        block_on(Db::open(config(0, AuthorSubject::SYSTEM, PolicyExpr::True))).unwrap(),
+    );
+    let closed = block_on(server.publish_bundle(&users(PolicyExpr::False))).unwrap();
+    let bob = AuthorSubject::for_test_bytes([0x66; 16]);
+    let (on_closed, _b) = pinned(&server, 2, bob, closed);
+    pump(&server, &[&on_closed]);
+    assert_eq!(
+        local(&on_closed),
+        [],
+        "the closed bundle does not read the row"
+    );
+
+    // A new schema version re-runs every subscription. Bob's must still be
+    // governed by his bundle, not by the store's own schema, which reads
+    // everything.
+    let v2 = SchemaBuilder::new()
+        .table(
+            TableSchemaBuilder::new("users")
+                .column("name", ColumnType::Text)
+                .policies(read_and_allow_all_writes(PolicyExpr::True)),
+        )
+        .table(
+            TableSchemaBuilder::new("notes")
+                .column("body", ColumnType::Text)
+                .policies(read_and_allow_all_writes(PolicyExpr::True)),
+        )
+        .build();
+    block_on(server.admit_schema_with_lenses(compile_schema(&v2), &[])).unwrap();
+    pump(&server, &[&on_closed]);
+    assert_eq!(
+        local(&on_closed),
+        [],
+        "still closed after the schema changed"
+    );
+}

@@ -178,7 +178,7 @@ jobs:
           echo "release_pr_head_sha=${{ steps.gate.outputs.release_pr_head_sha }}"
 
   # Publication requires the release test tier on the exact tree being
-  # published: CI, starters E2E and RN device acceptance on the Version
+  # published: CI, examples E2E and RN device acceptance on the Version
   # Packages PR head, which changesets-release-pr.yml dispatches. Dry runs
   # build candidates before that tier has run, so they skip this gate.
   release-test-gate:

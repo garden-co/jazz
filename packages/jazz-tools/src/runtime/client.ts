@@ -1,3 +1,8 @@
+import {
+  validateAcceptedReadTimeout,
+  type AcceptedRows,
+  type TransactionReadCapability,
+} from "./accepted-read.js";
 import { runtimeRandomBytes } from "./runtime-entropy.js";
 import { UnsupportedSnapshotError, type SnapshotRef } from "./snapshot-ref.js";
 /**
@@ -158,11 +163,29 @@ export type AuthUpdate =
  * Common interface for the runtime backing `JazzClient`.
  */
 export interface Runtime {
+  /**
+   * Wait until every write committed so far reaches `tier`. `throughOutage`
+   * keeps the wait pending through outages until a terminal failure.
+   */
+  waitForPendingWrites?(
+    tier?: string,
+    options?: { throughOutage?: boolean; signal?: AbortSignal },
+  ): Promise<void>;
+  /** @internal Close mutation admission and report the foreground TxTime high-water. */
+  quiesceForegroundTxTimeHighWater?(): Promise<bigint>;
   beginTransaction(
     transactionKind: TransactionKind,
     id: OpenTransactionId,
     sessionJson?: string | null,
+    readCapability?: TransactionReadCapability,
   ): OpenTransactionId;
+  /** @internal Authority evidence in an opted-in existing serializable batch. */
+  queryAccepted?(
+    queryJson: string,
+    openTransactionId: OpenTransactionId,
+    sessionJson: string | null | undefined,
+    timeoutMs: number,
+  ): Promise<AcceptedRows<Row>>;
   /** Completion may include asynchronous preparation before physical submission. */
   commitTransaction(id: OpenTransactionId): TxId | Promise<TxId>;
   rollbackTransaction(id: OpenTransactionId): Promise<boolean>;
@@ -298,6 +321,12 @@ export interface Runtime {
   nativeUpstreamConfigured?(): boolean;
   /** Push updated auth credentials into the live Rust transport. */
   updateAuth(auth_json: string): void;
+  /**
+   * The session this client resolved from its credentials, set before it
+   * connects and again whenever its auth changes. A runtime that serves
+   * only its connection's session (thin) compares calls against it.
+   */
+  useSession?(session: Session | null): void;
   /** End waits held for a refused credential that nothing will renew. */
   endCredentialWait?(): void;
   /** Register a callback invoked when the Rust transport rejects the JWT. */
@@ -350,6 +379,8 @@ export interface AuthConfig {
   admin_secret?: string;
   /** Opaque session payload forwarded by a backend proxy. */
   backend_session?: unknown;
+  /** The published permissions bundle the session is pinned to. */
+  bundle?: string;
 }
 
 /**
@@ -1005,15 +1036,17 @@ export class WriteResult<T> extends WriteHandle<T, T> {
  */
 export class SerializableWriteHandle extends WriteHandle<void> {
   /**
-   * Wait for the serializable transaction to be accepted or rejected by the authority.
+   * Wait for the selected durability tier. Without options, use global with an
+   * upstream or local otherwise. Explicit global waits never fall back to local.
    *
    * Rejects with a {@link PersistedWriteRejectedError} if the transaction is rejected,
    * or a {@link WriteWaitTimeoutError} once `timeoutMs` passes. Without
    * `timeoutMs`, the wait lasts through network outages and reconnects.
    */
-  override async wait(options: { timeoutMs?: number } = {}): Promise<void> {
+  override async wait(options: Partial<WriteWaitOptions> = {}): Promise<void> {
+    const tier = options.tier === undefined ? undefined : resolveWriteWaitTier(options.tier);
     validateWriteWaitTimeout(options.timeoutMs);
-    await this.client().waitForSerializableTransaction(this.txId, options.timeoutMs);
+    await this.client().waitForSerializableTransaction(this.txId, options.timeoutMs, tier);
   }
 }
 
@@ -1022,15 +1055,17 @@ export class SerializableWriteHandle extends WriteHandle<void> {
  */
 export class SerializableWriteResult<T> extends WriteResult<T> {
   /**
-   * Wait for the serializable transaction to be accepted or rejected by the authority.
+   * Wait for the selected durability tier. Without options, use global with an
+   * upstream or local otherwise. Explicit global waits never fall back to local.
    *
    * Rejects with a {@link PersistedWriteRejectedError} if the transaction is rejected,
    * or a {@link WriteWaitTimeoutError} once `timeoutMs` passes.
    * @returns the callback result.
    */
-  override async wait(options: { timeoutMs?: number } = {}): Promise<T> {
+  override async wait(options: Partial<WriteWaitOptions> = {}): Promise<T> {
+    const tier = options.tier === undefined ? undefined : resolveWriteWaitTier(options.tier);
     validateWriteWaitTimeout(options.timeoutMs);
-    await this.client().waitForSerializableTransaction(this.txId, options.timeoutMs);
+    await this.client().waitForSerializableTransaction(this.txId, options.timeoutMs, tier);
     return this.value;
   }
 
@@ -1071,8 +1106,16 @@ export function beginClientTransactionAfter(
   attribution: string | undefined,
   reservedId: OpenTransactionId | undefined,
   prerequisite: TransactionAdmission | undefined,
+  readCapability?: TransactionReadCapability,
 ): OpenTransactionId {
-  return client.openTransaction(kind, session, attribution, reservedId, prerequisite);
+  return client.openTransaction(
+    kind,
+    session,
+    attribution,
+    reservedId,
+    prerequisite,
+    readCapability,
+  );
 }
 
 /** High-level Jazz client. */
@@ -1149,6 +1192,7 @@ export class JazzClient {
     this.scheduler = getScheduler();
     this.context = context;
     this.resolvedSession = this.resolveSessionFromContext();
+    this.runtime.useSession?.(this.resolvedSession);
 
     const onAuthFailure = runtimeOptions?.onAuthFailure;
     this.runtime.onAuthFailure((rawReason: string) => {
@@ -1200,10 +1244,24 @@ export class JazzClient {
     attribution: string | undefined,
     reservedId: OpenTransactionId | undefined,
     prerequisite?: TransactionAdmission,
+    readCapability?: TransactionReadCapability,
   ): OpenTransactionId {
+    if (
+      readCapability !== undefined &&
+      (readCapability !== "accepted-evidence" ||
+        kind !== "serializable" ||
+        attribution !== undefined ||
+        !this.runtime.queryAccepted)
+    )
+      throw new Error(
+        "Accepted evidence requires a supported session-bound serializable transaction",
+      );
     const id = reservedId ?? createOpenTransactionId();
     if (prerequisite) {
-      const context = this.writeContext(session, attribution);
+      const context =
+        readCapability && session === undefined
+          ? undefined
+          : this.writeContext(session, attribution);
       const state: { pending?: Promise<void>; committing: boolean; unopened?: boolean } = {
         committing: false,
         unopened: true,
@@ -1220,13 +1278,18 @@ export class JazzClient {
         assertCurrent();
         await prerequisite();
         assertCurrent();
-        this.runtime.beginTransaction(kind, id, context);
+        if (readCapability) this.runtime.beginTransaction(kind, id, context, readCapability);
+        else this.runtime.beginTransaction(kind, id, context);
         state.unopened = false;
       });
       state.pending.catch(() => {});
       return id;
     }
-    const opened = this.runtime.beginTransaction(kind, id, this.writeContext(session, attribution));
+    const context =
+      readCapability && session === undefined ? undefined : this.writeContext(session, attribution);
+    const opened = readCapability
+      ? this.runtime.beginTransaction(kind, id, context, readCapability)
+      : this.runtime.beginTransaction(kind, id, context);
     this.transactionPreparations.set(opened, { committing: false });
     return opened;
   }
@@ -1437,6 +1500,7 @@ export class JazzClient {
 
     try {
       this.resolvedSession = this.resolveSessionFromContext();
+      this.runtime.useSession?.(this.resolvedSession);
       if (updateRuntime) {
         this.runtime.updateAuth(JSON.stringify(this.buildTransportAuthPayload()));
       }
@@ -1445,6 +1509,7 @@ export class JazzClient {
       this.context.cookieSession = previousCookieSession;
       setTrustedReservedSession(this.context, previousTrustedReservedSession);
       this.resolvedSession = previousResolvedSession;
+      this.runtime.useSession?.(previousResolvedSession);
       throw error;
     }
   }
@@ -1640,11 +1705,74 @@ export class JazzClient {
     attribution?: string,
     objectId?: string,
   ): Promise<WriteHandle<{ id: string }>> {
+    const result = await this.runStreamingMutation(
+      mutation,
+      table,
+      values,
+      column,
+      source,
+      options,
+      session,
+      attribution,
+      objectId,
+    );
+    if (result.kind !== "committed") {
+      throw new Error("Streaming mutations cannot be staged inside an open transaction");
+    }
+    return new WriteHandle(result.txId, this, { id: result.id });
+  }
+
+  /**
+   * @internal Stage a streamed mutation in open transaction
+   * `openTransactionId`; it commits with the transaction.
+   */
+  async streamingMutationInTransaction(
+    mutation: StreamingMutationKind,
+    table: string,
+    values: InsertValues,
+    column: string,
+    source: StreamingValueSource,
+    openTransactionId: OpenTransactionId,
+    options?: InsertOptions | UpdateOptions,
+    session?: Session,
+    attribution?: string,
+    objectId?: string,
+  ): Promise<{ id: string }> {
+    const result = await this.runStreamingMutation(
+      mutation,
+      table,
+      values,
+      column,
+      source,
+      options,
+      session,
+      attribution,
+      objectId,
+      openTransactionId,
+    );
+    if (result.kind !== "staged") {
+      throw new Error("A streaming mutation in a transaction must be staged in it");
+    }
+    return { id: result.id };
+  }
+
+  private async runStreamingMutation(
+    mutation: StreamingMutationKind,
+    table: string,
+    values: InsertValues,
+    column: string,
+    source: StreamingValueSource,
+    options?: InsertOptions | UpdateOptions,
+    session?: Session,
+    attribution?: string,
+    objectId?: string,
+    openTransactionId?: OpenTransactionId,
+  ): Promise<StreamingInsertResult> {
     if (!this.runtime.streamingMutation) {
       throw new Error("This runtime does not support streaming mutations");
     }
-    const writeContext = this.writeContext(session, attribution, undefined, options);
-    const result = await this.runtime.streamingMutation(
+    const writeContext = this.writeContext(session, attribution, openTransactionId, options);
+    return this.runtime.streamingMutation(
       mutation,
       table,
       values,
@@ -1653,10 +1781,6 @@ export class JazzClient {
       writeContext,
       objectId ?? ("id" in (options ?? {}) ? (options as InsertOptions).id : undefined),
     );
-    if (result.kind !== "committed") {
-      throw new Error("Streaming mutations cannot be staged inside an open transaction");
-    }
-    return new WriteHandle(result.txId, this, { id: result.id });
   }
 
   /**
@@ -1796,6 +1920,26 @@ export class JazzClient {
       optionsJson,
     );
     return results as Row[];
+  }
+
+  /** @internal Reuse the existing admission chain before the native read. */
+  async queryAcceptedInternal(
+    query: string,
+    openTransactionId: OpenTransactionId,
+    timeoutMs: number,
+    session?: Session,
+  ): Promise<AcceptedRows<Row>> {
+    validateAcceptedReadTimeout(timeoutMs);
+    if (!this.runtime.queryAccepted) throw new Error("Runtime does not expose accepted reads");
+    const state = this.transactionPreparations.get(openTransactionId);
+    if (!state || state.committing) throw new Error("Accepted read requires an open transaction");
+    if (state.pending) await state.pending;
+    return this.runtime.queryAccepted(
+      query,
+      openTransactionId,
+      session ? JSON.stringify(serializeRuntimeSession(session)) : undefined,
+      timeoutMs,
+    );
   }
 
   /**
@@ -2229,11 +2373,18 @@ export class JazzClient {
   async waitForSerializableTransaction(
     txId: TxId | Promise<TxId>,
     timeoutMs?: number,
+    requiredTier?: DurabilityTier,
   ): Promise<void> {
-    txId = await txId;
     const hasAuthority =
       Boolean(this.context.serverUrl) || this.runtime.nativeUpstreamConfigured?.() === true;
-    await this.waitForTransaction(txId, hasAuthority ? "global" : "local", undefined, timeoutMs);
+    // Keep the unresolved identity inside the runtime wait so one timeout
+    // budget also covers a commit that has not returned its ID yet.
+    await this.waitForTransaction(
+      txId,
+      requiredTier ?? (hasAuthority ? "global" : "local"),
+      undefined,
+      timeoutMs,
+    );
   }
 
   private normalizeTransactionWaitError(error: unknown): Error {
