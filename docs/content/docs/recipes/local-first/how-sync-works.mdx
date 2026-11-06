@@ -121,6 +121,10 @@ wins. The other stays in the row's history. Device clocks play no part: an edit 
 applied when it reaches Core, so it overwrites an edit someone else made in the meantime, even
 though it was made earlier.
 
+Deleting a row is a change to the row too. An edit that did not see the delete, such as one made
+offline, still applies its fields but leaves the row deleted: it is accepted, so it reports no
+error, and the row stays deleted until someone restores it.
+
 If a stale offline edit must not overwrite newer data (for example a "restore this version" action,
 or a status that only moves forward), write it in a
 [serializable transaction](/docs/writing/transactions#use-a-serializable-transaction-to-reject-conflicts):
