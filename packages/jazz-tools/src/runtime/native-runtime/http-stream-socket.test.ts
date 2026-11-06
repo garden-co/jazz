@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  SOCKET_OPEN_DEADLINE_MS,
   STREAM_RECORD_SESSION,
   UPGRADE_FAILURES_BEFORE_STREAM,
   encodeStreamRecord,
@@ -49,6 +50,26 @@ function openingNative(): WebSocketConstructor {
     }
     send() {}
     close() {}
+  } as unknown as WebSocketConstructor;
+}
+
+/** A native socket whose upgrade never gets an answer, behind a proxy that holds it. */
+function hangingNative(closed: string[]): WebSocketConstructor {
+  return class HangingSocket {
+    binaryType = "blob";
+    readyState = 0;
+    private listeners = new Map<string, Listener[]>();
+    constructor(private readonly url: string) {}
+    addEventListener(type: string, listener: Listener) {
+      this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
+    }
+    send() {}
+    close() {
+      closed.push(this.url);
+      this.readyState = 3;
+      for (const listener of this.listeners.get("close") ?? [])
+        listener({ code: 1006, reason: "" });
+    }
   } as unknown as WebSocketConstructor;
 }
 
@@ -135,6 +156,59 @@ describe("same-origin socket fallback", () => {
     socket.close();
     expect(warn.mock.calls.flat().join(" ")).toMatch(/doesn't pass WebSocket upgrades on/);
     warn.mockRestore();
+  });
+
+  it("switches to the HTTP stream when an upgrade gets no answer at all", async () => {
+    // A proxy (vite preview without ws) that passes plain requests on and
+    // holds upgrades: the socket neither opens nor fails.
+    vi.useFakeTimers();
+    const url = "ws://holding-proxy.test/jazz/apps/a1/ws";
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const target = String(input);
+      if (init?.method === "POST" && target === "http://holding-proxy.test/jazz/apps/a1/ws") {
+        return new Response("Upgrade to a WebSocket", { status: 426 });
+      }
+      if (init?.method === "POST" && target === streamUrlForSocketUrl(url)) {
+        return openStreamResponse("s3");
+      }
+      return new Response(null, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const closed: string[] = [];
+    try {
+      const Socket = sameOriginWebSocketConstructor(hangingNative(closed));
+      const socket = new Socket(url);
+      const result = outcome(socket);
+      await vi.advanceTimersByTimeAsync(SOCKET_OPEN_DEADLINE_MS - 1);
+      expect(fetchMock).not.toHaveBeenCalled();
+      // One hung upgrade is enough: a restarting backend refuses, it doesn't hold.
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await result).toBe("open");
+      expect(closed).toEqual([url]);
+      expect(warn.mock.calls.flat().join(" ")).toMatch(/got no answer/);
+      socket.close();
+    } finally {
+      warn.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("leaves a hung upgrade to fail as a socket when the endpoint is not a createJazz backend", async () => {
+    vi.useFakeTimers();
+    const url = "ws://elsewhere.test/jazz/apps/a1/ws";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(null, { status: 404 })),
+    );
+    try {
+      const Socket = sameOriginWebSocketConstructor(hangingNative([]));
+      const result = outcome(new Socket(url));
+      await vi.advanceTimersByTimeAsync(SOCKET_OPEN_DEADLINE_MS);
+      expect(await result).toBe("closed");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("starts the count of failed upgrades again once a socket opens", async () => {
