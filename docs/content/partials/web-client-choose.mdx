@@ -6,7 +6,7 @@ later without changing app code.
 
 |                  | [Thin Client](/docs/setup/web-client/thin-client) | [Local-First Client](/docs/setup/web-client/local-first-client) |
 | :--------------- | :------------------------------------------------ | :-------------------------------------------------------------- |
-| Bundle           | about 86 KB gzipped                               | adds the Wasm engine, loaded as its own chunk                   |
+| Bundle           | about 130 KB gzipped                              | adds the Wasm engine, loaded as its own chunk                   |
 | Queries run      | on your backend, under the user's policies        | in the browser, against a local replica                         |
 | Writes show up   | after one round trip                              | instantly, then sync                                            |
 | Offline          | no                                                | yes, reads and writes                                           |
