@@ -88,6 +88,36 @@ export type JazzClientConfig = Omit<OpenJazzClientConfig, "account" | "serverUrl
 /** A browser's Jazz session, which follows your auth's signed-in user. */
 export type BrowserJazzSession = UserFollowingSession<JazzClient>;
 
+/**
+ * A client keeps its options as configuration (`db.getConfig()` clones them),
+ * so one that holds a function or class could only fail later, in whatever
+ * first reads the config (a sign-in). No client option takes one: name it now.
+ */
+function refuseUnkeptOptions(clientConfig: Record<string, unknown>): void {
+  for (const [key, value] of Object.entries(clientConfig)) {
+    let kept = value;
+    if (key === "runtimeSources" && value && typeof value === "object") {
+      // Live handles the Db leaves out of its config.
+      const {
+        browserWorkerPort: _port,
+        browserWorkerSession: _session,
+        ...sources
+      } = value as Record<string, unknown>;
+      kept = sources;
+    }
+    try {
+      structuredClone(kept);
+    } catch {
+      throw new TypeError(
+        `createJazzClient has no option "${key}" that takes a function or class` +
+          (key === "WebSocket"
+            ? ": the client uses the platform's own WebSocket (Node has one from 22)"
+            : ""),
+      );
+    }
+  }
+}
+
 /** Own one configured client and serialize its account lifecycle. */
 export async function createJazzClient(config: JazzClientConfig): Promise<BrowserJazzSession> {
   refuseClientAppId(config);
@@ -104,6 +134,7 @@ export async function createJazzClient(config: JazzClientConfig): Promise<Browse
     fetch: _fetch,
     ...clientConfig
   } = { ...config, serverUrl };
+  refuseUnkeptOptions(clientConfig);
   const accounts = await createAccountManagerWithMinter(
     { ...config, serverUrl },
     mintLocalFirstTokenInJs,
@@ -253,6 +284,7 @@ async function createDeviceOnlySession(config: JazzClientConfig): Promise<Browse
     );
   }
   const { serverUrl: _serverUrl, ...clientConfig } = rest;
+  refuseUnkeptOptions(clientConfig);
   const accounts = await createAccountManagerWithMinter(config, mintLocalFirstTokenInJs);
   const { createClient } = await loadLocalFirst();
   return createJazzSessionOwner({
