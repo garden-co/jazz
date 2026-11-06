@@ -55,7 +55,11 @@ use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::future::poll_fn;
 use std::rc::Rc;
-use std::task::Poll;
+use std::task::{Poll, Waker};
+
+#[path = "accepted_transport.rs"]
+mod accepted_transport;
+use crate::db::{AcceptedReadScope, EncodedAcceptedRead};
 use web_time::Instant;
 
 use crate::protocol::SnapshotRef;
@@ -1398,6 +1402,11 @@ pub enum SyncMessage {
     ConnectionSettled {
         through: u64,
     },
+    /// An authority's paired accepted evidence, returned on the normal read route.
+    Accepted {
+        id: u64,
+        read: EncodedAcceptedRead,
+    },
 }
 
 /// The catalogue entries a [`SyncMessage::Catalogue`] or
@@ -1429,6 +1438,13 @@ pub enum ReadSpan {
     /// reopened tab's capture, which its worker settled), which also sends
     /// the tx ids of the commits it names (see [`SyncMessage::Rows`]).
     Once { at: Option<u64> },
+    /// One authority evaluation in an explicitly admitted schema and scope.
+    /// Relays forward its evidence; they cannot reconstruct it from cached rows.
+    AcceptedOnce {
+        at: Option<u64>,
+        schema: [u8; 16],
+        scope: Option<AcceptedReadScope>,
+    },
 }
 
 /// One admitted schema version in a [`SyncMessage::Catalogue`].
@@ -1475,6 +1491,7 @@ impl SyncMessage {
             Self::Catalogue(_) => "Catalogue",
             Self::Welcome { .. } => "Welcome",
             Self::ConnectionSettled { .. } => "ConnectionSettled",
+            Self::Accepted { .. } => "Accepted",
         }
     }
 }
@@ -1694,7 +1711,7 @@ struct LiveRead {
 }
 
 enum ReadLifetime {
-    Once { historical: bool },
+    Once { cache_result: bool },
     Live(LiveRead),
 }
 
@@ -1817,7 +1834,7 @@ pub(crate) struct Client {
     /// A live read's position, the connection's, or an own commit past
     /// them moved since results last ran.
     pub(crate) visibility_moved: bool,
-    answers: HashMap<u64, Option<Result<(Pos, Vec<[u8; 16]>), Error>>>,
+    answers: HashMap<u64, Option<Result<OnceAnswer, Error>>>,
     /// Permission preflights asked for; `None` until answered.
     advice: HashMap<u64, Option<PermissionAdvice>>,
     /// The next permission preflight's id. Each client starts at a random
@@ -1905,6 +1922,29 @@ type RelayedAnswer = (
     u64,
 );
 
+/// Both result modes share the same one-shot slot, request lifetime and relay.
+enum OnceAnswer {
+    Coverage(Pos, Vec<[u8; 16]>),
+    Evidence(EncodedAcceptedRead),
+}
+
+/// A scheduled read retains its task waker until the next drive turn. The
+/// existing deadline registry owns only weak references, so cancellation
+/// releases both the task and the deadline without a parallel request queue.
+pub(crate) struct ReadDeadline {
+    at: Instant,
+    waker: RefCell<Option<Waker>>,
+}
+
+impl ReadDeadline {
+    pub(crate) fn watch(&self, waker: &Waker) {
+        let mut slot = self.waker.borrow_mut();
+        if slot.as_ref().is_none_or(|prior| !prior.will_wake(waker)) {
+            *slot = Some(waker.clone());
+        }
+    }
+}
+
 /// A session's one-shot `Read` a relay asked its upstream for.
 struct RelayedFetch {
     /// The relay's own fetch id upstream.
@@ -1917,6 +1957,8 @@ struct RelayedFetch {
     /// Otherwise it is served from this store once the upstream can no
     /// longer answer, or its wait runs out (`None`: never).
     until: Option<Instant>,
+    /// Keep the existing host deadline registration alive while relaying.
+    _deadline_guard: Option<Rc<ReadDeadline>>,
     session: usize,
     /// The session's `Read`, served locally once the upstream answered.
     message: SyncMessage,
@@ -5025,9 +5067,9 @@ struct PendingFetch<'a> {
 impl Drop for PendingFetch<'_> {
     fn drop(&mut self) {
         if let Some((id, _)) = self.asked
-            && let Some(client) = self.db.inner.borrow_mut().client.as_mut()
+            && self.db.inner.cancel_fetch(id)
         {
-            client.forget_once(id);
+            self.db.schedule_pending_tick();
         }
     }
 }
@@ -5327,8 +5369,8 @@ impl Inner {
     ) -> ActiveRead {
         let resumable = match &lifetime {
             ReadLifetime::Live(_) => true,
-            ReadLifetime::Once { historical } => {
-                !historical && matches!(view, ReadViewSourceSpec::Current)
+            ReadLifetime::Once { cache_result } => {
+                *cache_result && matches!(view, ReadViewSourceSpec::Current)
             }
         };
         let watermark = resumable.then(|| {
@@ -5355,7 +5397,8 @@ impl Inner {
         }
     }
 
-    /// Register a one-shot request in the same table as live reads.
+    /// Register a one-shot request in the same table as live reads. Historical
+    /// and evidence reads do not populate or resume the ordinary row cache.
     fn register_once_read(
         &mut self,
         id: u64,
@@ -5363,16 +5406,14 @@ impl Inner {
         binding: &BTreeMap<String, Value>,
         include_deleted: bool,
         view: &ReadViewSourceSpec,
-        at: Option<u64>,
+        cache_result: bool,
     ) -> Option<u64> {
         let read = self.active_read(
             query.clone(),
             binding.clone(),
             include_deleted,
             view.clone(),
-            ReadLifetime::Once {
-                historical: at.is_some(),
-            },
+            ReadLifetime::Once { cache_result },
         );
         let since = read.since();
         self.client.as_mut().expect("client").reads.insert(id, read);
@@ -6533,12 +6574,16 @@ impl Inner {
 }
 
 impl Client {
-    fn forget_once(&mut self, id: u64) {
-        self.answers.remove(&id);
+    pub(super) fn forget_once(&mut self, id: u64) -> bool {
+        let pending = self.answers.remove(&id).is_some();
         self.reads.remove(&id);
         self.outbox.retain(|message| {
-            !matches!(message, SyncMessage::Read { id: read, span: ReadSpan::Once { .. }, .. } if *read == id)
+            !matches!(message, SyncMessage::Read { id: read, span: ReadSpan::Once { .. } | ReadSpan::AcceptedOnce { .. }, .. } if *read == id)
         });
+        if pending {
+            self.outbox.push(SyncMessage::Unsubscribe { id });
+        }
+        pending
     }
 
     /// These requests belonged to the old link. Live fetch futures and
@@ -6550,7 +6595,7 @@ impl Client {
             !matches!(
                 message,
                 SyncMessage::Read {
-                    span: ReadSpan::Once { .. },
+                    span: ReadSpan::Once { .. } | ReadSpan::AcceptedOnce { .. },
                     ..
                 }
             )
@@ -6783,7 +6828,32 @@ impl Db {
                 ..
             } = &mut ask
             {
-                *since = inner.register_once_read(*id, query, binding, *include_deleted, view, *at);
+                *since = inner.register_once_read(
+                    *id,
+                    query,
+                    binding,
+                    *include_deleted,
+                    view,
+                    at.is_none(),
+                );
+            }
+            if let SyncMessage::Read {
+                id,
+                query,
+                binding,
+                include_deleted,
+                span: ReadSpan::AcceptedOnce { .. },
+                ..
+            } = &ask
+            {
+                inner.register_once_read(
+                    *id,
+                    query,
+                    binding,
+                    *include_deleted,
+                    &ReadViewSourceSpec::Current,
+                    false,
+                );
             }
             inner.client.as_mut().expect("client").outbox.push(ask);
         }
@@ -6990,6 +7060,9 @@ impl Db {
             reported: true,
             ..link
         });
+        drop(inner);
+        self.schedule_read_deadlines();
+        self.schedule_pending_tick();
     }
 
     pub(crate) fn is_client(&self) -> bool {
@@ -7036,7 +7109,7 @@ impl Db {
             }
             (ops, provenance)
         };
-        self.record_stored_upload_with_provenance(ops, seq, kind, relayed, Some(&provenance))
+        self.record_stored_upload_with_provenance(ops, seq, kind, relayed, Some(&provenance), None)
     }
 
     /// [`Db::record_upload`] of ops already named by stored names.
@@ -7047,10 +7120,11 @@ impl Db {
         kind: Kind,
         relayed: Option<Relayed>,
     ) -> Result<(), Error> {
-        self.record_stored_upload_with_provenance(ops, seq, kind, relayed, None)
+        self.record_stored_upload_with_provenance(ops, seq, kind, relayed, None, None)
     }
 
-    /// Known original operation scopes captured before stored-name lowering.
+    /// Preserve original operation scopes and the explicit batch identity.
+    /// Read-only serializable uploads still carry their bound session.
     pub(crate) fn record_stored_upload_with_provenance(
         &self,
         ops: Vec<StagedOp>,
@@ -7058,6 +7132,7 @@ impl Db {
         kind: Kind,
         relayed: Option<Relayed>,
         provenance: Option<&[Option<SubmissionProvenance>]>,
+        identity: Option<WriteIdentity>,
     ) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
         if inner.client.is_none() {
@@ -7067,7 +7142,8 @@ impl Db {
         let view = inner.stored_view();
         let active = std::mem::replace(&mut inner.schema, view);
         drop(inner);
-        let recorded = self.record_upload_under_stored_view(ops, seq, kind, relayed, provenance);
+        let recorded =
+            self.record_upload_under_stored_view(ops, seq, kind, relayed, provenance, identity);
         self.inner.borrow_mut().schema = active;
         recorded
     }
@@ -7079,6 +7155,7 @@ impl Db {
         kind: Kind,
         relayed: Option<Relayed>,
         provenance: Option<&[Option<SubmissionProvenance>]>,
+        identity: Option<WriteIdentity>,
     ) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
         if inner.tx.is_some() {
@@ -7093,10 +7170,15 @@ impl Db {
         // The writer the authority stamps: an explicit identity, or the
         // system at this node (the authority stamps its own writes as its
         // node, so a trusted link names its own).
-        let session = ops.iter().any(StagedOp::is_session);
-        let author = ops.iter().find_map(StagedOp::author).or_else(|| {
-            (inner.identity.author == AuthorSubject::SYSTEM).then(|| inner.stamp_author())
-        });
+        let selected = identity.map(who);
+        let session =
+            matches!(selected, Some(Who::Session(_))) || ops.iter().any(StagedOp::is_session);
+        let author = match selected {
+            Some(Who::Session(author) | Who::Attributed(author)) => Some(author),
+            _ => ops.iter().find_map(StagedOp::author).or_else(|| {
+                (inner.identity.author == AuthorSubject::SYSTEM).then(|| inner.stamp_author())
+            }),
+        };
         // A session's writes carry its claims, for the authority's check.
         let acting = match author {
             None => Acting::Own,
@@ -7509,6 +7591,45 @@ impl Db {
         view: &ReadViewSourceSpec,
     ) -> Result<Option<Pos>, Error> {
         self.ensure_storage_owner_active()?;
+        match self
+            .fetch_once(
+                prepared,
+                at,
+                include_deleted,
+                reach,
+                deadline,
+                coverage,
+                strict,
+                view,
+                None,
+            )
+            .await?
+        {
+            Some(OnceAnswer::Coverage(through, _)) => Ok(Some(through)),
+            None => Ok(None),
+            Some(OnceAnswer::Evidence(_)) => Err(Error::new(
+                ErrorCode::Protocol,
+                "evidence cannot replace ordinary read coverage",
+            )),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn fetch_once(
+        &self,
+        prepared: &PreparedQuery,
+        at: Option<Pos>,
+        include_deleted: bool,
+        reach: RemoteReach,
+        deadline: Option<Instant>,
+        coverage: Option<&dyn Fn() -> bool>,
+        strict: bool,
+        view: &ReadViewSourceSpec,
+        evidence: Option<([u8; 16], Option<AcceptedReadScope>)>,
+    ) -> Result<Option<OnceAnswer>, Error> {
+        self.ensure_storage_owner_active()?;
+        let deadline_guard = self.read_deadline(deadline);
+        let _attempt = self.read_attempt_deadline();
         let tier = reach.tier;
         // Held on a live link: leaving it (even for a new attempt) releases
         // the read, as it releases a gated opening.
@@ -7544,27 +7665,44 @@ impl Db {
         };
         let message = |id: u64, since: Option<u64>| SyncMessage::Read {
             id,
-            query: Box::new(remote_query(&prepared.query).into_owned()),
+            query: Box::new(if evidence.is_some() {
+                prepared.query.clone()
+            } else {
+                remote_query(&prepared.query).into_owned()
+            }),
             binding: prepared.binding.clone(),
             include_deleted,
             tier,
             wait: reach.wait,
             view: Box::new(view.clone()),
             since,
-            span: ReadSpan::Once { at },
+            span: match &evidence {
+                Some((schema, scope)) => ReadSpan::AcceptedOnce {
+                    at,
+                    schema: *schema,
+                    scope: scope.clone(),
+                },
+                None => ReadSpan::Once { at },
+            },
         };
         // The request in flight, and the connection it went out on.
         let mut request = PendingFetch {
             db: self,
             asked: None,
         };
-        let answer = poll_fn(|_| {
+        let answer = poll_fn(|cx| {
             if let Err(error) = self.ensure_storage_owner_active() {
                 return Poll::Ready(Err(error));
+            }
+            if let Some(guard) = &deadline_guard {
+                guard.watch(cx.waker());
             }
             let mut inner = self.inner.borrow_mut();
             let answerable = answerable(&inner);
             let client = inner.client.as_mut().expect("client");
+            if evidence.is_some() && deadline.is_some_and(|at| Instant::now() >= at) {
+                return Poll::Ready(Ok(None));
+            }
             if let Some((id, _)) = request.asked
                 && let Some(Some(_)) = client.answers.get(&id)
             {
@@ -7597,15 +7735,20 @@ impl Db {
                 client.answers.insert(id, None);
                 // Asked while detached, it goes out on the next connection.
                 let connection = client.connection + u64::from(client.transport.is_none());
-                let query = remote_query(&prepared.query).into_owned();
+                let query = if evidence.is_some() {
+                    prepared.query.clone()
+                } else {
+                    remote_query(&prepared.query).into_owned()
+                };
                 let since = inner.register_once_read(
                     id,
                     &query,
                     &prepared.binding,
                     include_deleted,
                     view,
-                    at,
+                    evidence.is_none() && at.is_none(),
                 );
+                let since = if evidence.is_some() { None } else { since };
                 inner
                     .client
                     .as_mut()
@@ -7618,31 +7761,25 @@ impl Db {
             if (!strict && !answerable) || deadline.is_some_and(|d| Instant::now() >= d) {
                 return Poll::Ready(Ok(None));
             }
-            if let Some(expired) = coverage {
-                if client.unadmitted {
-                    return Poll::Ready(Err(Error::new(
-                        ErrorCode::Schema,
-                        "schema version is awaiting published catalogue admission; \
-                         deploy it to the server",
-                    )));
-                }
-                if expired() {
-                    return Poll::Ready(Err(Error::new(
-                        ErrorCode::NotObserved,
-                        "Timed out waiting for query coverage",
-                    )));
-                }
+            if client.unadmitted && (coverage.is_some() || evidence.is_some()) {
+                return Poll::Ready(Err(Error::new(
+                    ErrorCode::Schema,
+                    "schema version is awaiting published catalogue admission; deploy it to the server",
+                )));
+            }
+            if coverage.is_some_and(|expired| expired()) {
+                return Poll::Ready(Err(Error::new(ErrorCode::NotObserved, "Timed out waiting for query coverage")));
+            }
+            drop(inner);
+            if ask {
+                self.schedule_pending_tick();
+            } else {
+                self.flush_pending_tick();
             }
             Poll::Pending
         })
         .await?;
-        // A current answer lists its result's rows: cached rows the
-        // replica's settled view of it holds and the answer lacks lost their
-        // listing (INV-SYNC-14), though no subscription saw them leave.
-        let Some((through, _listed)) = answer else {
-            return Ok(None);
-        };
-        Ok(Some(through))
+        Ok(answer)
     }
 
     /// Freeze everything this database has committed, its own unsettled
@@ -7792,7 +7929,7 @@ impl Db {
                     matches!(
                         message,
                         SyncMessage::Read {
-                            span: ReadSpan::Once { .. },
+                            span: ReadSpan::Once { .. } | ReadSpan::AcceptedOnce { .. },
                             ..
                         }
                     )
@@ -8238,10 +8375,11 @@ impl Db {
                         let mut once = false;
                         if let Some(read) = client.reads.get_mut(&id) {
                             let (listed, save_after) = match &mut read.lifetime {
-                                ReadLifetime::Once { historical } => {
+                                ReadLifetime::Once { cache_result } => {
                                     once = true;
                                     (
-                                        (!*historical).then(|| members.clone().unwrap_or_default()),
+                                        (*cache_result)
+                                            .then(|| members.clone().unwrap_or_default()),
                                         global,
                                     )
                                 }
@@ -8276,7 +8414,7 @@ impl Db {
                             client.reads.remove(&id);
                         }
                         if let Some(slot) = client.answers.get_mut(&id) {
-                            *slot = Some(Ok((at, members.unwrap_or_default())));
+                            *slot = Some(Ok(OnceAnswer::Coverage(at, members.unwrap_or_default())));
                             client.relay_ready |=
                                 client.relayed_fetches.iter().any(|f| f.upstream == id);
                         }
@@ -8295,6 +8433,15 @@ impl Db {
                     }
                     SyncMessage::SchemaAdmission { admitted } => {
                         inner.client.as_mut().expect("client").unadmitted = !admitted;
+                    }
+                    SyncMessage::Accepted { id, read } => {
+                        let client = inner.client.as_mut().expect("client");
+                        if let Some(slot @ None) = client.answers.get_mut(&id) {
+                            *slot = Some(read.validate().map(|()| OnceAnswer::Evidence(read)));
+                            client.reads.remove(&id);
+                            client.relay_ready |=
+                                client.relayed_fetches.iter().any(|f| f.upstream == id);
+                        }
                     }
                     SyncMessage::Refused { id, code, message } => {
                         let client = inner.client.as_mut().expect("client");
@@ -8875,6 +9022,10 @@ impl Inner {
             for remote in client.reads.values().filter_map(ActiveRead::live) {
                 *remote.refused.borrow_mut() = Some(error.clone());
             }
+            for slot in client.answers.values_mut() {
+                *slot = Some(Err(error.clone()));
+            }
+            client.relay_ready |= !client.relayed_fetches.is_empty();
         }
     }
 
@@ -8936,16 +9087,17 @@ impl Inner {
         let Some(client) = self.client.as_mut() else {
             return;
         };
-        let answers = &mut client.answers;
-        let reads = &mut client.reads;
+        let mut cancelled = Vec::new();
         client.relayed_fetches.retain(|fetch| {
             let keep = fetch.session != index;
             if !keep {
-                answers.remove(&fetch.upstream);
-                reads.remove(&fetch.upstream);
+                cancelled.push(fetch.upstream);
             }
             keep
         });
+        for id in cancelled {
+            client.forget_once(id);
+        }
         for sessions in client.relayed_fates.values_mut() {
             sessions.retain(|(session, _, _)| *session != index);
         }
@@ -9005,8 +9157,15 @@ impl Inner {
         let mut kept = Vec::new();
         for fetch in std::mem::take(&mut client.relayed_fetches) {
             let answered = matches!(client.answers.get(&fetch.upstream), Some(Some(_)));
-            let given_up =
-                !fetch.strict && (!can_wait || fetch.until.is_some_and(|until| now >= until));
+            let evidence = matches!(
+                &fetch.ask,
+                SyncMessage::Read {
+                    span: ReadSpan::AcceptedOnce { .. },
+                    ..
+                }
+            );
+            let expired = fetch.until.is_some_and(|until| now >= until);
+            let given_up = (evidence && expired) || (!fetch.strict && (!can_wait || expired));
             if fetch.session != index || !answered && !given_up {
                 kept.push(fetch);
                 continue;
@@ -9015,13 +9174,45 @@ impl Inner {
             let SyncMessage::Read { id, .. } = &fetch.message else {
                 continue;
             };
+            // Release the shared request lifetime, including timed-out relay requests.
+            client.forget_once(fetch.upstream);
+            if !answered {
+                client
+                    .outbox
+                    .push(SyncMessage::Unsubscribe { id: fetch.upstream });
+            }
             match answer {
+                _ if evidence && expired => refused.push(SyncMessage::Refused {
+                    id: *id,
+                    code: ErrorCode::NotObserved,
+                    message: "timed out waiting for authority accepted evidence".into(),
+                }),
+                Some(Ok(OnceAnswer::Evidence(read))) if evidence => {
+                    refused.push(SyncMessage::Accepted { id: *id, read })
+                }
+                Some(Ok(OnceAnswer::Evidence(_))) => refused.push(SyncMessage::Refused {
+                    id: *id,
+                    code: ErrorCode::Protocol,
+                    message: "unexpected evidence for ordinary coverage".into(),
+                }),
+                None if evidence => refused.push(SyncMessage::Refused {
+                    id: *id,
+                    code: ErrorCode::NotObserved,
+                    message: "timed out waiting for authority accepted evidence".into(),
+                }),
                 Some(Err(error)) => refused.push(SyncMessage::Refused {
                     id: *id,
                     code: error.code,
                     message: error.message,
                 }),
-                Some(Ok((through, listed))) => {
+                Some(Ok(OnceAnswer::Coverage(_, _))) if evidence => {
+                    refused.push(SyncMessage::Refused {
+                        id: *id,
+                        code: ErrorCode::Protocol,
+                        message: "ordinary coverage cannot replace accepted evidence".into(),
+                    })
+                }
+                Some(Ok(OnceAnswer::Coverage(through, listed))) => {
                     if let SyncMessage::Read {
                         query,
                         binding,
@@ -9924,7 +10115,7 @@ impl Db {
             let fetch = matches!(
                 message,
                 SyncMessage::Read {
-                    span: ReadSpan::Once { .. },
+                    span: ReadSpan::Once { .. } | ReadSpan::AcceptedOnce { .. },
                     ..
                 }
             )
@@ -9996,6 +10187,10 @@ impl Db {
             SyncMessage::CheckAllowed { .. } => true,
             // A read frozen at a snapshot may name the held commits
             // themselves, which the server cannot resolve until they apply.
+            SyncMessage::Read {
+                span: ReadSpan::AcceptedOnce { .. },
+                ..
+            } => false,
             SyncMessage::Read { view, .. } if frozen_at(view).is_some() => {
                 barrier.tables.is_some() && !barrier.commits
             }
@@ -11236,6 +11431,38 @@ impl Db {
                 wait,
                 view,
                 since,
+                span: ReadSpan::AcceptedOnce { at, schema, scope },
+            } => {
+                if !matches!(*view, ReadViewSourceSpec::Current)
+                    || tier != ReadTier::Remote
+                    || since.is_some()
+                {
+                    return Err(unsupported(
+                        "accepted evidence outside a fresh Remote Current read",
+                    ));
+                }
+                self.serve_accepted(
+                    index,
+                    id,
+                    *query,
+                    binding,
+                    include_deleted,
+                    at,
+                    schema,
+                    scope,
+                    claims,
+                    wait,
+                )?;
+            }
+            SyncMessage::Read {
+                id,
+                query,
+                binding,
+                include_deleted,
+                tier,
+                wait,
+                view,
+                since,
                 span: ReadSpan::Live,
             } => {
                 let local = tier == ReadTier::LocalOnly;
@@ -11412,6 +11639,17 @@ impl Db {
             }
             SyncMessage::Unsubscribe { id } => {
                 let mut inner = self.inner.borrow_mut();
+                if let Some(client) = inner.client.as_mut() {
+                    let mut cancelled = Vec::new();
+                    client.relayed_fetches.retain(|fetch| {
+                        let keep = fetch.session != index || !matches!(&fetch.message, SyncMessage::Read { id: downstream, .. } if *downstream == id);
+                        if !keep { cancelled.push(fetch.upstream); }
+                        keep
+                    });
+                    for upstream in cancelled {
+                        client.forget_once(upstream);
+                    }
+                }
                 inner.sessions[index].support.remove(&id);
                 inner.sessions[index].first_load.remove(&id);
                 inner.sessions[index].resume.remove(&id);
@@ -11532,7 +11770,7 @@ impl Db {
                         &prepared.binding,
                         include_deleted,
                         &view,
-                        at,
+                        at.is_none(),
                     );
                     let client = inner.client.as_mut().expect("client");
                     client.outbox.push(SyncMessage::Read {
@@ -11559,7 +11797,7 @@ impl Db {
                         &prepared.binding,
                         include_deleted,
                         &view,
-                        at,
+                        at.is_none(),
                     );
                     let client = inner.client.as_mut().expect("client");
                     client.answers.insert(upstream, None);
@@ -11581,6 +11819,7 @@ impl Db {
                         ask,
                         strict,
                         until: wait.and_then(wait_until),
+                        _deadline_guard: None,
                         message: SyncMessage::Read {
                             id,
                             query,
@@ -12413,6 +12652,12 @@ impl Db {
             .enumerate()
             .flat_map(|(index, op)| op.bases.iter().map(move |base| (index, base.clone())))
             .collect();
+        // A trusted backend's session batch validates reads under the same
+        // session as its writes, not under the transport's SYSTEM privilege.
+        let identity = identity.or(match who {
+            Who::Session(author) => Some(author),
+            Who::Local | Who::Attributed(_) => None,
+        });
         let ops: Vec<StagedOp> = match ops.into_iter().map(from_wire).collect::<Result<_, _>>() {
             Ok(ops) => ops,
             Err(error) => return Err((error, Vec::new())),
@@ -12698,6 +12943,7 @@ impl Db {
                     bases,
                 }),
                 provenance,
+                None,
             )
         } else {
             Ok(())
@@ -13156,6 +13402,131 @@ impl Db {
                 .collect::<BTreeMap<_, _>>(),
             client.transport.is_some(),
         )
+    }
+}
+
+impl Db {
+    /// Install the host hook for one-shot read progress and deadlines. The
+    /// host schedules a later tick and re-polls waiting operations afterwards.
+    /// Existing live deadlines are armed when a hook is installed or replaced.
+    /// This does not install a timer or executor by itself.
+    pub fn set_tick_scheduler(&self, scheduler: Option<Rc<dyn TickScheduler>>) {
+        let expired = {
+            let mut inner = self.inner.borrow_mut();
+            inner.scheduler = scheduler;
+            let now = Instant::now();
+            inner
+                .read_deadlines
+                .iter()
+                .filter_map(Weak::upgrade)
+                .any(|deadline| deadline.at <= now)
+        };
+        self.schedule_read_deadlines();
+        // A newly installed hook missed the old timer. Request one drive turn
+        // so expired reads can settle, without rearming them on every tick.
+        if expired {
+            self.schedule_pending_tick();
+        } else {
+            self.flush_pending_tick();
+        }
+    }
+
+    pub(crate) fn read_deadline(&self, at: Option<Instant>) -> Option<Rc<ReadDeadline>> {
+        let deadline = Rc::new(ReadDeadline {
+            at: at?,
+            waker: RefCell::new(None),
+        });
+        self.inner
+            .borrow_mut()
+            .read_deadlines
+            .push(Rc::downgrade(&deadline));
+        self.schedule_read_deadlines();
+        Some(deadline)
+    }
+
+    pub(crate) fn read_attempt_deadline(&self) -> Option<Rc<ReadDeadline>> {
+        let link = self.link_hint()?.get();
+        self.read_deadline(
+            (link.hint == RemoteLinkHint::Attempting)
+                .then_some(link.since + crate::options::REMOTE_LINK_ATTEMPT_WINDOW),
+        )
+    }
+
+    pub(crate) fn schedule_pending_tick(&self) {
+        self.inner.3.set(true);
+        self.flush_pending_tick();
+    }
+
+    /// Dropping a read inside a coverage callback can hold Inner's borrow.
+    /// Defer only the wake notification; Store owns the existing cancellation
+    /// queue. The surrounding read poll or tick flushes after releasing Inner.
+    pub(crate) fn flush_pending_tick(&self) {
+        if !self.inner.3.get() {
+            return;
+        }
+        let scheduler = {
+            let Ok(mut inner) = self.inner.0.try_borrow_mut() else {
+                return;
+            };
+            self.inner.flush_cancelled_fetches(&mut inner);
+            inner.scheduler.clone()
+        };
+        self.inner.3.set(false);
+        if let Some(scheduler) = scheduler {
+            scheduler.schedule_tick(TickUrgency::Immediate);
+        }
+    }
+
+    pub(crate) fn wake_read_deadlines(&self) {
+        let wakers: Vec<_> = {
+            let inner = self.inner.borrow();
+            inner
+                .read_deadlines
+                .iter()
+                .filter_map(Weak::upgrade)
+                .filter_map(|guard| guard.waker.borrow_mut().take())
+                .collect()
+        };
+        for waker in wakers {
+            waker.wake();
+        }
+    }
+
+    /// Hosts may keep only their earliest timer. Every tick re-arms the next
+    /// outstanding deadline, even if the read whose timer fired was cancelled.
+    pub(crate) fn schedule_read_deadlines(&self) {
+        let (scheduler, next) = {
+            let mut inner = self.inner.borrow_mut();
+            let now = Instant::now();
+            let mut next = None;
+            inner.read_deadlines.retain(|weak| {
+                let Some(deadline) = weak.upgrade() else {
+                    return false;
+                };
+                if deadline.at > now {
+                    next = Some(next.map_or(deadline.at, |at: Instant| at.min(deadline.at)));
+                }
+                // Keep live guards even after their original wake expires:
+                // the host may restart a connection attempt while they wait.
+                true
+            });
+            if !inner.read_deadlines.is_empty()
+                && let Some(client) = &inner.client
+            {
+                let link = client.hint.get();
+                let at = link.since + crate::options::REMOTE_LINK_ATTEMPT_WINDOW;
+                if link.hint == RemoteLinkHint::Attempting && at > now {
+                    next = Some(next.map_or(at, |pending| pending.min(at)));
+                }
+            }
+            (inner.scheduler.clone(), next)
+        };
+        if let (Some(scheduler), Some(next)) = (scheduler, next) {
+            // Round up: an early timer must not consume the final sub-ms wait.
+            let nanos = next.saturating_duration_since(Instant::now()).as_nanos();
+            let millis = nanos.div_ceil(1_000_000).max(1).min(u128::from(u64::MAX)) as u64;
+            scheduler.schedule_tick_after(millis);
+        }
     }
 }
 

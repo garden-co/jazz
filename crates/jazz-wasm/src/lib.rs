@@ -22,7 +22,10 @@ use futures_util::future::{AbortHandle, Abortable};
 use jazz::binding_host::{
     self, Binding, EventChunk, HostError, HostObject, HostResult, OpenAs, Write,
 };
-use jazz::db::{block_on, Error, LargeValueUpdate, SubscriptionEvent, SubscriptionStream};
+use jazz::db::{
+    block_on, Error, LargeValueUpdate, SubscriptionEvent, SubscriptionStream, TickScheduler,
+    TickUrgency,
+};
 use jazz::ids::AuthorSubject;
 use jazz::tx::DurabilityTier;
 use wasm_bindgen::prelude::*;
@@ -432,6 +435,13 @@ impl Host {
         false
     }
 
+    fn request_tick(&self, wake: &str) {
+        let scheduler = self.tick_scheduler.borrow().clone();
+        if let Some(scheduler) = scheduler {
+            let _ = scheduler.call1(&JsValue::NULL, &JsValue::from_str(wake));
+        }
+    }
+
     /// Resolve once every commit so far is in the browser store's backing
     /// storage (a no-op without one).
     async fn flush(&self) -> Result<(), JsValue> {
@@ -443,6 +453,20 @@ impl Host {
             }
         }
         Ok(())
+    }
+}
+
+impl TickScheduler for Host {
+    fn schedule_tick(&self, urgency: TickUrgency) {
+        self.request_tick(match urgency {
+            TickUrgency::Immediate => "immediate",
+            TickUrgency::Deferred => "deferred",
+            TickUrgency::AfterCurrentTurn => "after-current-turn",
+        });
+    }
+
+    fn schedule_tick_after(&self, delay_ms: u64) {
+        self.request_tick(&format!("after:{delay_ms}"));
     }
 }
 
@@ -458,10 +482,7 @@ impl WasmDbInner {
         let host = Rc::new(Host::default());
         let scheduler = Rc::clone(&host);
         *binding.hooks.schedule_tick.borrow_mut() = Some(Box::new(move || {
-            let scheduler = scheduler.tick_scheduler.borrow().clone();
-            if let Some(scheduler) = scheduler {
-                let _ = scheduler.call1(&JsValue::NULL, &JsValue::from_str("immediate"));
-            }
+            scheduler.request_tick("immediate");
         }));
         let reporter = Rc::clone(&host);
         *binding.hooks.rejected.borrow_mut() =
@@ -1394,12 +1415,16 @@ impl WasmDb {
         subscription_stream_to_js(inner, stream)
     }
 
-    /// The host's tick callback: called with `"immediate"` whenever there
-    /// is sync work (a local write to upload, frames to apply).
+    /// Install the core's progress/deadline hook. The host schedules ticks
+    /// and re-polls pending reads, using `"after:<milliseconds>"` for timers.
     #[wasm_bindgen(js_name = setTickScheduler)]
     pub fn set_tick_scheduler(&self, callback: js_sys::Function) {
         if let Ok(inner) = self.open_inner() {
             *inner.host.tick_scheduler.borrow_mut() = Some(callback);
+            inner
+                .binding
+                .db
+                .set_tick_scheduler(Some(inner.host.clone()));
         }
     }
 
@@ -1760,6 +1785,8 @@ impl WasmDb {
         }
         future_to_promise(async move {
             if owns_runtime {
+                inner.binding.db.set_tick_scheduler(None);
+                inner.host.tick_scheduler.borrow_mut().take();
                 let closed = inner.binding.close().await;
                 let retired = inner.binding.db.retire_storage_owner();
                 inner.binding.hooks.progress.wake_all();
