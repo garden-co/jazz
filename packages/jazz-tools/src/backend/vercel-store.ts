@@ -8,7 +8,6 @@
 // Wake handling is adapted from garden-co/infra's v2 sync proxy (ADR 0004).
 
 import { createHash, randomUUID } from "node:crypto";
-import { createRequire } from "node:module";
 import type { JazzCoreSocketEvent } from "jazz-napi";
 import {
   connectedBlobStore,
@@ -484,9 +483,10 @@ async function functionOidcToken(): Promise<string> {
   let fetched: string | undefined;
   let failure: unknown;
   try {
-    const { getVercelOidcToken } = (await import(
-      /* @vite-ignore */ "@vercel/functions/oidc" as string
-    )) as { getVercelOidcToken(): Promise<string> };
+    // A literal inside `try`, like `importSandboxSdk`'s.
+    const { getVercelOidcToken } = (await import(/* @vite-ignore */ "@vercel/functions/oidc")) as {
+      getVercelOidcToken(): Promise<string>;
+    };
     fetched = await getVercelOidcToken();
   } catch (error) {
     failure = error;
@@ -580,13 +580,19 @@ export function defaultCoreTarballUrl(version: string): string {
 }
 
 /**
- * The installed jazz-tools version. Read through `require` of the package's
- * own export, not `readFile(new URL(…, import.meta.url))`: webpack (Next 15)
- * rewrites `new URL(…, import.meta.url)` into an asset URL that `fs` refuses,
- * while it bundles a required JSON file as is.
+ * The installed jazz-tools version, as a JSON import of the package's own
+ * `package.json` export. Bundlers (webpack, Turbopack) inline it, and Node
+ * loads it as a module. Neither reads a path at runtime, unlike `readFile`
+ * of a URL resolved against `import.meta.url` (webpack rewrites that URL
+ * into one `fs` refuses) or `createRequire` from `import.meta.url`
+ * (bundlers bake the build machine's path into it, so a deployed function
+ * can't find it).
  */
-function installedVersion(): string {
-  return (createRequire(import.meta.url)("jazz-tools/package.json") as { version: string }).version;
+async function installedVersion(): Promise<string> {
+  const packageJson = (await import("jazz-tools/package.json", { with: { type: "json" } })) as {
+    default: { version: string };
+  };
+  return packageJson.default.version;
 }
 
 export interface OpenVercelCoreOptions {
@@ -597,17 +603,27 @@ export interface OpenVercelCoreOptions {
   env?: Record<string, string | undefined>;
 }
 
+/**
+ * `@vercel/sandbox`, an optional peer dependency. The import is a literal
+ * inside `try`: bundlers (Turbopack, webpack) then bundle the package when
+ * it's installed, and turn a missing one into an error at runtime instead
+ * of failing every route that imports jazz-tools (an app on `sqlite()`
+ * never needs it). A `.catch()` on the import isn't enough for that.
+ */
+async function importSandboxSdk(): Promise<SandboxSdk> {
+  try {
+    return (await import(/* @vite-ignore */ "@vercel/sandbox")) as unknown as SandboxSdk;
+  } catch {
+    throw new Error("vercel() needs the @vercel/sandbox package: npm install @vercel/sandbox");
+  }
+}
+
 export async function openVercelCore(params: OpenVercelCoreOptions): Promise<VercelCore> {
   const { options, openRemote } = params;
   refuseVercelAppId(options);
   const env = params.env ?? process.env;
-  const sdk =
-    params.sdk ??
-    options.sdk ??
-    ((await import(/* @vite-ignore */ "@vercel/sandbox" as string).catch(() => {
-      throw new Error("vercel() needs the @vercel/sandbox package: npm install @vercel/sandbox");
-    })) as SandboxSdk);
-  const version = params.version ?? installedVersion();
+  const sdk = params.sdk ?? options.sdk ?? (await importSandboxSdk());
+  const version = params.version ?? (await installedVersion());
   const tarballUrl = options.coreTarballUrl ?? defaultCoreTarballUrl(version);
   const project = options.credentials?.projectId ?? env.VERCEL_PROJECT_ID;
   if (!options.name && !project) {

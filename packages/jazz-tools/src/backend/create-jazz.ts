@@ -2240,14 +2240,24 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       onVercelHost()
     ) {
       if (!originAllowed(request)) return new Response("origin not allowed", { status: 403 });
-      const { upgradeWebSocket } = (await import(
-        /* @vite-ignore */ "@vercel/functions" as string
-      )) as {
+      // An optional peer: a literal import inside `try`, so bundlers report
+      // a missing one at runtime, not on every route (see importSandboxSdk).
+      let vercelFunctions: {
         upgradeWebSocket(
           handler: (ws: WsLikeSocket) => void,
           options?: { maxPayload?: number },
         ): Response;
       };
+      try {
+        vercelFunctions = (await import(
+          /* @vite-ignore */ "@vercel/functions"
+        )) as unknown as typeof vercelFunctions;
+      } catch {
+        throw new Error(
+          "Jazz on Vercel needs the @vercel/functions package: npm install @vercel/functions",
+        );
+      }
+      const { upgradeWebSocket } = vercelFunctions;
       return upgradeWebSocket((ws) => acceptSocket(request, ws), {
         maxPayload: MAX_STREAM_MESSAGE_BYTES,
       });
