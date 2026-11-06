@@ -171,4 +171,17 @@ describe("a host without cookies signing in with the app's bearer", () => {
       }),
     ).rejects.toThrow(/not supported yet in a browser/);
   });
+
+  it("is refused on React Native, whose own entry sends the bearer", async () => {
+    vi.stubGlobal("navigator", { product: "ReactNative" });
+    await expect(
+      createAccountManager({
+        serverUrl: "https://app.example/jazz",
+        store: memoryStore(),
+        bearer: () => "token-alice",
+      }),
+    ).rejects.toThrow(
+      /not supported on React Native: use createAccountManager from jazz-tools\/react-native/,
+    );
+  });
 });

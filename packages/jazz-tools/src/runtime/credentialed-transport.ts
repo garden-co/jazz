@@ -81,11 +81,25 @@ export function bearerWebSocket(
       } catch {
         return null;
       }
-      return Promise.resolve(bearer());
+      // A bearer that throws closes the socket like one that rejects, and one
+      // that never settles gives up: a socket has no deadline of its own.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      return Promise.race([
+        Promise.resolve().then(() => bearer()),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error("the app's bearer did not answer")),
+            BEARER_TIMEOUT_MS,
+          );
+        }),
+      ]).finally(() => clearTimeout(timer));
     },
     "the app's bearer",
   );
 }
+
+/** How long a socket waits for the app's bearer before it gives up (and reconnects later). */
+const BEARER_TIMEOUT_MS = 30_000;
 
 type Listener = (event?: unknown) => void;
 

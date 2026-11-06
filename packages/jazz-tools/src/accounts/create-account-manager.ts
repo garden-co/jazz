@@ -28,8 +28,8 @@ export interface AccountManagerConfig {
    */
   store?: AccountStore;
   /**
-   * Browser hosts only: the `fetch` sign-in requests to the app's backend go
-   * through (default: the global one), as for a test or a proxy. The backend
+   * The `fetch` sign-in requests to the app's backend go through (default:
+   * the global one), as for a test or a proxy. The backend
    * names the user by the cookie a browser sends on the sync connection too,
    * so a bearer this adds would sign in but never sync: pass `bearer`
    * instead. Outside a browser page or worker (Node, Deno, a CLI) without
@@ -47,8 +47,8 @@ export interface AccountManagerConfig {
    *
    * Not supported yet in a browser page or worker, whose sync connection
    * can't carry a header: there the backend's cookie names the user. On
-   * React Native, pass `bearer` to `createAccountManager` from
-   * `jazz-tools/react-native` or `jazz-tools/expo`.
+   * React Native it is refused here: pass `bearer` to `createAccountManager`
+   * from `jazz-tools/react-native` or `jazz-tools/expo` instead.
    */
   bearer?: AppBearer;
 }

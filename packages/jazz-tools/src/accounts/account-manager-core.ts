@@ -22,6 +22,12 @@ export async function createAccountManagerWithMinter(
       throw new Error(
         "bearer is not supported yet in a browser page or worker: its sync connection can't carry the token. There the app's backend names the user by its cookie; leave bearer out.",
       );
+    // React Native's WebSocket takes headers in another argument: its own
+    // entry sends the bearer on the native sync connection.
+    if ((globalThis as { navigator?: { product?: string } }).navigator?.product === "ReactNative")
+      throw new Error(
+        "bearer from jazz-tools/client is not supported on React Native: use createAccountManager from jazz-tools/react-native or jazz-tools/expo, whose bearer the native sync connection sends.",
+      );
     if (config.serverUrl === null)
       throw new Error("bearer signs in through the app's backend: a device-only client has none");
   }
