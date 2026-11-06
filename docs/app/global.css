@@ -509,18 +509,21 @@ h6 {
   border-radius: var(--radius-container);
   background-color: var(--color-background-card);
 }
+/* The deployment diagram takes two thirds, the three principles stack in the
+   remaining third; below desktop width they sit full width under it. */
+.home-overview {
+  display: grid;
+  gap: var(--spacing-10);
+}
+@media (min-width: 1024px) {
+  .home-overview {
+    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+    align-items: start;
+  }
+}
 .home-facts {
   display: grid;
   gap: var(--spacing-8);
-}
-@media (min-width: 768px) {
-  .home-facts {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-}
-.home-fact {
-  border-top: 1px solid var(--color-border-emphasized);
-  padding-top: var(--spacing-4);
 }
 .home-feature {
   display: grid;

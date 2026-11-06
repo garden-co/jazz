@@ -140,7 +140,7 @@ export function OpenTodos() {
 
 const principles = [
   {
-    title: "Inside your backend",
+    title: "Part of your backend",
     body: "Jazz is a library your server imports, wherever you deploy it, and keeps its data on that platform's storage. Its schema and permissions are the code you deploy, with no database server to run.",
   },
   {
@@ -370,18 +370,20 @@ export default function HomePage() {
             id="how-it-works"
             title="One database, from your backend to every client"
           />
-          <Figure className="home-figure-wide mt-6">
-            <DeploymentCarousel />
-          </Figure>
-          <div className="home-facts mt-10">
-            {principles.map((item) => (
-              <div key={item.title} className="home-fact">
-                <Heading level={3}>{item.title}</Heading>
-                <Text as="p" display="block" color="secondary" className="mt-2">
-                  {item.body}
-                </Text>
-              </div>
-            ))}
+          <div className="home-overview mt-6">
+            <Figure className="home-figure-wide">
+              <DeploymentCarousel />
+            </Figure>
+            <div className="home-facts">
+              {principles.map((item) => (
+                <div key={item.title} className="home-fact">
+                  <Heading level={3}>{item.title}</Heading>
+                  <Text as="p" display="block" color="secondary" className="mt-2">
+                    {item.body}
+                  </Text>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
       </section>
