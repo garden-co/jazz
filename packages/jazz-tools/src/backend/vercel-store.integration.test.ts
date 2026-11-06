@@ -389,10 +389,12 @@ describe("vercel() store", () => {
     const fake = fakeVercel({ ...core, appId });
     const asked: string[] = [];
     // The test core's workload is production's; the store says preview's.
+    // Answers at once, before the wake is done.
     const claimedByPreview = (async (input: RequestInfo | URL) => {
       asked.push(String(input));
       return new Response("preview\n");
     }) as typeof fetch;
+    let closed = 0;
     await expect(
       openVercelCore({
         options: {
@@ -402,12 +404,21 @@ describe("vercel() store", () => {
           blobs: vercelBlob({ storeId: "store_Shared1" }),
         },
         openRemote: ({ url }) =>
-          ({ serverUrl: url, handle: async () => ({}), close: async () => {} }) as never,
+          ({
+            serverUrl: url,
+            handle: async () => ({}),
+            close: async () => {
+              closed++;
+            },
+          }) as never,
         version: "1.2.3",
         env: { VERCEL_ENV: "production" },
         fetch: claimedByPreview,
       }),
     ).rejects.toThrow(/Blob store Shared1 serves the preview environment, not production/);
+    // The core the wake came up with is closed, though the refusal came first.
+    for (let i = 0; closed === 0 && i < 300; i++) await new Promise((r) => setTimeout(r, 100));
+    expect(closed).toBe(1);
     expect(asked).toEqual([
       "https://shared1.private.blob.vercel-storage.com/.jazz-environment?cache=0",
     ]);

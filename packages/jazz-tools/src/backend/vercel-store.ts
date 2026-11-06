@@ -991,12 +991,14 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   }, KEEPALIVE_MS);
   (keepalive as { unref?: () => void }).unref?.();
 
-  let first: Awaited<ReturnType<typeof ensure>>;
+  const ensured = ensure();
+  let first: Awaited<typeof ensured>;
   try {
-    [first] = await Promise.all([ensure(), storeChecked]);
+    [first] = await Promise.all([ensured, storeChecked]);
   } catch (error) {
     clearInterval(keepalive);
-    void live?.core.close().catch(() => {});
+    // The wake may still be under way: close the core it comes up with.
+    void ensured.then(({ core }) => core.close()).catch(() => {});
     throw error;
   }
   // Clients in this process (the backend's own session) reach the core through
