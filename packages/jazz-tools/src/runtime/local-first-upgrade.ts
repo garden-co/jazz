@@ -40,6 +40,13 @@ export function setLocalFirstUpgrader(db: Db, upgrade: Upgrader): void {
 
 /** @internal Implementation of `Db.upgradeToLocalFirst`. */
 export async function upgradeDbToLocalFirst(db: Db, loader: LocalFirstLoader): Promise<void> {
+  // `const { upgradeToLocalFirst } = db` loses its Db: say so, instead of
+  // resolving as if there were nothing to upgrade.
+  if (typeof db !== "object" || db === null) {
+    throw new TypeError(
+      "upgradeToLocalFirst was called without its Db: call it as db.upgradeToLocalFirst(loader), not destructured from the Db",
+    );
+  }
   const upgrade = upgraders.get(db);
   if (upgrade) return await upgrade(loader);
   if (isThinDb(db)) {

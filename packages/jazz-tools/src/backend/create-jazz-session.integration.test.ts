@@ -99,6 +99,31 @@ describe("Node shared backend session", () => {
     }
   });
 
+  it("the main backend's own client acts for a user through jazz.forReqUser, not forUser", async () => {
+    const appId = randomUUID();
+    const backendSecret = "for-user-service-secret";
+    const server = await startLocalJazzServer({ appId, backendSecret });
+    try {
+      const owner = await openJazzSession({
+        appId,
+        serverUrl: server.url,
+        app,
+        permissions,
+        driver: { type: "memory" },
+        initial: { backendSecret },
+      });
+      try {
+        await expect(owner.getSnapshot().client!.forUser("alice")).rejects.toThrow(
+          /only on a trusted backend client.*jazz\.forReqUser/,
+        );
+      } finally {
+        await owner.close();
+      }
+    } finally {
+      await server.stop();
+    }
+  });
+
   it("retains the memory node clock when retry reopens the backend's client", async () => {
     const appId = randomUUID();
     const backendSecret = "clock-service-secret";
