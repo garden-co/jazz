@@ -691,10 +691,15 @@ describe("thin client", () => {
     });
     await db.disconnect();
     const read = db.all(app.notes);
+    const write = db.insert(app.notes, { text: "unsent", done: false });
     // The connection that would send it ends with a terminal error.
     await db.reconnect().catch(() => {});
     internals.lost(internals.carrier, { code: "gone", retry: "never", message: "for good" });
     await expect(read).rejects.toThrow(/for good/);
+    // Never sent, so it certainly didn't commit.
+    const writeError = await write.wait({ tier: "global" }).catch((error: unknown) => error);
+    expect(causes(writeError)[0]).toBe("ThinRequestNotSentError");
+    expect(String(writeError)).toMatch(/for good/);
     // A live query ends on it too, as on any fatal error.
     await expect.poll(() => liveError?.message).toMatch(/for good/);
     unsubscribe();

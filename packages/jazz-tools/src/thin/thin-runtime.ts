@@ -555,21 +555,29 @@ export class ThinRuntime implements Runtime {
   }
 
   /**
-   * End every request still waiting for a connection: one never sent with
-   * `notSent`, a write sent once and waiting to go out again with its fate
-   * unknown, as it may have committed.
+   * End every request still waiting for a connection. A write sent once and
+   * waiting to go out again ends with its fate unknown, as it may have
+   * committed; one never sent with {@link ThinRequestNotSentError}, as it
+   * certainly didn't. Any other request ends with `notSent`.
    */
   private endWaitingRequests(error: Error, notSent: Error = error): void {
     for (const [id, oneShot] of this.oneShots) {
       this.oneShots.delete(id);
-      oneShot.reject(oneShot.resending ? unknownOutcome(error) : notSent);
+      if (oneShot.resending) oneShot.reject(unknownOutcome(error));
+      else if (oneShot.write && !(notSent instanceof ThinRequestNotSentError))
+        oneShot.reject(
+          new ThinRequestNotSentError(`the request never reached the server: ${error.message}`, {
+            cause: error,
+          }),
+        );
+      else oneShot.reject(notSent);
     }
   }
 
   /**
    * @internal Its Db handed over to a successor: end the reads (outside a
-   * transaction) and snapshot captures not sent yet, and any made from now
-   * on, with {@link RuntimeClosedError} as their cause,
+   * transaction) not sent yet, and any made from now on, with
+   * {@link RuntimeClosedError} as their cause,
    * so each asks the successor instead of waiting for this runtime's server.
    * Writes stay, to upload once it answers.
    */
@@ -602,8 +610,9 @@ export class ThinRuntime implements Runtime {
       return {
         answer: Promise.reject(new RuntimeClosedError("the thin runtime is closed")),
       };
-    if (this.failure) return { answer: Promise.reject(this.failure) };
+    // Handed over first: the successor serves a read even after a failure here.
     if (this.handedOver && endsAtHandOver(op)) return { answer: Promise.reject(handedOver()) };
+    if (this.failure) return { answer: Promise.reject(this.failure) };
     let oneShot: OneShot | undefined;
     const answer = new Promise<ThinBody>((resolve, reject) => {
       oneShot = { op, resolve, reject, sent: false };
@@ -1472,10 +1481,10 @@ function tooLarge(op: string, bytes: number): ThinRemoteError {
 
 /**
  * A request its Db's successor serves instead once the Db hands over: a read
- * outside a transaction, or a snapshot capture. Writes stay, to upload.
+ * outside a transaction (`Db.all` asks the successor again). Writes stay, to
+ * upload, and so does a snapshot capture, which has no such retry.
  */
 function endsAtHandOver(op: ThinOp): boolean {
-  if (op.type === "captureSnapshot") return true;
   return op.type === "query" && transactionOf(op) === undefined;
 }
 
