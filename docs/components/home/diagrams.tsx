@@ -356,7 +356,7 @@ function Nested({
   title: string[];
   inner: string[];
 }) {
-  const pad = w < 90 ? 8 : 12;
+  const pad = w < 70 ? 5 : w < 90 ? 8 : 12;
   return (
     <g>
       <Frame x={x} y={y} w={w} h={h} tone="ink" />
@@ -409,9 +409,11 @@ function ClientBox({
   h: number;
   client: Client;
 }) {
+  // Each box fits its contents.
+  const boxH = Math.min(h, 23 + client.name.length * 18 + client.inner.length * 16 + 12);
   return (
     <g>
-      <Frame x={x} y={y} w={w} h={h} tone="ink" />
+      <Frame x={x} y={y} w={w} h={boxH} tone="ink" />
       <Lines x={x + 12} y={y + 23} lines={client.name} className="dg-title dg-fill-ink" />
       <Lines
         x={x + 12}
@@ -425,72 +427,108 @@ function ClientBox({
 }
 
 /**
- * Fig. 1: where Jazz runs. Your platform account on top (shards and the
- * large-value store), your backend with the jazz core and its /jazz mount
- * behind your auth in the middle, every kind of client at the bottom.
+ * Fig. 1: where Jazz runs, drawn narrow enough for a phone. Your platform
+ * account on top (the large-value store, then the shards), your backend with
+ * the jazz core and its /jazz mount behind your auth, then the clients in two
+ * rows of three. Sync wires from the lower row climb the gutters between the
+ * upper row's boxes; the dashed large-value reads come down the left edge.
  * In this figure blue marks Jazz's own parts and mint your auth.
  */
 export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }) {
   const { label, runtime, account, scaling, shard, store } = deploymentScenarios[scenario];
   const local = !account;
-  const rowY = 36;
-  const rowH = 104;
-  const shardArea = { x: 20, w: 560 };
-  const storeBox = { x: 600, w: 340 };
-  const backend = { x: 20, y: local ? 12 : 188, w: 880 };
-  const backendBottom = 332;
-  const authH = 26;
-  const core = { x: 300, y: 204, w: 584, h: 50 };
-  const mount = { x: 300, y: 262, w: 584, h: 46 };
-  const api = { x: 36, y: 262, w: 248, h: 46 };
-  const syncY = backendBottom + authH;
-  const busY = 470;
-  const clientY = 484;
-  const clientH = 124;
-  const cw = 148;
-  const cx = (index: number) => 8 + index * 158 + cw / 2;
-  const gap = 10;
-  const sw = shard.count ? (shardArea.w - gap * (shard.count - 1)) / shard.count : 0;
-  const shardXs = Array.from({ length: shard.count }, (_, i) => shardArea.x + i * (sw + gap));
-  const localBoxes = [
-    { x: 300, w: 288 },
-    { x: 596, w: 288 },
+  const W = 560;
+  const storeBox = { x: 16, y: 32, w: 528, h: 70 };
+  const shardRow = { x: 16, y: 120, w: 484, h: 104 };
+  const backend = { x: 16, y: local ? 12 : 264, w: 484 };
+  const backendBottom = 392;
+  const authH = 24;
+  const authBottom = backendBottom + authH;
+  const core = { x: 232, y: 276, w: 256, h: 44 };
+  const api = { x: 32, y: 336, w: 180, h: 44 };
+  const mount = { x: 224, y: 336, w: 264, h: 44 };
+  const cw = 168;
+  const colX = [16, 196, 376];
+  const center = (col: number) => colX[col] + cw / 2;
+  const rowY = [480, 632];
+  const clientH = 108;
+  // Upper row: traditional, web app, native app; lower row: web page,
+  // backend worker, agent VM.
+  const grid = [
+    { client: clients[0], col: 0, row: 0 },
+    { client: clients[2], col: 1, row: 0 },
+    { client: clients[3], col: 2, row: 0 },
+    { client: clients[1], col: 0, row: 1 },
+    { client: clients[4], col: 1, row: 1 },
+    { client: clients[5], col: 2, row: 1 },
   ];
-  // Where each synced client's wire lands under the /jazz mount, and the
-  // height its elbow turns at, chosen so the wires never cross.
-  const syncTargets = [
-    { tx: 380, turn: 396 },
-    { tx: 490, turn: 408 },
-    { tx: 600, turn: 420 },
-    { tx: cx(4), turn: 0 },
-    { tx: 840, turn: 396 },
+  const gap = shard.count > 4 ? 6 : 10;
+  const sw = shard.count ? (shardRow.w - gap * (shard.count - 1)) / shard.count : 0;
+  const shardXs = Array.from({ length: shard.count }, (_, i) => shardRow.x + i * (sw + gap));
+  const below = rowY[1] - 20;
+  const syncWires: Point[][] = [
+    // Upper row: straight up into the auth band under the mount.
+    [
+      [center(1), rowY[0]],
+      [center(1), authBottom],
+    ],
+    [
+      [center(2), rowY[0]],
+      [center(2), authBottom],
+    ],
+    // Lower row: across under the upper row, then up a gutter.
+    [
+      [center(0), rowY[1]],
+      [center(0), below],
+      [190, below],
+      [190, 430],
+      [240, 430],
+      [240, authBottom],
+    ],
+    [
+      [center(1), rowY[1]],
+      [center(1), below],
+      [370, below],
+      [370, 430],
+      [330, 430],
+      [330, authBottom],
+    ],
+    [
+      [center(2), rowY[1]],
+      [center(2), below],
+      [552, below],
+      [552, 426],
+      [480, 426],
+      [480, authBottom],
+    ],
   ];
   return (
-    <Diagram viewBox="0 0 956 616" label={label}>
-      {account ? <rect x={6} y={6} width={944} height={386} rx={2} className="dg-region" /> : null}
+    <Diagram viewBox={`0 0 ${W} 714`} label={label}>
+      {account ? <rect x={4} y={4} width={552} height={418} rx={2} className="dg-region" /> : null}
       <Frame x={backend.x} y={backend.y} w={backend.w} h={backendBottom - backend.y} tone="ink" />
       <Lines
         x={backend.x + 16}
-        y={backend.y + 26}
+        y={backend.y + 24}
         lines={["Your Backend", ...runtime]}
-        step={20}
+        step={18}
         className="dg-title dg-fill-ink"
       />
       {account ? (
         <g>
-          <Label x={shardArea.x} y={26} tone="blue">
+          <Label x={16} y={22} tone="blue">
             {scaling}
           </Label>
-          <Label x={938} y={26} tone="ink" anchor="end">
+          <Label x={544} y={22} tone="ink" anchor="end">
             {account}
           </Label>
+          <Nested {...storeBox} title={[store]} inner={LARGE_VALUES} />
           {shardXs.map((x) => (
             <Nested
               key={x}
               x={x}
-              y={rowY}
+              y={shardRow.y}
               w={sw}
-              h={rowH}
+              h={shardRow.h}
               title={shard.title}
               inner={shard.inner}
             />
@@ -499,28 +537,22 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
             <Wire
               key={`w${x}`}
               points={[
-                [x + sw / 2, rowY + rowH],
-                [x + sw / 2, 168],
-                [520, 168],
-                [520, core.y],
+                [x + sw / 2, shardRow.y + shardRow.h],
+                [x + sw / 2, 244],
+                [360, 244],
+                [360, core.y],
               ]}
               start
               end={index === 0}
               tone="blue"
             />
           ))}
-          <Nested
-            x={storeBox.x}
-            y={rowY}
-            w={storeBox.w}
-            h={rowH}
-            title={[store]}
-            inner={LARGE_VALUES}
-          />
+          {/* The store reaches the core around the right of the shards. */}
           <Wire
             points={[
-              [storeBox.x + 200, rowY + rowH],
-              [storeBox.x + 200, core.y],
+              [516, storeBox.y + storeBox.h],
+              [516, core.y + core.h / 2],
+              [core.x + core.w, core.y + core.h / 2],
             ]}
             tone="blue"
             dashed
@@ -529,120 +561,134 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
           {/* Clients read large values from the store directly. */}
           <Wire
             points={[
-              [storeBox.x + storeBox.w - 16, rowY + rowH],
-              [storeBox.x + storeBox.w - 16, busY],
-              [cx(1) + 40, busY],
-              [cx(1) + 40, clientY],
+              [storeBox.x, storeBox.y + storeBox.h / 2],
+              [8, storeBox.y + storeBox.h / 2],
+              [8, rowY[1] - 8],
+              [colX[0] + 12, rowY[1] - 8],
+              [colX[0] + 12, rowY[1]],
             ]}
             tone="blue"
             dashed
             start
           />
-          {[2, 3, 4, 5].map((index) => (
+          {[1, 2].map((col) => (
             <Wire
-              key={`d${index}`}
+              key={`d1${col}`}
               points={[
-                [cx(index) + 40, busY],
-                [cx(index) + 40, clientY],
+                [colX[col] - 8 + 20, rowY[1] - 8],
+                [colX[col] + 12, rowY[1]],
               ]}
               tone="blue"
               dashed
             />
           ))}
+          <Wire
+            points={[
+              [8, 474],
+              [colX[2] + 12, 474],
+            ]}
+            tone="blue"
+            dashed
+            end={false}
+          />
+          {[1, 2].map((col) => (
+            <Wire
+              key={`d0${col}`}
+              points={[
+                [colX[col] + 12, 474],
+                [colX[col] + 12, rowY[0]],
+              ]}
+              tone="blue"
+              dashed
+            />
+          ))}
+          <Wire
+            points={[
+              [8, rowY[1] - 8],
+              [colX[2] + 12, rowY[1] - 8],
+            ]}
+            tone="blue"
+            dashed
+            end={false}
+          />
         </g>
       ) : (
         <g>
           <Box
-            x={localBoxes[0].x}
-            y={rowY}
-            w={localBoxes[0].w}
-            h={rowH}
-            tone="blue"
-            title="local SQLite"
-            center
-          />
-          <Box
-            x={localBoxes[1].x}
-            y={rowY}
-            w={localBoxes[1].w}
-            h={rowH}
+            x={32}
+            y={96}
+            w={452}
+            h={70}
             tone="blue"
             title="local files"
             lines={LARGE_VALUES.map((text) => ({ text, tone: "blue" as const }))}
           />
-          {localBoxes.map((box) => (
-            <Wire
-              key={`l${box.x}`}
-              points={[
-                [box.x + box.w / 2, rowY + rowH],
-                [box.x + box.w / 2, core.y],
-              ]}
-              tone="blue"
-              start
-            />
-          ))}
+          <Box x={32} y={186} w={408} h={50} tone="blue" title="local SQLite" center />
+          <Wire
+            points={[
+              [464, 166],
+              [464, core.y],
+            ]}
+            tone="blue"
+            start
+          />
+          <Wire
+            points={[
+              [300, 236],
+              [300, core.y],
+            ]}
+            tone="blue"
+            start
+          />
         </g>
       )}
       <Box {...core} tone="blue" title="jazz core" center />
-      <Box {...mount} tone="blue" title="mounted /jazz sync endpoint" center />
       <Box {...api} title="normal API route" center />
+      <Box {...mount} tone="blue" title="mounted /jazz sync endpoint" center />
       <Wire
         points={[
-          [api.x + api.w - 40, api.y],
-          [api.x + api.w - 40, core.y + core.h / 2],
+          [206, api.y],
+          [206, core.y + core.h / 2],
           [core.x, core.y + core.h / 2],
         ]}
         tone="blue"
         start
       />
       <Frame x={backend.x} y={backendBottom} w={backend.w} h={authH} tone="mint" />
-      <Label x={backend.x + backend.w / 2} y={backendBottom + 17} tone="mint" anchor="middle">
+      <Label x={backend.x + backend.w / 2} y={backendBottom + 16} tone="mint" anchor="middle">
         your auth
       </Label>
       {/* The traditional client makes ordinary requests (and streams) to your
           API routes; every other client keeps a live sync connection. */}
       <Wire
         points={[
-          [cx(0), clientY],
-          [cx(0), api.y + api.h],
+          [center(0), rowY[0]],
+          [center(0), api.y + api.h],
         ]}
         start
       />
       <Lines
-        x={cx(0) + 10}
-        y={414}
+        x={center(0) + 6}
+        y={432}
         lines={["manual http", "requests &", "streaming"]}
-        step={16}
+        step={14}
         className="dg-label dg-fill-ink"
       />
-      {syncTargets.map(({ tx, turn }, index) => {
-        const x = cx(index + 1);
-        const points: Point[] =
-          turn === 0
-            ? [
-                [x, clientY],
-                [x, syncY],
-              ]
-            : [
-                [x, clientY],
-                [x, turn],
-                [tx, turn],
-                [tx, syncY],
-              ];
-        return <Wire key={x} points={points} tone="blue" start />;
-      })}
+      {syncWires.map((points) => (
+        <Wire key={points[0].join()} points={points} tone="blue" start />
+      ))}
       <Lines
-        x={cx(1) + 10}
-        y={436}
-        lines={["efficient", "realtime sync"]}
-        step={16}
+        x={center(2) + 8}
+        y={440}
+        lines={["efficient", "realtime", "sync"]}
+        step={14}
         className="dg-label dg-fill-blue"
       />
-      {clients.map((client, index) => (
+      {grid.map(({ client, col, row }) => (
         <ClientBox
           key={client.name.join(" ")}
-          x={8 + index * 158}
-          y={clientY}
+          x={colX[col]}
+          y={rowY[row]}
           w={cw}
           h={clientH}
           client={client}
