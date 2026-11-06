@@ -850,10 +850,8 @@ h6 {
 }
 .home-carousel-tabs {
   position: absolute;
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  grid-template-rows: 1fr 1fr;
-  gap: 0.3em;
+  display: flex;
+  gap: 0.4em;
   /* Text in step with the diagram's 12-unit labels at any width. */
   font-family: var(--font-family-code);
   font-size: calc(12 / 552 * 100cqw);

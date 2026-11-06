@@ -262,33 +262,33 @@ type Platform = {
   store: string;
 };
 
-const LARGE_VALUES = ["jazz large value chunks", "(blobs, streams, JSON, richtext)"];
+const LARGE_VALUES = ["jazz large", "values"];
 
 const deploymentScenarios: Record<DeploymentScenario, Platform> = {
   vercel: {
     label:
-      "On Vercel, everything stays in your Vercel account: jazz SQLite shards in Vercel Sandboxes, auto-scaling and hibernating, jazz large value chunks in Vercel Blobs, and the jazz core in your backend's Vercel functions, next to your normal API routes and behind your auth. Web pages, web apps, native apps, backend workers and agent VMs get efficient realtime sync through the mounted /jazz sync endpoint; traditional clients make manual HTTP requests and streaming.",
+      "On Vercel, everything stays in your Vercel account: jazz SQLite shards in Vercel Sandboxes, auto-scaling and hibernating, jazz large value chunks in Vercel Blobs, and the jazz core in your backend's Vercel functions, next to your normal API routes and behind your auth. Web pages, web apps, native apps, backend workers and agent VMs get efficient realtime sync through the mounted /jazz route; traditional clients make manual HTTP requests and streaming.",
     runtime: ["(Functions)"],
     shard: { title: ["Sandbox"], inner: ["jazz SQLite", "shard"], count: 4 },
-    store: "Vercel Blobs",
+    store: "Blobs",
   },
   cloudflare: {
     label:
-      "On Cloudflare, coming soon: everything stays in your Cloudflare account: jazz shards in Durable Objects with their own SQLite, auto-scaling and hibernating, jazz large value chunks in R2, and the jazz core in your backend's Workers, next to your normal API routes and behind your auth. Clients get efficient realtime sync through the mounted /jazz sync endpoint; traditional clients make manual HTTP requests and streaming.",
+      "On Cloudflare, coming soon: everything stays in your Cloudflare account: jazz shards in Durable Objects with their own SQLite, auto-scaling and hibernating, jazz large value chunks in R2, and the jazz core in your backend's Workers, next to your normal API routes and behind your auth. Clients get efficient realtime sync through the mounted /jazz route; traditional clients make manual HTTP requests and streaming.",
     runtime: ["(CF Workers)"],
-    shard: { title: ["durable", "object"], small: true, inner: ["jazz", "shard"], count: 7 },
+    shard: { title: ["durable", "object"], small: true, inner: ["jazz", "shard"], count: 6 },
     store: "R2",
   },
   aws: {
     label:
-      "On AWS, everything stays in your AWS account: jazz SQLite shards on EC2 instances, manually scaled and long running, jazz large value chunks in S3, and the jazz core in your backend on AWS Lambda, next to your normal API routes and behind your auth. Clients get efficient realtime sync through the mounted /jazz sync endpoint; traditional clients make manual HTTP requests and streaming.",
+      "On AWS, everything stays in your AWS account: jazz SQLite shards on EC2 instances, manually scaled and long running, jazz large value chunks in S3, and the jazz core in your backend on AWS Lambda, next to your normal API routes and behind your auth. Clients get efficient realtime sync through the mounted /jazz route; traditional clients make manual HTTP requests and streaming.",
     runtime: ["(AWS Lambda)"],
     shard: { title: ["EC2 instance"], inner: ["jazz SQLite", "shard"], count: 2 },
     store: "S3",
   },
   server: {
     label:
-      "On a local machine or your own server: a jazz SQLite shard on local disk, jazz large value chunks in local files, and the jazz core in your backend next to your normal API routes, behind your auth. Clients get efficient realtime sync through the mounted /jazz sync endpoint; traditional clients make manual HTTP requests and streaming.",
+      "On a local machine or your own server: a jazz SQLite shard on local disk, jazz large value chunks in local files, and the jazz core in your backend next to your normal API routes, behind your auth. Clients get efficient realtime sync through the mounted /jazz route; traditional clients make manual HTTP requests and streaming.",
     runtime: ["(local machine", "or your server)"],
     shard: { title: ["local disk"], inner: ["jazz SQLite", "shard"], count: 1 },
     store: "local files",
@@ -384,12 +384,12 @@ const clients: Client[] = [
   { name: ["web page"], inner: ["thin jazz client"], tone: "blue" },
   {
     name: ["web app"],
-    inner: ["local-first", "jazz client", "(SQLite on", "indexeddb)"],
+    inner: ["local-first jazz client", "(SQLite on indexeddb)"],
     tone: "blue",
   },
   {
     name: ["native app"],
-    inner: ["local-first", "jazz client", "(native SQLite)"],
+    inner: ["local-first jazz client", "(native SQLite)"],
     tone: "blue",
   },
   { name: ["backend worker"], inner: ["thin jazz client"], tone: "blue" },
@@ -451,14 +451,14 @@ function cycleDelay(count: number, turn: number, col: number): string {
  */
 export const DEPLOYMENT_LAYOUT = {
   width: 552,
-  height: 582,
-  switcher: { x: 16, y: 32, w: 256, h: 76 },
+  height: 528,
+  switcher: { x: 16, y: 30, w: 520, h: 26 },
 };
 
 /**
  * Fig. 1: where Jazz runs, drawn narrow enough for a phone. Your own platform
- * on top (room for the scenario switcher, the large-value store, then the
- * shards), your backend with the jazz core and its /jazz mount behind your
+ * on top (room for the scenario switcher, then the shards and the
+ * large-value store in one row), your backend with the jazz core and its /jazz mount behind your
  * auth, then three clients, getting simpler to the right: the traditional
  * one, a local-first one (web app, native app in turn) and a thin client (web
  * page, backend worker, agent VM in turn). Sync goes through your auth into
@@ -469,23 +469,25 @@ export const DEPLOYMENT_LAYOUT = {
 export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }) {
   const { label, runtime, shard, store } = deploymentScenarios[scenario];
   const { width: W, height: H, switcher } = DEPLOYMENT_LAYOUT;
-  const storeBox = { x: 284, y: 32, w: 252, h: 76 };
-  const shardRow = { x: 16, y: 120, w: 484, h: 80 };
-  const backend = { x: 16, y: 240, w: 484 };
-  const backendBottom = 368;
+  // The store closes the shard row, as wide as a Vercel Sandbox.
+  const shardRow = { x: 16, y: 66, w: 414, h: 80 };
+  const storeBox = { x: 440, y: shardRow.y, w: 96, h: shardRow.h };
+  const backend = { x: 16, y: 186, w: 484 };
+  const backendBottom = 314;
   const authH = 24;
-  const api = { x: 32, y: 312, w: 180, h: 44 };
+  const api = { x: 32, y: 258, w: 180, h: 44 };
   // The jazz core above, its mounted /jazz route below the divider, level
   // with the normal API route.
-  const jazz = { x: 224, y: 252, w: 264, h: 104, divider: api.y };
-  const cw = 164;
-  const colX = [16, 192, 368];
+  const jazz = { x: 224, y: 198, w: 264, h: 104, divider: api.y };
+  // Widths fit each client's longest line ("local-first jazz client").
+  const cws = [150, 182, 160];
+  const colX = [16, 178, 372];
   // The one large-value lane, right of your backend.
   const lane = 512;
-  const center = (col: number) => colX[col] + cw / 2;
-  const rowY = 456;
+  const center = (col: number) => colX[col] + cws[col] / 2;
+  const rowY = 402;
   // Shorter to the right, as each kind of client does less itself.
-  const clientH = [H - rowY - 6, 106, 76];
+  const clientH = [H - rowY - 6, 98, 76];
   // The traditional client stays; the local-first and thin slots take
   // turns between their kinds of client.
   const slots = [[clients[0]], [clients[2], clients[3]], [clients[1], clients[4], clients[5]]];
@@ -498,10 +500,10 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
   // stays where it is in the other variants.
   const single = scenario === "server";
   const backendTop = single ? shardRow.y : backend.y;
-  const local = { y: 188, h: 44, sqlite: { x: 224, w: 124 }, files: { x: 364, w: 124 } };
+  const local = { y: 134, h: 44, sqlite: { x: 224, w: 124 }, files: { x: 364, w: 124 } };
   return (
     <Diagram viewBox={`0 0 ${W} ${H}`} label={label}>
-      <rect x={4} y={4} width={W - 8} height={394} rx={4} className="dg-cloud" />
+      <rect x={4} y={4} width={W - 8} height={340} rx={4} className="dg-cloud" />
       <Label x={switcher.x} y={22} tone="ink">
         Your own cloud:
       </Label>
@@ -550,8 +552,8 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
               points={[
                 // A lone shard spans the row; drop straight into the core.
                 [shard.count === 1 ? 360 : x + sw / 2, shardRow.y + shardRow.h],
-                [shard.count === 1 ? 360 : x + sw / 2, 220],
-                [360, 220],
+                [shard.count === 1 ? 360 : x + sw / 2, 166],
+                [360, 166],
                 [360, jazz.y],
               ]}
               start
@@ -581,9 +583,9 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
           />
           <Wire
             points={[
-              [lane, 442],
-              [colX[1] + cw - 16, 442],
-              [colX[1] + cw - 16, rowY],
+              [lane, 388],
+              [colX[1] + cws[1] - 16, 388],
+              [colX[1] + cws[1] - 16, rowY],
             ]}
             tone="blue"
             dashed
@@ -640,7 +642,7 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
       />
       <Lines
         x={center(0) + 6}
-        y={408}
+        y={354}
         lines={["manual http", "requests &", "streaming"]}
         step={14}
         className="dg-label dg-fill-ink"
@@ -658,7 +660,7 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
       ))}
       <Lines
         x={(center(1) + center(2)) / 2}
-        y={414}
+        y={360}
         lines={
           single
             ? ["efficient realtime sync"]
@@ -681,7 +683,7 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
               kinds.length > 1 ? { animationDelay: cycleDelay(kinds.length, turn, col) } : undefined
             }
           >
-            <ClientBox x={colX[col]} y={rowY} w={cw} h={clientH[col]} client={client} />
+            <ClientBox x={colX[col]} y={rowY} w={cws[col]} h={clientH[col]} client={client} />
           </g>
         )),
       )}
