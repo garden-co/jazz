@@ -71,7 +71,8 @@ export interface VercelStoreOptions {
   /**
    * Where the core comes from: an npm tarball of
    * `@garden-co/jazz-napi-linux-x64-gnu`, the Node addon the Sandbox runs
-   * it with. Defaults to the registry's tarball of the installed version.
+   * it with. Defaults to the registry's tarball of the installed version
+   * (for a release candidate, the tarball attached to its GitHub release).
    */
   coreTarballUrl?: string;
   /** Vercel credentials for scripts outside a Vercel function. Defaults to the function's OIDC token. */
@@ -513,6 +514,19 @@ export function defaultCoreName(project: string, env: Record<string, string | un
   return `jazz-${safe(project)}-preview-${slug}-${hash}`;
 }
 
+/**
+ * The core addon's tarball for a jazz-tools version: npm's for a published
+ * version, the GitHub release asset for a release candidate (rc builds are
+ * attached to their release and never reach npm).
+ */
+export function defaultCoreTarballUrl(version: string): string {
+  const name = "jazz-napi-linux-x64-gnu";
+  if (/^2\.0\.0-alpha\.[0-9]+-rc\.[0-9]+$/.test(version)) {
+    return `https://github.com/garden-co/jazz/releases/download/v${version}/garden-co-${name}-${version}.tgz`;
+  }
+  return `https://registry.npmjs.org/@garden-co/${name}/-/${name}-${version}.tgz`;
+}
+
 async function installedVersion(): Promise<string> {
   const packageJson = JSON.parse(
     await readFile(new URL("../../package.json", import.meta.url), "utf8"),
@@ -539,9 +553,7 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
       throw new Error("vercel() needs the @vercel/sandbox package: npm install @vercel/sandbox");
     })) as SandboxSdk);
   const version = params.version ?? (await installedVersion());
-  const tarballUrl =
-    options.coreTarballUrl ??
-    `https://registry.npmjs.org/@garden-co/jazz-napi-linux-x64-gnu/-/jazz-napi-linux-x64-gnu-${version}.tgz`;
+  const tarballUrl = options.coreTarballUrl ?? defaultCoreTarballUrl(version);
   const project = options.credentials?.projectId ?? env.VERCEL_PROJECT_ID;
   if (!options.name && !project) {
     throw new Error(
