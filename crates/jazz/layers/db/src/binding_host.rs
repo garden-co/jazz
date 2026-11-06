@@ -1594,6 +1594,76 @@ impl Binding {
         ))
     }
 
+    /// Synchronous local candidates for nonempty metadata queries at ONE cut.
+    /// This neither opens a transaction nor retains a cut across host turns;
+    /// every error drops it. Pending overlays and authority inference are excluded.
+    pub fn observe_local_batch(
+        &self,
+        queries: Vec<Vec<u8>>,
+        author: Option<&[u8]>,
+        claims: Option<serde_json::Value>,
+    ) -> HostResult<serde_json::Value> {
+        let explicit = author.is_some();
+        let author = self.read_author(author)?;
+        let claims = if explicit {
+            author
+                .map(|author| self::claims(author, claims.unwrap_or(serde_json::Value::Null)))
+                .transpose()?
+        } else {
+            None
+        };
+        Self::observe_local_batch_as(&self.db, queries, author, claims, |db, prepared| {
+            db.local_observation_cut(prepared, author)
+        })
+    }
+
+    fn observe_local_batch_as(
+        db: &Db,
+        queries: Vec<Vec<u8>>,
+        author: Option<AuthorSubject>,
+        claims: Option<Cells>,
+        capture: impl FnOnce(
+            &Db,
+            &crate::db::PreparedQuery,
+        ) -> Result<crate::db::LocalObservationCut, Error>,
+    ) -> HostResult<serde_json::Value> {
+        if queries.is_empty() {
+            return Err("local observation requires queries".into());
+        }
+        let mut prepared = Vec::with_capacity(queries.len());
+        for bytes in queries {
+            let query: Query = postcard::from_bytes(&bytes)?;
+            let mut query = db.prepare_query(&query)?;
+            if let (Some(author), Some(claims)) = (author, &claims) {
+                query = query.with_identity_claims(author, claims.clone());
+            }
+            prepared.push(query);
+        }
+        let cut = capture(db, &prepared[0])?;
+        let mut output = Vec::with_capacity(prepared.len());
+        for query in &prepared {
+            let observed = db.observe_local(&cut, query, false)?;
+            let evidence: Vec<_> = observed.evidence.iter().map(|pair| {
+                let origin = |value: crate::db::AcceptedVersion| serde_json::json!({
+                    "transactionId": TransactionId::from_committed_tx(value.transaction).to_string(),
+                    "position": value.sequence.to_string()
+                });
+                serde_json::json!({"rowId": pair.row.0.to_string(), "state": origin(pair.state), "content": origin(pair.content)})
+            }).collect();
+            let provenance: Vec<_> = observed
+                .provenance
+                .iter()
+                .map(|value| match value {
+                    crate::db::LocalEvidenceProvenance::LocalSubmission => "local-submission",
+                    crate::db::LocalEvidenceProvenance::AuthorityRead => "authority-read",
+                })
+                .collect();
+            output.push(serde_json::json!({"rows": crate::binding_codec::encode_rows(&observed.rows)?,
+                "through": observed.through.to_string(), "evidence": evidence, "provenance": provenance}));
+        }
+        Ok(serde_json::Value::Array(output))
+    }
+
     /// Subscribe to a postcard query. A remote attachment goes upstream on
     /// the next tick.
     pub fn subscribe<O: HostObject>(
@@ -1931,6 +2001,31 @@ impl Binding {
         }
     }
 
+    /// A local observer admitted by the already-authenticated owner. There is
+    /// deliberately no host identity, claims, bundle or policy-mode argument.
+    pub fn accept_own_observation_subscriber(&self) -> HostResult<Link> {
+        if self.trusted_backend {
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                "backend cannot select own-client observation",
+            )
+            .into());
+        }
+        let queues = WireQueues::default();
+        let transport = Box::new(WireTransportAdapter::current(QueueTransport {
+            queues: queues.clone(),
+        }));
+        let (subscriber, identity) = self.db.accept_own_observation_subscriber(transport)?;
+        Ok(Link {
+            binding: self.clone(),
+            queues,
+            kind: LinkKind::Subscriber {
+                id: Some(subscriber),
+                identity,
+            },
+        })
+    }
+
     /// Serve a subscriber (another replica) as `identity` with `claims`.
     /// A store configured as a user refuses any other identity (see
     /// [`Db::accept_subscriber`]).
@@ -2266,6 +2361,39 @@ impl Link {
     /// Called whenever a frame is queued to send (`None` clears it).
     pub fn set_outbound_ready(&self, ready: Option<Box<dyn Fn()>>) {
         *self.queues.outbound_ready.borrow_mut() = ready;
+    }
+
+    /// Observe with this actual admitted identity/claims/governance. No host
+    /// session token or requested policy context crosses this entrypoint.
+    pub fn observe_local_batch(
+        &self,
+        queries: Vec<Vec<u8>>,
+        expected_claims: Option<serde_json::Value>,
+    ) -> HostResult<serde_json::Value> {
+        let LinkKind::Subscriber { id: Some(id), .. } = self.kind else {
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                "local observation requires an admitted subscriber",
+            )
+            .into());
+        };
+        let (db, identity, claims, _) = self.binding.db.admitted_observation_context(id)?;
+        if let Some(expected) = expected_claims
+            && self::claims(identity, expected)? != claims
+        {
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                "local observation admission claims changed",
+            )
+            .into());
+        }
+        Binding::observe_local_batch_as(
+            &db,
+            queries,
+            Some(identity),
+            Some(claims),
+            |db, prepared| db.local_observation_cut_for_admitted_session(prepared, id),
+        )
     }
 
     /// Rebind a subscriber link's claims.

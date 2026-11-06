@@ -1081,6 +1081,22 @@ impl Transport {
         false
     }
 
+    /// Partial accepted local candidates, never SELECT or complete-history proof.
+    #[napi(js_name = "observeLocalBatch")]
+    pub fn observe_local_batch(
+        &self,
+        queries: Vec<Uint8Array>,
+        claims: JsonValue,
+    ) -> js::Result<JsonValue> {
+        Ok(self
+            .link
+            .observe_local_batch(
+                queries.into_iter().map(|q| q.to_vec()).collect(),
+                Some(claims),
+            )
+            .map_err(host_error)?)
+    }
+
     #[napi(js_name = "sendWireFrame")]
     pub fn send_wire_frame(&self, frame: Uint8Array) {
         self.link.receive([frame.to_vec()]);
@@ -1892,6 +1908,24 @@ impl NapiDb {
         read_or_pending(read)
     }
 
+    /// Partial accepted local candidates, never SELECT or complete-history proof.
+    #[napi(js_name = "observeLocalBatch")]
+    pub fn observe_local_batch(
+        &self,
+        queries: Vec<Uint8Array>,
+        author: Option<Uint8Array>,
+        claims: Option<JsonValue>,
+    ) -> js::Result<JsonValue> {
+        Ok(self
+            .binding()?
+            .observe_local_batch(
+                queries.into_iter().map(|q| q.to_vec()).collect(),
+                author.as_deref(),
+                claims,
+            )
+            .map_err(host_error)?)
+    }
+
     /// Bind receipt-correlation claims to this client's own admitted identity.
     #[napi(js_name = "setSessionClaims")]
     pub fn set_session_claims(
@@ -2033,6 +2067,16 @@ impl NapiDb {
             .set_slow_query_threshold_ms(ms)
             .map_err(host_error)?;
         Ok(())
+    }
+
+    /// Inherit this already-authenticated durable owner's live observation scope.
+    #[napi(js_name = "acceptOwnObservationSubscriber")]
+    pub fn accept_own_observation_subscriber(&self) -> js::Result<Transport> {
+        Ok(self.transport(
+            self.binding()?
+                .accept_own_observation_subscriber()
+                .map_err(host_error)?,
+        ))
     }
 
     /// Connect to the server over byte frames the host carries: each frame
