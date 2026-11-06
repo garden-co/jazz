@@ -780,7 +780,7 @@ describe("permissions DSL", () => {
         policy.todos.allowUpdate.where(isCreator as never);
       }),
     ).toThrow(
-      /`isCreator` was removed in alpha\.60.*\$createdBy: session\.user.*\$createdBy\.account/,
+      /`isCreator` was removed in alpha\.60.*\$createdBy: session\.user.*"\$createdBy\.identity": session\.identity/,
     );
   });
 

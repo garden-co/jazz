@@ -3109,7 +3109,7 @@ impl PolicyBindingKey {
         );
         let mut claims = self.claims().clone();
         let mut presence = 0_u8;
-        // Bits use the eight derived names' canonical UTF-8 ordering. Absent
+        // Bits use the derived names' canonical UTF-8 ordering. Absent
         // entries remain absent: internal bindings may intentionally be partial.
         for (bit, (name, expected)) in derived.into_iter().enumerate() {
             if claims.get(&name) == Some(&expected) {
@@ -5528,7 +5528,8 @@ mod tests {
         let Value::Record(fields) = encoded.clone() else {
             panic!("typed directory record")
         };
-        assert_eq!(fields.get_idx(0).unwrap(), Value::U8(255));
+        // All seven identity-derived entries are reconstructed.
+        assert_eq!(fields.get_idx(0).unwrap(), Value::U8(0b111_1111));
         let stored =
             policy_binding_directory_claims_from_value(fields.get_idx(1).unwrap()).unwrap();
         assert_eq!(stored.len(), 1);
@@ -5560,7 +5561,7 @@ mod tests {
         assert!(
             PolicyBindingKey::from_directory_value(
                 identity,
-                policy_directory_payload(255, redundant).unwrap()
+                policy_directory_payload(0b111_1111, redundant).unwrap()
             )
             .is_err()
         );
@@ -5568,8 +5569,8 @@ mod tests {
             &identity,
             BTreeMap::new(),
         );
-        assert_eq!(derived.len(), 8);
-        for mask in 0_u16..=255 {
+        assert_eq!(derived.len(), 7);
+        for mask in 0_u16..=0b111_1111 {
             let partial = derived
                 .iter()
                 .enumerate()

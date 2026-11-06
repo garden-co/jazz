@@ -860,10 +860,7 @@ pub fn operand_claim_path(name: &str) -> Vec<String> {
             return segments;
         }
     }
-    if matches!(
-        name,
-        "user.account" | "user.identity" | "user.identity.issuer" | "user.identity.subject"
-    ) {
+    if matches!(name, "identity" | "identity.issuer" | "identity.subject") {
         return name.split('.').map(str::to_owned).collect();
     }
     name.strip_prefix(PROVIDER_CLAIM_PREFIX)
@@ -877,11 +874,7 @@ pub fn author_claim_path_key(path: &[String]) -> Option<String> {
     let name = path.join(".");
     let valid = matches!(
         name.as_str(),
-        "user"
-            | "user.account"
-            | "user.identity"
-            | "user.identity.issuer"
-            | "user.identity.subject"
+        "user" | "identity" | "identity.issuer" | "identity.subject"
     );
     (valid && path.iter().all(|part| !part.contains('.'))).then_some(name)
 }

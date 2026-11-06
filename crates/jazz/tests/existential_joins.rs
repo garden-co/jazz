@@ -20,7 +20,7 @@ use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 
 use common::{allow_all_policies, compile_schema, read_and_allow_all_writes, session_eq};
 
-const ME: [&str; 3] = ["user", "identity", "subject"];
+const ME: [&str; 2] = ["identity", "subject"];
 
 fn schema() -> JazzSchema {
     compile_schema(

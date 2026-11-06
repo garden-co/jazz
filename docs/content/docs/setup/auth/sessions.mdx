@@ -8,16 +8,19 @@ A context's session describes its account and the exact identity currently actin
 
 ## Get the session and canonical user identity
 
-Public sessions expose a structured author:
+A session exposes its account as `session.user` and the exact login acting for it as
+`session.identity`:
 
 ```ts
-const author = {
-  account: "00000000-0000-4000-8000-000000000001",
-  identity: { issuer: "https://issuer.example", subject: "alice" },
-};
+const session = db.getAuthState().session;
+session?.user; // "00000000-0000-4000-8000-000000000001", the account
+session?.identity; // { issuer: "https://issuer.example", subject: "alice" }
 ```
 
-This illustrates `session.user`; session objects are read-only. Account ownership compares `session.user.account`. Exact authorship compares the entire structure, including issuer and subject.
+Session objects are read-only. Policies see the same two values: `session.user` for ownership
+shared by every identity linked to the account, and `session.identity` when a rule must tell the
+linked identities apart. A row's `$createdBy` is the full author record,
+`{ account, identity: { issuer, subject } }`.
 
 ## System-authored rows
 
@@ -76,7 +79,7 @@ Filter with the account ID:
 
 ```ts
 const session = db.getAuthState().session;
-const accountId = session?.user.account;
+const accountId = session?.user;
 const todos = accountId ? await db.all(app.todos.where({ owner_id: accountId })) : [];
 ```
 
@@ -96,8 +99,8 @@ Client-side filters do not enforce access control. Define the corresponding serv
 
 ```ts
 const permissions = s.definePermissions(app, ({ policy, session }) => {
-  policy.todos.allowRead.where({ owner_id: session.user.account });
-  policy.todos.allowInsert.where({ owner_id: session.user.account });
+  policy.todos.allowRead.where({ owner_id: session.user });
+  policy.todos.allowInsert.where({ owner_id: session.user });
 });
 ```
 

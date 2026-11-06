@@ -272,7 +272,7 @@ export interface PermissionRelation {
 export interface ReachableSeedBuilder {
   /**
    * Seed the walk with `team_column` of the `seed_table` rows whose `user_column`
-   * equals `from`, such as `session.user.account` or `session.claims["sub"]`.
+   * equals `from`, such as `session.user` or `session.claims["sub"]`.
    */
   seeded_by(
     seed_table: string,
@@ -622,7 +622,7 @@ class ReachableRelationSeedBuilder implements ReachableSeedBuilder {
   ): PermissionRelation {
     if (!isSessionRefValue(from)) {
       throw new Error(
-        'seeded_by(...) takes a session reference such as session.user.account or session.claims["sub"].',
+        'seeded_by(...) takes a session reference such as session.user or session.claims["sub"].',
       );
     }
     const accessScope = "__reachable_access_0";
@@ -776,13 +776,18 @@ type DirectWhereInputGuard<Input, WhereInput> = [Input] extends [(...args: never
         : [error: "Input is not assignable to the allowed where input type"];
 
 export type SessionContext = {
-  /** Exact author; compare account for ownership shared by linked identities. */
-  readonly user: SessionRefValue & {
-    readonly account: SessionRefValue;
-    readonly identity: SessionRefValue & {
-      readonly issuer: SessionRefValue;
-      readonly subject: SessionRefValue;
-    };
+  /**
+   * The account. `{ $createdBy: session.user }` matches rows written through
+   * any identity linked to the account.
+   */
+  readonly user: SessionRefValue;
+  /**
+   * The exact login (issuer and subject), shared by no other identity linked
+   * to the account: compare it with `$createdBy.identity`.
+   */
+  readonly identity: SessionRefValue & {
+    readonly issuer: SessionRefValue;
+    readonly subject: SessionRefValue;
   };
   /** Raw provider claims, kept separate from Jazz-owned session identity. */
   readonly claims: Readonly<Record<string, SessionRefValue>>;
@@ -1072,9 +1077,9 @@ export function definePermissions<TApp extends AppLike>(
 
 const ISCREATOR_REMOVED =
   "`isCreator` was removed in alpha.60. Write the creator check out as a row condition: " +
-  '`{ $createdBy: session.user }`, or `{ "$createdBy.account": session.user.account }` to match ' +
-  "every identity linked to the account (rows imported from alpha.59 keep their old issuer and " +
-  "need this form).";
+  "`{ $createdBy: session.user }` matches rows written through any identity linked to the " +
+  "account (including alpha.59 rows imported with an account), and " +
+  '`{ "$createdBy.identity": session.identity }` only the exact login.';
 
 function collectFkReferencesByTable(app: AppLike): Map<string, Map<string, string>> {
   const result = new Map<string, Map<string, string>>();
@@ -1909,12 +1914,23 @@ export function createSessionContext(): SessionContext {
     __jazzPermissionKind: "session-ref",
     path,
   });
-  const user = Object.assign(claimRef("user"), {
-    account: claimRef("user", "account"),
-    identity: Object.assign(claimRef("user", "identity"), {
-      issuer: claimRef("user", "identity", "issuer"),
-      subject: claimRef("user", "identity", "subject"),
-    }),
+  const user = claimRef("user");
+  // `session.user` is the account itself now: name the replacement for the
+  // parts it used to have instead of building a policy on `undefined`.
+  for (const [part, replacement] of [
+    ["account", "session.user, which is the account"],
+    ["identity", "session.identity, the exact login"],
+  ] as const) {
+    Object.defineProperty(user, part, {
+      enumerable: false,
+      get() {
+        throw new Error(`session.user.${part} was removed: use ${replacement}.`);
+      },
+    });
+  }
+  const identity = Object.assign(claimRef("identity"), {
+    issuer: claimRef("identity", "issuer"),
+    subject: claimRef("identity", "subject"),
   });
   const whereBuilder = Object.assign(
     (input: Record<string, unknown>): SessionWhereCondition =>
@@ -1941,6 +1957,7 @@ export function createSessionContext(): SessionContext {
           );
         }
         if (prop === "user") return user;
+        if (prop === "identity") return identity;
         if (prop === "authMode") return claimRef(prop);
         throw new Error(
           `Unknown session property ${prop}; raw provider claims must use session.claims["${prop}"]`,
@@ -2168,7 +2185,7 @@ function resolveWhereInput(
   }
   throw new Error(
     `Unsupported permission condition input: ${describeConditionInput(input)}. A condition is a ` +
-      "where-object such as `{ owner_id: session.user.account }`, a function of the row returning " +
+      "where-object such as `{ owner_id: session.user }`, a function of the row returning " +
       "one, `anyOf`/`allOf` of conditions, `policy.<table>.exists.where(...)`, `allowedTo.<op>(...)`, " +
       "or `raw(...)`.",
   );

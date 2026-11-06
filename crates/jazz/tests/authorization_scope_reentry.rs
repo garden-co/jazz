@@ -50,7 +50,7 @@ fn schema() -> JazzSchema {
         MEMBERSHIPS,
         vec![
             outer_eq("team", "team"),
-            session_eq("user", &["user", "identity", "subject"]),
+            session_eq("user", &["identity", "subject"]),
         ],
     );
     compile_schema(
@@ -66,7 +66,7 @@ fn schema() -> JazzSchema {
                     .column("user", PublicColumnType::Text)
                     .policies(read_and_allow_all_writes(session_eq(
                         "user",
-                        &["user", "identity", "subject"],
+                        &["identity", "subject"],
                     ))),
             )
             .table(

@@ -35,7 +35,7 @@ product slice, not another generic Todo tutorial.
 - **Profile visibility follows relationships.** A profile is readable by its
   owner, by co-members, by anyone who can read a message it sent, and by a room
   creator reviewing its join request.
-- A message must reference a profile owned by `session.user.account`. Profiles,
+- A message must reference a profile owned by `session.user`. Profiles,
   memberships, and row provenance store that enrolled account UUID. The
   external issuer and subject remain account identity metadata, never
   membership values. Revocation rejects subsequent writes at the serving

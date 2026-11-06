@@ -41,12 +41,12 @@ const app = s.defineApp(
 );
 const permissions = s.definePermissions(app, ({ policy, allowedTo, session, allOf }) => {
   for (const table of [policy.authors, policy.grants]) {
-    table.allowRead.where({ owner: session.user.account });
-    table.allowInsert.where({ owner: session.user.account, insertable: true });
+    table.allowRead.where({ owner: session.user });
+    table.allowInsert.where({ owner: session.user, insertable: true });
     table.allowUpdate
-      .whereOld({ owner: session.user.account, editable: true })
-      .whereNew({ owner: session.user.account, editable: true });
-    table.allowDelete.where({ owner: session.user.account, removable: true });
+      .whereOld({ owner: session.user, editable: true })
+      .whereNew({ owner: session.user, editable: true });
+    table.allowDelete.where({ owner: session.user, removable: true });
   }
   policy.posts.allowRead.where(allowedTo.read("writer"));
   policy.posts.allowInsert.where(allowedTo.insert("writer"));

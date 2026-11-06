@@ -2719,10 +2719,17 @@ fn operand_type(
 }
 
 fn claim_type(name: &str) -> Result<Option<ColumnType>, QueryError> {
-    if let Some(suffix) = name.strip_prefix("user") {
-        if let Some(ty) = crate::ids::AuthorSubject::metadata_type(&format!("$createdBy{suffix}")) {
-            return Ok(Some(ty.clone()));
-        }
+    // `session.user` is the account; `session.identity` the exact login.
+    let author_part = match name {
+        "user" => Some("$createdBy.account".to_owned()),
+        _ => name
+            .strip_prefix("identity")
+            .map(|suffix| format!("$createdBy.identity{suffix}")),
+    };
+    if let Some(part) = author_part
+        && let Some(ty) = crate::ids::AuthorSubject::metadata_type(&part)
+    {
+        return Ok(Some(ty.clone()));
     }
     match name {
         "team" => Ok(Some(ColumnType::Uuid)),

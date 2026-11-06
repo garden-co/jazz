@@ -18,7 +18,7 @@ function ChatShell({
   onSignOut: () => Promise<void>;
 }): React.JSX.Element {
   const { claims, authMode, user } = useAuthState();
-  const userId = user?.account ?? null;
+  const userId = user;
   const role = typeof claims.role === "string" ? claims.role : null;
   const canPostAnnouncements = authMode === "external" && role === "admin";
   return (
