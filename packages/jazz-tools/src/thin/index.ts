@@ -82,16 +82,52 @@ export async function upgradeToLocalFirst(thin: Db, open: () => Promise<Db>): Pr
 
 const PREFETCH_ROUNDS = 3;
 
-/** @internal Read every query `thin` is subscribed to into `next` from the server. */
+/**
+ * @internal Read every query `thin` is subscribed to into `next` from the
+ * server, until the thin link reports offline or a read fails. The
+ * prefetch only spares the app's live queries a moment without rows: with
+ * no server to read from (a first visit offline, an outage) it must not
+ * hold the upgrade, or a guest's writes would stay in the thin client's
+ * memory, never stored, until the server is back.
+ */
 export async function prefetchThinQueries(thin: Db, next: Db): Promise<void> {
   const runtime = thinRuntimeOf(thin);
   if (!runtime) return;
+  const ended = { done: false };
+  // Still connecting: wait to learn whether the server answers (an outage
+  // reports as offline after a few seconds).
+  let stop!: () => void;
+  const offline = new Promise<void>((resolve) => {
+    stop = thin.onSyncStatusChange(({ link }) => {
+      if (link.state === "offline") resolve();
+    });
+  });
+  try {
+    if (thin.getSyncStatus().link.state === "offline") return;
+    // A read that fails (the server went away) just ends the prefetch.
+    await Promise.race([prefetchRounds(runtime, next, ended).catch(() => {}), offline]);
+  } finally {
+    ended.done = true;
+    stop();
+  }
+}
+
+/**
+ * The prefetch's rounds, until `ended`. A read already sent when the
+ * prefetch ends may still land in `next` later: rows from the server, as its
+ * own sync would bring them, so that is harmless.
+ */
+async function prefetchRounds(
+  runtime: ThinRuntime,
+  next: Db,
+  ended: { done: boolean },
+): Promise<void> {
   // Queries the app subscribes to while one round reads are read in the
   // next, so each live query opens on the local-first Db with its rows.
   // A few rounds: a component that keeps subscribing with new queries
   // must not hold the upgrade.
   const read = new Set<string>();
-  for (let round = 0; round < PREFETCH_ROUNDS; round++) {
+  for (let round = 0; round < PREFETCH_ROUNDS && !ended.done; round++) {
     const pending = runtime.liveQueryJsons().filter((query) => !read.has(query));
     if (pending.length === 0) return;
     await next.prefetchRuntimeQueries(runtime.schema, pending);
