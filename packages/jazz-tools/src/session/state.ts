@@ -216,6 +216,8 @@ export async function createJazzSessionOwner<
           await db?.waitForSync?.({ timeoutMs: 5_000 }).catch(() => {});
           await db?.deleteClientStorage?.();
           await client.shutdown();
+        } else if (signsOut) {
+          await signOutOf(client);
         } else {
           await client.shutdown({ waitForSync: true });
         }
@@ -429,4 +431,41 @@ export async function createJazzSessionOwner<
   });
   if (options.decorate) Object.assign(session, options.decorate(session));
   return Object.freeze(session) as JazzSession<Client> & Extra;
+}
+
+type SigningOutClient = {
+  shutdown(options?: { waitForSync?: boolean }): Promise<void>;
+  db?: {
+    getAuthState?(): { error?: unknown };
+    getSyncStatus?(): { pendingUploads: number };
+    getConfig?(): { driver?: { type?: string } };
+  };
+};
+
+/**
+ * Sign out of `client`: upload what the server still accepts, then stop it.
+ * When the server refuses this user's sign-in (their session at the backend
+ * ended), no retry uploads the rest while they are signed out, and refusing
+ * the sign-out would leave them no way out, through reloads too: it signs
+ * out and says what became of those writes. A persistent client keeps them
+ * on this device, under that account, and uploads them when it next opens;
+ * one that keeps nothing (in memory, or thin) loses them. Any other failure
+ * (an outage) may pass, so it still fails the sign-out for the app to retry.
+ */
+async function signOutOf(client: SigningOutClient) {
+  try {
+    await client.shutdown({ waitForSync: true });
+  } catch (cause) {
+    const db = client.db;
+    if (!(cause instanceof GracefulShutdownSyncError) || !db?.getAuthState?.().error) throw cause;
+    const writes = db.getSyncStatus?.().pendingUploads ?? 0;
+    const kept = !isThinDb(db as Db) && db.getConfig?.().driver?.type !== "memory";
+    console.warn(
+      kept
+        ? `Jazz signed out with ${writes} write(s) the server refused, as it no longer accepts this user's sign-in. They stay on this device and upload when this account signs in again.`
+        : `Jazz signed out and dropped ${writes} write(s) the server refused, as it no longer accepts this user's sign-in. This client keeps nothing on the device.`,
+      cause.cause,
+    );
+    await client.shutdown();
+  }
 }

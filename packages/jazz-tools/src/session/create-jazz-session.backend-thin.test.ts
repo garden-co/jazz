@@ -336,3 +336,46 @@ describe("browser session against the app's backend", () => {
     expect(guest.getSnapshot().account).toBe(account);
   });
 });
+
+describe("signing out with writes the server won't take", () => {
+  // The backend's session ended (cookies cleared, expired) with a write still
+  // on this device: the sign-out must go through, or the app is stuck on an
+  // error it can't leave, through reloads too.
+  it("signs out when the backend does, past a write the server won't take", async () => {
+    const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    cleanups.push(() => jazz.close());
+    const served = await listen(jazz);
+    const { origin } = served;
+    const jar = cookies(origin, "alice");
+    const session = await createJazzClient({
+      serverUrl: `${origin}/jazz`,
+      store: memoryStore(),
+      driver: { type: "memory" },
+      client: async () => ({ createClient: createLocalFirstDb }),
+    });
+    cleanups.push(() => session.close());
+    await session.loginWithBackend();
+    await expect
+      .poll(() => isThinDb(session.getSnapshot().client!.db), { timeout: 15_000 })
+      .toBe(false);
+    const local = session.getSnapshot().client!;
+    const owner = local.session!.user!;
+    await local.db.insert(app.todos, { title: "synced", owner }).wait({ tier: "global" });
+
+    // The backend goes down; a write stays on this device; the cookie goes.
+    await served.close();
+    await local.db.insert(app.todos, { title: "unsynced", owner });
+    jar.user = jar.socketUser = null;
+    await listen(jazz, Number(new URL(origin).port));
+    const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+    cleanups.push(async () => warned.mockRestore());
+    await (session as unknown as { reauthenticate(): Promise<void> }).reauthenticate();
+    expect(session.getSnapshot().status).toBe("signed-out");
+    // In memory, it says so: those writes are gone.
+    expect(warned).toHaveBeenCalledWith(
+      expect.stringMatching(/dropped 1 write\(s\) the server refused/),
+      expect.anything(),
+    );
+    await session.close();
+  }, 60_000);
+});
