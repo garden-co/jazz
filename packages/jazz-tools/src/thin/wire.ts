@@ -8,7 +8,16 @@ import { PostcardReader, PostcardWriter } from "../runtime/native-runtime/native
 /** `FEATURE_THIN_RESULTS` in `crates/jazz/layers/protocol/src/wire.rs`. */
 export const FEATURE_THIN_RESULTS = 1 << 10;
 
+/** `MAX_THIN_MESSAGE_BYTES` in `crates/jazz/layers/protocol/src/thin.rs`:
+ * the most one thin request or response may take, split into parts. */
+export const MAX_THIN_MESSAGE_BYTES = 32 * 1024 * 1024;
+/** `MAX_WHOLE_THIN_FRAME_BYTES`: a wire frame, less the carrier batch's
+ * prefixes. */
+const MAX_WHOLE_THIN_FRAME_BYTES = 2 * 1024 * 1024 - 16;
+const THIN_PART_BYTES = MAX_WHOLE_THIN_FRAME_BYTES - 16;
+
 const WIRE_FRAME_THIN_REQUEST = 4;
+const WIRE_FRAME_THIN_PART = 6;
 const WIRE_FRAME_THIN_RESPONSE = 5;
 
 /**
@@ -217,6 +226,105 @@ export function encodeThinRequest(id: number, op: ThinOp): Uint8Array {
       break;
   }
   return writer.finish();
+}
+
+/**
+ * An encoded thin frame as the wire frames that carry it (`thin_wire_frames`
+ * in `thin.rs`): itself when it fits one, else its `WireFrame::ThinPart`s,
+ * sent back to back. Null past {@link MAX_THIN_MESSAGE_BYTES}.
+ */
+export function thinWireFrames(frame: Uint8Array): Uint8Array[] | null {
+  if (frame.byteLength <= MAX_WHOLE_THIN_FRAME_BYTES) return [frame];
+  if (frame.byteLength > MAX_THIN_MESSAGE_BYTES) return null;
+  const parts: Uint8Array[] = [];
+  const varint = (header: number[], value: number) => {
+    for (let rest = value; ; rest >>>= 7) {
+      if (rest < 0x80) {
+        header.push(rest);
+        return;
+      }
+      header.push((rest & 0x7f) | 0x80);
+    }
+  };
+  for (let offset = 0; offset < frame.byteLength; offset += THIN_PART_BYTES) {
+    const bytes = frame.subarray(offset, offset + THIN_PART_BYTES);
+    // Tag, the whole frame's length, then the bytes' length, as varints:
+    // written by hand, as the generic writer goes byte by byte.
+    const header = [WIRE_FRAME_THIN_PART];
+    varint(header, frame.byteLength);
+    varint(header, bytes.byteLength);
+    const part = new Uint8Array(header.length + bytes.byteLength);
+    part.set(header);
+    part.set(bytes, header.length);
+    parts.push(part);
+  }
+  return parts;
+}
+
+/**
+ * Joins `WireFrame::ThinPart`s back into the frame they carry
+ * (`ThinAssembler` in `thin.rs`), refusing as it does a part that does not
+ * make its frame.
+ */
+export class ThinAssembler {
+  private joined: Uint8Array | undefined;
+  private length = 0;
+
+  /** Whether `frame` is a part, for {@link push}. */
+  static isPart(frame: Uint8Array): boolean {
+    return frame[0] === WIRE_FRAME_THIN_PART;
+  }
+
+  /** Whether a split frame is part way through. */
+  get joining(): boolean {
+    return this.joined !== undefined;
+  }
+
+  /** The joined frame once it has all its bytes, else undefined. Throws,
+   * dropping what was joined, for a malformed part. */
+  push(part: Uint8Array): Uint8Array | undefined {
+    try {
+      return this.join(part);
+    } catch (error) {
+      this.reset();
+      throw error;
+    }
+  }
+
+  private join(part: Uint8Array): Uint8Array | undefined {
+    const reader = new PostcardReader(part);
+    if (reader.u64() !== WIRE_FRAME_THIN_PART) throw new Error("expected WireFrame::ThinPart");
+    const total = reader.u64();
+    const bytes = reader.bytesAtMost(MAX_WHOLE_THIN_FRAME_BYTES, "thin part");
+    if (!reader.done()) throw new Error("a thin part has bytes after it");
+    if (total <= MAX_WHOLE_THIN_FRAME_BYTES || total > MAX_THIN_MESSAGE_BYTES) {
+      throw new Error(`a split thin frame of ${total} bytes is out of bounds`);
+    }
+    if (this.joined !== undefined && total !== this.joined.byteLength) {
+      throw new Error("a part of another thin frame arrived inside a split one");
+    }
+    const joined = (this.joined ??= new Uint8Array(total));
+    const end = this.length + bytes.byteLength;
+    // Every part but the last is full.
+    if (
+      bytes.byteLength === 0 ||
+      end > total ||
+      (end < total && bytes.byteLength !== THIN_PART_BYTES)
+    ) {
+      throw new Error("a thin part does not fit its frame");
+    }
+    joined.set(bytes, this.length);
+    this.length += bytes.byteLength;
+    if (this.length < total) return undefined;
+    this.reset();
+    return joined;
+  }
+
+  /** Drop a split frame part way through, as a new connection does. */
+  reset(): void {
+    this.joined = undefined;
+    this.length = 0;
+  }
 }
 
 /** Whether `frame` is a `WireFrame::ThinResponse`, by its postcard tag. */

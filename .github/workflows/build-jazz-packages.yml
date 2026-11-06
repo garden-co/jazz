@@ -660,6 +660,11 @@ jobs:
       - name: Generate iOS host from the packed package
         run: pnpm --dir "$JAZZ_RN_CONSUMER_FIXTURE" exec expo prebuild --platform ios --clean --no-install
 
+      - name: Evaluate JazzRn.podspec against each React Native architecture signal
+        run: node --test --test-name-pattern='JazzRn.podspec accepts' dev/gates/test/jazz-rn-packaging.test.mjs
+        env:
+          JAZZ_RN_REQUIRE_RUBY: "1"
+
       - name: Install the packed native pod
         run: pod install
         working-directory: ${{ env.JAZZ_RN_CONSUMER_FIXTURE }}/ios

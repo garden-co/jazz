@@ -260,9 +260,8 @@ describe("cli validate", () => {
     expect(await fileExists(join(root, "permissions.test.ts"))).toBe(false);
     expect(logs).toContain(`Loaded schema from ${join(root, "schema.ts")}.`);
     expect(logs).toContain(`Loaded current permissions from ${join(root, "permissions.ts")}.`);
-    expect(logs).toContain(
-      "Permission-only changes do not create schema hashes or require migrations.",
-    );
+    // A project with no snapshot is told to take one before changing schema.ts.
+    expect(logs.join("\n")).toContain("no schema snapshot yet");
   });
 
   it("loads src/schema.ts and src/permissions.ts when schemaDir points at the app root", async () => {

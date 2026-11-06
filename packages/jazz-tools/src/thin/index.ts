@@ -54,16 +54,18 @@ export async function createClient(config: ThinDbConfig): Promise<Db> {
 /**
  * Move an app from a thin `Db` to a local-first one, once it has loaded the
  * full client. `open` creates the local-first `Db` for the same account, for
- * example after `await import("jazz-tools")`. Every query the app is
- * subscribed to is read into the new `Db` from the server first, so its live
- * queries answer from local data straight away; then the thin `Db` waits for
+ * example after `await import("jazz-tools")`. The queries the app is
+ * subscribed to are read into the new `Db` from the server first, so its live
+ * queries answer from local data straight away. Queries subscribed during
+ * that read are read too, for up to 3 rounds; one subscribed later opens on
+ * the new `Db` with what it has locally. Then the thin `Db` waits for
  * its writes and shuts down. The app swaps the returned `Db` in where it held
  * the thin one.
  *
  * This is for a thin `Db` the app opened itself with {@link createClient}.
  * Under a Jazz provider or `createJazzClient`, call the `Db` method
  * `db.upgradeToLocalFirst(loader)` instead: it takes the loader, and the
- * session swaps the new `Db` in for every component.
+ * session upgrades in place, so the app keeps the same `Db`.
  */
 export async function upgradeToLocalFirst(thin: Db, open: () => Promise<Db>): Promise<Db> {
   thinRuntimeOf(thin);
@@ -78,10 +80,23 @@ export async function upgradeToLocalFirst(thin: Db, open: () => Promise<Db>): Pr
   return next;
 }
 
+const PREFETCH_ROUNDS = 3;
+
 /** @internal Read every query `thin` is subscribed to into `next` from the server. */
 export async function prefetchThinQueries(thin: Db, next: Db): Promise<void> {
   const runtime = thinRuntimeOf(thin);
-  if (runtime) await next.prefetchRuntimeQueries(runtime.schema, runtime.liveQueryJsons());
+  if (!runtime) return;
+  // Queries the app subscribes to while one round reads are read in the
+  // next, so each live query opens on the local-first Db with its rows.
+  // A few rounds: a component that keeps subscribing with new queries
+  // must not hold the upgrade.
+  const read = new Set<string>();
+  for (let round = 0; round < PREFETCH_ROUNDS; round++) {
+    const pending = runtime.liveQueryJsons().filter((query) => !read.has(query));
+    if (pending.length === 0) return;
+    await next.prefetchRuntimeQueries(runtime.schema, pending);
+    for (const query of pending) read.add(query);
+  }
 }
 
 function thinRuntimeOf(thin: Db): ThinRuntime | null {
