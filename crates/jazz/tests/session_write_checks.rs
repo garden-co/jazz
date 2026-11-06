@@ -23,6 +23,7 @@ use jazz::query::Query;
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder};
+use jazz::tx::DurabilityTier;
 
 use common::{allow_all_policies, compile_schema, exists, outer_eq, session_eq};
 
@@ -390,11 +391,13 @@ fn a_trusted_links_session_write_is_checked_as_that_session_at_the_authority() {
 }
 
 /// Read-for-write under a read policy that reads other rows: the replica
-/// may lack the rows that grant access, so it stages an upsert and the
-/// authority refuses a session that may not read the row. An update merges
-/// into the session's view of the row, so the replica refuses it at once.
+/// may lack the rows that grant access (here it never loaded `admins`, as a
+/// fresh backend process has loaded nothing), so it stages the update or
+/// upsert and leaves the decision to the authority. An admin's update goes
+/// through; a session the authority finds may not read the row is refused
+/// there, and the replica reverts.
 #[test]
-fn a_replica_leaves_a_relational_read_for_write_upsert_to_the_authority() {
+fn a_replica_leaves_a_relational_read_for_write_to_the_authority() {
     let server = open(0);
     seed(&server, "admins", id(2, 1), &[("user_id", text("alice"))]);
     seed(&server, "notes", id(4, 1), &[("data", text("initial"))]);
@@ -416,22 +419,44 @@ fn a_replica_leaves_a_relational_read_for_write_upsert_to_the_authority() {
     pump();
     assert_eq!(cell(&backend, "notes", "data"), text("initial"));
 
+    let alice = user(&backend, 1, "alice");
+    user(&server, 1, "alice");
+    block_on(backend.update(
+        "notes",
+        id(4, 1),
+        BTreeMap::from([("data".to_owned(), text("alice"))]),
+        as_session(alice),
+    ))
+    .expect("the replica stages an update it cannot decide");
+    pump();
+    assert_eq!(cell(&server, "notes", "data"), text("alice"));
+    assert_eq!(cell(&backend, "notes", "data"), text("alice"));
+
     let bob = user(&backend, 2, "bob");
     user(&server, 2, "bob");
-    let error = block_on(backend.update(
+    let update = block_on(backend.update(
         "notes",
         id(4, 1),
         BTreeMap::from([("data".to_owned(), text("bob"))]),
         as_session(bob),
     ))
-    .err()
-    .expect("an update of a row hidden from the session is refused at once");
+    .expect("the replica stages the session update");
+    // Until the authority answers, the replica shows the staged value, as it
+    // does for any write it cannot decide.
+    assert_eq!(cell(&backend, "notes", "data"), text("bob"));
+    pump();
+    let refusal =
+        block_on(backend.wait_for_transaction(update.mergeable_tx_id(), DurabilityTier::Global))
+            .err()
+            .expect("the authority refuses the update, and its wait says so");
     assert!(
-        error.message.contains("read policy denied UPDATE"),
-        "{}",
-        error.message
+        format!("{refusal:?}").contains("read policy denied UPDATE"),
+        "{refusal:?}"
     );
-    block_on(backend.upsert(
+    assert_eq!(cell(&server, "notes", "data"), text("alice"));
+    assert_eq!(cell(&backend, "notes", "data"), text("alice"));
+
+    let upsert = block_on(backend.upsert(
         "notes",
         id(4, 1),
         BTreeMap::from([("data".to_owned(), text("bob"))]),
@@ -442,8 +467,11 @@ fn a_replica_leaves_a_relational_read_for_write_upsert_to_the_authority() {
     ))
     .expect("the replica stages the session upsert");
     pump();
-    assert_eq!(cell(&server, "notes", "data"), text("initial"));
-    assert_eq!(cell(&backend, "notes", "data"), text("initial"));
+    block_on(backend.wait_for_transaction(upsert.mergeable_tx_id(), DurabilityTier::Global))
+        .err()
+        .expect("the authority refuses the upsert, and its wait says so");
+    assert_eq!(cell(&server, "notes", "data"), text("alice"));
+    assert_eq!(cell(&backend, "notes", "data"), text("alice"));
 }
 
 /// A session link cannot vouch for the sessions its runtime writes as: the
