@@ -27,10 +27,14 @@ export interface AccountManagerConfig {
    */
   store?: AccountStore;
   /**
-   * The `fetch` sign-in requests to the app's backend go through (default:
-   * the global one). Supply one that adds what the backend authenticates
-   * requests by, when that is not a cookie the global one sends, such as a
-   * native app's bearer.
+   * Browser hosts only: the `fetch` sign-in requests to the app's backend go
+   * through (default: the global one), as for a test or a proxy. The backend
+   * names the user by the cookie a browser sends on the sync connection too,
+   * so a bearer this adds would sign in but never sync. Outside a browser
+   * page or worker (Node, Deno, a CLI), `loginWithBackend` and
+   * `linkWithBackend` refuse without calling it. On React Native, pass
+   * `bearer` to `createAccountManager` from `jazz-tools/react-native` or
+   * `jazz-tools/expo`.
    */
   fetch?: typeof fetch;
 }
