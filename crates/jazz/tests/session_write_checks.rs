@@ -536,3 +536,44 @@ fn a_session_links_session_write_is_checked_as_the_link() {
     pump(&alice_client);
     assert_eq!(cell(&server, "protected", "data"), text("alice as bob"));
 }
+
+/// A session's write doesn't reveal whether a row it may not read exists:
+/// an update or a delete of a hidden row and of a missing one are refused
+/// alike, as policy denials.
+#[test]
+fn a_write_to_a_hidden_row_reads_as_one_to_a_missing_row() {
+    let db = open(0);
+    seed(&db, "notes", id(4, 1), &[("data", text("secret"))]);
+    let bob = user(&db, 2, "bob");
+    let update = |row| {
+        block_on(db.update(
+            "notes",
+            row,
+            BTreeMap::from([("data".to_owned(), text("bob"))]),
+            as_session(bob),
+        ))
+        .err()
+        .expect("bob may not read notes")
+    };
+    let (hidden, missing) = (update(id(4, 1)), update(id(4, 9)));
+    assert!(hidden.is_authorization_denied(), "{}", hidden.message);
+    assert_eq!(hidden.message, missing.message);
+    assert_eq!(hidden.reason, missing.reason);
+
+    let delete = |row| {
+        block_on(db.delete(
+            "notes",
+            row,
+            DeleteOptions {
+                identity: WriteIdentity::Session(bob),
+                ..Default::default()
+            },
+        ))
+        .err()
+        .expect("notes declares no delete policy")
+    };
+    let (hidden, missing) = (delete(id(4, 1)), delete(id(4, 9)));
+    assert!(hidden.is_authorization_denied(), "{}", hidden.message);
+    assert_eq!(hidden.message, missing.message);
+    assert!(!hidden.message.contains("RowUuid"), "{}", hidden.message);
+}

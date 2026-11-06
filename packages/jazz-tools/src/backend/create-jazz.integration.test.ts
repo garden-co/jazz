@@ -1652,7 +1652,7 @@ describe("createJazz", () => {
     // A row the read cannot find is refused as missing.
     await expect(
       third.db.update(app.todos, randomUUID(), { title: "nope" }).wait({ tier: "global" }),
-    ).rejects.toThrow(/does not exist or this session cannot read it/);
+    ).rejects.toThrow(/the row does not exist or the session may not read it/);
   }, 60_000);
 
   it("leaves an update under a relational read policy to the core, from a fresh backend", async () => {
@@ -1720,7 +1720,7 @@ describe("createJazz", () => {
     const asCarol = await fresh("carol");
     await expect(
       asCarol.update(shared.notes, note.id, { body: "carol" }).wait({ tier: "global" }),
-    ).rejects.toThrow(/does not exist or this session cannot read it/);
+    ).rejects.toThrow(/the row does not exist or the session may not read it/);
     expect((await asAlice.one(shared.notes.where({ id: note.id })))?.body).toBe("alice");
   }, 60_000);
 

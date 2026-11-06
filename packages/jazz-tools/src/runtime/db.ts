@@ -3542,9 +3542,14 @@ export class Db {
           if (nativeCoreErrorCode(error) !== "not_observed") throw error;
           return loadRow(client, table, id, context?.readSession, normalized?.branch).then(
             (rows) => {
+              // As the authority answers: a missing row and one the session
+              // may not read are refused alike, with the denial's code.
               if (rows.length === 0)
-                throw new Error(
-                  `update on table ${table._table}: row ${id} does not exist or this session cannot read it`,
+                throw Object.assign(
+                  new Error(
+                    `Update failed: WriteError("authorization_denied: read policy denied UPDATE on table ${table._table}: the row does not exist or the session may not read it")`,
+                  ),
+                  { code: "permission_denied" },
                 );
               return submit(record);
             },

@@ -5429,7 +5429,15 @@ function writeOrNormalizeRejection<T>(
     if (isCoreWriteRejection(error)) {
       const message = errorMessage(error);
       const reason = extractWriteRejectedReason(message) ?? message;
-      throw new Error(`${operation} failed: WriteError("${reason}")`);
+      // A synchronous NAPI throw carries no reason, but a denial's message
+      // leads with it. Either way the caller gets the code a rejected wait
+      // would carry, so one check handles a denial wherever it is decided.
+      const coreReason =
+        nativeCoreErrorReason(error) ??
+        (reason.startsWith("authorization_denied:") ? "authorization_denied" : undefined);
+      throw Object.assign(new Error(`${operation} failed: WriteError("${reason}")`), {
+        code: rejectionCode(coreReason),
+      });
     }
     throw error;
   }

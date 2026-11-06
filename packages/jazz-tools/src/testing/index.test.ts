@@ -708,6 +708,65 @@ describe("createPolicyTestApp", () => {
   }, 10_000);
 });
 
+describe("expectDenied", () => {
+  const owned = definePermissions(testApp, ({ policy, session }) => {
+    policy.todos.allowRead.where({ ownerId: session.user });
+    policy.todos.allowUpdate.where({ ownerId: session.user });
+  });
+  const session = (user_id: string, account_id: string) =>
+    ({
+      issuer: "https://policy-test.example",
+      user_id,
+      account_id,
+      claims: {},
+      authMode: "external",
+    }) as const;
+
+  it("counts an update denied at once, because the user may not read the row", async () => {
+    const policyTestApp = await createPolicyTestApp(testApp, owned, expect);
+    try {
+      const todo = await policyTestApp.seed((db) =>
+        db.insert(testApp.todos, {
+          title: "Alice's",
+          done: false,
+          ownerId: "00000000-0000-4000-8000-000000000001",
+        }),
+      );
+      const bob = policyTestApp.as(session("bob", "00000000-0000-4000-8000-000000000002"));
+      // The local denial carries the code a server rejection carries.
+      let thrown: unknown;
+      try {
+        bob.update(testApp.todos, todo.id, { title: "Bob's now" });
+      } catch (error) {
+        thrown = error;
+      }
+      expect((thrown as { code?: string } | undefined)?.code).toBe("permission_denied");
+      await bob.expectDenied((db) => db.update(testApp.todos, todo.id, { title: "Bob's now" }));
+    } finally {
+      await policyTestApp.shutdown();
+    }
+  }, 10_000);
+
+  it("fails, saying so, when the write is accepted", async () => {
+    const policyTestApp = await createPolicyTestApp(testApp, owned, expect);
+    try {
+      const alice = policyTestApp.as(session("alice", "00000000-0000-4000-8000-000000000001"));
+      const todo = await policyTestApp.seed((db) =>
+        db.insert(testApp.todos, {
+          title: "Alice's",
+          done: false,
+          ownerId: "00000000-0000-4000-8000-000000000001",
+        }),
+      );
+      await expect(
+        alice.expectDenied((db) => db.update(testApp.todos, todo.id, { title: "still hers" })),
+      ).rejects.toThrow("expected the write to be denied, but it was accepted");
+    } finally {
+      await policyTestApp.shutdown();
+    }
+  }, 10_000);
+});
+
 describe("policies that correlate optional and required columns", () => {
   // `exists.where` equalities between an optional column and a required column
   // of the same type used to be rejected when the server converted the policy
