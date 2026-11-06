@@ -1696,20 +1696,28 @@ describe("createJazz", () => {
 
     const second = await open();
     cleanups.push(() => second.close());
-    // An editor's update goes through.
+    // A fresh backend filters a session's reads itself, so until it holds
+    // the rows a read policy depends on, a session can't see the note on it.
+    // Each session reads its own grants first.
     const asAlice = await as(second, "alice");
+    const asBob = await as(second, "bob");
+    const asCarol = await as(second, "carol");
+    for (const session of [asAlice, asBob, asCarol]) {
+      await session.all(shared.readers, { tier: "remote" });
+      await session.all(shared.editors, { tier: "remote" });
+    }
+    // An editor's update goes through.
     await asAlice.update(shared.notes, note.id, { body: "alice" }).wait({ tier: "global" });
     // A reader may read the note but not update it: the core refuses the
     // update the backend staged, and the wait says so.
-    const asBob = await as(second, "bob");
     await expect(
       asBob.update(shared.notes, note.id, { body: "bob" }).wait({ tier: "global" }),
     ).rejects.toThrow(/permission_denied|Write rejected by server authorization/);
-    // A session the core won't show the note to can't update it either.
-    const asCarol = await as(second, "carol");
+    // So is a session the core won't show the note to: the backend holds the
+    // note now, but can't tell whether carol may read it.
     await expect(
       asCarol.update(shared.notes, note.id, { body: "carol" }).wait({ tier: "global" }),
-    ).rejects.toThrow(/does not exist or this session cannot read it/);
+    ).rejects.toThrow(/permission_denied|Write rejected by server authorization/);
     expect((await asAlice.one(shared.notes.where({ id: note.id })))?.body).toBe("alice");
   }, 60_000);
 
