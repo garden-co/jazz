@@ -5301,6 +5301,9 @@ export class Db {
       );
     let pendingDecryption = Promise.resolve();
     let encryptedFrontier = 0;
+    // Incremental changes are relative to the preceding internal frontier. If
+    // that frontier was withheld, publish complete rows instead of stale patches.
+    let lastEncryptedDeliveryFrontier = 0;
     let deliveryReady = initialReadiness === null;
     const bufferedDeltas: SubscriptionDelta<T>[] = [];
 
@@ -5512,13 +5515,14 @@ export class Db {
             activeSubscription === subscription &&
             frontier === encryptedFrontier
           ) {
-            if (subscription.equality) {
+            if (subscription.equality || frontier !== lastEncryptedDeliveryFrontier + 1) {
               deliver({
                 reset: true,
                 delta: [],
                 all: materialized,
               });
             } else deliver(typedDelta);
+            lastEncryptedDeliveryFrontier = frontier;
           }
         })
         .catch((error) => {
@@ -5662,6 +5666,7 @@ export class Db {
                       delta: [],
                       all: materialized,
                     });
+                    lastEncryptedDeliveryFrontier = frontier;
                   }
                 })
                 .catch((error) => {

@@ -40,3 +40,7 @@ transaction; omitted recipients keep the creator default and an explicit empty
 list is rejected rather than replaced by the default. Late undeclared scope
 creation reports the required call;
 ordinary transactions without a scope declaration do no extra online work.
+
+When a newer encrypted subscription frontier suppresses an intermediate update,
+return complete current rows without incremental splices based on the unseen
+value. Uninterrupted TEXT/BYTEA updates retain their valid splice metadata.
