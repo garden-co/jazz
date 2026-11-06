@@ -43,3 +43,12 @@ Run locally with:
 cargo test -p jazz-example-big-label-benchmark
 cargo bench -p jazz-example-big-label-benchmark --bench loads
 ```
+
+## Memory ceiling
+
+[memory-ceiling.ts](memory-ceiling.ts) is BigLabel's adapter for
+[dev/benchmarks/memory-ceiling](../../../dev/benchmarks/memory-ceiling/README.md):
+the most labels (or, in the `flagship` scenario, releases in one label) the
+shipped sync server and a client hold before crossing their memory budgets.
+Unlike the Rust variant above, it uses the app's own `schema.ts` and
+`permissions.ts`, so it measures the policies the app deploys.
