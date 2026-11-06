@@ -124,7 +124,6 @@ describe("browser session", () => {
     const client = session.getSnapshot().client;
     const kept = db(session);
     await kept.insert(app.notes, { text: "before" }).wait({ tier: "global" });
-    expect(kept.isLocalFirst()).toBe(false);
     const seen: string[][] = [];
     const errors: Error[] = [];
     const states: string[] = [];
@@ -142,7 +141,6 @@ describe("browser session", () => {
     expect(session.getSnapshot().client).toBe(client);
     expect(db(session)).toBe(kept);
     expect(isThinDb(kept)).toBe(false);
-    expect(kept.isLocalFirst()).toBe(true);
     expect(states).toEqual([]);
     // The rows were read into the local-first client first.
     expect((await kept.all(app.notes, { tier: "local-first" })).map((row) => row.text)).toEqual([
@@ -185,6 +183,56 @@ describe("browser session", () => {
     expect((await kept.all(app.notes, { tier: "local-first" })).map((row) => row.text)).toEqual([
       "late",
     ]);
+  }, 60_000);
+
+  it("shows a streamed thin write in local-first reads after the upgrade", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const kept = db(session);
+    async function* chunks(): AsyncGenerator<string> {
+      yield "streamed ";
+      yield "text";
+    }
+    const written = await kept.insertStreaming(app.notes, { text: chunks() });
+    await written.wait({ tier: "global" });
+
+    await kept.upgradeToLocalFirst(loadLocalFirst);
+    expect((await kept.all(app.notes, { tier: "local-first" })).map((row) => row.text)).toEqual([
+      "streamed text",
+    ]);
+  }, 60_000);
+
+  it("upgrades with committed thin writes while the server is gone", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const kept = db(session);
+    await kept.insert(app.notes, { text: "thin" }).wait({ tier: "global" });
+    await server.stop();
+
+    // The hand-off can't read the write back: it gives up, and the upgrade
+    // goes ahead with what the device has.
+    await kept.upgradeToLocalFirst(loadLocalFirst);
+    expect(isThinDb(kept)).toBe(false);
+    await kept.insert(app.notes, { text: "local" }).wait({ tier: "local" });
+  }, 60_000);
+
+  it("resolves a thin write's global wait when its hand-off read gets no answer", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const kept = db(session);
+    await kept.disconnect();
+    const write = kept.insert(app.notes, { text: "late" });
+    // The local-first Db never hears back (another tab took its shared
+    // worker offline, its socket dropped).
+    const read = vi
+      .spyOn(Db.prototype, "prefetchRuntimeQueries")
+      .mockImplementation(() => new Promise(() => {}));
+    await kept.upgradeToLocalFirst(loadLocalFirst);
+    await kept.reconnect();
+
+    await write.wait({ tier: "global" });
+    expect(read).toHaveBeenCalled();
+    read.mockRestore();
   }, 60_000);
 
   it("counts and uploads the thin Db's unsent writes after the upgrade", async () => {

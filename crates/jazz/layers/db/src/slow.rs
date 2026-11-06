@@ -59,7 +59,9 @@ impl SlowQuery {
     /// What would most likely make this query fast, read off its plan.
     pub fn hint(&self) -> Option<String> {
         let scanned_enough = self.scanned >= INDEX_HINT_MIN_ROWS;
-        let sorted_enough = self.rows >= INDEX_HINT_MIN_ROWS;
+        // A sort reads every row it orders, and a `LIMIT` returns only a
+        // few of them: the scan count tells a large sort too.
+        let sorted_enough = self.rows.max(self.scanned) >= INDEX_HINT_MIN_ROWS;
         let scans: Vec<&str> = self
             .plan
             .lines()
@@ -287,6 +289,17 @@ mod tests {
         few.scanned = 2;
         assert_eq!(few.hint(), None);
         assert!(!few.line(None).contains("index"), "{}", few.line(None));
+    }
+
+    #[test]
+    fn a_limited_page_of_a_large_sort_still_blames_its_ordering() {
+        // `ORDER BY created DESC LIMIT 20` over a million rows.
+        let mut page = shape("SCAN docs\nUSE TEMP B-TREE FOR ORDER BY", true);
+        page.rows = 20;
+        page.scanned = 1_000_000;
+        let hint = page.hint().unwrap();
+        assert!(hint.contains("scans all of docs"), "{hint}");
+        assert!(hint.contains("ordering columns"), "{hint}");
     }
 
     #[test]

@@ -6,7 +6,12 @@ import type { Db } from "../runtime/db.js";
 import { formatAuthSecret } from "../runtime/auth-secret-codec.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { startTestJazz, type TestJazz } from "../testing/index.js";
-import { createAccountManager, createClient, upgradeToLocalFirst } from "./index.js";
+import {
+  createAccountManager,
+  createClient,
+  prefetchThinQueries,
+  upgradeToLocalFirst,
+} from "./index.js";
 import { ThinRuntime } from "./thin-runtime.js";
 import { JazzClient } from "../runtime/client.js";
 import type { Session } from "../runtime/context.js";
@@ -173,6 +178,48 @@ describe("thin client", () => {
       .toEqual(["from the replica", "from thin"]);
   }, 60_000);
 
+  // A first visit offline (or an outage): there is nothing to prefetch, and
+  // holding the upgrade would keep a guest's writes in memory only.
+  it("doesn't hold the upgrade for a server that doesn't answer", async () => {
+    const server = await startServer();
+    const secret = formatAuthSecret(new Uint8Array(32).fill(6));
+    const thin = await thinDb(server, secret);
+    const unsubscribe = thin.subscribe(app.notes, () => undefined);
+    await thin.insert(app.notes, { text: "before", done: false }).wait({ tier: "global" });
+    const config = await localAccountConfig(server.appId, server.url, secret);
+    await server.stop();
+    const next = await createLocalFirstDb(config);
+    opened.push(next);
+
+    // Still connecting: the prefetch waits until the outage shows.
+    const prefetch = prefetchThinQueries(thin, next);
+    await expect.poll(() => thin.getSyncStatus().link.state, { timeout: 20_000 }).toBe("offline");
+    await prefetch;
+    // Offline already: it returns at once.
+    await prefetchThinQueries(thin, next);
+    unsubscribe();
+  }, 60_000);
+
+  it("upgrades with the server down, and a guest's write goes to the local store", async () => {
+    const server = await startServer();
+    const secret = formatAuthSecret(new Uint8Array(32).fill(7));
+    const thin = await thinDb(server, secret);
+    const unsubscribe = thin.subscribe(app.notes, () => undefined);
+    await thin.all(app.notes);
+    const config = await localAccountConfig(server.appId, server.url, secret);
+    await server.stop();
+
+    const local = await upgradeToLocalFirst(thin, () => createLocalFirstDb(config));
+    opened.push(local);
+    unsubscribe();
+    // Written while the server is still down: stored locally, and read back
+    // without it.
+    const { value: written } = local.insert(app.notes, { text: "offline guest", done: false });
+    expect((await local.all(app.notes, { tier: "local-first" })).map((row) => row.id)).toContain(
+      written.id,
+    );
+  }, 60_000);
+
   it("upgrades to local-first with the app's live queries already loaded", async () => {
     const server = await startServer();
     const secret = formatAuthSecret(new Uint8Array(32).fill(5));
@@ -313,6 +360,28 @@ describe("thin client", () => {
       .toEqual(["after", "before"]);
     expect(deliveries.every((rows) => new Set(rows).size === rows.length)).toBe(true);
     stop();
+  }, 60_000);
+
+  it("reports its link: connected, then offline once an outage lasts", async () => {
+    const server = await startServer();
+    const db = await thinDb(server);
+    await db.insert(app.notes, { text: "first", done: false }).wait({ tier: "global" });
+    expect(db.getSyncStatus().link).toEqual({ state: "connected" });
+    const links: string[] = [];
+    db.onSyncStatusChange(({ link }) =>
+      links.push(link.state === "offline" ? `offline ${link.reason}` : link.state),
+    );
+
+    // The server goes away: a short blip reads as connecting, a lasting
+    // outage as offline.
+    await server.stop();
+    await expect.poll(() => db.getSyncStatus().link.state, { timeout: 5_000 }).toBe("connecting");
+    await expect
+      .poll(() => db.getSyncStatus().link, { timeout: 20_000 })
+      .toEqual({ state: "offline", reason: "network", retrying: true });
+    // Never offline for another reason on the way.
+    expect(links.at(-1)).toBe("offline network");
+    expect(links.filter((link) => link.startsWith("offline"))).toEqual(["offline network"]);
   }, 60_000);
 
   it("gives up a write in flight when the app goes offline, so waiting for sync ends", async () => {

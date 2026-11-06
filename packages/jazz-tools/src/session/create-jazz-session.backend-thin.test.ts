@@ -1,5 +1,5 @@
 import { createServer, type Server } from "node:http";
-import type { AddressInfo } from "node:net";
+import type { AddressInfo, Socket } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
 import { createJazz, memory, type Jazz } from "../backend/index.js";
@@ -32,37 +32,62 @@ function authenticate(request: Request) {
   return userId ? { userId } : null;
 }
 
-async function serve(jazz: Jazz): Promise<string> {
+async function serve(jazz: Jazz, port = 0): Promise<string> {
+  return (await listen(jazz, port)).origin;
+}
+
+/** Serve `jazz`; `close` ends every connection, upgraded sockets too. */
+async function listen(jazz: Jazz, port = 0) {
   const server: Server = createServer((req, res) =>
     jazz.nodeHandler(req, res, () => {
       res.statusCode = 404;
       res.end();
     }),
   );
+  const sockets = new Set<Socket>();
+  server.on("connection", (socket) => {
+    sockets.add(socket);
+    socket.on("close", () => sockets.delete(socket));
+  });
   await jazz.attach(server);
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  cleanups.push(
-    () =>
-      new Promise((resolve) => {
-        server.closeAllConnections();
-        server.close(resolve);
-      }),
-  );
-  return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  await new Promise<void>((resolve) => server.listen(port, "127.0.0.1", resolve));
+  let closing: Promise<void> | undefined;
+  const close = () =>
+    (closing ??= new Promise<void>((resolve) => {
+      for (const socket of sockets) socket.destroy();
+      server.close(() => resolve());
+    }));
+  cleanups.push(close);
+  return { origin: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, close };
 }
 
 /** Every request and socket to `origin` carries `userId`'s session, as a cookie would. */
 function signInAs(origin: string, userId: string) {
+  return cookies(origin, userId);
+}
+
+/**
+ * Requests and sockets to `origin` carry the signed-in user's session, as a
+ * cookie would; `socketUser` sets what sockets carry alone (a stale cookie).
+ */
+function cookies(origin: string, userId: string | null) {
+  // A browser page: the host that sends the backend's cookie.
+  vi.stubGlobal("document", {});
+  const jar = { user: userId, socketUser: userId };
   const realFetch = globalThis.fetch;
   const RealWebSocket = globalThis.WebSocket;
   globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
     const request = new Request(input, init);
-    if (new URL(request.url).origin === origin) request.headers.set("x-test-user", userId);
+    if (jar.user && new URL(request.url).origin === origin)
+      request.headers.set("x-test-user", jar.user);
     return realFetch(request);
   }) as typeof fetch;
   globalThis.WebSocket = class extends RealWebSocket {
     constructor(url: string | URL, options?: { headers?: Record<string, string> }) {
-      const headers = new URL(url).host === new URL(origin).host ? { "x-test-user": userId } : {};
+      const headers =
+        jar.socketUser && new URL(url).host === new URL(origin).host
+          ? { "x-test-user": jar.socketUser }
+          : {};
       super(url, { ...options, headers: { ...options?.headers, ...headers } } as never);
     }
   } as typeof WebSocket;
@@ -70,6 +95,7 @@ function signInAs(origin: string, userId: string) {
     globalThis.fetch = realFetch;
     globalThis.WebSocket = RealWebSocket;
   });
+  return jar;
 }
 
 function memoryStore(): AccountStore {
@@ -184,5 +210,90 @@ describe("browser session against the app's backend", () => {
       "local",
       "thin",
     ]);
+  }, 60_000);
+
+  // The core no longer holds the user's account (a reset dev store, a new
+  // core): the sync server refuses the thin client, which must say so for the
+  // session to sign the user in again instead of hanging.
+  it("signs a user in again after the backend restarts on an empty store", async () => {
+    const first = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    cleanups.push(() => first.close());
+    const served = await listen(first);
+    signInAs(served.origin, "alice");
+    const session = await createJazzClient({
+      serverUrl: `${served.origin}/jazz`,
+      store: memoryStore(),
+      driver: { type: "memory" },
+    });
+    cleanups.push(() => session.close());
+    await session.loginWithBackend();
+    const before = session.getSnapshot().client!;
+    const lost = before.session!.user!;
+    await before.db.insert(app.todos, { title: "before", owner: lost }).wait({ tier: "global" });
+    expect(before.db.getSyncStatus().link).toEqual({ state: "connected" });
+    const links: string[] = [];
+    before.db.onSyncStatusChange(({ link }) =>
+      links.push(link.state === "offline" ? `offline ${link.reason}` : link.state),
+    );
+
+    // The same backend, restarted on an empty store: alice has no account.
+    await first.close();
+    await served.close();
+    const second = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    cleanups.push(() => second.close());
+    await listen(second, Number(new URL(served.origin).port));
+
+    const signedInAgain = () => {
+      const { status, client } = session.getSnapshot();
+      return status === "ready" && client?.session?.user !== lost ? client : undefined;
+    };
+    await expect.poll(signedInAgain, { timeout: 30_000 }).toBeDefined();
+    // The refusal is what told the session.
+    expect(links).toContain("offline auth");
+    const after = signedInAgain()!;
+    const row = await after.db
+      .insert(app.todos, { title: "after", owner: after.session!.user! })
+      .wait({ tier: "global" });
+    expect((await second.db.all(app.todos.where({ id: row.id }))).map((t) => t.title)).toEqual([
+      "after",
+    ]);
+    // Its sockets close before the server does.
+    await session.close();
+  }, 60_000);
+
+  // A socket refused for a stale cookie while the backend still names the
+  // user: the same client reconnects with fresh cookies and reports it.
+  it("reports connected again when a refused client reconnects", async () => {
+    const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    cleanups.push(() => jazz.close());
+    const served = await listen(jazz);
+    const jar = cookies(served.origin, "alice");
+    const session = await createJazzClient({
+      serverUrl: `${served.origin}/jazz`,
+      store: memoryStore(),
+      driver: { type: "memory" },
+    });
+    cleanups.push(() => session.close());
+    await session.loginWithBackend();
+    const client = session.getSnapshot().client!;
+    const owner = client.session!.user!;
+    await client.db.insert(app.todos, { title: "first", owner }).wait({ tier: "global" });
+
+    // The next socket goes without the cookie and is refused.
+    jar.socketUser = null;
+    await client.db.disconnect();
+    await client.db.reconnect();
+    await expect
+      .poll(() => client.db.getSyncStatus().link, { timeout: 15_000 })
+      .toMatchObject({ state: "offline", reason: "auth" });
+
+    // Fresh cookies: the watch's reconnect binds again.
+    jar.socketUser = "alice";
+    await expect
+      .poll(() => client.db.getSyncStatus().link, { timeout: 30_000 })
+      .toEqual({ state: "connected" });
+    expect(session.getSnapshot().client).toBe(client);
+    await client.db.insert(app.todos, { title: "second", owner }).wait({ tier: "global" });
+    await session.close();
   }, 60_000);
 });
