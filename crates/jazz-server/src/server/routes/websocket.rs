@@ -728,7 +728,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     // advertises thin results is answered with results, not sync.
     let negotiated = match negotiate_wire(
         &remote_hello,
-        current_wire_features() | jazz::wire::FEATURE_THIN_RESULTS,
+        current_wire_features() | jazz::wire::FEATURE_THIN_RESULTS | jazz::wire::FEATURE_HEARTBEAT,
     ) {
         Ok(negotiated) => negotiated,
         Err(error) => {
@@ -940,6 +940,11 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     // Ping on a fixed cadence and drop the link once nothing at all has
     // arrived for the idle timeout; every WebSocket client answers pings.
     let mut last_inbound = tokio::time::Instant::now();
+    let heartbeat = negotiated.features & jazz::wire::FEATURE_HEARTBEAT != 0;
+    let heartbeat_batch = encode_frame(&WireFrame::Heartbeat)
+        .ok()
+        .and_then(|frame| encode_ws_frame_batches(&[frame]).ok())
+        .unwrap_or_default();
     let mut keepalive = tokio::time::interval_at(
         last_inbound + WS_KEEPALIVE_PING_INTERVAL,
         WS_KEEPALIVE_PING_INTERVAL,
@@ -964,8 +969,13 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                     break;
                 }
                 // A full writer queue already proves the link is busy; the
-                // next tick pings again.
-                let _ = writer_tx.try_send(vec![Message::Ping(Default::default())]);
+                // next tick pings again. A client that cannot see pings (a
+                // browser) asked for a heartbeat frame it can see instead.
+                let mut beat = vec![Message::Ping(Default::default())];
+                if heartbeat {
+                    beat.extend(heartbeat_batch.iter().cloned().map(|bytes| Message::Binary(bytes.into())));
+                }
+                let _ = writer_tx.try_send(beat);
             }
             _ = async {
                 if let Some(changes) = &mut account_changes { let _ = changes.changed().await; }
@@ -2660,6 +2670,32 @@ mod tests {
             };
             expect_ws_server_hello(&mut ws, features).await;
         }
+    }
+
+    /// A browser cannot see WebSocket pings, so a client that asks for it
+    /// gets a heartbeat it can see; its frame is the one byte the TypeScript
+    /// carrier drops before the runtime (`WIRE_FRAME_HEARTBEAT`).
+    #[tokio::test]
+    async fn websocket_negotiates_the_heartbeat_a_browser_asks_for() {
+        assert_eq!(encode_frame(&WireFrame::Heartbeat).unwrap(), vec![7]);
+        let state = make_ws_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let entry = websocket_prelude_v1_fixture()["fixtures"]
+            .as_array()
+            .expect("fixture entries")
+            .iter()
+            .find(|entry| entry["name"] == "typescript_admin_default_link")
+            .expect("the TypeScript default-link fixture")
+            .clone();
+        let (mut ws, _) = connect_async(ws_url(addr, state.app_id))
+            .await
+            .expect("connect websocket");
+        ws.send(WsMessage::Text(
+            entry["json"].as_str().unwrap().to_owned().into(),
+        ))
+        .await
+        .expect("send prelude");
+        expect_ws_server_hello(&mut ws, jazz::wire::FEATURE_HEARTBEAT).await;
     }
 
     #[tokio::test]

@@ -184,6 +184,15 @@ which every shipped artifact (native, NAPI, WASM) validates
 (`jazz::sync_wire_corpus`). The corpus may be re-pinned until alpha.60 ships;
 after that, a layout change needs a compatibility write-up.
 
+A server pings every link every 20 s and drops one that sent nothing for
+60 s. A browser cannot see pings, so a client that advertises
+`FEATURE_HEARTBEAT` also gets a `WireFrame::Heartbeat` (tag 7, no body, no
+answer) with each ping. Such a client gives a link up, and reconnects, once
+nothing at all, heartbeat included, arrived for 45 s: a half-open TCP link
+or a stalled proxy then ends instead of showing `connected` while nothing
+moves. The browser carrier asks for it on every link and drops the frame
+before the runtime sees it; a native client sees pings and does not ask.
+
 In-process links (a worker and its tab, tests) carry `SyncMessage` values
 directly (`sync::duplex`); a byte link frames them with postcard
 (`WireTransportAdapter`).
