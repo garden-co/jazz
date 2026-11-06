@@ -34,6 +34,12 @@ const largeValues: s.App<LargeValueAppSchema> = s.defineApp(largeValueSchema, {
   migrations: "none",
 });
 
+const textSchema = {
+  pages: s.table({ body: s.string().merge("markdown") }, {}),
+};
+type TextAppSchema = s.Schema<typeof textSchema>;
+const texts: s.App<TextAppSchema> = s.defineApp(textSchema, { migrations: "none" });
+
 const optionalJsonSchema = {
   jobs: s.table(
     {
@@ -65,6 +71,39 @@ describe("createDb in-memory driver", () => {
     // Opening the native client decodes and compiles the TypeScript-authored
     // source schema before this query can run.
     await expect(db.all(app.notes)).resolves.toEqual([]);
+  });
+
+  it("merges a text edit over a value its editor had not shown yet", async () => {
+    db = await createDb({
+      ...(await localAccountConfig("in-memory-text-edit-test")),
+      driver: { type: "memory" },
+    });
+    const { value: page } = db.insert(texts.pages, { body: "Hello world" });
+    // A merged value arrives in the store before the editor shows it...
+    await db.update(texts.pages, page.id, { body: "Hello there world" }).wait({ tier: "local" });
+    // ...and the editor, still showing "Hello world", types "!".
+    await db
+      .update(
+        texts.pages,
+        page.id,
+        { body: "Hello world!" },
+        { editedFrom: { body: "Hello world" } },
+      )
+      .wait({ tier: "local" });
+    const [read] = await db.all(texts.pages.where({ id: page.id }));
+    expect(read?.body).toBe("Hello there world!");
+
+    // An edit of the value the column holds is written as it is.
+    await db
+      .update(
+        texts.pages,
+        page.id,
+        { body: "Hi there world!" },
+        { editedFrom: { body: "Hello there world!" } },
+      )
+      .wait({ tier: "local" });
+    const [again] = await db.all(texts.pages.where({ id: page.id }));
+    expect(again?.body).toBe("Hi there world!");
   });
 
   it("can read and write data without connecting to a server", async () => {

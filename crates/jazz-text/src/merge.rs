@@ -15,6 +15,9 @@
 //! HTML also tags and entities), so an edit never splits one. Two sides'
 //! changes then combine by these rules, in base order:
 //!
+//! - a word typed into or deleted from (characters inserted at one place,
+//!   or only deleted), by one side or both, is diffed by character, so
+//!   typing into one word at once keeps both sides' letters;
 //! - changes to disjoint parts of the base all apply;
 //! - an identical change made by both applies once;
 //! - inserts at one point apply in seq order, the held value's first;
@@ -78,16 +81,35 @@ pub fn try_merge3_within(
     if incoming == base || held == incoming {
         return Some(held.to_owned());
     }
-    let base_tokens = tokenize(format, base);
-    let held_tokens = tokenize(format, held);
-    let incoming_tokens = tokenize(format, incoming);
+    let mut base_tokens = tokenize(format, base);
+    let mut held_tokens = tokenize(format, held);
+    let mut incoming_tokens = tokenize(format, incoming);
     let mut work = Work::new(budget);
-    let (Ok(ours), Ok(mut theirs)) = (
+    let (Ok(mut ours), Ok(mut theirs)) = (
         diff(&base_tokens, &held_tokens, &mut work),
         diff(&base_tokens, &incoming_tokens, &mut work),
     ) else {
         return None;
     };
+    // Typing into a word (or deleting from one) edits its characters, not
+    // the word: those words are diffed by character on every side, so two
+    // people typing into one word both keep what they typed.
+    if let Some((base_split, held_split, incoming_split)) = split_typed_words(
+        (&base_tokens, &held_tokens, &incoming_tokens),
+        (&ours, &theirs),
+    ) {
+        base_tokens = base_split;
+        held_tokens = held_split;
+        incoming_tokens = incoming_split;
+        let (Ok(held_diff), Ok(incoming_diff)) = (
+            diff(&base_tokens, &held_tokens, &mut work),
+            diff(&base_tokens, &incoming_tokens, &mut work),
+        ) else {
+            return None;
+        };
+        ours = held_diff;
+        theirs = incoming_diff;
+    }
     // A change both made applies once. Hunks of one diff never share a base
     // span (touching ones are coalesced), so each has at most one twin.
     let mine: HashMap<(usize, usize), (usize, usize)> =
@@ -189,6 +211,110 @@ pub fn try_merge3_within(
         out = balance_tags(&out, &[&base_tokens, &held_tokens, &incoming_tokens]);
     }
     Some(out)
+}
+
+/// Where `new` holds base token `index` of the diff `hunks` (from `base`):
+/// the token it is kept as, or the one word a hunk only typed into or
+/// deleted from; `None` when a hunk replaced it otherwise.
+fn typed_or_kept(base: &[&str], new: &[&str], hunks: &[Hunk], index: usize) -> Option<usize> {
+    let mut at = index;
+    for hunk in hunks {
+        let (old, len) = (hunk.old.1 - hunk.old.0, hunk.new.1 - hunk.new.0);
+        if hunk.old.0 > index {
+            break;
+        }
+        if old == 0 || hunk.old.1 <= index {
+            // Before the token (an insert at it included): it shifts.
+            at = at + len - old;
+            continue;
+        }
+        let typed = old == 1 && len == 1 && typed_into(base[index], new[hunk.new.0]);
+        return typed.then_some(hunk.new.0);
+    }
+    Some(at)
+}
+
+/// Whether `new` is the word `old` with characters only inserted at one
+/// place, or only deleted from one.
+fn typed_into(old: &str, new: &str) -> bool {
+    if !anchors(old) || !anchors(new) || old == new {
+        return false;
+    }
+    let prefix = old
+        .chars()
+        .zip(new.chars())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let (old_len, new_len) = (old.chars().count(), new.chars().count());
+    let room = old_len.min(new_len) - prefix;
+    let suffix = old
+        .chars()
+        .rev()
+        .zip(new.chars().rev())
+        .take(room)
+        .take_while(|(a, b)| a == b)
+        .count();
+    prefix + suffix == old_len.min(new_len)
+}
+
+/// The three token lists with each base word that a side only typed into
+/// (and the other side kept or only typed into too) cut into characters,
+/// in all three; `None` when there is no such word.
+#[allow(clippy::type_complexity)]
+fn split_typed_words<'a>(
+    (base, held, incoming): (&[&'a str], &[&'a str], &[&'a str]),
+    (ours, theirs): (&[Hunk], &[Hunk]),
+) -> Option<(Vec<&'a str>, Vec<&'a str>, Vec<&'a str>)> {
+    let typed = |hunks: &[Hunk], new: &[&str]| {
+        hunks
+            .iter()
+            .filter(|hunk| {
+                hunk.old.1 == hunk.old.0 + 1
+                    && hunk.new.1 == hunk.new.0 + 1
+                    && typed_into(base[hunk.old.0], new[hunk.new.0])
+            })
+            .map(|hunk| hunk.old.0)
+            .collect::<Vec<_>>()
+    };
+    let mut candidates = typed(ours, held);
+    candidates.extend(typed(theirs, incoming));
+    candidates.sort_unstable();
+    candidates.dedup();
+    let mut cuts = (Vec::new(), Vec::new(), Vec::new());
+    for index in candidates {
+        let (Some(in_held), Some(in_incoming)) = (
+            typed_or_kept(base, held, ours, index),
+            typed_or_kept(base, incoming, theirs, index),
+        ) else {
+            continue;
+        };
+        cuts.0.push(index);
+        cuts.1.push(in_held);
+        cuts.2.push(in_incoming);
+    }
+    if cuts.0.is_empty() {
+        return None;
+    }
+    let cut = |tokens: &[&'a str], at: &[usize]| {
+        let mut out = Vec::with_capacity(tokens.len() + at.len() * 8);
+        for (index, token) in tokens.iter().enumerate() {
+            if at.binary_search(&index).is_ok() {
+                out.extend(
+                    token
+                        .char_indices()
+                        .map(|(i, c)| &token[i..i + c.len_utf8()]),
+                );
+            } else {
+                out.push(*token);
+            }
+        }
+        out
+    };
+    Some((
+        cut(base, &cuts.0),
+        cut(held, &cuts.1),
+        cut(incoming, &cuts.2),
+    ))
 }
 
 /// A block of base tokens `old` that one side deleted there and inserted,

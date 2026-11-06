@@ -9,8 +9,8 @@ use std::path::Path;
 use std::rc::Rc;
 
 use jazz::db::{
-    Db, DbConfig, DbIdentity, FileOptions, InsertOptions, LargeValueUpdateSplice, ReadOpts,
-    ReadTier, SubscriptionStream, UpdateOptions, WireTransportAdapter, block_on,
+    Db, DbConfig, DbIdentity, FileOptions, InsertOptions, LargeValueUpdate, LargeValueUpdateSplice,
+    ReadOpts, ReadTier, SubscriptionStream, UpdateOptions, WireTransportAdapter, block_on,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::large_values::{INLINE_VALUE_MAX_BYTES, TEXT_MERGE_INLINE_MAX_BYTES};
@@ -626,4 +626,141 @@ fn a_merge_inserting_more_than_an_epoch_edit_is_written_whole() {
         per_key < 1024.0,
         "{per_key} bytes per keystroke after the merge"
     );
+}
+
+/// An editor over the column, as markdownSync and a controlled textarea
+/// keep one: its own text and cursor, brought to the column's value only
+/// when its subscription delivers it (`refresh`, the next render), and the
+/// value it last wrote or showed, which each write says it was made from.
+struct Editor {
+    text: String,
+    cursor: usize,
+    seen: String,
+}
+
+impl Editor {
+    fn new(text: &str, cursor: usize) -> Self {
+        Self {
+            text: text.to_owned(),
+            cursor,
+            seen: text.to_owned(),
+        }
+    }
+
+    /// Show `value`, the cursor mapped through the change: kept before
+    /// it, moved with the text after it.
+    fn refresh(&mut self, value: String) {
+        let old = &self.text;
+        let prefix = old
+            .bytes()
+            .zip(value.bytes())
+            .take_while(|(a, b)| a == b)
+            .count();
+        let room = old.len().min(value.len()) - prefix;
+        let suffix = old
+            .bytes()
+            .rev()
+            .zip(value.bytes().rev())
+            .take(room)
+            .take_while(|(a, b)| a == b)
+            .count();
+        if self.cursor > prefix {
+            self.cursor = if self.cursor >= old.len() - suffix {
+                self.cursor + value.len() - old.len()
+            } else {
+                value.len() - suffix
+            };
+        }
+        self.seen = value.clone();
+        self.text = value;
+    }
+
+    fn type_char(&mut self, db: &Db, c: char) {
+        self.text.insert(self.cursor, c);
+        self.cursor += c.len_utf8();
+        block_on(db.update_with_large_value_mutations(
+            "docs",
+            row(),
+            BTreeMap::new(),
+            vec![LargeValueUpdate::TextEdit {
+                column: "body".to_owned(),
+                text: self.text.clone(),
+                edited_from: self.seen.clone(),
+            }],
+            UpdateOptions::default(),
+        ))
+        .unwrap();
+        self.seen = self.text.clone();
+    }
+}
+
+/// Two editors typing at once, a keystroke each per round; with `lag`,
+/// each shows the column's merged value only every other round, so it
+/// types over text it has not shown yet (its store has).
+fn type_together(start: &str, a: (usize, &str), b: (usize, &str), lag: bool) -> String {
+    let server = block_on(Db::open(config(0x60))).unwrap();
+    let mut da = connect(block_on(Db::open(config(0x91))).unwrap(), &server);
+    let mut db = connect(block_on(Db::open(config(0x92))).unwrap(), &server);
+    insert(&da.db, start);
+    settle(&server, &mut [&mut da, &mut db]);
+    let mut ea = Editor::new(start, a.0);
+    let mut eb = Editor::new(start, b.0);
+    let (ac, bc): (Vec<char>, Vec<char>) = (a.1.chars().collect(), b.1.chars().collect());
+    for i in 0..ac.len().max(bc.len()) {
+        if let Some(&c) = ac.get(i) {
+            ea.type_char(&da.db, c);
+        }
+        if let Some(&c) = bc.get(i) {
+            eb.type_char(&db.db, c);
+        }
+        settle(&server, &mut [&mut da, &mut db]);
+        if !lag || i % 2 == 1 {
+            ea.refresh(body(&da.db));
+            eb.refresh(body(&db.db));
+        }
+    }
+    settle(&server, &mut [&mut da, &mut db]);
+    ea.refresh(body(&da.db));
+    eb.refresh(body(&db.db));
+    let merged = body(&server);
+    assert_eq!(ea.text, merged);
+    assert_eq!(eb.text, merged);
+    merged
+}
+
+/// Alice types at the end of one paragraph while Bob types at the start of
+/// the next, both a keystroke at a time; whether their editors show each
+/// other's text before the next keystroke or after it, both sentences
+/// stay whole.
+#[test]
+fn two_people_typing_next_to_each_other_keep_every_character() {
+    // Short (inline) and over the 4 KiB threshold (chunked).
+    for intro in [String::new(), format!("{}\n\n", text(6 * 1024, 29))] {
+        let start = format!("{intro}Start here.\n\nSecond paragraph.");
+        let (a, b) = (intro.len() + 11, intro.len() + 13);
+        for lag in [false, true] {
+            assert_eq!(
+                type_together(&start, (a, " Alice was here."), (b, "Bob says hi. "), lag),
+                format!("{intro}Start here. Alice was here.\n\nBob says hi. Second paragraph."),
+                "lag: {lag}, {} bytes",
+                start.len()
+            );
+        }
+    }
+}
+
+/// Two people typing at the very same spot both keep what they typed, each
+/// word in one piece.
+#[test]
+fn two_people_typing_at_one_spot_keep_every_character() {
+    let start = "Start here.\n\nSecond paragraph.";
+    for lag in [false, true] {
+        let merged = type_together(start, (11, "AAAA "), (11, "BBBB "), lag);
+        assert_eq!(merged.matches('A').count(), 4, "{merged:?} (lag: {lag})");
+        assert_eq!(merged.matches('B').count(), 4, "{merged:?} (lag: {lag})");
+        assert!(
+            merged.starts_with("Start here.") && merged.ends_with("\n\nSecond paragraph."),
+            "{merged:?}"
+        );
+    }
 }
