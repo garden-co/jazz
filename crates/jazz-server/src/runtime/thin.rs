@@ -476,18 +476,31 @@ fn encode_fitting(
     response: ThinResponse,
 ) -> Option<(Vec<Vec<u8>>, bool)> {
     let id = response.id;
-    let frame = encode_response(output, response)?;
-    let size = match jazz::thin::thin_wire_frames(frame) {
-        Ok(frames) => return Some((frames, false)),
-        Err(size) => size,
+    // A body already past the most one answer takes is refused before it is
+    // encoded, which would copy it once more.
+    let payload = match &response.body {
+        ThinBody::Rows { rows, .. } => rows.len(),
+        ThinBody::Event { delta, .. } => delta.len(),
+        ThinBody::Snapshot { snapshot } => snapshot.len(),
+        _ => 0,
+    };
+    let size = if payload > jazz::thin::MAX_THIN_MESSAGE_BYTES {
+        payload
+    } else {
+        let frame = encode_response(output, response)?;
+        match jazz::thin::thin_wire_frames(frame) {
+            Ok(frames) => return Some((frames, false)),
+            Err(size) => size,
+        }
     };
     let refused = ThinResponse {
         id,
         body: ThinBody::Error {
             code: "TooLarge".to_owned(),
             message: format!(
-                "this result is {size} bytes, more than the {} a thin client takes in one \
-                 answer: reading values that large on a thin client is not supported yet",
+                "this result is {size} bytes or more, over the {} a thin client takes in one \
+                 answer: narrow or page the query, and read values that large another way \
+                 (streaming them to a thin client is not supported yet)",
                 jazz::thin::MAX_THIN_MESSAGE_BYTES
             ),
         },

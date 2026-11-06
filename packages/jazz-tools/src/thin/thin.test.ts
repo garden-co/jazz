@@ -127,6 +127,29 @@ describe("thin client", () => {
     unsubscribe();
   }, 60_000);
 
+  it("writes and reads values over a wire frame, and refuses writes past the most one takes", async () => {
+    const server = await startServer();
+    const alice = await thinDb(server);
+    const deliveries: number[][] = [];
+    const unsubscribe = alice.subscribe(app.notes, (rows) =>
+      deliveries.push(rows.map((row) => row.text.length)),
+    );
+    await expect.poll(() => deliveries.length, { timeout: 10_000 }).toBeGreaterThan(0);
+    // A 3 MB value goes out in parts, and comes back in parts, both as a
+    // query's answer and as a live query's update.
+    const long = "t".repeat(3 * 1024 * 1024);
+    const written = alice.insert(app.notes, { text: long, done: false });
+    await written.wait({ tier: "global" });
+    expect((await alice.all(app.notes)).map((row) => row.text)).toEqual([long]);
+    await expect.poll(() => deliveries.at(-1), { timeout: 10_000 }).toEqual([long.length]);
+    // Past the most one request takes, refused here, and its wait settles.
+    const huge = alice.insert(app.notes, { text: "h".repeat(33 * 1024 * 1024), done: false });
+    await expect(huge.wait({ tier: "global" })).rejects.toThrow("sends in one request");
+    // The connection goes on.
+    await alice.update(app.notes, written.value.id, { done: true }).wait({ tier: "global" });
+    unsubscribe();
+  }, 120_000);
+
   it("shares data with a local-first client of the same account", async () => {
     const server = await startServer();
     const secret = formatAuthSecret(new Uint8Array(32).fill(9));

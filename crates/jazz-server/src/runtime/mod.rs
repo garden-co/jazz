@@ -183,6 +183,11 @@ pub struct ServerSession(u64);
 /// it are refused (the peer ignored flow control); outbound messages past it
 /// wait in the engine until the socket catches up.
 pub(crate) const SESSION_QUEUE_BUDGET: usize = 8 * 1024 * 1024;
+/// Bytes of thin requests the whole server may hold, being joined from
+/// parts or queued for the owner. A reader past it waits for room before
+/// reading more of its socket, so many large writes at once slow down
+/// instead of growing memory without bound.
+pub(crate) const THIN_INGRESS_SERVER_BUDGET: usize = 256 * 1024 * 1024;
 /// The slow-query threshold: `JAZZ_SLOW_QUERY_MS` (0 turns the log off),
 /// else jazz-db's default.
 fn slow_query_threshold() -> Option<Duration> {
@@ -817,6 +822,7 @@ impl AppStore {
                 activity,
                 next_session: AtomicU64::new(1),
                 edges: Mutex::new(HashMap::new()),
+                thin_ingress: Arc::new(tokio::sync::Semaphore::new(THIN_INGRESS_SERVER_BUDGET)),
             }),
         })
     }
@@ -1207,6 +1213,8 @@ struct Inner {
     activity: watch::Sender<u64>,
     next_session: AtomicU64,
     edges: Mutex<HashMap<ServerSession, Edge>>,
+    /// [`THIN_INGRESS_SERVER_BUDGET`], as permits of one byte.
+    thin_ingress: Arc<tokio::sync::Semaphore>,
 }
 
 /// The socket side of one session.
@@ -1214,7 +1222,18 @@ struct Edge {
     /// Taken by [`ServerRuntimeHandle::open_wire_stream`].
     output: Option<tokio_mpsc::UnboundedReceiver<Outbound>>,
     ingress: Arc<AtomicUsize>,
+    /// A thin session's room for requests being joined or queued: the most
+    /// one request takes, as permits of one byte.
+    thin_ingress: Arc<tokio::sync::Semaphore>,
     egress: Arc<AtomicUsize>,
+}
+
+/// Room for one thin request, in its session's and the server's ingress
+/// budgets, held from before its bytes are buffered until the owner has
+/// run it.
+pub struct ThinIngress {
+    _session: tokio::sync::OwnedSemaphorePermit,
+    _server: tokio::sync::OwnedSemaphorePermit,
 }
 
 /// A session's next frame batch, or the error frame that ends it.
@@ -1382,6 +1401,9 @@ impl ServerRuntimeHandle {
             Edge {
                 output: Some(receiver),
                 ingress: Arc::new(AtomicUsize::new(0)),
+                thin_ingress: Arc::new(tokio::sync::Semaphore::new(
+                    jazz::thin::MAX_THIN_MESSAGE_BYTES,
+                )),
                 egress,
             },
         );
@@ -1442,10 +1464,7 @@ impl ServerRuntimeHandle {
             .get(&session)
             .map(|edge| Arc::clone(&edge.ingress))
             .ok_or_else(|| "unknown server session".to_owned())?;
-        // One request may be larger than the budget (a write of a value
-        // over it, joined from parts), but only with nothing else queued.
-        let queued = ingress.fetch_add(bytes, Ordering::AcqRel);
-        if queued > 0 && queued + bytes > SESSION_QUEUE_BUDGET {
+        if ingress.fetch_add(bytes, Ordering::AcqRel) + bytes > SESSION_QUEUE_BUDGET {
             ingress.fetch_sub(bytes, Ordering::AcqRel);
             return Err("session ingress budget exceeded".to_owned());
         }
@@ -1484,30 +1503,54 @@ impl ServerRuntimeHandle {
         self.settle_open(session, opened)
     }
 
-    /// Queue a thin client's request, `bytes` long on the wire, for the
-    /// owner. Refused when the session already has its budget queued, as
-    /// [`Self::receive_wire_frames`] refuses sync frames.
+    /// Wait for room for a thin request `bytes` long on the wire, before
+    /// reading or joining it: in `session`'s budget (the most one request
+    /// takes, [`jazz::thin::MAX_THIN_MESSAGE_BYTES`]) and the server's
+    /// ([`THIN_INGRESS_SERVER_BUDGET`]). While it waits, its reader reads
+    /// nothing more, so the client's socket backs up instead of the
+    /// session ending; the room frees as the owner runs queued requests.
+    pub async fn admit_thin_request(
+        &self,
+        session: ServerSession,
+        bytes: usize,
+    ) -> Result<ThinIngress, String> {
+        let permits = u32::try_from(bytes)
+            .ok()
+            .filter(|_| bytes <= jazz::thin::MAX_THIN_MESSAGE_BYTES)
+            .ok_or_else(|| format!("a thin request of {bytes} bytes is over the most one takes"))?;
+        let room = self
+            .edges()?
+            .get(&session)
+            .map(|edge| Arc::clone(&edge.thin_ingress))
+            .ok_or_else(|| "unknown server session".to_owned())?;
+        let closed = |_| "server runtime stopped".to_owned();
+        // Session first: a session waiting on itself holds none of the
+        // server's room.
+        let session_room = room.acquire_many_owned(permits).await.map_err(closed)?;
+        let server_room = Arc::clone(&self.inner.thin_ingress)
+            .acquire_many_owned(permits)
+            .await
+            .map_err(closed)?;
+        Ok(ThinIngress {
+            _session: session_room,
+            _server: server_room,
+        })
+    }
+
+    /// Queue a thin client's request for the owner, in the room
+    /// [`Self::admit_thin_request`] made for it, which frees once it ran.
     pub fn receive_thin_request(
         &self,
         session: ServerSession,
         request: jazz::thin::ThinRequest,
-        bytes: usize,
+        ingress: ThinIngress,
     ) -> Result<(), String> {
-        let ingress = self
-            .edges()?
-            .get(&session)
-            .map(|edge| Arc::clone(&edge.ingress))
-            .ok_or_else(|| "unknown server session".to_owned())?;
-        // One request may be larger than the budget (a write of a value
-        // over it, joined from parts), but only with nothing else queued.
-        let queued = ingress.fetch_add(bytes, Ordering::AcqRel);
-        if queued > 0 && queued + bytes > SESSION_QUEUE_BUDGET {
-            ingress.fetch_sub(bytes, Ordering::AcqRel);
-            return Err("session ingress budget exceeded".to_owned());
+        if !self.edges()?.contains_key(&session) {
+            return Err("unknown server session".to_owned());
         }
         self.send(Box::new(move |owner| {
             owner.thin_request(session, request);
-            ingress.fetch_sub(bytes, Ordering::AcqRel);
+            drop(ingress);
         }))
     }
 
@@ -1517,14 +1560,6 @@ impl ServerRuntimeHandle {
     pub(crate) fn hold_egress_for_test(&self, session: ServerSession, bytes: usize) {
         let edges = self.edges().expect("edges");
         edges[&session].egress.fetch_add(bytes, Ordering::AcqRel);
-    }
-
-    /// Count `bytes` against `session`'s ingress budget as if a request
-    /// that size were queued and not yet run.
-    #[cfg(test)]
-    pub(crate) fn hold_ingress_for_test(&self, session: ServerSession, bytes: usize) {
-        let edges = self.edges().expect("edges");
-        edges[&session].ingress.fetch_add(bytes, Ordering::AcqRel);
     }
 
     /// Release `bytes` held by [`Self::hold_egress_for_test`], as the

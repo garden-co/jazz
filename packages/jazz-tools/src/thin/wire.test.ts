@@ -134,12 +134,39 @@ describe("thin frames over a wire frame", () => {
     });
     expect(joined.slice(0, 2)).toEqual([undefined, undefined]);
     expect(Buffer.compare(joined[2]!, frame)).toBe(0);
-    // `ThinPart { more: true, bytes: [1, 2, 3] }`, as thin.rs encodes it.
-    expect(new ThinAssembler().push(new Uint8Array([6, 1, 3, 1, 2, 3]))).toBeUndefined();
-    expect(new ThinAssembler().push(new Uint8Array([6, 0, 3, 1, 2, 3]))).toEqual(
-      new Uint8Array([1, 2, 3]),
-    );
+    // Tag 6, the frame's length (5 MiB), then the part's, as thin.rs pins.
+    expect([...parts[0]!.subarray(0, 5)]).toEqual([6, 0x80, 0x80, 0xc0, 0x02]);
     expect(thinWireFrames(new Uint8Array(10))).toHaveLength(1);
     expect(thinWireFrames(new Uint8Array(MAX_THIN_MESSAGE_BYTES + 1))).toBeNull();
+  });
+
+  it("split at their bounds", () => {
+    const whole = 2 * 1024 * 1024 - 16;
+    expect(thinWireFrames(new Uint8Array(whole))).toHaveLength(1);
+    expect(thinWireFrames(new Uint8Array(whole + 1))).toHaveLength(2);
+    const parts = thinWireFrames(new Uint8Array(MAX_THIN_MESSAGE_BYTES))!;
+    const assembler = new ThinAssembler();
+    const joined = parts.map((part) => assembler.push(part));
+    expect(joined.at(-1)?.byteLength).toBe(MAX_THIN_MESSAGE_BYTES);
+    expect(joined.slice(0, -1).every((piece) => piece === undefined)).toBe(true);
+  });
+
+  it("refuse parts that do not make their frame, and start over", () => {
+    const [first, second] = thinWireFrames(new Uint8Array(3 * 1024 * 1024))!;
+    const [other] = thinWireFrames(new Uint8Array(4 * 1024 * 1024))!;
+    const assembler = new ThinAssembler();
+    expect(assembler.push(first!)).toBeUndefined();
+    expect(() => assembler.push(other!)).toThrow("another thin frame");
+    expect(assembler.joining).toBe(false);
+    // Trailing bytes after a part.
+    const trailing = new Uint8Array(first!.byteLength + 1);
+    trailing.set(first!);
+    expect(() => assembler.push(trailing)).toThrow("bytes after it");
+    expect(assembler.joining).toBe(false);
+    // A frame small enough to go whole, or past the most a frame takes.
+    expect(() => assembler.push(new Uint8Array([6, 3, 3, 1, 2, 3]))).toThrow("out of bounds");
+    // Starting over, the frame joins.
+    expect(assembler.push(first!)).toBeUndefined();
+    expect(assembler.push(second!)?.byteLength).toBe(3 * 1024 * 1024);
   });
 });

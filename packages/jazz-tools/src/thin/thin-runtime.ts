@@ -277,7 +277,7 @@ export class ThinRuntime implements Runtime {
       features: FEATURE_THIN_RESULTS,
       authJson: this.authJson,
       WebSocket: this.WebSocketImpl,
-      onFrame: (frame) => this.receive(frame),
+      onFrame: (frame) => this.receive(carrier, frame),
       onTerminal: (error) => this.lost(carrier, error),
     });
     this.carrier = carrier;
@@ -317,7 +317,31 @@ export class ThinRuntime implements Runtime {
       // A connection that ends before the answer is retried as a whole.
       reject: () => undefined,
     });
-    void carrier.send(encodeThinRequest(id, { type: "schema", schema: this.schemaBytes }));
+    this.sendFrame(
+      carrier,
+      encodeThinRequest(id, { type: "schema", schema: this.schemaBytes }),
+      (bytes) => {
+        this.oneShots.delete(id);
+        this.fatal(tooLarge("schema", bytes));
+      },
+    );
+  }
+
+  /** Send `frame`, in parts when it is over a wire frame; `tooLarge`
+   * instead past what one request takes. */
+  private sendFrame(
+    carrier: WebSocketCarrier | undefined,
+    frame: Uint8Array,
+    refused: (bytes: number) => void,
+  ): boolean {
+    const frames = thinWireFrames(frame);
+    if (frames === null) {
+      refused(frame.byteLength);
+      return false;
+    }
+    // Parts of one frame go back to back.
+    void carrier?.sendBatch(frames);
+    return true;
   }
 
   private lost(carrier: WebSocketCarrier, error: WireError): void {
@@ -404,35 +428,39 @@ export class ThinRuntime implements Runtime {
   }
 
   private transmit(id: number, oneShot: OneShot): void {
-    const frame = encodeThinRequest(id, oneShot.op);
-    const frames = thinWireFrames(frame);
-    if (frames === null) {
+    const sent = this.sendFrame(this.carrier, encodeThinRequest(id, oneShot.op), (bytes) => {
       // Refused here: the server would refuse it.
       this.oneShots.delete(id);
-      oneShot.reject(
-        new ThinRemoteError(
-          "TooLarge",
-          `this ${oneShot.op.type} is ${frame.byteLength} bytes, more than the ` +
-            `${MAX_THIN_MESSAGE_BYTES} a thin client sends in one request: write values ` +
-            `that large with insertStreaming or updateStreaming`,
-        ),
-      );
-      return;
-    }
-    oneShot.sent = true;
-    // Parts of one frame go back to back.
-    void this.carrier?.sendBatch(frames);
+      oneShot.reject(tooLarge(oneShot.op.type, bytes));
+    });
+    if (sent) oneShot.sent = true;
   }
 
-  private receive(piece: Uint8Array): void {
-    let frame = piece;
-    if (ThinAssembler.isPart(piece)) {
-      const joined = this.parts.push(piece);
-      if (joined === undefined) return;
-      frame = joined;
+  private receive(carrier: WebSocketCarrier, piece: Uint8Array): void {
+    if (this.carrier !== carrier) return;
+    let response: ReturnType<typeof decodeThinResponse>;
+    try {
+      let frame = piece;
+      if (ThinAssembler.isPart(piece)) {
+        const joined = this.parts.push(piece);
+        if (joined === undefined) return;
+        frame = joined;
+      } else if (this.parts.joining) {
+        throw new Error("a thin frame arrived inside a split one");
+      }
+      if (!isThinResponse(frame)) return;
+      response = decodeThinResponse(frame);
+    } catch (error) {
+      // The server broke the framing: start over on a new connection.
+      this.parts.reset();
+      this.lost(carrier, {
+        code: "MalformedFrame",
+        retry: "later",
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return;
     }
-    if (!isThinResponse(frame)) return;
-    const { id, body } = decodeThinResponse(frame);
+    const { id, body } = response;
     const handle = this.liveByRequest.get(id);
     if (handle !== undefined) {
       this.receiveLive(handle, id, body);
@@ -571,12 +599,18 @@ export class ThinRuntime implements Runtime {
     if (handle === undefined) return;
     live.requestId = id;
     this.liveByRequest.set(id, handle);
-    void this.carrier?.send(
-      encodeThinRequest(id, {
-        type: "subscribe",
-        query: live.query,
-        options: live.options,
-      }),
+    this.sendFrame(
+      this.carrier,
+      encodeThinRequest(id, { type: "subscribe", query: live.query, options: live.options }),
+      (bytes) => {
+        this.liveByRequest.delete(id);
+        live.requestId = undefined;
+        this.receiveLive(handle, id, {
+          type: "error",
+          code: "TooLarge",
+          message: tooLarge("subscribe", bytes).message,
+        });
+      },
     );
   }
 
@@ -1067,4 +1101,13 @@ function uuidv7(): Uint8Array {
 function transactionOf(op: ThinOp): OpenTransactionId | undefined {
   const transaction = (op as { transaction?: unknown }).transaction;
   return typeof transaction === "string" ? (transaction as OpenTransactionId) : undefined;
+}
+
+/** The local refusal of a request past what one takes. */
+function tooLarge(op: string, bytes: number): ThinRemoteError {
+  return new ThinRemoteError(
+    "TooLarge",
+    `this ${op} is ${bytes} bytes, more than the ${MAX_THIN_MESSAGE_BYTES} a thin client ` +
+      `sends in one request: write values that large with insertStreaming or updateStreaming`,
+  );
 }

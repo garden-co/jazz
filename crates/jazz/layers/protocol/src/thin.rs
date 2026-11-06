@@ -608,16 +608,37 @@ const THIN_PART_BYTES: usize = MAX_WHOLE_THIN_FRAME_BYTES - 16;
 
 /// One piece of a thin request or response too large for one wire frame:
 /// a row holding a value over 2 MiB, or a write of one. The encoded frame
-/// is cut into consecutive parts, `more` on all but the last; the receiver
-/// joins them and decodes the frame they make. Parts of one frame are sent
-/// back to back, with no other thin frame between.
+/// is cut into consecutive parts, each naming the frame's whole length, so
+/// a receiver can admit (or refuse) the frame before buffering any of it;
+/// the receiver joins them and decodes the frame they make once it has
+/// `total` bytes. Parts of one frame are sent back to back, with no other
+/// thin frame between.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThinPart {
-    /// Whether more parts of this frame follow.
-    pub more: bool,
+    /// The length of the whole frame the parts carry.
+    pub total: u64,
     /// The next bytes of the frame.
     #[serde(with = "serde_bytes")]
     pub bytes: Vec<u8>,
+}
+
+impl ThinPart {
+    /// The length of the frame this part starts, if it may be joined: over
+    /// a whole frame and at most [`MAX_THIN_MESSAGE_BYTES`].
+    pub fn total(&self) -> Result<usize, String> {
+        usize::try_from(self.total)
+            .ok()
+            .filter(|total| {
+                (MAX_WHOLE_THIN_FRAME_BYTES + 1..=MAX_THIN_MESSAGE_BYTES).contains(total)
+            })
+            .ok_or_else(|| {
+                format!(
+                    "a split thin frame of {} bytes is not over a wire frame and at most \
+                     {MAX_THIN_MESSAGE_BYTES} bytes",
+                    self.total
+                )
+            })
+    }
 }
 
 /// An encoded thin frame as the wire frames that carry it: itself when it
@@ -630,13 +651,12 @@ pub fn thin_wire_frames(frame: Vec<u8>) -> Result<Vec<Vec<u8>>, usize> {
     if frame.len() > MAX_THIN_MESSAGE_BYTES {
         return Err(frame.len());
     }
-    let count = frame.len().div_ceil(THIN_PART_BYTES);
+    let total = frame.len() as u64;
     Ok(frame
         .chunks(THIN_PART_BYTES)
-        .enumerate()
-        .map(|(index, bytes)| {
+        .map(|bytes| {
             crate::wire::encode_frame(&crate::wire::WireFrame::ThinPart(ThinPart {
-                more: index + 1 < count,
+                total,
                 bytes: bytes.to_vec(),
             }))
             .expect("a thin part encodes")
@@ -649,25 +669,55 @@ pub fn thin_wire_frames(frame: Vec<u8>) -> Result<Vec<Vec<u8>>, usize> {
 #[derive(Debug, Default)]
 pub struct ThinAssembler {
     joined: Vec<u8>,
+    /// The length of the frame being joined; 0 between frames.
+    total: usize,
 }
 
 impl ThinAssembler {
-    /// The next part of a split frame: the whole frame once `part` is its
-    /// last, `None` before; `Err` past [`MAX_THIN_MESSAGE_BYTES`].
+    /// The next part of a split frame: the whole frame once it has all its
+    /// bytes, `None` before. `Err`, dropping what was joined, for a part
+    /// whose frame is not one a part may carry ([`ThinPart::total`]), one
+    /// naming another length than the parts before it, an empty one, or
+    /// one past its frame's end. The first part reserves the frame's whole
+    /// length, no more.
     pub fn push(&mut self, part: ThinPart) -> Result<Option<Vec<u8>>, String> {
-        if self.joined.len() + part.bytes.len() > MAX_THIN_MESSAGE_BYTES {
-            self.joined = Vec::new();
-            return Err(format!(
-                "a split thin frame is over {MAX_THIN_MESSAGE_BYTES} bytes"
-            ));
+        let checked = self.check(&part);
+        if let Err(error) = checked {
+            *self = Self::default();
+            return Err(error);
+        }
+        if self.total == 0 {
+            self.total = checked?;
+            self.joined = Vec::with_capacity(self.total);
         }
         self.joined.extend_from_slice(&part.bytes);
-        Ok((!part.more).then(|| std::mem::take(&mut self.joined)))
+        if self.joined.len() < self.total {
+            return Ok(None);
+        }
+        self.total = 0;
+        Ok(Some(std::mem::take(&mut self.joined)))
+    }
+
+    fn check(&self, part: &ThinPart) -> Result<usize, String> {
+        let total = part.total()?;
+        if self.total != 0 && total != self.total {
+            return Err(format!(
+                "a part of a {total}-byte thin frame arrived inside a {}-byte one",
+                self.total
+            ));
+        }
+        if part.bytes.is_empty() || self.joined.len() + part.bytes.len() > total {
+            return Err(format!(
+                "a part of {} bytes does not fit its {total}-byte thin frame",
+                part.bytes.len()
+            ));
+        }
+        Ok(total)
     }
 
     /// Whether a split frame is part way through.
     pub fn is_joining(&self) -> bool {
-        !self.joined.is_empty()
+        self.total != 0
     }
 }
 
@@ -700,16 +750,67 @@ mod part_tests {
         }
         assert_eq!(joined.unwrap(), frame);
         assert!(!assembler.is_joining());
+        // Tag 6, the frame's length (5 MiB), then the part's: the layout
+        // the TypeScript thin client's `wire.test.ts` pins too.
+        let five = thin_wire_frames(vec![0; 5 * 1024 * 1024]).unwrap();
+        assert_eq!(five[0][..5], [6, 0x80, 0x80, 0xc0, 0x02]);
         assert_eq!(thin_wire_frames(vec![1; 10]).unwrap(), vec![vec![1; 10]]);
         assert!(thin_wire_frames(vec![0; MAX_THIN_MESSAGE_BYTES + 1]).is_err());
-        // The layout the TypeScript thin client's `wire.test.ts` pins too.
         let part = ThinPart {
-            more: true,
+            total: 300,
             bytes: vec![1, 2, 3],
         };
         assert_eq!(
             encode_frame(&WireFrame::ThinPart(part)).unwrap(),
-            [6, 1, 3, 1, 2, 3]
+            [6, 0xac, 0x02, 3, 1, 2, 3]
         );
+    }
+
+    #[test]
+    fn the_largest_frames_split_and_join_at_their_bounds() {
+        let whole = MAX_WHOLE_THIN_FRAME_BYTES;
+        assert_eq!(thin_wire_frames(vec![1; whole]).unwrap().len(), 1);
+        assert_eq!(thin_wire_frames(vec![1; whole + 1]).unwrap().len(), 2);
+        let parts = thin_wire_frames(vec![2; MAX_THIN_MESSAGE_BYTES]).unwrap();
+        let mut assembler = ThinAssembler::default();
+        let mut joined = None;
+        for part in parts {
+            let WireFrame::ThinPart(part) = decode_frame(&part).unwrap() else {
+                panic!("a part");
+            };
+            assert!(joined.is_none());
+            joined = assembler.push(part).unwrap();
+        }
+        let joined = joined.unwrap();
+        assert_eq!(joined.len(), MAX_THIN_MESSAGE_BYTES);
+        assert_eq!(joined.capacity(), MAX_THIN_MESSAGE_BYTES);
+    }
+
+    #[test]
+    fn parts_that_do_not_make_their_frame_are_refused() {
+        let part = |total: usize, len: usize| ThinPart {
+            total: total as u64,
+            bytes: vec![0; len],
+        };
+        let big = MAX_WHOLE_THIN_FRAME_BYTES + 10;
+        for refused in [
+            part(MAX_WHOLE_THIN_FRAME_BYTES, 10),
+            part(MAX_THIN_MESSAGE_BYTES + 1, 10),
+            part(big, 0),
+            part(big, big + 1),
+        ] {
+            let mut assembler = ThinAssembler::default();
+            assert!(assembler.push(refused).is_err());
+            assert!(!assembler.is_joining());
+        }
+        // A part naming another frame's length, inside a split.
+        let mut assembler = ThinAssembler::default();
+        assert_eq!(assembler.push(part(big, 10)).unwrap(), None);
+        assert!(assembler.push(part(big + 1, 10)).is_err());
+        assert!(!assembler.is_joining());
+        // Past its frame's end.
+        assert_eq!(assembler.push(part(big, big - 5)).unwrap(), None);
+        assert!(assembler.push(part(big, 10)).is_err());
+        assert!(!assembler.is_joining());
     }
 }

@@ -804,7 +804,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
             }
         };
     let thin = negotiated.features & jazz::wire::FEATURE_THIN_RESULTS != 0;
-    let mut thin_parts = jazz::thin::ThinAssembler::default();
+    let mut thin_parts = ThinParts::default();
     // A thin connection is one session reading finished results: it holds
     // no replica to relay for tabs, so it is never a client relay. An admin
     // link is served as SYSTEM either way. `session_context` is for sync
@@ -1044,7 +1044,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                         }
                     };
                     if thin {
-                        if let Err(error) = receive_thin_frames(&core_server_shell, session, &mut thin_parts, frames) {
+                        if let Err(error) = receive_thin_frames(&core_server_shell, session, &mut thin_parts, frames).await {
                             queue_ws_error(&writer_tx, error);
                             break 'connection;
                         }
@@ -1080,45 +1080,68 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     }
 }
 
-/// Hand a thin client's requests to the runtime. A thin connection carries
-/// nothing else after its `Hello`.
-fn receive_thin_frames(
+/// A thin connection's split request part way through, with the room it
+/// was admitted in.
+#[derive(Default)]
+struct ThinParts {
+    assembler: jazz::thin::ThinAssembler,
+    ingress: Option<crate::runtime::ThinIngress>,
+}
+
+/// Hand a thin client's requests to the runtime, each once it has room
+/// (`admit_thin_request`): a request, or the first part of a split one, is
+/// admitted before its bytes are kept, and the reader waits for that room.
+/// A thin connection carries nothing else after its `Hello`.
+async fn receive_thin_frames(
     runtime: &ServerRuntimeHandle,
     session: ServerSession,
-    assembler: &mut jazz::thin::ThinAssembler,
+    parts: &mut ThinParts,
     frames: Vec<Vec<u8>>,
 ) -> Result<(), WireError> {
+    let malformed =
+        |error: String| WireError::new(WireErrorCode::MalformedFrame, WireRetry::Never, error);
+    let stopped =
+        |error: String| WireError::new(WireErrorCode::Backpressure, WireRetry::Later, error);
     for frame in frames {
         let decoded = jazz::wire::decode_frame(&frame);
         // A request too large for one frame arrives in parts, back to back.
-        let (decoded, frame) = match decoded {
+        let (decoded, ingress) = match decoded {
             Ok(WireFrame::ThinPart(part)) => {
-                let joined = assembler.push(part).map_err(|error| {
-                    WireError::new(WireErrorCode::MalformedFrame, WireRetry::Never, error)
-                })?;
-                let Some(joined) = joined else { continue };
-                (jazz::wire::decode_postcard_frame(&joined), joined)
+                if !parts.assembler.is_joining() {
+                    let total = part.total().map_err(malformed)?;
+                    parts.ingress = Some(
+                        runtime
+                            .admit_thin_request(session, total)
+                            .await
+                            .map_err(stopped)?,
+                    );
+                }
+                let Some(joined) = parts.assembler.push(part).map_err(malformed)? else {
+                    continue;
+                };
+                let ingress = parts.ingress.take().expect("a joined frame was admitted");
+                (jazz::wire::decode_postcard_frame(&joined), ingress)
             }
-            _ if assembler.is_joining() => {
-                return Err(WireError::new(
-                    WireErrorCode::MalformedFrame,
-                    WireRetry::Never,
-                    "a thin frame arrived inside a split one",
+            _ if parts.assembler.is_joining() => {
+                return Err(malformed(
+                    "a thin frame arrived inside a split one".to_owned(),
                 ));
             }
-            decoded => (decoded, frame),
+            decoded => {
+                let ingress = runtime
+                    .admit_thin_request(session, frame.len())
+                    .await
+                    .map_err(stopped)?;
+                (decoded, ingress)
+            }
         };
         match decoded {
             Ok(WireFrame::ThinRequest(request)) => runtime
-                .receive_thin_request(session, request, frame.len())
-                .map_err(|error| {
-                    WireError::new(WireErrorCode::Backpressure, WireRetry::Later, error)
-                })?,
+                .receive_thin_request(session, request, ingress)
+                .map_err(stopped)?,
             _ => {
-                return Err(WireError::new(
-                    WireErrorCode::MalformedFrame,
-                    WireRetry::Never,
-                    "a thin connection sends only thin requests",
+                return Err(malformed(
+                    "a thin connection sends only thin requests".to_owned(),
                 ));
             }
         }
@@ -5218,11 +5241,16 @@ mod tests {
         let mut responses = Vec::new();
         let mut parts = jazz::thin::ThinAssembler::default();
         let start = tokio::time::Instant::now();
+        // Values of many MiB take seconds to write and read in a debug build.
+        let deadline = WS_PUMP_DEADLINE * 6;
         while !done(&responses) || parts.is_joining() {
-            let remaining = WS_PUMP_DEADLINE.saturating_sub(start.elapsed());
+            let remaining = deadline.saturating_sub(start.elapsed());
             let message = tokio::time::timeout(remaining, ws.next())
                 .await
-                .unwrap_or_else(|_| panic!("thin responses so far: {} ", responses.len()))
+                .unwrap_or_else(|_| {
+                    let ids: Vec<u64> = responses.iter().map(|r| r.id).collect();
+                    panic!("thin responses so far: {ids:?}")
+                })
                 .expect("websocket open")
                 .expect("websocket message");
             for frame in decode_ws_message(&message) {
@@ -5815,7 +5843,10 @@ mod tests {
                     .await
                     .unwrap();
                 let mut stream = runtime.open_wire_stream(session).unwrap();
-                runtime.receive_thin_request(session, schema(), 16).unwrap();
+                let room = runtime.admit_thin_request(session, 16).await.unwrap();
+                runtime
+                    .receive_thin_request(session, schema(), room)
+                    .unwrap();
                 runtime.request_wire_tick(session).unwrap();
                 let frames = tokio::time::timeout(Duration::from_secs(5), stream.recv())
                     .await
@@ -5898,8 +5929,9 @@ mod tests {
             });
         }
         for (id, op) in requests.into_iter().enumerate() {
+            let room = runtime.admit_thin_request(session, 16).await.unwrap();
             runtime
-                .receive_thin_request(session, ThinRequest { id: id as u64, op }, 16)
+                .receive_thin_request(session, ThinRequest { id: id as u64, op }, room)
                 .unwrap();
             runtime.request_wire_tick(session).unwrap();
             runtime.settle_for_test().await;
@@ -6076,8 +6108,51 @@ mod tests {
         ));
     }
 
+    /// Large writes sent together, and small requests sent while they are
+    /// queued, all get answered on the one connection: past the session's
+    /// room a request waits, it does not end the session.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn thin_requests_past_the_ingress_budget_are_refused() {
+    async fn concurrent_large_thin_writes_share_one_session() {
+        use jazz::thin::{ThinBody, ThinOp};
+        let (state, schema) = private_docs_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let mut ws = open_thin_ws(addr, &state, alice).await;
+        bind_thin_schema(&mut ws, &schema).await;
+        let photo = |n: usize| ThinOp::Insert {
+            table: "docs".to_owned(),
+            cells: doc_cells(&format!("{n}").repeat(5 * 1024 * 1024), alice),
+            options: Vec::new(),
+            transaction: None,
+        };
+        // Three 5 MB writes and a 12 MB one, over a session's room
+        // together, each followed at once by a small request.
+        let big = ThinOp::Insert {
+            table: "docs".to_owned(),
+            cells: doc_cells(&"b".repeat(12 * 1024 * 1024), alice),
+            options: Vec::new(),
+            transaction: None,
+        };
+        send_thin(&mut ws, 10, big).await;
+        send_thin(&mut ws, 11, ThinOp::CaptureSnapshot).await;
+        for n in 1..=3 {
+            send_thin(&mut ws, 10 + 2 * n as u64, photo(n)).await;
+            send_thin(&mut ws, 11 + 2 * n as u64, ThinOp::CaptureSnapshot).await;
+        }
+        let responses = thin_responses_until(&mut ws, |responses| {
+            (10..=17).all(|id| responses.iter().any(|r| r.id == id))
+        })
+        .await;
+        for response in &responses {
+            match (response.id % 2, &response.body) {
+                (0, ThinBody::Written { .. }) | (1, ThinBody::Snapshot { .. }) => {}
+                (_, body) => panic!("request {} got {body:?}", response.id),
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thin_requests_past_the_ingress_budget_wait_for_room() {
         let (state, _) = private_docs_state().await;
         let runtime = state.runtime_for_client().expect("runtime");
         let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
@@ -6085,31 +6160,67 @@ mod tests {
             &current_bundle(std::net::SocketAddr::from(([127, 0, 0, 1], 0)), &state).await,
         )
         .expect("bundle id");
-        let session = runtime
-            .open_thin_session(
+        let open = || {
+            runtime.open_thin_session(
                 alice,
                 BTreeMap::new(),
                 Some(bundle),
                 CommitUnitTrust::Session,
             )
-            .await
-            .expect("open thin session");
-        let request = |id| jazz::thin::ThinRequest {
-            id,
-            op: jazz::thin::ThinOp::CaptureSnapshot,
         };
-        let budget = crate::runtime::SESSION_QUEUE_BUDGET;
-        // One request may be over the budget alone (a large write joined
-        // from parts), but not on top of others still queued.
+        let (session, other) = (open().await.unwrap(), open().await.unwrap());
+        let most = jazz::thin::MAX_THIN_MESSAGE_BYTES;
+        let soon = Duration::from_millis(200);
+        // One request may take a session's whole budget; the next waits
+        // until it has run, and another session is not held up by it.
+        let held = runtime.admit_thin_request(session, most).await.unwrap();
+        assert!(
+            tokio::time::timeout(soon, runtime.admit_thin_request(session, 16))
+                .await
+                .is_err()
+        );
+        let elsewhere = runtime.admit_thin_request(other, 16).await.unwrap();
+        let waiting = tokio::spawn({
+            let runtime = runtime.clone();
+            async move { runtime.admit_thin_request(session, 16).await.map(drop) }
+        });
         runtime
-            .receive_thin_request(session, request(1), budget + 1)
-            .expect("a lone request over the budget is queued");
-        runtime.settle_for_test().await;
-        runtime.hold_ingress_for_test(session, 16);
-        let error = runtime
-            .receive_thin_request(session, request(2), budget)
-            .expect_err("a request past the budget is refused");
-        assert!(error.contains("ingress budget"), "{error}");
+            .receive_thin_request(
+                session,
+                jazz::thin::ThinRequest {
+                    id: 1,
+                    op: jazz::thin::ThinOp::CaptureSnapshot,
+                },
+                held,
+            )
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), waiting)
+            .await
+            .expect("room once the request ran")
+            .unwrap()
+            .unwrap();
+        drop(elsewhere);
+        // Past the most one request takes, refused outright.
+        assert!(runtime.admit_thin_request(session, most + 1).await.is_err());
+        // The server's budget bounds every session together.
+        let budget = crate::runtime::THIN_INGRESS_SERVER_BUDGET;
+        let mut sessions = Vec::new();
+        let mut rooms = Vec::new();
+        for _ in 0..budget / most {
+            let session = open().await.unwrap();
+            rooms.push(runtime.admit_thin_request(session, most).await.unwrap());
+            sessions.push(session);
+        }
+        assert!(
+            tokio::time::timeout(soon, runtime.admit_thin_request(other, 16))
+                .await
+                .is_err()
+        );
+        rooms.pop();
+        tokio::time::timeout(soon, runtime.admit_thin_request(other, 16))
+            .await
+            .expect("room once another request is done")
+            .unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
