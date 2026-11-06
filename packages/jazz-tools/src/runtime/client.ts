@@ -159,6 +159,11 @@ export type AuthUpdate =
  */
 export interface Runtime {
   /**
+   * @internal The Db handed over to a successor: end reads not sent yet with
+   * a `RuntimeClosedError` cause, so they ask the successor instead.
+   */
+  endUnsentReads?(): void;
+  /**
    * Wait until every write committed so far reaches `tier`. `throughOutage`
    * keeps the wait pending through outages until a terminal failure.
    */

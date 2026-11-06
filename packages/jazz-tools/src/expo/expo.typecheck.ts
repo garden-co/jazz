@@ -1,10 +1,12 @@
 // Typecheck-only port of the deleted origin/main Expo auth tests to the v2 API.
 import {
+  createJazzClient,
   ExpoAuthSecretStore,
   expoAuthSecretStore,
   useLocalFirstAuth,
   type ExpoAuthSecretStoreOptions,
   type ExpoSecureStoreLike,
+  type JazzClientConfig,
   type UseLocalFirstAuthOptions,
 } from "./index.js";
 
@@ -38,3 +40,10 @@ function HookConsumer() {
 }
 
 void HookConsumer;
+
+// The app's own token for its backend, passed through to the account manager.
+const withBearer: JazzClientConfig = {
+  serverUrl: "https://app.example.test/jazz",
+  bearer: () => "app-token",
+};
+void createJazzClient(withBearer);

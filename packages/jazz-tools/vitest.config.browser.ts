@@ -23,6 +23,7 @@ import { readCorrectnessArtifactSnapshot } from "../../dev/artifacts/test-artifa
 import {
   jazzAppFront,
   jazzAppUser,
+  jazzAppSignOut,
   jazzAppRequest,
   jazzServerInfo,
   stopJazzServerByUrl,
@@ -48,6 +49,35 @@ import {
   shouldExcludeRealisticBrowserBench,
 } from "./src/browser-benchmark-mode.js";
 
+type QuotaPage = {
+  context(): { newCDPSession(page: unknown): Promise<QuotaCdpSession> };
+};
+type QuotaCdpSession = {
+  send(method: string, params: object): Promise<unknown>;
+  detach(): Promise<void>;
+};
+// The override lasts as long as the CDP session that set it.
+const quotaSessions = new Map<string, QuotaCdpSession>();
+async function overrideStorageQuota(
+  page: unknown,
+  origin: string,
+  quotaSize: number | null,
+): Promise<void> {
+  let session = quotaSessions.get(origin);
+  if (!session) {
+    session = await (page as QuotaPage).context().newCDPSession(page);
+    quotaSessions.set(origin, session);
+  }
+  await session.send(
+    "Storage.overrideQuotaForOrigin",
+    quotaSize === null ? { origin } : { origin, quotaSize },
+  );
+  if (quotaSize === null) {
+    quotaSessions.delete(origin);
+    await session.detach();
+  }
+}
+
 const realisticBrowserScenarios = process.env.JAZZ_REALISTIC_BROWSER_SCENARIOS ?? "";
 const realisticBrowserRunId = process.env.JAZZ_REALISTIC_BROWSER_RUN_ID ?? "";
 const realisticBrowserLimitOverrides =
@@ -60,6 +90,17 @@ if (!(["chromium", "firefox", "webkit"] as const).includes(browserName as never)
   throw new Error(`Unsupported JAZZ_BROWSER=${browserName}`);
 }
 const excludeRealisticBrowserBench = shouldExcludeRealisticBrowserBench();
+// A CDP quota override reaches IndexedDB only if nothing in the browser has
+// used the origin's IndexedDB before, and every file here shares one origin.
+// So each quota file runs only when named, in a browser of its own (see the
+// test:browser:storage-quota script).
+const STORAGE_QUOTA_TESTS = [
+  "tests/browser/db.storage-quota.test.ts",
+  "tests/browser/db.storage-quota-retry.test.ts",
+];
+const unnamedStorageQuotaTests = STORAGE_QUOTA_TESTS.filter(
+  (test) => !process.argv.some((value) => value.replaceAll("\\", "/").endsWith(test)),
+);
 const realisticBrowserBenchReportDir = resolve(__dirname, ".vitest-browser-bench");
 const sealedWasmPackage = process.env.JAZZ_CORRECTNESS_WASM_PACKAGE;
 if (process.env.JAZZ_CORRECTNESS_ARTIFACT_RUN === "1" && !sealedWasmPackage)
@@ -160,6 +201,10 @@ export default defineConfig({
           return JSON.parse(readFileSync(resolve(directory, file), "utf8"));
         },
         workerFaultBundleUrl: async () => workerFaultBundle.url(),
+        // Chromium only: caps (or, with `null`, restores) the storage quota of
+        // `origin` through CDP, so a test can run IndexedDB out of space.
+        overrideStorageQuota: async ({ page }, origin: string, quotaSize: number | null) =>
+          overrideStorageQuota(page, origin, quotaSize),
         recoverPendingIndexedDbWrites: async ({ context, page }, config) =>
           recoverPendingIndexedDbWrites(context, page, config),
         writeBrowserStorageCorpus: async (_context, records: Record<string, string>) => {
@@ -190,6 +235,7 @@ export default defineConfig({
         jazzAppFront: async (_context, coreUrl, app) => jazzAppFront(coreUrl, app),
         jazzAppUser: async (_context, frontUrl, userId, claims) =>
           jazzAppUser(frontUrl, userId, claims),
+        jazzAppSignOut: async (_context, frontUrl, userUrl) => jazzAppSignOut(frontUrl, userUrl),
         jazzAppRequest: async (_context, url, init) => jazzAppRequest(url, init),
         jazzServerStop: async (_context, serverUrl) => stopJazzServerByUrl(serverUrl),
         jazzServerTransportControlCreate: async (_context, serverUrl) =>
@@ -225,7 +271,10 @@ export default defineConfig({
       },
     },
     include: ["tests/browser/**/*.test.ts", "tests/browser/**/*.test.tsx"],
-    exclude: excludeRealisticBrowserBench ? [REALISTIC_BROWSER_BENCH_TEST] : [],
+    exclude: [
+      ...(excludeRealisticBrowserBench ? [REALISTIC_BROWSER_BENCH_TEST] : []),
+      ...unnamedStorageQuotaTests,
+    ],
     globalSetup: ["tests/browser/global-setup.ts"],
     testTimeout: 30000,
   },

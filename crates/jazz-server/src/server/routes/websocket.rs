@@ -128,7 +128,9 @@ pub(super) async fn ws_handler(
 
     ws.max_frame_size(WS_MAX_FRAME_BYTES)
         .max_message_size(WS_MAX_MESSAGE_BYTES)
-        .on_upgrade(move |socket| handle_ws_connection(socket, state, headers, websocket_guard))
+        .on_upgrade(move |socket| {
+            handle_ws_connection(socket, state, headers, websocket_guard, Handshake::Network)
+        })
 }
 
 #[derive(Clone, Debug)]
@@ -607,12 +609,40 @@ fn ws_validate_session_identity(
     Ok(())
 }
 
+/// How long a new connection's peer may take to send its prelude and Hello.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Handshake {
+    /// A peer over the network: one that sends nothing within
+    /// [`WS_HANDSHAKE_READ_TIMEOUT`] is dropped, so stalled upgrades don't
+    /// hold connection slots.
+    Network,
+    /// A client in this process, carried by the embedding host: it cannot
+    /// be half-open, and its Hello waits on the host's event loop, which a
+    /// burst of synchronous work can hold for longer than a network
+    /// peer's handshake may take.
+    InProcess,
+}
+
+/// `read`, within the handshake deadline a network peer has.
+async fn within_handshake<T: Default>(
+    handshake: Handshake,
+    read: impl std::future::Future<Output = T>,
+) -> T {
+    match handshake {
+        Handshake::Network => tokio::time::timeout(WS_HANDSHAKE_READ_TIMEOUT, read)
+            .await
+            .unwrap_or_default(),
+        Handshake::InProcess => read.await,
+    }
+}
+
 async fn read_ws_auth_prelude<S: SyncSocket>(
     socket: &mut S,
     shutdown_rx: &mut tokio::sync::watch::Receiver<crate::server::ShutdownPhase>,
     state: &ServerState,
+    handshake: Handshake,
 ) -> Option<Vec<u8>> {
-    tokio::time::timeout(WS_HANDSHAKE_READ_TIMEOUT, async {
+    within_handshake(handshake, async {
         tokio::select! {
             msg = socket.next() => match msg {
                 Some(Ok(Message::Binary(bytes))) => Some(bytes.to_vec()),
@@ -628,15 +658,15 @@ async fn read_ws_auth_prelude<S: SyncSocket>(
         }
     })
     .await
-    .unwrap_or_default()
 }
 
 async fn read_ws_frame_batch<S: SyncSocket>(
     socket: &mut S,
     shutdown_rx: &mut tokio::sync::watch::Receiver<crate::server::ShutdownPhase>,
     state: &ServerState,
+    handshake: Handshake,
 ) -> Option<Vec<u8>> {
-    tokio::time::timeout(WS_HANDSHAKE_READ_TIMEOUT, async {
+    within_handshake(handshake, async {
         tokio::select! {
             msg = socket.next() => match msg {
                 Some(Ok(Message::Binary(bytes))) => Some(bytes.to_vec()),
@@ -651,7 +681,6 @@ async fn read_ws_frame_batch<S: SyncSocket>(
         }
     })
     .await
-    .unwrap_or_default()
 }
 
 pub(crate) async fn handle_ws_connection<S: SyncSocket>(
@@ -659,6 +688,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     state: Arc<ServerState>,
     request_headers: HeaderMap,
     _websocket_guard: ActiveWebSocketGuard,
+    handshake: Handshake,
 ) {
     let mut shutdown_rx = state.shutdown.subscribe();
     if state.shutdown.is_shutting_down() {
@@ -666,14 +696,17 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
         return;
     }
 
-    let Some(auth_bytes) = read_ws_auth_prelude(&mut socket, &mut shutdown_rx, &state).await else {
+    let Some(auth_bytes) =
+        read_ws_auth_prelude(&mut socket, &mut shutdown_rx, &state, handshake).await
+    else {
         return;
     };
     // Every client sends its Hello right behind the prelude, without waiting.
     // Read it before answering anything: how an error frame is encoded is
     // itself scoped to the wire version, so a client on another version is
     // refused in its own layout before admission can reply in ours.
-    let Some(first) = read_ws_frame_batch(&mut socket, &mut shutdown_rx, &state).await else {
+    let Some(first) = read_ws_frame_batch(&mut socket, &mut shutdown_rx, &state, handshake).await
+    else {
         return;
     };
     if let Some(refusal) = ws_foreign_version_refusal(&first) {
@@ -728,7 +761,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     // advertises thin results is answered with results, not sync.
     let negotiated = match negotiate_wire(
         &remote_hello,
-        current_wire_features() | jazz::wire::FEATURE_THIN_RESULTS,
+        current_wire_features() | jazz::wire::FEATURE_THIN_RESULTS | jazz::wire::FEATURE_HEARTBEAT,
     ) {
         Ok(negotiated) => negotiated,
         Err(error) => {
@@ -940,11 +973,16 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     // Ping on a fixed cadence and drop the link once nothing at all has
     // arrived for the idle timeout; every WebSocket client answers pings.
     let mut last_inbound = tokio::time::Instant::now();
+    let heartbeat = negotiated.features & jazz::wire::FEATURE_HEARTBEAT != 0;
     let mut keepalive = tokio::time::interval_at(
         last_inbound + WS_KEEPALIVE_PING_INTERVAL,
         WS_KEEPALIVE_PING_INTERVAL,
     );
     keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    // A sync batch read while its session's ingress budget was full: the
+    // socket is not read again until the owner has taken earlier frames.
+    let mut held: Option<(Vec<Vec<u8>>, WireAdmission)> = None;
 
     'connection: loop {
         let stall_at = thin_reader.stall_deadline();
@@ -953,7 +991,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
             _ = keepalive.tick() => {
                 // A connection waiting for room reads nothing, its peer's
                 // pongs included: that is not the peer going quiet.
-                if thin_reader.waiting() {
+                if thin_reader.waiting() || held.is_some() {
                     last_inbound = tokio::time::Instant::now();
                 }
                 if last_inbound.elapsed() >= WS_IDLE_TIMEOUT {
@@ -964,8 +1002,9 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                     break;
                 }
                 // A full writer queue already proves the link is busy; the
-                // next tick pings again.
-                let _ = writer_tx.try_send(vec![Message::Ping(Default::default())]);
+                // next tick pings again. A client that cannot see pings (a
+                // browser) asked for a heartbeat frame it can see instead.
+                let _ = writer_tx.try_send(keepalive_beat(heartbeat));
             }
             _ = async {
                 if let Some(changes) = &mut account_changes { let _ = changes.changed().await; }
@@ -1049,7 +1088,20 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                 ));
                 break 'connection;
             }
-            msg = socket_reader.next(), if !thin_reader.waiting() => {
+            room = async {
+                match &mut held {
+                    Some((_, admission)) => admission.await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                let (frames, _) = held.take().expect("a held batch is waiting");
+                let received = room.and_then(|room| core_server_shell.receive_wire_frames(session, frames, room));
+                if let Err(error) = received {
+                    queue_ws_error(&writer_tx, WireError::new(WireErrorCode::Backpressure, WireRetry::Later, error));
+                    break 'connection;
+                }
+            }
+            msg = socket_reader.next(), if !thin_reader.waiting() && held.is_none() => {
                 last_inbound = tokio::time::Instant::now();
                 match msg {
                 Some(Ok(Message::Binary(bytes))) => {
@@ -1074,7 +1126,19 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                         }
                         continue;
                     }
-                    if let Err(error) = core_server_shell.receive_wire_frames(session, frames) {
+                    let bytes = frames.iter().map(Vec::len).sum::<usize>();
+                    let received = match core_server_shell.try_admit_wire_frames(session, bytes) {
+                        Ok(Some(room)) => core_server_shell.receive_wire_frames(session, frames, room),
+                        Ok(None) => {
+                            let runtime = core_server_shell.clone();
+                            held = Some((frames, Box::pin(async move {
+                                runtime.admit_wire_frames(session, bytes).await
+                            })));
+                            Ok(())
+                        }
+                        Err(error) => Err(error),
+                    };
+                    if let Err(error) = received {
                         queue_ws_error(&writer_tx, WireError::new(WireErrorCode::Backpressure, WireRetry::Later, error));
                         break 'connection;
                     }
@@ -1112,6 +1176,11 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
 const THIN_PART_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 #[cfg(test)]
 const THIN_PART_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The wait for room for a sync batch in its session's ingress budget.
+type WireAdmission = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<crate::runtime::WireIngress, String>> + Send>,
+>;
 
 type ThinAdmission = std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<crate::runtime::ThinIngress, String>> + Send>,
@@ -1259,6 +1328,19 @@ impl Drop for SocketWriterGuard {
     fn drop(&mut self) {
         self.0.abort();
     }
+}
+
+/// One keepalive tick's messages: a ping, and for a client that negotiated
+/// [`jazz::wire::FEATURE_HEARTBEAT`] a heartbeat frame it can see.
+fn keepalive_beat(heartbeat: bool) -> Vec<Message> {
+    let mut beat = vec![Message::Ping(Default::default())];
+    if heartbeat {
+        let frame = encode_frame(&WireFrame::Heartbeat).expect("a unit frame encodes");
+        let batch = jazz::wire::encode_websocket_frame_batch(&[frame])
+            .expect("a one-byte frame fits a batch");
+        beat.push(Message::Binary(batch.into()));
+    }
+    beat
 }
 
 fn queue_ws_error(writer: &mpsc::Sender<Vec<Message>>, error: WireError) {
@@ -2660,6 +2742,45 @@ mod tests {
             };
             expect_ws_server_hello(&mut ws, features).await;
         }
+    }
+
+    /// A browser cannot see WebSocket pings, so a client that asks for it
+    /// gets a heartbeat it can see; its frame is the one byte the TypeScript
+    /// carrier drops before the runtime (`WIRE_FRAME_HEARTBEAT`).
+    #[test]
+    fn keepalive_sends_a_heartbeat_only_to_a_client_that_asked() {
+        let [Message::Ping(_)] = keepalive_beat(false).as_slice() else {
+            panic!("a client without the feature gets only the ping");
+        };
+        let beat = keepalive_beat(true);
+        let [Message::Ping(_), Message::Binary(batch)] = beat.as_slice() else {
+            panic!("a heartbeat client gets the ping and one batch");
+        };
+        let frames = decode_ws_frame_batch(batch).expect("a frame batch");
+        assert_eq!(frames, vec![WireFrame::Heartbeat]);
+    }
+
+    #[tokio::test]
+    async fn websocket_negotiates_the_heartbeat_a_browser_asks_for() {
+        assert_eq!(encode_frame(&WireFrame::Heartbeat).unwrap(), vec![7]);
+        let state = make_ws_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let entry = websocket_prelude_v1_fixture()["fixtures"]
+            .as_array()
+            .expect("fixture entries")
+            .iter()
+            .find(|entry| entry["name"] == "typescript_admin_default_link")
+            .expect("the TypeScript default-link fixture")
+            .clone();
+        let (mut ws, _) = connect_async(ws_url(addr, state.app_id))
+            .await
+            .expect("connect websocket");
+        ws.send(WsMessage::Text(
+            entry["json"].as_str().unwrap().to_owned().into(),
+        ))
+        .await
+        .expect("send prelude");
+        expect_ws_server_hello(&mut ws, jazz::wire::FEATURE_HEARTBEAT).await;
     }
 
     #[tokio::test]
@@ -6206,6 +6327,181 @@ mod tests {
             thin_answer(&mut ws, 7).await,
             ThinBody::Snapshot { .. }
         ));
+    }
+
+    /// A text-merge column, written by a thin client as editors do: an
+    /// `editedFrom` text edit and a splice, both lowered on the server
+    /// against the row as the session may read it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thin_text_edits_and_splices_apply_on_the_server() {
+        use jazz::thin::{ThinBody, ThinOp};
+        use jazz::tools::{ColumnDescriptor, ColumnMergeStrategy, RowDescriptor, TableName};
+        let source = Schema::from([(
+            TableName::new("notes"),
+            PublicTableSchema {
+                columns: RowDescriptor::new(vec![
+                    ColumnDescriptor::new("body", ColumnType::Text)
+                        .merge_strategy(ColumnMergeStrategy::Markdown),
+                ]),
+                indexed_columns: None,
+                composite_indexes: Vec::new(),
+                policies: public_table_policies(),
+                branch_by: Vec::new(),
+                history: Default::default(),
+            },
+        )]);
+        let state = ServerBuilder::new(AppId::random())
+            .with_auth_config(AuthConfig {
+                admin_secret: Some("admin-secret".to_owned()),
+                backend_secret: Some("backend-secret".to_owned()),
+                ..Default::default()
+            })
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await
+            .expect("build thin test state")
+            .state;
+        publish_source_bundle(&state, &source).await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let mut ws = open_thin_ws(addr, &state, alice).await;
+        bind_thin_schema(&mut ws, &source).await;
+        let cells = |columns: &[(&str, &str)]| {
+            let descriptor = jazz::records::RecordDescriptor::new(
+                columns
+                    .iter()
+                    .map(|(name, _)| (*name, jazz::records::ValueType::String)),
+            );
+            let values: Vec<CoreValue> = columns
+                .iter()
+                .map(|(_, value)| CoreValue::String((*value).to_owned()))
+                .collect();
+            let record = jazz::records::OwnedRecord::new(
+                descriptor.create(&values).expect("note record"),
+                descriptor,
+            );
+            jazz::binding_codec::encode_named_cells(&record).expect("encode note cells")
+        };
+        send_thin(
+            &mut ws,
+            1,
+            ThinOp::Insert {
+                table: "notes".to_owned(),
+                cells: cells(&[("body", "Hello")]),
+                options: Vec::new(),
+                transaction: None,
+            },
+        )
+        .await;
+        let ThinBody::Written { row, .. } = thin_answer(&mut ws, 1).await else {
+            panic!("the insert must commit");
+        };
+        const TX: &str = "0190f3e4000070008000000000000009";
+        let edit = |id: u64, mutations: serde_json::Value| ThinOp::UpdateLargeValues {
+            table: "notes".to_owned(),
+            row,
+            patch: cells(&[]),
+            mutations: serde_json::to_vec(&mutations).unwrap(),
+            updated_at_ms: None,
+            transaction: (id == 5).then(|| TX.to_owned()),
+        };
+        send_thin(
+            &mut ws,
+            2,
+            edit(
+                2,
+                serde_json::json!([{
+                    "kind": "text_edit",
+                    "column": "body",
+                    "text": "Hello world",
+                    "edited_from": "Hello",
+                }]),
+            ),
+        )
+        .await;
+        match thin_answer(&mut ws, 2).await {
+            ThinBody::Written { .. } => {}
+            other => panic!("the text edit must commit, got {other:?}"),
+        }
+        send_thin(
+            &mut ws,
+            3,
+            edit(
+                3,
+                serde_json::json!([{
+                    "kind": "splice",
+                    "column": "body",
+                    "within": { "kind": "text_utf16", "from": 11, "to": 11 },
+                    "splices": [{ "at": 0, "delete": 0, "insert": [33] }],
+                }]),
+            ),
+        )
+        .await;
+        match thin_answer(&mut ws, 3).await {
+            ThinBody::Written { .. } => {}
+            other => panic!("the splice must commit, got {other:?}"),
+        }
+        // Inside a transaction, too.
+        send_thin(
+            &mut ws,
+            4,
+            ThinOp::Begin {
+                transaction: TX.to_owned(),
+                kind: "mergeable".to_owned(),
+            },
+        )
+        .await;
+        assert_eq!(thin_answer(&mut ws, 4).await, ThinBody::Ok);
+        send_thin(
+            &mut ws,
+            5,
+            edit(
+                5,
+                serde_json::json!([{
+                    "kind": "text_edit",
+                    "column": "body",
+                    "text": "Hey world!",
+                    "edited_from": "Hello world!",
+                }]),
+            ),
+        )
+        .await;
+        match thin_answer(&mut ws, 5).await {
+            ThinBody::Staged { .. } => {}
+            other => panic!("the transaction's text edit must stage, got {other:?}"),
+        }
+        send_thin(
+            &mut ws,
+            6,
+            ThinOp::Commit {
+                transaction: TX.to_owned(),
+            },
+        )
+        .await;
+        match thin_answer(&mut ws, 6).await {
+            ThinBody::Written { .. } => {}
+            other => panic!("the transaction must commit, got {other:?}"),
+        }
+        send_thin(
+            &mut ws,
+            7,
+            ThinOp::Query {
+                query: postcard::to_allocvec(&jazz::query::Query::from("notes")).unwrap(),
+                options: remote_read(),
+                transaction: None,
+            },
+        )
+        .await;
+        let ThinBody::Rows { rows, .. } = thin_answer(&mut ws, 7).await else {
+            panic!("the query must answer rows");
+        };
+        let bodies: Vec<CoreValue> = jazz::binding_codec::decode_rows(&rows)
+            .unwrap()
+            .into_iter()
+            .flat_map(|batch| batch.rows)
+            .filter_map(|row| row.cells.get("body").cloned())
+            .collect();
+        assert_eq!(bodies, vec![CoreValue::String("Hey world!".to_owned())]);
     }
 
     /// Large writes sent together, and small requests sent while they are

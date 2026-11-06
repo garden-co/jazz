@@ -1467,3 +1467,42 @@ describe("BrowserConnectionManager explicit transport transitions", () => {
     expect(manager.initialExplicitOfflineState()).toBeNull();
   });
 });
+
+describe("BrowserConnectionManager write readiness", () => {
+  // A write's Global wait in a tab: its worker refused the sign-in (or
+  // published an outage), so it has no server link to wait for. The write
+  // stays queued and the wait holds, as without a worker (#3923).
+  it("does not make a write's Global wait wait for the server link", async () => {
+    const fixture = await leasedManagerFixture();
+    const refused = new Error("session missing: not signed in");
+    vi.mocked(fixture.connection.waitForServerConnection).mockRejectedValue(refused);
+    try {
+      await expect(fixture.manager.ensureReady("upload")).resolves.toBeUndefined();
+      expect(fixture.connection.waitForServerConnection).not.toHaveBeenCalled();
+      // A remote read still needs the link, and says why it has none.
+      await expect(fixture.manager.ensureReady("server")).rejects.toBe(refused);
+    } finally {
+      fixture.allowFinish();
+      fixture.host.isShuttingDown = true;
+      await fixture.manager.shutdown();
+    }
+  });
+
+  it("holds a write's Global wait through an explicit disconnect", async () => {
+    const fixture = await leasedManagerFixture();
+    try {
+      await fixture.manager.disconnect();
+      let ready = false;
+      const waiting = fixture.manager.ensureReady("upload").then(() => (ready = true));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(ready).toBe(false);
+      await fixture.manager.reconnect();
+      await waiting;
+      expect(fixture.connection.waitForServerConnection).not.toHaveBeenCalled();
+    } finally {
+      fixture.allowFinish();
+      fixture.host.isShuttingDown = true;
+      await fixture.manager.shutdown();
+    }
+  });
+});

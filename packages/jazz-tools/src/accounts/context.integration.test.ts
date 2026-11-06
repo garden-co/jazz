@@ -3,6 +3,7 @@ import { createDb, schema } from "../index.js";
 import { getDbInternalSession } from "../runtime/db-internal-session.js";
 import { mapAuthReason, type AuthFailureReason } from "../runtime/auth-state.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
+import { createAccountManager } from "./create-account-manager.js";
 
 function failAuth(db: object, reason: AuthFailureReason): void {
   (db as { markUnauthenticated(reason: AuthFailureReason): void }).markUnauthenticated(reason);
@@ -169,6 +170,46 @@ describe("account context authority", () => {
       await vi.waitFor(() => expect(refresh).toHaveBeenCalledTimes(3), { timeout: 6_000 });
       await vi.waitFor(() => expect(db.getAuthState().error).toBeUndefined());
     } finally {
+      await db.shutdown();
+    }
+  });
+
+  it("leaves a refused backend sign-in to the backend, with no token to renew", async () => {
+    // A browser page, signed in by the app's backend from its cookie.
+    vi.stubGlobal("document", {});
+    const appId = "backend-signed-in-no-renewal";
+    let stored: string | null = null;
+    const accounts = await createAccountManager({
+      appId,
+      serverUrl: "http://127.0.0.1:1",
+      store: {
+        async read() {
+          return stored;
+        },
+        async update(transform) {
+          stored = transform(stored);
+        },
+      },
+      fetch: async () =>
+        Response.json({
+          account: "6f1c1b6e-2d1a-4c8e-9a43-5b0f2f6f3a10",
+          identity: { issuer: "jazz:backend", subject: "alice" },
+          claims: {},
+        }),
+    });
+    const account = await accounts.loginWithBackend();
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const db = await createDb({ appId, account, driver: { type: "memory" } });
+    try {
+      const refresh = vi.spyOn(db, "refreshOwnAccountAuth");
+      failAuth(db, "expired");
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
+      // Renewing would only fail, and log it every few seconds.
+      expect(refresh).not.toHaveBeenCalled();
+      expect(logged).not.toHaveBeenCalledWith("Account auth refresh failed", expect.anything());
+    } finally {
+      logged.mockRestore();
+      vi.unstubAllGlobals();
       await db.shutdown();
     }
   });

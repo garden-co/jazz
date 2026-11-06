@@ -82,8 +82,17 @@ export interface BackendWatch {
  *   guest), and once refused the watch never links that guest to that user
  *   again. With `linkGuest: false` the watch leaves such a guest to the app.
  *
+ * A check that fails for a reason that passes (a network error, a timeout,
+ * a 5xx), asking the backend or following its answer, is tried again with
+ * backoff, so a blip leaves no tab where it was until focus returns.
+ *
  * The app calls `reauthenticate` after its own sign-in or sign-out, so the
  * session follows at once.
+ *
+ * A user the sync server refuses whom the backend still names but says has
+ * no account (the core lost it: a reset dev store, a new core) is signed in
+ * again, once, which gives them a new account; reconnecting would only be
+ * refused again.
  *
  * A sync server refusing the sign-in (`authRefused`) asks the backend too, but
  * only to reconnect, with backoff, while it still names the same user. It
@@ -123,6 +132,12 @@ export function watchBackendUser<Client>(
      * long, said 404. Default 5s.
      */
     notFoundRetryMs?: number;
+    /**
+     * The first wait before checking again after a check failed for a
+     * reason that passes (a network error, a timeout, a 5xx); it doubles up
+     * to a minute. Default 2s.
+     */
+    retryMs?: number;
   } = {},
 ): BackendWatch {
   const confirmMs = options.confirmMs ?? 2000;
@@ -134,6 +149,27 @@ export function watchBackendUser<Client>(
     notFound = undefined;
     if (notFoundTimer) clearTimeout(notFoundTimer);
     notFoundTimer = undefined;
+  };
+  // A check that failed for a reason that passes is tried again with backoff,
+  // so a blip doesn't leave the session where it was until focus returns.
+  const firstRetryMs = options.retryMs ?? 2_000;
+  let retryMs = firstRetryMs;
+  let retryTimer: ReturnType<typeof setTimeout> | undefined;
+  let retries = 0;
+  const retryLater = (cause: unknown) => {
+    if (stopped || !passes(cause) || retryTimer) return;
+    retries++;
+    const wait = retryMs;
+    retryMs = Math.min(retryMs * 2, 60_000);
+    retryTimer = setTimeout(() => {
+      retryTimer = undefined;
+      check();
+    }, wait);
+  };
+  const clearRetry = () => {
+    retryMs = firstRetryMs;
+    if (retryTimer) clearTimeout(retryTimer);
+    retryTimer = undefined;
   };
   // Why the watch stopped: later reauthenticates reject with it.
   let stopReason: Error | undefined;
@@ -167,6 +203,9 @@ export function watchBackendUser<Client>(
   // user: one re-check follows the newer answer, more would loop if they
   // disagree. Kept per user, so another user gets their own re-check.
   let signedOutLink: string | undefined;
+  // A signed-in user the backend said has no account any more, signed in
+  // again once: kept per user until the backend says they have one.
+  let lostAccount: string | undefined;
   let checking: Promise<void> | undefined;
   // Checks asked for while one runs: a plain one (may sign out), a refused
   // one (only reconnects) and an asked one (the app's auth changed: no
@@ -242,21 +281,22 @@ export function watchBackendUser<Client>(
    * asks again once that settles.
    */
   async function once(refused: boolean, asked = false): Promise<"again" | void> {
-    // Plain checks swallow a failed transition: the session shows it.
+    // Plain checks swallow a failed transition (the session shows it), and
+    // try again later when it may pass.
     const attempt = (run: Promise<unknown>) =>
-      asked
-        ? run.then(() => {})
-        : run.then(
-            () => {},
-            () => {},
-          );
+      asked ? run.then(() => {}) : run.then(() => {}, retryLater);
     const busy = () => (asked && !stopped ? "again" : undefined);
     if (quiet(asked)) return busy();
     // Only this account is signed out on the answer this check gets.
     const startedWith = session.getSnapshot().account;
     let signedIn = await ask();
     if (signedIn !== null && "failed" in signedIn) {
-      if (!asked) return;
+      if (!asked) {
+        // A 404 has its own retry (see `notFoundAnswer`).
+        if (!(signedIn.failed instanceof AccountAuthError && signedIn.failed.status === 404))
+          retryLater(signedIn.failed);
+        return;
+      }
       throw new Error("Jazz could not ask your backend who is signed in", {
         cause: signedIn.failed,
       });
@@ -270,6 +310,26 @@ export function watchBackendUser<Client>(
         // The same user, whose client failed to open: the app asking is
         // how it recovers.
         if (asked && session.getSnapshot().status === "error") return attempt(session.retry());
+        const who = `${signedIn.issuer}\0${signedIn.subject}`;
+        // The sync server refused them, and the core holds no account for
+        // them any more (a reset dev store, a new core): it refuses this
+        // account for good, so reconnecting would loop. Sign in again, which
+        // gives them a new one. Once per user, so a backend whose answers keep
+        // saying no account doesn't sign in again and again.
+        if (signedIn.hasAccount === false && (refused || refusedPending)) {
+          if (lostAccount === who) return;
+          lostAccount = who;
+          remembered = undefined;
+          // A sign-in that fails (a network error, a 5xx) is tried again on
+          // the next refusal.
+          return attempt(
+            session.loginWithBackend().catch((cause: unknown) => {
+              if (lostAccount === who) lostAccount = undefined;
+              throw cause;
+            }),
+          );
+        }
+        if (signedIn.hasAccount !== false && lostAccount === who) lostAccount = undefined;
         const account = session.getSnapshot().account;
         if (account === remembered && !refused) {
           remembered = undefined;
@@ -329,6 +389,7 @@ export function watchBackendUser<Client>(
             // A network error, a 5xx, an expired challenge, or a backend
             // whose answers keep disagreeing: a later check tries again.
             if (asked) throw cause;
+            retryLater(cause);
             return;
           }
           signedOutLink = undefined;
@@ -406,6 +467,7 @@ export function watchBackendUser<Client>(
       return;
     }
     const batch = asked ? waiters.splice(0) : [];
+    const retriesBefore = retries;
     let retry = false;
     let failure: Error | undefined;
     checking = once(refused, asked)
@@ -419,6 +481,8 @@ export function watchBackendUser<Client>(
       )
       .finally(() => {
         checking = undefined;
+        // A check that followed the backend ends any retry streak.
+        if (!refused && !retry && !failure && retries === retriesBefore) clearRetry();
         const next = again;
         again = undefined;
         if (retry) waiters.unshift(...batch);
@@ -471,6 +535,7 @@ export function watchBackendUser<Client>(
       settle(waiters.splice(0));
       clearTimeout(start);
       clearNotFound();
+      clearRetry();
       markStarted();
       resetRefusal();
       unsubscribe();
@@ -556,4 +621,12 @@ export function browserBackendWatchEvents(channelName: string): BackendWatchEven
     crossTab,
     isVisible: () => typeof document === "undefined" || document.visibilityState === "visible",
   };
+}
+
+/** Whether a failed check may pass if asked again: the network, a timeout, or a 5xx. */
+function passes(cause: unknown): boolean {
+  if (cause instanceof TypeError) return true;
+  if (!(cause instanceof AccountAuthError)) return false;
+  if (cause.status === undefined) return cause.code === "account_request_timeout";
+  return cause.status >= 500 || cause.status === 408 || cause.status === 429;
 }

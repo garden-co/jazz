@@ -1,4 +1,5 @@
 import {
+  camelize,
   defineComponent,
   h,
   inject,
@@ -51,6 +52,10 @@ export const JazzProvider = defineComponent({
     scope: String,
     serverUrl: { type: String as PropType<string | null>, default: undefined },
     initial: [String, Object] as PropType<JazzClientConfig["initial"]>,
+    // Declared so `clear-on-sign-out` (bare or bound) reaches the session as
+    // a boolean; left out, each keeps the session's own default.
+    clearOnSignOut: { type: Boolean, default: undefined },
+    linkGuestOnSignUp: { type: Boolean, default: undefined },
     autoAttachDevTools: { type: Boolean, default: true },
   },
   setup(props, { slots, attrs }) {
@@ -65,11 +70,19 @@ export const JazzProvider = defineComponent({
           },
           slots,
         );
+    // Vue passes undeclared attributes as written: `driver` stays `driver`,
+    // but a kebab-case `log-level` must still reach the client as `logLevel`.
+    const options: Record<string, unknown> = {};
+    for (const [name, value] of Object.entries(attrs)) options[camelize(name)] = value;
     const config = {
-      ...attrs,
+      ...options,
       scope: props.scope,
       serverUrl: props.serverUrl,
       initial: props.initial,
+      ...(props.clearOnSignOut === undefined ? {} : { clearOnSignOut: props.clearOnSignOut }),
+      ...(props.linkGuestOnSignUp === undefined
+        ? {}
+        : { linkGuestOnSignUp: props.linkGuestOnSignUp }),
     } as JazzClientConfig;
     const app = createJazzAppOwner(config, createJazzClient, { start: false });
     const snapshot = shallowRef(app.getSnapshot());

@@ -4,6 +4,7 @@ import { AccountManager } from "../accounts/state.js";
 import { createJazzSessionOwner } from "../session/state.js";
 import { makeFakeAccount, makeFakeClient } from "../react-core/test-utils.js";
 import { useJazzAuth } from "../react-core/app.js";
+import { useJazzSession } from "../react-core/session.js";
 const host = vi.hoisted(() => ({ create: vi.fn() }));
 vi.mock("../session/create-jazz-session.js", () => ({ createJazzClient: host.create }));
 import { JazzProvider } from "./provider.js";
@@ -139,4 +140,41 @@ it("starts signed out with `initial`, then follows the backend's user on reauthe
   });
   await waitFor(() => expect(view.getByText("signed out")).toBeDefined());
   expect(shutdowns).toEqual([{ waitForSync: true }]);
+});
+it("refuses a `fallback` prop by name instead of handing it to the client config", () => {
+  const props = { fallback: <p>Loading…</p> } as object;
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  expect(() =>
+    render(
+      <JazzProvider
+        scope="app"
+        serverUrl="https://sync.example.test"
+        autoAttachDevTools={false}
+        {...props}
+      >
+        <p>data</p>
+      </JazzProvider>,
+    ),
+  ).toThrow(/has no `fallback` prop.*`loading`|`loading`.*no `fallback` prop/s);
+  expect(host.create).not.toHaveBeenCalled();
+});
+it("points useJazzSession under <JazzProvider> to useJazzAuth", async () => {
+  host.create.mockReturnValue(new Promise(() => {}));
+  function Status() {
+    useJazzSession();
+    return null;
+  }
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  expect(() =>
+    render(
+      <JazzProvider
+        scope="app"
+        serverUrl="https://sync.example.test"
+        autoAttachDevTools={false}
+        loading={<Status />}
+      >
+        <p>data</p>
+      </JazzProvider>,
+    ),
+  ).toThrow(/Under <JazzProvider>, use useJazzAuth\(\)/);
 });

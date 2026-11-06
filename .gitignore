@@ -63,7 +63,6 @@ data-multi/
 .turbo
 
 # Benchmark scratch data
-/crates/opfs-btree/wasm-bench/bench-data/
 /bench-out/
 /dev/benchmarks/profiles/
 

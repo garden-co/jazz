@@ -31,16 +31,6 @@ afterEach(async () => {
   await testApp?.shutdown();
 });
 
-/**
- * Updating a row you can't read fails before it leaves your device: Jazz
- * needs read permission on the existing row to apply an update, so there is
- * nothing to send to the server. `expectDenied` waits for a server
- * rejection, so these cases assert the local denial instead.
- */
-function expectUnreadableUpdate(write: () => unknown) {
-  expect(write).toThrow(/read policy denied UPDATE/);
-}
-
 async function setUpShow() {
   const chief = testApp.as(session("chiara", chiefAccount));
   const crew = testApp.as(session("cole", crewAccount));
@@ -211,7 +201,9 @@ describe("StagePlan permissions", () => {
         rank: 2,
       }),
     );
-    expectUnreadableUpdate(() => outsider.update(app.tasks, ctx.task.id, { status: "done" }));
+    // An update of a row you can't read is refused by the server, as any
+    // denied write is: Jazz needs read permission on the row to update it.
+    await outsider.expectDenied((db) => db.update(app.tasks, ctx.task.id, { status: "done" }));
     await outsider.expectDenied((db) =>
       db.insert(app.activity, {
         showId: ctx.show.id,
@@ -220,7 +212,7 @@ describe("StagePlan permissions", () => {
         kind: "moved",
       }),
     );
-    expectUnreadableUpdate(() => outsider.update(app.shows, ctx.show.id, { name: "Mine now" }));
+    await outsider.expectDenied((db) => db.update(app.shows, ctx.show.id, { name: "Mine now" }));
   });
 
   it("lets someone join only with the current invite code", async () => {
@@ -435,7 +427,7 @@ describe("StagePlan permissions", () => {
       })
       .wait({ tier: "global" });
     await expect(ctx.chief.all(app.checklistItems.where({ id: item.id }))).resolves.toEqual([]);
-    expectUnreadableUpdate(() => ctx.chief.update(app.checklistItems, item.id, { done: true }));
+    await ctx.chief.expectDenied((db) => db.update(app.checklistItems, item.id, { done: true }));
     await ctx.crew.update(app.checklistItems, item.id, { done: true }).wait({ tier: "global" });
   });
 });

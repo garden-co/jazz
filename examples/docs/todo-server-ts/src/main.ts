@@ -120,16 +120,17 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
   const app = express();
   app.use(express.json());
 
-  // Sign in: returns the caller's Jazz account, which Jazz creates the first
-  // time it sees a verified identity.
+  // Sign in: returns the caller's Jazz account, creating it on their first
+  // sign-in. Jazz never creates one by itself on the backend; this API has
+  // no browser client (and so no local-first guest to link), so it does.
   app.post("/sign-in", async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const account = await jazz.accountFor(toRequest(req));
-      if (!account) {
+      const user = await authenticate(toRequest(req));
+      if (!user) {
         res.status(401).json({ error: "Unauthorized" });
         return;
       }
-      res.json({ account });
+      res.json({ account: await jazz.createAccountFor(user.userId) });
     } catch (e) {
       next(e);
     }

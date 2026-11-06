@@ -189,11 +189,14 @@ which its writer never saw); the value Core holds; and the write's value:
   by Jazz's own tables, not the toolchain's Unicode version, so every Core
   cuts a value alike. A `<`, `&` or `](` with no closer within a bounded
   window is a token of one character;
-- a word both sides changed only by inserting characters at one place in
-  it or only by deleting characters from it (typing into or backspacing in
-  it) is cut into characters on all three sides before the diffs, so two
-  people typing into one word both keep what they typed; letters typed at
-  one spot of it interleave in seq order. The cut keeps each character
+- a word (or number) both sides changed only by inserting characters into
+  it, at any number of places, or only by deleting characters from it
+  (typing into or backspacing in it) is cut into characters on all three
+  sides before the diffs, together with the tokens that side turned it
+  into (typing a space or punctuation into a word makes several), so two
+  people typing into one word both keep what they typed, also once their
+  earlier keystrokes have merged into it; letters typed at one spot of it
+  interleave in seq order. The cut keeps each character
   whole, with the marks and joiners that complete it, and only words of
   scripts whose letters stand alone (Latin, Greek, Cyrillic, Armenian,
   CJK, kana, Hangul syllables) are cut: a word joining letters with vowel

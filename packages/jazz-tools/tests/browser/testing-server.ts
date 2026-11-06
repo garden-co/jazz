@@ -64,6 +64,17 @@ export function jazzAppUserUrl(
 }
 
 /**
+ * Sign the user at `userUrl` (from {@link jazzAppUserUrl}) out of the app
+ * backend `app`, as its logout clears their cookie.
+ */
+export function signOutOfJazzApp(app: JazzServerInfo, userUrl: string): Promise<void> {
+  const signOut = jazzServerBrowserCommands().jazzAppSignOut;
+  if (!signOut)
+    throw new Error("This browser test config does not register the jazzAppSignOut command");
+  return signOut(app.serverUrl, userUrl);
+}
+
+/**
  * A `fetch` for an account manager's sign-in requests to a test app backend.
  * The page's origin is not the backend's and the backend answers no CORS (an
  * app serves its backend on its own origin), so Node sends them.

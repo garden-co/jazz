@@ -12,6 +12,8 @@ export interface JazzServerBrowserCommands {
     app: { schema: WasmSchema; permissions: CompiledPermissionsMap; pageOrigin: string },
   ): Promise<string>;
   jazzAppUser(frontUrl: string, userId: string, claims?: Record<string, unknown>): Promise<string>;
+  /** Optional: only configs whose tests sign users out register it. */
+  jazzAppSignOut?(frontUrl: string, userUrl: string): Promise<void>;
   /** Optional: only configs whose tests write as the backend register it. */
   jazzAppBackendInsert?(
     frontUrl: string,
@@ -64,6 +66,18 @@ export function jazzStorageCorpusBrowserCommands(): JazzStorageCorpusBrowserComm
     throw new Error("Browser test project is missing the storage corpus export command.");
   }
   return commands as unknown as JazzStorageCorpusBrowserCommands;
+}
+
+export interface StorageQuotaBrowserCommands {
+  /** Cap `origin`'s storage quota at `quotaSize` bytes, or restore it (`null`). */
+  overrideStorageQuota(origin: string, quotaSize: number | null): Promise<void>;
+}
+
+export function storageQuotaBrowserCommands(): StorageQuotaBrowserCommands {
+  if (!hasFunction(commands, "overrideStorageQuota")) {
+    throw new Error("Browser test project is missing the storage quota command.");
+  }
+  return commands as unknown as StorageQuotaBrowserCommands;
 }
 
 function hasFunction(value: object, key: string): boolean {
