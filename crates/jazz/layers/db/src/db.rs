@@ -1282,6 +1282,21 @@ fn refused_at_commit(mut error: Error) -> Error {
     error
 }
 
+/// A session's update or upsert of a row it may not read, or that does not
+/// exist: the two read alike, so the answer reveals neither.
+fn unreadable_target(verb: &str, table: &str) -> Error {
+    denied(format_args!(
+        "read policy denied {verb} on table {table}: the row does not exist or the session \
+         may not read it"
+    ))
+}
+
+/// A session's delete its DELETE policy refuses, or of a row that does not
+/// exist: the two read alike, so the answer reveals neither.
+fn delete_denied() -> Error {
+    denied("DELETE policy denied the target row, or it does not exist")
+}
+
 impl Error {
     /// Whether a policy rejected the write.
     pub fn is_authorization_denied(&self) -> bool {
@@ -6882,6 +6897,34 @@ impl Inner {
         }
     }
 
+    /// The refusal of a write to a deleted row. A session that may read the
+    /// row is told it is deleted; one that may not, or whose read policy
+    /// only the authority can decide here, is told what it is told for a
+    /// missing row, so a tombstone reveals no more than a live row does.
+    fn refuse_deleted(
+        &self,
+        table: &Table,
+        row: RowUuid,
+        key: &[u8],
+        who: &Who,
+        verb: &str,
+    ) -> Result<Error, Error> {
+        if let Who::Session(author) = *who {
+            let conclusive = self.client.is_none()
+                || !table
+                    .policy(Operation::Select)
+                    .is_some_and(policy_reads_other_rows);
+            if !conclusive || !self.check(table, row, key, author, Operation::Select)? {
+                return Ok(if verb == "DELETE" {
+                    delete_denied()
+                } else {
+                    unreadable_target(verb, &table.name)
+                });
+            }
+        }
+        Ok(row_already_deleted(row))
+    }
+
     /// Read-for-write (SPEC 7, INV-RLS-20): a session may update or upsert
     /// only a row it may read, and omitted cells must not be merged blind.
     /// A replica acting for a session (a backend's request) refuses at once
@@ -6907,18 +6950,9 @@ impl Inner {
             && conclusive
             && !self.check(table, row, key, author, Operation::Select)?
         {
-            let detail = format!(
-                "read policy denied {verb} on table {}: the operation requires read \
-                 permission on the target row",
-                table.name
-            );
-            // A replica refuses it locally, as main does; an authority
-            // reports it as its policy rejection.
-            return Err(if self.client.is_some() {
-                rejected(detail)
-            } else {
-                denied(detail)
-            });
+            // A replica refuses it locally as the authority would, so the
+            // caller sees one denial wherever it is decided.
+            return Err(unreadable_target(verb, &table.name));
         }
         if let Some(author) = self.checked(*who)
             && !self.check_clause(
@@ -6993,9 +7027,15 @@ impl Inner {
             Located::Absent { .. } if self.client.is_some() => {
                 return Err(update_target_not_loaded(verb, table_name, row));
             }
+            // A session is told what it is told for a row it may not read,
+            // so a write doesn't reveal whether a hidden row exists.
+            Located::Absent { .. } if !upsert && self.checked(who).is_some() => {
+                return Err(unreadable_target(verb, table_name));
+            }
             Located::Absent { .. } if !upsert => {
                 return Err(rejected(format!(
-                    "{verb} target {row:?} does not exist in `{table_name}`"
+                    "{verb} target {} does not exist in `{table_name}`",
+                    row.0
                 )));
             }
             // A deleted row's id stays reserved: only a restore revives it.
@@ -7006,9 +7046,9 @@ impl Inner {
             Located::Row {
                 deleted: true,
                 seq: current,
-                ..
+                key,
             } if !self.merging && (!upsert || current != self.own_pos(seq)) => {
-                return Err(row_already_deleted(row));
+                return Err(self.refuse_deleted(table, row, &key, &who, verb)?);
             }
             Located::Row {
                 key,
@@ -7149,7 +7189,7 @@ impl Inner {
             if let Some(author) = inner.checked(who)
                 && !inner.check(table, row, key, author, Operation::Delete)?
             {
-                return Err(denied("DELETE policy denied the target row"));
+                return Err(delete_denied());
             }
             Ok(())
         };
@@ -7198,10 +7238,16 @@ impl Inner {
             // A merged delete of a deleted row changes nothing: concurrent
             // deletes of one row all apply.
             Located::Row { deleted: true, .. } if self.merging => {}
-            Located::Row { deleted: true, .. } => return Err(row_already_deleted(row)),
+            Located::Row {
+                deleted: true, key, ..
+            } => return Err(self.refuse_deleted(table, row, &key, &who, "DELETE")?),
+            // As for an update: a session can't tell a missing row from one
+            // its DELETE policy refuses.
+            _ if self.checked(who).is_some() => return Err(delete_denied()),
             _ => {
                 return Err(rejected(format!(
-                    "DELETE target {row:?} does not exist in `{table_name}`"
+                    "DELETE target {} does not exist in `{table_name}`",
+                    row.0
                 )));
             }
         }
@@ -7236,7 +7282,8 @@ impl Inner {
             }
             Located::Absent { .. } => {
                 return Err(rejected(format!(
-                    "RESTORE target {row:?} does not exist in `{table_name}`"
+                    "RESTORE target {} does not exist in `{table_name}`",
+                    row.0
                 )));
             }
             Located::Row { .. } | Located::Inherited { .. } => return Err(row_not_deleted(row)),
