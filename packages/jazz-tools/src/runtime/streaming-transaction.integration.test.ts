@@ -10,9 +10,9 @@ const app = s.defineApp(
 );
 
 const permissions = s.definePermissions(app, ({ policy, session }) => {
-  policy.files.allowRead.where({ "$createdBy.account": session.user.account });
+  policy.files.allowRead.where({ "$createdBy.account": session.user });
   policy.files.allowInsert.always();
-  policy.files.allowUpdate.where({ "$createdBy.account": session.user.account });
+  policy.files.allowUpdate.where({ "$createdBy.account": session.user });
 });
 
 const uploader = {

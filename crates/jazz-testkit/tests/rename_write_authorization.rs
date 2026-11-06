@@ -67,14 +67,7 @@ fn compile_public_schema(builder: SchemaBuilder) -> JazzSchema {
 }
 
 fn owner_policy() -> PolicyExpr {
-    PolicyExpr::eq_session(
-        "owner",
-        vec![
-            "user".to_owned(),
-            "identity".to_owned(),
-            "subject".to_owned(),
-        ],
-    )
+    PolicyExpr::eq_session("owner", vec!["identity".to_owned(), "subject".to_owned()])
 }
 
 fn owner_write_policies(select: PolicyExpr) -> TablePolicies {
@@ -423,10 +416,7 @@ async fn sibling_schema_paths_translate_rows_defaults_and_owner_policies_inner()
         .unwrap();
     support::wait_for_global_txs(&alice, &[tx.unwrap()]).await;
 
-    let owner = PolicyExpr::eq_session(
-        "right_owner",
-        vec!["user".into(), "identity".into(), "subject".into()],
-    );
+    let owner = PolicyExpr::eq_session("right_owner", vec!["identity".into(), "subject".into()]);
     activate_legacy_fixture(
         &server,
         &right,
@@ -494,10 +484,7 @@ async fn sibling_schema_paths_translate_rows_defaults_and_owner_policies_inner()
         .unwrap();
     support::wait_for_global_txs(&reader, &[tx.unwrap()]).await;
     // Select B again so its renamed table is governed by explicit current grants.
-    let owner = PolicyExpr::eq_session(
-        "left_owner",
-        vec!["user".into(), "identity".into(), "subject".into()],
-    );
+    let owner = PolicyExpr::eq_session("left_owner", vec!["identity".into(), "subject".into()]);
     activate_legacy_fixture(
         &server,
         &left,

@@ -53,7 +53,7 @@ function update() {
       status(snapshot.error?.message ?? "Could not open StagePlan.", true),
     );
   const client = snapshot.status === "ready" ? snapshot.client : undefined;
-  const account = client?.session?.user.account;
+  const account = client?.session?.user;
   if (!client || !account) return show("loading", () => status("Opening StagePlan…"));
   show(`planner:${account}`, () =>
     plannerScreen(Jazz.fromDb(client.db), account, () => void signOut()),

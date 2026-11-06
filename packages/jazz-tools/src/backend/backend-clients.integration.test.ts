@@ -18,8 +18,8 @@ const app = s.defineApp(
   { migrations: "none" },
 );
 const permissions = s.definePermissions(app, ({ policy, session }) => {
-  policy.todos.allowRead.where({ owner: session.user.account });
-  policy.todos.allowInsert.where({ owner: session.user.account });
+  policy.todos.allowRead.where({ owner: session.user });
+  policy.todos.allowInsert.where({ owner: session.user });
   policy.todos.allowUpdate.never();
   policy.todos.allowDelete.never();
 });
@@ -210,8 +210,8 @@ describe("scoped backend clients", () => {
     // It opened signed in as its user, without being asked to.
     const { client, status, error } = session.getSnapshot();
     if (status !== "ready") throw error ?? new Error(status);
-    const account = client!.session!.user!.account;
-    expect(client!.session!.user!.identity).toEqual({
+    const account = client!.session!.user!;
+    expect(client!.session!.identity).toEqual({
       issuer: "jazz:backend",
       subject: "machine:worker",
     });

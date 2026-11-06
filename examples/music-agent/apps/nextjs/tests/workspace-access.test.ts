@@ -94,7 +94,7 @@ async function signIn(email: string, name: string) {
     new Request(`${origin}/api/bootstrap`, { headers: { cookie } }),
   );
   if (!account) throw new Error(`the app's Jazz resolves no account for ${email}`);
-  expect(client!.session!.user!.account).toBe(account);
+  expect(client!.session!.user!).toBe(account);
   return { db: client!.db, accountId: account, userId: session!.user.id };
 }
 let userId: string;

@@ -123,11 +123,15 @@ components; local-first identities use the reserved Jazz issuer and key-derived
 subject. Linking adds admission and never rewrites existing authorship.
 
 `$createdBy` and `$updatedBy` are non-null native author records:
-`{account: UUID, identity: {issuer, subject}}`. Compare `.account` for ownership
-across linked identities; whole-author equality compares all three components.
-The same subject from different issuers remains a different identity. Admitted
-`session.user` policy values use the matching record descriptor. Accountless
-readers retain a null session account and ownership equality fails closed.
+`{account: UUID, identity: {issuer, subject}}`. `session.user` is the
+account UUID and `session.identity` the exact login `{issuer, subject}`.
+`$createdBy == session.user` compares the account, so it matches rows written
+through any identity linked to it; `$createdBy.identity == session.identity`
+compares issuer and subject. The same subject from different issuers remains a
+different identity. Other pairings, and operators other than Eq/Ne, are refused
+at schema compile with an error naming these forms. Accountless sessions have
+a null `session.user` and match no whole author record, never the system
+account.
 Provider `user` claims remain at `session.claims["user"]`; they cannot shadow
 this admitted identity.
 

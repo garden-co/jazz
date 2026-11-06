@@ -18,7 +18,7 @@ type Bootstrap =
 export default function WorkspacePage() {
   // The Jazz provider renders this page only once the account's client is ready.
   const session = useSession();
-  const account = session?.user.account;
+  const account = session?.user;
   const db = useDb();
   const [bootstrap, setBootstrap] = useState<Bootstrap>(() => {
     const remembered = account ? rememberedHomeWorkspace(account) : null;

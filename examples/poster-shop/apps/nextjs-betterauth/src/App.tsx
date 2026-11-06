@@ -78,7 +78,7 @@ export function PosterStudio({
   const { data: authSession } = authClient.useSession();
   const { reauthenticate } = useJazzAuth();
   const { data: canvases, error: canvasesError } = useAll(app.canvases);
-  const author = session?.user.account ?? null;
+  const author = session?.user ?? null;
   // The poster the user picked in this visit; until then the invited poster,
   // else the one open before a reload (not whichever syncs first). The
   // remembered poster is read once the account is known, which can be after

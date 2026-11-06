@@ -90,7 +90,7 @@ interface MessageReactionsProps {
 
 export const MessageReactions = ({ messageId, isMe }: MessageReactionsProps) => {
   const session = useSession();
-  const userId = session?.user.account ?? undefined;
+  const userId = session?.user ?? undefined;
 
   const { data: reactions = [], db } = useAll(app.reactions.where({ messageId }));
 

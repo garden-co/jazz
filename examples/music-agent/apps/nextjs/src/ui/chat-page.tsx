@@ -19,7 +19,7 @@ export function ChatPage({ agentLabel }: { agentLabel: string }) {
   // The server prepares the workspace of the user's Jazz account, which their
   // first Jazz sign-in creates: wait for it rather than race it.
   const jazz = useJazzAuth();
-  const account = jazz.status === "ready" ? jazz.client?.session?.user.account : undefined;
+  const account = jazz.status === "ready" ? jazz.client?.session?.user : undefined;
   const [bootstrap, setBootstrap] = useState<"loading" | "ready" | "failed">("loading");
   useEffect(() => {
     if (!session || !account) return;
@@ -41,7 +41,7 @@ export function ChatPage({ agentLabel }: { agentLabel: string }) {
 }
 
 export function MusicAgentApp({ agentLabel, userName }: { agentLabel: string; userName: string }) {
-  const account = useSession()?.user.account;
+  const account = useSession()?.user;
   const { data: artists = [], db } = useAll(app.artists);
   const { data: conversations = [] } = useAll(app.conversations.orderBy("$createdAt", "desc"));
   const [selectedId, setSelectedId] = useState<string>();

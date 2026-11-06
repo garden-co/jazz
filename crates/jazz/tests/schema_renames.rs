@@ -652,7 +652,7 @@ fn a_client_on_the_old_schema_syncs_with_a_server_on_the_new_one() {
 /// `notes(owner, body)`, readable by its owner; `owner_column` names `owner`.
 fn notes(owner_column: &str) -> JazzSchema {
     let policies: TablePolicies =
-        read_and_allow_all_writes(session_eq(owner_column, &["user", "identity", "subject"]));
+        read_and_allow_all_writes(session_eq(owner_column, &["identity", "subject"]));
     compile_schema(
         &SchemaBuilder::new()
             .table(

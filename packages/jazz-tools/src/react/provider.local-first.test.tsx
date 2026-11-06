@@ -22,10 +22,8 @@ const SESSION: Session = {
   authMode: "local-first",
 };
 const PUBLIC_SESSION: PublicSession = {
-  user: {
-    account: "00000000-0000-4000-8000-000000000002",
-    identity: { issuer: SESSION.issuer, subject: SESSION.user_id },
-  },
+  user: "00000000-0000-4000-8000-000000000002",
+  identity: { issuer: SESSION.issuer, subject: SESSION.user_id },
   claims: { iss: SESSION.issuer, sub: SESSION.user_id },
   authMode: "local-first",
 };
@@ -51,7 +49,7 @@ function makeClient() {
 
 function IdentityProbe() {
   const session = useSession();
-  return <output data-testid="identity" data-account={session?.user.account ?? ""} />;
+  return <output data-testid="identity" data-account={session?.user ?? ""} />;
 }
 
 describe("JazzProvider local-first auth", () => {

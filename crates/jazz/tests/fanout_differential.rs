@@ -62,7 +62,7 @@ impl Rng {
 }
 
 fn open() -> Db {
-    let me = ["user", "identity", "subject"];
+    let me = ["identity", "subject"];
     let schema = compile_schema(
         &SchemaBuilder::new()
             .table(

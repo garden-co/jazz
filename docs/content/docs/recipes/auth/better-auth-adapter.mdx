@@ -165,7 +165,7 @@ export async function messages(request: Request) {
 }
 ```
 
-These scopes keep the signed-in user's policies and authorship without switching the backend's own identity. For account-owned rows, compare ownership against `session.user.account` in permissions; a Better Auth user ID is not a Jazz account UUID. Never accept a raw account ID from a request as authority.
+These scopes keep the signed-in user's policies and authorship without switching the backend's own identity. For account-owned rows, compare ownership against `session.user` in permissions; a Better Auth user ID is not a Jazz account UUID. Never accept a raw account ID from a request as authority.
 
 ### Publishing schema and permissions
 
