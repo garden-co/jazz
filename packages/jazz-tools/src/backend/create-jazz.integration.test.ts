@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
-import { createServer, request as httpRequest, type Server } from "node:http";
+import { createServer, request as httpRequest, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -269,6 +269,58 @@ describe("createJazz", () => {
     await expect(
       jazz.forReqUser(new Request("http://app/x", { headers: { "x-fail": "1" } })),
     ).rejects.toBe(failure);
+  });
+
+  it("leaves a body a parser read before nodeHandler to the app's routes", async () => {
+    const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    cleanups.push(() => jazz.close());
+    // What express.json() does before the app's handlers: read the stream
+    // whole and leave the result on `req.body`.
+    const parse = (req: IncomingMessage & { body?: unknown }, done: () => void) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk: Buffer) => chunks.push(chunk));
+      req.on("end", () => {
+        const raw = Buffer.concat(chunks);
+        req.body = req.headers["content-type"] === "application/json" ? JSON.parse(`${raw}`) : raw;
+        done();
+      });
+    };
+    const server: Server = createServer((req, res) =>
+      parse(req, () =>
+        jazz.nodeHandler(req, res, () => {
+          res.setHeader("content-type", "application/json");
+          res.end(JSON.stringify({ got: (req as { body?: unknown }).body }));
+        }),
+      ),
+    );
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise((resolve) => server.close(resolve)));
+    const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+    const echoed = await fetch(`${origin}/api/echo`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: '{"a":1}',
+    });
+    expect(echoed.status).toBe(200);
+    expect(await echoed.json()).toEqual({ got: { a: 1 } });
+
+    // A Jazz route whose body a JSON parser took fails plainly, naming the
+    // fix, instead of with a locked-stream error.
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const taken = await fetch(`${origin}/jazz/auth/sign-in`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      expect(taken.status).toBe(500);
+      expect(errors.mock.calls.flat().join(" ")).toMatch(
+        /mount jazz.nodeHandler before body parsers/,
+      );
+    } finally {
+      errors.mockRestore();
+    }
   });
 
   it("signs users in with fromJWT and keeps their account and claims", async () => {
@@ -1508,6 +1560,105 @@ describe("createJazz", () => {
     expect((await jazz.db.all(app.todos.where({ id: made.id }))).map((todo) => todo.title)).toEqual(
       ["as a guest"],
     );
+  }, 60_000);
+
+  it("reconnects to a remote core that restarts, and still closes", async () => {
+    const appId = randomUUID();
+    const dataDir = await mkdtemp(join(tmpdir(), "jazz-remote-restart-"));
+    cleanups.push(() => rm(dataDir, { recursive: true, force: true }));
+    const adminSecret = `restart-admin-${randomUUID().slice(0, 8)}`;
+    const backendSecret = `restart-backend-${randomUUID().slice(0, 8)}`;
+    const start = (port = 0) =>
+      startLocalJazzServer({ appId, port, dataDir, adminSecret, backendSecret });
+    let core = await start();
+    cleanups.push(() => core.stop());
+    const port = core.port;
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: remote({ url: core.url, appId, secret: adminSecret }),
+      authenticate,
+    }).ready();
+    let closed = false;
+    cleanups.push(() => (closed ? Promise.resolve() : jazz.close()));
+    const asAlice = () =>
+      jazz.forReqUser(new Request("http://app/x", { headers: { "x-test-user": "alice" } }));
+    const alice = await jazz.accountFor(
+      new Request("http://app/x", { headers: { "x-test-user": "alice" } }),
+    );
+    await (
+      await asAlice()
+    )
+      .insert(app.todos, { title: "before", owner: alice! })
+      .wait({ tier: "global" });
+
+    // The core goes away and comes back on the same address and data.
+    await core.stop();
+    core = await start(port);
+
+    const within = <T>(promise: Promise<T>, what: string) =>
+      Promise.race([
+        promise,
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error(`${what} hung after the core restarted`)), 20_000),
+        ),
+      ]);
+    const db = await within(asAlice(), "forReqUser");
+    await within(
+      db.insert(app.todos, { title: "after", owner: alice! }).wait({ tier: "global" }),
+      "a global write",
+    );
+    const titles = await within(db.all(app.todos, { tier: "remote" }), "a remote read");
+    expect(titles.map((todo) => todo.title).sort()).toEqual(["after", "before"]);
+
+    // The core sees the write: it reached the restarted core, not a cache.
+    const other = await createJazz({
+      app,
+      permissions,
+      store: remote({ url: core.url, appId, secret: adminSecret }),
+      authenticate,
+    }).ready();
+    cleanups.push(() => other.close());
+    expect((await other.db.all(app.todos)).map((todo) => todo.title).sort()).toEqual([
+      "after",
+      "before",
+    ]);
+
+    await within(jazz.close(), "close()");
+    closed = true;
+  }, 90_000);
+
+  it("closes while its remote core is down, with a write still pending", async () => {
+    const appId = randomUUID();
+    const core = await startLocalJazzServer({ appId, inMemory: true });
+    cleanups.push(() => core.stop());
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: remote({ url: core.url, appId, secret: core.adminSecret }),
+      authenticate,
+    }).ready();
+    let closed = false;
+    cleanups.push(() => (closed ? Promise.resolve() : jazz.close()));
+    const request = new Request("http://app/x", { headers: { "x-test-user": "alice" } });
+    const alice = await jazz.accountFor(request);
+    const db = await jazz.forReqUser(request);
+    await db.insert(app.todos, { title: "reached", owner: alice! }).wait({ tier: "global" });
+
+    await core.stop();
+    db.insert(app.todos, { title: "stranded", owner: alice! });
+
+    // A SIGTERM handler's close(): it gives pending writes their time, then
+    // ends instead of waiting for a core that is not coming back.
+    const started = Date.now();
+    await Promise.race([
+      jazz.close(),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("close() hung with the core down")), 25_000),
+      ),
+    ]);
+    closed = true;
+    expect(Date.now() - started).toBeLessThan(25_000);
   }, 60_000);
 
   it("serves each deployment's sessions by its own permissions, side by side", async () => {
