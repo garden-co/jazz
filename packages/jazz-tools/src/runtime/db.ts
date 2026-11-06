@@ -4319,7 +4319,11 @@ export class Db {
    */
   adoptSuccessor(next: Db): void {
     if (this.successor) throw new Error("This Db already has a successor");
+    const own = this.currentRuntime();
     this.successor = next;
+    // A read still waiting for this runtime's server (the server is down)
+    // asks `next` instead: only the drain below waits for that server.
+    own?.endUnsentReads?.();
     // Upload what this runtime still holds, then stop it. Until then its
     // writes count in the sync status and in waitForSync.
     let draining = true;

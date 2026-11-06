@@ -299,8 +299,14 @@ describe("browser session", () => {
     await expect
       .poll(() => kept.getSyncStatus().link.state, { timeout: 5_000 })
       .not.toBe("connected");
+    // Unanswered, so the thin runtime waits for the server to upload it.
+    void kept
+      .insert(app.notes, { text: "offline" })
+      .wait({ tier: "global" })
+      .catch(() => {});
     // Never sent: it waits for a connection, which the upgrade ends. The
-    // local-first Db answers from what it has, as it would offline.
+    // local-first Db answers from what it has, as it would offline (not the
+    // thin rows: the hand-off reads them from the server once it's back).
     const read = kept.all(app.notes, { tier: "local-first" });
     await kept.upgradeToLocalFirst(loadLocalFirst);
     expect(isThinDb(kept)).toBe(false);

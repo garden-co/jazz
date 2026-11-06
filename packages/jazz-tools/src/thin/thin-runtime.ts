@@ -125,6 +125,18 @@ export class ThinConnectionLostError extends Error {
 }
 
 /**
+ * The request never reached the server: a write didn't commit. The thin
+ * runtime ended it before a connection could carry it (it closed, or its Db
+ * handed over to the local-first one).
+ */
+export class ThinRequestNotSentError extends Error {
+  constructor(message = "the request never reached the Jazz server", options?: ErrorOptions) {
+    super(message, options);
+    this.name = "ThinRequestNotSentError";
+  }
+}
+
+/**
  * The server ends a thin connection's open transactions with it (on a
  * reconnect, including the one a credential renewal takes): their staged
  * writes are gone, and the transaction can only be started again.
@@ -335,9 +347,15 @@ export class ThinRuntime implements Runtime {
       cause: new RuntimeClosedError("the thin runtime is closed"),
     });
     this.dropConnection(closed);
-    // Nothing connects again: a request not sent yet ends too, so a read the
-    // app made while the server was down asks the Db's successor instead.
-    this.endWaitingRequests(closed);
+    // Nothing connects again: a request not sent yet ends too (a write
+    // waiting to go out again with its fate unknown), so a read the app made
+    // while the server was down asks the Db's successor instead.
+    this.endWaitingRequests(
+      closed,
+      new ThinRequestNotSentError("the thin runtime closed before sending the request", {
+        cause: closed.cause,
+      }),
+    );
     for (const live of this.liveQueries.values()) live.callback = undefined;
     this.liveQueries.clear();
   }
@@ -537,14 +555,33 @@ export class ThinRuntime implements Runtime {
   }
 
   /**
-   * End every request still waiting for a connection with `error`. A write
-   * sent once and waiting to go out again may have committed: it ends with
-   * its fate unknown.
+   * End every request still waiting for a connection: one never sent with
+   * `notSent`, a write sent once and waiting to go out again with its fate
+   * unknown, as it may have committed.
    */
-  private endWaitingRequests(error: Error): void {
+  private endWaitingRequests(error: Error, notSent: Error = error): void {
     for (const [id, oneShot] of this.oneShots) {
       this.oneShots.delete(id);
-      oneShot.reject(oneShot.resending ? unknownOutcome(error) : error);
+      oneShot.reject(oneShot.resending ? unknownOutcome(error) : notSent);
+    }
+  }
+
+  /**
+   * @internal Its Db handed over to a successor: end the reads not sent yet
+   * (outside a transaction), with {@link RuntimeClosedError} as their cause,
+   * so each asks the successor instead of waiting for this runtime's server.
+   * Writes stay, to upload once it answers.
+   */
+  endUnsentReads(): void {
+    for (const [id, oneShot] of this.oneShots) {
+      if (oneShot.sent || oneShot.op.type !== "query" || transactionOf(oneShot.op) !== undefined)
+        continue;
+      this.oneShots.delete(id);
+      oneShot.reject(
+        new ThinRequestNotSentError("the Db handed over to its local-first successor", {
+          cause: new RuntimeClosedError("the thin runtime handed over"),
+        }),
+      );
     }
   }
 

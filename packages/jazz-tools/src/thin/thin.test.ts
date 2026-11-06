@@ -231,10 +231,18 @@ describe("thin client", () => {
     // Never answered: the server is gone.
     const unanswered = thin.insert(app.notes, { text: "on the thin client", done: false });
     void unanswered.wait({ tier: "global" }).catch(() => {});
+    const runtime = thin.currentRuntime() as ThinRuntime;
+    const waiting = (runtime as unknown as { oneShots: Map<number, unknown> }).oneShots;
+    const read = thin.all(app.notes).catch((error: unknown) => error);
+    await expect.poll(() => waiting.size).toBe(2);
 
     // The thin Db's last uploads don't hold the upgrade.
     const local = await upgradeToLocalFirst(thin, () => createLocalFirstDb(config));
     opened.push(local);
+    // A read that never reached the server ends, to be made again on `local`;
+    // the write stays, to upload once the server is back.
+    expect(causes(await read)[0]).toBe("ThinRequestNotSentError");
+    expect(waiting.size).toBe(1);
     expect(() => thin.insert(app.notes, { text: "too late", done: false })).toThrow(
       /shutting down or closed/,
     );
@@ -242,8 +250,11 @@ describe("thin client", () => {
     expect((await local.all(app.notes, { tier: "local-first" })).map((row) => row.id)).toContain(
       written.id,
     );
-    // Still waiting for the server, as it would until the page closes.
-    thin.abortGracefulShutdown();
+    // Still waiting for the server, until `local` shuts down (a sign-out):
+    // then the thin runtime closes too, and its write ends.
+    await local.shutdown();
+    await expect(unanswered.wait({ tier: "global" })).rejects.toThrow();
+    await expect.poll(() => thin.currentRuntime()).toBeNull();
   }, 60_000);
 
   it("hands off the rows of confirmed inserts and updates, not of deletes", async () => {
@@ -576,7 +587,9 @@ describe("thin client", () => {
     const readError = await read.catch((error: unknown) => error);
     // What lets the Db ask its successor (see `Db.all`).
     expect(causes(readError)).toContain("RuntimeClosedError");
-    await expect(write.wait({ tier: "global" })).rejects.toThrow();
+    // Never sent, so it certainly didn't commit: not an unknown outcome.
+    const writeError = await write.wait({ tier: "global" }).catch((error: unknown) => error);
+    expect(causes(writeError)[0]).toBe("ThinRequestNotSentError");
   }, 60_000);
 
   it("ends a write waiting to go out again with its fate unknown when the runtime stops for good", async () => {
@@ -622,12 +635,20 @@ describe("thin client", () => {
       carrier: unknown;
       lost(carrier: unknown, error: { code: string; retry: string; message: string }): void;
     };
+    let liveError: Error | undefined;
+    const unsubscribe = db.subscribe(app.notes, {
+      onUpdate: () => undefined,
+      onError: (error) => (liveError = error),
+    });
     await db.disconnect();
     const read = db.all(app.notes);
     // The connection that would send it ends with a terminal error.
     await db.reconnect().catch(() => {});
     internals.lost(internals.carrier, { code: "gone", retry: "never", message: "for good" });
     await expect(read).rejects.toThrow(/for good/);
+    // A live query ends on it too, as on any fatal error.
+    await expect.poll(() => liveError?.message).toMatch(/for good/);
+    unsubscribe();
     expect(db.getSyncStatus().link).toMatchObject({ state: "offline", reason: "stopped" });
   }, 60_000);
 

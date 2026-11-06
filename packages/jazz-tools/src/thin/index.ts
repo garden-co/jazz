@@ -64,8 +64,11 @@ export async function createClient(config: ThinDbConfig): Promise<Db> {
  * and closes once its writes are answered, in the background: the returned
  * `Db` doesn't wait for them, so a server that is down doesn't hold the
  * upgrade (those writes stay in the thin client's memory until it is back,
- * and are lost if the page closes first). The app swaps the returned `Db` in
- * where it held the thin one.
+ * and are lost if the page closes first). Shutting the returned `Db` down
+ * (a sign-out) stops that wait and closes the thin runtime, dropping what it
+ * still holds. A read the app made on the thin `Db` that never reached the
+ * server ends with `ThinRequestNotSentError`: read again on the returned
+ * `Db`. The app swaps the returned `Db` in where it held the thin one.
  *
  * This is for a thin `Db` the app opened itself with {@link createClient}.
  * Under a Jazz provider or `createJazzClient`, call the `Db` method
@@ -73,7 +76,7 @@ export async function createClient(config: ThinDbConfig): Promise<Db> {
  * session upgrades in place, so the app keeps the same `Db`.
  */
 export async function upgradeToLocalFirst(thin: Db, open: () => Promise<Db>): Promise<Db> {
-  thinRuntimeOf(thin);
+  const runtime = thinRuntimeOf(thin);
   const next = await open();
   try {
     await prefetchThinQueries(thin, next);
@@ -84,8 +87,13 @@ export async function upgradeToLocalFirst(thin: Db, open: () => Promise<Db>): Pr
   }
   // The thin Db's last writes upload in the background, then it closes: with
   // the server down, waiting for them would hold the upgrade until it is
-  // back. A write the server rejects only ends that wait early.
-  void thin.shutdown({ waitForSync: true }).catch(() => thin.shutdown());
+  // back. Shutting `next` down ends the wait, and the thin runtime closes.
+  runtime?.endUnsentReads();
+  next.onShutdown(() => thin.abortGracefulShutdown());
+  void thin
+    .shutdown({ waitForSync: true })
+    .catch(() => thin.shutdown())
+    .catch(() => {});
   return next;
 }
 
