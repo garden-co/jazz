@@ -665,6 +665,7 @@ export const jazzTiers: Record<
     price: "Free",
     summary:
       "When an app outgrows one instance, shard it across several for free, up to 4 GB of RAM in total",
+    note: "Sharding is coming soon.",
   },
   scale: {
     name: "Jazz Scale",
@@ -672,7 +673,7 @@ export const jazzTiers: Record<
     priceExtra: "+ $50/mo per 1,000 peak active sessions",
     summary:
       "Unlimited sharded instances, to take your database to millions of users, globally distributed",
-    note: "Peak active sessions: the monthly 95th percentile of sessions active per minute. A session is active when it writes, subscribes or receives an update. As Jazz gets faster your platform bill shrinks while the license stays the same. The license is a key your servers check offline: no metering and no phone-home. Going over it only logs a reminder.",
+    note: "Sharding is coming soon. Peak active sessions: the monthly 95th percentile of sessions active per minute. A session is active when it writes, subscribes or receives an update. As Jazz gets faster your platform bill shrinks while the license stays the same. The license is a key your servers check offline: no metering and no phone-home. Going over it only logs a reminder.",
   },
   custom: {
     name: "Jazz Custom",

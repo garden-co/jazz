@@ -257,6 +257,7 @@ function PlatformResult({
               {requiredShards > 1
                 ? `Sharded: even the largest size needs ${formatCount(requiredShards)} shards.`
                 : "Sharded: cheaper than one larger instance with headroom."}{" "}
+              Sharding is coming soon.{" "}
               <span className="text-fd-muted-foreground">
                 {tier === "scale"
                   ? `Jazz Scale is billed on ${formatCount(peakActiveSessions)} peak active sessions.`

@@ -1,6 +1,6 @@
 "use client";
 
-import { Server } from "lucide-react";
+import { Cloud, Server } from "lucide-react";
 import { siCloudflare, siVercel } from "simple-icons";
 import { useEffect, useRef, useState } from "react";
 import {
@@ -9,11 +9,11 @@ import {
   type DeploymentScenario,
 } from "@/components/home/diagrams";
 
-const scenarios: DeploymentScenario[] = ["vercel", "cloudflare", "server"];
+const scenarios: DeploymentScenario[] = ["vercel", "cloudflare", "aws", "server"];
 const INTERVAL_MS = 4500;
 
 /**
- * Fig. 1: the same app deployed three ways, cross-fading from one to the next.
+ * Fig. 1: the same app deployed four ways, cross-fading from one to the next.
  * It starts once it scrolls into view, stops for good when the reader picks a
  * scenario, and never moves on its own for readers who prefer reduced motion.
  */
@@ -93,6 +93,9 @@ export function DeploymentCarousel() {
 function ScenarioIcon({ scenario }: { scenario: DeploymentScenario }) {
   if (scenario === "server") {
     return <Server aria-hidden className="home-carousel-tab-icon" strokeWidth={1.75} />;
+  }
+  if (scenario === "aws") {
+    return <Cloud aria-hidden className="home-carousel-tab-icon" strokeWidth={1.75} />;
   }
   const icon = scenario === "vercel" ? siVercel : siCloudflare;
   return (
