@@ -264,7 +264,7 @@ export class BrowserConnectionManager extends ConnectionManager {
     await this.connectionReady;
     if (this.host.isShuttingDown) return;
     if (this.connectionError) throw this.connectionError;
-    if (requirement === "server") {
+    if (requirement !== "runtime") {
       for (;;) {
         while (this.disconnected) {
           await this.waitForReconnect(signal);

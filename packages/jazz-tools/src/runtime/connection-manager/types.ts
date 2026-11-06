@@ -49,9 +49,13 @@ function getPolicyStrippedSchema(schema: WasmSchema): WasmSchema {
 
 /** Readiness required by an operation, independent of read or write tiers.
  * `runtime` admits local work, including browser worker initialization.
+ * `upload` also waits out an explicit disconnect, but never for the server
+ * link itself: a write's Global wait holds through an outage or a credential
+ * refusal something renews, and only the runtime's wait decides when it
+ * ends (#3923).
  * `server` also waits for the configured server transport to be available.
  */
-export type ConnectionRequirement = "runtime" | "server";
+export type ConnectionRequirement = "runtime" | "upload" | "server";
 
 export interface ConnectionManagerClientInput {
   schemaKey: string;
