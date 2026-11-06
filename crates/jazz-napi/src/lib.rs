@@ -1681,6 +1681,24 @@ impl NapiDb {
         Ok(Self::open_as(&schema, &config, Some(&data_path), how)?)
     }
 
+    /// Authority table UUID as 16 canonical bytes, or empty for an unknown name.
+    /// Refuses with NotObserved until the authority confirms this schema.
+    #[napi(js_name = "tableIdentity")]
+    pub fn table_identity(&self, table: String) -> js::Result<Uint8Array> {
+        let id = self.binding()?.table_identity(&table).map_err(host_error)?;
+        Ok(Uint8Array::new(id.map_or_else(Vec::new, |id| id.to_vec())))
+    }
+
+    /// Authority column UUID as 16 canonical bytes, or empty for an unknown name.
+    #[napi(js_name = "columnIdentity")]
+    pub fn column_identity(&self, table: String, column: String) -> js::Result<Uint8Array> {
+        let id = self
+            .binding()?
+            .column_identity(&table, &column)
+            .map_err(host_error)?;
+        Ok(Uint8Array::new(id.map_or_else(Vec::new, |id| id.to_vec())))
+    }
+
     /// Register and return a typed view backed by this same runtime owner,
     /// of an app shipping `migrations` (its bundle as JSON).
     #[napi(js_name = "registerSchema")]
