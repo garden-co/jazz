@@ -458,6 +458,17 @@ impl<W> WireTransportAdapter<W> {
     }
 }
 
+impl<W: WireTransport> WireTransportAdapter<W> {
+    fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
+        let result = self.wire.send_frame(frame);
+        if let Err(error @ TransportError::Failed(_)) = &result {
+            self.failed = Some(Some(error.clone()));
+            self.unsent.clear();
+        }
+        result
+    }
+}
+
 impl<W: WireTransport> Transport for WireTransportAdapter<W> {
     /// Accepts `message` once its first frame is queued: `Backpressure`
     /// means none of it was, so the caller keeps it. Parts a full queue
@@ -466,7 +477,7 @@ impl<W: WireTransport> Transport for WireTransportAdapter<W> {
         self.flush()?;
         let mut frames = encode_frames(message)?.into_iter();
         let first = frames.next().expect("a message encodes to a frame");
-        self.wire.send_frame(first)?;
+        self.send_frame(first)?;
         self.unsent.extend(frames);
         match self.flush() {
             Err(TransportError::Backpressure) => Ok(()),
@@ -475,8 +486,13 @@ impl<W: WireTransport> Transport for WireTransportAdapter<W> {
     }
 
     fn flush(&mut self) -> Result<(), TransportError> {
+        if self.failed.is_some() {
+            return Err(TransportError::Failed(
+                "SQLite wire transport is closed".into(),
+            ));
+        }
         while let Some(frame) = self.unsent.front() {
-            self.wire.send_frame(frame.clone())?;
+            self.send_frame(frame.clone())?;
             self.unsent.pop_front();
         }
         Ok(())
