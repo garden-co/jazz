@@ -172,6 +172,34 @@ describe("fromJWT", () => {
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 
+  // The issuer rotates to a new key moments after the JWKS was fetched
+  // (by a sign-in, the cache expiring, or any token with a key it lacks):
+  // its users stay signed in, retrying until the next fetch can show it.
+  it("retries a token with a key newer than a JWKS fetched moments ago", async () => {
+    let keys = [jwk];
+    const fetch = serveJwks(() => keys);
+    const start = Date.now();
+    const authenticate = fromJWT({ jwksUrl: jwksUrl(), issuer: ISSUER, audience: AUDIENCE });
+    expect((await authenticate(request(await sign({}))))?.userId).toBe("user_01");
+    keys = [jwk, rotatedJwk];
+    const rotatedToken = await sign({}, { key: rotatedKey, kid: "k2" });
+    vi.useFakeTimers({ toFake: ["Date"], now: start + 10_000 });
+    await expect(authenticate(request(rotatedToken))).rejects.toThrow(/retry/);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    // A key the document has still refuses a bad signature at once.
+    const forged = await sign({}, { key: otherKey, kid: "k1" });
+    expect(await authenticate(request(forged))).toBeNull();
+    // After the cooldown the refetch shows the new key.
+    vi.setSystemTime(start + 31_000);
+    expect((await authenticate(request(rotatedToken)))?.userId).toBe("user_01");
+    expect(fetch).toHaveBeenCalledTimes(2);
+    // A fetched document that lacks a key refuses it.
+    vi.setSystemTime(start + 62_000);
+    const unknown = await sign({}, { key: otherKey, kid: "k9" });
+    expect(await authenticate(request(unknown))).toBeNull();
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
   it("throws when the JWKS cannot be fetched at all, so clients retry", async () => {
     vi.stubGlobal(
       "fetch",
