@@ -7,6 +7,8 @@ import { createDb as createLocalFirstDb } from "../runtime/default-create-db.js"
 import { isThinDb } from "../runtime/local-first-upgrade.js";
 import type { AccountStore } from "../accounts/persistence.js";
 import { createJazzClient } from "./create-jazz-session.js";
+import type { ThinRuntime } from "../thin/thin-runtime.js";
+import { decodeThinResponse, isThinResponse } from "../thin/wire.js";
 
 // The browser session against an app's own backend (`createJazz`), which
 // signs users in from their cookies: the hero examples' setup.
@@ -365,10 +367,12 @@ describe("browser session against the app's backend", () => {
     await session.close();
   }, 60_000);
 
-  // R29 as reported: the write is made as the token expires, so it may be on
-  // the wire when the backend's re-check ends the socket. Whichever way it
-  // goes, it lands exactly once after the app signs in again.
-  it("lands a write made as the session expires exactly once, after the app signs in again", async () => {
+  // R29 as reported: the write is on the wire when the token expires, and
+  // the backend's re-check ends the socket before its answer arrives. The
+  // refusal is final for that credential, so the thin client doesn't send
+  // it again: the write ends with its fate unknown (it may have committed,
+  // and here it did), and the app signs in again without writing it twice.
+  it("ends a write in flight as the session expires with its fate unknown, and doesn't write it twice", async () => {
     const auth = tokenAuth("alice:1");
     const jazz = await createJazz({
       app,
@@ -391,18 +395,45 @@ describe("browser session against the app's backend", () => {
     const owner = client.session!.user!;
     await client.db.insert(app.todos, { title: "first", owner }).wait({ tier: "global" });
 
-    auth.valid.delete("alice:1");
+    // The server's answer to the next write never reaches the client.
+    const runtime = client.db.currentRuntime() as ThinRuntime;
+    const internals = runtime as unknown as {
+      oneShots: Map<number, { op: { type: string }; sent: boolean }>;
+      receive(carrier: unknown, piece: Uint8Array): void;
+    };
+    const receive = internals.receive.bind(runtime);
+    let held: number | undefined;
+    let dropped = 0;
+    internals.receive = (carrier, piece) => {
+      if (held !== undefined && isThinResponse(piece) && decodeThinResponse(piece).id === held) {
+        dropped++;
+        return;
+      }
+      receive(carrier, piece);
+    };
+    cleanups.push(async () => void (internals.receive = receive));
     const pending = client.db.insert(app.todos, { title: "as it expired", owner });
-    const landed = pending.wait({ tier: "global" });
+    const landed = pending.wait({ tier: "global" }).catch((error: unknown) => error);
+    const [id] = [...internals.oneShots].find(([, oneShot]) => oneShot.op.type === "insert")!;
+    held = id;
+    await expect.poll(() => dropped).toBe(1);
+    expect(internals.oneShots.has(id)).toBe(true);
+
+    // Then the token expires, and the re-check ends the socket.
+    auth.valid.delete("alice:1");
     await expect
       .poll(() => client.db.getSyncStatus().link, { timeout: 15_000 })
       .toMatchObject({ state: "offline", reason: "auth" });
 
     auth.valid.add("alice:2");
     jar.user = jar.socketUser = "alice:2";
+    expect(await landed).toMatchObject({ name: "ThinConnectionLostError" });
+    held = undefined;
     await session.reauthenticate();
-    await landed;
     expect(session.getSnapshot().client).toBe(client);
+    await expect
+      .poll(() => client.db.getSyncStatus().link, { timeout: 15_000 })
+      .toEqual({ state: "connected" });
     expect(
       (await jazz.db.all(app.todos)).filter((todo) => todo.title === "as it expired"),
     ).toHaveLength(1);
@@ -512,6 +543,8 @@ describe("another user signing in on a local-first browser", () => {
     return { jazz, served, jar, session, alice, owner };
   }
 
+  // A smoke test: Alice left nothing behind, so her sign-out goes through
+  // either way. The variant below, with a write left behind, is R48's.
   it("switches to the new user", async () => {
     const { jar, session, alice } = await aliceLocalFirst();
     const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -534,7 +567,7 @@ describe("another user signing in on a local-first browser", () => {
 
     // Alice writes while the backend is away; Bob signs in when it is back.
     await served.close();
-    await session.getSnapshot().client!.db.insert(app.todos, { title: "unsynced", owner });
+    session.getSnapshot().client!.db.insert(app.todos, { title: "unsynced", owner });
     jar.user = jar.socketUser = "bob";
     await listen(jazz, Number(new URL(served.origin).port));
     await session.reauthenticate();

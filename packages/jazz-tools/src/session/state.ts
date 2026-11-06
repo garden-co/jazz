@@ -215,13 +215,13 @@ export async function createJazzSessionOwner<
           const db = (client as WipeableClient).db;
           // Upload what the server still accepts before wiping the rest.
           await db?.waitForSync?.({ timeoutMs: 5_000 }).catch(() => {});
-          // Say what the wipe takes, as a sign-out past refused writes does.
+          // Say what the wipe took, as a sign-out past refused writes does.
           const writes = db?.getSyncStatus?.().pendingUploads ?? 0;
+          await db?.deleteClientStorage?.();
           if (writes > 0)
             console.warn(
-              `Jazz signed out and wiped ${writes} write(s) that hadn't reached the server, as clearOnSignOut asks: they are gone from this device.`,
+              `Jazz signed out and wiped ${writes} write(s) the server hadn't confirmed, as clearOnSignOut asks. They are gone from this device; any the server did receive stay there.`,
             );
-          await db?.deleteClientStorage?.();
           await client.shutdown();
         } else if (signsOut) {
           await signOutOf(client);
@@ -469,8 +469,7 @@ async function signOutOf(client: SigningOutClient) {
     if (!(cause instanceof GracefulShutdownSyncError) || !db?.getAuthState?.().error) throw cause;
     const writes = db.getSyncStatus?.().pendingUploads ?? 0;
     const kept = !isThinDb(db as Db) && db.getConfig?.().driver?.type !== "memory";
-    // Warn only about writes left behind: with none, the refusal alone failed
-    // the wait (a switch to another user, whose cookie the old socket carries).
+    // Warn only about writes left behind: with none, nothing was lost.
     if (writes > 0)
       console.warn(
         kept
