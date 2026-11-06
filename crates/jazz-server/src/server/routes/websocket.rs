@@ -128,7 +128,9 @@ pub(super) async fn ws_handler(
 
     ws.max_frame_size(WS_MAX_FRAME_BYTES)
         .max_message_size(WS_MAX_MESSAGE_BYTES)
-        .on_upgrade(move |socket| handle_ws_connection(socket, state, headers, websocket_guard))
+        .on_upgrade(move |socket| {
+            handle_ws_connection(socket, state, headers, websocket_guard, Handshake::Network)
+        })
 }
 
 #[derive(Clone, Debug)]
@@ -607,12 +609,40 @@ fn ws_validate_session_identity(
     Ok(())
 }
 
+/// How long a new connection's peer may take to send its prelude and Hello.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Handshake {
+    /// A peer over the network: one that sends nothing within
+    /// [`WS_HANDSHAKE_READ_TIMEOUT`] is dropped, so stalled upgrades don't
+    /// hold connection slots.
+    Network,
+    /// A client in this process, carried by the embedding host: it cannot
+    /// be half-open, and its Hello waits on the host's event loop, which a
+    /// burst of synchronous work can hold for longer than a network
+    /// peer's handshake may take.
+    InProcess,
+}
+
+/// `read`, within the handshake deadline a network peer has.
+async fn within_handshake<T: Default>(
+    handshake: Handshake,
+    read: impl std::future::Future<Output = T>,
+) -> T {
+    match handshake {
+        Handshake::Network => tokio::time::timeout(WS_HANDSHAKE_READ_TIMEOUT, read)
+            .await
+            .unwrap_or_default(),
+        Handshake::InProcess => read.await,
+    }
+}
+
 async fn read_ws_auth_prelude<S: SyncSocket>(
     socket: &mut S,
     shutdown_rx: &mut tokio::sync::watch::Receiver<crate::server::ShutdownPhase>,
     state: &ServerState,
+    handshake: Handshake,
 ) -> Option<Vec<u8>> {
-    tokio::time::timeout(WS_HANDSHAKE_READ_TIMEOUT, async {
+    within_handshake(handshake, async {
         tokio::select! {
             msg = socket.next() => match msg {
                 Some(Ok(Message::Binary(bytes))) => Some(bytes.to_vec()),
@@ -628,15 +658,15 @@ async fn read_ws_auth_prelude<S: SyncSocket>(
         }
     })
     .await
-    .unwrap_or_default()
 }
 
 async fn read_ws_frame_batch<S: SyncSocket>(
     socket: &mut S,
     shutdown_rx: &mut tokio::sync::watch::Receiver<crate::server::ShutdownPhase>,
     state: &ServerState,
+    handshake: Handshake,
 ) -> Option<Vec<u8>> {
-    tokio::time::timeout(WS_HANDSHAKE_READ_TIMEOUT, async {
+    within_handshake(handshake, async {
         tokio::select! {
             msg = socket.next() => match msg {
                 Some(Ok(Message::Binary(bytes))) => Some(bytes.to_vec()),
@@ -651,7 +681,6 @@ async fn read_ws_frame_batch<S: SyncSocket>(
         }
     })
     .await
-    .unwrap_or_default()
 }
 
 pub(crate) async fn handle_ws_connection<S: SyncSocket>(
@@ -659,6 +688,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     state: Arc<ServerState>,
     request_headers: HeaderMap,
     _websocket_guard: ActiveWebSocketGuard,
+    handshake: Handshake,
 ) {
     let mut shutdown_rx = state.shutdown.subscribe();
     if state.shutdown.is_shutting_down() {
@@ -666,14 +696,17 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
         return;
     }
 
-    let Some(auth_bytes) = read_ws_auth_prelude(&mut socket, &mut shutdown_rx, &state).await else {
+    let Some(auth_bytes) =
+        read_ws_auth_prelude(&mut socket, &mut shutdown_rx, &state, handshake).await
+    else {
         return;
     };
     // Every client sends its Hello right behind the prelude, without waiting.
     // Read it before answering anything: how an error frame is encoded is
     // itself scoped to the wire version, so a client on another version is
     // refused in its own layout before admission can reply in ours.
-    let Some(first) = read_ws_frame_batch(&mut socket, &mut shutdown_rx, &state).await else {
+    let Some(first) = read_ws_frame_batch(&mut socket, &mut shutdown_rx, &state, handshake).await
+    else {
         return;
     };
     if let Some(refusal) = ws_foreign_version_refusal(&first) {

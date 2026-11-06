@@ -171,6 +171,37 @@ impl JazzCore {
         headers: Vec<Vec<String>>,
         on_event: Function<'_, JazzCoreSocketEvent, ()>,
     ) -> napi::Result<JazzCoreSocket> {
+        let peer = self
+            .server
+            .open_socket_with(&pairs(&headers))
+            .map_err(|refused| napi::Error::from_reason(refused.to_string()))?;
+        self.carry(peer, on_event)
+    }
+
+    /// Start a sync session for a client in this process. Unlike
+    /// `openSocket` it has no handshake deadline: the client's Hello waits on
+    /// this event loop, which synchronous work can hold for seconds.
+    #[napi(
+        js_name = "openInProcessSocket",
+        ts_args_type = "onEvent: (err: Error | null, event: JazzCoreSocketEvent) => void"
+    )]
+    pub fn open_in_process_socket(
+        &self,
+        on_event: Function<'_, JazzCoreSocketEvent, ()>,
+    ) -> napi::Result<JazzCoreSocket> {
+        let peer = self
+            .server
+            .open_in_process_socket()
+            .map_err(|refused| napi::Error::from_reason(refused.to_string()))?;
+        self.carry(peer, on_event)
+    }
+
+    /// Hand `peer`'s messages for the client to `on_event`, and, last, its close.
+    fn carry(
+        &self,
+        mut peer: jazz_server::EmbeddedSocketPeer,
+        on_event: Function<'_, JazzCoreSocketEvent, ()>,
+    ) -> napi::Result<JazzCoreSocket> {
         let callback: ThreadsafeFunction<
             JazzCoreSocketEvent,
             (),
@@ -181,10 +212,6 @@ impl JazzCore {
             .build_threadsafe_function::<JazzCoreSocketEvent>()
             .callee_handled::<true>()
             .build()?;
-        let mut peer = self
-            .server
-            .open_socket_with(&pairs(&headers))
-            .map_err(|refused| napi::Error::from_reason(refused.to_string()))?;
         let sender = peer.sender();
         self.server.runtime().spawn(async move {
             loop {
