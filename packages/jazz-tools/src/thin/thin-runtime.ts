@@ -78,6 +78,9 @@ import {
   FEATURE_THIN_RESULTS,
   decodeThinResponse,
   encodeThinRequest,
+  MAX_THIN_MESSAGE_BYTES,
+  ThinAssembler,
+  thinWireFrames,
   isThinResponse,
   type ThinBody,
   type ThinOp,
@@ -181,6 +184,8 @@ export class ThinRuntime implements Runtime {
   private readonly reconnectDelaysMs: readonly number[];
   private author: string | undefined;
   private carrier?: WebSocketCarrier;
+  /** Joins the current connection's split responses. */
+  private parts = new ThinAssembler();
   private url?: string;
   private authJson?: string;
   /** Requests and live queries go out only once the schema is bound. */
@@ -262,6 +267,7 @@ export class ThinRuntime implements Runtime {
   private open(): void {
     if (this.closed || !this.url || this.authJson === undefined || this.carrier) return;
     clearTimeout(this.reconnectTimer);
+    this.parts.reset();
     const carrier = new WebSocketCarrier({
       endpointUrl: this.url,
       peerIdentity: peerIdentityForWebSocketAuth(
@@ -398,11 +404,33 @@ export class ThinRuntime implements Runtime {
   }
 
   private transmit(id: number, oneShot: OneShot): void {
+    const frame = encodeThinRequest(id, oneShot.op);
+    const frames = thinWireFrames(frame);
+    if (frames === null) {
+      // Refused here: the server would refuse it.
+      this.oneShots.delete(id);
+      oneShot.reject(
+        new ThinRemoteError(
+          "TooLarge",
+          `this ${oneShot.op.type} is ${frame.byteLength} bytes, more than the ` +
+            `${MAX_THIN_MESSAGE_BYTES} a thin client sends in one request: write values ` +
+            `that large with insertStreaming or updateStreaming`,
+        ),
+      );
+      return;
+    }
     oneShot.sent = true;
-    void this.carrier?.send(encodeThinRequest(id, oneShot.op));
+    // Parts of one frame go back to back.
+    void this.carrier?.sendBatch(frames);
   }
 
-  private receive(frame: Uint8Array): void {
+  private receive(piece: Uint8Array): void {
+    let frame = piece;
+    if (ThinAssembler.isPart(piece)) {
+      const joined = this.parts.push(piece);
+      if (joined === undefined) return;
+      frame = joined;
+    }
     if (!isThinResponse(frame)) return;
     const { id, body } = decodeThinResponse(frame);
     const handle = this.liveByRequest.get(id);

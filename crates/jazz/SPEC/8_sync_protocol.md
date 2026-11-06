@@ -938,6 +938,18 @@ channels. The server answers a thin connection with no sync session: a thin
 connection that sends any other frame after its `Hello` ends with
 `MalformedFrame`.
 
+A request or response whose frame is over a wire frame (2 MiB, less the
+carrier batch's prefixes; a row holding a large value, or a write of one)
+travels as `WireFrame::ThinPart`s (tag 6): its encoded frame cut into
+consecutive pieces, `more` set on all but the last, sent back to back with
+no other thin frame between. The receiver joins them and decodes the frame
+they make; any other frame inside a split one ends the connection with
+`MalformedFrame`. A frame over `MAX_THIN_MESSAGE_BYTES` (32 MiB) is not
+sent: the client refuses such a write itself, and the server answers such a
+result with a `TooLarge` error for that request alone (ending a live query),
+keeping the session. One request joined from parts may be over the
+session's ingress budget when nothing else is queued.
+
 - A thin session is served as its admitted identity and claims, exactly as a
   sync session with that admission is (§8.6): reads see what its policies let
   it see, and writes are admitted and authorized as `WriteIdentity::Session`.

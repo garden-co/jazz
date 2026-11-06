@@ -1,6 +1,14 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { decodeThinResponse, encodeThinRequest, type ThinBody, type ThinOp } from "./wire.js";
+import {
+  decodeThinResponse,
+  encodeThinRequest,
+  MAX_THIN_MESSAGE_BYTES,
+  ThinAssembler,
+  thinWireFrames,
+  type ThinBody,
+  type ThinOp,
+} from "./wire.js";
 
 // The thin wire corpus pinned by `crates/jazz/layers/protocol/src/thin.rs`:
 // one frame of every request op and response body, built from the same
@@ -110,5 +118,28 @@ describe("thin wire corpus", () => {
     corpus.responses.map((entry, index) => [entry.name, entry.frame_hex, index + 1] as const),
   )("decodes the %s response as the server writes it", (name, frameHex, id) => {
     expect(decodeThinResponse(unhex(frameHex))).toEqual({ id, body: RESPONSES[name] });
+  });
+});
+
+describe("thin frames over a wire frame", () => {
+  it("travel as parts in the layout thin.rs pins, and join back", () => {
+    const frame = new Uint8Array(5 * 1024 * 1024).map((_, index) => index % 251);
+    const parts = thinWireFrames(frame)!;
+    expect(parts).toHaveLength(3);
+    const assembler = new ThinAssembler();
+    const joined = parts.map((part) => {
+      expect(ThinAssembler.isPart(part)).toBe(true);
+      expect(part.byteLength).toBeLessThanOrEqual(2 * 1024 * 1024 - 16);
+      return assembler.push(part);
+    });
+    expect(joined.slice(0, 2)).toEqual([undefined, undefined]);
+    expect(Buffer.compare(joined[2]!, frame)).toBe(0);
+    // `ThinPart { more: true, bytes: [1, 2, 3] }`, as thin.rs encodes it.
+    expect(new ThinAssembler().push(new Uint8Array([6, 1, 3, 1, 2, 3]))).toBeUndefined();
+    expect(new ThinAssembler().push(new Uint8Array([6, 0, 3, 1, 2, 3]))).toEqual(
+      new Uint8Array([1, 2, 3]),
+    );
+    expect(thinWireFrames(new Uint8Array(10))).toHaveLength(1);
+    expect(thinWireFrames(new Uint8Array(MAX_THIN_MESSAGE_BYTES + 1))).toBeNull();
   });
 });

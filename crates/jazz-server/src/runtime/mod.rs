@@ -1442,7 +1442,10 @@ impl ServerRuntimeHandle {
             .get(&session)
             .map(|edge| Arc::clone(&edge.ingress))
             .ok_or_else(|| "unknown server session".to_owned())?;
-        if ingress.fetch_add(bytes, Ordering::AcqRel) + bytes > SESSION_QUEUE_BUDGET {
+        // One request may be larger than the budget (a write of a value
+        // over it, joined from parts), but only with nothing else queued.
+        let queued = ingress.fetch_add(bytes, Ordering::AcqRel);
+        if queued > 0 && queued + bytes > SESSION_QUEUE_BUDGET {
             ingress.fetch_sub(bytes, Ordering::AcqRel);
             return Err("session ingress budget exceeded".to_owned());
         }
@@ -1495,7 +1498,10 @@ impl ServerRuntimeHandle {
             .get(&session)
             .map(|edge| Arc::clone(&edge.ingress))
             .ok_or_else(|| "unknown server session".to_owned())?;
-        if ingress.fetch_add(bytes, Ordering::AcqRel) + bytes > SESSION_QUEUE_BUDGET {
+        // One request may be larger than the budget (a write of a value
+        // over it, joined from parts), but only with nothing else queued.
+        let queued = ingress.fetch_add(bytes, Ordering::AcqRel);
+        if queued > 0 && queued + bytes > SESSION_QUEUE_BUDGET {
             ingress.fetch_sub(bytes, Ordering::AcqRel);
             return Err("session ingress budget exceeded".to_owned());
         }
@@ -1511,6 +1517,14 @@ impl ServerRuntimeHandle {
     pub(crate) fn hold_egress_for_test(&self, session: ServerSession, bytes: usize) {
         let edges = self.edges().expect("edges");
         edges[&session].egress.fetch_add(bytes, Ordering::AcqRel);
+    }
+
+    /// Count `bytes` against `session`'s ingress budget as if a request
+    /// that size were queued and not yet run.
+    #[cfg(test)]
+    pub(crate) fn hold_ingress_for_test(&self, session: ServerSession, bytes: usize) {
+        let edges = self.edges().expect("edges");
+        edges[&session].ingress.fetch_add(bytes, Ordering::AcqRel);
     }
 
     /// Release `bytes` held by [`Self::hold_egress_for_test`], as the
