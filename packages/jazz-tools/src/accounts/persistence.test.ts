@@ -5,6 +5,7 @@ import { formatAuthSecret } from "../runtime/auth-secret-codec.js";
 import { generateAuthSecret } from "../runtime/auth-secret-store.js";
 import { accountToken, exportLocalFirstSecret } from "./enrollment.js";
 import type { AccountHandle } from "./state.js";
+import { localFirstAccountId } from "./local-first.js";
 
 const registry = "https://core.example/apps/test/accounts";
 // Controlled crypto boundary: these tests prove storage ordering and recovery;
@@ -479,4 +480,78 @@ it("never remembers the backend user with rememberBackendUser: false (clearOnSig
   await accounts.settleSelection();
   expect(JSON.parse(store.value()!).backendUser).toBeUndefined();
   expect((await prepareAccountManager(options)).getLoggedIn()).toBeUndefined();
+});
+
+// A shared device (clearOnSignOut): Kim starts as a guest, signs up (the
+// backend links her guest), and signs out. Her guest root must not stay on
+// the device, or the next person reopens her account with it.
+function linkFetch(account: string) {
+  return (async (input: unknown) =>
+    String(input).endsWith("/backend-link/challenge")
+      ? Response.json({ challenge: "issued-for-kim.mac", expiresAt: 0 })
+      : Response.json({
+          account,
+          identity: { issuer: "jazz:backend", subject: "kim" },
+          claims: {},
+        })) as unknown as typeof fetch;
+}
+
+it("forgets a guest's root once it is linked to a user, with rememberBackendUser: false (clearOnSignOut)", async () => {
+  const store = storeWith(null);
+  const guestAccount = localFirstAccountId("test", "00000000-0000-4000-8000-000000000001");
+  const options = {
+    appId: "test",
+    registry,
+    store,
+    mintToken,
+    fetch: linkFetch(guestAccount),
+    rememberBackendUser: false,
+  };
+  const accounts = await prepareAccountManager(options);
+  accounts.createLocalFirst();
+  await accounts.settleSelection();
+  expect(JSON.parse(store.value()!).roots).toHaveLength(1);
+
+  await accounts.linkWithBackend();
+  await accounts.settleSelection();
+  expect(JSON.parse(store.value()!)).toMatchObject({ roots: [], selected: null });
+  accounts.logout();
+  await accounts.settleSelection();
+  // Nothing on the device reopens her.
+  expect(JSON.parse(store.value()!).roots).toEqual([]);
+  expect((await prepareAccountManager(options)).getLoggedIn()).toBeUndefined();
+});
+
+it("keeps a linked guest's root when the device remembers its user", async () => {
+  const store = storeWith(null);
+  const guestAccount = localFirstAccountId("test", "00000000-0000-4000-8000-000000000001");
+  const accounts = await prepareAccountManager({
+    appId: "test",
+    registry,
+    store,
+    mintToken,
+    fetch: linkFetch(guestAccount),
+  });
+  accounts.createLocalFirst();
+  await accounts.linkWithBackend();
+  await accounts.settleSelection();
+  expect(JSON.parse(store.value()!).roots).toHaveLength(1);
+});
+
+it("keeps another guest's root when a different user signs in (clearOnSignOut)", async () => {
+  const store = storeWith(null);
+  const accounts = await prepareAccountManager({
+    appId: "test",
+    registry,
+    store,
+    mintToken,
+    fetch: signInFetch,
+    rememberBackendUser: false,
+  });
+  accounts.createLocalFirst();
+  await accounts.settleSelection();
+  // Not a link: the guest's data is its own, and its root its only key.
+  await accounts.loginWithBackend();
+  await accounts.settleSelection();
+  expect(JSON.parse(store.value()!).roots).toHaveLength(1);
 });

@@ -7,7 +7,8 @@ import {
   type RememberedBackendUser,
 } from "./enrollment.js";
 import type { AccountHandle, AccountManager } from "./state.js";
-import { localFirstFactory } from "./local-first.js";
+import { localFirstAccountId, localFirstFactory } from "./local-first.js";
+import { parseJwtPayload } from "../runtime/client-session.js";
 import { generateAuthSecret } from "../runtime/auth-secret-store.js";
 import { parseAuthSecret } from "../runtime/auth-secret-codec.js";
 
@@ -23,6 +24,9 @@ export interface AccountStore {
 
 // Local helper preferences, not a database/wire codec. Keep every local root:
 // logout clears selection but must never destroy the only key to offline data.
+// The one exception is `clearOnSignOut` (no remembered user): a guest root
+// linked to a backend user is no one's only key (the backend signs them in),
+// and leaving it would let the next person on the device reopen that user.
 //
 // `backendUser` (optional, versioned on its own) remembers the user the app's
 // backend signed in, when that is the selection: their account, identity and
@@ -117,6 +121,13 @@ export async function prepareAccountManager(options: {
   const remembers = options.rememberBackendUser ?? true;
   const stored = decode(await options.store.read());
   if (!remembers) delete stored.backendUser;
+  // Roots this manager dropped: other managers' snapshots must not bring them back.
+  const forgotten = new Set<string>();
+  /** The account a local-first root founds, as `localFirstFactory` derives it. */
+  const rootAccount = (root: string): string | undefined => {
+    const subject = parseJwtPayload(options.mintToken(root, options.appId))?.sub;
+    return typeof subject === "string" ? localFirstAccountId(options.appId, subject) : undefined;
+  };
   let writes = Promise.resolve();
   let adoptingSecret: string | undefined;
   const save = () => {
@@ -133,6 +144,7 @@ export async function prepareAccountManager(options: {
           // Independent managers may have discovered roots since we loaded. Never
           // replace their key inventory with this manager's older snapshot.
           for (const root of roots) if (!latest.roots.includes(root)) latest.roots.push(root);
+          latest.roots = latest.roots.filter((root) => !forgotten.has(root));
           latest.selected = selected === null ? null : latest.roots.indexOf(selected);
           if (backendUser && selected === null) latest.backendUser = backendUser;
           else delete latest.backendUser;
@@ -158,6 +170,13 @@ export async function prepareAccountManager(options: {
           delete stored.backendUser;
           return;
         }
+        // A guest linked to this user (their sign-up): with no remembered
+        // user, nothing on the device may reopen them, so forget the root.
+        const guest = stored.selected === null ? undefined : stored.roots[stored.selected];
+        if (!remembers && next && guest !== undefined && rootAccount(guest) === next.id) {
+          forgotten.add(guest);
+          stored.roots.splice(stored.selected!, 1);
+        }
         stored.selected = null;
         // A user the backend signed in is remembered without any credential,
         // so a reload reopens their account. Other accounts (the Node host's
@@ -177,6 +196,8 @@ export async function prepareAccountManager(options: {
       generateSecret: options.generateSecret,
       isSecretRetained: async (secret) => decode(await options.store.read()).roots.includes(secret),
       retainSecret(secret) {
+        // Selected again (the app restores it): kept like any other root.
+        forgotten.delete(secret);
         let index = stored.roots.indexOf(secret);
         if (index < 0) index = stored.roots.push(secret) - 1;
         stored.selected = index;

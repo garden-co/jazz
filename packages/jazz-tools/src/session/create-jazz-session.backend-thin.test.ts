@@ -581,6 +581,60 @@ describe("another user signing in on a local-first browser", () => {
   }, 60_000);
 });
 
+describe("a shared device (clearOnSignOut)", () => {
+  // Kim starts as a guest, signs up (the backend links her guest), and signs
+  // out. Nothing left on the device may reopen her account: not her replica,
+  // and not her guest's signing root either.
+  it("leaves no root that reopens a guest who signed up and signed out", async () => {
+    const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz);
+    // A browser page, no one signed in at the backend yet.
+    const jar = cookies(origin, null);
+    let stored: string | null = null;
+    const store: AccountStore = {
+      read: async () => stored,
+      update: async (transform) => void (stored = transform(stored)),
+    };
+    const session = await createJazzClient({
+      serverUrl: `${origin}/jazz`,
+      store,
+      driver: { type: "memory" },
+      initial: "local-first",
+      clearOnSignOut: true,
+      client: async () => ({ createClient: createLocalFirstDb }),
+    });
+    cleanups.push(() => session.close());
+    const guest = session.getSnapshot().client!;
+    const account = guest.session!.user!;
+    expect(JSON.parse(stored!).roots).toHaveLength(1);
+
+    // The app's sign-up created "kim"; the backend now names her.
+    jar.user = jar.socketUser = "kim";
+    await session.linkWithBackend();
+    expect(session.getSnapshot().client!.session!.user).toBe(account);
+    await session
+      .getSnapshot()
+      .client!.db.insert(app.todos, { title: "kim-private-note", owner: account })
+      .wait({ tier: "global" });
+    jar.user = jar.socketUser = null;
+    await session.logout();
+    expect(session.getSnapshot().status).toBe("signed-out");
+    expect(JSON.parse(stored!)).toMatchObject({ roots: [], selected: null });
+    await session.close();
+
+    // The next person on the device finds nothing to reopen.
+    const next = await createJazzClient({
+      serverUrl: `${origin}/jazz`,
+      store,
+      driver: { type: "memory" },
+      clearOnSignOut: true,
+    });
+    cleanups.push(() => next.close());
+    expect(next.getSnapshot().status).toBe("signed-out");
+  }, 60_000);
+});
+
 describe("signing out with writes the server won't take", () => {
   // The backend's session ended (cookies cleared, expired) with a write still
   // on this device: the sign-out must go through, or the app is stuck on an
