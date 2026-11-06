@@ -1,5 +1,5 @@
 import { createServer, type Server } from "node:http";
-import type { AddressInfo } from "node:net";
+import type { AddressInfo, Socket } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
 import { createJazz, memory, type Jazz } from "../backend/index.js";
@@ -32,19 +32,25 @@ function authenticate(request: Request) {
   return userId ? { userId } : null;
 }
 
-async function serve(jazz: Jazz): Promise<string> {
+async function serve(jazz: Jazz, port = 0): Promise<string> {
   const server: Server = createServer((req, res) =>
     jazz.nodeHandler(req, res, () => {
       res.statusCode = 404;
       res.end();
     }),
   );
+  // Upgraded sockets too: closing the server ends every connection.
+  const sockets = new Set<Socket>();
+  server.on("connection", (socket) => {
+    sockets.add(socket);
+    socket.on("close", () => sockets.delete(socket));
+  });
   await jazz.attach(server);
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  await new Promise<void>((resolve) => server.listen(port, "127.0.0.1", resolve));
   cleanups.push(
     () =>
       new Promise((resolve) => {
-        server.closeAllConnections();
+        for (const socket of sockets) socket.destroy();
         server.close(resolve);
       }),
   );
@@ -184,5 +190,65 @@ describe("browser session against the app's backend", () => {
       "local",
       "thin",
     ]);
+  }, 60_000);
+});
+
+describe("signing out with writes the server won't take", () => {
+  // The backend's session ended (cookies cleared, expired) with a write still
+  // on this device: the sign-out must go through, or the app is stuck on an
+  // error it can't leave, through reloads too.
+  it("signs out when the backend does, past a write the server won't take", async () => {
+    const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz);
+    let user: string | null = "alice";
+    const realFetch = globalThis.fetch;
+    const RealWebSocket = globalThis.WebSocket;
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const request = new Request(input, init);
+      if (user && new URL(request.url).origin === origin) request.headers.set("x-test-user", user);
+      return realFetch(request);
+    }) as typeof fetch;
+    globalThis.WebSocket = class extends RealWebSocket {
+      constructor(url: string | URL, options?: { headers?: Record<string, string> }) {
+        const headers =
+          user && new URL(url).host === new URL(origin).host ? { "x-test-user": user } : {};
+        super(url, { ...options, headers: { ...options?.headers, ...headers } } as never);
+      }
+    } as typeof WebSocket;
+    cleanups.push(async () => {
+      globalThis.fetch = realFetch;
+      globalThis.WebSocket = RealWebSocket;
+    });
+    const session = await createJazzClient({
+      serverUrl: `${origin}/jazz`,
+      store: memoryStore(),
+      driver: { type: "memory" },
+      client: async () => ({ createClient: createLocalFirstDb }),
+    });
+    cleanups.push(() => session.close());
+    await session.loginWithBackend();
+    await expect
+      .poll(() => isThinDb(session.getSnapshot().client!.db), { timeout: 15_000 })
+      .toBe(false);
+    const local = session.getSnapshot().client!;
+    const owner = local.session!.user!;
+    await local.db.insert(app.todos, { title: "synced", owner }).wait({ tier: "global" });
+
+    // The backend goes down; a write stays on this device; the cookie goes.
+    const servers = cleanups.splice(1, 1);
+    await servers[0]!();
+    await local.db.insert(app.todos, { title: "unsynced", owner });
+    user = null;
+    await serve(jazz, Number(new URL(origin).port));
+    const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+    cleanups.push(async () => warned.mockRestore());
+    await (session as unknown as { reauthenticate(): Promise<void> }).reauthenticate();
+    expect(session.getSnapshot().status).toBe("signed-out");
+    expect(warned).toHaveBeenCalledWith(
+      expect.stringContaining("writes the server didn't accept"),
+      expect.anything(),
+    );
+    await session.close();
   }, 60_000);
 });

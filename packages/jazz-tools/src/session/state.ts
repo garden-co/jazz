@@ -216,6 +216,8 @@ export async function createJazzSessionOwner<
           await db?.waitForSync?.({ timeoutMs: 5_000 }).catch(() => {});
           await db?.deleteClientStorage?.();
           await client.shutdown();
+        } else if (signsOut) {
+          await signOutOf(client);
         } else {
           await client.shutdown({ waitForSync: true });
         }
@@ -429,4 +431,25 @@ export async function createJazzSessionOwner<
   });
   if (options.decorate) Object.assign(session, options.decorate(session));
   return Object.freeze(session) as JazzSession<Client> & Extra;
+}
+
+/**
+ * Sign out of `client`: upload what the server still accepts, then stop it.
+ * Writes it won't accept (the user is no longer signed in, so no credential
+ * uploads them) don't hold the sign-out: refusing it would leave the user
+ * with no way out, through reloads too. A persistent client keeps them on
+ * this device, under that account, and uploads them when it next opens;
+ * a client that keeps nothing (in memory) loses them.
+ */
+async function signOutOf(client: { shutdown(options?: { waitForSync?: boolean }): Promise<void> }) {
+  try {
+    await client.shutdown({ waitForSync: true });
+  } catch (cause) {
+    if (!(cause instanceof GracefulShutdownSyncError)) throw cause;
+    console.warn(
+      "Jazz signed out with writes the server didn't accept. A persistent client keeps them on this device and uploads them when this account signs in again.",
+      cause.cause,
+    );
+    await client.shutdown();
+  }
 }
