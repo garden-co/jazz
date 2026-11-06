@@ -940,6 +940,50 @@ impl Binding {
         self.trusted_backend
     }
 
+    /// The authority's table identity for this schema view. An unknown table
+    /// is None; a catalogue not confirmed by the authority is NotObserved.
+    /// Learning an identity grants no permission to read its rows.
+    pub fn table_identity(&self, table: &str) -> HostResult<Option<[u8; 16]>> {
+        Ok(self.db.table_identity(table)?.map(|id| *id.0.as_bytes()))
+    }
+
+    /// The authority's stored column identity, following rename lenses.
+    pub fn column_identity(&self, table: &str, column: &str) -> HostResult<Option<[u8; 16]>> {
+        Ok(self
+            .db
+            .column_identity(table, column)?
+            .map(|id| *id.0.as_bytes()))
+    }
+
+    /// Fresh schema/session catalogue coverage using the normal pending read
+    /// lifetime. Claims use the ordinary host JSON codec and are never installed.
+    pub fn cover_catalogue(
+        &self,
+        timeout_ms: f64,
+        author: Option<&[u8]>,
+        claims: Option<serde_json::Value>,
+    ) -> HostResult<HostFuture<Vec<u8>>> {
+        let timeout_ms = checked_u64(timeout_ms, "catalogue timeout")?;
+        let scope = match author {
+            Some(bytes) => {
+                let author = self.author_of(bytes)?;
+                Some(crate::db::AcceptedReadScope {
+                    author,
+                    claims: self::claims(author, claims.unwrap_or(serde_json::Value::Null))?,
+                })
+            }
+            None if claims.is_some() => {
+                return Err("catalogue claims require an explicit author".into());
+            }
+            None => None,
+        };
+        let admitted = self.db.cover_catalogue_with_timeout(scope, timeout_ms)?;
+        Ok(Box::pin(self.parked(async move {
+            admitted.await?;
+            Ok(Vec::new())
+        })))
+    }
+
     /// A typed schema view backed by the same runtime.
     pub fn register_schema(&self, schema: &[u8]) -> HostResult<Self> {
         self.register_schema_shipping(schema, crate::db::Migrations::default())

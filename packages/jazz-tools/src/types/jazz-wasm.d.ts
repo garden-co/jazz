@@ -163,6 +163,15 @@ declare module "jazz-wasm" {
     /** Resolves once every commit so far is in the browser store's backing storage. */
     flush(): Promise<void>;
 
+    /** Authority UUID bytes (empty for an unknown name); throws before catalogue admission. */
+    coverCatalogue(
+      timeoutMs: number,
+      author?: Uint8Array,
+      claims?: unknown,
+    ): Uint8Array | PendingNativeRead;
+    tableIdentity(table: string): Uint8Array;
+    columnIdentity(table: string, column: string): Uint8Array;
+
     registerSchema(schema: Uint8Array, migrations?: Uint8Array): WasmDb;
     captureSnapshot(): Uint8Array | PendingNativeRead;
     beginTransaction(

@@ -73,7 +73,8 @@ impl Db {
             .ok_or_else(|| unsupported("accepted-read timeout outside the clock range"))?;
         let answer = self
             .fetch_once(
-                prepared,
+                &prepared.query,
+                &prepared.binding,
                 at.map(Pos::at),
                 include_deleted,
                 RemoteReach {
@@ -84,7 +85,7 @@ impl Db {
                 None,
                 true,
                 &ReadViewSourceSpec::Current,
-                Some((schema, scope)),
+                Some(ReadSpan::AcceptedOnce { at, schema, scope }),
             )
             .await?;
         match answer {
@@ -144,66 +145,24 @@ impl Db {
             }
         };
         if self.is_client() {
-            let timeout_ms = timeout_ms.unwrap_or(15_000).min(15_000);
-            let until = Instant::now() + std::time::Duration::from_millis(timeout_ms);
-            let deadline_guard = self.read_deadline(Some(until));
-            let mut inner = self.inner();
-            let client = inner.client.as_mut().expect("client");
-            let upstream = client.next_id;
-            client.next_id += 1;
-            client.answers.insert(upstream, None);
-            // Evidence never resumes an ordinary row-cache watermark.
-            inner.register_once_read(
-                upstream,
-                &query,
-                &binding,
-                include_deleted,
-                &ReadViewSourceSpec::Current,
-                false,
-            );
-            let client = inner.client.as_mut().expect("client");
-            let ask = SyncMessage::Read {
-                id: upstream,
-                query: Box::new(query.clone()),
-                binding: binding.clone(),
-                include_deleted,
-                tier: ReadTier::Remote,
-                wait: Some(timeout_ms),
-                view: Box::new(ReadViewSourceSpec::Current),
-                since: None,
-                span: ReadSpan::AcceptedOnce {
-                    at,
-                    schema,
-                    scope: Some(scope),
-                },
-            };
-            client.outbox.push(ask.clone());
-            client.relayed_fetches.push(RelayedFetch {
-                upstream,
-                ask,
-                strict: true,
-                until: Some(until),
-                _deadline_guard: deadline_guard,
-                session: index,
-                message: SyncMessage::Read {
+            return self.relay_scoped_read(
+                index,
+                SyncMessage::Read {
                     id,
                     query: Box::new(query),
                     binding,
                     include_deleted,
                     tier: ReadTier::Remote,
-                    wait: Some(timeout_ms),
+                    wait: timeout_ms,
                     view: Box::new(ReadViewSourceSpec::Current),
                     since: None,
                     span: ReadSpan::AcceptedOnce {
                         at,
                         schema,
-                        scope: None,
+                        scope: Some(scope),
                     },
                 },
-            });
-            drop(inner);
-            self.schedule_pending_tick();
-            return Ok(());
+            );
         }
         let view = {
             let inner = self.inner();

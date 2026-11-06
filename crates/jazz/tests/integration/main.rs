@@ -21,6 +21,8 @@ mod authorization_scope_reentry;
 mod binding_accepted_reads;
 #[path = "../binding_host.rs"]
 mod binding_host;
+#[path = "../binding_identities.rs"]
+mod binding_identities;
 #[path = "../branch_column_evolution.rs"]
 mod branch_column_evolution;
 #[path = "../branch_view_sync.rs"]
@@ -238,6 +240,8 @@ mod accepted_evidence_wire;
 
 #[path = "../accepted_transaction_reads.rs"]
 mod accepted_transaction_reads;
+#[path = "../catalogue_coverage.rs"]
+mod catalogue_coverage;
 
 #[path = "../accepted_bundle_reads.rs"]
 mod accepted_bundle_reads;

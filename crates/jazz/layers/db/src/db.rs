@@ -63,12 +63,12 @@ pub use accepted_read::{
     AcceptedRead, AcceptedReadScope, AcceptedRowEvidence, AcceptedVersion, EncodedAcceptedRead,
 };
 pub use sync::{
-    ACCEPTED, AccessProof, Acting, BuiltOn, Cell as SyncCell, CellDelta, CorpusReader, FirstLoad,
-    FrameJoiner, Image, LocalEvidenceProvenance, LocalObservation, LocalObservationCut,
-    LocalSubmissionExport, LocalSubmissionRoute, MAX_SEQ, Outcome, PENDING, Pos, ReadSpan,
-    RejectedTransaction, RelationSnapshot, RemoteLinkHint, SerializedReadResult, SubscriberId,
-    SyncMessage, Transport, TransportError, TxName, Upstream, WireBase, WireChunk, WireChunkRef,
-    WireDelta, WireError, WireKind, WireOp, WirePull, WireTarget, WireTransport,
+    ACCEPTED, AccessProof, Acting, BuiltOn, CatalogueCoverage, Cell as SyncCell, CellDelta,
+    CorpusReader, FirstLoad, FrameJoiner, Image, LocalEvidenceProvenance, LocalObservation,
+    LocalObservationCut, LocalSubmissionExport, LocalSubmissionRoute, MAX_SEQ, Outcome, PENDING,
+    Pos, ReadSpan, RejectedTransaction, RelationSnapshot, RemoteLinkHint, SerializedReadResult,
+    SubscriberId, SyncMessage, Transport, TransportError, TxName, Upstream, WireBase, WireChunk,
+    WireChunkRef, WireDelta, WireError, WireKind, WireOp, WirePull, WireTarget, WireTransport,
     WireTransportAdapter, WireWrite, WriteConflict, decode_message, duplex, encode_frames,
     validate_frame_batch_for_corpus,
 };

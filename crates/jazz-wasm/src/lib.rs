@@ -1286,6 +1286,40 @@ impl WasmDb {
         })
     }
 
+    /// Fresh schema/session catalogue coverage on the ordinary pending-read route.
+    #[wasm_bindgen(js_name = coverCatalogue)]
+    pub fn cover_catalogue(
+        &self,
+        timeout_ms: f64,
+        author: Option<Vec<u8>>,
+        claims: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        let read = self
+            .binding()?
+            .cover_catalogue(timeout_ms, author.as_deref(), json(claims)?)
+            .map_err(host_error)?;
+        wasm_read_or_pending(Box::pin(async move { read.await.map_err(host_error) }))
+    }
+
+    /// Authority table UUID as 16 canonical bytes, or empty for an unknown name.
+    /// Refuses with NotObserved until the authority confirms this schema.
+    #[wasm_bindgen(js_name = tableIdentity)]
+    pub fn table_identity(&self, table: String) -> Result<Vec<u8>, JsValue> {
+        self.binding()?
+            .table_identity(&table)
+            .map(|id| id.map_or_else(Vec::new, |id| id.to_vec()))
+            .map_err(host_error)
+    }
+
+    /// Authority column UUID as 16 canonical bytes, or empty for an unknown name.
+    #[wasm_bindgen(js_name = columnIdentity)]
+    pub fn column_identity(&self, table: String, column: String) -> Result<Vec<u8>, JsValue> {
+        self.binding()?
+            .column_identity(&table, &column)
+            .map(|id| id.map_or_else(Vec::new, |id| id.to_vec()))
+            .map_err(host_error)
+    }
+
     /// Register a typed schema view backed by this same runtime owner, of
     /// an app shipping `migrations` (its bundle as JSON).
     #[wasm_bindgen(js_name = registerSchema)]
