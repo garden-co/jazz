@@ -26,7 +26,7 @@ use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz_alpha59_alpha60_dump as dump;
 use jazz_server::server::alpha59_alpha60::{
-    migrate_import_active_permissions, migrate_import_login,
+    migrate_import_first_permissions, migrate_import_login,
 };
 use jazz_server::{BlobStore, ServerBuilder, ServerState, StorageBackend};
 use serde_json::{Value as Json, json};
@@ -373,6 +373,13 @@ pub async fn verify(args: &Args) -> Result<Json, String> {
     }
 
     check_app_id(&args.data_dir, &args.app_id_text)?;
+    // A running backend holds the dir's lock; verify reads a dir at rest.
+    let _lock = jazz_server::lock_data_dir(&args.data_dir).map_err(|error| {
+        format!(
+            "data dir '{}' {error}: stop the backend before verifying",
+            args.data_dir.display()
+        )
+    })?;
     let built = ServerBuilder::new(args.app_id)
         .with_storage(StorageBackend::Persistent {
             path: args.data_dir.clone(),
@@ -443,15 +450,16 @@ fn verify_permissions(
     admin: &[dump::AdminEntry],
     report: &mut Report,
 ) -> Result<(), String> {
-    // The one deployment the import makes publishes this bundle.
+    // The one deployment the import makes publishes this bundle, first:
+    // the app may have published its own since.
     let expected = match active_deployment(admin)? {
         None => Json::Null,
-        Some(deployment) => json!({
+        Some((deployment, _)) => json!({
             "schema_hash": deployment["targetSchemaHash"],
             "permissions": deployment["permissions"],
         }),
     };
-    let mut actual = migrate_import_active_permissions(state)?;
+    let mut actual = migrate_import_first_permissions(state)?;
     if let Some(actual) = actual.as_object_mut() {
         actual.remove("bundle");
     }

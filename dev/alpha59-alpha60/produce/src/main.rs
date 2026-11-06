@@ -94,14 +94,23 @@ fn v2() -> Schema {
 }
 
 /// Permissions bundle `n`: allow-all, except that bundle 2 forbids deleting
-/// documents, so the two bundles differ.
+/// documents, so the two bundles differ. Its documents read policy also
+/// names `session.user.account` and `session.user.identity.subject`,
+/// alpha.59's paths that the import renames; it still allows every read.
 fn permissions(schema: &Schema, n: u8) -> HashMap<String, TablePolicies> {
+    use jazz::tools::policy_expr::{eq, session};
     schema
         .keys()
         .map(|name| {
             let mut policies = allow_all();
             if n == 2 && name.as_str() == "documents" {
-                policies = policies.with_delete(PolicyExpr::False);
+                policies = policies
+                    .with_delete(PolicyExpr::False)
+                    .with_select(PolicyExpr::or(vec![
+                        PolicyExpr::True,
+                        eq("owner", session(&["user", "account"][..])),
+                        eq("body", session(&["user", "identity", "subject"][..])),
+                    ]));
             }
             (name.as_str().to_owned(), policies)
         })

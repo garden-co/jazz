@@ -56,10 +56,12 @@ pub async fn migrate_import_login(
     })
 }
 
-/// The permissions bundle published last: `{"schema_hash", "bundle",
-/// "permissions"}`. A deployment publishes a bundle; nothing is activated.
-pub fn migrate_import_active_permissions(state: &ServerState) -> Result<serde_json::Value, String> {
-    let Some(bundle) = state.catalogue_store.published_bundles().pop() else {
+/// The permissions bundle published first: `{"schema_hash", "bundle",
+/// "permissions"}`. That is the import's one deployment; the app's own
+/// deployments, such as a backend's first start with its permissions, come
+/// after it.
+pub fn migrate_import_first_permissions(state: &ServerState) -> Result<serde_json::Value, String> {
+    let Some(bundle) = state.catalogue_store.published_bundles().into_iter().next() else {
         return Ok(serde_json::Value::Null);
     };
     let permissions: std::collections::BTreeMap<_, _> = bundle.permissions.into_iter().collect();
