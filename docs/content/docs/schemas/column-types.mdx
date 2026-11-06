@@ -92,16 +92,16 @@ const schema = {
 With this schema, `priority` is stored as an `INTEGER`, but TypeScript treats it as `Priority` when reading and writing rows:
 
 ```ts
-db.insert(app.tasks, {
+const { value: created } = db.insert(app.tasks, {
   title: "Write launch notes",
   priority: "high",
 });
 
-db.update(app.tasks, task.id, {
+db.update(app.tasks, created.id, {
   priority: "medium",
 });
 
-const task = await db.one(app.tasks.where({ id: task.id }));
+const task = await db.one(app.tasks.where({ id: created.id }));
 task?.priority; // "low" | "medium" | "high"
 ```
 
