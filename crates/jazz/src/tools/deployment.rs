@@ -101,10 +101,18 @@ pub enum DeploymentError {
         display_hashes(.roots, ", ")
     )]
     DisconnectedGraph { roots: Vec<SchemaHash> },
-    #[error("migration paths disagree: {} and {}", display_hashes(.first, " -> "), display_hashes(.second, " -> "))]
+    #[error(
+        "the migrations from {} to {} disagree along two paths ({} and {}): {difference}. Make the migrations on both paths give the same result",
+        short_hash(.first.first()),
+        short_hash(.first.last()),
+        short_hashes(.first),
+        short_hashes(.second)
+    )]
     ConflictingPaths {
         first: Vec<SchemaHash>,
         second: Vec<SchemaHash>,
+        /// What differs, by table and column.
+        difference: String,
     },
     #[error(
         "deploying schema {target} switches {} to latest-only history, which drops each row's past versions at its next write and cannot be undone. Deploy again with `allowDroppingHistory: true` to confirm.",
@@ -126,6 +134,72 @@ fn display_tables(tables: &[TableName]) -> String {
         1 => format!("table {names}"),
         _ => format!("tables {names}"),
     }
+}
+
+/// A schema hash as `migrations/snapshots` names it.
+fn short_hash(hash: Option<&SchemaHash>) -> String {
+    hash.map(|hash| hash.to_hex()[..12].to_owned())
+        .unwrap_or_default()
+}
+
+fn short_hashes(hashes: &[SchemaHash]) -> String {
+    hashes
+        .iter()
+        .map(|hash| short_hash(Some(hash)))
+        .collect::<Vec<_>>()
+        .join(" -> ")
+}
+
+/// A default as an app author writes it.
+fn value_text(value: &Value) -> String {
+    match value {
+        Value::Text(text) => serde_json::to_string(text).unwrap_or_default(),
+        Value::Integer(n) => n.to_string(),
+        Value::BigInt(n) => n.to_string(),
+        Value::Double(n) => n.to_string(),
+        Value::Boolean(b) => b.to_string(),
+        Value::Null => "null".into(),
+        other => serde_json::to_string(other).unwrap_or_else(|_| "a value".into()),
+    }
+}
+
+/// Where two projections of one schema first differ, by table and column.
+fn projection_difference(first: &Projection, second: &Projection) -> String {
+    let describe = |origin: Option<&ColumnOrigin>| match origin {
+        Some(ColumnOrigin::Source(column)) => format!("keeps column `{column}`"),
+        Some(ColumnOrigin::Default(value)) => format!("adds it with default {}", value_text(value)),
+        Some(ColumnOrigin::NewTable) => "adds it with a new table".into(),
+        None => "has no such column".into(),
+    };
+    let tables: BTreeSet<&String> = first.keys().chain(second.keys()).collect();
+    for table in tables {
+        let (Some(a), Some(b)) = (first.get(table), second.get(table)) else {
+            return format!("table `{table}` exists along only one of them");
+        };
+        if a.source != b.source {
+            let source = |source: &Option<String>| match source {
+                Some(name) => format!("keeps table `{name}`"),
+                None => "adds it".into(),
+            };
+            return format!(
+                "for table `{table}`, one path {} and the other {}",
+                source(&a.source),
+                source(&b.source)
+            );
+        }
+        let columns: BTreeSet<&String> = a.columns.keys().chain(b.columns.keys()).collect();
+        for column in columns {
+            let (x, y) = (a.columns.get(column), b.columns.get(column));
+            if x != y {
+                return format!(
+                    "for `{table}.{column}`, one path {} and the other {}",
+                    describe(x),
+                    describe(y)
+                );
+            }
+        }
+    }
+    "they give different results".into()
 }
 
 fn display_hashes(hashes: &[SchemaHash], separator: &str) -> String {
@@ -587,6 +661,7 @@ fn validate_parallel_paths(
                         return Err(DeploymentError::ConflictingPaths {
                             first: previous_path.clone(),
                             second: next_path,
+                            difference: projection_difference(previous, &next),
                         });
                     }
                 } else {

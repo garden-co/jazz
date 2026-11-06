@@ -94,9 +94,13 @@ impl From<DeploymentError> for DeployError {
                 "disconnected_migration_graph",
                 serde_json::json!({"roots":roots.iter().map(ToString::to_string).collect::<Vec<_>>()}),
             ),
-            ConflictingPaths { first, second } => (
+            ConflictingPaths {
+                first,
+                second,
+                difference,
+            } => (
                 "conflicting_paths",
-                serde_json::json!({"first":first.iter().map(ToString::to_string).collect::<Vec<_>>(),"second":second.iter().map(ToString::to_string).collect::<Vec<_>>()}),
+                serde_json::json!({"first":first.iter().map(ToString::to_string).collect::<Vec<_>>(),"second":second.iter().map(ToString::to_string).collect::<Vec<_>>(),"difference":difference}),
             ),
             DropsHistory { target, tables } => (
                 "drops_history",

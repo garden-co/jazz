@@ -325,7 +325,7 @@ fn parallel_paths_must_preserve_column_identity_and_defaults() {
             request(&merged, &schemas, edges(conflicting)),
         )
         .unwrap_err();
-        let DeploymentError::ConflictingPaths { first, second } = error else {
+        let DeploymentError::ConflictingPaths { first, second, .. } = error else {
             panic!("{error}")
         };
         assert_eq!(first.first(), Some(&SchemaHash::compute(&base)));
@@ -357,10 +357,26 @@ fn parallel_paths_must_preserve_column_identity_and_defaults() {
             ],
         ),
     );
-    assert!(matches!(
-        result,
-        Err(DeploymentError::ConflictingPaths { .. })
-    ));
+    let error = result.unwrap_err();
+    assert!(matches!(error, DeploymentError::ConflictingPaths { .. }));
+    // The refusal names the column and how the paths differ, and the
+    // versions as their snapshots are named.
+    let message = error.to_string();
+    for part in [
+        "for `notes.a`, one path adds it with default",
+        r#""default-a""#,
+        r#""different""#,
+    ] {
+        assert!(message.contains(part), "{message}");
+    }
+    assert!(
+        message.contains(&SchemaHash::compute(&base).to_hex()[..12]),
+        "{message}"
+    );
+    assert!(
+        !message.contains(&SchemaHash::compute(&base).to_hex()),
+        "{message}"
+    );
 }
 
 #[test]
@@ -545,4 +561,115 @@ fn parallel_paths_must_preserve_table_identity() {
     .unwrap_err();
     assert!(matches!(error, DeploymentError::ConflictingPaths { .. }));
     assert!(error.to_string().contains(" -> "));
+}
+
+mod client_bundle {
+    use super::*;
+    use jazz::tools::deployment::published::{
+        ClientMigrations, PublishLensOp, PublishMigrationRequest, PublishTableLens,
+        PublishedSchema, check_client_migrations,
+    };
+
+    fn published(schema: &Schema) -> PublishedSchema {
+        PublishedSchema {
+            hash: SchemaHash::compute(schema).to_hex(),
+            schema: schema.clone(),
+        }
+    }
+
+    fn adds(from: &Schema, to: &Schema, column: &str, default: &str) -> PublishMigrationRequest {
+        PublishMigrationRequest {
+            from_hash: SchemaHash::compute(from).to_hex(),
+            to_hash: SchemaHash::compute(to).to_hex(),
+            forward: vec![PublishTableLens {
+                table: "notes".into(),
+                added: false,
+                removed: false,
+                renamed_from: None,
+                operations: vec![PublishLensOp::Introduce {
+                    column: column.into(),
+                    column_type: ColumnType::Text,
+                    value: Value::Text(default.into()),
+                }],
+            }],
+        }
+    }
+
+    fn check(
+        target: &Schema,
+        schemas: &[&Schema],
+        migrations: Vec<PublishMigrationRequest>,
+    ) -> Result<(), String> {
+        let bundle = ClientMigrations {
+            schemas: schemas.iter().map(|schema| published(schema)).collect(),
+            migrations,
+        };
+        check_client_migrations(
+            &serde_json::to_vec(&bundle).unwrap(),
+            &SchemaHash::compute(target).to_hex(),
+        )
+    }
+
+    /// Validate checks what a deploy checks of the migrations alone: each
+    /// lens, the paths between two versions, and the bundle's own hashes.
+    /// Whether the history joins into one is left to the deploy.
+    #[test]
+    fn checks_the_migrations_as_a_deploy_does_apart_from_the_history_shape() {
+        let (base, left, right, merged) = (
+            schema(&[]),
+            schema(&["a"]),
+            schema(&["b"]),
+            schema(&["a", "b"]),
+        );
+        let all = [&base, &left, &right, &merged];
+        let diamond = |default: &str| {
+            vec![
+                adds(&base, &left, "a", "x"),
+                adds(&base, &right, "b", "y"),
+                adds(&left, &merged, "b", "y"),
+                adds(&right, &merged, "a", default),
+            ]
+        };
+        check(&merged, &all, diamond("x")).expect("both paths agree");
+        let refused = check(&merged, &all, diamond("other")).unwrap_err();
+        for part in [
+            "for `notes.a`, one path adds it with default",
+            r#""x""#,
+            r#""other""#,
+        ] {
+            assert!(refused.contains(part), "{refused}");
+        }
+
+        // A snapshot no migration reaches is no refusal here: the store may
+        // already run it.
+        let unrelated = schema(&["z"]);
+        check(
+            &left,
+            &[&base, &left, &unrelated],
+            vec![adds(&base, &left, "a", "x")],
+        )
+        .expect("history shape is the deploy's");
+
+        // Two different migrations between the same versions are refused.
+        let refused = check(
+            &left,
+            &[&base, &left],
+            vec![adds(&base, &left, "a", "x"), adds(&base, &left, "a", "y")],
+        )
+        .unwrap_err();
+        assert!(refused.contains("conflicting migrations"), "{refused}");
+
+        // A schema that isn't the one its hash names is refused.
+        let mut bundle = ClientMigrations {
+            schemas: vec![published(&base), published(&left)],
+            migrations: vec![adds(&base, &left, "a", "x")],
+        };
+        bundle.schemas[1].schema = right.clone();
+        let refused = check_client_migrations(
+            &serde_json::to_vec(&bundle).unwrap(),
+            &SchemaHash::compute(&left).to_hex(),
+        )
+        .unwrap_err();
+        assert!(refused.contains("hash"), "{refused}");
+    }
 }
