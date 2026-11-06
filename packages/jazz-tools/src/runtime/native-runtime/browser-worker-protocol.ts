@@ -662,6 +662,13 @@ export type BrowserFollowerPortEvent =
   | { type: "auth-restored" }
   | { type: "mutation-error"; event: MutationErrorEvent }
   /**
+   * The worker could not write its store to IndexedDB (storage full, most
+   * often): `message` says why, or `null` once a write succeeds again.
+   * Meanwhile it keeps the tab's writes in memory and acknowledges none, so
+   * the tab rejects their `local` waits.
+   */
+  | { type: "storage-failure"; message: string | null }
+  /**
    * A failure of the worker-owned upstream server transport. This is
    * deliberately not a mutation rejection: the follower records it only to
    * reject its active remote waits and subscriptions, or, while the worker

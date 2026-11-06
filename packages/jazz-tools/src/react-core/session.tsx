@@ -21,7 +21,10 @@ const SessionContext = createContext<UseJazzSessionResult<any> | null>(null);
 /** The active account lifecycle, available in both the data UI and signed-out fallback. */
 export function useJazzSession<Client = CoreJazzClient>(): UseJazzSessionResult<Client> {
   const value = useContext(SessionContext);
-  if (!value) throw new Error("useJazzSession must be used within <JazzSessionProvider>");
+  if (!value)
+    throw new Error(
+      "useJazzSession must be used within <JazzSessionProvider>. Under <JazzProvider>, use useJazzAuth() for the account lifecycle.",
+    );
   return value;
 }
 

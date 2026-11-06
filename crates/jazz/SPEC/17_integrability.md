@@ -65,7 +65,7 @@ roadmap work.
   terminology, admission hooks, claims, backend attribution, and fail-closed
   policy behavior.
 - **Storage portability** — every host runs the same SQLite engine: native
-  files, the browser on an IndexedDB or OPFS VFS, and Cloudflare Durable
+  files, the browser on an IndexedDB VFS, and Cloudflare Durable
   Object SQLite; ch. 14 owns how jazz data maps onto it.
 - **Subscription event bridge** — ch. 16 owns maintained subscription terminal
   deltas and the TypeScript event bridge; ch. 13 owns the ergonomic watch API.

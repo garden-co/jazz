@@ -215,7 +215,9 @@ impl Inner {
             shape: Shape([0; 16]),
             binding_id: Binding([0; 16]),
             request_claims: None,
-            schema: None,
+            // Read under the schema this handle serves (a pinned session's
+            // view and its bundle's policies), as its own reads are.
+            schema: Some(self.schema.clone()),
         };
         let compiled = self.compile(&prepared, identity, &ReadSpec::default())?;
         let cell: Option<Sql> = self
