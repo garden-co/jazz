@@ -38,10 +38,7 @@ it("keeps a tab's remote reads and Global waits pending while its worker cannot 
     await createBrowserTestDb({
       appId: uniqueDbName("worker-remote-tiers-offline"),
       secret: generateAuthSecret(),
-      driver: {
-        type: "persistent",
-        dbName: uniqueDbName("worker-remote-tiers-offline-db"),
-      },
+      driver: { type: "persistent", dbName: uniqueDbName("worker-remote-tiers-offline-db") },
     }),
   );
   const write = db.insert(app.entries, { title: "local" });
@@ -57,9 +54,7 @@ it("keeps a tab's remote reads and Global waits pending while its worker cannot 
   );
   const strict: unknown[][] = [];
   ctx.trackSubscription(
-    db.subscribe(app.entries, (rows) => strict.push(rows), {
-      tier: ReadTier.Remote,
-    }),
+    db.subscribe(app.entries, (rows) => strict.push(rows), { tier: ReadTier.Remote }),
   );
   expect(await db.all(app.entries, { tier: ReadTier.LocalFirst })).toEqual([row]);
   await new Promise((resolve) => setTimeout(resolve, 500));
@@ -73,13 +68,7 @@ it("waits for a tab's firstLoadRemoteWaitMs in its worker, then shows the worker
     serverUrl: coreUrl,
     adminSecret,
   } = await getJazzServerInfo(uniqueDbName("worker-first-load-wait"));
-  await deploy({
-    appId,
-    serverUrl: coreUrl,
-    adminSecret,
-    schema: app.wasmSchema,
-    permissions,
-  });
+  await deploy({ appId, serverUrl: coreUrl, adminSecret, schema: app.wasmSchema, permissions });
   const { serverUrl } = await startJazzApp(
     { appId, serverUrl: coreUrl, adminSecret },
     { schema: app.wasmSchema, permissions },
@@ -101,10 +90,7 @@ it("waits for a tab's firstLoadRemoteWaitMs in its worker, then shows the worker
         appId,
         serverUrl: transport.url,
         secret: generateAuthSecret(),
-        driver: {
-          type: "persistent",
-          dbName: uniqueDbName("worker-first-load-wait-db"),
-        },
+        driver: { type: "persistent", dbName: uniqueDbName("worker-first-load-wait-db") },
       }),
     );
     await reader.insert(app.entries, { title: "Written by the reader" }).wait({ tier: "global" });
@@ -151,13 +137,7 @@ it("holds a tab's Global wait for a write made after its worker published an out
     serverUrl: coreUrl,
     adminSecret,
   } = await getJazzServerInfo(uniqueDbName("worker-global-wait-outage"));
-  await deploy({
-    appId,
-    serverUrl: coreUrl,
-    adminSecret,
-    schema: app.wasmSchema,
-    permissions,
-  });
+  await deploy({ appId, serverUrl: coreUrl, adminSecret, schema: app.wasmSchema, permissions });
   const { serverUrl } = await startJazzApp(
     { appId, serverUrl: coreUrl, adminSecret },
     { schema: app.wasmSchema, permissions },
@@ -169,10 +149,7 @@ it("holds a tab's Global wait for a write made after its worker published an out
         appId,
         serverUrl: transport.url,
         secret: generateAuthSecret(),
-        driver: {
-          type: "persistent",
-          dbName: uniqueDbName("worker-global-wait-outage-db"),
-        },
+        driver: { type: "persistent", dbName: uniqueDbName("worker-global-wait-outage-db") },
       }),
     );
     await db.insert(app.entries, { title: "before the outage" }).wait({ tier: "global" });
@@ -319,7 +296,7 @@ it("holds a session's Global wait through its worker's outage after a reload", a
       fetch: jazzAppFetch,
       driver: { type: "persistent", dbName },
       client: async () => ({ createClient: createLocalFirstDb }),
-    } as never);
+    });
     if (session.getSnapshot().status !== "ready") await session.reauthenticate();
     return session;
   };
@@ -372,6 +349,8 @@ it("holds a session's Global wait through its worker's outage after a reload", a
       await transport.up();
       await waitForCondition(async () => outcomes.write !== "pending", 30_000, "the reconnect");
       expect(outcomes.write).toBe("global");
+      await waitForCondition(async () => outcomes.sync !== "pending", 30_000, "the sync");
+      expect(outcomes.sync).toBe("synced");
     } finally {
       await session.close();
     }
