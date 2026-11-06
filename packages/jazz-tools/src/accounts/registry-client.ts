@@ -113,8 +113,11 @@ async function backendRequest(
       method: "POST",
       credentials: "same-origin",
       redirect: "error",
-      headers: { "Content-Type": "application/json" },
-      body: body === undefined ? undefined : JSON.stringify(body),
+      // No body, no content type: a host's JSON parser (Fastify's, Express's)
+      // refuses or swallows an empty "JSON" body.
+      ...(body === undefined
+        ? {}
+        : { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }),
     });
     if (!response.ok) {
       const code = await response.text();

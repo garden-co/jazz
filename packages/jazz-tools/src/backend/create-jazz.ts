@@ -2268,8 +2268,15 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     // A body parser mounted before nodeHandler (express.json(), express.raw())
     // has read the stream already: its buffer is the body, or nothing is.
     const parsed = (req as { body?: unknown }).body;
+    // No bytes to read: what a parser made of nothing (`{}`) doesn't matter.
+    const empty =
+      req.headers["content-length"] === "0" ||
+      (req.headers["content-length"] === undefined &&
+        req.headers["transfer-encoding"] === undefined);
     let body: BodyInit | undefined;
-    if (hasBody && req.readableEnded) {
+    if (hasBody && req.readableEnded && empty) {
+      body = undefined;
+    } else if (hasBody && req.readableEnded) {
       if (!(parsed instanceof Uint8Array)) {
         throw new Error(
           "jazz: the request body was already read by another handler; mount jazz.nodeHandler before body parsers such as express.json()",
@@ -2301,8 +2308,9 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       request = nodeRequest(req);
     } catch (error) {
       console.error(error instanceof Error ? error.message : error);
+      // A code the client reports, so the browser doesn't fail silently.
       res.statusCode = 500;
-      res.end("Internal error");
+      res.end("request_body_already_read");
       return;
     }
     void handle(request).then(

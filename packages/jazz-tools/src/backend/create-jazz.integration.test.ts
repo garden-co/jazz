@@ -419,12 +419,77 @@ describe("createJazz", () => {
         body: "{}",
       });
       expect(taken.status).toBe(500);
+      // A code the browser's client reports, not a bare "Internal error".
+      expect(await taken.text()).toBe("request_body_already_read");
       expect(errors.mock.calls.flat().join(" ")).toMatch(
         /mount jazz.nodeHandler before body parsers/,
       );
     } finally {
       errors.mockRestore();
     }
+  });
+
+  it("signs a browser in behind a host's JSON body parser", async () => {
+    const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    cleanups.push(() => jazz.close());
+    const parsed: string[] = [];
+    let strict = true;
+    // What Fastify does to a JSON request (400 on an empty one), or else
+    // what express.json() does (read it whole onto `req.body`), before Jazz.
+    const server: Server = createServer((req, res) => {
+      if (req.headers["content-type"] === "application/json") {
+        const chunks: Buffer[] = [];
+        req.on("data", (chunk: Buffer) => chunks.push(chunk));
+        req.on("end", () => {
+          const raw = Buffer.concat(chunks);
+          parsed.push(req.url ?? "");
+          if (raw.length === 0 && strict) {
+            res.statusCode = 400;
+            return void res.end("FST_ERR_CTP_EMPTY_JSON_BODY");
+          }
+          (req as { body?: unknown }).body = raw.length ? JSON.parse(`${raw}`) : {};
+          jazz.nodeHandler(req, res);
+        });
+        return;
+      }
+      jazz.nodeHandler(req, res);
+    });
+    await jazz.attach(server);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    cleanups.push(
+      () =>
+        new Promise((resolve) => {
+          server.closeAllConnections();
+          server.close(resolve);
+        }),
+    );
+    const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    // Sign-in asks the backend with empty POSTs: no JSON body, no JSON type.
+    const alice = await userSession(jazz.appId, origin, "alice");
+    await alice.db
+      .insert(app.todos, { title: "signed in", owner: alice.session!.user! })
+      .wait({ tier: "global" });
+    expect(parsed).toEqual([]);
+    // A parser that read an empty JSON body whole (an older client sends
+    // one) leaves Jazz nothing to miss.
+    strict = false;
+    const read = await new Promise<number | undefined>((resolve, reject) => {
+      const req = httpRequest(
+        `${origin}/jazz/apps/${jazz.appId}/accounts/backend-user`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-test-user": "alice" },
+        },
+        (res) => {
+          res.resume();
+          resolve(res.statusCode);
+        },
+      );
+      req.on("error", reject);
+      req.end();
+    });
+    expect(read).toBe(200);
+    expect(parsed).toHaveLength(1);
   });
 
   it("signs users in with fromJWT and keeps their account and claims", async () => {
