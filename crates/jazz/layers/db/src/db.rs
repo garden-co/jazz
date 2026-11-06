@@ -41,6 +41,7 @@ pub use large_ops::{
 };
 #[path = "sync.rs"]
 pub(crate) mod sync;
+pub use sync::origin_node;
 
 #[path = "shard.rs"]
 pub mod shard;
@@ -203,6 +204,26 @@ impl WriteHandle {
 /// A committed transaction's sequence number.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TxReceipt(pub u64);
+
+/// What [`Db::write_as_origin`] did.
+#[derive(Debug)]
+pub enum OriginWrite {
+    /// It wrote, as the origin's commit.
+    Written(WriteHandle),
+    /// The origin's commit was already made here, or is known to the
+    /// authority's servers: nothing was written again.
+    Repeat,
+}
+
+/// What a store knows of a commit made as another writer's.
+#[derive(Debug)]
+pub(crate) enum OriginFate {
+    Unseen,
+    /// Made here, its upload not yet decided.
+    Pending,
+    Accepted,
+    Rejected(Error),
+}
 
 impl From<TxReceipt> for u64 {
     fn from(receipt: TxReceipt) -> u64 {
@@ -616,6 +637,11 @@ struct Inner {
     /// its HLC is where the commit's versions are ([`Pos::pending`]), its
     /// writer (node, tx) what history keeps them under (`_writer`).
     pub(crate) own_order: HashMap<u64, sync::Order>,
+    /// The writer id the next standalone write commits under instead of
+    /// this store's own: a thin client's write (see [`Db::write_as_origin`]).
+    pub(crate) next_origin: Option<([u8; 16], u64)>,
+    /// That id while its write runs (see `Db::write_unnotified`).
+    commit_origin: Option<([u8; 16], u64)>,
     /// A wall clock tests set (see `Db::set_clock_for_test`).
     clock_for_test: Option<i64>,
     /// The diff steps a text merge may take ([`jazz_text::MERGE_WORK_BUDGET`]
@@ -1538,6 +1564,8 @@ impl Db {
                 last_stamp: (0, 0),
                 hlc_last: 0,
                 own_order: HashMap::new(),
+                next_origin: None,
+                commit_origin: None,
                 clock_for_test: None,
                 merge_budget: jazz_text::MERGE_WORK_BUDGET,
                 authors: RefCell::new(AuthorCodes::default()),
@@ -1708,6 +1736,43 @@ impl Db {
     /// own permissions.
     pub fn require_session_pins(&self) {
         self.inner.borrow_mut().pins_required = true;
+    }
+
+    /// Run `write`, one standalone write, under a thin client's own id for
+    /// it, `key` (its node and that node's counter, SPEC 8 §8.14). The
+    /// commit's writer is [`sync::origin_node`] of `author` (the session the
+    /// write runs as) and the client's node, at the client's counter: the
+    /// same on every server, and no other identity's. The authority records
+    /// the commit's fate under it; a replica uploads it under it. A resend
+    /// of the same key by the same author, here or through another server of
+    /// the same authority, is not written again: it returns what this store
+    /// knows of the first. A write that fails, or makes no commit, leaves
+    /// nothing under the id.
+    pub async fn write_as_origin(
+        &self,
+        key: crate::tx::TxId,
+        author: &AuthorSubject,
+        write: impl AsyncFnOnce() -> Result<WriteHandle, Error>,
+    ) -> Result<OriginWrite, Error> {
+        let (node, tx) = (sync::origin_node(author, *key.node.as_bytes()), key.time.0);
+        {
+            let inner = self.inner.borrow();
+            if inner.tx.is_some() {
+                return Err(unsupported(
+                    "a write as another writer's commit inside a transaction",
+                ));
+            }
+            match inner.origin_fate(node, tx, author)? {
+                OriginFate::Unseen => {}
+                OriginFate::Pending | OriginFate::Accepted => return Ok(OriginWrite::Repeat),
+                OriginFate::Rejected(error) => return Err(error),
+            }
+        }
+        self.inner.borrow_mut().next_origin = Some((node, tx));
+        let written = write().await;
+        // Read by each attempt of the write's commit.
+        self.inner.borrow_mut().next_origin = None;
+        written.map(OriginWrite::Written)
     }
 
     /// Whether this store is the global authority.
@@ -2890,14 +2955,53 @@ impl Db {
             let mut inner = self.inner();
             let (seq, standalone) = match &inner.tx {
                 Some((seq, _)) => (*seq, false),
-                None => (inner.next_seq(), true),
+                None => (inner.fresh_seq(), true),
             };
             begin_savepoint(&inner.conn, "w")?;
             let mark = inner.changed.borrow().len();
-            match apply(&mut inner, seq) {
-                Ok(handle) => {
+            // A standalone commit takes the writer id a thin client's write
+            // gave it (`Db::write_as_origin`), on every attempt of the write
+            // (`Db::fetching_with` runs one again). Its seq is not used up
+            // unless it commits, and the next commit takes it: what this one
+            // put in `own_order` for it goes back, so no other commit
+            // inherits its writer id, nor it another's (and `fresh_seq`
+            // drops whatever an exit after this one leaves).
+            let origin = if standalone { inner.next_origin } else { None };
+            let prior = standalone.then(|| inner.own_order.get(&seq).copied());
+            inner.commit_origin = origin;
+            let applied = apply(&mut inner, seq);
+            inner.commit_origin = None;
+            let restore = |inner: &mut Inner| match prior {
+                Some(Some(order)) => {
+                    inner.own_order.insert(seq, order);
+                }
+                Some(None) => {
+                    inner.own_order.remove(&seq);
+                }
+                None => {}
+            };
+            // The authority records the fate of a commit made under a
+            // client's id in the commit itself.
+            let applied = applied.and_then(|handle| {
+                let wrote = handle.seq == inner.own_pos(seq);
+                if let (true, true, Some((node, tx))) =
+                    (standalone && wrote, inner.me == sync::ACCEPTED, origin)
+                {
+                    inner.record_fate(node, tx, &Ok(()))?;
+                    inner.record_settled(node, tx, Some(Pos::at(seq)))?;
+                }
+                Ok((wrote, handle))
+            });
+            match applied {
+                Ok((wrote, handle)) => {
                     end_savepoint(&inner.conn, "w", true)?;
-                    let wrote = handle.seq == inner.own_pos(seq);
+                    if !wrote {
+                        restore(&mut inner);
+                    } else if origin.is_some() {
+                        // The client's write is made: no later commit of the
+                        // same call takes its id.
+                        inner.next_origin = None;
+                    }
                     if wrote {
                         if standalone {
                             inner.seq = inner.seq.max(seq);
@@ -2909,6 +3013,7 @@ impl Db {
                 }
                 Err(error) => {
                     inner.changed.borrow_mut().truncate(mark);
+                    restore(&mut inner);
                     end_savepoint(&inner.conn, "w", false)?;
                     return Err(error);
                 }
@@ -2953,7 +3058,7 @@ impl Db {
             }
             begin_savepoint(&inner.conn, "tx")?;
             inner.changed.borrow_mut().clear();
-            let seq = inner.next_seq();
+            let seq = inner.fresh_seq();
             inner.tx = Some((seq, BTreeSet::new()));
         }
         let mut tx = MergeableTx { db: self, identity };
@@ -8193,13 +8298,33 @@ impl Inner {
         self.hlc_last = self.hlc_last.max(self.bounded_hlc(seen));
     }
 
+    /// The seq a new local commit takes ([`Inner::next_seq`]). It is above
+    /// every seq this store committed, so on a replica an `own_order` entry
+    /// already there is stale, left by a commit at it that never happened
+    /// (a write that failed, or whose upload record did): the new commit
+    /// must not inherit its HLC or its writer id.
+    fn fresh_seq(&mut self) -> u64 {
+        let seq = self.next_seq();
+        if self.me != sync::ACCEPTED {
+            self.own_order.remove(&seq);
+        }
+        seq
+    }
+
     /// Give commit `seq` its HLC if it has none yet: its writes are at it,
     /// written by this store's node as tx `seq`.
     fn stamp_commit(&mut self, seq: u64) {
-        if self.me != sync::ACCEPTED && !self.own_order.contains_key(&seq) {
+        if self.me == sync::ACCEPTED {
+            return;
+        }
+        // A commit made under a thin client's id is kept under it: a relay
+        // uploads it so, so a resend of it anywhere gets its fate (SPEC 8
+        // §8.14).
+        let origin = self.commit_origin.filter(|_| self.tx.is_none());
+        if origin.is_some() || !self.own_order.contains_key(&seq) {
             let hlc = self.next_hlc();
-            let node = *self.identity.node.as_bytes();
-            self.own_order.insert(seq, (hlc, node, seq));
+            let (node, tx) = origin.unwrap_or((*self.identity.node.as_bytes(), seq));
+            self.own_order.insert(seq, (hlc, node, tx));
         }
     }
 
@@ -8669,7 +8794,7 @@ impl Db {
         let ops = &batch.ops;
         let (seq, prior, mark) = {
             let mut inner = self.inner();
-            let seq = inner.next_seq();
+            let seq = inner.fresh_seq();
             begin_savepoint(&inner.conn, "commit_batch")?;
             let mark = inner.changed.borrow().len();
             inner.defer_checks();
