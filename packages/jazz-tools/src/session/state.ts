@@ -460,12 +460,15 @@ async function signOutOf(client: SigningOutClient) {
     if (!(cause instanceof GracefulShutdownSyncError) || !db?.getAuthState?.().error) throw cause;
     const writes = db.getSyncStatus?.().pendingUploads ?? 0;
     const kept = !isThinDb(db as Db) && db.getConfig?.().driver?.type !== "memory";
-    console.warn(
-      kept
-        ? `Jazz signed out with ${writes} write(s) the server refused, as it no longer accepts this user's sign-in. They stay on this device and upload when this account signs in again.`
-        : `Jazz signed out and dropped ${writes} write(s) the server refused, as it no longer accepts this user's sign-in. This client keeps nothing on the device.`,
-      cause.cause,
-    );
+    // Warn only about writes left behind: with none, the refusal alone failed
+    // the wait (a switch to another user, whose cookie the old socket carries).
+    if (writes > 0)
+      console.warn(
+        kept
+          ? `Jazz signed out with ${writes} write(s) the server refused, as it no longer accepts this user's sign-in. They stay on this device and upload when this account signs in again.`
+          : `Jazz signed out and dropped ${writes} write(s) the server refused, as it no longer accepts this user's sign-in. This client keeps nothing on the device.`,
+        cause.cause,
+      );
     await client.shutdown();
   }
 }
