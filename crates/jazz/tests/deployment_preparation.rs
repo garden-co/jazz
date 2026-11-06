@@ -127,6 +127,44 @@ fn retention_only_changes_deploy_without_a_migration_in_both_directions() {
     }
 }
 
+/// Indexes change how a node finds rows, not the rows: adding or dropping a
+/// composite index or narrowing the indexed columns deploys without a
+/// migration, in both directions, as `migrations create` promises.
+#[test]
+fn index_only_changes_deploy_without_a_migration_in_both_directions() {
+    let plain = schema(&["state", "priority"]);
+    let mut composite = plain.clone();
+    composite
+        .get_mut(&TableName::from("notes"))
+        .unwrap()
+        .composite_indexes = vec![vec!["state".into(), "priority".into()]];
+    let mut index_only = plain.clone();
+    index_only
+        .get_mut(&TableName::from("notes"))
+        .unwrap()
+        .indexed_columns = Some(vec!["state".into()]);
+    for changed in [&composite, &index_only] {
+        assert_ne!(SchemaHash::compute(&plain), SchemaHash::compute(changed));
+        for (from, to) in [(&plain, changed), (changed, &plain)] {
+            let stored = DeploymentCatalogue {
+                schemas: vec![from.clone()],
+                admitted_schema_hashes: vec![SchemaHash::compute(from)],
+                ..Default::default()
+            };
+            let prepared =
+                prepare_deployment(&stored, request(to, std::slice::from_ref(to), vec![]))
+                    .expect("an index change needs no migration");
+            assert!(
+                prepared
+                    .migrations()
+                    .iter()
+                    .all(|lens| lens.forward.ops.is_empty()),
+                "schemas differing only in indexes are joined by an empty lens"
+            );
+        }
+    }
+}
+
 /// Switching a table the store keeps in full to latest-only drops its past
 /// versions for good, so the deploy is refused until it says so; a new
 /// latest-only table, or switching back to full history, needs no flag.

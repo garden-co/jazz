@@ -9,7 +9,9 @@ pub fn schemas_are_compatible(left: &Schema, right: &Schema) -> bool {
     let normalize = |schema: &Schema| {
         let mut schema = structural(schema.clone());
         for table in schema.values_mut() {
+            // Indexes change how nodes find rows, not the rows.
             table.indexed_columns = None;
+            table.composite_indexes = Vec::new();
             // Retention changes what nodes keep, not the rows.
             table.history = Default::default();
             table
