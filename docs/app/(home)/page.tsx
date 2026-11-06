@@ -141,15 +141,15 @@ export function OpenTodos() {
 const principles = [
   {
     title: "Inside your backend",
-    body: "Jazz is a library your server imports. Its schema and permissions are the code you deploy, with no database server to run.",
+    body: "Jazz is a library your server imports, wherever you deploy it, and keeps its data on that platform's storage. Its schema and permissions are the code you deploy, with no database server to run.",
   },
   {
     title: "Live queries everywhere",
-    body: "Query from a route handler or straight from a component. Results stay up to date as anyone writes.",
+    body: "Traditional clients call your API routes as usual. Browsers, mobile apps and backend clients can also live-sync on your own origin, querying straight from a component. Results stay up to date as anyone writes.",
   },
   {
     title: "Local-first when you want it",
-    body: "Clients start thin. Switch one to local-first for offline use and instant reads, with the same queries.",
+    body: "Clients start thin. Switch one to local-first for offline use and instant reads: it runs the same Rust engine on the device, with the same queries.",
   },
 ];
 
@@ -366,14 +366,10 @@ export default function HomePage() {
 
       <section className="home-section">
         <div className="home-container">
-          <SectionHeader id="how-it-works" title="One database, from your backend to every client">
-            <Text as="p" display="block" type="large" color="secondary" weight="normal">
-              Jazz runs inside your backend wherever you deploy it, and keeps its data on that
-              platform&apos;s storage. Traditional clients call your API routes as usual, while
-              browsers, mobile apps and backend clients can also live-sync with it on your own
-              origin. Local-first clients run the same Rust engine on the device.
-            </Text>
-          </SectionHeader>
+          <SectionHeader
+            id="how-it-works"
+            title="One database, from your backend to every client"
+          />
           <Figure className="home-figure-wide mt-6">
             <DeploymentCarousel />
           </Figure>
