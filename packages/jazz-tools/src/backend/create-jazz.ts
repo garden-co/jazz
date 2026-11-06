@@ -76,6 +76,8 @@ export {
 import { isSameAdmission, recheckEvery } from "./session-recheck.js";
 import { NoJazzAccountError } from "./no-account-error.js";
 import { RequestAuthenticationError } from "./request-auth.js";
+import { optionalPeerImportError } from "./optional-peer.js";
+import { closingBeforeDeadline } from "./socket-deadline.js";
 
 /** Where the core keeps its data. */
 export type JazzStore =
@@ -2315,17 +2317,31 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       onVercelHost()
     ) {
       if (!originAllowed(request)) return new Response("origin not allowed", { status: 403 });
-      const { upgradeWebSocket } = (await import(
-        /* @vite-ignore */ "@vercel/functions" as string
-      )) as {
+      // An optional peer: a literal import inside `try`, so bundlers report
+      // a missing one at runtime, not on every route (see importSandboxSdk).
+      let vercelFunctions: {
         upgradeWebSocket(
           handler: (ws: WsLikeSocket) => void,
           options?: { maxPayload?: number },
         ): Response;
+        getDeadline?(): Date | undefined;
       };
-      return upgradeWebSocket((ws) => acceptSocket(request, ws), {
-        maxPayload: MAX_STREAM_MESSAGE_BYTES,
-      });
+      try {
+        vercelFunctions = (await import(
+          /* @vite-ignore */ "@vercel/functions"
+        )) as unknown as typeof vercelFunctions;
+      } catch (error) {
+        throw optionalPeerImportError("Jazz on Vercel", "@vercel/functions", error);
+      }
+      const { upgradeWebSocket } = vercelFunctions;
+      // The socket ends with this invocation, at the route's maxDuration:
+      // close it just before, so the client reconnects without a stall.
+      const deadline = vercelFunctions.getDeadline?.()?.getTime();
+      return upgradeWebSocket(
+        (ws) =>
+          acceptSocket(request, deadline === undefined ? ws : closingBeforeDeadline(ws, deadline)),
+        { maxPayload: MAX_STREAM_MESSAGE_BYTES },
+      );
     }
     // On Vercel this handler upgrades sockets (above); elsewhere (next dev)
     // only if attach() runs on the same server.
