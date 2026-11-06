@@ -84,12 +84,27 @@ pub enum LargeValueUpdate {
         /// Ordered replacements.
         edits: Vec<JsonSetEdit>,
     },
+    /// A text-merge column's new value, `text`, made by editing
+    /// `edited_from`: the value its writer (an editor) last saw. When the
+    /// column moved on since (a merged value this store took in that the
+    /// editor has not shown yet), `text` is merged over the column's value
+    /// as the authority merges, so the write keeps what it did not see.
+    TextEdit {
+        /// Target column.
+        column: String,
+        /// The column's new value as the writer made it.
+        text: String,
+        /// The value the writer made it from.
+        edited_from: String,
+    },
 }
 
 impl LargeValueUpdate {
     fn column(&self) -> &str {
         match self {
-            Self::Splice { column, .. } | Self::JsonSet { column, .. } => column,
+            Self::Splice { column, .. }
+            | Self::JsonSet { column, .. }
+            | Self::TextEdit { column, .. } => column,
         }
     }
 }
@@ -1571,6 +1586,34 @@ impl Inner {
                         *slot = edit.value;
                     }
                     Value::String(json.to_string())
+                }
+                LargeValueUpdate::TextEdit {
+                    text, edited_from, ..
+                } => {
+                    let Some(format) = col.merge.text_format() else {
+                        return Err(Error::new(
+                            ErrorCode::Schema,
+                            format!("{table}.{column} does not merge text"),
+                        ));
+                    };
+                    let current = if large_cell(&cell) {
+                        String::from_utf8(self.chunks.materialize(cell.as_ref())?)
+                            .map_err(|_| query(format!("{table}.{column} is not text")))?
+                    } else {
+                        String::new()
+                    };
+                    let value = if current == edited_from {
+                        text
+                    } else {
+                        jazz_text::merge3_within(
+                            format,
+                            &edited_from,
+                            &current,
+                            &text,
+                            self.merge_budget,
+                        )
+                    };
+                    Value::String(value)
                 }
             };
             patch.insert(column, nullable(&col, value));

@@ -15,6 +15,9 @@
 //! HTML also tags and entities), so an edit never splits one. Two sides'
 //! changes then combine by these rules, in base order:
 //!
+//! - a word typed into or deleted from (characters inserted at one place,
+//!   or only deleted), by one side or both, is diffed by character, so
+//!   typing into one word at once keeps both sides' letters;
 //! - changes to disjoint parts of the base all apply;
 //! - an identical change made by both applies once;
 //! - inserts at one point apply in seq order, the held value's first;
@@ -78,16 +81,39 @@ pub fn try_merge3_within(
     if incoming == base || held == incoming {
         return Some(held.to_owned());
     }
-    let base_tokens = tokenize(format, base);
-    let held_tokens = tokenize(format, held);
-    let incoming_tokens = tokenize(format, incoming);
+    let mut base_tokens = tokenize(format, base);
+    let mut held_tokens = tokenize(format, held);
+    let mut incoming_tokens = tokenize(format, incoming);
     let mut work = Work::new(budget);
-    let (Ok(ours), Ok(mut theirs)) = (
+    let (Ok(mut ours), Ok(mut theirs)) = (
         diff(&base_tokens, &held_tokens, &mut work),
         diff(&base_tokens, &incoming_tokens, &mut work),
     ) else {
         return None;
     };
+    // Typing into a word (or deleting from one) edits its characters, not
+    // the word: a word both sides typed into is diffed by grapheme on every
+    // side, so two people typing into one word both keep what they typed.
+    if let Some((base_split, held_split, incoming_split)) = split_typed_words(
+        (&base_tokens, &held_tokens, &incoming_tokens),
+        (&ours, &theirs),
+    ) {
+        // Out of budget for the finer diffs, the word-level ones stand,
+        // with the work they had left.
+        let left = work.left;
+        if let (Ok(held_diff), Ok(incoming_diff)) = (
+            diff(&base_split, &held_split, &mut work),
+            diff(&base_split, &incoming_split, &mut work),
+        ) {
+            base_tokens = base_split;
+            held_tokens = held_split;
+            incoming_tokens = incoming_split;
+            ours = held_diff;
+            theirs = incoming_diff;
+        } else {
+            work.left = left;
+        }
+    }
     // A change both made applies once. Hunks of one diff never share a base
     // span (touching ones are coalesced), so each has at most one twin.
     let mine: HashMap<(usize, usize), (usize, usize)> =
@@ -189,6 +215,120 @@ pub fn try_merge3_within(
         out = balance_tags(&out, &[&base_tokens, &held_tokens, &incoming_tokens]);
     }
     Some(out)
+}
+
+/// `word` cut into the characters a merge never splits: a character with
+/// the marks, joiners and modifiers that complete it, and two regional
+/// indicators as one flag, as [`token_len`] keeps them.
+fn graphemes(word: &str) -> Vec<&str> {
+    let regional = |c: Option<char>| c.is_some_and(|c| ('\u{1F1E6}'..='\u{1F1FF}').contains(&c));
+    let mut out = Vec::new();
+    let mut at = 0;
+    while let Some(c) = word[at..].chars().next() {
+        let mut len = c.len_utf8();
+        if regional(Some(c)) && regional(word[at + len..].chars().next()) {
+            len += 4;
+        }
+        len += grapheme_tail(&word[at + len..]);
+        out.push(&word[at..at + len]);
+        at += len;
+    }
+    out
+}
+
+/// Whether [`graphemes`] cuts `word` only between whole characters: every
+/// character is from a script whose letters stand alone (Latin, Greek,
+/// Cyrillic, Armenian, CJK, kana, Hangul syllables) or is a mark
+/// [`grapheme_tail`] keeps. Scripts whose words join letters with spacing
+/// vowel signs or viramas (Devanagari, Arabic, Hebrew points, ...) are
+/// never cut: a word typed into from both sides there merges whole, as a
+/// replaced word does. So does a word holding any other character the
+/// tokenizer keeps inside words (an emoji, or `’` in `don’t`): safe, if
+/// coarser than cutting it.
+fn cuttable(word: &str) -> bool {
+    word.chars().all(|c| {
+        let n = c as u32;
+        n < 0x0483
+            || (0x048A..0x0590).contains(&n)
+            || (0x1E00..0x2000).contains(&n)
+            || (0x3040..0x3100).contains(&n)
+            || (0x3400..0x4DC0).contains(&n)
+            || (0x4E00..0xA000).contains(&n)
+            || (0xAC00..0xD7A4).contains(&n)
+            || extends(c)
+    })
+}
+
+/// Whether `new` is the word `old` with characters (whole graphemes) only
+/// inserted at one place, or only deleted from one.
+fn typed_into(old: &str, new: &str) -> bool {
+    if !anchors(old) || !anchors(new) || old == new || !cuttable(old) || !cuttable(new) {
+        return false;
+    }
+    let (old, new) = (graphemes(old), graphemes(new));
+    let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+    let room = old.len().min(new.len()) - prefix;
+    let suffix = old
+        .iter()
+        .rev()
+        .zip(new.iter().rev())
+        .take(room)
+        .take_while(|(a, b)| a == b)
+        .count();
+    prefix + suffix == old.len().min(new.len())
+}
+
+/// The three token lists with each base word that both sides only typed
+/// into cut into graphemes, in all three; `None` when there is no such
+/// word. A word one side kept merges the same whole, so only these are cut.
+#[allow(clippy::type_complexity)]
+fn split_typed_words<'a>(
+    (base, held, incoming): (&[&'a str], &[&'a str], &[&'a str]),
+    (ours, theirs): (&[Hunk], &[Hunk]),
+) -> Option<(Vec<&'a str>, Vec<&'a str>, Vec<&'a str>)> {
+    // Base index to the new index of each word a side only typed into.
+    let typed = |hunks: &[Hunk], new: &[&str]| {
+        hunks
+            .iter()
+            .filter(|hunk| {
+                hunk.old.1 == hunk.old.0 + 1
+                    && hunk.new.1 == hunk.new.0 + 1
+                    && typed_into(base[hunk.old.0], new[hunk.new.0])
+            })
+            .map(|hunk| (hunk.old.0, hunk.new.0))
+            .collect::<HashMap<_, _>>()
+    };
+    let (in_held, in_incoming) = (typed(ours, held), typed(theirs, incoming));
+    let mut cuts = (Vec::new(), Vec::new(), Vec::new());
+    for (&index, &at_held) in &in_held {
+        if let Some(&at_incoming) = in_incoming.get(&index) {
+            cuts.0.push(index);
+            cuts.1.push(at_held);
+            cuts.2.push(at_incoming);
+        }
+    }
+    if cuts.0.is_empty() {
+        return None;
+    }
+    for list in [&mut cuts.0, &mut cuts.1, &mut cuts.2] {
+        list.sort_unstable();
+    }
+    let cut = |tokens: &[&'a str], at: &[usize]| {
+        let mut out = Vec::with_capacity(tokens.len() + at.len() * 8);
+        for (index, token) in tokens.iter().enumerate() {
+            if at.binary_search(&index).is_ok() {
+                out.extend(graphemes(token));
+            } else {
+                out.push(*token);
+            }
+        }
+        out
+    };
+    Some((
+        cut(base, &cuts.0),
+        cut(held, &cuts.1),
+        cut(incoming, &cuts.2),
+    ))
 }
 
 /// A block of base tokens `old` that one side deleted there and inserted,
@@ -1096,6 +1236,61 @@ mod tests {
     #[test]
     fn inserts_at_one_point_keep_seq_order() {
         assert_eq!(merge("Hi", "Hi!", "Hi?"), "Hi!?");
+    }
+
+    #[test]
+    fn two_people_typing_into_one_word_both_keep_their_letters() {
+        // Disjoint spots in one word: both land where they were typed.
+        assert_eq!(merge("banana", "banXana", "banaYna"), "banXaYna");
+        // One spot: both keep every letter, the held ones first.
+        assert_eq!(merge("cat", "cart", "cast"), "carst");
+        assert_eq!(merge("cat", "cast", "cart"), "casrt");
+        // An insert next to a delete in one word.
+        assert_eq!(merge("hello", "heXllo", "helo"), "heXlo");
+        // A word only one side typed into merges whole, as before.
+        assert_eq!(
+            merge("the cat sat", "the cart sat", "the cat sat down"),
+            "the cart sat down"
+        );
+    }
+
+    #[test]
+    fn typing_into_one_word_never_splits_a_character() {
+        // A vowel sign typed on its own never lands on the other side's
+        // letter: a Devanagari word merges whole.
+        for (held, incoming) in [("कि", "कत"), ("कत", "कि")] {
+            assert_eq!(merge("क", held, incoming), incoming);
+        }
+        assert!(!cuttable("कि"));
+        assert!(cuttable("café") && cuttable("кот") && cuttable("猫です"));
+        // A combining accent stays on its letter.
+        for (held, incoming) in [("cafe\u{301}", "cafes"), ("cafes", "cafe\u{301}")] {
+            let merged = merge("cafe", held, incoming);
+            assert!(!merged.contains("s\u{301}"), "{merged:?}");
+        }
+        // A joiner stays with what it joins.
+        for (held, incoming) in [("a\u{200d}b", "aXb"), ("aXb", "a\u{200d}b")] {
+            let merged = merge("ab", held, incoming);
+            assert!(!merged.contains("X\u{200d}"), "{merged:?}");
+        }
+        assert_eq!(graphemes("ne\u{301}e"), ["n", "e\u{301}", "e"]);
+        assert_eq!(
+            graphemes("\u{1F1E9}\u{1F1EA}x"),
+            ["\u{1F1E9}\u{1F1EA}", "x"]
+        );
+    }
+
+    #[test]
+    fn a_split_out_of_budget_keeps_the_word_level_merge() {
+        // Both sides typed into "cat"; elsewhere they edited different
+        // words, which the word-level diffs already placed.
+        let (base, held, incoming) = ("one cat two", "uno cart two", "one cast dos");
+        let needed = work_of(base, held, incoming);
+        let within = |budget| merge3_within(TextFormat::Plain, base, held, incoming, budget);
+        // Enough for the word-level merge only: the same-word conflict goes
+        // to the incoming write, every other edit stays.
+        assert_eq!(within(needed), "uno cast dos");
+        assert_eq!(within(u64::MAX), "uno carst dos");
     }
 
     #[test]

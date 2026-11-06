@@ -17,7 +17,7 @@ Invariant digest:
 - `INV-HIST-8`: For a plain (`MergeStrategy::Lww`) column and for `_deletion`, Core MUST apply each accepted write to the row's post-image as a patch in the order it accepts the writes: every cell the write authored takes the write's value (last arrival wins), every cell it did not author keeps the row's value, and nothing a write authored is dropped. Concurrent writes to different cells of one row therefore all apply, and a write that does not author `_deletion` keeps the row's deletion state, so an edit made over an image older than an accepted delete leaves the row deleted.
 - `INV-HIST-9`: `MergeStrategy::Counter` MUST be declared only on non-nullable integer user columns.
 - `INV-HIST-10`: For `MergeStrategy::Counter`, a write MUST travel as its delta from the row image it was made over, and Core MUST add each accepted delta to the current value, so concurrent increments from the same base sum exactly. Core MUST reject a write whose delta would take the counter outside its column type's range rather than wrap, and a write that does not author a merge column MUST NOT replace that column's accepted ops with the writer's snapshot, also across schema versions.
-- `INV-HIST-24`: A text-merging column (`MergeStrategy::Text`, `Markdown` or `Html`) MUST be declared only on a string user column, nullable or not, and MUST store a plain string or NULL; writes to it travel as plain values. Only Core merges: when a version before the write that its writer never saw (§4.6) authored the column, Core MUST three-way merge the value its writer last saw of the column (the newest commit on its chain that authored the column, as that commit sent it, or else the accepted version the chain was built on), the value it holds and the write's value at token boundaries: changes to disjoint parts of the base all apply, a change both sides made applies once, inserts at one point apply in seq order, overlapping pure inserts and deletes union (as do one side's inserts with the other's replacements), and of two overlapping replacements the write sequenced later wins. Each side's diff against the base first keeps in place the heaviest in-order run of word tokens that occur once on both sides; a block of at least three words one side deleted and reinserted elsewhere is a move, and the other side's changes inside it apply to the moved copy. Whitespace inserted at the very end of the value goes after other inserts there, and in an HTML column the merge drops tags it left unmatched, keeping their content. Otherwise, or when the merge would spend more than a fixed budget of diff steps, the write's value stands as sent. On a nullable column a NULL base merges as the empty string, and a write of NULL or a write over a held NULL stands as sent: the later write wins the whole value. For a version whose value a merge changed, Core MUST also keep that version as its writer sent it, flagged as sent in its state bits, and MUST NOT list, sync or read it as a version.
+- `INV-HIST-24`: A text-merging column (`MergeStrategy::Text`, `Markdown` or `Html`) MUST be declared only on a string user column, nullable or not, and MUST store a plain string or NULL; writes to it travel as plain values. A text edit (a write that names the value it was edited from) MUST be merged by the writer's own store before it is sent, as `merge3(edited_from, held, text)`, and is written as is when the store holds `edited_from`; among concurrent writes only Core merges: when a version before the write that its writer never saw (§4.6) authored the column, Core MUST three-way merge the value its writer last saw of the column (the newest commit on its chain that authored the column, as that commit sent it, or else the accepted version the chain was built on), the value it holds and the write's value at token boundaries (a word both sides typed into is cut into whole characters): changes to disjoint parts of the base all apply, a change both sides made applies once, inserts at one point apply in seq order, overlapping pure inserts and deletes union (as do one side's inserts with the other's replacements), and of two overlapping replacements the write sequenced later wins. Each side's diff against the base first keeps in place the heaviest in-order run of word tokens that occur once on both sides; a block of at least three words one side deleted and reinserted elsewhere is a move, and the other side's changes inside it apply to the moved copy. Whitespace inserted at the very end of the value goes after other inserts there, and in an HTML column the merge drops tags it left unmatched, keeping their content. Otherwise, or when the merge would spend more than a fixed budget of diff steps, the write's value stands as sent. On a nullable column a NULL base merges as the empty string, and a write of NULL or a write over a held NULL stands as sent: the later write wins the whole value. For a version whose value a merge changed, Core MUST also keep that version as its writer sent it, flagged as sent in its state bits, and MUST NOT list, sync or read it as a version.
 - `INV-HIST-25`: A table MAY declare latest-only history retention. A retention change MUST be a version of its own that keeps its predecessor's compatibility id, schemas whose tables all keep full history MUST keep their `SchemaVersionId` and `SchemaHash`, and a write MUST prune by the version it was written under (its session's declared version, else its bundle's; a node's own writes by its own schema), so a write under a full-history version prunes nothing. A schema MUST fail to compile when a latest-only table declares `branchBy` or a text-merging column, and a deploy MUST be refused when it makes a table latest-only for the first time (some admitted version keeps it in full, none latest-only) without confirming that it drops history.
 - `INV-HIST-26`: For each row of a latest-only table a node MUST keep its current version, the newest accepted version it superseded, and every version above that (its own or a relay's unsettled ones), and SHOULD drop the older accepted versions when it writes or receives the next one. A value large enough to be chunked MUST be refused there with a typed not-supported error, since its chunks name versions the table drops.
 - `INV-HIST-27`: A read of a table any admitted version declares latest-only that needs a version the table may have dropped MUST fail with a typed not-supported error or ship whole, never answer with another version; a subscription resuming over a latest-only input that changed since it settled MUST open fresh; and a write to a latest-only table is never maybe conflicting.
@@ -144,11 +144,29 @@ and is not applied again, so a retried increment counts once (`INV-EDGE-16`).
 
 Text-merging columns merge concurrent edits to one string. The text
 strategies (`MergeStrategy::Text`, `Markdown`, `Html`; `text`, `markdown`
-and `html` in the DSL) are opt-in and may be declared only on non-nullable
-string columns (`INV-HIST-24`). The column stores a plain string, inline or
+and `html` in the DSL) are opt-in and may be declared only on string
+columns, nullable or not (`INV-HIST-24`). The column stores a plain string, inline or
 as a large value (ch. 19), and a write to it travels as its plain value.
-Only Core merges; replicas apply a pending text write as sent, like any
-patched cell, until Core's image arrives.
+Only Core merges concurrent writes; replicas apply a pending text write as
+sent, like any patched cell, until Core's image arrives.
+
+An editor can write the column as a text edit (`LargeValueUpdate::TextEdit`;
+`editedFrom` on `update` in TypeScript): its whole new text, and the value
+it made it from, the one it last showed or wrote. Between a merged value
+reaching the store and the editor showing it, a plain write of what the
+editor shows would undo the newer value. So the store merges the edit
+before writing it: held the column's current value (NULL read as the empty
+string), base the value it was edited from, incoming the edit's text, by
+the same merge as Core's, and writes the result as an ordinary write over
+the value it holds. Edited from the value it holds, the text is written as
+is. The named value must be the one the editor showed or last wrote: the
+store keeps no memory of earlier edits to guess from, so an edit named from
+a value that lags the editor's own keystrokes (a subscription a render
+behind) applies those keystrokes again. The store decides only the value it sends: Core sequences it
+like any write, so replicas cannot diverge. A text edit of a column that
+does not merge text is refused with a schema error. Branch views refuse
+text edits explicitly as not supported yet, as they do `applyDiffs`
+(ch. 19).
 
 Core reads what the write was built on from its base (§4.6). When no
 version before the write that its writer never saw authored the column
@@ -171,6 +189,18 @@ which its writer never saw); the value Core holds; and the write's value:
   by Jazz's own tables, not the toolchain's Unicode version, so every Core
   cuts a value alike. A `<`, `&` or `](` with no closer within a bounded
   window is a token of one character;
+- a word both sides changed only by inserting characters at one place in
+  it or only by deleting characters from it (typing into or backspacing in
+  it) is cut into characters on all three sides before the diffs, so two
+  people typing into one word both keep what they typed; letters typed at
+  one spot of it interleave in seq order. The cut keeps each character
+  whole, with the marks and joiners that complete it, and only words of
+  scripts whose letters stand alone (Latin, Greek, Cyrillic, Armenian,
+  CJK, kana, Hangul syllables) are cut: a word joining letters with vowel
+  signs or viramas (Devanagari, Arabic and the like) merges whole. A word
+  only one side typed into merges whole too, to the same result. When the
+  diffs of the cut values would exceed the budget, the word-level diffs
+  stand;
 - each side's changes are diffed against the base, and both apply where
   they touch disjoint tokens; a change both sides made identically applies
   once (near-identical concurrent inserts both apply, as in diff3);
