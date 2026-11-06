@@ -126,3 +126,23 @@ it("restores the same selection through canonical application and default enviro
   expect(canonical.getLoggedIn()?.id).toBe(account.id);
   expect(values.size).toBe(1);
 });
+
+it("sends the app's bearer when signing in through the backend", async () => {
+  const signIn = vi.fn(async (_url: string | URL | Request, _init?: RequestInit) =>
+    Response.json({
+      account: "11111111-1111-4111-8111-111111111111",
+      identity: { issuer: "jazz:backend", subject: "alice" },
+      claims: {},
+    }),
+  );
+  vi.stubGlobal("fetch", signIn);
+  try {
+    const accounts = await createAccountManager({ ...config, bearer: () => "expo-app-token" });
+    await accounts.loginWithBackend();
+    expect(signIn).toHaveBeenCalled();
+    const headers = new Headers(signIn.mock.calls[0]![1]?.headers);
+    expect(headers.get("authorization")).toBe("Bearer expo-app-token");
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});

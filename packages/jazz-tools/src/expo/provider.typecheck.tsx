@@ -26,3 +26,12 @@ export const expoApplicationWithoutGuests = (
     <Data />
   </JazzProvider>
 );
+export const expoApplicationWithBearer = (
+  <JazzProvider
+    serverUrl="https://app.example.test/jazz"
+    bearer={async () => "app-token"}
+    signedOut={null}
+  >
+    <Data />
+  </JazzProvider>
+);
