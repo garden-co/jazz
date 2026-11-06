@@ -35,6 +35,7 @@ import { streamingChunks } from "../runtime/streaming-source.js";
 import { runtimeRandomBytes } from "../runtime/runtime-entropy.js";
 import { writeRow } from "../runtime/write-row.js";
 import { formatUuid } from "../runtime/hex.js";
+import { RuntimeClosedError } from "../runtime/runtime-closed-error.js";
 import { canonicalAuthorSubject } from "../runtime/author-id.js";
 import type { Session } from "../runtime/context.js";
 import {
@@ -114,8 +115,11 @@ export class ThinRemoteError extends Error {
 
 /** The connection ended before the server answered. A write may or may not have committed. */
 export class ThinConnectionLostError extends Error {
-  constructor(message = "the connection to the Jazz server ended before it answered") {
-    super(message);
+  constructor(
+    message = "the connection to the Jazz server ended before it answered",
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
     this.name = "ThinConnectionLostError";
   }
 }
@@ -303,7 +307,11 @@ export class ThinRuntime implements Runtime {
     this.closed = true;
     this.wanted = false;
     this.stop();
-    this.dropConnection(new ThinConnectionLostError("the thin runtime is closed"));
+    this.dropConnection(
+      new ThinConnectionLostError("the thin runtime is closed", {
+        cause: new RuntimeClosedError("the thin runtime is closed"),
+      }),
+    );
     for (const live of this.liveQueries.values()) live.callback = undefined;
     this.liveQueries.clear();
   }
@@ -501,7 +509,7 @@ export class ThinRuntime implements Runtime {
   ): { answer: Promise<ThinBody>; oneShot?: OneShot } {
     if (this.closed)
       return {
-        answer: Promise.reject(new Error("the thin runtime is closed")),
+        answer: Promise.reject(new RuntimeClosedError("the thin runtime is closed")),
       };
     if (this.failure) return { answer: Promise.reject(this.failure) };
     let oneShot: OneShot | undefined;

@@ -425,10 +425,11 @@ describe("thin client", () => {
       { notes: s.table({ text: s.string(), done: s.boolean(), extra: s.string() }, {}) },
       { migrations: "none" },
     );
-    await expect(db.all(stale.notes)).rejects.toThrow(/schema/);
+    const notDeployed = { name: "ThinRemoteError", code: "SchemaNotDeployed" };
+    await expect(db.all(stale.notes)).rejects.toMatchObject(notDeployed);
     await expect(
       db.insert(stale.notes, { text: "x", done: false, extra: "y" }).wait({ tier: "global" }),
-    ).rejects.toThrow(/schema/);
+    ).rejects.toMatchObject(notDeployed);
     expect(db.getSyncStatus().link).toMatchObject({ state: "offline", reason: "stopped" });
   }, 60_000);
 
