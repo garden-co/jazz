@@ -725,8 +725,8 @@ pub fn wait_claims_rejection(write: &Write, tier: &str) -> bool {
 }
 
 /// A wait's `fate` that claims the write's rejection when it reports one
-/// itself: a `local` wait still open when the refusal arrives (one a relay
-/// answers) fails with it, so the listener is not told a second time.
+/// itself: a non-durable replica's `local` wait, still open when the
+/// refusal arrives (one a relay answers), fails with it, so the listener is not told a second time.
 pub fn claiming(fate: HostFuture<()>, claimed: Rc<Cell<bool>>) -> HostFuture<()> {
     Box::pin(async move {
         let result = fate.await;

@@ -487,7 +487,9 @@ impl Inner {
                     Some(_) => Built::On(self.predecessor_at(node, tx)?.seq),
                     None => match self.settled(node, tx)? {
                         None => return Err(unknown_base("another node's commit")),
-                        Some(None) => return Err(self.rejected_predecessor(node, tx)?),
+                        // A peer link may carry several sessions: another
+                        // node's refusal names no cause.
+                        Some(None) => return Err(predecessor_rejected()),
                         landed => Built::On(predecessor(landed)?.seq),
                     },
                 },
