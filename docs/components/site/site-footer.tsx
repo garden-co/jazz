@@ -42,7 +42,8 @@ export function SiteFooter() {
         <div className="col-span-2 flex flex-col gap-4 md:col-span-6">
           <JazzLogo label="Jazz" className="h-7 self-start" />
           <Text as="p" display="block" color="secondary" className="max-w-[22rem]">
-            The local-first relational database that syncs across your frontend, backend and cloud.
+            The data layer that you own: a relational database in your backend that syncs to every
+            client.
           </Text>
         </div>
         {columns.map((column) => (
