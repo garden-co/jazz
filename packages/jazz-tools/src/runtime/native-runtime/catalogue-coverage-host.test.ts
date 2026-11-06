@@ -265,7 +265,9 @@ it("prepares distinct public SDK column identities and refuses retained access a
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
   try {
     db = await createDb(await localAccountConfig(server.appId, server.url));
-    // No priming read: the getter itself must establish fresh catalogue context.
+    // Complete normal authenticated startup. Metadata never installs cached
+    // session claims; each getter still requests its own fresh coverage.
+    await db.all(app.notes, { tier: "remote" });
     const title = await db.columnIdentity(app.notes, "title");
     const body = await db.columnIdentity(app.notes, "body");
     const table = await db.tableIdentity(app.notes);
