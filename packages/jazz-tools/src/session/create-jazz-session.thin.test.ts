@@ -3,6 +3,10 @@ import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
 import { createDb as createLocalFirstDb } from "../runtime/default-create-db.js";
 import { isThinDb, type LocalFirstLoader } from "../runtime/local-first-upgrade.js";
+import { DbReplacedError } from "../runtime/db-replaced-error.js";
+import { Db } from "../runtime/db.js";
+import { WriteWaitTimeoutError } from "../runtime/client.js";
+import { ThinRemoteError, ThinRuntime } from "../thin/thin-runtime.js";
 import type { AccountStore } from "../accounts/persistence.js";
 import { startTestJazz, type TestJazz } from "../testing/index.js";
 import { createJazzClient, type BrowserJazzSession } from "./create-jazz-session.js";
@@ -53,7 +57,9 @@ function memoryLocalStorage() {
   };
 }
 
-const loadLocalFirst: LocalFirstLoader = async () => ({ createClient: createLocalFirstDb });
+const loadLocalFirst: LocalFirstLoader = async () => ({
+  createClient: createLocalFirstDb,
+});
 
 async function open(
   server: TestJazz,
@@ -112,29 +118,271 @@ describe("browser session", () => {
     await db(session).insert(app.notes, { text: "custom fetch" }).wait({ tier: "global" });
   }, 60_000);
 
-  it("upgrades on demand, keeping the app's live queries answered", async () => {
+  it("upgrades on demand in place: the same Db keeps its live queries and takes writes", async () => {
     const server = await startServer();
     const session = await open(server, memoryStore());
-    const thin = db(session);
-    await thin.insert(app.notes, { text: "before" }).wait({ tier: "global" });
+    const client = session.getSnapshot().client;
+    const kept = db(session);
+    await kept.insert(app.notes, { text: "before" }).wait({ tier: "global" });
     const seen: string[][] = [];
-    const stop = thin.subscribe(app.notes, (rows) => seen.push(rows.map((row) => row.text)));
+    const errors: Error[] = [];
+    const states: string[] = [];
+    const stopStates = session.subscribe(() => states.push(session.getSnapshot().status));
+    const stop = kept.subscribe(app.notes, {
+      onUpdate: (rows) => seen.push(rows.map((row) => row.text).sort()),
+      onError: (error) => errors.push(error),
+    });
     await expect.poll(() => seen.at(-1), { timeout: 10_000 }).toEqual(["before"]);
+    const updatesBefore = seen.length;
 
-    await thin.upgradeToLocalFirst(loadLocalFirst);
-    stop();
+    await kept.upgradeToLocalFirst(loadLocalFirst);
 
-    const local = db(session);
-    expect(local).not.toBe(thin);
-    expect(isThinDb(local)).toBe(false);
-    // The live query's rows were read into the local-first client first.
-    expect((await local.all(app.notes, { tier: "local-first" })).map((row) => row.text)).toEqual([
+    // The session kept its client and Db: nothing for an app or provider to redo.
+    expect(session.getSnapshot().client).toBe(client);
+    expect(db(session)).toBe(kept);
+    expect(isThinDb(kept)).toBe(false);
+    expect(states).toEqual([]);
+    // The rows were read into the local-first client first.
+    expect((await kept.all(app.notes, { tier: "local-first" })).map((row) => row.text)).toEqual([
       "before",
     ]);
-    await local.insert(app.notes, { text: "after" }).wait({ tier: "global" });
-    expect((await local.all(app.notes)).map((row) => row.text).sort()).toEqual(["after", "before"]);
+    await kept.insert(app.notes, { text: "after" }).wait({ tier: "global" });
+    await expect.poll(() => seen.at(-1), { timeout: 10_000 }).toEqual(["after", "before"]);
+    // The live query never went empty: its first local-first result replaced the thin one.
+    expect(seen.slice(updatesBefore).every((rows) => rows.length > 0)).toBe(true);
+    expect(errors).toEqual([]);
     // A local-first Db has nothing left to upgrade.
-    await expect(local.upgradeToLocalFirst(loadLocalFirst)).resolves.toBeUndefined();
+    await expect(kept.upgradeToLocalFirst(loadLocalFirst)).resolves.toBeUndefined();
+    stop();
+    stopStates();
+  }, 60_000);
+
+  it("counts and uploads the thin Db's unsent writes after the upgrade", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const kept = db(session);
+    await kept.disconnect();
+    kept.insert(app.notes, { text: "unsent" });
+    await kept.upgradeToLocalFirst(loadLocalFirst);
+
+    // The thin runtime still holds the write: the kept Db says so.
+    expect(kept.getSyncStatus().synced).toBe(false);
+    expect(kept.getSyncStatus().pendingUploads).toBeGreaterThan(0);
+    await expect(kept.waitForSync({ timeoutMs: 200 })).rejects.toThrow(WriteWaitTimeoutError);
+
+    // Its own runtime reconnects and uploads it; then the kept Db is synced.
+    await kept.reconnect();
+    await kept.waitForSync({ timeoutMs: 10_000 });
+    expect(kept.getSyncStatus().pendingUploads).toBe(0);
+    await expect
+      .poll(async () => (await kept.all(app.notes)).map((row) => row.text), {
+        timeout: 10_000,
+      })
+      .toEqual(["unsent"]);
+  }, 60_000);
+
+  it("keeps an app that went offline offline across the upgrade", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const kept = db(session);
+    await kept.disconnect();
+    await kept.upgradeToLocalFirst(loadLocalFirst);
+
+    // The local-first Db opened offline: its write stays local.
+    const write = kept.insert(app.notes, { text: "offline" });
+    await expect(write.wait({ tier: "global", timeoutMs: 300 })).rejects.toThrow(
+      WriteWaitTimeoutError,
+    );
+
+    await kept.reconnect();
+    await kept.waitForSync({ timeoutMs: 10_000 });
+    expect(kept.getSyncStatus().pendingUploads).toBe(0);
+  }, 60_000);
+
+  it("takes the thin runtime offline too while it still uploads", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const kept = db(session);
+    await kept.insert(app.notes, { text: "online" }).wait({ tier: "global" });
+    const thinRuntime = kept.currentRuntime() as ThinRuntime;
+    await kept.disconnect();
+    kept.insert(app.notes, { text: "unsent" });
+    await kept.upgradeToLocalFirst(loadLocalFirst);
+    const disconnects = vi.spyOn(thinRuntime, "disconnect");
+    const connects = vi.spyOn(thinRuntime, "connect");
+
+    await kept.reconnect();
+    expect(connects).toHaveBeenCalledTimes(1);
+    await kept.disconnect();
+    expect(disconnects).toHaveBeenCalledTimes(1);
+    // Sent or not, the thin write ends: the kept Db doesn't wait forever.
+    await kept.reconnect();
+    await kept.waitForSync({ timeoutMs: 10_000 });
+    expect(kept.getSyncStatus().pendingUploads).toBe(0);
+  }, 60_000);
+
+  it("tells a sync status listener the combined status when the upgrade moves it", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const kept = db(session);
+    await kept.disconnect();
+    kept.insert(app.notes, { text: "unsent" });
+    const statuses: ReturnType<Db["getSyncStatus"]>[] = [];
+    const stop = kept.onSyncStatusChange((status) => statuses.push(status));
+    await kept.upgradeToLocalFirst(loadLocalFirst);
+    const before = statuses.length;
+    // The local-first Db's own write adds to the thin runtime's unsent one.
+    kept.insert(app.notes, { text: "local" });
+    await expect
+      .poll(() => statuses.slice(before).at(-1)?.pendingUploads, { timeout: 10_000 })
+      .toBe(2);
+    expect(statuses.at(-1)).toEqual(kept.getSyncStatus());
+    stop();
+  }, 60_000);
+
+  it("fails waitForSync on the kept Db when the server rejects a thin write", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const kept = db(session);
+    const note = await kept.insert(app.notes, { text: "mine" }).wait({ tier: "global" });
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    await kept.disconnect();
+    // Nothing may update notes: the server rejects this once it is sent.
+    kept.update(app.notes, note.id, { text: "changed" });
+    await kept.upgradeToLocalFirst(loadLocalFirst);
+    await kept.reconnect();
+
+    try {
+      await expect(kept.waitForSync({ timeoutMs: 10_000 })).rejects.toThrow(ThinRemoteError);
+    } finally {
+      logged.mockRestore();
+    }
+  }, 60_000);
+
+  it("closes at once after the upgrade, even with thin writes it can't upload", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const kept = db(session);
+    await kept.disconnect();
+    kept.insert(app.notes, { text: "unsent" });
+    await kept.upgradeToLocalFirst(loadLocalFirst);
+
+    let closed = false;
+    void session.close().then(() => (closed = true));
+    await expect.poll(() => closed, { timeout: 5_000 }).toBe(true);
+    sessions.splice(sessions.indexOf(session), 1);
+  }, 60_000);
+
+  it("renews the thin runtime's own expired credential after the upgrade, so its writes upload", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const kept = db(session);
+    await kept.disconnect();
+    kept.insert(app.notes, { text: "unsent" });
+    await kept.upgradeToLocalFirst(loadLocalFirst);
+    const renewals = vi.spyOn(Db.prototype, "refreshOwnAccountAuth");
+
+    // The thin runtime's credential runs out while its write waits.
+    (kept as unknown as { markUnauthenticated(reason: string): void }).markUnauthenticated(
+      "expired",
+    );
+    await kept.reconnect();
+
+    // Its own account context renews it, so the write uploads.
+    await expect.poll(() => renewals.mock.contexts.includes(kept), { timeout: 10_000 }).toBe(true);
+    await kept.waitForSync({ timeoutMs: 10_000 });
+    await expect
+      .poll(async () => (await kept.all(app.notes)).map((row) => row.text), {
+        timeout: 10_000,
+      })
+      .toEqual(["unsent"]);
+    renewals.mockRestore();
+  }, 60_000);
+
+  it("prefetches a query subscribed while the upgrade reads the others", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const kept = db(session);
+    await kept.insert(app.notes, { text: "before" }).wait({ tier: "global" });
+    const first = kept.subscribe(app.notes, () => {});
+    const seen: string[][] = [];
+    let late: (() => void) | undefined;
+    const rounds: number[] = [];
+    await kept.upgradeToLocalFirst(async () => ({
+      createClient: async (config) => {
+        const next = await createLocalFirstDb(config);
+        const prefetch = next.prefetchRuntimeQueries.bind(next);
+        next.prefetchRuntimeQueries = async (schema, queries) => {
+          rounds.push(queries.length);
+          // A component mounts during the first round's read.
+          late ??= kept.subscribe(app.notes.where({ text: "before" }), (rows) =>
+            seen.push(rows.map((row) => row.text)),
+          );
+          return prefetch(schema, queries);
+        };
+        return next;
+      },
+    }));
+    // The second round read the late query in, so it never opened empty.
+    expect(rounds).toEqual([1, 1]);
+    await expect.poll(() => seen.at(-1), { timeout: 10_000 }).toEqual(["before"]);
+    expect(seen.every((rows) => rows.length > 0)).toBe(true);
+    late?.();
+    first();
+  }, 60_000);
+
+  it("hands mutation errors nobody had heard yet to the local-first Db's listeners", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const kept = db(session);
+    const note = await kept.insert(app.notes, { text: "mine" }).wait({ tier: "global" });
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    // Nothing may update notes: the server rejects this, and nobody listens yet.
+    kept.update(app.notes, note.id, { text: "changed" });
+    await expect
+      .poll(
+        () =>
+          logged.mock.calls.filter(([message]) => message === "Unhandled Jazz mutation error")
+            .length,
+        {
+          timeout: 10_000,
+        },
+      )
+      .toBe(1);
+
+    await kept.upgradeToLocalFirst(loadLocalFirst);
+    const listener = vi.fn();
+    const stop = kept.onMutationError(listener);
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(
+      logged.mock.calls.filter(([message]) => message === "Unhandled Jazz mutation error"),
+    ).toHaveLength(1);
+    stop();
+    logged.mockRestore();
+  }, 60_000);
+
+  it("ends a kept Db's queries loudly once its user signs out", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const kept = db(session);
+    await kept.insert(app.notes, { text: "before" }).wait({ tier: "global" });
+    const errors: Error[] = [];
+    kept.subscribe(app.notes, {
+      onUpdate: () => {},
+      onError: (error) => errors.push(error),
+    });
+
+    await session.logout();
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toBeInstanceOf(DbReplacedError);
+    expect(errors[0]!.message).toMatch(/signed out or switched accounts/);
+    expect(errors[0]!.message).toMatch(
+      /session\.getSnapshot\(\)\.client inside session\.subscribe/,
+    );
+    expect(() => kept.insert(app.notes, { text: "lost" })).toThrow(DbReplacedError);
+    expect(() => kept.subscribe(app.notes, () => {})).toThrow(DbReplacedError);
+    expect(() => kept.onMutationError(() => {})).toThrow(DbReplacedError);
   }, 60_000);
 
   it("upgrades in the background with a client loader, and remembers it", async () => {

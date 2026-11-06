@@ -4,6 +4,8 @@ import {
   clientRegistryUrl,
   createAccountManagerWithMinter,
 } from "../accounts/account-manager-core.js";
+import { attachSubscriptionStore, getSubscriptionStore } from "../subscription-store-internal.js";
+import type { ShutdownOptions } from "../runtime/db.js";
 import {
   createRegisteredJazzClient,
   type CreateAccountDb,
@@ -117,37 +119,41 @@ export async function createJazzClient(config: JazzClientConfig): Promise<Browse
 
   const upgrade = async (loader: LocalFirstLoader) => {
     let upgraded: AccountHandle | undefined;
-    await replaceJazzSessionClient<JazzClient>(session!, async (current, account) => {
-      const { createClient } = await loader();
-      const next = await openLocalFirst(createClient, account);
-      try {
-        await prefetchThinQueries(current.db, next.db);
-      } catch (error) {
-        await next.shutdown().catch(() => {});
-        throw error;
-      }
-      upgraded = account;
-      return next;
-    });
+    await replaceJazzSessionClient<JazzClient>(
+      session!,
+      async (current, account) => {
+        const { createClient } = await loader();
+        const next = await openLocalFirst(createClient, account);
+        try {
+          await prefetchThinQueries(current.db, next.db);
+        } catch (error) {
+          await next.shutdown().catch(() => {});
+          throw error;
+        }
+        upgraded = account;
+        return next;
+      },
+      (current, next) => upgradesInPlace.get(current)!(next),
+    );
     // Only once the session took the new client: a superseded upgrade
     // (a logout or account switch meanwhile) is not remembered.
     if (upgraded) upgrades.remember(upgraded);
   };
 
   const openThin = async (account: AccountHandle) => {
-    const client = await createRegisteredJazzClient(
+    const thin = await createRegisteredJazzClient(
       "web-thin",
       { ...clientConfig, account },
       createThinDb,
     );
     let pending: Promise<void> | undefined;
-    setLocalFirstUpgrader(client.db, (loader) => {
+    setLocalFirstUpgrader(thin.db, (loader) => {
       pending ??= upgrade(loader).finally(() => {
         pending = undefined;
       });
       return pending;
     });
-    return client;
+    return upgradableClient(thin);
   };
 
   const openClient = async (account: AccountHandle) => {
@@ -182,6 +188,43 @@ export async function createJazzClient(config: JazzClientConfig): Promise<Browse
   if (loadLocalFirst) upgradeInBackground(session, loadLocalFirst);
   await firstBackendAnswer(session);
   return session;
+}
+
+const upgradesInPlace = new WeakMap<JazzClient, (next: JazzClient) => void>();
+
+/**
+ * The session's client while it is thin, and after it upgrades: the upgrade
+ * moves its work to the local-first client in place, so its `db`, its query
+ * cache and the app's component state all carry on. The thin `Db` becomes a
+ * handle on the local-first one (see `Db.adoptSuccessor`), and its own
+ * runtime stops once its writes are uploaded.
+ */
+function upgradableClient(thin: JazzClient): JazzClient {
+  let inner = thin;
+  const client: JazzClient = attachSubscriptionStore(
+    {
+      db: thin.db,
+      get session() {
+        return inner.session;
+      },
+      async shutdown(options?: ShutdownOptions) {
+        if (inner === thin) return thin.shutdown(options);
+        // Both runtimes stop the same way: with `waitForSync`, after their
+        // writes upload; without, straight away (a close, or a sign-out
+        // that wipes this device).
+        await Promise.all([inner.shutdown(options), thin.db.stopOwnRuntime(options)]);
+        // Its query cache served the app until now.
+        await thin.shutdown();
+      },
+    },
+    getSubscriptionStore(thin),
+  );
+  upgradesInPlace.set(client, (next) => {
+    // The thin Db starts uploading what it still holds and stops once done.
+    thin.db.adoptSuccessor(next.db);
+    inner = next;
+  });
+  return client;
 }
 
 /**

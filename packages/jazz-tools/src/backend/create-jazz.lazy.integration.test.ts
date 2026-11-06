@@ -118,6 +118,7 @@ describe("createJazz, opened on first use", () => {
       "ensureReady",
       "allInternal",
       "runShutdown",
+      "waitForOwnSync",
     ]);
     const asyncOnes = names.filter(
       (name) =>
