@@ -1655,6 +1655,64 @@ describe("createJazz", () => {
     ).rejects.toThrow(/does not exist or this session cannot read it/);
   }, 60_000);
 
+  it("leaves an update under a relational read policy to the core, from a fresh backend", async () => {
+    const appId = randomUUID();
+    const core = await startLocalJazzServer({ appId, inMemory: true });
+    cleanups.push(() => core.stop());
+    const shared = s.defineApp(
+      {
+        readers: s.table({ user: s.uuid() }, {}),
+        editors: s.table({ user: s.uuid() }, {}),
+        notes: s.table({ body: s.string() }, {}),
+      },
+      { migrations: "none" },
+    );
+    // Access to a note comes from other rows, which a fresh backend has not loaded.
+    const relational = s.definePermissions(shared, ({ policy, session }) => {
+      policy.readers.allowRead.where({ user: session.user });
+      policy.editors.allowRead.where({ user: session.user });
+      policy.notes.allowRead.where(() => policy.readers.exists.where({ user: session.user }));
+      policy.notes.allowUpdate.where(() => policy.editors.exists.where({ user: session.user }));
+    });
+    const open = () =>
+      createJazz({
+        app: shared,
+        permissions: relational,
+        store: remote({ url: core.url, appId, secret: core.adminSecret }),
+        authenticate,
+      }).ready();
+    const as = (jazz: Jazz, user: string) =>
+      jazz.forReqUser(new Request("http://app/x", { headers: { "x-test-user": user } }));
+
+    const first = await open();
+    const alice = await first.createAccountFor("alice");
+    const bob = await first.createAccountFor("bob");
+    await first.createAccountFor("carol");
+    await first.db.insert(shared.readers, { user: alice }).wait({ tier: "global" });
+    await first.db.insert(shared.readers, { user: bob }).wait({ tier: "global" });
+    await first.db.insert(shared.editors, { user: alice }).wait({ tier: "global" });
+    const note = await first.db.insert(shared.notes, { body: "initial" }).wait({ tier: "global" });
+    await first.close();
+
+    const second = await open();
+    cleanups.push(() => second.close());
+    // An editor's update goes through.
+    const asAlice = await as(second, "alice");
+    await asAlice.update(shared.notes, note.id, { body: "alice" }).wait({ tier: "global" });
+    // A reader may read the note but not update it: the core refuses the
+    // update the backend staged, and the wait says so.
+    const asBob = await as(second, "bob");
+    await expect(
+      asBob.update(shared.notes, note.id, { body: "bob" }).wait({ tier: "global" }),
+    ).rejects.toThrow(/permission_denied|Write rejected by server authorization/);
+    // A session the core won't show the note to can't update it either.
+    const asCarol = await as(second, "carol");
+    await expect(
+      asCarol.update(shared.notes, note.id, { body: "carol" }).wait({ tier: "global" }),
+    ).rejects.toThrow(/does not exist or this session cannot read it/);
+    expect((await asAlice.one(shared.notes.where({ id: note.id })))?.body).toBe("alice");
+  }, 60_000);
+
   it("runs a sqlite store as the alpha.59 app its import kept", async () => {
     const dir = await mkdtemp(join(tmpdir(), "jazz-imported-"));
     cleanups.push(() => rm(dir, { recursive: true, force: true }));

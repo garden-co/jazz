@@ -23,6 +23,7 @@ use jazz::query::Query;
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder};
+use jazz::tx::DurabilityTier;
 
 use common::{allow_all_policies, compile_schema, exists, outer_eq, session_eq};
 
@@ -433,17 +434,29 @@ fn a_replica_leaves_a_relational_read_for_write_to_the_authority() {
 
     let bob = user(&backend, 2, "bob");
     user(&server, 2, "bob");
-    block_on(backend.update(
+    let update = block_on(backend.update(
         "notes",
         id(4, 1),
         BTreeMap::from([("data".to_owned(), text("bob"))]),
         as_session(bob),
     ))
     .expect("the replica stages the session update");
+    // Until the authority answers, the replica shows the staged value, as it
+    // does for any write it cannot decide.
+    assert_eq!(cell(&backend, "notes", "data"), text("bob"));
     pump();
+    let refusal =
+        block_on(backend.wait_for_transaction(update.mergeable_tx_id(), DurabilityTier::Global))
+            .err()
+            .expect("the authority refuses the update, and its wait says so");
+    assert!(
+        format!("{refusal:?}").contains("read policy denied UPDATE"),
+        "{refusal:?}"
+    );
     assert_eq!(cell(&server, "notes", "data"), text("alice"));
     assert_eq!(cell(&backend, "notes", "data"), text("alice"));
-    block_on(backend.upsert(
+
+    let upsert = block_on(backend.upsert(
         "notes",
         id(4, 1),
         BTreeMap::from([("data".to_owned(), text("bob"))]),
@@ -454,6 +467,9 @@ fn a_replica_leaves_a_relational_read_for_write_to_the_authority() {
     ))
     .expect("the replica stages the session upsert");
     pump();
+    block_on(backend.wait_for_transaction(upsert.mergeable_tx_id(), DurabilityTier::Global))
+        .err()
+        .expect("the authority refuses the upsert, and its wait says so");
     assert_eq!(cell(&server, "notes", "data"), text("alice"));
     assert_eq!(cell(&backend, "notes", "data"), text("alice"));
 }
