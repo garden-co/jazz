@@ -1,8 +1,11 @@
 import { randomUUID } from "node:crypto";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { exportJWK, generateKeyPair, SignJWT, type JWTPayload } from "jose";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
 import { createJazz, createJazzClient, memory, trustWorkload, type Jazz } from "./index.js";
 import { backendDbForSession } from "./create-jazz-session.js";
@@ -482,6 +485,54 @@ describe("a backend client's close()", () => {
     );
     // Refused for good: no point waiting out the deadline.
     expect(Date.now() - started).toBeLessThan(5_000);
+    expect(session.getSnapshot().status).toBe("closed");
+  }, 30_000);
+
+  it("closes at once with timeoutMs 0, warning about the writes it drops", async () => {
+    const { appId, origin } = await appWith([]);
+    const session = await createJazzClient({
+      appId,
+      app,
+      permissions,
+      serverUrl: `${origin}/jazz`,
+      driver: { type: "memory" },
+      initial: "local-first",
+    });
+    const { client } = session.getSnapshot();
+    client!.db.insert(app.todos, { title: "dropped", owner: client!.session!.user! });
+    await expect(session.close({ timeoutMs: -1 })).rejects.toThrow(/timeoutMs/);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await session.close({ timeoutMs: 0 });
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/1 write the server never accepted/));
+    } finally {
+      warn.mockRestore();
+    }
+    expect(session.getSnapshot().status).toBe("closed");
+  }, 30_000);
+
+  it("only warns when its persistent driver keeps the writes it couldn't upload", async () => {
+    const { appId, origin } = await appWith([]);
+    const dataPath = join(mkdtempSync(join(tmpdir(), "jazz-client-close-")), "client.db");
+    const session = await createJazzClient({
+      appId,
+      app,
+      permissions,
+      serverUrl: `${origin}/jazz`,
+      driver: { type: "persistent", dataPath },
+      initial: "local-first",
+    });
+    const { client } = session.getSnapshot();
+    client!.db.insert(app.todos, { title: "kept on disk", owner: client!.session!.user! });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await session.close();
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringMatching(/1 write not uploaded yet .*driver keeps them/),
+      );
+    } finally {
+      warn.mockRestore();
+    }
     expect(session.getSnapshot().status).toBe("closed");
   }, 30_000);
 });
