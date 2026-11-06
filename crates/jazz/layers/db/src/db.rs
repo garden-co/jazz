@@ -413,7 +413,12 @@ impl Drop for SubscriptionStream {
     fn drop(&mut self) {
         self.dropped.set(self.dropped.get() + 1);
         if let Some((inner, query, binding, include_deleted, view, reach)) = self.remote.take() {
-            Db { inner, view: None }.detach_remote(&query, &binding, include_deleted, &view, reach);
+            Db {
+                inner,
+                view: None,
+                defer_fetches: false,
+            }
+            .detach_remote(&query, &binding, include_deleted, &view, reach);
         }
     }
 }
@@ -768,6 +773,11 @@ pub struct Db {
     inner: Rc<Store>,
     /// `Some` for a schema-view handle: operations run under this schema.
     view: Option<Rc<Schema>>,
+    /// On a host-run chunk store: a read that waits on offloaded nodes
+    /// returns the missing-chunks error at once, leaving them wanted for
+    /// the host's fetch lane, instead of fetching them on this thread
+    /// ([`Self::deferring_chunk_fetches`]).
+    defer_fetches: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1477,6 +1487,7 @@ impl Db {
         let owner = Rc::new(schema.clone());
         let db = Self {
             view: None,
+            defer_fetches: false,
             inner: Rc::new(Store::new(Inner {
                 conn,
                 mutation_admission_closed: false,
@@ -2141,6 +2152,11 @@ impl Db {
                         return Err(error);
                     };
                     if chunks.host_io() {
+                        if self.defer_fetches {
+                            // The host's fetch lane reads them, off this
+                            // thread and with its backoff.
+                            return Err(error);
+                        }
                         // Beside the host's batch, which may be out: a
                         // node a read waits on is referenced, so no
                         // delete in that batch removes it.
@@ -2258,6 +2274,20 @@ impl Db {
                  (SELECT count(*) FROM _jazz_lv_root WHERE refs > 0)",
                 [],
                 |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)),
+            )
+            .map_err(storage)
+    }
+
+    /// Diagnostics: stored large-value nodes whose bytes live only in the
+    /// chunk store.
+    #[doc(hidden)]
+    pub fn offloaded_large_value_nodes_for_test(&self) -> Result<u64, Error> {
+        self.inner()
+            .conn
+            .cached_row(
+                "SELECT count(*) FROM _jazz_lv_node WHERE length(bytes) = 0",
+                [],
+                |r| r.get::<_, i64>(0).map(|n| n as u64),
             )
             .map_err(storage)
     }
@@ -7705,7 +7735,20 @@ impl Db {
         Some(Db {
             inner: self.inner.clone(),
             view: Some(view),
+            defer_fetches: self.defer_fetches,
         })
+    }
+
+    /// This handle, but a read or write that waits on offloaded nodes of a
+    /// host-run chunk store ([`crate::options::DbConfig::with_host_chunk_io`])
+    /// fails at once with the missing-chunks error instead of fetching them
+    /// on this thread; they stay wanted, so the host's next fetches read
+    /// them and the caller tries again once they land. A server serving
+    /// many sessions on one thread uses it, so one session's slow chunk
+    /// store read never stalls the others.
+    pub fn deferring_chunk_fetches(mut self) -> Db {
+        self.defer_fetches = true;
+        self
     }
 
     /// [`Self::governed_view`] for a session pinned to published bundle
@@ -7732,6 +7775,7 @@ impl Db {
         Ok(Some(Db {
             inner: self.inner.clone(),
             view: Some(view),
+            defer_fetches: self.defer_fetches,
         }))
     }
 
@@ -7822,6 +7866,7 @@ impl Db {
         Ok(Db {
             inner: self.inner.clone(),
             view: Some(Rc::new(logical)),
+            defer_fetches: self.defer_fetches,
         })
     }
 
@@ -9203,15 +9248,21 @@ impl TxRef<'_> {
             }
         }
         // Relations nest inside the overlay, so they see staged rows too.
-        let rows = self.db.in_overlay_prefix(self.id, prefix, |inner, cut| {
-            let read = ReadSpec {
-                include_deleted,
-                cut,
-                ..ReadSpec::default()
-            };
-            let roots = inner.run(prepared, identity, &read)?;
-            inner.nest_relations(prepared, identity, &read, roots)
-        })?;
+        // Offloaded leaves are fetched as for any read.
+        let rows = self
+            .db
+            .fetching_with((), |()| {
+                self.db.in_overlay_prefix(self.id, prefix, |inner, cut| {
+                    let read = ReadSpec {
+                        include_deleted,
+                        cut,
+                        ..ReadSpec::default()
+                    };
+                    let roots = inner.run(prepared, identity, &read)?;
+                    inner.nest_relations(prepared, identity, &read, roots)
+                })
+            })
+            .await?;
         self.db.record_read(self.id, prepared, include_deleted)?;
         Ok(rows)
     }
