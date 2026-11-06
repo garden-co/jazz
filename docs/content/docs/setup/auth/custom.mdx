@@ -253,4 +253,10 @@ each user: `fromJWT` checks that every token comes from the one `issuer` you con
 policies and authorship; `jazz.db` acts with backend authority. See
 [Main Backend](/docs/setup/deployment/own-server#user-scoped-use).
 
+Only a sign-in from a Jazz client (step 3 above), a guest link or `jazz.createAccountFor(userId)`
+gives a user an account. For a user who has none yet, `forReqUser` throws `NoJazzAccountError`
+(`code: "no_account"`). Users of a REST or API-only server never open a client, so call
+`createAccountFor` in your sign-in route; see
+[Users without an account](/docs/setup/deployment/own-server#users-without-an-account).
+
 Full working examples: [Better Auth chat](https://github.com/garden-co/jazz/tree/main/examples/auth-betterauth-chat), [simple auth chat](https://github.com/garden-co/jazz/tree/main/examples/auth-simple-chat), [WorkOS chat](https://github.com/garden-co/jazz/tree/main/examples/auth-workos-chat).

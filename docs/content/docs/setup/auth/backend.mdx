@@ -205,6 +205,11 @@ Your main backend has full access by default. To run code as a user instead:
 - `await jazz.withAttribution(request)` keeps backend access but records the request's user as
   author. Use it only after your own code has made the authorization decision.
 
+Both need the user to have a Jazz account already, from a client sign-in, a guest link or
+`jazz.createAccountFor(userId)`. Otherwise they throw `NoJazzAccountError` (`code: "no_account"`):
+your backend never creates an account on its own. See
+[Users without an account](/docs/setup/deployment/own-server#users-without-an-account).
+
 A copied account id or claim is not authorization: Jazz checks the request or handle itself. See
 [Backend Client](/docs/setup/backend-client) for background jobs and other machines.
 
