@@ -93,6 +93,10 @@ Each is an explicit "not supported" error:
 - a write in flight when the socket drops is rejected with `ThinConnectionLostError` (from
   `jazz-tools/thin`) and not retried; it may or may not have committed, so read before you retry
 - `getSyncStatus()` and `useSyncStatus()` stay on `connecting` for now
+- a single write, and a single answer to a query, can be at most 32 MiB. The client refuses a
+  larger write itself; the server answers a larger result with a `TooLarge` error for that query
+  alone (ending a live query) and keeps the session. So one very large row fails every query that
+  includes it, until paging large answers arrives with streaming reads
 - no admin secret in the browser
 
 ## Upgrading to local-first

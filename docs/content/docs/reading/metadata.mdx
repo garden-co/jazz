@@ -17,6 +17,12 @@ You can select and filter on Jazz's magic columns just like other columns. They 
 `account` is the Jazz account; `identity.subject` is the `userId` your `authenticate` returned for a
 backend sign-in.
 
+Anyone who can read a row can read its `$createdBy` and `$updatedBy`, including
+`identity.subject`, and so can anyone who can read its [history](/docs/reading/history). If your
+`authenticate` returns an email or another personal value as `userId`, every reader of the user's
+rows sees it. Return an opaque id (your auth's user id, not the email) when author identity is
+sensitive.
+
 These are useful for showing authorship, when a row last changed, or building "my created items"
 views without storing duplicate ownership fields.
 

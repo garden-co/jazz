@@ -1,14 +1,82 @@
 ---
 title: Relationships
-description: "Learn how to model references between tables."
+description: "Learn how to model references between tables with UUID columns, s.rel and s.reverse."
 ---
 
-<Callout type="info">
-  Preview: this page is a rough outline for the server-first docs restructure. The bullets below are
-  what it will cover.
-</Callout>
+A relationship is a UUID column that holds another row's `id`, plus a name for following it.
 
-- Reference columns and what they point to
-- One-to-many and many-to-many
-- Reading related rows: see [Includes & Relations](/docs/reading/includes-and-relations)
-- Policies that follow references (`allowedTo.*`)
+## Forward relations
+
+Store the other row's id in a UUID column, then name the relation with `s.rel(targetTable, column)`
+in the table's second argument:
+
+```ts
+const schema = {
+  posts: s.table(
+    { authorId: s.uuid(), title: s.string() },
+    {
+      author: s.rel("users", "authorId"),
+    },
+  ),
+  users: s.table({ name: s.string() }),
+};
+```
+
+A UUID column without an `s.rel` stays an ordinary UUID column: queries can't include through it
+and policies can't follow it. In particular, `exists` rules that correlate across tables need the
+column declared with `s.rel`; a plain `s.uuid()` column fails validation with
+`JoinNotRefCompatible`.
+
+## Optional and many
+
+The column decides optionality and cardinality, and `s.rel` points at it the same way:
+
+- `s.uuid()`: exactly one related row.
+- `s.uuid().optional()`: zero or one.
+- `s.array(s.uuid())`: any number.
+
+## Reverse relations
+
+Jazz doesn't generate the inverse of a relation. Declare it on the target table with
+`s.reverse(sourceTable, forwardRelationName)`. The second argument is the forward relation's name,
+not the column:
+
+```ts
+users: s.table(
+  { name: s.string() },
+  {
+    authoredPosts: s.reverse("posts", "author"),
+  },
+),
+```
+
+A reverse relation returns the matching source rows as an array.
+
+## One-to-many and many-to-many
+
+- **One-to-many:** a forward relation on the "many" side (each post has one `author`) and,
+  if you want to read it from the other side, a reverse relation on the "one" side.
+- **Many-to-many:** either an array column (`tagIds: s.array(s.uuid())` with
+  `tags: s.rel("tags", "tagIds")`), or a join table with two forward relations, such as
+  `memberships` with `member` and `team`. Use a join table when the link has its own columns
+  (a role, a date) or its own permissions.
+
+## Reading related rows
+
+`include({ author: true })` loads a forward relation and `include({ authoredPosts: true })` a
+reverse one. See [Includes & Relations](/docs/reading/includes-and-relations).
+
+A relation doesn't guarantee the target exists or is readable: it may not have synced yet, it may
+have been deleted, or permissions may hide it. See
+[Missing references](/docs/reading/includes-and-relations#missing-references).
+
+## Permissions that follow relations
+
+Relation names are what policies use to follow references: `allowedTo.read("author")` and the
+other `allowedTo.*` helpers, `hopTo`, and correlated `exists` rules. See
+[Inherited access](/docs/schemas/policies#inherited-access-allowedto) in Declarative Permissions.
+
+## Adding a relation later
+
+Declaring `s.rel` on a UUID column that already exists is a schema change: follow the
+[migration workflow](/docs/schemas/migrations). Existing values stay unchanged.

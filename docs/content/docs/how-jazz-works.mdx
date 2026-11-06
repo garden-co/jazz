@@ -83,7 +83,9 @@ If you're working directly with a `Db` handle instead of the window helper, `awa
 - Deletes only the selected IndexedDB namespace. Preserve `localStorage`, `sessionStorage`, cookies, and other databases; default local-first credentials are stored outside this data database. Apps with custom credential stores must check those separately.
 - Reopens a clean worker/runtime so the same live client remains usable after the wipe.
 
-This is useful when iterating on your schema during development.
+This is useful when iterating on your schema during development. `window.__jazz` is registered by
+every browser client, production builds included: it resets this browser's own storage and
+closes this page's own clients, nothing more.
 
 </Accordion>
 

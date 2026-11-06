@@ -237,6 +237,23 @@ From then on, `authenticate` returning `user.id` opens the guest's account and a
 identity can belong to only one account, so `to` must not have signed in to Jazz on its own yet.
 Linking keeps the account id; earlier rows keep their original issuer and subject.
 
+## Shared devices
+
+On a computer several people use, such as a family laptop or a library terminal:
+
+- **Pass `clearOnSignOut: true`** to `createJazzClient` (or `<JazzProvider>`). The device then
+  never remembers the user, and signing out wipes the account's local storage after waiting up to
+  5 seconds for pending writes to upload; writes still unsynced then are lost. For now the wipe
+  runs when your page signs out and calls `reauthenticate()`; a sign-out Jazz notices another way
+  (another tab, an expired session) closes the account without wiping it.
+- **Pass `linkGuestOnSignUp: false`**, so a guest left on the device by someone else isn't linked
+  to the next person who signs up. See [Guests and linking](#guests-and-linking).
+- **Keep personal data out of `userId` and claims.** Every reader of a user's rows sees
+  `identity.subject` in `$createdBy` and history (see [Metadata](/docs/reading/metadata)), and
+  without `clearOnSignOut` the device remembers the user's claims.
+- **After your own sign-out, call `reauthenticate()`** rather than only redirecting, so Jazz
+  follows your backend's signed-out answer straight away.
+
 ## Lifecycle
 
 `<JazzProvider>` and `createJazzClient` run the lifecycle for you. This section is what happens underneath, and

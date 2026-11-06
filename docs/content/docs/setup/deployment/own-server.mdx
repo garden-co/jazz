@@ -95,6 +95,8 @@ That's the whole deployment:
 Keep the data directory on a durable disk (a Docker volume, an attached block device), and run one
 process per directory: a second process on the same directory is refused (`<path>/jazz.lock`). `sqlite()` refuses to start on serverless hosts with no
 lasting disk (Vercel, AWS Lambda, Netlify); on Vercel, use [`vercel()`](/docs/setup/deployment/vercel).
+Jazz creates the directory's files readable by every user on the machine (mode 0644), so on a shared
+host restrict the directory itself to the service's user (for example `chmod 700`).
 
 ```dockerfile title="Dockerfile"
 FROM node:22-slim
