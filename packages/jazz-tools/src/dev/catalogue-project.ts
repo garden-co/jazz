@@ -46,7 +46,7 @@ import {
 } from "../schema-permissions.js";
 import { collectConventionalProvenanceDiagnostics } from "../provenance-guidance.js";
 import { fetchSchemaHashes, fetchStoredWasmSchema } from "./catalogue-api.js";
-import { renderMigrationStub } from "./migrations.js";
+import { renderMigrationStub, UNFILLED_STUB_TODO } from "./migrations.js";
 import { normalizeSchemaHashInput } from "./schema-utils.js";
 import { legacySchemaHash } from "./legacy-schema-hash.js";
 import {
@@ -212,6 +212,7 @@ export async function validateProject(
   const compiled = ensurePermissionsProject(await loadCompiledSchema(options.schemaDir));
   await validateSchemaAndPermissions(compiled.wasmSchema, compiled.permissions);
   const migrationsDir = resolvedMigrationsDir(options.schemaDir, options.migrationsDir);
+  await refuseUnfilledStubs(migrationsDir);
   let retired: string[] = [];
   let schema: ValidateProjectResult["schema"];
   if (options.check) {
@@ -236,6 +237,51 @@ export async function validateProject(
       ).map((diagnostic) => diagnostic.message),
     ],
   };
+}
+
+/** A line that gives `column` a step: `column: …` or `"column": …`. */
+function stepKey(column: string): RegExp {
+  const name = column.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^\\s*(?:${name}|"${name}"|'${name}')\\s*:`);
+}
+
+/**
+ * The lines after `lines[index]` up to the end of the block it sits in: the
+ * first later line indented less closes it. A stub's TODO sits in its
+ * table's `migrate` block, so this stops before the next table and before
+ * the `from`/`to` witnesses, which name every column.
+ */
+function tableBlockAfter(lines: readonly string[], index: number): readonly string[] {
+  const indent = (line: string) => line.length - line.trimStart().length;
+  const own = indent(lines[index]!);
+  const block: string[] = [];
+  for (const line of lines.slice(index + 1)) {
+    if (line.trim() !== "" && indent(line) < own) break;
+    block.push(line);
+  }
+  return block;
+}
+
+/** Refuse a migration file that still holds a step its stub left to fill in. */
+async function refuseUnfilledStubs(migrationsDir: string): Promise<void> {
+  const files = await readdir(migrationsDir).catch(() => [] as string[]);
+  const unfilled: string[] = [];
+  for (const file of files.filter((name) => name.endsWith(".ts")).sort()) {
+    const lines = (await readFile(join(migrationsDir, file), "utf8")).split("\n");
+    lines.forEach((line, index) => {
+      const todo = UNFILLED_STUB_TODO.exec(line);
+      // Authors often fill the step in under the comment and keep it, so
+      // only a column its table's block gives no step is unfilled.
+      if (todo && !tableBlockAfter(lines, index).some((later) => stepKey(todo[2]!).test(later))) {
+        unfilled.push(`  ${join(basename(migrationsDir), file)}:${index + 1}: ${todo[1]}`);
+      }
+    });
+  }
+  if (unfilled.length === 0) return;
+  throw new Error(
+    `A migration still has steps to fill in, so it cannot deploy:\n${unfilled.join("\n")}\n` +
+      "Replace each TODO with its step (for example `points: m.add.int({ default: 1 })`).",
+  );
 }
 
 /** How `schema` relates to the committed snapshots in `migrationsDir`. */
