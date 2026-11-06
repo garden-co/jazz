@@ -2,6 +2,7 @@ import { CryptoDigestAlgorithm, digestStringAsync } from "expo-crypto";
 import { getItem, getItemAsync, setItem } from "expo-secure-store";
 import { clientRegistryUrl } from "../accounts/account-manager-core.js";
 import type { AccountStore } from "../accounts/persistence.js";
+import type { AppBearer } from "../accounts/enrollment.js";
 import { createAccountManager as createNativeAccountManager } from "../react-native/create-account-manager.js";
 
 export interface AccountManagerConfig {
@@ -20,6 +21,13 @@ export interface AccountManagerConfig {
   /** Separate retained account selections within the same application. */
   profile?: string;
   env?: string;
+  /**
+   * The app's own token for its backend (an app has no cookie to send), read
+   * whenever it is needed: sent as `Authorization: Bearer` when signing in
+   * through the backend (`loginWithBackend`) and on the device's sync
+   * connection, where the backend's `authenticate` reads who the user is.
+   */
+  bearer?: AppBearer;
 }
 
 /** Prepare retained accounts without opening a database or a Jazz context. */
