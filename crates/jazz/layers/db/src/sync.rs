@@ -669,6 +669,33 @@ pub type Order = (u64, [u8; 16], u64);
 
 /// A pending version's writer as history keys it (`_writer`): its node, then its
 /// tx big-endian. An accepted version's is empty.
+/// The writer node a thin client's write commits under (SPEC 8 §8.14):
+/// derived from the author the write runs as and the node the client named,
+/// so every server derives the same one and no other author can name it, nor
+/// any store's own node. Marked as RFC 9562 version 8, which no runtime
+/// mints its nodes as (they are version 4, `NodeUuid::random_from`).
+pub fn origin_node(author: &AuthorSubject, client_node: [u8; 16]) -> [u8; 16] {
+    let (account, issuer, subject) = author_key(author);
+    let mut hasher = jazz_types::sha256::Hasher::new();
+    hasher.update(b"jazz thin write origin v1\0");
+    hasher.update(account.as_bytes());
+    for part in [issuer.as_bytes(), subject.as_bytes()] {
+        hasher.update(&(part.len() as u64).to_be_bytes());
+        hasher.update(part);
+    }
+    hasher.update(&client_node);
+    let digest = hasher.finalize();
+    let mut node: [u8; 16] = digest.as_bytes()[..16].try_into().expect("16 bytes");
+    node[6] = (node[6] & 0x0f) | 0x80;
+    node[8] = (node[8] & 0x3f) | 0x80;
+    node
+}
+
+/// Whether `node` is a thin client's writer node ([`origin_node`]).
+pub(crate) fn is_origin_node(node: [u8; 16]) -> bool {
+    node[6] >> 4 == 8 && node[8] >> 6 == 0b10
+}
+
 pub(crate) fn writer_bytes(node: [u8; 16], tx: u64) -> Vec<u8> {
     let mut w = node.to_vec();
     w.extend_from_slice(&tx.to_be_bytes());
@@ -5752,26 +5779,11 @@ impl Inner {
         }
     }
 
-    /// Whether `identity` may commit as `node`. A node belongs to the
-    /// principal that first commits as it: commits are deduplicated by
-    /// (node, tx), so another principal committing as that node could claim
-    /// its transactions before it sends them, and builds on its commits
-    /// under its own claims.
-    ///
-    /// The node moves with its account's sign-in: a local-first guest that
-    /// signs up keeps its account and its store, and so its node, and goes on
-    /// writing under the principal the app's backend names; later the same
-    /// account may sign in another way (another issuer, or an identity the
-    /// backend linked). The first commit as the node by another signed-in
-    /// principal of the same account takes the node over, and from then on
-    /// only that principal writes as it, until another one takes it over.
-    /// A local-first principal never takes a node over, so a guest's key
-    /// (unexpired, or leaked) no longer writes as its node once the account
-    /// has signed in.
-    /// What this store knows of the commit `(node, tx)` made as another
-    /// writer's: a thin client's write (see [`Db::write_as_origin`]).
-    /// `author` must be the writer the node belongs to; the first to write
-    /// as a node claims it, like a session committing as one.
+    /// What this store knows of the commit `(node, tx)` made under a thin
+    /// client's id (see [`Db::write_as_origin`]): `node` is the
+    /// [`origin_node`] of `author` and the client's node. It is bound to
+    /// `author` here, as a session's node is when it first commits, and no
+    /// session commits as one (`is_origin_node`).
     pub(crate) fn origin_fate(
         &self,
         node: [u8; 16],
@@ -5803,6 +5815,22 @@ impl Inner {
         })
     }
 
+    /// Whether `identity` may commit as `node`. A node belongs to the
+    /// principal that first commits as it: commits are deduplicated by
+    /// (node, tx), so another principal committing as that node could claim
+    /// its transactions before it sends them, and builds on its commits
+    /// under its own claims.
+    ///
+    /// The node moves with its account's sign-in: a local-first guest that
+    /// signs up keeps its account and its store, and so its node, and goes on
+    /// writing under the principal the app's backend names; later the same
+    /// account may sign in another way (another issuer, or an identity the
+    /// backend linked). The first commit as the node by another signed-in
+    /// principal of the same account takes the node over, and from then on
+    /// only that principal writes as it, until another one takes it over.
+    /// A local-first principal never takes a node over, so a guest's key
+    /// (unexpired, or leaked) no longer writes as its node once the account
+    /// has signed in.
     pub(crate) fn claim_node(
         &self,
         node: [u8; 16],
@@ -5991,6 +6019,7 @@ impl Inner {
     pub(crate) fn dropped(&self, node: [u8; 16], tx: u64, ops: &[WireOp]) -> Result<bool, Error> {
         if self.client.is_some()
             || ops.is_empty()
+            || is_origin_node(node)
             || self.shard.awaits(crate::db::shard::CommitRef { node, tx })
             || !ops.iter().all(|op| {
                 self.schema
@@ -6051,7 +6080,11 @@ impl Inner {
         .map_err(storage)?;
         let code = self.node_code(node)?;
         // The commit's own version decides, as for its history.
+        // A thin client's commits reach the authority through any of its
+        // servers, so out of order (`INV-HIST-23` holds per server): each
+        // keeps its exact entry, which a resend is answered from.
         let latest_only = !ops.is_empty()
+            && !is_origin_node(node)
             && !self.shard.awaits(crate::db::shard::CommitRef { node, tx })
             && ops.iter().all(|op| {
                 self.schema
@@ -12222,7 +12255,11 @@ impl Db {
                 // trusted link (a relay forwarding its sessions' commits)
                 // may send any.
                 let identity = self.inner.borrow().sessions[index].identity;
-                if policy.is_some() && !self.inner.borrow().claim_node(node, &identity)? {
+                // No session commits as a thin client's writer node: those
+                // are the server's, derived per author (`origin_node`).
+                if policy.is_some()
+                    && (is_origin_node(node) || !self.inner.borrow().claim_node(node, &identity)?)
+                {
                     let mut inner = self.inner.borrow_mut();
                     let through = inner.served_through();
                     inner.sessions[index].outbox.push(SyncMessage::Fate {

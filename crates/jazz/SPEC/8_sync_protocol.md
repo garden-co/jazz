@@ -1001,19 +1001,29 @@ that does not read are not bounded yet (#4865).
 - A standalone `Insert`, `Update`, `Upsert`, `Delete` or `Restore` may name a
   `writeKey` option, `{ node: <32 hex digits>, seq }`: the client's own id
   for it, a node the client picks and that node's counter, in the order the
-  client makes its writes. The server makes the write as that writer's
-  commit (`Db::write_as_origin`): the authority records its fate under the
-  id, and a replica uploads it under the id, which the authority dedups
-  like any resent commit (§8.2). A write whose key the store already knows
-  is not made again: it answers `Written` with seq 0, or the first one's
-  refusal. The first identity to write as a node claims it; another's key
-  naming it is refused. An insert with a key names its `rowId`; a staged
-  write names no key. So a client resends a keyed write its connection
-  left unanswered, in order, on its next connection, through whichever
-  server of the authority it reaches. The TypeScript thin client does,
-  with a fresh node per runtime and per credential. `UpdateLargeValues`
-  and streams take no key: one their connection left unanswered ends with
-  its outcome unknown.
+  client makes its writes. The server makes the write as a commit whose
+  writer is derived from the session's author and the client's node
+  (`origin_node`, an RFC 9562 version-8 node), at the client's counter
+  (`Db::write_as_origin`): every server derives the same writer, and no
+  other author can name it. No session commits as such a node. The
+  authority records the commit's fate under it; a replica uploads it under
+  it, which the authority dedups like any resent commit (§8.2), and never
+  infers from pruned entries (a client's commits reach it through any
+  server, so out of order). A write that fails, or makes no commit, records
+  nothing, and the next commit does not inherit its id. A write whose key
+  the store already knows for the same author is not made again: it answers
+  `Written` with seq 0, or the first one's refusal as uploaded through a
+  replica. The authority does not record its own refusal: a resend of a
+  write it refused runs again, against current state. On a replica, seq 0
+  can answer a write still pending upstream. An insert with a key names its
+  `rowId`; a staged write names no key. So a client resends a keyed write
+  its connection left unanswered, in order, on its next connection, through
+  whichever server of the authority it reaches, under the same credential.
+  The TypeScript thin client does, with one node per runtime; a write left
+  unanswered when the credential changes ends with its outcome unknown, as
+  the new one may name another user. `UpdateLargeValues` and streams take
+  no key: one their connection left unanswered ends with its outcome
+  unknown.
 - `Begin` opens a mergeable or serializable transaction under a
   client-chosen open-transaction id, owned by that session. A write naming it
   is staged and answered `Staged`; a refusal while staging is kept and

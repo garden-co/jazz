@@ -147,16 +147,77 @@ fn the_authority_answers_a_resent_write_with_the_first_one() {
 }
 
 #[test]
-fn a_write_id_belongs_to_the_identity_that_first_wrote_as_it() {
+fn another_users_write_under_the_same_key_is_a_write_of_its_own() {
+    // The commit's writer is derived from the author and the client's
+    // node: another user naming the same key neither replays nor blocks the
+    // first user's write.
     let core = open(0);
     let row = RowUuid::from_bytes([1; 16]);
     insert_as(&core, 1, row, "draft");
-    let stolen = block_on(core.write_as_origin(origin(2), &user(2), async || {
-        core.update("notes", row, body("not yours"), Default::default())
-            .await
-    }));
-    assert!(stolen.is_err(), "{stolen:?}");
-    assert_eq!(bodies(&core), vec!["draft".to_owned()]);
+    let theirs = block_on(core.write_as_origin(origin(2), &user(2), async || {
+        core.update(
+            "notes",
+            row,
+            body("theirs"),
+            UpdateOptions {
+                identity: WriteIdentity::Session(user(2)),
+                ..Default::default()
+            },
+        )
+        .await
+    }))
+    .unwrap();
+    assert!(matches!(theirs, OriginWrite::Written(_)));
+    assert!(matches!(
+        update_as(&core, 2, row, "mine").unwrap(),
+        OriginWrite::Written(_)
+    ));
+    assert_eq!(bodies(&core), vec!["mine".to_owned()]);
+}
+
+#[test]
+fn a_failed_write_leaves_its_key_to_no_other_commit() {
+    let core = open(0);
+    let replica = open(1);
+    let (up, down) = duplex();
+    let _link = block_on(replica.connect_upstream(up));
+    core.accept_subscriber(down, AuthorSubject::SYSTEM).unwrap();
+    replica.set_remote_link_hint(RemoteLinkHint::Live);
+    let settle = || {
+        for _ in 0..8 {
+            for db in [&replica, &core] {
+                block_on(db.tick()).unwrap();
+            }
+        }
+    };
+    let missing = RowUuid::from_bytes([9; 16]);
+    let prepared = replica.prepare_query(&Query::from("notes")).unwrap();
+    let _live = block_on(replica.subscribe(&prepared, ReadOpts::default())).unwrap();
+    for (key, db) in [(1, &core), (2, &replica)] {
+        // The keyed write fails before it commits; the store's next commit
+        // takes its seq, and must not take its key with it.
+        assert!(update_as(db, key, missing, "nothing").is_err());
+        let row = RowUuid::from_bytes([key as u8 + 2; 16]);
+        block_on(db.insert(
+            "notes",
+            body("plain"),
+            InsertOptions {
+                row_id: Some(row),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        settle();
+        // So the key is still unwritten, here and at the authority.
+        assert!(matches!(
+            update_as(db, key, row, "keyed").unwrap(),
+            OriginWrite::Written(_)
+        ));
+        settle();
+    }
+    let mut seen = bodies(&core);
+    seen.sort();
+    assert_eq!(seen, vec!["keyed".to_owned(), "keyed".to_owned()]);
 }
 
 #[test]
@@ -219,4 +280,51 @@ fn a_resend_through_another_server_gets_the_first_fate_from_the_authority() {
         update_as(&first, 1, row, "mine").unwrap(),
         OriginWrite::Repeat
     ));
+}
+
+#[test]
+fn two_users_writing_under_one_key_through_two_servers_both_land() {
+    let core = open(0);
+    let first = open(1);
+    let second = open(2);
+    let mut links = Vec::new();
+    for server in [&first, &second] {
+        let (up, down) = duplex();
+        links.push(block_on(server.connect_upstream(up)));
+        core.accept_subscriber(down, AuthorSubject::SYSTEM).unwrap();
+        server.set_remote_link_hint(RemoteLinkHint::Live);
+    }
+    let settle = || {
+        for _ in 0..8 {
+            for db in [&first, &second, &core] {
+                block_on(db.tick()).unwrap();
+            }
+        }
+    };
+    // The second user writes first, under the key the first user's write
+    // will name, through another server: still both are written.
+    let theirs = block_on(second.write_as_origin(origin(1), &user(2), async || {
+        second
+            .insert(
+                "notes",
+                body("theirs"),
+                InsertOptions {
+                    row_id: Some(RowUuid::from_bytes([2; 16])),
+                    identity: WriteIdentity::Session(user(2)),
+                    ..Default::default()
+                },
+            )
+            .await
+    }))
+    .unwrap();
+    assert!(matches!(theirs, OriginWrite::Written(_)));
+    settle();
+    assert!(matches!(
+        insert_as(&first, 1, RowUuid::from_bytes([1; 16]), "mine"),
+        OriginWrite::Written(_)
+    ));
+    settle();
+    let mut seen = bodies(&core);
+    seen.sort();
+    assert_eq!(seen, vec!["mine".to_owned(), "theirs".to_owned()]);
 }

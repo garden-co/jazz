@@ -191,16 +191,7 @@ fn write_key(options: &serde_json::Value) -> Result<Option<jazz::tx::TxId>, Thin
     let node = key
         .get("node")
         .and_then(serde_json::Value::as_str)
-        .and_then(|hex| {
-            (hex.len() == 32)
-                .then(|| {
-                    (0..16)
-                        .map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).ok())
-                        .collect::<Option<Vec<u8>>>()
-                })
-                .flatten()
-        })
-        .and_then(|bytes| <[u8; 16]>::try_from(bytes).ok());
+        .and_then(hex_node);
     let seq = key.get("seq").and_then(serde_json::Value::as_u64);
     match (node, seq) {
         (Some(node), Some(seq)) => Ok(Some(jazz::tx::TxId::new(
@@ -211,6 +202,22 @@ fn write_key(options: &serde_json::Value) -> Result<Option<jazz::tx::TxId>, Thin
             "writeKey names the client's node as 32 hex digits and its write's seq",
         )),
     }
+}
+
+/// 32 hex digits as 16 bytes. The input is the client's: it is read as
+/// bytes, so any other text (a sign, a multibyte character) is refused, not
+/// sliced.
+fn hex_node(hex: &str) -> Option<[u8; 16]> {
+    let digits = hex.as_bytes();
+    if digits.len() != 32 {
+        return None;
+    }
+    let digit = |d: u8| (d as char).to_digit(16).map(|v| v as u8);
+    let mut node = [0u8; 16];
+    for (byte, pair) in node.iter_mut().zip(digits.chunks_exact(2)) {
+        *byte = digit(pair[0])? << 4 | digit(pair[1])?;
+    }
+    Some(node)
 }
 
 /// A standalone write, as the client's own commit `key` when it names one:
@@ -1051,4 +1058,43 @@ fn serve_thin_op(
         }
     };
     Ok(Some(body))
+}
+
+#[cfg(test)]
+mod write_key_tests {
+    use super::*;
+
+    fn key(node: &str) -> Result<Option<jazz::tx::TxId>, ThinBody> {
+        write_key(&serde_json::json!({ "writeKey": { "node": node, "seq": 3 } }))
+    }
+
+    #[test]
+    fn a_write_key_names_its_node_as_32_hex_digits() {
+        let id = key("00112233445566778899aabbccddeeFF").unwrap().unwrap();
+        assert_eq!(
+            id.node.as_bytes(),
+            &[
+                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+                0xee, 0xff
+            ]
+        );
+        assert_eq!(id.time.0, 3);
+    }
+
+    #[test]
+    fn a_malformed_write_key_is_refused_not_sliced() {
+        // 32 bytes with a multibyte character at an odd offset: slicing the
+        // text by byte pairs would panic.
+        let multibyte = format!("a{}b", "é".repeat(15));
+        assert_eq!(multibyte.len(), 32);
+        for node in [
+            multibyte.as_str(),
+            "+f+f+f+f+f+f+f+f+f+f+f+f+f+f+f+f",
+            "0011223344556677889900aabbccddeeff",
+            "0011223344556677889900aabbccddz",
+            "",
+        ] {
+            assert!(key(node).is_err(), "{node:?}");
+        }
+    }
 }

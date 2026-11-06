@@ -355,6 +355,47 @@ describe("thin client", () => {
     expect(runtime.pendingUploadCount()).toBe(0);
   }, 60_000);
 
+  it("does not send a write again under a new credential, which may name another user", async () => {
+    const server = await startServer();
+    const db = await thinDb(server);
+    await db.insert(app.notes, { text: "first", done: false }).wait({ tier: "global" });
+    const runtime = db.currentRuntime() as ThinRuntime;
+    // The write's answer is lost with its connection; before the client
+    // reconnects, the app hands it a new credential.
+    const internals = runtime as unknown as {
+      receive(carrier: unknown, piece: Uint8Array): void;
+      lost(carrier: unknown, error: { code: string; retry: string; message: string }): void;
+    };
+    const receive = internals.receive.bind(runtime);
+    let dropped = false;
+    internals.receive = (carrier, piece) => {
+      if (!dropped && isThinResponse(piece) && decodeThinResponse(piece).body.type === "written") {
+        dropped = true;
+        internals.lost(carrier, {
+          code: "websocket_closed",
+          retry: "later",
+          message: "the answer was lost",
+        });
+        reconnect(db);
+        return;
+      }
+      receive(carrier, piece);
+    };
+
+    const write = db.insert(app.notes, { text: "in flight", done: false });
+    // It may have committed as the old user, so it ends with its fate unknown.
+    await expect(write.wait({ tier: "global" })).rejects.toThrow();
+    expect(dropped).toBe(true);
+    expect(runtime.pendingUploadCount()).toBe(0);
+    // The connection the new credential opened serves the next write.
+    await db.insert(app.notes, { text: "after", done: false }).wait({ tier: "global" });
+    expect((await db.all(app.notes)).map((row) => row.text).sort()).toEqual([
+      "after",
+      "first",
+      "in flight",
+    ]);
+  }, 60_000);
+
   it("gives up a write in flight when the app goes offline, so waiting for sync ends", async () => {
     const server = await startServer();
     const db = await thinDb(server);

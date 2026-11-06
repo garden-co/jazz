@@ -144,6 +144,8 @@ type OneShot = {
    * connection ends unanswered, since the server answers a resend with the
    * first one's outcome instead of writing again. */
   resendable?: boolean;
+  /** Sent once and waiting to go out again (see `resendable`). */
+  resending?: boolean;
 };
 
 /** Standalone writes the server dedups by their `writeKey` (SPEC 8 §8.14). */
@@ -218,8 +220,10 @@ export class ThinRuntime implements Runtime {
   private readonly liveByRequest = new Map<number, number>();
   private readonly writes = new Map<string, Write>();
   /** This runtime's writer node: with {@link nextWriteSeq}, each write's
-   * `writeKey`, the id it commits under on the server. */
-  private writerNode = bytesToHex(runtimeRandomBytes(16));
+   * `writeKey`. The server commits the write under a node it derives from
+   * this one and the session's author, so one node serves every identity
+   * the runtime writes as. */
+  private readonly writerNode = bytesToHex(runtimeRandomBytes(16));
   private nextWriteSeq = 1;
   /** Writes the server has not answered yet. */
   private unanswered = 0;
@@ -254,13 +258,13 @@ export class ThinRuntime implements Runtime {
 
   updateAuth(authJson: string): void {
     this.authJson = authJson;
-    // The credential may name another user (a cookie session names none
-    // here): later writes go under a fresh node, which that user claims.
-    this.writerNode = bytesToHex(runtimeRandomBytes(16));
+    // The new credential may name another user (a cookie session names
+    // none here), as whom a sent write must not be made: one that may have
+    // been made ends with its fate unknown, as it did before resends.
+    this.dropConnection(new ThinConnectionLostError());
     if (!this.wanted) return;
     // The server binds a connection to the credential it opened with: a new
     // one takes a new connection.
-    this.dropConnection(new ThinConnectionLostError(), true);
     this.open();
   }
 
@@ -270,13 +274,9 @@ export class ThinRuntime implements Runtime {
    * connects and again as its auth changes.
    */
   useSession(session: Session | null): void {
-    const author = session
+    this.author = session
       ? canonicalAuthorSubject(session.issuer, session.user_id, session.account_id)
       : undefined;
-    // A writer node belongs to the identity that first wrote as it: another
-    // identity's writes go under a node of their own.
-    if (author !== this.author) this.writerNode = bytesToHex(runtimeRandomBytes(16));
-    this.author = author;
   }
 
   onAuthFailure(callback: (reason: string) => void): void {
@@ -424,10 +424,12 @@ export class ThinRuntime implements Runtime {
         oneShot.reject(new ThinTransactionLostError(transaction));
         continue;
       }
-      // Requests not sent yet wait for the next connection.
-      if (!oneShot.sent) continue;
-      if (resend && oneShot.resendable) {
+      // Requests not sent yet wait for the next connection, and so does a
+      // write sent once, unless this drop ends its resends.
+      if (!oneShot.sent && !(oneShot.resending && !resend)) continue;
+      if (oneShot.sent && resend && oneShot.resendable) {
         oneShot.sent = false;
+        oneShot.resending = true;
         continue;
       }
       this.oneShots.delete(id);
