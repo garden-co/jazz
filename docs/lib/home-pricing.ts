@@ -396,7 +396,7 @@ export const platforms: Platform[] = [
     costNote:
       "Hobby (free) while the app fits its allowances and sleeps when idle, otherwise Pro: $20 a month, which includes $20 of usage. Usage is Sandbox memory (2 GB per vCPU) and active CPU while awake, the sync proxy function, Drive and Blob storage, and transfer.",
     traits: {
-      coldWake: "~0.75 s / ~1 s",
+      coldWake: "~0.75 s / ~4 s",
       idle: "Active-CPU pricing; Jazz hibernates a Sandbox after a few idle minutes",
       security: "Vercel Firewall and DDoS protection, with a fast-patching security team",
       durability: "Persistent Drive, Blob for large values",

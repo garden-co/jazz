@@ -82,7 +82,8 @@ Large values, such as files and long streams, are stored in chunks outside the c
 On Vercel, `vercel()` picks where they go:
 
 - **Vercel Blob**, when a Blob store is connected to the project (the Storage tab in the Vercel
-  dashboard sets `BLOB_STORE_ID`). Nothing else to set up: browsers send and fetch large values
+  dashboard sets `BLOB_STORE_ID`). A store created through the Vercel API or CLI sets only
+  `BLOB_READ_WRITE_TOKEN`, so pass its id as `vercelBlob({ storeId })`. Nothing else to set up: browsers send and fetch large values
   through your `/jazz` route, and the core reads and writes the blobs itself with your function's
   OIDC token. Blobs are private, and each is checked against its SHA-256 when read.
 - **The core's SQLite file** on its Drive, when no Blob store is connected. This works, but the
@@ -107,8 +108,9 @@ warning suggesting you set `AWS_REGION` to it. Putting the bucket in your Sandbo
 keeps latency and transfer costs down. Its options are the same
 as for [your own server](/docs/setup/deployment/own-server#large-values).
 
-Each Blob store or bucket serves one Vercel environment. Give production and previews their own,
-connect each to its environment, and enable OIDC for each environment in the project's settings. A core given another environment's store refuses to
+Each Blob store or bucket serves one Vercel environment. A store you connect spans every
+environment unless you limit it, so create one store per environment, connect each to its own
+environment only, and enable OIDC for each environment in the project's settings. A core given another environment's store refuses to
 start and says so. Both `vercelBlob()` and `s3()` also take a `prefix`, by default
 `jazz/<store id>/`.
 
@@ -119,6 +121,10 @@ and the core refuses to start.
 
 History keeps every version of a row, so deleting rows doesn't free their large values, and there
 is no way to erase them yet. Expect blob storage to only grow.
+
+A change to the `vercelBlob()` or `s3()` options doesn't reach a core that is already running the
+same `jazz-tools` version. It applies the next time the core starts: after it stops when idle, or
+when you deploy a new `jazz-tools` version.
 
 ## Local development
 
@@ -151,7 +157,13 @@ All options are optional.
 | `local`          | `sqlite({ path: ".jazz/local" })`                                     | The store used outside Vercel                                    |
 
 The default `name` uses Vercel's system environment variables, which are exposed by default. If
-they aren't, `vercel()` throws and asks you to pass `name`. A Sandbox that already holds another
+they aren't, `vercel()` throws and asks you to pass `name`. It also throws for a preview with no
+Git branch, such as a deploy through the Vercel API or from the CLI outside a Git checkout: pass
+`name` to give such previews a core of their own.
+
+`coreTarballUrl` is needed for any `jazz-tools` version that isn't on npm, such as a release
+candidate. If the Sandbox can't download the core, the function's error says so and the Sandbox is
+stopped. A Sandbox that already holds another
 app's core is refused.
 
 ## Limits
@@ -159,11 +171,12 @@ app's core is refused.
 - Production and each preview branch get one persistent Sandbox and its Drive.
   Two apps in one project need their own `name`. The smallest size is 2 GB of memory and 1 vCPU.
 - Production has one core. Each Git branch's previews get their own core and data
-  (`jazz-<VERCEL_PROJECT_ID>-preview-<branch>-<hash>`). Cores for merged branches aren't cleaned up
-  yet.
+  (`jazz-<VERCEL_PROJECT_ID>-preview-<branch>-<hash>`). Nothing cleans up the Sandboxes and Drives
+  of merged or deleted branches yet; delete them in the Vercel dashboard.
 - The first request in an environment takes longer: it creates the Sandbox and downloads the Jazz
   server onto the Drive.
 - The Sandbox stops after 5 minutes with no requests and no connected clients; a connected
-  client keeps it awake, even when idle. The next request wakes it, which takes about a second.
+  client keeps it awake, even when idle. The next request wakes it, which took 0.6 to 1 s in our
+  benchmarks and 4.2 s on a real project; requests after the wake took about 0.45 s.
 - Deploying a newer `jazz-tools` restarts the core on that version, which briefly drops open
   sockets; clients reconnect. An older deployment that is still running never moves the core back.

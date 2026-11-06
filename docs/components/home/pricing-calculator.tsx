@@ -473,8 +473,8 @@ export function PricingCalculator() {
           {assumptions["global.proRamGb"]} GB of RAM in total, and Jazz Scale (${licenseScaleBase}
           /mo plus ${licensePer1k} per 1,000 peak active sessions) beyond that. A session is active
           in a minute when it writes, subscribes or gets an update. Vercel cold wakes are from our
-          October measurements (0.6 to 1 s); Cloudflare&apos;s are estimates until its runtime
-          ships.
+          October measurements (0.6 to 1 s) and an alpha.60 test project (4.2 s); Cloudflare&apos;s
+          are estimates until its runtime ships.
         </p>
       ) : null}
       <div className="flex justify-center">
