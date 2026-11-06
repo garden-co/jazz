@@ -260,6 +260,25 @@ const failedUpgrades = new Map<string, number>();
  */
 export const UPGRADE_FAILURES_BEFORE_STREAM = 3;
 
+/**
+ * How long a socket may stay connecting before it counts as failed before
+ * opening. Some proxies (`vite preview` without `ws`, a fetch-based proxy)
+ * never answer an upgrade at all, so the socket neither opens nor fails.
+ * The probe that follows gets as long.
+ */
+export const SOCKET_OPEN_DEADLINE_MS = 10_000;
+
+/**
+ * How many sockets in a row that got no answer at all, to a backend that
+ * answers and upgrades them, mean upgrades never get through. Two, not one:
+ * a scale-to-zero host's edge holds the first upgrade after idle while the
+ * instance cold-starts, and lets the next one through.
+ */
+export const UPGRADE_HANGS_BEFORE_STREAM = 2;
+
+/** Sockets in a row that got no answer, to an endpoint whose backend answers and upgrades. */
+const hungUpgrades = new Map<string, number>();
+
 /** Header on createJazz's 426 for a socket path (see `createJazz`). */
 const STREAM_AVAILABLE_HEADER = "x-jazz-stream";
 
@@ -279,6 +298,9 @@ async function probeSocketPath(
     const response = await fetch(url.replace(/^ws/, "http"), {
       method: "POST",
       credentials: "same-origin",
+      // A stall that holds plain requests too must not keep the socket
+      // connecting: a probe that gets no answer says nothing.
+      signal: AbortSignal.timeout?.(SOCKET_OPEN_DEADLINE_MS),
     });
     void response.body?.cancel().catch(() => undefined);
     if (response.status === 403) return "refused";
@@ -289,14 +311,18 @@ async function probeSocketPath(
   }
 }
 
-/** Whether a socket to `url` that just failed before opening should give way to the stream. */
-async function servesStreamInstead(url: string): Promise<boolean> {
+/** Whether a socket to `url` that just failed before opening should give way to the stream.
+ * Upgrades that got no answer at all (`hung`) count on their own: a backend
+ * that restarts or drains refuses a socket, it doesn't leave one hanging,
+ * so fewer of them in a row ({@link UPGRADE_HANGS_BEFORE_STREAM}) switch. */
+async function servesStreamInstead(url: string, hung = false): Promise<boolean> {
   const answer = await probeSocketPath(url);
   if (answer === "stream") return true;
   if (answer !== "upgrades") {
     // Not a backend that answered and upgrades (down, restarting, or
     // refusing this origin): the failures are no longer in a row.
     failedUpgrades.delete(url);
+    hungUpgrades.delete(url);
     if (answer === "refused" && !refusedOrigins.has(url)) {
       refusedOrigins.add(url);
       console.warn(
@@ -307,8 +333,19 @@ async function servesStreamInstead(url: string): Promise<boolean> {
   }
   const failures = (failedUpgrades.get(url) ?? 0) + 1;
   failedUpgrades.set(url, failures);
-  if (failures < UPGRADE_FAILURES_BEFORE_STREAM) return false;
+  const hangs = hung ? (hungUpgrades.get(url) ?? 0) + 1 : 0;
+  if (hung) hungUpgrades.set(url, hangs);
+  else hungUpgrades.delete(url);
+  const hangsSwitch = hangs >= UPGRADE_HANGS_BEFORE_STREAM;
+  if (failures < UPGRADE_FAILURES_BEFORE_STREAM && !hangsSwitch) return false;
   failedUpgrades.delete(url);
+  hungUpgrades.delete(url);
+  if (hangsSwitch) {
+    console.warn(
+      `jazz: ${hangs} WebSockets in a row to ${url} got no answer in ${SOCKET_OPEN_DEADLINE_MS / 1000} s, although the backend answers and upgrades them: something in between (a proxy or dev server) doesn't pass WebSocket upgrades on. Syncing over the HTTP stream instead, for as long as this page is open.`,
+    );
+    return true;
+  }
   console.warn(
     `jazz: ${failures} WebSockets in a row to ${url} failed, although the backend answers and upgrades them: something in between (a proxy or dev server) doesn't pass WebSocket upgrades on. Syncing over the HTTP stream instead, for as long as this page is open.`,
   );
@@ -328,6 +365,8 @@ export function sameOriginWebSocketConstructor(native: WebSocketConstructor): We
     private settled = false;
     /** The native socket failed and we're asking whether to use the stream. */
     private probing = false;
+    /** Ends a socket that stays connecting (see {@link SOCKET_OPEN_DEADLINE_MS}). */
+    private openDeadline: ReturnType<typeof setTimeout> | undefined;
 
     constructor(private readonly url: string) {
       super();
@@ -348,6 +387,7 @@ export function sameOriginWebSocketConstructor(native: WebSocketConstructor): We
     close(): void {
       this.settled = true;
       this.probing = false;
+      clearTimeout(this.openDeadline);
       this.inner.close();
     }
 
@@ -356,7 +396,8 @@ export function sameOriginWebSocketConstructor(native: WebSocketConstructor): We
       socket.binaryType = "arraybuffer";
       let opened = false;
       let failure: { error?: unknown; close?: unknown } | undefined;
-      const failedBeforeOpen = (kind: "error" | "close", event: unknown) => {
+      const failedBeforeOpen = (kind: "error" | "close", event: unknown, hung = false) => {
+        clearTimeout(this.openDeadline);
         if (this.settled) return;
         if (failure) {
           failure[kind] ??= event;
@@ -364,7 +405,7 @@ export function sameOriginWebSocketConstructor(native: WebSocketConstructor): We
         }
         failure = { [kind]: event };
         this.probing = true;
-        void servesStreamInstead(this.url).then((stream) => {
+        void servesStreamInstead(this.url, hung).then((stream) => {
           this.probing = false;
           if (this.settled) return;
           this.settled = true;
@@ -378,13 +419,27 @@ export function sameOriginWebSocketConstructor(native: WebSocketConstructor): We
           this.emit("close", failure?.close ?? { code: 1006, reason: "" });
         });
       };
+      this.openDeadline = setTimeout(() => {
+        failedBeforeOpen(
+          "close",
+          { code: 1006, reason: "the WebSocket upgrade got no answer" },
+          true,
+        );
+        socket.close();
+      }, SOCKET_OPEN_DEADLINE_MS);
       socket.addEventListener("open", () => {
+        // A socket given up on (its open deadline passed) says nothing more.
+        if (failure) return;
+        clearTimeout(this.openDeadline);
         opened = true;
         failedUpgrades.delete(this.url);
+        hungUpgrades.delete(this.url);
         this.settled = true;
         this.emit("open");
       });
-      socket.addEventListener("message", (event) => this.emit("message", event));
+      socket.addEventListener("message", (event) => {
+        if (!failure) this.emit("message", event);
+      });
       socket.addEventListener("error", (event) => {
         if (opened) this.emit("error", event);
         else failedBeforeOpen("error", event);

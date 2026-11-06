@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  SOCKET_OPEN_DEADLINE_MS,
   STREAM_RECORD_SESSION,
   UPGRADE_FAILURES_BEFORE_STREAM,
   encodeStreamRecord,
@@ -52,6 +53,26 @@ function openingNative(): WebSocketConstructor {
   } as unknown as WebSocketConstructor;
 }
 
+/** A native socket whose upgrade never gets an answer, behind a proxy that holds it. */
+function hangingNative(closed: string[]): WebSocketConstructor {
+  return class HangingSocket {
+    binaryType = "blob";
+    readyState = 0;
+    private listeners = new Map<string, Listener[]>();
+    constructor(private readonly url: string) {}
+    addEventListener(type: string, listener: Listener) {
+      this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
+    }
+    send() {}
+    close() {
+      closed.push(this.url);
+      this.readyState = 3;
+      for (const listener of this.listeners.get("close") ?? [])
+        listener({ code: 1006, reason: "" });
+    }
+  } as unknown as WebSocketConstructor;
+}
+
 function outcome(socket: { addEventListener(type: string, listener: Listener): void }) {
   return new Promise<string>((resolve) => {
     socket.addEventListener("open", () => resolve("open"));
@@ -77,7 +98,48 @@ function openStreamResponse(id: string): Response {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+  vi.useRealTimers();
 });
+
+/** A createJazz backend that upgrades sockets (426, no stream marker) and serves the stream. */
+function backendThatUpgrades(host: string, url: string, session: string) {
+  return vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    const target = String(input);
+    if (init?.method === "POST" && target === `http://${host}/jazz/apps/a1/ws`) {
+      return new Response("Upgrade to a WebSocket", { status: 426 });
+    }
+    if (init?.method === "POST" && target === streamUrlForSocketUrl(url)) {
+      return openStreamResponse(session);
+    }
+    return new Response(null, { status: 404 });
+  });
+}
+
+type HeldSocket = { closed: boolean; fire(type: string, event?: unknown): void };
+
+/** Native sockets the test opens (or not) by hand. */
+function heldNative(sockets: HeldSocket[]): WebSocketConstructor {
+  return class Held {
+    binaryType = "blob";
+    readyState = 0;
+    closed = false;
+    private listeners = new Map<string, Listener[]>();
+    constructor(_url: string) {
+      sockets.push(this);
+    }
+    addEventListener(type: string, listener: Listener) {
+      this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
+    }
+    fire(type: string, event: unknown = {}) {
+      for (const listener of this.listeners.get(type) ?? []) listener(event);
+    }
+    send() {}
+    close() {
+      this.closed = true;
+    }
+  } as unknown as WebSocketConstructor;
+}
 
 describe("same-origin socket fallback", () => {
   it("switches to the HTTP stream only when a createJazz backend says it serves one", async () => {
@@ -135,6 +197,91 @@ describe("same-origin socket fallback", () => {
     socket.close();
     expect(warn.mock.calls.flat().join(" ")).toMatch(/doesn't pass WebSocket upgrades on/);
     warn.mockRestore();
+  });
+
+  it("switches to the HTTP stream when upgrades get no answer at all, twice in a row", async () => {
+    // A proxy (vite preview without ws) that passes plain requests on and
+    // holds upgrades: the socket neither opens nor fails.
+    vi.useFakeTimers();
+    const url = "ws://holding-proxy.test/jazz/apps/a1/ws";
+    const fetchMock = backendThatUpgrades("holding-proxy.test", url, "s3");
+    vi.stubGlobal("fetch", fetchMock);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const closed: string[] = [];
+    const Socket = sameOriginWebSocketConstructor(hangingNative(closed));
+    // The first hang fails as a socket: a scale-to-zero edge holds the
+    // first upgrade after idle while the instance starts.
+    const first = outcome(new Socket(url));
+    await vi.advanceTimersByTimeAsync(SOCKET_OPEN_DEADLINE_MS - 1);
+    expect(fetchMock).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await first).toBe("closed");
+    expect(closed).toEqual([url]);
+    expect(warn).not.toHaveBeenCalled();
+    // A second in a row, and the stream takes over, saying why.
+    const socket = new Socket(url);
+    const second = outcome(socket);
+    await vi.advanceTimersByTimeAsync(SOCKET_OPEN_DEADLINE_MS);
+    expect(await second).toBe("open");
+    expect(warn.mock.calls.flat().join(" ")).toMatch(/got no answer/);
+    socket.close();
+  });
+
+  it("keeps a socket that opens just before its deadline, and nothing it said after", async () => {
+    vi.useFakeTimers();
+    const url = "ws://slow-open.test/jazz/apps/a1/ws";
+    const fetchMock = backendThatUpgrades("slow-open.test", url, "s4");
+    vi.stubGlobal("fetch", fetchMock);
+    const natives: HeldSocket[] = [];
+    const Socket = sameOriginWebSocketConstructor(heldNative(natives));
+    const socket = new Socket(url);
+    const result = outcome(socket);
+    await vi.advanceTimersByTimeAsync(SOCKET_OPEN_DEADLINE_MS - 1);
+    natives[0]!.fire("open");
+    expect(await result).toBe("open");
+    await vi.advanceTimersByTimeAsync(SOCKET_OPEN_DEADLINE_MS);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(natives[0]!.closed).toBe(false);
+    socket.close();
+
+    // A socket past its deadline is given up on: an open it reports later
+    // is not taken.
+    const late = new Socket(url);
+    const events: string[] = [];
+    for (const type of ["open", "message", "close"])
+      late.addEventListener(type, () => events.push(type));
+    await vi.advanceTimersByTimeAsync(SOCKET_OPEN_DEADLINE_MS);
+    natives[1]!.fire("open");
+    natives[1]!.fire("message", { data: "late" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(events).toEqual(["close"]);
+  });
+
+  it("stops the deadline when the socket is closed while connecting", async () => {
+    vi.useFakeTimers();
+    const url = "ws://closed-early.test/jazz/apps/a1/ws";
+    const fetchMock = backendThatUpgrades("closed-early.test", url, "s5");
+    vi.stubGlobal("fetch", fetchMock);
+    const natives: HeldSocket[] = [];
+    const socket = new (sameOriginWebSocketConstructor(heldNative(natives)))(url);
+    socket.close();
+    await vi.advanceTimersByTimeAsync(2 * SOCKET_OPEN_DEADLINE_MS);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("leaves a hung upgrade to fail as a socket when the endpoint is not a createJazz backend", async () => {
+    vi.useFakeTimers();
+    const url = "ws://elsewhere.test/jazz/apps/a1/ws";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(null, { status: 404 })),
+    );
+    const Socket = sameOriginWebSocketConstructor(hangingNative([]));
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const result = outcome(new Socket(url));
+      await vi.advanceTimersByTimeAsync(SOCKET_OPEN_DEADLINE_MS);
+      expect(await result).toBe("closed");
+    }
   });
 
   it("starts the count of failed upgrades again once a socket opens", async () => {
