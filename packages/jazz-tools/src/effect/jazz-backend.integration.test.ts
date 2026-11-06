@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { startTestJazz } from "../testing/index.js";
-import { Jazz, JazzBackend, JazzWriteRejected } from "./backend/index.js";
+import { Jazz, JazzBackend, JazzNoAccount, JazzWriteRejected } from "./backend/index.js";
 
 const app = s.defineApp(
   {
@@ -50,6 +50,8 @@ describe("JazzBackend Effect layer", () => {
     try {
       const backendLayer = JazzBackend.layerJazz(server.jazz);
       const clientLayer = Jazz.layer(await localAccountConfig(server.appId, server.url));
+      // The reader is a user the backend serves without a client of their own.
+      await server.jazz.createAccountFor("effect-reader");
       const headers = { authorization: `Bearer ${server.bearer("effect-reader")}` };
       const request = () => new Request("http://localhost/posts", { headers });
 
@@ -103,11 +105,49 @@ describe("JazzBackend Effect layer", () => {
     }
   }, 60_000);
 
+  it("fails with JazzNoAccount for a user without an account, until the backend creates one", async () => {
+    const server = await startTestJazz({ app, permissions });
+    try {
+      const request = new Request("http://localhost/posts", {
+        headers: { authorization: `Bearer ${server.bearer("newcomer")}` },
+      });
+      const write = createPost("first post").pipe(JazzBackend.forReqUser(request));
+      const outcome = await Effect.runPromise(
+        Effect.gen(function* () {
+          // Jazz creates no account on its own: the handler gets a typed failure...
+          const refused = yield* write.pipe(
+            Effect.flip,
+            Effect.flatMap((error) =>
+              error instanceof JazzNoAccount ? Effect.succeed(error) : Effect.die(error),
+            ),
+          );
+          // ...until the backend creates the account, once, explicitly.
+          const backend = yield* JazzBackend;
+          const account = yield* backend.createAccountFor("newcomer");
+          const created = yield* write;
+          return { refused, account, created };
+        }).pipe(Effect.provide(JazzBackend.layerJazz(server.jazz))),
+      );
+      expect(outcome.refused).toMatchObject({
+        _tag: "JazzNoAccount",
+        userId: "newcomer",
+        operation: "forReqUser",
+      });
+      expect(outcome.created).toMatchObject({
+        _tag: "Some",
+        value: { $createdBy: { account: outcome.account } },
+      });
+    } finally {
+      await server.stop();
+    }
+  }, 60_000);
+
   it("isolates concurrent request handlers to each user's own permissions", async () => {
     const server = await startTestJazz({ app, permissions });
     try {
       const backendLayer = JazzBackend.layerJazz(server.jazz);
       const users = ["diarist-a", "diarist-b"];
+      for (const user of users) await server.jazz.createAccountFor(user);
       const requests = users.map(
         (user) =>
           new Request("http://localhost/diary", {

@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { createServer, request as httpRequest, type IncomingMessage, type Server } from "node:http";
 import { createRequire } from "node:module";
-import type { AddressInfo } from "node:net";
+import type { AddressInfo, Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -219,9 +219,21 @@ describe("createJazz", () => {
     // The backend's own db sees the row; a request scope sees only its user's rows.
     const seen = await jazz.db.all(app.todos.where({ id: row.id }));
     expect(seen.map((todo) => todo.title)).toEqual(["from alice"]);
-    const asBob = await jazz.forReqUser(
-      new Request("http://app/x", { headers: { "x-test-user": "bob" } }),
-    );
+    // Bob never signed in: looking him up or acting as him makes no account.
+    const bobRequest = () => new Request("http://app/x", { headers: { "x-test-user": "bob" } });
+    await expect(jazz.accountFor(bobRequest())).resolves.toBeNull();
+    await expect(jazz.forReqUser(bobRequest())).rejects.toMatchObject({
+      name: "NoJazzAccountError",
+      code: "no_account",
+      userId: "bob",
+    });
+    await expect(jazz.withAttribution(bobRequest())).rejects.toMatchObject({ code: "no_account" });
+    await expect(jazz.accountFor(bobRequest())).resolves.toBeNull();
+    // The backend creates his account on purpose, and then acts as him.
+    const bobAccount = await jazz.createAccountFor("bob");
+    await expect(jazz.createAccountFor("bob")).resolves.toBe(bobAccount);
+    await expect(jazz.accountFor(bobRequest())).resolves.toBe(bobAccount);
+    const asBob = await jazz.forReqUser(bobRequest());
     expect(await asBob.all(app.todos)).toEqual([]);
     // API routes can name the request's account without a client credential.
     await expect(
@@ -437,11 +449,13 @@ describe("createJazz", () => {
             .sign(privateKey)}`,
         },
       });
-    const account = await jazz.accountFor(await bearer("user_01"));
+    // The token names the user; they have no account until one is made.
+    await expect(jazz.accountFor(await bearer("user_01"))).resolves.toBeNull();
+    const account = await jazz.createAccountFor("user_01");
     expect(account).toEqual(expect.any(String));
     // A fresh token for the same user opens the same account.
     await expect(jazz.accountFor(await bearer("user_01"))).resolves.toBe(account);
-    await expect(jazz.accountFor(await bearer("user_02"))).resolves.not.toBe(account);
+    await expect(jazz.accountFor(await bearer("user_02"))).resolves.toBeNull();
     await expect(jazz.accountFor(new Request("http://app/x"))).resolves.toBeNull();
   }, 60_000);
 
@@ -755,6 +769,80 @@ describe("createJazz", () => {
       .toMatchObject({ state: "offline", reason: "auth" });
   }, 30_000);
 
+  it("refuses a sync session for a user without an account, until they sign in", async () => {
+    // One origin whose backend is replaced by one on a new core (a reset dev
+    // store): the client remembers alice, but the new core has no account
+    // for her, and sync admission never creates one. (A browser's session
+    // then signs her in again: see backend-watch.test.ts.)
+    const listen = async (jazz: Jazz, port = 0) => {
+      const server = createServer((req, res) => jazz.nodeHandler(req, res));
+      // Upgraded sync sockets too, which `server.close` would wait on.
+      const sockets = new Set<Socket>();
+      server.on("connection", (socket) => {
+        sockets.add(socket);
+        socket.once("close", () => sockets.delete(socket));
+      });
+      await jazz.attach(server);
+      await new Promise<void>((resolve) => server.listen(port, "127.0.0.1", resolve));
+      const close = () =>
+        new Promise<void>((resolve) => {
+          for (const socket of sockets) socket.destroy();
+          server.close(() => resolve());
+        });
+      cleanups.push(close);
+      return { port: (server.address() as AddressInfo).port, close };
+    };
+    const first = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    cleanups.push(() => first.close());
+    const before = await listen(first);
+    const origin = `http://127.0.0.1:${before.port}`;
+    signInAs(origin, "alice");
+    const session = await createJazzClient({
+      app,
+      permissions,
+      serverUrl: `${origin}/jazz`,
+      driver: { type: "memory" },
+    });
+    cleanups.push(() => session.close());
+    await session.loginWithBackend();
+    const firstAccount = session.getSnapshot().client!.session!.user!;
+    await session
+      .getSnapshot()
+      .client!.db.insert(app.todos, { title: "before the reset", owner: firstAccount })
+      .wait({ tier: "global" });
+
+    await before.close();
+    const second = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    cleanups.push(() => second.close());
+    await listen(second, before.port);
+
+    // The client reconnects stating alice's session: the new core has no
+    // account for her, and admission refuses it rather than make one.
+    const remembered = session.getSnapshot().client!;
+    await expect
+      .poll(() => remembered.db.getSyncStatus().link, { timeout: 20_000, interval: 100 })
+      .toMatchObject({ state: "offline", reason: "auth" });
+    const asAlice = new Request("http://app/x", { headers: { "x-test-user": "alice" } });
+    await expect(second.accountFor(asAlice)).resolves.toBeNull();
+
+    // Her sign-in gives her an account on the new core, and syncs.
+    const again = await createJazzClient({
+      app,
+      permissions,
+      serverUrl: `${origin}/jazz`,
+      driver: { type: "memory" },
+    });
+    cleanups.push(() => again.close());
+    await again.loginWithBackend();
+    const account = again.getSnapshot().client!.session!.user!;
+    expect(account).not.toBe(firstAccount);
+    await expect(second.accountFor(asAlice)).resolves.toBe(account);
+    await again
+      .getSnapshot()
+      .client!.db.insert(app.todos, { title: "after the reset", owner: account })
+      .wait({ tier: "global" });
+  }, 60_000);
+
   it("reconnects a user whose socket's cookies expired but who is still signed in", async () => {
     // Requests seen before `expiredBefore` carry cookies that have since expired.
     const firstSeen = new WeakMap<Request, number>();
@@ -1039,6 +1127,18 @@ describe("createJazz", () => {
       expect(answer.account).toBeNull();
       expect(answer.identity).toEqual({ issuer: "jazz:backend", subject: "alice" });
     }
+    // Nor do the backend's own lookups and requests for her (V9): an API
+    // route that asks for her account, or acts as her, before her browser's
+    // guest links leaves the link open.
+    const asAlice = () => new Request("http://app/x", { headers: { "x-test-user": "alice" } });
+    await expect(jazz.accountFor(asAlice())).resolves.toBeNull();
+    await expect(jazz.forReqUser(asAlice())).rejects.toMatchObject({ code: "no_account" });
+    await expect(jazz.withAttribution(asAlice())).rejects.toMatchObject({ code: "no_account" });
+    // createAccountFor needs the user's id, and rejects without one.
+    await expect(jazz.createAccountFor("")).rejects.toThrow(/pass the user's id/);
+    await expect(jazz.createAccountFor(undefined as unknown as string)).rejects.toThrow(
+      /pass the user's id/,
+    );
     // So the guest's link to alice still goes through, and the answer names
     // the guest's account from then on.
     const secret = generateSecret();
@@ -1053,6 +1153,8 @@ describe("createJazz", () => {
     const { account } = (await linked.json()) as { account: string };
     const after = (await (await post("backend-user", "alice")).json()) as { account: string };
     expect(after.account).toBe(account);
+    await expect(jazz.accountFor(asAlice())).resolves.toBe(account);
+    await expect(jazz.forReqUser(asAlice())).resolves.toBeDefined();
     // A user who signed in has an account; a GET is refused.
     await post("backend-sign-in", "bob");
     expect(
@@ -1627,9 +1729,11 @@ describe("createJazz", () => {
     expect((await asAlice.all(app.todos)).map((todo) => todo.title)).toEqual([
       "through the backend",
     ]);
-    const asBob = await other.forReqUser(
-      new Request("http://app/x", { headers: { "x-test-user": "bob" } }),
-    );
+    // An account one instance creates is the account every instance finds.
+    const bobAccount = await jazz.createAccountFor("bob");
+    const bobRequest = new Request("http://app/x", { headers: { "x-test-user": "bob" } });
+    await expect(other.accountFor(bobRequest)).resolves.toBe(bobAccount);
+    const asBob = await other.forReqUser(bobRequest);
     expect(await asBob.all(app.todos)).toEqual([]);
 
     // A guest whose client names no app: the backend vouches for the
@@ -1675,13 +1779,11 @@ describe("createJazz", () => {
     cleanups.push(() => (closed ? Promise.resolve() : jazz.close()));
     const asAlice = () =>
       jazz.forReqUser(new Request("http://app/x", { headers: { "x-test-user": "alice" } }));
-    const alice = await jazz.accountFor(
-      new Request("http://app/x", { headers: { "x-test-user": "alice" } }),
-    );
+    const alice = await jazz.createAccountFor("alice");
     await (
       await asAlice()
     )
-      .insert(app.todos, { title: "before", owner: alice! })
+      .insert(app.todos, { title: "before", owner: alice })
       .wait({ tier: "global" });
 
     // The core goes away and comes back on the same address and data.
@@ -1697,7 +1799,7 @@ describe("createJazz", () => {
       ]);
     const db = await within(asAlice(), "forReqUser");
     await within(
-      db.insert(app.todos, { title: "after", owner: alice! }).wait({ tier: "global" }),
+      db.insert(app.todos, { title: "after", owner: alice }).wait({ tier: "global" }),
       "a global write",
     );
     const titles = await within(db.all(app.todos, { tier: "remote" }), "a remote read");
@@ -1733,12 +1835,12 @@ describe("createJazz", () => {
     let closed = false;
     cleanups.push(() => (closed ? Promise.resolve() : jazz.close()));
     const request = new Request("http://app/x", { headers: { "x-test-user": "alice" } });
-    const alice = await jazz.accountFor(request);
+    const alice = await jazz.createAccountFor("alice");
     const db = await jazz.forReqUser(request);
-    await db.insert(app.todos, { title: "reached", owner: alice! }).wait({ tier: "global" });
+    await db.insert(app.todos, { title: "reached", owner: alice }).wait({ tier: "global" });
 
     await core.stop();
-    db.insert(app.todos, { title: "stranded", owner: alice! });
+    db.insert(app.todos, { title: "stranded", owner: alice });
 
     // A SIGTERM handler's close(): it gives pending writes their time, then
     // ends instead of waiting for a core that is not coming back.
