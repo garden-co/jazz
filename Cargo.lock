@@ -160,12 +160,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "arrayref"
-version = "0.3.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76a2e8124351fda1ef8aaaa3bbd7ebbcb486bbcd4225aca0aa0d84bb2db8fecb"
-
-[[package]]
 name = "arrayvec"
 version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -329,20 +323,6 @@ name = "bitflags"
 version = "2.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "843867be96c8daad0d758b57df9392b6d8d271134fce549de6ce169ff98a92af"
-
-[[package]]
-name = "blake3"
-version = "1.8.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4d2d5991425dfd0785aed03aedcf0b321d61975c9b5b3689c774a2610ae0b51e"
-dependencies = [
- "arrayref",
- "arrayvec",
- "cc",
- "cfg-if",
- "constant_time_eq",
- "cpufeatures 0.3.0",
-]
 
 [[package]]
 name = "block-buffer"
@@ -644,12 +624,6 @@ name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
-
-[[package]]
-name = "constant_time_eq"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
 name = "convert_case"
@@ -1894,7 +1868,6 @@ name = "jazz"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
- "blake3",
  "bytes",
  "codspeed-divan-compat",
  "criterion",
@@ -1994,11 +1967,11 @@ dependencies = [
 name = "jazz-db"
 version = "0.1.0"
 dependencies = [
- "blake3",
  "bytes",
  "futures",
  "jazz-model",
  "jazz-protocol",
+ "jazz-text",
  "jazz-types",
  "postcard",
  "rusqlite",
@@ -2149,9 +2122,9 @@ name = "jazz-model"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
- "blake3",
  "hex",
  "internment",
+ "jazz-text",
  "jazz-types",
  "jsonschema",
  "postcard",
@@ -2172,6 +2145,7 @@ dependencies = [
  "jazz-native-relay",
  "jazz-otel",
  "jazz-server",
+ "jazz-text",
  "libsodium-sys-stable",
  "mimalloc-safe",
  "napi",
@@ -2188,16 +2162,15 @@ name = "jazz-native-relay"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
- "blake3",
  "futures",
  "getrandom 0.3.4",
  "jazz",
  "jazz-native-transport",
  "jazz-server",
  "jazz-testkit",
+ "jazz-text",
  "libc",
  "postcard",
- "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
@@ -2256,7 +2229,6 @@ dependencies = [
 name = "jazz-protocol"
 version = "0.1.0"
 dependencies = [
- "blake3",
  "hex",
  "jazz-compression",
  "jazz-model",
@@ -2282,10 +2254,12 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
+ "bytes",
  "flate2",
  "futures",
  "futures-util",
  "hex",
+ "hmac",
  "http",
  "jazz",
  "jazz-otel",
@@ -2343,11 +2317,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-text"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "jazz-types"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
- "blake3",
  "bytes",
  "ed25519-dalek",
  "futures",
@@ -2377,6 +2358,7 @@ dependencies = [
  "getrandom 0.2.17",
  "getrandom 0.3.4",
  "jazz",
+ "jazz-text",
  "jazz-wasm-tracing",
  "js-sys",
  "postcard",

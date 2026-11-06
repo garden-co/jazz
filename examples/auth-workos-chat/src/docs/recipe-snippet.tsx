@@ -1,34 +1,33 @@
-import { AuthKitProvider, useAuth } from "@workos-inc/authkit-react";
-import { JazzProvider, jwtAuth, useJazzAuth } from "jazz-tools/react";
-function YourApp() {
-  const { logout } = useJazzAuth();
-  return <button onClick={() => void logout()}>Sign out</button>;
+import { JazzProvider, useJazzAuth } from "jazz-tools/react";
+import { useWorkOSSession } from "../session.js";
+function YourApp({ signOut }: { signOut: () => Promise<void> }) {
+  const { reauthenticate } = useJazzAuth();
+  return (
+    <button
+      onClick={async () => {
+        await signOut();
+        await reauthenticate();
+      }}
+    >
+      Sign out
+    </button>
+  );
 }
 
 // #region workos-jazz-react
-function JazzWithWorkOS() {
-  const { user, isLoading, getAccessToken, signIn, signOut } = useAuth();
+export function App() {
+  // Your backend's own endpoint, reading the AuthKit session cookie.
+  const { signIn, signOut } = useWorkOSSession();
   return (
     <JazzProvider
       appId="my-app"
-      serverUrl="wss://your-jazz-server.example.com"
-      auth={jwtAuth({
-        key: user?.id ?? null,
-        isPending: isLoading,
-        getToken: () => getAccessToken({ forceRefresh: true }),
-        logout: () => signOut(),
-      })}
+      serverUrl="/jazz"
       signedOut={<button onClick={() => void signIn()}>Sign in</button>}
     >
-      <YourApp />
+      <YourApp signOut={signOut} />
     </JazzProvider>
   );
 }
-export function App() {
-  return (
-    <AuthKitProvider clientId="client_01ABC...">
-      <JazzWithWorkOS />
-    </AuthKitProvider>
-  );
-}
+// Jazz asks your backend's `authenticate` who is signed in on start and on
+// focus; call `reauthenticate()` from `useJazzAuth()` after your own sign-out.
 // #endregion workos-jazz-react

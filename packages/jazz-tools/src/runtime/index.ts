@@ -64,11 +64,13 @@ export type { ClientMigrations } from "./client-migrations.js";
 export type { AuthFailureReason, AuthState } from "./auth-state.js";
 export type { LinkStatus, SyncStatus } from "./sync-status.js";
 export {
+  fetchPublishedBundles,
   fetchStoredPermissions,
   fetchSchemaHashes,
   fetchStoredWasmSchema,
   type FetchStoredPermissionsOptions,
   type FetchStoredWasmSchemaOptions,
+  type PublishedBundle,
   type StoredSchemaHash,
   type StoredPermissionsResponse,
 } from "../dev/catalogue-api.js";
@@ -87,3 +89,11 @@ export {
   AuthSecretFormatError,
 } from "./auth-secret-store.js";
 export type { AuthSecretStore, BrowserAuthSecretStoreOptions } from "./auth-secret-store.js";
+export type {
+  ResolvedTextAnchor,
+  ResolvedTextRange,
+  TextAnchor,
+  TextAnchors,
+  TextRange,
+  TextSide,
+} from "./text-anchors.js";

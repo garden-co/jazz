@@ -152,3 +152,22 @@ describe("account storage and principal runtime isolation", () => {
     expect(() => assertBrowserStorageOwnerUnchanged(alice, { ...alice })).not.toThrow();
   });
 });
+
+describe("browser storage scope", () => {
+  it("opens the same database for `scope: X` as for `appId: X`, and one per endpoint", async () => {
+    const {
+      createBrowserAuthSessionKey,
+      createBrowserPhysicalDatabaseName,
+      createBrowserStorageOwner,
+    } = await import("./browser-worker-config.js");
+    const keys = (config: Record<string, unknown>) => [
+      createBrowserPhysicalDatabaseName(config as never, "app"),
+      createBrowserStorageOwner(config as never),
+      createBrowserAuthSessionKey(config as never),
+    ];
+    expect(keys({ scope: "legacy-app" })).toEqual(keys({ appId: "legacy-app" }));
+    expect(keys({ serverUrl: "https://a.example/jazz" })).not.toEqual(
+      keys({ serverUrl: "https://b.example/jazz" }),
+    );
+  });
+});

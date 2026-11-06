@@ -19,7 +19,9 @@ pub use account_session::{
 };
 mod node_lease;
 mod relay;
+mod text_anchors;
 pub use relay::*;
+pub use text_anchors::jazz_native_relay_text_anchors;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::c_void;
@@ -163,7 +165,14 @@ struct PendingPrivateSession {
 struct PrivateRelaySocketSession {
     server_url: String,
     app_id: String,
+    /// What the socket presents: a local-first account's own token, or, for
+    /// a user signed in through the app's backend, the app's own bearer.
     bearer: String,
+    /// Set for a user signed in through the app's backend: the session the
+    /// socket states, which the backend checks against who `bearer` is. The
+    /// bearer then rides the upgrade's `Authorization` header to the app's
+    /// backend, never the prelude a core reads.
+    backend_session: Option<serde_json::Value>,
 }
 
 /// JSON-shaped form accepted only by the platform-owned admission C entry
@@ -1163,10 +1172,20 @@ impl NativeRelayHost {
                 app_id: AppId::from_string(&session.app_id)
                     .unwrap_or_else(|_| AppId::from_name(&session.app_id)),
                 peer_identity,
-                auth: AuthConfig {
-                    jwt_token: Some(session.bearer),
-                    ..AuthConfig::default()
+                auth: match &session.backend_session {
+                    Some(stated) => AuthConfig {
+                        backend_session: Some(stated.clone()),
+                        ..AuthConfig::default()
+                    },
+                    None => AuthConfig {
+                        jwt_token: Some(session.bearer.clone()),
+                        ..AuthConfig::default()
+                    },
                 },
+                authorization: session
+                    .backend_session
+                    .is_some()
+                    .then(|| format!("Bearer {}", session.bearer)),
                 on_event: Arc::new(move |event| {
                     link_for_event
                         .lock()
@@ -1945,7 +1964,7 @@ impl NativeRelayHost {
         RelayScope::from(scope.clone())
             .validate()
             .map_err(relay_status)?;
-        let digest = blake3::hash(
+        let digest = jazz::sha256::hash(
             format!(
                 "{}\0{}\0{}",
                 scope.app_namespace, scope.storage_namespace, canonical_subject
@@ -1973,6 +1992,7 @@ impl NativeRelayHost {
                     server_url: request.server_url,
                     app_id: request.app_id,
                     bearer: request.jwt,
+                    backend_session: None,
                 }),
             },
         );

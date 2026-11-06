@@ -40,7 +40,11 @@ import {
   INDEXEDDB_STORAGE_MANIFEST_STORE,
   IndexedDbPageStore,
 } from "../../src/runtime/indexeddb-page-store.js";
-import { createJazzServerTransportControl, getJazzServerInfo } from "./testing-server.js";
+import {
+  createJazzServerTransportControl,
+  getJazzServerInfo,
+  startJazzApp,
+} from "./testing-server.js";
 import {
   createBrowserTestDb as createDb,
   sleep,
@@ -188,14 +192,15 @@ describe("browser Jazz storage compatibility corpus", () => {
   });
 
   it("produces the SQLite catalogue/history/branch/large-value corpus through public WasmDb", async () => {
-    const server = await getJazzServerInfo(CORPUS_APP_ID);
+    const core = await getJazzServerInfo(CORPUS_APP_ID);
     await deploy({
-      appId: server.appId,
-      serverUrl: server.serverUrl,
-      adminSecret: server.adminSecret,
+      appId: core.appId,
+      serverUrl: core.serverUrl,
+      adminSecret: core.adminSecret,
       schema: app.wasmSchema,
       permissions,
     });
+    const server = await startJazzApp(core, { schema: app.wasmSchema, permissions });
     const transport = transportCleanup.trackTransport(
       await createJazzServerTransportControl(server.serverUrl),
     );

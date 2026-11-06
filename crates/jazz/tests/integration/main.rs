@@ -13,6 +13,8 @@ mod aggregate_nullable_keys;
 mod aggregate_ordering;
 #[path = "../array_columns.rs"]
 mod array_columns;
+#[path = "../authority_accepted_content.rs"]
+mod authority_accepted_content;
 #[path = "../authorization_scope_reentry.rs"]
 mod authorization_scope_reentry;
 #[path = "../binding_host.rs"]
@@ -23,10 +25,14 @@ mod branch_column_evolution;
 mod branch_view_sync;
 #[path = "../branch_views.rs"]
 mod branch_views;
+#[path = "../bundle_permissions.rs"]
+mod bundle_permissions;
 #[path = "../catalogue_rows.rs"]
 mod catalogue_rows;
 #[path = "../claims_change.rs"]
 mod claims_change;
+#[path = "../claims_registry_refresh.rs"]
+mod claims_registry_refresh;
 #[path = "../column_defaults.rs"]
 mod column_defaults;
 #[path = "../commit_atomicity_frames.rs"]
@@ -83,6 +89,8 @@ mod local_first_server_wait;
 mod maybe_conflicting;
 #[path = "../mutation_admission.rs"]
 mod mutation_admission;
+#[path = "../nested_policy_dependencies.rs"]
+mod nested_policy_dependencies;
 #[path = "../order_by_unselected_column.rs"]
 mod order_by_unselected_column;
 #[path = "../parameterized_subscription_routing.rs"]
@@ -99,6 +107,8 @@ mod pre_sync_writes;
 mod prepared_claim_routing;
 #[path = "../provenance.rs"]
 mod provenance;
+#[path = "../read_deadline_scheduling.rs"]
+mod read_deadline_scheduling;
 #[path = "../read_request_lifecycle.rs"]
 mod read_request_lifecycle;
 #[path = "../recheck_policies.rs"]
@@ -127,6 +137,8 @@ mod relay_serves_on_arrival;
 mod schema_activation;
 #[path = "../schema_renames.rs"]
 mod schema_renames;
+#[path = "../self_table_policy_watches.rs"]
+mod self_table_policy_watches;
 #[path = "../serializable_relay.rs"]
 mod serializable_relay;
 #[path = "../serializable_sqlite.rs"]
@@ -149,10 +161,16 @@ mod storage_corpus;
 mod storage_errors;
 #[path = "../stored_identities.rs"]
 mod stored_identities;
+#[path = "../streaming_transaction.rs"]
+mod streaming_transaction;
 #[path = "../streaming_upload_ownership.rs"]
 mod streaming_upload_ownership;
 #[path = "../structured_result_tree.rs"]
 mod structured_result_tree;
+#[path = "../subscription_refresh_metadata.rs"]
+mod subscription_refresh_metadata;
+#[path = "../subscription_scope_sharing.rs"]
+mod subscription_scope_sharing;
 #[path = "../sync_access_loss.rs"]
 mod sync_access_loss;
 #[path = "../sync_aggregates.rs"]
@@ -187,6 +205,10 @@ mod text_merge;
 mod transaction_commit_kind;
 #[path = "../transaction_handles.rs"]
 mod transaction_handles;
+#[path = "../transaction_identity.rs"]
+mod transaction_identity;
+#[path = "../transaction_read_guards.rs"]
+mod transaction_read_guards;
 #[path = "../transaction_read_tiers.rs"]
 mod transaction_read_tiers;
 #[path = "../union_queries.rs"]
@@ -195,8 +217,22 @@ mod union_queries;
 mod uuid_page_probe;
 #[path = "../write_check_evidence.rs"]
 mod write_check_evidence;
+
+#[path = "../relay_read_claims.rs"]
+mod relay_read_claims;
 #[path = "../write_receipt_owner.rs"]
 mod write_receipt_owner;
 
 #[path = "../transaction_read_prefix.rs"]
 mod transaction_read_prefix;
+
+#[path = "../executing_handle_policy_context.rs"]
+mod executing_handle_policy_context;
+#[path = "../governance_claims_composition.rs"]
+mod governance_claims_composition;
+
+#[path = "../governance_ordinary_composition.rs"]
+mod governance_ordinary_composition;
+
+#[path = "../local_observation_submission.rs"]
+mod local_observation_submission;

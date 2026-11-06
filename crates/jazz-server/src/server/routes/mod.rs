@@ -30,12 +30,14 @@ use tower_http::trace::TraceLayer;
 use crate::server::{MAX_CATALOGUE_REQUEST_BODY_BYTES, ServerState};
 
 use http::{
-    admin_subscription_introspection_handler, deploy_handler, health_handler,
-    internal_shutdown_handler, migration_graph_handler, permissions_handler, schema_handler,
-    schema_hashes_handler,
+    admin_subscription_introspection_handler, health_handler, internal_shutdown_handler,
+    migration_graph_handler, permissions_handler, publish_bundle_handler,
+    published_bundles_handler, schema_handler, schema_hashes_handler,
 };
 use utils::parse_app_id_param;
 pub(crate) use websocket::WebSocketAdmissionState;
+#[cfg(feature = "embedded-server")]
+pub(crate) use websocket::handle_ws_connection;
 use websocket::ws_handler;
 
 async fn app_id_gate(
@@ -85,8 +87,21 @@ async fn app_shutdown_gate(
 
 pub fn create_router(state: Arc<ServerState>) -> Router {
     let admin_routes = Router::new()
-        .route("/deploy", post(deploy_handler))
+        .route(
+            "/bundles",
+            post(publish_bundle_handler).get(published_bundles_handler),
+        )
         .route("/accounts/resolve", post(accounts::resolve_for_admin))
+        .route(
+            "/accounts/login-or-register",
+            post(accounts::login_or_register_for_admin),
+        )
+        .route("/accounts/link", post(accounts::link_for_admin))
+        .route(
+            "/accounts/found-local-first",
+            post(accounts::found_local_first_for_admin),
+        )
+        .route("/accounts/revoke", post(accounts::revoke_for_admin))
         .route("/permissions", get(permissions_handler))
         .route("/migrations/graph", get(migration_graph_handler))
         .route(
@@ -94,17 +109,7 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
             get(admin_subscription_introspection_handler),
         )
         .layer(DefaultBodyLimit::max(MAX_CATALOGUE_REQUEST_BODY_BYTES));
-    let account_routes = Router::new()
-        .route("/register", post(accounts::register))
-        .route("/found-local-first", post(accounts::found_local_first))
-        .route("/revoke", post(accounts::revoke))
-        .route("/login", post(accounts::login))
-        .route("/login-or-register", post(accounts::login_or_register))
-        .route("/links/request", post(accounts::request_link))
-        .route("/links/accept", post(accounts::accept_link))
-        .layer(DefaultBodyLimit::max(64 * 1024));
     let traced_routes = Router::new()
-        .nest("/accounts", account_routes)
         .route("/backend/admit", post(accounts::admit_backend))
         .route("/ws", axum::routing::any(ws_handler))
         .route("/schema/{hash}", get(schema_handler))
@@ -113,6 +118,10 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             app_shutdown_gate,
+        ))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::middleware::workload::workload_gate,
         ))
         .route_layer(middleware::from_fn_with_state(state.clone(), app_id_gate))
         .layer(TraceLayer::new_for_http());
@@ -213,7 +222,6 @@ mod tests {
             backend_secret: None,
             admin_secret: Some("admin-secret".to_string()),
             allow_local_first_auth: true,
-            jwks_url: None,
             ..Default::default()
         }
     }
@@ -226,7 +234,6 @@ mod tests {
             backend_secret: Some(backend_secret.to_string()),
             admin_secret: None,
             allow_local_first_auth: false,
-            jwks_url: None,
             ..Default::default()
         };
 
@@ -312,7 +319,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method(Method::OPTIONS)
-                    .uri(test_app_route("/admin/deploy"))
+                    .uri(test_app_route("/admin/bundles"))
                     .header(header::ORIGIN, "http://localhost:3000")
                     .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
                     .header(header::ACCESS_CONTROL_REQUEST_HEADERS, requested_headers)
@@ -536,7 +543,6 @@ mod tests {
                 backend_secret: None,
                 admin_secret: Some("admin-secret".to_string()),
                 allow_local_first_auth: false,
-                jwks_url: None,
                 ..Default::default()
             })
             .with_storage(StorageBackend::InMemory)
@@ -686,7 +692,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri(test_app_route("/admin/deploy"))
+                    .uri(test_app_route("/admin/bundles"))
                     .header("Content-Type", "application/json")
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::from(
@@ -915,6 +921,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn published_bundles_require_the_admin_secret() {
+        let state = ServerBuilder::new(AppId::from_name("test-app"))
+            .with_auth_config(test_auth_config())
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await
+            .unwrap()
+            .state;
+        let app = make_test_router(state);
+        for secret in [None, Some("wrong-secret"), Some("admin-secret")] {
+            let mut request = axum::http::Request::builder().uri(test_app_route("/admin/bundles"));
+            if let Some(secret) = secret {
+                request = request.header("X-Jazz-Admin-Secret", secret);
+            }
+            let response = app
+                .clone()
+                .oneshot(request.body(axum::body::Body::empty()).unwrap())
+                .await
+                .unwrap();
+            if secret != Some("admin-secret") {
+                assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+                continue;
+            }
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let json: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(json, serde_json::json!({ "bundles": [] }));
+        }
+    }
+
+    #[tokio::test]
     async fn migration_graph_includes_isolated_schemas_forward_edges_and_active_schema() {
         let schema = |column| {
             SchemaBuilder::new()
@@ -1037,7 +1076,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri(test_app_route("/admin/deploy"))
+                    .uri(test_app_route("/admin/bundles"))
                     .header("Content-Type", "application/json")
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::from(
@@ -1133,7 +1172,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri(test_app_route("/admin/deploy"))
+                    .uri(test_app_route("/admin/bundles"))
                     .header("Content-Type", "application/json")
                     .body(axum::body::Body::from(request_body.to_string()))
                     .unwrap(),
@@ -1146,7 +1185,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri(test_app_route("/admin/deploy"))
+                    .uri(test_app_route("/admin/bundles"))
                     .header("Content-Type", "application/json")
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::from(request_body.to_string()))
@@ -1209,7 +1248,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri(test_app_route("/admin/deploy"))
+                    .uri(test_app_route("/admin/bundles"))
                     .header("Content-Type", "application/json")
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::from(request_body.to_string()))
@@ -1298,7 +1337,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri(test_app_route("/admin/deploy"))
+                    .uri(test_app_route("/admin/bundles"))
                     .header("Content-Type", "application/json")
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::from(request_body.to_string()))
@@ -1610,7 +1649,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method(Method::POST)
-                    .uri(test_app_route("/admin/deploy"))
+                    .uri(test_app_route("/admin/bundles"))
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(padded_migration(
@@ -1625,7 +1664,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method(Method::POST)
-                    .uri(test_app_route("/admin/deploy"))
+                    .uri(test_app_route("/admin/bundles"))
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(padded_migration(

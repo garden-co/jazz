@@ -1,15 +1,27 @@
 import { commands } from "vitest/browser";
 
 import type { JazzServerInfo } from "./testing-server.js";
+import type { WasmSchema } from "../../src/drivers/types.js";
+import type { CompiledPermissionsMap } from "../../src/schema-permissions.js";
 
 export interface JazzServerBrowserCommands {
   jazzServerInfo(appId?: string): Promise<JazzServerInfo>;
   jazzServerStop(serverUrl: string): Promise<void>;
-  jazzServerJwtForUser(
-    userId: string,
-    claims?: Record<string, unknown>,
-    appId?: string,
+  jazzAppFront(
+    coreUrl: string,
+    app: { schema: WasmSchema; permissions: CompiledPermissionsMap; pageOrigin: string },
   ): Promise<string>;
+  jazzAppUser(frontUrl: string, userId: string, claims?: Record<string, unknown>): Promise<string>;
+  /** Optional: only configs whose tests write as the backend register it. */
+  jazzAppBackendInsert?(
+    frontUrl: string,
+    table: string,
+    row: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
+  jazzAppRequest(
+    url: string,
+    init: { method: string; headers: [string, string][]; body: string | null },
+  ): Promise<{ status: number; headers: [string, string][]; body: string }>;
 }
 
 export interface JazzServerTransportControlBrowserCommands {
@@ -60,7 +72,9 @@ function isJazzServerBrowserCommands(value: unknown): value is JazzServerBrowser
     value !== null &&
     hasFunction(value, "jazzServerInfo") &&
     hasFunction(value, "jazzServerStop") &&
-    hasFunction(value, "jazzServerJwtForUser")
+    hasFunction(value, "jazzAppFront") &&
+    hasFunction(value, "jazzAppUser") &&
+    hasFunction(value, "jazzAppRequest")
   );
 }
 
@@ -81,8 +95,7 @@ export function jazzServerBrowserCommands(): JazzServerBrowserCommands {
   if (!isJazzServerBrowserCommands(commands)) {
     throw new Error(
       "Browser test project is missing Jazz server commands. Configure jazzServerInfo, " +
-        "jazzServerStop, and " +
-        "jazzServerJwtForUser.",
+        "jazzServerStop, jazzAppFront, jazzAppUser and jazzAppRequest.",
     );
   }
   return commands;

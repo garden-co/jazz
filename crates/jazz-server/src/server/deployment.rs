@@ -19,6 +19,7 @@ pub(crate) struct DeployRequest {
     pub migrations: Vec<PublishMigrationRequest>,
     pub permissions: HashMap<TableName, TablePolicies>,
 }
+
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct DeploySchema {
     pub hash: String,
@@ -85,10 +86,6 @@ impl From<DeploymentError> for DeployError {
             Cycle { schemas } => (
                 "migration_cycle",
                 serde_json::json!({"schemas":schemas.iter().map(ToString::to_string).collect::<Vec<_>>()}),
-            ),
-            UnreachableTarget { active, target } => (
-                "unreachable_deployment_target",
-                serde_json::json!({"active":active.to_string(),"target":target.to_string()}),
             ),
             DisconnectedGraph { roots } => (
                 "disconnected_migration_graph",
@@ -183,7 +180,7 @@ pub(crate) async fn deploy(
         .ok_or_else(|| DeployError::invalid("deployment revision overflow"))?;
     let staged = state
         .catalogue_store
-        .stage_deployment(&prepared, revision)
+        .stage_deployment(&prepared)
         .map_err(DeployError::invalid)?;
     if !staged.response.changed {
         return Ok(staged.response);
@@ -230,7 +227,43 @@ pub(crate) async fn deploy(
     Ok(staged.response)
 }
 
-/// What applying `prepared` to `runtime`'s catalogue changes.
+/// Publish `source` (a schema carrying its permissions as table policies)
+/// as a permissions bundle, as `createJazz` does on boot: no permissions
+/// become current. Its hex bundle id.
+#[cfg(any(test, feature = "embedded-server"))]
+pub(crate) async fn publish_source_bundle(
+    state: Arc<ServerState>,
+    source: &Schema,
+) -> Result<String, String> {
+    let mut structural = source.clone();
+    for table in structural.values_mut() {
+        table.policies = TablePolicies::default();
+    }
+    let hash = jazz::tools::public_schema::SchemaHash::compute(&structural).to_string();
+    let permissions = source
+        .iter()
+        .map(|(name, table)| (*name, table.policies.clone()))
+        .collect();
+    let response = deploy(
+        state,
+        DeployRequest {
+            target_schema_hash: hash.clone(),
+            schemas: vec![DeploySchema {
+                hash,
+                schema: structural,
+            }],
+            migrations: Vec::new(),
+            permissions,
+        },
+    )
+    .await
+    .map_err(|error| error.body.to_string())?;
+    Ok(response.bundle)
+}
+
+/// What applying `prepared` to `runtime`'s catalogue changes: its rows,
+/// and the admission of its schemas, the target among them so sessions
+/// pinned to its bundle can write by it. Nothing becomes current.
 async fn change(
     runtime: &ServerRuntimeHandle,
     prepared: &deployment::PreparedDeployment,
@@ -238,8 +271,21 @@ async fn change(
     revision: u64,
 ) -> Result<jazz::catalogue::CatalogueChange, DeployError> {
     let stored = runtime.catalogue().await.map_err(DeployError::internal)?;
-    deployment::prepare_catalogue_change(prepared, &stored, put, revision)
-        .map_err(DeployError::invalid)
+    let mut change = deployment::prepare_catalogue_change(prepared, &stored, put, revision)
+        .map_err(DeployError::invalid)?;
+    if let Some((_, target, lenses)) = change.activate.take()
+        && !stored
+            .schemas
+            .iter()
+            .any(|schema| schema.version == Some(target.version_id()))
+        && change
+            .admit
+            .iter()
+            .all(|(schema, _)| schema.version_id() != target.version_id())
+    {
+        change.admit.push((target, lenses));
+    }
+    Ok(change)
 }
 
 impl From<CatalogueApplyError> for DeployError {

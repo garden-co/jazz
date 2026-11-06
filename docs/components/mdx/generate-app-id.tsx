@@ -15,8 +15,7 @@ const JAZZ_CLOUD_SYNC_URL = "https://v2.sync.jazz.tools/";
 const BUNDLER_ITEMS = ["Vite", "Next.js", "SvelteKit", "Expo"] as const;
 type Bundler = (typeof BUNDLER_ITEMS)[number];
 
-// Client-exposed env var prefix per bundler, matching the dev plugins.
-// SvelteKit covers both SvelteKit itself and Svelte+Vite via jazzSvelteKit.
+// The env var prefix each bundler exposes to client code.
 const CLIENT_PREFIX: Record<Bundler, string> = {
   Vite: "VITE_",
   "Next.js": "NEXT_PUBLIC_",
@@ -28,9 +27,8 @@ function envBlockFor(bundler: Bundler, app: GeneratedApp): string {
   const prefix = CLIENT_PREFIX[bundler];
   return [
     `${prefix}JAZZ_APP_ID="${app.appId}"`,
-    `${prefix}JAZZ_SERVER_URL="${JAZZ_CLOUD_SYNC_URL}"`,
+    `JAZZ_SERVER_URL="${JAZZ_CLOUD_SYNC_URL}"`,
     `JAZZ_ADMIN_SECRET="${app.adminSecret}"`,
-    `BACKEND_SECRET="${app.backendSecret}"`,
   ].join("\n");
 }
 
@@ -47,7 +45,16 @@ function CredentialsBlock({ app }: { app: GeneratedApp }) {
 }
 
 function ConfigBlock({ app }: { app: GeneratedApp }) {
-  const code = `{\n  appId: "${app.appId}",\n  serverUrl: "https://v2.sync.jazz.tools/",\n}`;
+  const code = [
+    `createJazz({`,
+    `  appId: "${app.appId}",`,
+    `  // app, permissions, authenticate ...`,
+    `  store: remote({`,
+    `    url: process.env.JAZZ_SERVER_URL!,`,
+    `    secret: process.env.JAZZ_ADMIN_SECRET!,`,
+    `  }),`,
+    `});`,
+  ].join("\n");
   return <Code language="ts" code={code} />;
 }
 
@@ -109,7 +116,7 @@ export function GenerateAppId() {
       <CredentialsBlock app={app} />
 
       <Text as="p" display="block" color="secondary">
-        Use this config in your app:
+        Use them in your backend:
       </Text>
       <ConfigBlock app={app} />
     </div>

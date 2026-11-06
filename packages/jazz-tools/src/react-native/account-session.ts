@@ -10,6 +10,8 @@ export function beginNativeAccountSession(
   factory: NativeForegroundFactory,
   config: DbConfig,
   session: Session,
+  /** For a user signed in through the app's backend: the app's own bearer. */
+  bearer?: string,
 ): Uint8Array {
   assertAccountConfig(config);
   if (!config.accountId || !config.accountRegistryAuthority) {
@@ -23,6 +25,11 @@ export function beginNativeAccountSession(
   ) {
     throw new Error("React Native accounts require a matching native account-admission build");
   }
+  // A local-first account presents its own token; a user signed in through
+  // the app's backend presents the app's bearer, which the backend reads.
+  const credential = config.cookieSession
+    ? { bearer: requireBearer(bearer) }
+    : { jwt: config.jwtToken };
   return factory.beginAccountSession(
     JSON.stringify({
       registry: config.accountRegistryAuthority,
@@ -31,7 +38,7 @@ export function beginNativeAccountSession(
       account_id: config.accountId,
       issuer: session.issuer,
       subject: session.user_id,
-      jwt: config.jwtToken,
+      ...credential,
       claims: session.claims,
       server_url: config.serverUrl ?? null,
     }),
@@ -58,4 +65,11 @@ export function resolveNativeSession(config: DbConfig) {
   });
   if (!session) throw new Error("React Native account session could not be resolved");
   return session;
+}
+
+function requireBearer(bearer: string | undefined): string {
+  if (bearer) return bearer;
+  throw new Error(
+    "A React Native user signed in through the app's backend syncs with the app's bearer: pass `bearer` to createAccountManager",
+  );
 }
