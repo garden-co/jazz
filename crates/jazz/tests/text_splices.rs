@@ -893,7 +893,12 @@ fn same_spot_typing_in_any_order_keeps_every_character() {
             let merged = body(&server);
             for (editor, device) in editors.iter_mut().zip(&devices) {
                 editor.refresh(body(&device.db));
-                assert_eq!(editor.text, merged, "{people} people, seed {seed}");
+                assert_eq!(
+                    editor.text,
+                    merged,
+                    "{people} people, {} bytes, seed {seed}",
+                    start.len()
+                );
             }
             for word in &typed[..people] {
                 let mine: String = merged[intro.len()..]
@@ -903,7 +908,8 @@ fn same_spot_typing_in_any_order_keeps_every_character() {
                 assert_eq!(
                     mine,
                     word.replace(' ', ""),
-                    "{people} people, seed {seed}: {merged:?}"
+                    "{people} people, {} bytes, seed {seed}: {merged:?}",
+                    start.len()
                 );
             }
         }

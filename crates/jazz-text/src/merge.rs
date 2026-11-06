@@ -15,9 +15,10 @@
 //! HTML also tags and entities), so an edit never splits one. Two sides'
 //! changes then combine by these rules, in base order:
 //!
-//! - a word typed into or deleted from (characters inserted at one place,
-//!   or only deleted), by one side or both, is diffed by character, so
-//!   typing into one word at once keeps both sides' letters;
+//! - a word or number both sides typed into or deleted from (characters
+//!   only inserted, or only deleted, at any places, also where the typing
+//!   added a space or punctuation) is diffed by character, so typing into
+//!   one word at once keeps both sides' letters;
 //! - changes to disjoint parts of the base all apply;
 //! - an identical change made by both applies once;
 //! - inserts at one point apply in seq order, the held value's first;
@@ -259,6 +260,19 @@ fn cuttable(word: &str) -> bool {
     })
 }
 
+/// A word or number token (it starts with a word character, so the
+/// tokenizer made it of word characters alone).
+fn word_token(token: &str) -> bool {
+    token.chars().next().is_some_and(word)
+}
+
+/// A token a word typed into may become: a word, a number, or one
+/// character (a typed space or punctuation mark), never a tag, entity,
+/// link destination or delimiter run.
+fn typable(token: &str) -> bool {
+    word_token(token) || graphemes(token).len() == 1
+}
+
 /// Whether `new` (one or more tokens, joined) is the word `old` with
 /// characters (whole graphemes) only inserted, or only deleted, at any
 /// number of places. Both people typing
@@ -270,7 +284,7 @@ fn typed_into(old: &str, new: &str) -> bool {
     // one (`AB0` from `0`), merges by character too. Markers and
     // punctuation never do.
     let typed = |token: &str| token.chars().any(word) && cuttable(token);
-    if old == new || !typed(old) || !typed(new) {
+    if old == new || !word_token(old) || !typed(old) || !typed(new) {
         return false;
     }
     let (old, new) = (graphemes(old), graphemes(new));
@@ -302,6 +316,9 @@ fn split_typed_words<'a>(
             .filter(|hunk| {
                 hunk.old.1 == hunk.old.0 + 1
                     && hunk.new.1 > hunk.new.0
+                    // Only words, numbers and single characters: a tag, entity,
+                    // link destination or delimiter run is never split.
+                    && new[hunk.new.0..hunk.new.1].iter().all(|token| typable(token))
                     && typed_into(base[hunk.old.0], &new[hunk.new.0..hunk.new.1].concat())
             })
             .map(|hunk| (hunk.old.0, hunk.new.0..hunk.new.1))
@@ -1268,6 +1285,21 @@ mod tests {
             merge("-- XYZ--", "-- XYZW--", "-- abXYZcd--"),
             "-- abXYZWcd--"
         );
+        // A word one side turned into markup is never cut: the tag or link
+        // destination stays whole, and the later write wins the word.
+        for (format, held) in [
+            (TextFormat::Html, "a <a href=\"kit\">kits</a> b"),
+            (TextFormat::Markdown, "a [kits](http://kit.io) b"),
+        ] {
+            for (first, second) in [(held, "a kiXt b"), ("a kiXt b", held)] {
+                let merged = merge3(format, "a kit b", first, second);
+                assert!(
+                    !merged.contains("kiXt\"") && !merged.contains("kiXt.io"),
+                    "{merged:?}"
+                );
+                assert_eq!(tokenize(format, &merged).concat(), merged);
+            }
+        }
         // A number typed into, beside letters typed around it.
         assert_eq!(merge("-- 0--", "-- AB0--", "-- 01--"), "-- AB01--");
         assert_eq!(merge("v 2025", "v 20256", "v 20257"), "v 202567");
