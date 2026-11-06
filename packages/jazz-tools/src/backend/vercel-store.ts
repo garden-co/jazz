@@ -28,6 +28,7 @@ import type {
   BrowserWebSocket,
   WebSocketConstructor,
 } from "../runtime/native-runtime/websocket.js";
+import { optionalPeerImportError } from "./optional-peer.js";
 
 export const VERCEL_CORE_PORT = 1625;
 
@@ -613,8 +614,8 @@ export interface OpenVercelCoreOptions {
 async function importSandboxSdk(): Promise<SandboxSdk> {
   try {
     return (await import(/* @vite-ignore */ "@vercel/sandbox")) as unknown as SandboxSdk;
-  } catch {
-    throw new Error("vercel() needs the @vercel/sandbox package: npm install @vercel/sandbox");
+  } catch (error) {
+    throw optionalPeerImportError("vercel()", "@vercel/sandbox", error);
   }
 }
 

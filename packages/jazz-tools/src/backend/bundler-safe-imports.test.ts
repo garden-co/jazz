@@ -31,6 +31,8 @@ describe("backend imports under bundlers", () => {
         const opened = before.lastIndexOf("try {");
         expect(opened, `${peer} in ${file} is not inside try`).toBeGreaterThan(-1);
         // No block closes between the `try {` and the import at the try's level.
+        // A rough count: braces inside strings and comments count too, so keep
+        // that stretch of code free of them.
         let depth = 0;
         for (const char of before.slice(opened + 4)) {
           if (char === "{") depth++;

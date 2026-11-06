@@ -75,6 +75,7 @@ export {
 import { isSameAdmission, recheckEvery } from "./session-recheck.js";
 import { NoJazzAccountError } from "./no-account-error.js";
 import { RequestAuthenticationError } from "./request-auth.js";
+import { optionalPeerImportError } from "./optional-peer.js";
 
 /** Where the core keeps its data. */
 export type JazzStore =
@@ -2252,10 +2253,8 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         vercelFunctions = (await import(
           /* @vite-ignore */ "@vercel/functions"
         )) as unknown as typeof vercelFunctions;
-      } catch {
-        throw new Error(
-          "Jazz on Vercel needs the @vercel/functions package: npm install @vercel/functions",
-        );
+      } catch (error) {
+        throw optionalPeerImportError("Jazz on Vercel", "@vercel/functions", error);
       }
       const { upgradeWebSocket } = vercelFunctions;
       return upgradeWebSocket((ws) => acceptSocket(request, ws), {
