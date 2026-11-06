@@ -2881,7 +2881,6 @@ function http2Only(server: object): boolean {
 }
 
 /**
-/**
  * What a 503 tells the client to wait: until the store is tried again. The
  * reason stays in the backend's logs; it can name internal hosts.
  */
@@ -2897,7 +2896,8 @@ const UNAVAILABLE_BODY = "Jazz is unavailable; try again shortly";
  * closed. After a close it also closes the connection: a host shutting down
  * (`next start` on SIGTERM) waits for its keep-alive connections, and a
  * client re-opening its sync stream over one would keep it, and the
- * process, alive.
+ * process, alive. (A Fetch response can't tell an HTTP/2 host, which drops
+ * the header with a warning; nodeHandler leaves it off there.)
  */
 function storeUnavailable(retryAfter: number, closed: boolean): Response {
   return new Response(UNAVAILABLE_BODY, {
