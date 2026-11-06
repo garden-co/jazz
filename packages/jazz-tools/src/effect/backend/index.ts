@@ -4,4 +4,4 @@
  */
 export { JazzBackend, type JazzBackendService } from "../jazz-backend.js";
 export { Jazz, type JazzDb, type JazzTransaction, type WaitOptions } from "../jazz.js";
-export { JazzError, JazzWriteRejected } from "../errors.js";
+export { JazzError, JazzNoAccount, JazzWriteRejected } from "../errors.js";

@@ -187,14 +187,18 @@ export async function startTestJazz(options: StartTestJazzOptions): Promise<Test
     async as(userId, claims) {
       const host = await serve();
       users.set(host, { userId, claims });
-      const account = await jazz.accountFor(new Request(`http://${host}/`));
-      if (!account) throw new Error(`startTestJazz: no account for ${userId}`);
+      // Signed in as their browser would be: the sign-in gives them their account.
       const signIn = await jazz.handle(
         new Request(`http://${host}${jazz.basePath}/apps/${core.appId}/accounts/backend-sign-in`, {
           method: "POST",
         }),
       );
-      const { identity } = (await signIn.json()) as { identity: { issuer: string } };
+      if (!signIn.ok)
+        throw new Error(`startTestJazz: ${userId} could not sign in (${signIn.status})`);
+      const { account, identity } = (await signIn.json()) as {
+        account: string;
+        identity: { issuer: string };
+      };
       return {
         appId: core.appId,
         serverUrl: `http://${host}${jazz.basePath}`,
