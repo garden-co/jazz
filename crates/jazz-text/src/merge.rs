@@ -260,10 +260,10 @@ fn cuttable(word: &str) -> bool {
     })
 }
 
-/// A word or number token (it starts with a word character, so the
-/// tokenizer made it of word characters alone).
+/// A word or number token: word characters (and the marks completing
+/// them) alone, so not a list marker such as `1.`.
 fn word_token(token: &str) -> bool {
-    token.chars().next().is_some_and(word)
+    !token.is_empty() && token.chars().all(|c| word(c) || extends(c))
 }
 
 /// A token a word typed into may become: a word, a number, or one
@@ -1292,13 +1292,14 @@ mod tests {
             (TextFormat::Markdown, "a [kits](http://kit.io) b"),
         ] {
             for (first, second) in [(held, "a kiXt b"), ("a kiXt b", held)] {
-                let merged = merge3(format, "a kit b", first, second);
-                assert!(
-                    !merged.contains("kiXt\"") && !merged.contains("kiXt.io"),
-                    "{merged:?}"
-                );
-                assert_eq!(tokenize(format, &merged).concat(), merged);
+                // The later write wins the word, whole.
+                assert_eq!(merge3(format, "a kit b", first, second), second);
             }
+        }
+        // A list marker is not a number to type into.
+        for (first, second) in [("1. 2 apples", "1X2 apples"), ("1X2 apples", "1. 2 apples")] {
+            let merged = merge3(TextFormat::Markdown, "12 apples", first, second);
+            assert!(!merged.contains("1X."), "{merged:?}");
         }
         // A number typed into, beside letters typed around it.
         assert_eq!(merge("-- 0--", "-- AB0--", "-- 01--"), "-- AB01--");
