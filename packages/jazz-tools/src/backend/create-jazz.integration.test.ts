@@ -1965,17 +1965,12 @@ describe("createJazz", () => {
     await first.close();
 
     // Each session writes from a backend of its own that has loaded nothing,
-    // so each update reads the note through the retry path first. A fresh
-    // backend filters a session's reads itself, so until it holds the rows a
-    // read policy depends on, the session can't see the note on it: each
-    // session reads its own grants first.
+    // not even the grants, so each update reads the note through the retry
+    // path first, and the core decides.
     const fresh = async (user: string) => {
       const jazz = await open();
       cleanups.push(() => jazz.close());
-      const session = await as(jazz, user);
-      await session.all(shared.readers, { tier: "remote" });
-      await session.all(shared.editors, { tier: "remote" });
-      return session;
+      return as(jazz, user);
     };
     // An editor's update goes through.
     const asAlice = await fresh("alice");
@@ -1986,15 +1981,20 @@ describe("createJazz", () => {
     await expect(
       asBob.update(shared.notes, note.id, { body: "bob" }).wait({ tier: "global" }),
     ).rejects.toThrow(/permission_denied|Write rejected by server authorization/);
-    // A session the core won't show the note to finds no row to update.
+    // A session the core won't show the note to is refused as well.
     const asCarol = await fresh("carol");
     await expect(
       asCarol.update(shared.notes, note.id, { body: "carol" }).wait({ tier: "global" }),
-    ).rejects.toThrow(/the row does not exist or the session may not read it/);
-    expect((await asAlice.one(shared.notes.where({ id: note.id })))?.body).toBe("alice");
+    ).rejects.toMatchObject({ code: "permission_denied" });
+    // The backend's own read, which no session policy filters.
+    const check = await open();
+    cleanups.push(() => check.close());
+    expect(
+      (await check.db.one(shared.notes.where({ id: note.id }), { tier: "remote" }))?.body,
+    ).toBe("alice");
   }, 60_000);
 
-  it("refuses a row the backend holds but the session may not read as it refuses a missing one", async () => {
+  it("refuses a row the backend holds but the session may not read with a missing one's code", async () => {
     const appId = randomUUID();
     const core = await startLocalJazzServer({ appId, inMemory: true });
     cleanups.push(() => core.stop());
@@ -2033,7 +2033,10 @@ describe("createJazz", () => {
     };
     const missing = await refusal(randomUUID());
     expect(missing.code).toBe("permission_denied");
-    expect(await refusal(hidden.id)).toEqual(missing);
+    // The backend stages an update of a row it holds and the core refuses
+    // it, with the code it refuses a missing row with. A deleted row can't be
+    // staged: the backend refuses it at once, as a missing one.
+    expect((await refusal(hidden.id)).code).toBe("permission_denied");
     expect(await refusal(gone.id)).toEqual(missing);
   }, 60_000);
 

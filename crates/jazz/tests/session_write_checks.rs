@@ -65,6 +65,17 @@ fn schema() -> JazzSchema {
                     ),
             )
             .table(
+                // Read policy decided by the row alone.
+                TableSchemaBuilder::new("owned")
+                    .column("owner", ColumnType::Text)
+                    .column("data", ColumnType::Text)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(session_eq("owner", &SUB))
+                            .with_update(Some(PolicyExpr::True), PolicyExpr::True),
+                    ),
+            )
+            .table(
                 TableSchemaBuilder::new("protected")
                     .column("data", ColumnType::Text)
                     .policies(
@@ -472,6 +483,73 @@ fn a_replica_leaves_a_relational_read_for_write_to_the_authority() {
         .expect("the authority refuses the upsert, and its wait says so");
     assert_eq!(cell(&server, "notes", "data"), text("alice"));
     assert_eq!(cell(&backend, "notes", "data"), text("alice"));
+}
+
+/// Read-for-write under a read policy the row alone decides: the replica
+/// holds everything the policy reads, yet it still evaluates no policy for
+/// a session's write. It stages Bob's update of Alice's row, the authority
+/// refuses it, and the replica reverts.
+#[test]
+fn a_replica_leaves_a_row_local_read_for_write_to_the_authority() {
+    let server = open(0);
+    seed(
+        &server,
+        "owned",
+        id(7, 1),
+        &[("owner", text("alice")), ("data", text("initial"))],
+    );
+    let backend = open(1);
+    let (client_side, server_side) = duplex();
+    let _upstream = block_on(backend.connect_upstream(client_side));
+    server
+        .accept_subscriber(server_side, AuthorSubject::SYSTEM)
+        .unwrap();
+    let pump = || {
+        for _ in 0..4 {
+            block_on(backend.tick()).unwrap();
+            block_on(server.tick()).unwrap();
+        }
+        block_on(backend.tick()).unwrap();
+    };
+    let prepared = backend.prepare_query(&Query::from("owned")).unwrap();
+    let _stream = block_on(backend.subscribe(&prepared, ReadOpts::default())).unwrap();
+    pump();
+    assert_eq!(cell(&backend, "owned", "data"), text("initial"));
+
+    let bob = user(&backend, 2, "bob");
+    user(&server, 2, "bob");
+    let update = block_on(backend.update(
+        "owned",
+        id(7, 1),
+        BTreeMap::from([("data".to_owned(), text("bob"))]),
+        as_session(bob),
+    ))
+    .expect("the replica stages the session update");
+    assert_eq!(cell(&backend, "owned", "data"), text("bob"));
+    pump();
+    let refusal =
+        block_on(backend.wait_for_transaction(update.mergeable_tx_id(), DurabilityTier::Global))
+            .err()
+            .expect("the authority refuses the update, and its wait says so");
+    assert!(refusal.is_authorization_denied(), "{refusal:?}");
+    assert!(
+        format!("{refusal:?}").contains("read policy denied UPDATE"),
+        "{refusal:?}"
+    );
+    assert_eq!(cell(&server, "owned", "data"), text("initial"));
+    assert_eq!(cell(&backend, "owned", "data"), text("initial"));
+
+    let alice = user(&backend, 1, "alice");
+    user(&server, 1, "alice");
+    block_on(backend.update(
+        "owned",
+        id(7, 1),
+        BTreeMap::from([("data".to_owned(), text("alice"))]),
+        as_session(alice),
+    ))
+    .expect("the replica stages the owner's update");
+    pump();
+    assert_eq!(cell(&server, "owned", "data"), text("alice"));
 }
 
 /// A session link cannot vouch for the sessions its runtime writes as: the
