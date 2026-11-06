@@ -70,7 +70,7 @@ There is no `driver` option, since the thin client keeps nothing locally.
 
 Each is an explicit "not supported" error:
 
-- no offline use; writes are not optimistic: they show after one round trip, and `wait()` resolves when the server answered
+- no offline use: while the backend is unreachable, reads and subscriptions wait and are answered after the reconnect; writes are not optimistic: they show after one round trip, and `wait()` resolves when the server answered
 - no attributed writes
 - no streaming inside a transaction
 - no admin secret in the browser

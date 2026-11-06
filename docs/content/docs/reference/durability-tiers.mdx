@@ -36,7 +36,14 @@ They are intentionally separate from write durability.
 New applications should use the two product read choices `"local-first"` and `"remote"`:
 
 - `"local-first"` uses cached local knowledge and shows pending local writes immediately, while still syncing.
-- `"remote"` uses the server's current query scope, without pending local writes. It waits while offline.
+- `"remote"` uses the server's current query scope, without pending local writes. A one-shot remote
+  read made during an outage rejects with a transport error once the client has noticed the server
+  is unreachable (a few seconds in), even while it keeps reconnecting.
+
+On the [thin client](/docs/setup/web-client/thin-client) every read is a server read, whatever its
+tier. While the backend is unreachable, one-shot reads and subscriptions wait and are answered after
+the reconnect. To keep reading while offline,
+[upgrade to the local-first client](/docs/setup/web-client/local-first-client).
 
 Without a `tier`, browser and React Native clients read `"local-first"`, and when they have a server
 the first result waits up to 5 seconds for it (see below). Other clients read `"remote"` when they
@@ -65,7 +72,7 @@ server-confirmed result, together with the client's own pending writes. If the s
 answered by then, the local result is shown. The read waits even when local data exists, but never
 longer than the timeout.
 
-It never waits on a server it cannot reach. The first result is local, and immediate, when no
+On the local-first client it never waits on a server it cannot reach. The first result is local, and immediate, when no
 server is configured, after `db.disconnect()`, while the connection is down or retrying, or when the
 connection attempt fails. If the connection drops during the wait, the local result is delivered at
 that moment. After the first result, a subscription behaves exactly like `"local-first"`: local
