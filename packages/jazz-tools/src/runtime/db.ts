@@ -3799,7 +3799,14 @@ export class Db {
    * @returns Array of typed objects matching the query
    */
   async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
-    return this.allInternal(query, lowerPublicDbQueryOptions(options));
+    try {
+      return await this.allInternal(query, lowerPublicDbQueryOptions(options));
+    } catch (error) {
+      // Begun before this Db handed over to a successor, and ended by that
+      // (its own runtime stopping): the successor answers it.
+      if (this.successor) return this.current().all(query, options);
+      throw error;
+    }
   }
 
   private async allInternal<T>(

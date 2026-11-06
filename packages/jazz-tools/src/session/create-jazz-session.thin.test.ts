@@ -235,6 +235,24 @@ describe("browser session", () => {
     read.mockRestore();
   }, 60_000);
 
+  it("answers a read the upgrade ended on the thin runtime from the local-first Db", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const kept = db(session);
+    await kept.insert(app.notes, { text: "mine" }).wait({ tier: "global" });
+    const thinRuntime = kept.currentRuntime() as ThinRuntime;
+    let upgraded!: Promise<void>;
+    // The read reaches the thin runtime just as the upgrade closes it.
+    vi.spyOn(thinRuntime, "query").mockImplementationOnce(async () => {
+      await upgraded;
+      throw new Error("the thin runtime is closed");
+    });
+    const read = kept.all(app.notes);
+    upgraded = kept.upgradeToLocalFirst(loadLocalFirst);
+    await upgraded;
+    expect((await read).map((row) => row.text)).toEqual(["mine"]);
+  }, 60_000);
+
   it("counts and uploads the thin Db's unsent writes after the upgrade", async () => {
     const server = await startServer();
     const session = await open(server, memoryStore());

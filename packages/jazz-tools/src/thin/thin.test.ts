@@ -417,6 +417,21 @@ describe("thin client", () => {
     await expect(db.waitForSync({ timeoutMs: 5_000 })).resolves.toBeUndefined();
   }, 60_000);
 
+  it("fails reads and writes once the server can't serve its schema, instead of hanging", async () => {
+    const server = await startServer();
+    const db = await thinDb(server);
+    // A bundle built against a schema this server doesn't have.
+    const stale = s.defineApp(
+      { notes: s.table({ text: s.string(), done: s.boolean(), extra: s.string() }, {}) },
+      { migrations: "none" },
+    );
+    await expect(db.all(stale.notes)).rejects.toThrow(/schema/);
+    await expect(
+      db.insert(stale.notes, { text: "x", done: false, extra: "y" }).wait({ tier: "global" }),
+    ).rejects.toThrow(/schema/);
+    expect(db.getSyncStatus().link).toMatchObject({ state: "offline", reason: "stopped" });
+  }, 60_000);
+
   it("fails a transaction its connection took with it, and nothing else", async () => {
     const server = await startServer();
     const db = await thinDb(server);

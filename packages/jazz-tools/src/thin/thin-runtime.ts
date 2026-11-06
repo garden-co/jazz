@@ -215,6 +215,8 @@ export class ThinRuntime implements Runtime {
   private wanted = false;
   private closed = false;
   private attempt = 0;
+  /** Why this runtime stopped for good (a server that can't serve it). */
+  private failure: Error | undefined;
   private reconnectTimer?: ReturnType<typeof setTimeout>;
   /** The server refused the credential: nothing reconnects until `updateAuth`. */
   private refused = false;
@@ -255,6 +257,7 @@ export class ThinRuntime implements Runtime {
     // An explicit connect (a reconnect after a refusal or a terminal error)
     // starts over, as the core link does.
     if (!this.closed) this.stopped = false;
+    this.failure = undefined;
     this.setRefused(false);
     this.open();
   }
@@ -474,8 +477,14 @@ export class ThinRuntime implements Runtime {
 
   private fatal(error: Error): void {
     this.wanted = false;
+    this.failure = error;
     this.stop();
     this.dropConnection(error);
+    // Requests not sent yet would wait for a connection that never comes.
+    for (const [id, oneShot] of this.oneShots) {
+      this.oneShots.delete(id);
+      oneShot.reject(error);
+    }
     for (const live of this.liveQueries.values()) live.callback?.(error);
   }
 
@@ -494,6 +503,7 @@ export class ThinRuntime implements Runtime {
       return {
         answer: Promise.reject(new Error("the thin runtime is closed")),
       };
+    if (this.failure) return { answer: Promise.reject(this.failure) };
     let oneShot: OneShot | undefined;
     const answer = new Promise<ThinBody>((resolve, reject) => {
       oneShot = { op, resolve, reject, sent: false };
