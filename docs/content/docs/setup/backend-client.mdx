@@ -3,7 +3,7 @@ title: Backend Client
 description: "Learn how to connect other trusted machines to Jazz through your main backend, for machine-to-machine access."
 ---
 
-Your [main backend](/docs/setup/deployment) is the one that runs `createJazz`: browsers and apps sync
+Your [main backend](/docs/how-jazz-works#how-a-backend-talks-to-jazz) is the one that runs `createJazz`: browsers and apps sync
 through it, and its `authenticate` decides who each user is. A **backend client** is any other
 trusted machine that reads and writes the same data, such as a CI job, a worker on another cloud,
 a script or a partner's service. It connects to your main backend's `/jazz` like a browser does,

@@ -262,7 +262,7 @@ const features: {
       </>
     ),
     links: [
-      { label: "Main backend", href: "/docs/setup/deployment" },
+      { label: "Main backend", href: "/docs/setup/deployment/own-server" },
       { label: "Auth", href: "/docs/setup/auth/backend" },
       { label: "Permissions", href: "/docs/schemas/policies" },
       { label: "How sync works", href: "/docs/how-jazz-works" },

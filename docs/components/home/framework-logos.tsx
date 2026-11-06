@@ -52,7 +52,7 @@ const frameworks = [
   { label: "Bun", href: "/docs", path: siBun.path },
   { label: "Effect", href: "/docs/recipes/effect", path: siEffect.path },
   { label: "Vercel", href: "/docs/setup/deployment/vercel", path: siVercel.path },
-  { label: "Cloudflare Workers", href: "/docs/setup/deployment", path: siCloudflareworkers.path },
+  { label: "Cloudflare Workers", href: "/docs/setup/deployment/own-server", path: siCloudflareworkers.path },
 ];
 
 // One line each for frontend, backend and platforms.

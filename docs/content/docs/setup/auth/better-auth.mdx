@@ -13,7 +13,7 @@ No JWT plugin, JWKS or bearer tokens are involved.
   ../examples/auth-betterauth-chat/src/docs/recipe-server-snippet.ts#betterauth-server
 </include>
 
-Mount Jazz under `/jazz` next to Better Auth's own handler (see [Main Backend](/docs/setup/deployment)).
+Mount Jazz under `/jazz` next to Better Auth's own handler (see [Main Backend](/docs/setup/deployment/own-server)).
 Pass anything your policies need, such as the `admin` plugin's role, as `claims`.
 
 ### Act as the signed-in user
@@ -180,7 +180,7 @@ pnpm dlx jazz-tools@alpha validate
 
 ### Use Jazz as the database
 
-Create Jazz in your backend ([Main Backend](/docs/setup/deployment)), then pass `jazz.db` to `jazzAdapter(...)` as the `database` in your Better Auth config. Point both `db` and `schema` at the merged `app`, not at the generated module directly, so Better Auth and your own tables share a single Jazz app. `authenticate` asks the same Better Auth instance who a request's session cookie belongs to.
+Create Jazz in your backend ([Main Backend](/docs/setup/deployment/own-server)), then pass `jazz.db` to `jazzAdapter(...)` as the `database` in your Better Auth config. Point both `db` and `schema` at the merged `app`, not at the generated module directly, so Better Auth and your own tables share a single Jazz app. `authenticate` asks the same Better Auth instance who a request's session cookie belongs to.
 
 ```ts title="auth.ts"
 import { betterAuth } from "better-auth";

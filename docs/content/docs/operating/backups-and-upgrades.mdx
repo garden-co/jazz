@@ -5,7 +5,7 @@ description: "Learn how to keep the data in your backend's Jazz directory safe a
 
 ## What the data directory holds
 
-Everything your [main backend](/docs/setup/deployment) stores lives in the directory you pass to
+Everything your [main backend](/docs/how-jazz-works#how-a-backend-talks-to-jazz) stores lives in the directory you pass to
 `sqlite({ path })`:
 
 | File or folder                         | What it is                                                                                                   |
@@ -53,7 +53,7 @@ rolling back means restoring the backup.
 Alpha.60 changes how Jazz runs, so an alpha.59 app needs more than a version bump:
 
 - **Jazz runs inside your backend.** Clients no longer talk to a Jazz server with a JWT. Add a main
-  backend with `createJazz` (see [Deployment](/docs/setup/deployment)), and have it point at Jazz
+  backend with `createJazz` (see [Your Own Server](/docs/setup/deployment/own-server)), and have it point at Jazz
   Cloud with `remote()` if that's where your data is. The core admits only its own app's backend, so
   browsers can't connect to it directly any more.
 - **Auth moves into `authenticate`.** Your backend decides who each request is. To keep returning

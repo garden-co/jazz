@@ -94,10 +94,24 @@ const config = {
         destination: "/docs/setup/auth/better-auth#store-better-auths-tables-in-jazz",
         permanent: false,
       },
-      { source: "/docs/setup/backend", destination: "/docs/setup/deployment", permanent: false },
+      {
+        source: "/docs/setup/deployment",
+        destination: "/docs/setup/deployment/own-server",
+        permanent: false,
+      },
+      {
+        source: "/docs/recipes/local-first",
+        destination: "/docs/setup/web-client/local-first-client",
+        permanent: false,
+      },
+      {
+        source: "/docs/setup/backend",
+        destination: "/docs/setup/deployment/own-server",
+        permanent: false,
+      },
       {
         source: "/docs/setup/backend/install",
-        destination: "/docs/setup/deployment",
+        destination: "/docs/setup/deployment/own-server",
         permanent: false,
       },
       {
@@ -194,7 +208,7 @@ const config = {
       },
       {
         source: "/docs/getting-started/server-setup",
-        destination: "/docs/setup/deployment",
+        destination: "/docs/setup/deployment/own-server",
         permanent: false,
       },
       {
@@ -204,7 +218,7 @@ const config = {
       },
       {
         source: "/docs/install/typescript-server",
-        destination: "/docs/setup/deployment",
+        destination: "/docs/setup/deployment/own-server",
         permanent: false,
       },
       { source: "/docs/quickstart", destination: "/docs/setup/run-locally", permanent: false },

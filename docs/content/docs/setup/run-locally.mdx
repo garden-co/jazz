@@ -17,7 +17,7 @@ give it the same brief, which always lives at
 
 Each one has a default, so "you pick" is a fine answer.
 
-- **Where will it be deployed?** Vercel or your own server; Cloudflare is coming. Default: Vercel for Next.js, your own server otherwise. See [Main Backend](/docs/setup/deployment).
+- **Where will it be deployed?** Vercel or your own server; Cloudflare is coming. Default: Vercel for Next.js, your own server otherwise. See [Vercel](/docs/setup/deployment/vercel) and [Your Own Server](/docs/setup/deployment/own-server).
 - **Which auth?** Whatever your backend already uses; Better Auth for a new app. See [How Auth Works](/docs/setup/auth/backend).
 - **Which backend framework?** Next.js, Hono, Express / Node, Bun or Effect. Default: Next.js.
 - **API routes only, or Jazz from the frontend too?** If the frontend, the thin client (default) or local-first, and React, Vue, Svelte, Solid or plain TypeScript. React Native is always local-first. See [Thin Client](/docs/setup/web-client/thin-client).
@@ -54,7 +54,7 @@ export const jazz = createJazz({
 ```
 
 Edit `schema.ts` or `permissions.ts` and restart the dev server: Jazz applies them on start. See
-[Main Backend](/docs/setup/deployment) for mounting it in Next.js, Hono or Express.
+[Your Own Server](/docs/setup/deployment/own-server) for mounting it in Next.js, Hono or Express.
 
 ## How we test this page
 
