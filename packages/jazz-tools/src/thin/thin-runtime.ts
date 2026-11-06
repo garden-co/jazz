@@ -270,9 +270,16 @@ export class ThinRuntime implements Runtime {
   // ---- connection -------------------------------------------------------
 
   connect(url: string, authJson: string): void {
+    const changed =
+      (this.url !== undefined && url !== this.url) ||
+      (this.authJson !== undefined && authJson !== this.authJson);
     this.url = url;
     this.authJson = authJson;
     this.wanted = true;
+    // Another server or credential, as for `updateAuth`: the connection
+    // bound to the old one goes, and a sent write waiting to go out again
+    // ends with its fate unknown instead of being made as someone else.
+    if (changed) this.dropConnection(new ThinConnectionLostError());
     // An explicit connect (a reconnect after a refusal or a terminal error)
     // starts over, as the core link does.
     if (!this.closed) this.stopped = false;
