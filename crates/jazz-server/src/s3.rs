@@ -340,7 +340,12 @@ impl S3ChunkStore {
             return Ok(());
         }
         let inner = Arc::clone(&self.inner);
+        // A join handle, not `spawn`'s future: hosts await `build` on a
+        // multi-threaded runtime, so this future must be `Send`.
         let checked = self
+            .runtime
+            .as_ref()
+            .expect("the runtime lives as long as the store")
             .spawn(async move {
                 match tokio::time::timeout(STARTUP_CHECK_TIMEOUT, inner.claim()).await {
                     Ok(Err(error)) if inner.refused.load(Ordering::Relaxed) => Err(error),
@@ -358,13 +363,9 @@ impl S3ChunkStore {
                     }
                 }
             })
-            .await;
-        checked.map_err(|error| {
-            format!(
-                "{}. Check the S3 credentials and bucket policy.",
-                error.message
-            )
-        })
+            .await
+            .map_err(|error| format!("s3 blobs: startup check failed: {error}"))?;
+        checked.map_err(|error| format!("{error}. Check the S3 credentials and bucket policy."))
     }
 
     /// Run `op` on the store's runtime and await it from any executor.
