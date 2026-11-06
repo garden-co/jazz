@@ -121,3 +121,55 @@ it("waits for a tab's firstLoadRemoteWaitMs in its worker, then shows the worker
     await transport.stop();
   }
 }, 60_000);
+
+// A write made once the worker has published its outage (or had its sign-in
+// refused, which something renews) is queued like any other: its Global wait
+// holds until the worker reconnects, as without a worker (#3923). A tab must
+// not ask its worker for a live server link before it waits.
+it("holds a tab's Global wait for a write made after its worker published an outage", async () => {
+  const {
+    appId,
+    serverUrl: coreUrl,
+    adminSecret,
+  } = await getJazzServerInfo(uniqueDbName("worker-global-wait-outage"));
+  await deploy({ appId, serverUrl: coreUrl, adminSecret, schema: app.wasmSchema, permissions });
+  const { serverUrl } = await startJazzApp(
+    { appId, serverUrl: coreUrl, adminSecret },
+    { schema: app.wasmSchema, permissions },
+  );
+  const transport = await createJazzServerTransportControl(serverUrl);
+  try {
+    const db = ctx.track(
+      await createBrowserTestDb({
+        appId,
+        serverUrl: transport.url,
+        secret: generateAuthSecret(),
+        driver: { type: "persistent", dbName: uniqueDbName("worker-global-wait-outage-db") },
+      }),
+    );
+    await db.insert(app.entries, { title: "before the outage" }).wait({ tier: "global" });
+
+    await transport.block();
+    await waitForCondition(
+      async () => db.getSyncStatus().link.state === "offline",
+      30_000,
+      "the worker's published outage",
+    );
+    let outcome = "pending";
+    void db
+      .insert(app.entries, { title: "during the outage" })
+      .wait({ tier: "global" })
+      .then(
+        () => (outcome = "global"),
+        (error: unknown) => (outcome = `rejected: ${String(error)}`),
+      );
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    expect(outcome).toBe("pending");
+
+    await transport.unblock();
+    await waitForCondition(async () => outcome !== "pending", 30_000, "the reconnect");
+    expect(outcome).toBe("global");
+  } finally {
+    await transport.stop();
+  }
+}, 90_000);
