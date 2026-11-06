@@ -985,6 +985,16 @@ retryable `Backpressure` error, releasing its room. These budgets bound
 what the server holds of incoming requests; answers waiting for a client
 that does not read are not bounded yet (#4865).
 
+A read or row write that needs large-value bytes held only in a network
+chunk store (`s3()`, Vercel Blob; after a restart, say) never fetches them
+on the store thread, which serves every session. The request is parked: the
+store's fetch lane reads the bytes beside the store thread, with its
+backoff, and the parked request runs again on the tick after they land.
+Until then it keeps its admitted room, so that session's later requests wait
+behind it, in order, while other sessions are served as usual. A fetch that
+fails answers the request with its `Storage` error, and later reads of
+those bytes are refused with it at once until the fetch backoff ends.
+
 - A thin session is served as its admitted identity and claims, exactly as a
   sync session with that admission is (§8.6): reads see what its policies let
   it see, and writes are admitted and authorized as `WriteIdentity::Session`.
