@@ -677,8 +677,8 @@ impl ThinAssembler {
     /// The next part of a split frame: the whole frame once it has all its
     /// bytes, `None` before. `Err`, dropping what was joined, for a part
     /// whose frame is not one a part may carry ([`ThinPart::total`]), one
-    /// naming another length than the parts before it, an empty one, or
-    /// one past its frame's end. The first part reserves the frame's whole
+    /// naming another length than the parts before it, an empty one, one
+    /// past its frame's end, or one short of a full part before the last. The first part reserves the frame's whole
     /// length, no more.
     pub fn push(&mut self, part: ThinPart) -> Result<Option<Vec<u8>>, String> {
         let checked = self.check(&part);
@@ -706,7 +706,13 @@ impl ThinAssembler {
                 self.total
             ));
         }
-        if part.bytes.is_empty() || self.joined.len() + part.bytes.len() > total {
+        let end = self.joined.len() + part.bytes.len();
+        // Every part but the last is full, so a split arrives at least one
+        // wire frame at a time.
+        if part.bytes.is_empty()
+            || end > total
+            || (end < total && part.bytes.len() != THIN_PART_BYTES)
+        {
             return Err(format!(
                 "a part of {} bytes does not fit its {total}-byte thin frame",
                 part.bytes.len()
@@ -792,12 +798,15 @@ mod part_tests {
             total: total as u64,
             bytes: vec![0; len],
         };
-        let big = MAX_WHOLE_THIN_FRAME_BYTES + 10;
+        let full = THIN_PART_BYTES;
+        let big = full + 100;
         for refused in [
-            part(MAX_WHOLE_THIN_FRAME_BYTES, 10),
-            part(MAX_THIN_MESSAGE_BYTES + 1, 10),
+            part(MAX_WHOLE_THIN_FRAME_BYTES, full),
+            part(MAX_THIN_MESSAGE_BYTES + 1, full),
             part(big, 0),
             part(big, big + 1),
+            // Short of a full part before the last.
+            part(big, 10),
         ] {
             let mut assembler = ThinAssembler::default();
             assert!(assembler.push(refused).is_err());
@@ -805,12 +814,15 @@ mod part_tests {
         }
         // A part naming another frame's length, inside a split.
         let mut assembler = ThinAssembler::default();
-        assert_eq!(assembler.push(part(big, 10)).unwrap(), None);
+        assert_eq!(assembler.push(part(big, full)).unwrap(), None);
         assert!(assembler.push(part(big + 1, 10)).is_err());
         assert!(!assembler.is_joining());
         // Past its frame's end.
-        assert_eq!(assembler.push(part(big, big - 5)).unwrap(), None);
-        assert!(assembler.push(part(big, 10)).is_err());
+        assert_eq!(assembler.push(part(big, full)).unwrap(), None);
+        assert!(assembler.push(part(big, 101)).is_err());
         assert!(!assembler.is_joining());
+        // Its last part completes it.
+        assert_eq!(assembler.push(part(big, full)).unwrap(), None);
+        assert_eq!(assembler.push(part(big, 100)).unwrap().unwrap().len(), big);
     }
 }

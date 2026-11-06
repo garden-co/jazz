@@ -943,9 +943,11 @@ carrier batch's prefixes; a row holding a large value, or a write of one)
 travels as `WireFrame::ThinPart`s (tag 6): its encoded frame cut into
 consecutive pieces, each naming the whole frame's length (`total`), sent
 back to back with no other thin frame between. The receiver joins them and
-decodes the frame once it has `total` bytes; any other frame inside a split
-one, a part naming another length, an empty part or one past its frame's
-end ends the connection with `MalformedFrame`. A frame over
+decodes the frame once it has `total` bytes. Every part but the last
+carries a full part's bytes (a wire frame, less room for its own header);
+any other frame inside a split one, a part naming another length, an empty
+or short part, or one past its frame's end ends the connection with
+`MalformedFrame`. A frame over
 `MAX_THIN_MESSAGE_BYTES` (32 MiB) is not sent: the client refuses such a
 write or subscription itself, and the server answers such a result with a
 `TooLarge` error for that request alone (ending a live query), keeping the
@@ -953,13 +955,20 @@ session; a result whose rows alone are past it is refused before it is
 encoded.
 
 The server admits each thin request before it keeps its bytes: a whole
-request on arrival, a split one at its first part, by `total`. It needs
-room in its session's budget (the most one request takes, 32 MiB) and in
-the server's (`THIN_INGRESS_SERVER_BUDGET`, 256 MiB, across every thin
-session), and holds it until the request has run. Without room the reader
-waits, reading nothing more of that socket, so the client's sends back up
-and a burst of large writes slows down: neither ends the session nor grows
-the server's memory past its budgets.
+request on arrival, a split one at its first part, by `total`. Every
+request needs room in its session's budget (the most one request takes,
+32 MiB); a split one also needs room in the server's
+(`THIN_INGRESS_SERVER_BUDGET`, 256 MiB across every thin session), so
+requests that fit one frame never queue behind other sessions' large
+writes. The room is held until the request has run. Without room the
+connection reads nothing more of its socket, so the client's sends back up
+and a burst of large writes slows down instead of ending the session; it
+goes on writing answers, pinging and closing on shutdown meanwhile, and the
+wait does not count as the peer idling. A split whose next part does not
+arrive within `THIN_PART_TIMEOUT` (30 s) ends its connection with a
+retryable `Backpressure` error, releasing its room. These budgets bound
+what the server holds of incoming requests; answers waiting for a client
+that does not read are not bounded yet (#4865).
 
 - A thin session is served as its admitted identity and claims, exactly as a
   sync session with that admission is (§8.6): reads see what its policies let

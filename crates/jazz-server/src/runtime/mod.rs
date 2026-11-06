@@ -183,10 +183,12 @@ pub struct ServerSession(u64);
 /// it are refused (the peer ignored flow control); outbound messages past it
 /// wait in the engine until the socket catches up.
 pub(crate) const SESSION_QUEUE_BUDGET: usize = 8 * 1024 * 1024;
-/// Bytes of thin requests the whole server may hold, being joined from
-/// parts or queued for the owner. A reader past it waits for room before
-/// reading more of its socket, so many large writes at once slow down
-/// instead of growing memory without bound.
+/// Bytes of split thin requests (each over a wire frame) the whole server
+/// may hold, being joined from parts or queued for the owner. A split past
+/// it waits for room before its parts are read, so many large writes at
+/// once slow down instead of growing memory without bound. Requests that
+/// fit one frame are bounded by their session's room alone, so they never
+/// queue behind large writes of other sessions.
 pub(crate) const THIN_INGRESS_SERVER_BUDGET: usize = 256 * 1024 * 1024;
 /// The slow-query threshold: `JAZZ_SLOW_QUERY_MS` (0 turns the log off),
 /// else jazz-db's default.
@@ -1233,7 +1235,7 @@ struct Edge {
 /// run it.
 pub struct ThinIngress {
     _session: tokio::sync::OwnedSemaphorePermit,
-    _server: tokio::sync::OwnedSemaphorePermit,
+    _server: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 /// A session's next frame batch, or the error frame that ends it.
@@ -1505,14 +1507,16 @@ impl ServerRuntimeHandle {
 
     /// Wait for room for a thin request `bytes` long on the wire, before
     /// reading or joining it: in `session`'s budget (the most one request
-    /// takes, [`jazz::thin::MAX_THIN_MESSAGE_BYTES`]) and the server's
-    /// ([`THIN_INGRESS_SERVER_BUDGET`]). While it waits, its reader reads
-    /// nothing more, so the client's socket backs up instead of the
-    /// session ending; the room frees as the owner runs queued requests.
+    /// takes, [`jazz::thin::MAX_THIN_MESSAGE_BYTES`]) and, for a request
+    /// `split` into parts, the server's ([`THIN_INGRESS_SERVER_BUDGET`]).
+    /// While it waits, its reader reads nothing more, so the client's
+    /// socket backs up instead of the session ending; the room frees as the
+    /// owner runs queued requests.
     pub async fn admit_thin_request(
         &self,
         session: ServerSession,
         bytes: usize,
+        split: bool,
     ) -> Result<ThinIngress, String> {
         let permits = u32::try_from(bytes)
             .ok()
@@ -1527,10 +1531,16 @@ impl ServerRuntimeHandle {
         // Session first: a session waiting on itself holds none of the
         // server's room.
         let session_room = room.acquire_many_owned(permits).await.map_err(closed)?;
-        let server_room = Arc::clone(&self.inner.thin_ingress)
-            .acquire_many_owned(permits)
-            .await
-            .map_err(closed)?;
+        let server_room = if split {
+            Some(
+                Arc::clone(&self.inner.thin_ingress)
+                    .acquire_many_owned(permits)
+                    .await
+                    .map_err(closed)?,
+            )
+        } else {
+            None
+        };
         Ok(ThinIngress {
             _session: session_room,
             _server: server_room,

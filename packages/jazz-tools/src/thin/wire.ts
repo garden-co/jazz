@@ -304,7 +304,13 @@ export class ThinAssembler {
       throw new Error("a part of another thin frame arrived inside a split one");
     }
     const joined = (this.joined ??= new Uint8Array(total));
-    if (bytes.byteLength === 0 || this.length + bytes.byteLength > total) {
+    const end = this.length + bytes.byteLength;
+    // Every part but the last is full.
+    if (
+      bytes.byteLength === 0 ||
+      end > total ||
+      (end < total && bytes.byteLength !== THIN_PART_BYTES)
+    ) {
       throw new Error("a thin part does not fit its frame");
     }
     joined.set(bytes, this.length);
@@ -322,7 +328,6 @@ export class ThinAssembler {
 }
 
 /** Whether `frame` is a `WireFrame::ThinResponse`, by its postcard tag. */
-
 export function isThinResponse(frame: Uint8Array): boolean {
   return frame[0] === WIRE_FRAME_THIN_RESPONSE;
 }
