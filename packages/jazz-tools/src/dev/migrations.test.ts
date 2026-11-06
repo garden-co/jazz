@@ -365,7 +365,9 @@ describe("migration stub generation", () => {
       toSchema: s.defineApp(to, { migrations: "none" }).wasmSchema,
     });
 
-    expect(source).not.toContain("TODO");
+    expect(source).toContain('"points": m.add.int({ default: 1 }),');
+    expect(source).toContain('"rank": m.drop.int({ backwardsDefault: 3 }),');
+    expect(source).not.toContain("needs an explicit");
     const migration = new Function(
       "s",
       "m",
