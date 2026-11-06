@@ -43,9 +43,11 @@ document and written back in canonical form only where someone edits it.
 
 ## Connecting the editor
 
-`markdownSync` calls `onChange` with the document's Markdown after each local edit. Write that
-whole value with `db.update`: each write is one version, and the server merges it with whatever
-other people wrote meanwhile. When the merged value comes back, `applyMarkdown` turns it into the
+`markdownSync` calls `onChange` with the document's Markdown after each local edit, and the value
+it was edited from. Write it with `db.update`, passing that value as `editedFrom`: each write is one
+version, and the server merges it with whatever other people wrote meanwhile. A merged value can
+reach the local store before the editor shows it; a keystroke in between is then merged over it
+locally instead of undoing it. When the merged value comes back, `applyMarkdown` turns it into the
 smallest ProseMirror change, so the local cursor and undo history stay where they were.
 
 <include cwd lang="tsx" meta='title="SongSheet.tsx"'>

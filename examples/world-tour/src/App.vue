@@ -133,7 +133,7 @@ import Sheet from "./components/ui/Sheet.vue";
 
 const db = useDb();
 const session = useSession();
-const userId = computed(() => session.value?.user.account ?? null);
+const userId = computed(() => session.value?.user ?? null);
 const { route, goToBand } = useRoute();
 
 // Writes the server rejects later (a permission changed, a conflict) end up

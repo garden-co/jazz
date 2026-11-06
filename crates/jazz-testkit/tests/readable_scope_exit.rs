@@ -22,10 +22,8 @@ fn schema() -> Schema {
             p.allow_insert().always();
             p.allow_update().always();
             p.allow_delete().always();
-            p.allow_read().where_(pe::eq(
-                "owner",
-                pe::session(vec!["user", "identity", "subject"]),
-            ));
+            p.allow_read()
+                .where_(pe::eq("owner", pe::session(vec!["identity", "subject"])));
         }));
     SchemaBuilder::new().table(table).build()
 }
@@ -240,10 +238,8 @@ fn revocation_schema(dependency: bool) -> Schema {
                     .policies(permissions(|p| {
                         p.allow_insert().always();
                         p.allow_update().always();
-                        p.allow_read().where_(pe::eq(
-                            "owner",
-                            pe::session(vec!["user", "identity", "subject"]),
-                        ));
+                        p.allow_read()
+                            .where_(pe::eq("owner", pe::session(vec!["identity", "subject"])));
                     })),
             )
             .table(

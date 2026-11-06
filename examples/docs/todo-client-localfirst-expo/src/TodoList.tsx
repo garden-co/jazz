@@ -32,7 +32,7 @@ export function TodoList() {
   // #region reading-reactive-hooks-expo
   const { data: todos = [], db } = useAll(todosQuery);
   const session = useSession();
-  const sessionUserId = session?.user.account ?? null;
+  const sessionUserId = session?.user ?? null;
   // #endregion reading-reactive-hooks-expo
 
   // #region writing-use-db-expo

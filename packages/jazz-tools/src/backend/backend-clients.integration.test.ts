@@ -18,8 +18,8 @@ const app = s.defineApp(
   { migrations: "none" },
 );
 const permissions = s.definePermissions(app, ({ policy, session }) => {
-  policy.todos.allowRead.where({ owner: session.user.account });
-  policy.todos.allowInsert.where({ owner: session.user.account });
+  policy.todos.allowRead.where({ owner: session.user });
+  policy.todos.allowInsert.where({ owner: session.user });
   policy.todos.allowUpdate.never();
   policy.todos.allowDelete.never();
 });
@@ -210,8 +210,8 @@ describe("scoped backend clients", () => {
     // It opened signed in as its user, without being asked to.
     const { client, status, error } = session.getSnapshot();
     if (status !== "ready") throw error ?? new Error(status);
-    const account = client!.session!.user!.account;
-    expect(client!.session!.user!.identity).toEqual({
+    const account = client!.session!.user!;
+    expect(client!.session!.identity).toEqual({
       issuer: "jazz:backend",
       subject: "machine:worker",
     });
@@ -337,9 +337,7 @@ describe("trusted backend clients", () => {
     const { appId, jazz, origin } = await appWith([
       trustWorkload({ issuer, audience: AUDIENCE, claims: { sub: "ops" }, as: "backend" }),
     ]);
-    const alice = await jazz.accountFor(
-      new Request("http://app/x", { headers: { "x-test-user": "alice" } }),
-    );
+    const alice = await jazz.createAccountFor("alice");
     // A prelude stating alice's session is admitted on the machine's token.
     const socket = new WebSocket(`${origin.replace("http", "ws")}/jazz/apps/${appId}/ws`, {
       headers: { authorization: `Bearer ${await sign({ sub: "ops" })}` },

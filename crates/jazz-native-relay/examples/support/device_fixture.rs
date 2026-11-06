@@ -18,7 +18,7 @@ fn public_policies() -> TablePolicies {
 }
 
 fn schema_with_policy(protected: bool) -> Schema {
-    let owner = eq("$createdBy.account", session("user.account"));
+    let owner = eq("$createdBy.account", session("user"));
     SchemaBuilder::new()
         .table(
             TableSchemaBuilder::new("todos")

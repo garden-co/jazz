@@ -56,7 +56,7 @@ performance success.
 
 ## Compatibility repairs needed to run this historical fixture
 
-- Compare the UUID membership column with `user.account`, not structured `user`;
+- Compare the UUID membership column with `user`, not structured `user`;
   seed the account UUID derived by the fixture identity helper. The old form
   fails with `value does not match type Uuid`.
 - Finalize core seed writes as accepted after persisting them. The old seed

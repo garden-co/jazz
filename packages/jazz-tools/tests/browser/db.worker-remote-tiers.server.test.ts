@@ -149,9 +149,9 @@ it("holds a tab's Global wait for a write made after its worker published an out
     );
     await db.insert(app.entries, { title: "before the outage" }).wait({ tier: "global" });
 
-    // A blocked transport keeps its sockets, so the link never fails: sever
-    // them, so it retries until it publishes the outage (after 7.5 s).
-    await transport.sever();
+    // A blocked transport keeps its sockets, so the link never fails: take
+    // the server down, so it retries until it publishes the outage (7.5 s).
+    await transport.down();
     await waitForCondition(
       async () => {
         const link = db.getSyncStatus().link;
@@ -171,7 +171,7 @@ it("holds a tab's Global wait for a write made after its worker published an out
     await new Promise((resolve) => setTimeout(resolve, 1_000));
     expect(outcome).toBe("pending");
 
-    await transport.unblock();
+    await transport.up();
     await waitForCondition(async () => outcome !== "pending", 30_000, "the reconnect");
     expect(outcome).toBe("global");
   } finally {

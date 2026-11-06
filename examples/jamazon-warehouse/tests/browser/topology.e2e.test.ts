@@ -656,7 +656,7 @@ async function openClient(
 }
 
 function accountFromDb(db: Db): string {
-  const account = db.getAuthState().session?.user.account;
+  const account = db.getAuthState().session?.user;
   if (!account) throw new Error("test client is missing an admitted account");
   return account;
 }

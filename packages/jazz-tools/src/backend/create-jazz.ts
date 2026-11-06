@@ -73,6 +73,8 @@ export {
   type VercelBlobStore,
 } from "./blobs.js";
 import { isSameAdmission, recheckEvery } from "./session-recheck.js";
+import { NoJazzAccountError } from "./no-account-error.js";
+import { RequestAuthenticationError } from "./request-auth.js";
 
 /** Where the core keeps its data. */
 export type JazzStore =
@@ -438,14 +440,31 @@ export interface Jazz {
    * wait for it.
    */
   readonly db: Db;
-  /** The database as the request's user, judged by your permissions. */
+  /**
+   * The database as the request's user, judged by your permissions. Throws
+   * a {@link NoJazzAccountError} (`code: "no_account"`) for a user who has no
+   * account yet (see {@link createAccountFor}).
+   */
   forReqUser(request: Request): Promise<Db>;
   /**
-   * The Jazz account of the request's signed-in user (created on first use),
-   * or null when `authenticate` names no user. For API routes that act on
+   * The Jazz account of the request's signed-in user, or null when
+   * `authenticate` names no user or the user has no account yet. It never
+   * creates one (see {@link createAccountFor}). For API routes that act on
    * the user's data with the backend's own `db`.
    */
   accountFor(request: Request): Promise<string | null>;
+  /**
+   * Create the Jazz account of `userId` (the id your `authenticate` returns
+   * for them), or return the one they have. Jazz never creates accounts on
+   * its own on the backend: a user gets one when they sign in from a client,
+   * when a local-first guest links to them (`linkWithBackend`, so the
+   * guest's data becomes theirs), or here. Call it for a user who never
+   * opens a client (a webhook, an import, an API-only user) or to seed data
+   * before their first visit. A user with an account can no longer link a
+   * guest, so don't call it in a sign-up flow whose browser may hold one.
+   * Returns the account id.
+   */
+  createAccountFor(userId: string): Promise<string>;
   /**
    * The backend's own database (backend permissions), with every write
    * stamped as the request's signed-in user: for server actions that do what
@@ -454,6 +473,9 @@ export interface Jazz {
    * **Your permissions are not checked.** It writes with the backend's full
    * authority; only the attribution is the user's. Check yourself that the
    * user may do what the action does, and keep it in server-only code.
+   *
+   * Throws a {@link NoJazzAccountError} (`code: "no_account"`) for a user
+   * who has no account yet (see {@link createAccountFor}).
    */
   withAttribution(request: Request): Promise<Db>;
   /**
@@ -968,6 +990,17 @@ function openRemoteCore(
           onEvent(null, { kind: "message", data });
         });
         ws.addEventListener("close", (event) => finish(event.code, event.reason));
+        // A socket that never connects (the core is down or restarting) can
+        // report only the error, and stay CONNECTING: without this, the link
+        // waits on it forever instead of retrying.
+        ws.addEventListener("error", () => {
+          finish(1006, "connection to the core failed");
+          try {
+            ws?.close();
+          } catch {
+            // Already closing.
+          }
+        });
       })
       // A failing credential hook, or a socket that can't even be created.
       .catch((error: unknown) =>
@@ -1013,6 +1046,16 @@ function openRemoteCore(
     }),
   });
   return core;
+}
+
+/**
+ * A request `authenticate` names no user for: what an app answers with 401.
+ * (A throwing `authenticate` passes its own error through instead.)
+ */
+function signedOut(operation: string): RequestAuthenticationError {
+  return new RequestAuthenticationError(`${operation}: the request has no signed-in user`, {
+    code: "signed_out",
+  });
 }
 
 /** How long `close()` waits for pending writes to reach the core. */
@@ -1238,6 +1281,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         new Error(`Jazz account ${operation} failed (${response.status}): ${text}`),
         {
           status: response.status,
+          code: text.trim(),
         },
       );
     }
@@ -1247,26 +1291,57 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
 
   const identity = (userId: string) => ({ issuer, subject: userId });
 
-  /** The user's session: their account, created on first sign-in. */
   // A user's account never changes once assigned (linking only adds
   // identities to an account), so the core is asked once per user for a
-  // while, not on every sign-in, socket and request.
+  // while, not on every sign-in, socket and request. Only assignments are
+  // cached: a user without an account may get one at any moment.
   const accounts = new Map<string, { account: string; until: number }>();
   const ACCOUNT_CACHE_LIMIT = 10_000;
-  async function accountOf(userId: string): Promise<string> {
-    const now = Date.now();
-    const cached = accounts.get(userId);
-    if (cached && cached.until > now) return cached.account;
-    const { account } = await adminAccounts("login-or-register", { identity: identity(userId) });
+  function remember(userId: string, account: string): string {
     if (accounts.size >= ACCOUNT_CACHE_LIMIT) {
       accounts.delete(accounts.keys().next().value!);
     }
-    accounts.set(userId, { account, until: now + (options.sessionTtlSeconds ?? 3600) * 1000 });
+    accounts.set(userId, {
+      account,
+      until: Date.now() + (options.sessionTtlSeconds ?? 3600) * 1000,
+    });
     return account;
   }
 
-  async function sessionFor(user: JazzUser): Promise<Session> {
-    const account = await accountOf(user.userId);
+  /**
+   * The user's account, or null while they have none. Never creates one:
+   * only a client's sign-in (`backend-sign-in`), a guest's link
+   * (`backend-link`) and `createAccountFor` do, so a local-first guest can
+   * still link to a user the backend has only looked up or acted for (V9).
+   */
+  async function existingAccountOf(userId: string): Promise<string | null> {
+    const cached = accounts.get(userId);
+    if (cached && cached.until > Date.now()) return cached.account;
+    try {
+      const { account } = await adminAccounts("resolve", { identity: identity(userId) });
+      return remember(userId, account);
+    } catch (error) {
+      // Only the core's own "no account for this identity" answer: any other
+      // 404 (an unknown app, a missing route) is a server error, not a user
+      // without an account.
+      const { status, code } = error as { status?: number; code?: string };
+      if (status === 404 && code === "identity_not_assigned") return null;
+      throw error;
+    }
+  }
+
+  /** The user's account, created if they have none (a sign-in, or `createAccountFor`). */
+  async function accountOf(userId: string): Promise<string> {
+    const cached = accounts.get(userId);
+    if (cached && cached.until > Date.now()) return cached.account;
+    const { account } = await adminAccounts("login-or-register", { identity: identity(userId) });
+    return remember(userId, account);
+  }
+
+  /** The user's session, on the account they already have. */
+  async function sessionFor(user: JazzUser, caller: string): Promise<Session> {
+    const account = await existingAccountOf(user.userId);
+    if (account === null) throw new NoJazzAccountError(user.userId, caller);
     return {
       account_id: account,
       issuer,
@@ -1314,20 +1389,14 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     const user = await authenticate(request);
     if (!user) return new Response("signed_out", { status: 401 });
     let account: string | null;
-    const cached = accounts.get(user.userId);
-    if (cached && cached.until > Date.now()) {
-      account = cached.account;
-    } else {
-      try {
-        ({ account } = await adminAccounts("resolve", { identity: identity(user.userId) }));
-      } catch (error) {
-        const status = (error as { status?: number }).status;
-        // The core refuses this identity (it was revoked): say so, as the
-        // core does, rather than fail as a server error.
-        if (status === 403) return new Response("identity_not_authorized", { status: 403 });
-        if (status !== 404) throw error;
-        account = null;
-      }
+    try {
+      account = await existingAccountOf(user.userId);
+    } catch (error) {
+      // The core refuses this identity (it was revoked): say so, as the
+      // core does, rather than fail as a server error.
+      if ((error as { status?: number }).status === 403)
+        return new Response("identity_not_authorized", { status: 403 });
+      throw error;
     }
     return Response.json(
       { account, identity: identity(user.userId), claims: user.claims ?? {} },
@@ -1734,7 +1803,16 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     }
     const user = await authenticate(request);
     if (!user || user.userId !== stated.user_id) return null;
-    const vouched = { backend_secret: core.backendSecret, backend_session: await sessionFor(user) };
+    // A browser states a user's session only once its sign-in (or link)
+    // gave them an account; this never makes one.
+    let session: Session;
+    try {
+      session = await sessionFor(user, "a sync session");
+    } catch (error) {
+      if (error instanceof NoJazzAccountError) return null;
+      throw error;
+    }
+    const vouched = { backend_secret: core.backendSecret, backend_session: session };
     const rewritten = { ...parsed, ...vouched, auth: { ...auth, ...vouched } };
     return {
       prelude: new TextEncoder().encode(JSON.stringify(rewritten)),
@@ -1748,7 +1826,12 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
 
   // HTTP stream sessions, by id, with the key that proves a request comes
   // from the client that opened them.
-  const streams = new Map<string, { session: ClientSession; key: Buffer }>();
+  const streams = new Map<
+    string,
+    { session: ClientSession; key: Buffer; end(code: number, reason: string): void }
+  >();
+  // Sockets accepted for clients, so close() can end them.
+  const clientSockets = new Set<WsLikeSocket>();
 
   function openStream(request: Request): Response {
     const id = randomUUID();
@@ -1789,7 +1872,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     } catch (error) {
       return new Response(error instanceof Error ? error.message : String(error), { status: 503 });
     }
-    streams.set(id, { session: socket, key });
+    streams.set(id, { session: socket, key, end });
     controller.enqueue(
       encodeStreamRecord(
         STREAM_RECORD_SESSION,
@@ -1882,10 +1965,14 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       ws.close(1013, error instanceof Error ? error.message : String(error));
       return;
     }
+    clientSockets.add(ws);
     ws.on("message", (data) => {
       if (!socket.send(toBytes(data))) ws.close(1000, "session ended");
     });
-    ws.on("close", () => socket.close());
+    ws.on("close", () => {
+      clientSockets.delete(ws);
+      socket.close();
+    });
     ws.on("error", () => socket.close());
   }
 
@@ -2178,19 +2265,44 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       for (const item of Array.isArray(value) ? value : [value]) headers.append(name, item);
     }
     const hasBody = req.method !== "GET" && req.method !== "HEAD";
+    // A body parser mounted before nodeHandler (express.json(), express.raw())
+    // has read the stream already: its buffer is the body, or nothing is.
+    const parsed = (req as { body?: unknown }).body;
+    let body: BodyInit | undefined;
+    if (hasBody && req.readableEnded) {
+      if (!(parsed instanceof Uint8Array)) {
+        throw new Error(
+          "jazz: the request body was already read by another handler; mount jazz.nodeHandler before body parsers such as express.json()",
+        );
+      }
+      body = parsed as BodyInit;
+    } else if (hasBody) {
+      body = req as unknown as BodyInit;
+    }
     return new Request(`http://${host}${req.url ?? "/"}`, {
       method: req.method,
       headers,
-      ...(hasBody ? { body: req as unknown as BodyInit, duplex: "half" } : {}),
+      ...(body === undefined ? {} : { body, duplex: "half" }),
     } as RequestInit);
   }
 
   function nodeHandler(req: IncomingMessage, res: ServerResponse, next?: () => void): void {
-    const request = nodeRequest(req);
-    if (innerPath(request) === null) {
+    // Only Jazz's own paths: a request for the app passes on untouched, its
+    // body unread, whatever read it before.
+    const { pathname } = new URL(req.url ?? "/", "http://localhost");
+    if (pathname !== basePath && !pathname.startsWith(`${basePath}/`)) {
       if (next) return next();
       res.statusCode = 404;
       res.end();
+      return;
+    }
+    let request: Request;
+    try {
+      request = nodeRequest(req);
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : error);
+      res.statusCode = 500;
+      res.end("Internal error");
       return;
     }
     void handle(request).then(
@@ -2264,22 +2376,35 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     linkIdentity,
     async forReqUser(request) {
       const user = await authenticate(request);
-      if (!user) throw new Error("forReqUser: the request has no signed-in user");
-      return backendDbForSession(backend, await sessionFor(user));
+      if (!user) throw signedOut("forReqUser");
+      return backendDbForSession(backend, await sessionFor(user, "forReqUser"));
     },
     async withAttribution(request) {
       const user = await authenticate(request);
-      if (!user) throw new Error("withAttribution: the request has no signed-in user");
-      return backendDbAttributedTo(backend, await sessionFor(user));
+      if (!user) throw signedOut("withAttribution");
+      return backendDbAttributedTo(backend, await sessionFor(user, "withAttribution"));
     },
     async accountFor(request) {
       const user = await authenticate(request);
-      return user ? ((await sessionFor(user)).account_id ?? null) : null;
+      return user ? await existingAccountOf(user.userId) : null;
+    },
+    async createAccountFor(userId) {
+      if (typeof userId !== "string" || userId === "")
+        throw new Error("createAccountFor: pass the user's id, as your authenticate names it");
+      return accountOf(userId);
     },
     close() {
       closing ??= (async () => {
-        for (const { session: stream } of streams.values()) stream.close();
+        // Every client connection ends, so the host's own shutdown (which
+        // waits for the connections it serves) can finish, and the clients
+        // reconnect to whichever instance serves next.
+        for (const stream of [...streams.values()]) {
+          stream.session.close();
+          stream.end(1012, "server shutting down");
+        }
         streams.clear();
+        for (const ws of [...clientSockets]) ws.close(1012, "server shutting down");
+        clientSockets.clear();
         await Promise.all([...retiring].map((close) => close()));
         // Writes that resolved at the "local" tier may still be on their way
         // to the core. Hand them over before closing it, so a close right
@@ -2387,8 +2512,12 @@ function storeKey(store: JazzStore): string | undefined {
   if (store.kind === "sqlite") return `sqlite:${resolve(store.path)}`;
   if (store.kind === "vercel") {
     const project = store.options.credentials?.projectId ?? process.env.VERCEL_PROJECT_ID;
-    const name =
-      store.options.name ?? (project ? defaultCoreName(project, process.env) : undefined);
+    let name = store.options.name;
+    try {
+      name ??= project ? defaultCoreName(project, process.env) : undefined;
+    } catch {
+      // A preview without a branch: its open reports that, not createJazz.
+    }
     // Without a name the core is unknown: its open reports that.
     return name ? `vercel:${name}` : undefined;
   }
@@ -2508,6 +2637,7 @@ function openEntry(entry: Entry): Promise<OpenedJazz> {
       entry.failure = undefined;
       entry.opened = opened;
       entry.applied = options;
+      drainOnSignal(entry);
       return opened;
     },
     (error: unknown) => {
@@ -2521,6 +2651,43 @@ function openEntry(entry: Entry): Promise<OpenedJazz> {
   );
   entry.opening = opening;
   return opening;
+}
+
+/** The signals a host stops a server with (a deploy, a rolling restart, Ctrl-C). */
+const SHUTDOWN_SIGNALS = ["SIGTERM", "SIGINT"] as const;
+/** Every open Jazz in this process, closed when the process is asked to stop. */
+const drained = new Set<Entry>();
+const onShutdownSignal = (signal: NodeJS.Signals) => void shutDownOnSignal(signal);
+
+/**
+ * Close every open Jazz when the process is asked to stop. A host's own
+ * shutdown (`next start`, an Effect runtime, `server.close()`) waits for the
+ * connections it serves, and Jazz's sync sockets and streams last until Jazz
+ * ends them: without this, the process lingers and keeps its store locked
+ * for as long as a browser stays connected. The clients reconnect to
+ * whichever instance serves next. With no other handler for the signal the
+ * process then stops as it would have; otherwise that handler decides.
+ */
+function drainOnSignal(entry: Entry): void {
+  if (typeof process === "undefined" || typeof process.on !== "function") return;
+  if (drained.size === 0) {
+    for (const signal of SHUTDOWN_SIGNALS) process.on(signal, onShutdownSignal);
+  }
+  drained.add(entry);
+}
+
+function undrain(entry: Entry): void {
+  if (!drained.delete(entry) || drained.size > 0) return;
+  for (const signal of SHUTDOWN_SIGNALS) process.off(signal, onShutdownSignal);
+}
+
+async function shutDownOnSignal(signal: NodeJS.Signals): Promise<void> {
+  for (const each of SHUTDOWN_SIGNALS) process.off(each, onShutdownSignal);
+  const open = [...drained];
+  drained.clear();
+  await Promise.allSettled(open.map((entry) => entry.jazz.close()));
+  // Nobody else asked to handle it: stop the way the signal would have.
+  if (process.listenerCount(signal) === 0) process.kill(process.pid, signal);
 }
 
 /**
@@ -2545,6 +2712,7 @@ async function closeEntry(entry: Entry, early: EarlyDb): Promise<void> {
       if (entry.key !== undefined && registry().get(entry.key) === entry) {
         registry().delete(entry.key);
       }
+      undrain(entry);
       release();
     });
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -2697,6 +2865,7 @@ function facade(entry: Entry): Jazz {
     forReqUser: async (request) => (await use()).forReqUser(request),
     withAttribution: async (request) => (await use()).withAttribution(request),
     accountFor: async (request) => (await use()).accountFor(request),
+    createAccountFor: async (userId) => (await use()).createAccountFor(userId),
     linkIdentity: async (link) => (await use()).linkIdentity(link),
     async ready() {
       await use();

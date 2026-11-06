@@ -104,17 +104,17 @@ impl ThinSession {
         let mut frames = Vec::with_capacity(responses.len());
         for response in responses {
             match self.encode(response) {
-                Some(frame) => frames.push(frame),
+                Some(encoded) => frames.extend(encoded),
                 None => return false,
             }
         }
         self.send_frames(frames)
     }
 
-    /// `response` on the wire; `None` once the session was closed because
-    /// it could not be encoded.
-    fn encode(&self, response: ThinResponse) -> Option<Vec<u8>> {
-        encode_response(&self.output, response)
+    /// `response` on the wire ([`encode_fitting`]); `None` once the session
+    /// was closed because it could not be encoded.
+    fn encode(&self, response: ThinResponse) -> Option<Vec<Vec<u8>>> {
+        encode_fitting(&self.output, response).map(|(frames, _)| frames)
     }
 
     /// Send encoded `frames` as one batch, counted against the egress
@@ -417,9 +417,9 @@ fn drain_thin(thin: &mut ThinSession) -> Option<Vec<Vec<u8>>> {
     let mut bytes = 0;
     let mut held = std::mem::take(&mut thin.held).into_iter();
     for response in held.by_ref() {
-        let frame = thin.encode(response)?;
-        bytes += frame.len();
-        frames.push(frame);
+        let encoded = thin.encode(response)?;
+        bytes += encoded.iter().map(Vec::len).sum::<usize>();
+        frames.extend(encoded);
         if bytes >= room {
             break;
         }
@@ -443,12 +443,15 @@ fn drain_thin(thin: &mut ThinSession) -> Option<Vec<Vec<u8>>> {
                 continue 'streams;
             };
             let (body, last) = event_body(event);
+            let (encoded, refused) = encode_fitting(&thin.output, ThinResponse { id, body })?;
+            // A refused event ends its query with the error; the session
+            // and its other queries go on.
+            let last = last || refused;
             if last {
                 ended.push(id);
             }
-            let frame = encode_response(&thin.output, ThinResponse { id, body })?;
-            bytes += frame.len();
-            frames.push(frame);
+            bytes += encoded.iter().map(Vec::len).sum::<usize>();
+            frames.extend(encoded);
             if last {
                 continue 'streams;
             }
@@ -461,6 +464,48 @@ fn drain_thin(thin: &mut ThinSession) -> Option<Vec<Vec<u8>>> {
         thin.subscriptions.remove(&id);
     }
     Some(frames)
+}
+
+/// `response` as the wire frames that carry it: one, or its
+/// [`jazz::thin::ThinPart`]s when it is over a wire frame (a row holding a
+/// value over 2 MiB); past [`jazz::thin::MAX_THIN_MESSAGE_BYTES`], an error
+/// for its request in its place, and whether it was refused so. `None` as
+/// for [`encode_response`].
+fn encode_fitting(
+    output: &tokio_mpsc::UnboundedSender<Outbound>,
+    response: ThinResponse,
+) -> Option<(Vec<Vec<u8>>, bool)> {
+    let id = response.id;
+    // A body already past the most one answer takes is refused before it is
+    // encoded, which would copy it once more.
+    let payload = match &response.body {
+        ThinBody::Rows { rows, .. } => rows.len(),
+        ThinBody::Event { delta, .. } => delta.len(),
+        ThinBody::Snapshot { snapshot } => snapshot.len(),
+        _ => 0,
+    };
+    let size = if payload > jazz::thin::MAX_THIN_MESSAGE_BYTES {
+        payload
+    } else {
+        let frame = encode_response(output, response)?;
+        match jazz::thin::thin_wire_frames(frame) {
+            Ok(frames) => return Some((frames, false)),
+            Err(size) => size,
+        }
+    };
+    let refused = ThinResponse {
+        id,
+        body: ThinBody::Error {
+            code: "TooLarge".to_owned(),
+            message: format!(
+                "this result is {size} bytes or more, over the {} a thin client takes in one \
+                 answer: narrow or page the query, and read values that large another way \
+                 (streaming them to a thin client is not supported yet)",
+                jazz::thin::MAX_THIN_MESSAGE_BYTES
+            ),
+        },
+    };
+    encode_response(output, refused).map(|frame| (vec![frame], true))
 }
 
 /// `response` on the wire. On failure the session is told it closed, and

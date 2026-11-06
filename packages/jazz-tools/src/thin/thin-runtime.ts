@@ -78,6 +78,9 @@ import {
   FEATURE_THIN_RESULTS,
   decodeThinResponse,
   encodeThinRequest,
+  MAX_THIN_MESSAGE_BYTES,
+  ThinAssembler,
+  thinWireFrames,
   isThinResponse,
   type ThinBody,
   type ThinOp,
@@ -135,6 +138,8 @@ type OneShot = {
   resolve(body: ThinBody): void;
   reject(error: Error): void;
   sent: boolean;
+  /** A write: its fate is unknown once its connection ends unanswered. */
+  write?: boolean;
 };
 
 type LiveQuery = {
@@ -169,6 +174,8 @@ type Write = {
   observed: boolean;
   /** The server confirmed it. */
   committed: boolean;
+  /** It settled: committed, rejected, or given up with its fate unknown. */
+  answered: boolean;
 };
 
 /** Committed writes kept for later waits on them. */
@@ -181,6 +188,8 @@ export class ThinRuntime implements Runtime {
   private readonly reconnectDelaysMs: readonly number[];
   private author: string | undefined;
   private carrier?: WebSocketCarrier;
+  /** Joins the current connection's split responses. */
+  private parts = new ThinAssembler();
   private url?: string;
   private authJson?: string;
   /** Requests and live queries go out only once the schema is bound. */
@@ -195,6 +204,9 @@ export class ThinRuntime implements Runtime {
   private readonly liveQueries = new Map<number, LiveQuery>();
   private readonly liveByRequest = new Map<number, number>();
   private readonly writes = new Map<string, Write>();
+  /** Writes the server has not answered yet. */
+  private unanswered = 0;
+  private readonly syncStatusListeners = new Set<() => void>();
   private readonly transactions = new Map<OpenTransactionId, OpenTransaction>();
   private mutationErrorCallback?: (event: MutationErrorEvent) => void;
   private authFailureCallback?: (reason: string) => void;
@@ -262,6 +274,7 @@ export class ThinRuntime implements Runtime {
   private open(): void {
     if (this.closed || !this.url || this.authJson === undefined || this.carrier) return;
     clearTimeout(this.reconnectTimer);
+    this.parts.reset();
     const carrier = new WebSocketCarrier({
       endpointUrl: this.url,
       peerIdentity: peerIdentityForWebSocketAuth(
@@ -271,7 +284,7 @@ export class ThinRuntime implements Runtime {
       features: FEATURE_THIN_RESULTS,
       authJson: this.authJson,
       WebSocket: this.WebSocketImpl,
-      onFrame: (frame) => this.receive(frame),
+      onFrame: (frame) => this.receive(carrier, frame),
       onTerminal: (error) => this.lost(carrier, error),
     });
     this.carrier = carrier;
@@ -311,7 +324,31 @@ export class ThinRuntime implements Runtime {
       // A connection that ends before the answer is retried as a whole.
       reject: () => undefined,
     });
-    void carrier.send(encodeThinRequest(id, { type: "schema", schema: this.schemaBytes }));
+    this.sendFrame(
+      carrier,
+      encodeThinRequest(id, { type: "schema", schema: this.schemaBytes }),
+      (bytes) => {
+        this.oneShots.delete(id);
+        this.fatal(tooLarge("schema", bytes));
+      },
+    );
+  }
+
+  /** Send `frame`, in parts when it is over a wire frame; `tooLarge`
+   * instead past what one request takes. */
+  private sendFrame(
+    carrier: WebSocketCarrier | undefined,
+    frame: Uint8Array,
+    refused: (bytes: number) => void,
+  ): boolean {
+    const frames = thinWireFrames(frame);
+    if (frames === null) {
+      refused(frame.byteLength);
+      return false;
+    }
+    // Parts of one frame go back to back.
+    void carrier?.sendBatch(frames);
+    return true;
   }
 
   private lost(carrier: WebSocketCarrier, error: WireError): void {
@@ -364,6 +401,10 @@ export class ThinRuntime implements Runtime {
       if (!oneShot.sent) continue;
       this.oneShots.delete(id);
       if (error) oneShot.reject(error);
+      // A sent write is never sent again after an explicit disconnect: it may
+      // have committed, so it ends with its fate unknown. (A sent read is
+      // dropped unanswered, as before.)
+      else if (oneShot.write) oneShot.reject(new ThinConnectionLostError());
     }
   }
 
@@ -384,7 +425,10 @@ export class ThinRuntime implements Runtime {
     op: ThinOp,
     id = this.nextRequestId++,
   ): { answer: Promise<ThinBody>; oneShot?: OneShot } {
-    if (this.closed) return { answer: Promise.reject(new Error("the thin runtime is closed")) };
+    if (this.closed)
+      return {
+        answer: Promise.reject(new Error("the thin runtime is closed")),
+      };
     let oneShot: OneShot | undefined;
     const answer = new Promise<ThinBody>((resolve, reject) => {
       oneShot = { op, resolve, reject, sent: false };
@@ -398,13 +442,39 @@ export class ThinRuntime implements Runtime {
   }
 
   private transmit(id: number, oneShot: OneShot): void {
-    oneShot.sent = true;
-    void this.carrier?.send(encodeThinRequest(id, oneShot.op));
+    const sent = this.sendFrame(this.carrier, encodeThinRequest(id, oneShot.op), (bytes) => {
+      // Refused here: the server would refuse it.
+      this.oneShots.delete(id);
+      oneShot.reject(tooLarge(oneShot.op.type, bytes));
+    });
+    if (sent) oneShot.sent = true;
   }
 
-  private receive(frame: Uint8Array): void {
-    if (!isThinResponse(frame)) return;
-    const { id, body } = decodeThinResponse(frame);
+  private receive(carrier: WebSocketCarrier, piece: Uint8Array): void {
+    if (this.carrier !== carrier) return;
+    let response: ReturnType<typeof decodeThinResponse>;
+    try {
+      let frame = piece;
+      if (ThinAssembler.isPart(piece)) {
+        const joined = this.parts.push(piece);
+        if (joined === undefined) return;
+        frame = joined;
+      } else if (this.parts.joining) {
+        throw new Error("a thin frame arrived inside a split one");
+      }
+      if (!isThinResponse(frame)) return;
+      response = decodeThinResponse(frame);
+    } catch (error) {
+      // The server broke the framing: start over on a new connection.
+      this.parts.reset();
+      this.lost(carrier, {
+        code: "MalformedFrame",
+        retry: "later",
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
+    const { id, body } = response;
     const handle = this.liveByRequest.get(id);
     if (handle !== undefined) {
       this.receiveLive(handle, id, body);
@@ -427,7 +497,11 @@ export class ThinRuntime implements Runtime {
    */
   private refuseOtherSession(sessionJson: string | null | undefined, operation: string): void {
     if (sessionJson == null) return;
-    type SessionJson = { issuer?: string; user_id?: string; account_id?: string };
+    type SessionJson = {
+      issuer?: string;
+      user_id?: string;
+      account_id?: string;
+    };
     // A session, or a write context naming one.
     const parsed = JSON.parse(sessionJson) as SessionJson & {
       session?: SessionJson;
@@ -531,7 +605,10 @@ export class ThinRuntime implements Runtime {
     if (live.requestId === undefined) return;
     this.liveByRequest.delete(live.requestId);
     if (this.bound) {
-      void this.request({ type: "unsubscribe", subscription: live.requestId }).catch(() => {
+      void this.request({
+        type: "unsubscribe",
+        subscription: live.requestId,
+      }).catch(() => {
         // The connection ended: the server closed the live query with it.
       });
     }
@@ -543,12 +620,18 @@ export class ThinRuntime implements Runtime {
     if (handle === undefined) return;
     live.requestId = id;
     this.liveByRequest.set(id, handle);
-    void this.carrier?.send(
-      encodeThinRequest(id, {
-        type: "subscribe",
-        query: live.query,
-        options: live.options,
-      }),
+    this.sendFrame(
+      this.carrier,
+      encodeThinRequest(id, { type: "subscribe", query: live.query, options: live.options }),
+      (bytes) => {
+        this.liveByRequest.delete(id);
+        live.requestId = undefined;
+        this.receiveLive(handle, id, {
+          type: "error",
+          code: "TooLarge",
+          message: tooLarge("subscribe", bytes).message,
+        });
+      },
     );
   }
 
@@ -664,7 +747,10 @@ export class ThinRuntime implements Runtime {
       table,
       row: parseUuid(objectId),
       cells: encodeCellsForRow(definition, values, table),
-      options: { branch: context.branchView?.head, updatedAtMs: context.updatedAtMs },
+      options: {
+        branch: context.branchView?.head,
+        updatedAtMs: context.updatedAtMs,
+      },
     });
     const row = writeRow(table, objectId, definition.columns, values);
     return { id: row.id, values: row.values, ...receipt };
@@ -680,7 +766,9 @@ export class ThinRuntime implements Runtime {
     const context = this.writeTarget(writeContext, "Update");
     // Branch views have no partial-value coordinate space yet (#2087).
     if (context.branchView) {
-      throw new Error("Typed large-value updates are not supported in branch views.");
+      throw new Error(
+        "Partial-value updates (applyDiffs, editedFrom) are not yet supported in branch views.",
+      );
     }
     return this.mutate(context, {
       type: "updateLargeValues",
@@ -782,7 +870,11 @@ export class ThinRuntime implements Runtime {
       transaction.requests.push(staged);
       transaction.staged = true;
       await staged;
-      return { id: formatUuid(row), kind: "staged", openTransactionId: context.transaction! };
+      return {
+        id: formatUuid(row),
+        kind: "staged",
+        openTransactionId: context.transaction!,
+      };
     }
     return {
       id: formatUuid(row),
@@ -914,9 +1006,29 @@ export class ThinRuntime implements Runtime {
     return Promise.race([
       write.done,
       new Promise<never>((_, reject) =>
-        signal.addEventListener("abort", () => reject(signal.reason), { once: true }),
+        signal.addEventListener("abort", () => reject(signal.reason), {
+          once: true,
+        }),
       ),
     ]);
+  }
+
+  /** How many writes still wait for the server's answer. */
+  pendingUploadCount(): number {
+    return this.unanswered;
+  }
+
+  /** Observe changes of {@link pendingUploadCount}. */
+  onSyncStatusChange(listener: () => void, signal: AbortSignal): void {
+    if (signal.aborted) return;
+    this.syncStatusListeners.add(listener);
+    signal.addEventListener("abort", () => this.syncStatusListeners.delete(listener), {
+      once: true,
+    });
+  }
+
+  private notifySyncStatus(): void {
+    for (const listener of [...this.syncStatusListeners]) listener();
   }
 
   /** Every write made so far has been answered. Every write is global once answered. */
@@ -924,7 +1036,23 @@ export class ThinRuntime implements Runtime {
     _tier?: string,
     options: { throughOutage?: boolean; signal?: AbortSignal } = {},
   ): Promise<void> {
-    const answered = Promise.allSettled([...this.writes.values()].map((write) => write.done));
+    // Only writes still waiting for their answer, like a local-first client:
+    // a rejection the app already had doesn't fail every later wait.
+    const dones = [...this.writes.values()]
+      .filter((write) => !write.answered)
+      .map((write) => write.done);
+    // Waiting for sync fails on the server's rejection. A write whose
+    // connection ended unanswered is not rejected, and the shutdown drain
+    // only waits for every write to be answered.
+    const answered = options.throughOutage
+      ? Promise.all(
+          dones.map((done) =>
+            done.catch((error: unknown) => {
+              if (error instanceof ThinRemoteError) throw error;
+            }),
+          ),
+        )
+      : Promise.allSettled(dones);
     const signal = options.signal;
     if (!signal) {
       await answered;
@@ -934,15 +1062,24 @@ export class ThinRuntime implements Runtime {
     await Promise.race([
       answered,
       new Promise<never>((_, reject) =>
-        signal.addEventListener("abort", () => reject(signal.reason), { once: true }),
+        signal.addEventListener("abort", () => reject(signal.reason), {
+          once: true,
+        }),
       ),
     ]);
   }
 
   private write(op: ThinOp): TxId {
     const txId = `thin:${this.nextRequestId}` as TxId;
-    const write: Write = { observed: false, committed: false, done: Promise.resolve() };
-    write.done = this.request(op).then(
+    const write: Write = {
+      observed: false,
+      committed: false,
+      answered: false,
+      done: Promise.resolve(),
+    };
+    const { answer, oneShot } = this.requestWith(op);
+    if (oneShot) oneShot.write = true;
+    write.done = answer.then(
       (body) => {
         if (body.type !== "written") throw new Error(`unexpected answer to a write: ${body.type}`);
       },
@@ -965,7 +1102,12 @@ export class ThinRuntime implements Runtime {
               kind: "mergeable",
               sealed: true,
               latestSettlement: rejected
-                ? { kind: "rejected", transactionId: txId, code, reason: failure.message }
+                ? {
+                    kind: "rejected",
+                    transactionId: txId,
+                    code,
+                    reason: failure.message,
+                  }
                 : { kind: "missing", transactionId: txId },
             },
           });
@@ -975,6 +1117,15 @@ export class ThinRuntime implements Runtime {
     );
     // An unobserved failure is reported above, not as an unhandled rejection.
     write.done.catch(() => undefined);
+    this.unanswered++;
+    this.notifySyncStatus();
+    void write.done
+      .catch(() => undefined)
+      .then(() => {
+        write.answered = true;
+        this.unanswered--;
+        this.notifySyncStatus();
+      });
     write.done.then(
       () => (write.committed = true),
       () => undefined,
@@ -1039,4 +1190,13 @@ function uuidv7(): Uint8Array {
 function transactionOf(op: ThinOp): OpenTransactionId | undefined {
   const transaction = (op as { transaction?: unknown }).transaction;
   return typeof transaction === "string" ? (transaction as OpenTransactionId) : undefined;
+}
+
+/** The local refusal of a request past what one takes. */
+function tooLarge(op: string, bytes: number): ThinRemoteError {
+  return new ThinRemoteError(
+    "TooLarge",
+    `this ${op} is ${bytes} bytes, more than the ${MAX_THIN_MESSAGE_BYTES} a thin client ` +
+      `sends in one request: write values that large with insertStreaming or updateStreaming`,
+  );
 }

@@ -804,6 +804,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
             }
         };
     let thin = negotiated.features & jazz::wire::FEATURE_THIN_RESULTS != 0;
+    let mut thin_reader = ThinReader::default();
     // A thin connection is one session reading finished results: it holds
     // no replica to relay for tabs, so it is never a client relay. An admin
     // link is served as SYSTEM either way. `session_context` is for sync
@@ -946,9 +947,15 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     'connection: loop {
+        let stall_at = thin_reader.stall_deadline();
         tokio::select! {
             _ = &mut writer_terminal => break,
             _ = keepalive.tick() => {
+                // A connection waiting for room reads nothing, its peer's
+                // pongs included: that is not the peer going quiet.
+                if thin_reader.waiting() {
+                    last_inbound = tokio::time::Instant::now();
+                }
                 if last_inbound.elapsed() >= WS_IDLE_TIMEOUT {
                     tracing::debug!("closing idle websocket: no inbound traffic within the idle timeout");
                     let _ = writer_tx.try_send(vec![Message::Close(Some(CloseFrame {
@@ -1024,7 +1031,25 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                     }
                 }
             }
-            msg = socket_reader.next() => {
+            room = thin_reader.admitted() => {
+                if let Err(error) = thin_reader.grant(&core_server_shell, session, room) {
+                    queue_ws_error(&writer_tx, error);
+                    break 'connection;
+                }
+            }
+            _ = async {
+                match stall_at {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                queue_ws_error(&writer_tx, WireError::new(
+                    WireErrorCode::Backpressure, WireRetry::Later,
+                    "a split thin request stalled before its next part",
+                ));
+                break 'connection;
+            }
+            msg = socket_reader.next(), if !thin_reader.waiting() => {
                 last_inbound = tokio::time::Instant::now();
                 match msg {
                 Some(Ok(Message::Binary(bytes))) => {
@@ -1043,7 +1068,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                         }
                     };
                     if thin {
-                        if let Err(error) = receive_thin_frames(&core_server_shell, session, frames) {
+                        if let Err(error) = thin_reader.read(&core_server_shell, session, frames) {
                             queue_ws_error(&writer_tx, error);
                             break 'connection;
                         }
@@ -1079,30 +1104,153 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     }
 }
 
-/// Hand a thin client's requests to the runtime. A thin connection carries
-/// nothing else after its `Hello`.
-fn receive_thin_frames(
-    runtime: &ServerRuntimeHandle,
-    session: ServerSession,
-    frames: Vec<Vec<u8>>,
-) -> Result<(), WireError> {
-    for frame in frames {
-        match jazz::wire::decode_frame(&frame) {
-            Ok(WireFrame::ThinRequest(request)) => runtime
-                .receive_thin_request(session, request, frame.len())
-                .map_err(|error| {
-                    WireError::new(WireErrorCode::Backpressure, WireRetry::Later, error)
-                })?,
-            _ => {
-                return Err(WireError::new(
-                    WireErrorCode::MalformedFrame,
-                    WireRetry::Never,
-                    "a thin connection sends only thin requests",
-                ));
-            }
+/// How long a split thin request may go without its next part before its
+/// connection ends, so a stalled upload does not keep the server's room
+/// for splits. Every part but the last is full, so this is also the
+/// slowest a split may arrive (one wire frame per timeout).
+#[cfg(not(test))]
+const THIN_PART_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+#[cfg(test)]
+const THIN_PART_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+type ThinAdmission = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<crate::runtime::ThinIngress, String>> + Send>,
+>;
+
+/// A thin connection's requests on their way to the runtime: each is
+/// admitted (`admit_thin_request`) before its bytes are kept, a split one
+/// at its first part. While a request waits for room the connection reads
+/// nothing more, but keeps answering, pinging and watching for shutdown:
+/// the wait is a future the connection loop polls beside its other work.
+#[derive(Default)]
+struct ThinReader {
+    /// Frames read and not yet handed on, oldest first, with their length.
+    queue: VecDeque<(WireFrame, usize)>,
+    assembler: jazz::thin::ThinAssembler,
+    /// The room of the split being joined.
+    joining: Option<crate::runtime::ThinIngress>,
+    /// Room granted for the frame at the head of `queue`.
+    granted: Option<crate::runtime::ThinIngress>,
+    /// The wait for that room.
+    admission: Option<ThinAdmission>,
+    /// When the split being joined must have sent its next part.
+    part_deadline: Option<tokio::time::Instant>,
+}
+
+fn thin_malformed(error: impl ToString) -> WireError {
+    WireError::new(
+        WireErrorCode::MalformedFrame,
+        WireRetry::Never,
+        error.to_string(),
+    )
+}
+
+fn thin_stopped(error: String) -> WireError {
+    WireError::new(WireErrorCode::Backpressure, WireRetry::Later, error)
+}
+
+impl ThinReader {
+    /// Whether the connection waits for room, reading nothing meanwhile.
+    fn waiting(&self) -> bool {
+        self.admission.is_some()
+    }
+
+    /// The room being waited for (pending while there is no wait).
+    async fn admitted(&mut self) -> Result<crate::runtime::ThinIngress, String> {
+        match &mut self.admission {
+            Some(admission) => admission.await,
+            None => std::future::pending().await,
         }
     }
-    Ok(())
+
+    /// When a stalled split ends the connection: none while not joining.
+    fn stall_deadline(&self) -> Option<tokio::time::Instant> {
+        self.part_deadline.filter(|_| !self.waiting())
+    }
+
+    /// Take a batch read off the socket, handing on what has room.
+    fn read(
+        &mut self,
+        runtime: &ServerRuntimeHandle,
+        session: ServerSession,
+        frames: Vec<Vec<u8>>,
+    ) -> Result<(), WireError> {
+        for frame in frames {
+            let decoded = jazz::wire::decode_frame(&frame)
+                .map_err(|_| thin_malformed("a thin connection sends only thin requests"))?;
+            self.queue.push_back((decoded, frame.len()));
+        }
+        self.advance(runtime, session)
+    }
+
+    /// Room came for the frame at the head of the queue: go on.
+    fn grant(
+        &mut self,
+        runtime: &ServerRuntimeHandle,
+        session: ServerSession,
+        room: Result<crate::runtime::ThinIngress, String>,
+    ) -> Result<(), WireError> {
+        self.admission = None;
+        self.granted = Some(room.map_err(thin_stopped)?);
+        self.advance(runtime, session)
+    }
+
+    fn advance(
+        &mut self,
+        runtime: &ServerRuntimeHandle,
+        session: ServerSession,
+    ) -> Result<(), WireError> {
+        while let Some((frame, len)) = self.queue.front() {
+            // A request too large for one frame arrives in parts, back to back.
+            let needs = match frame {
+                WireFrame::ThinPart(part) if !self.assembler.is_joining() => {
+                    Some((part.total().map_err(thin_malformed)?, true))
+                }
+                WireFrame::ThinPart(_) => None,
+                _ if self.assembler.is_joining() => {
+                    return Err(thin_malformed("a thin frame arrived inside a split one"));
+                }
+                _ => Some((*len, false)),
+            };
+            if let Some((bytes, split)) = needs
+                && self.granted.is_none()
+            {
+                let runtime = runtime.clone();
+                self.admission = Some(Box::pin(async move {
+                    runtime.admit_thin_request(session, bytes, split).await
+                }));
+                return Ok(());
+            }
+            let (frame, _) = self.queue.pop_front().expect("a frame at the head");
+            let (frame, room) = match frame {
+                WireFrame::ThinPart(part) => {
+                    if !self.assembler.is_joining() {
+                        self.joining = self.granted.take();
+                    }
+                    let Some(joined) = self.assembler.push(part).map_err(thin_malformed)? else {
+                        self.part_deadline = Some(tokio::time::Instant::now() + THIN_PART_TIMEOUT);
+                        continue;
+                    };
+                    self.part_deadline = None;
+                    let room = self.joining.take().expect("a joined frame was admitted");
+                    let frame = jazz::wire::decode_postcard_frame(&joined)
+                        .map_err(|_| thin_malformed("a split thin frame does not decode"))?;
+                    (frame, room)
+                }
+                frame => (
+                    frame,
+                    self.granted.take().expect("a whole frame was admitted"),
+                ),
+            };
+            match frame {
+                WireFrame::ThinRequest(request) => runtime
+                    .receive_thin_request(session, request, room)
+                    .map_err(thin_stopped)?,
+                _ => return Err(thin_malformed("a thin connection sends only thin requests")),
+            }
+        }
+        Ok(())
+    }
 }
 
 // A cancelled socket task must not leave its writer owning the socket or queued catalogue.
@@ -1450,15 +1598,16 @@ mod tests {
 
         assert_eq!(
             claims.get("user"),
-            Some(
-                &RowAuthor::from_persisted_subject(
+            Some(&CoreValue::Uuid(
+                RowAuthor::from_persisted_subject(
                     AuthorSubject::authenticated("https://issuer.example", "verified-subject")
                         .expect("authenticated author")
                         .with_account(account),
                 )
                 .expect("admitted row author")
-                .to_value()
-            )
+                .account_id()
+                .0
+            ))
         );
         assert_eq!(
             claims.get("\0claims:user"),
@@ -1573,11 +1722,7 @@ mod tests {
                     .column("owner", ColumnType::Text)
                     .policies(public_table_policies().with_select(PolicyExpr::eq_session(
                         "owner",
-                        vec![
-                            "user".to_owned(),
-                            "identity".to_owned(),
-                            "subject".to_owned(),
-                        ],
+                        vec!["identity".to_owned(), "subject".to_owned()],
                     ))),
             )
             .build();
@@ -2099,11 +2244,12 @@ mod tests {
         );
         assert_eq!(
             admission.claims.get("user"),
-            Some(
-                &RowAuthor::from_persisted_subject(identity)
+            Some(&CoreValue::Uuid(
+                RowAuthor::from_persisted_subject(identity)
                     .expect("admitted row author")
-                    .to_value()
-            )
+                    .account_id()
+                    .0
+            ))
         );
         assert!(!admission.claims.contains_key("\0claims:authMode"));
     }
@@ -4592,11 +4738,7 @@ mod tests {
         let addr = start_ws_test_server(state.clone()).await;
         let policies = public_table_policies().with_select(PolicyExpr::eq_session(
             "title",
-            vec![
-                "user".to_owned(),
-                "identity".to_owned(),
-                "subject".to_owned(),
-            ],
+            vec!["identity".to_owned(), "subject".to_owned()],
         ));
         let response = reqwest::Client::new()
             .post(format!("http://{addr}/apps/{}/admin/bundles", state.app_id))
@@ -5131,11 +5273,7 @@ mod tests {
                     .column("owner", ColumnType::Text)
                     .policies(public_table_policies().with_select(PolicyExpr::eq_session(
                         "owner",
-                        vec![
-                            "user".to_owned(),
-                            "identity".to_owned(),
-                            "subject".to_owned(),
-                        ],
+                        vec!["identity".to_owned(), "subject".to_owned()],
                     ))),
             )
             .build()
@@ -5180,10 +5318,13 @@ mod tests {
     async fn send_thin(ws: &mut TestWs, id: u64, op: jazz::thin::ThinOp) {
         let frame = encode_frame(&WireFrame::ThinRequest(jazz::thin::ThinRequest { id, op }))
             .expect("encode thin request");
-        let batch = postcard::to_allocvec(&vec![frame]).expect("encode thin batch");
-        ws.send(WsMessage::Binary(batch.into()))
-            .await
-            .expect("send thin request");
+        // A request over one frame goes in parts, a message each.
+        for frame in jazz::thin::thin_wire_frames(frame).expect("a thin request in bounds") {
+            let batch = postcard::to_allocvec(&vec![frame]).expect("encode thin batch");
+            ws.send(WsMessage::Binary(batch.into()))
+                .await
+                .expect("send thin request");
+        }
     }
 
     /// Thin responses until `done` holds for the ones so far.
@@ -5192,15 +5333,28 @@ mod tests {
         done: impl Fn(&[jazz::thin::ThinResponse]) -> bool,
     ) -> Vec<jazz::thin::ThinResponse> {
         let mut responses = Vec::new();
+        let mut parts = jazz::thin::ThinAssembler::default();
         let start = tokio::time::Instant::now();
-        while !done(&responses) {
-            let remaining = WS_PUMP_DEADLINE.saturating_sub(start.elapsed());
+        // Values of many MiB take seconds to write and read in a debug build.
+        let deadline = WS_PUMP_DEADLINE * 6;
+        while !done(&responses) || parts.is_joining() {
+            let remaining = deadline.saturating_sub(start.elapsed());
             let message = tokio::time::timeout(remaining, ws.next())
                 .await
-                .unwrap_or_else(|_| panic!("thin responses so far: {responses:?}"))
+                .unwrap_or_else(|_| {
+                    let ids: Vec<u64> = responses.iter().map(|r| r.id).collect();
+                    panic!("thin responses so far: {ids:?}")
+                })
                 .expect("websocket open")
                 .expect("websocket message");
             for frame in decode_ws_message(&message) {
+                let frame = match frame {
+                    WireFrame::ThinPart(part) => match parts.push(part).expect("in bounds") {
+                        Some(joined) => jazz::wire::decode_postcard_frame(&joined).unwrap(),
+                        None => continue,
+                    },
+                    frame => frame,
+                };
                 match frame {
                     WireFrame::ThinResponse(response) => responses.push(response),
                     other => panic!("a thin connection received {other:?}"),
@@ -5783,7 +5937,13 @@ mod tests {
                     .await
                     .unwrap();
                 let mut stream = runtime.open_wire_stream(session).unwrap();
-                runtime.receive_thin_request(session, schema(), 16).unwrap();
+                let room = runtime
+                    .admit_thin_request(session, 16, false)
+                    .await
+                    .unwrap();
+                runtime
+                    .receive_thin_request(session, schema(), room)
+                    .unwrap();
                 runtime.request_wire_tick(session).unwrap();
                 let frames = tokio::time::timeout(Duration::from_secs(5), stream.recv())
                     .await
@@ -5866,8 +6026,12 @@ mod tests {
             });
         }
         for (id, op) in requests.into_iter().enumerate() {
+            let room = runtime
+                .admit_thin_request(session, 16, false)
+                .await
+                .unwrap();
             runtime
-                .receive_thin_request(session, ThinRequest { id: id as u64, op }, 16)
+                .receive_thin_request(session, ThinRequest { id: id as u64, op }, room)
                 .unwrap();
             runtime.request_wire_tick(session).unwrap();
             runtime.settle_for_test().await;
@@ -5952,7 +6116,198 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn thin_requests_past_the_ingress_budget_are_refused() {
+    async fn thin_values_over_a_wire_frame_travel_in_parts() {
+        use jazz::thin::{ThinBody, ThinOp};
+        let (state, schema) = private_docs_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let mut ws = open_thin_ws(addr, &state, alice).await;
+        bind_thin_schema(&mut ws, &schema).await;
+        send_thin(
+            &mut ws,
+            2,
+            ThinOp::Subscribe {
+                query: docs_query(),
+                options: br#"{"tier":"local-first"}"#.to_vec(),
+            },
+        )
+        .await;
+        // A 3 MB title: written in parts, read back and delivered in parts.
+        let long = "t".repeat(3 * 1024 * 1024);
+        send_thin(
+            &mut ws,
+            1,
+            ThinOp::Insert {
+                table: "docs".to_owned(),
+                cells: doc_cells(&long, alice),
+                options: Vec::new(),
+                transaction: None,
+            },
+        )
+        .await;
+        let responses = thin_responses_until(&mut ws, |responses| {
+            responses.iter().any(|r| r.id == 1)
+                && responses.iter().any(|r| match &r.body {
+                    ThinBody::Event { delta, .. } if r.id == 2 => {
+                        let (added, _) =
+                            jazz::binding_codec::decode_subscription_delta_rows(delta).unwrap();
+                        titles_of(added) == [long.clone()]
+                    }
+                    _ => false,
+                })
+        })
+        .await;
+        assert!(
+            responses
+                .iter()
+                .any(|r| r.id == 1 && matches!(r.body, ThinBody::Written { .. }))
+        );
+        assert_eq!(thin_titles(&mut ws, 3, None).await, vec![long.clone()]);
+
+        // A result past the most one answer takes is refused for that
+        // query alone; the session goes on.
+        let huge = "h".repeat(17 * 1024 * 1024);
+        for id in [4, 5] {
+            send_thin(
+                &mut ws,
+                id,
+                ThinOp::Insert {
+                    table: "docs".to_owned(),
+                    cells: doc_cells(&huge, alice),
+                    options: Vec::new(),
+                    transaction: None,
+                },
+            )
+            .await;
+            assert!(matches!(
+                thin_answer(&mut ws, id).await,
+                ThinBody::Written { .. }
+            ));
+        }
+        send_thin(
+            &mut ws,
+            6,
+            ThinOp::Query {
+                query: docs_query(),
+                options: remote_read(),
+                transaction: None,
+            },
+        )
+        .await;
+        match thin_answer(&mut ws, 6).await {
+            ThinBody::Error { code, message } => {
+                assert_eq!(code, "TooLarge");
+                assert!(message.contains("not supported yet"), "{message}");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        send_thin(&mut ws, 7, ThinOp::CaptureSnapshot).await;
+        assert!(matches!(
+            thin_answer(&mut ws, 7).await,
+            ThinBody::Snapshot { .. }
+        ));
+    }
+
+    /// Large writes sent together, and small requests sent while they are
+    /// queued, all get answered on the one connection: past the session's
+    /// room a request waits, it does not end the session.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_large_thin_writes_share_one_session() {
+        use jazz::thin::{ThinBody, ThinOp};
+        let (state, schema) = private_docs_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let mut ws = open_thin_ws(addr, &state, alice).await;
+        bind_thin_schema(&mut ws, &schema).await;
+        let photo = |n: usize| ThinOp::Insert {
+            table: "docs".to_owned(),
+            cells: doc_cells(&format!("{n}").repeat(12 * 1024 * 1024), alice),
+            options: Vec::new(),
+            transaction: None,
+        };
+        // Three 12 MB writes and a 5 MB one, over a session's room (the
+        // most one request takes) together: later ones wait for room, and
+        // each is followed at once by a small request.
+        let big = ThinOp::Insert {
+            table: "docs".to_owned(),
+            cells: doc_cells(&"b".repeat(5 * 1024 * 1024), alice),
+            options: Vec::new(),
+            transaction: None,
+        };
+        send_thin(&mut ws, 10, big).await;
+        send_thin(&mut ws, 11, ThinOp::CaptureSnapshot).await;
+        for n in 1..=3 {
+            send_thin(&mut ws, 10 + 2 * n as u64, photo(n)).await;
+            send_thin(&mut ws, 11 + 2 * n as u64, ThinOp::CaptureSnapshot).await;
+        }
+        let responses = thin_responses_until(&mut ws, |responses| {
+            (10..=17).all(|id| responses.iter().any(|r| r.id == id))
+        })
+        .await;
+        for response in &responses {
+            match (response.id % 2, &response.body) {
+                (0, ThinBody::Written { .. }) | (1, ThinBody::Snapshot { .. }) => {}
+                (_, body) => panic!("request {} got {body:?}", response.id),
+            }
+        }
+    }
+
+    /// A split request that stops part way ends its own connection once
+    /// its next part is overdue; other connections are answered meanwhile.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stalled_split_thin_request_ends_only_its_connection() {
+        use jazz::thin::{ThinBody, ThinOp};
+        let (state, schema) = private_docs_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let mut stalled = open_thin_ws(addr, &state, alice).await;
+        bind_thin_schema(&mut stalled, &schema).await;
+        let mut other = open_thin_ws(addr, &state, alice).await;
+        bind_thin_schema(&mut other, &schema).await;
+        let frame = encode_frame(&WireFrame::ThinRequest(jazz::thin::ThinRequest {
+            id: 9,
+            op: ThinOp::Insert {
+                table: "docs".to_owned(),
+                cells: doc_cells(&"s".repeat(30 * 1024 * 1024), alice),
+                options: Vec::new(),
+                transaction: None,
+            },
+        }))
+        .unwrap();
+        let first = jazz::thin::thin_wire_frames(frame).unwrap().remove(0);
+        let batch = postcard::to_allocvec(&vec![first]).unwrap();
+        stalled.send(WsMessage::Binary(batch.into())).await.unwrap();
+        let started = tokio::time::Instant::now();
+        send_thin(&mut other, 1, ThinOp::CaptureSnapshot).await;
+        assert!(matches!(
+            thin_answer(&mut other, 1).await,
+            ThinBody::Snapshot { .. }
+        ));
+        assert!(started.elapsed() < THIN_PART_TIMEOUT);
+        // The stalled connection is told why, and closed.
+        let error = tokio::time::timeout(THIN_PART_TIMEOUT * 5, async {
+            loop {
+                match stalled.next().await {
+                    Some(Ok(message)) => {
+                        for frame in decode_ws_message(&message) {
+                            if let WireFrame::Error(error) = frame {
+                                return Some(error);
+                            }
+                        }
+                    }
+                    _ => return None,
+                }
+            }
+        })
+        .await
+        .expect("the stalled split ends");
+        let error = error.expect("an error frame before the close");
+        assert!(error.message.contains("stalled"), "{error:?}");
+        assert!(started.elapsed() >= THIN_PART_TIMEOUT);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn thin_requests_past_the_ingress_budget_wait_for_room() {
         let (state, _) = private_docs_state().await;
         let runtime = state.runtime_for_client().expect("runtime");
         let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
@@ -5960,27 +6315,90 @@ mod tests {
             &current_bundle(std::net::SocketAddr::from(([127, 0, 0, 1], 0)), &state).await,
         )
         .expect("bundle id");
-        let session = runtime
-            .open_thin_session(
+        let open = || {
+            runtime.open_thin_session(
                 alice,
                 BTreeMap::new(),
                 Some(bundle),
                 CommitUnitTrust::Session,
             )
-            .await
-            .expect("open thin session");
-        let request = |id| jazz::thin::ThinRequest {
-            id,
-            op: jazz::thin::ThinOp::CaptureSnapshot,
         };
-        let budget = crate::runtime::SESSION_QUEUE_BUDGET;
-        let error = runtime
-            .receive_thin_request(session, request(1), budget + 1)
-            .expect_err("a request past the budget is refused");
-        assert!(error.contains("ingress budget"), "{error}");
+        let (session, other) = (open().await.unwrap(), open().await.unwrap());
+        let most = jazz::thin::MAX_THIN_MESSAGE_BYTES;
+        let soon = Duration::from_millis(200);
+        // One request may take a session's whole budget; the next waits
+        // until it has run, and another session is not held up by it.
+        let held = runtime
+            .admit_thin_request(session, most, true)
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(soon, runtime.admit_thin_request(session, 16, false))
+                .await
+                .is_err()
+        );
+        let elsewhere = runtime.admit_thin_request(other, 16, true).await.unwrap();
+        let waiting = tokio::spawn({
+            let runtime = runtime.clone();
+            async move {
+                runtime
+                    .admit_thin_request(session, 16, false)
+                    .await
+                    .map(drop)
+            }
+        });
         runtime
-            .receive_thin_request(session, request(2), 16)
-            .expect("a request within the budget is queued");
+            .receive_thin_request(
+                session,
+                jazz::thin::ThinRequest {
+                    id: 1,
+                    op: jazz::thin::ThinOp::CaptureSnapshot,
+                },
+                held,
+            )
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), waiting)
+            .await
+            .expect("room once the request ran")
+            .unwrap()
+            .unwrap();
+        drop(elsewhere);
+        // Past the most one request takes, refused outright.
+        assert!(
+            runtime
+                .admit_thin_request(session, most + 1, true)
+                .await
+                .is_err()
+        );
+        // The server's budget bounds every session together.
+        let budget = crate::runtime::THIN_INGRESS_SERVER_BUDGET;
+        let mut sessions = Vec::new();
+        let mut rooms = Vec::new();
+        for _ in 0..budget / most {
+            let session = open().await.unwrap();
+            rooms.push(
+                runtime
+                    .admit_thin_request(session, most, true)
+                    .await
+                    .unwrap(),
+            );
+            sessions.push(session);
+        }
+        assert!(
+            tokio::time::timeout(soon, runtime.admit_thin_request(other, 16, true))
+                .await
+                .is_err()
+        );
+        // A request that fits one frame needs only its session's room.
+        tokio::time::timeout(soon, runtime.admit_thin_request(other, 16, false))
+            .await
+            .expect("whole requests do not queue behind splits")
+            .unwrap();
+        rooms.pop();
+        tokio::time::timeout(soon, runtime.admit_thin_request(other, 16, true))
+            .await
+            .expect("room once another request is done")
+            .unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

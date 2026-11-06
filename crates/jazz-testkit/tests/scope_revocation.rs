@@ -30,19 +30,11 @@ fn owned_docs_schema() -> jazz::tools::Schema {
                 .with_select(PolicyExpr::or(vec![
                     PolicyExpr::eq_session(
                         "owner_id",
-                        vec![
-                            "user".to_owned(),
-                            "identity".to_owned(),
-                            "subject".to_owned(),
-                        ],
+                        vec!["identity".to_owned(), "subject".to_owned()],
                     ),
                     PolicyExpr::eq_session(
                         "transfer_writer_id",
-                        vec![
-                            "user".to_owned(),
-                            "identity".to_owned(),
-                            "subject".to_owned(),
-                        ],
+                        vec!["identity".to_owned(), "subject".to_owned()],
                     ),
                 ]))
                 .with_update(Some(PolicyExpr::True), PolicyExpr::True)

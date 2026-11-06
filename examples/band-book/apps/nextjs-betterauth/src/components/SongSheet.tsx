@@ -69,12 +69,15 @@ function SheetEditor({ sheet, editable }: { sheet: SongSheetRow; editable: boole
         doc: parseSheet(sheet.body),
         plugins: [
           ...editingPlugins(),
-          // Every change is written as the whole value, at once. Each write is
-          // one version, and the authority merges it with whatever others
-          // wrote meanwhile.
+          // Every change is written as the whole value, at once, as an edit
+          // of the value the editor last showed or wrote. Each write is one
+          // version, and the authority merges it with whatever others wrote
+          // meanwhile; one typed before a merged value is shown is merged
+          // over it locally.
           markdownSync({
             parse: parseSheet,
-            onChange: (body) => db.update(app.songSheets, sheet.id, { body }),
+            onChange: (body, { editedFrom }) =>
+              db.update(app.songSheets, sheet.id, { body }, { editedFrom: { body: editedFrom } }),
           }),
           overlays({ anchors: () => db.textAnchors(), onPlaced: setPlaced }),
         ],

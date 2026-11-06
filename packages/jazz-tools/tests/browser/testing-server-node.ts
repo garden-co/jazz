@@ -214,18 +214,29 @@ export async function createJazzServerTransportControl(serverUrl: string): Promi
   return control.url;
 }
 
-export function blockJazzServerTransport(
-  url: string,
-  direction: "both" | "inbound" | "sever",
-): void {
+export function blockJazzServerTransport(url: string, direction: "both" | "inbound"): void {
   const control = transportControl(url);
   if (direction === "inbound") control.blockInbound();
-  else if (direction === "sever") control.sever();
   else control.block();
 }
 
 export function unblockJazzServerTransport(url: string): void {
   transportControl(url).unblock();
+}
+
+export function downJazzServerTransport(url: string): void {
+  transportControl(url).down();
+}
+
+/** Bring the transport back up in front of `serverUrl` (a restarted front). */
+export async function upJazzServerTransport(url: string, serverUrl?: string): Promise<void> {
+  if (serverUrl) {
+    for (const runningServer of jazzServerPromises.values()) {
+      const front = (await runningServer.catch(() => undefined))?.front;
+      if (front?.proxyOrigin(serverUrl, new URL(url).host)) break;
+    }
+  }
+  transportControl(url).up(serverUrl);
 }
 
 export async function stopJazzServerTransportControl(url: string): Promise<void> {

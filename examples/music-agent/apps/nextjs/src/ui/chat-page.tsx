@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useAll, useSession } from "jazz-tools/react";
+import { useAll, useJazzAuth, useSession } from "jazz-tools/react";
 import { AppShell } from "@astryxdesign/core/AppShell";
 import { Badge } from "@astryxdesign/core/Badge";
 import { Button } from "@astryxdesign/core/Button";
@@ -16,10 +16,15 @@ import { ConversationView } from "./conversation-view";
 /** Prepare the workspace once (server-side, idempotent), then show the app. */
 export function ChatPage({ agentLabel }: { agentLabel: string }) {
   const { data: session } = authClient.useSession();
+  // The server prepares the workspace of the user's Jazz account, which their
+  // first Jazz sign-in creates: wait for it rather than race it.
+  const jazz = useJazzAuth();
+  const account = jazz.status === "ready" ? jazz.client?.session?.user : undefined;
   const [bootstrap, setBootstrap] = useState<"loading" | "ready" | "failed">("loading");
   useEffect(() => {
-    if (!session) return;
+    if (!session || !account) return;
     let cancelled = false;
+    setBootstrap("loading");
     void bootstrapWorkspace()
       .catch(() => undefined)
       .then((response) => {
@@ -28,15 +33,15 @@ export function ChatPage({ agentLabel }: { agentLabel: string }) {
     return () => {
       cancelled = true;
     };
-  }, [session?.user.id]);
-  if (!session || bootstrap === "loading")
+  }, [session?.user.id, account]);
+  if (!session || !account || bootstrap === "loading")
     return <StatusScreen message="Preparing your booking desk…" />;
   if (bootstrap === "failed") return <StatusScreen error="The workspace could not be prepared." />;
   return <MusicAgentApp agentLabel={agentLabel} userName={session.user.name} />;
 }
 
 export function MusicAgentApp({ agentLabel, userName }: { agentLabel: string; userName: string }) {
-  const account = useSession()?.user.account;
+  const account = useSession()?.user;
   const { data: artists = [], db } = useAll(app.artists);
   const { data: conversations = [] } = useAll(app.conversations.orderBy("$createdAt", "desc"));
   const [selectedId, setSelectedId] = useState<string>();

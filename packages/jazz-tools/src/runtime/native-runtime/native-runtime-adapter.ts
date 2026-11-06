@@ -2006,7 +2006,9 @@ export class NativeRuntimeAdapter implements Runtime {
     // Branch views have no partial-value coordinate space yet (#2087). Do not
     // silently read or stage through the root instead.
     if (branchView) {
-      throw new Error("Typed large-value updates are not supported in branch views.");
+      throw new Error(
+        "Partial-value updates (applyDiffs, editedFrom) are not yet supported in branch views.",
+      );
     }
     if (tx) {
       // The transaction was opened with its identity, and the core stages the
@@ -2044,7 +2046,9 @@ export class NativeRuntimeAdapter implements Runtime {
     // Outside a transaction the binding writes as the adapter's own identity.
     // Do not silently substitute it for a session or attributed write.
     if (largeValueWriteHasIncompatibleIdentity(writeContext, this.peerIdentity)) {
-      throw new Error("Typed large-value updates do not yet support an attributed identity.");
+      throw new Error(
+        "Partial-value updates (applyDiffs, editedFrom) do not yet support a session or attributed identity outside a transaction.",
+      );
     }
     const updateLargeValues = this.db.updateLargeValues;
     if (!updateLargeValues) {

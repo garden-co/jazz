@@ -773,6 +773,34 @@ describe("permissions DSL", () => {
     ).toThrow(/multiple asymmetric update rules.*todos.*USING and WITH CHECK.*ORed independently/i);
   });
 
+  it("names isCreator's replacement when a rule destructures it (removed in alpha.60)", () => {
+    expect(() =>
+      definePermissions(app, (ctx) => {
+        const { policy, isCreator } = ctx as typeof ctx & { isCreator: unknown };
+        policy.todos.allowUpdate.where(isCreator as never);
+      }),
+    ).toThrow(
+      /`isCreator` was removed in alpha\.60.*\$createdBy: session\.user.*"\$createdBy\.identity": session\.identity/,
+    );
+  });
+
+  it("names the rule and the input an unsupported condition came from", () => {
+    expect(() =>
+      definePermissions(app, ({ policy }) => {
+        policy.todos.allowRead.where(undefined as never);
+      }),
+    ).toThrow(
+      /^policy\.todos\.allowRead\.where: Unsupported permission condition input: undefined\./,
+    );
+    expect(() =>
+      definePermissions(app, ({ policy }) => {
+        policy.todos.allowUpdate.whereOld([{ done: true }] as never);
+      }),
+    ).toThrow(
+      /policy\.todos\.allowUpdate\.whereOld: .*an array \(wrap several conditions in anyOf or allOf\)/,
+    );
+  });
+
   it("still OR-merges multiple symmetric update rules", () => {
     const compiled = definePermissions(app, ({ policy }) => [
       policy.todos.allowUpdate.where({ archived: false }),

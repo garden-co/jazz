@@ -619,6 +619,17 @@ edits when the column is text-merging (ch. 4 §4.3, `INV-HIST-24`). Branch views
 reject `applyDiffs` explicitly, as do React Native transactions until its
 foreground codec carries the descriptor.
 
+`update` also takes `editedFrom`, the value each text-merge column was
+edited from, lowered to a `text_edit` descriptor (`kind: "text_edit"`,
+`column`, `text`, `edited_from`) that the store merges over the value it
+holds (ch. 4 §4.3). It needs no coordinates, but travels the same
+partial-value path, with the same limits: branch views refuse it, as do
+React Native transactions and, in the native runtime, a session or
+attributed write outside a transaction, each explicitly as not supported
+yet. TypeScript refuses `editedFrom` on a column with its own transform,
+and `upsert` and the streaming writes do not take it. A column left
+`undefined` in `editedFrom` is written as a plain value.
+
 `Db` exposes `value_delta(table, row, column, from_version, to_version)`,
 returning `delta` (§19.6) as splices for callers allowed to read both
 versions: each replaces `delete` bytes at `at` with `insert`, applied in

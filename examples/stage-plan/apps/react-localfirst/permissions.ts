@@ -13,7 +13,7 @@ import { app } from "./schema.js";
  * - Checklist items are private to their owner.
  */
 export default s.definePermissions(app, ({ policy, session, anyOf, allOf, allowedTo }) => {
-  const me = session.user.account;
+  const me = session.user;
 
   const isChief = (showId: RowRefValue) =>
     policy.shows.exists.where({ id: showId, chiefAccount: me });

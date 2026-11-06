@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { AccountManager, type AccountHandle, type AccountIdentity } from "../accounts/state.js";
 import { AccountAuthError } from "../accounts/registry-client.js";
-import { watchBackendUser } from "./backend-watch.js";
+import { watchBackendUser, type BackendUser } from "./backend-watch.js";
 import { followUser } from "./follow-user.js";
 import { createJazzSessionOwner } from "./state.js";
 
@@ -62,7 +62,7 @@ async function setup(
   let focus: (() => void) | undefined;
   const posts = vi.fn();
   let otherTab: (() => void) | undefined;
-  const probe = vi.fn(async (): Promise<AccountIdentity | null> => {
+  const probe = vi.fn(async (): Promise<BackendUser | null> => {
     if (options.noBackend) throw new AccountAuthError("not_found", 404);
     return backendUser?.identity ?? null;
   });
@@ -421,6 +421,53 @@ it("a refused check leaves a remembered user's claims refresh to the next check"
   t.focus();
   await settle();
   expect(t.loginWithBackend).toHaveBeenCalledOnce();
+  t.watch.stop();
+  await t.session.close();
+});
+
+it("signs a remembered user in again, once, when the core lost their account", async () => {
+  // Reopened from this device's memory, but the core no longer holds the
+  // account (a reset dev store, a new core): sync admission refuses it.
+  const t = await setup(user("alice"));
+  t.signIn(user("alice"));
+  t.probe.mockResolvedValue({ ...user("alice").identity, hasAccount: false });
+  t.watch.authRefused();
+  await settle();
+  // Signing in again gives her a new account; reconnecting would only be refused.
+  expect(t.loginWithBackend).toHaveBeenCalledOnce();
+  expect(t.reconnect).not.toHaveBeenCalled();
+  // A backend that keeps saying no account doesn't make it sign in again and again.
+  t.watch.authRefused();
+  await settle();
+  expect(t.loginWithBackend).toHaveBeenCalledOnce();
+  // Once the backend says she has one, a later loss signs her in again.
+  t.watch.connected();
+  t.probe.mockResolvedValue({ ...user("alice").identity, hasAccount: true });
+  t.focus();
+  await settle();
+  t.probe.mockResolvedValue({ ...user("alice").identity, hasAccount: false });
+  t.watch.authRefused();
+  await settle();
+  expect(t.loginWithBackend).toHaveBeenCalledTimes(2);
+  expect(t.session.getSnapshot().status).toBe("ready");
+  t.watch.stop();
+  await t.session.close();
+});
+
+it("tries the sign-in for a lost account again when it failed", async () => {
+  const t = await setup(user("alice"));
+  t.signIn(user("alice"));
+  t.probe.mockResolvedValue({ ...user("alice").identity, hasAccount: false });
+  // The first sign-in can't reach the backend.
+  t.loginWithBackend.mockRejectedValueOnce(new AccountAuthError("account_request_failed", 503));
+  t.watch.authRefused();
+  await settle();
+  // A later check signs in again, and that one works.
+  t.watch.authRefused();
+  await settle();
+  expect(t.loginWithBackend).toHaveBeenCalledTimes(2);
+  await expect(t.loginWithBackend.mock.results[0]!.value).rejects.toThrow();
+  expect(t.session.getSnapshot().status).toBe("ready");
   t.watch.stop();
   await t.session.close();
 });

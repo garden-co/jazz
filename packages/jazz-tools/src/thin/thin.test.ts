@@ -127,6 +127,29 @@ describe("thin client", () => {
     unsubscribe();
   }, 60_000);
 
+  it("writes and reads values over a wire frame, and refuses writes past the most one takes", async () => {
+    const server = await startServer();
+    const alice = await thinDb(server);
+    const deliveries: number[][] = [];
+    const unsubscribe = alice.subscribe(app.notes, (rows) =>
+      deliveries.push(rows.map((row) => row.text.length)),
+    );
+    await expect.poll(() => deliveries.length, { timeout: 10_000 }).toBeGreaterThan(0);
+    // A 3 MB value goes out in parts, and comes back in parts, both as a
+    // query's answer and as a live query's update.
+    const long = "t".repeat(3 * 1024 * 1024);
+    const written = alice.insert(app.notes, { text: long, done: false });
+    await written.wait({ tier: "global" });
+    expect((await alice.all(app.notes)).map((row) => row.text)).toEqual([long]);
+    await expect.poll(() => deliveries.at(-1), { timeout: 10_000 }).toEqual([long.length]);
+    // Past the most one request takes, refused here, and its wait settles.
+    const huge = alice.insert(app.notes, { text: "h".repeat(33 * 1024 * 1024), done: false });
+    await expect(huge.wait({ tier: "global" })).rejects.toThrow("sends in one request");
+    // The connection goes on.
+    await alice.update(app.notes, written.value.id, { done: true }).wait({ tier: "global" });
+    unsubscribe();
+  }, 120_000);
+
   it("shares data with a local-first client of the same account", async () => {
     const server = await startServer();
     const secret = formatAuthSecret(new Uint8Array(32).fill(9));
@@ -290,6 +313,39 @@ describe("thin client", () => {
       .toEqual(["after", "before"]);
     expect(deliveries.every((rows) => new Set(rows).size === rows.length)).toBe(true);
     stop();
+  }, 60_000);
+
+  it("gives up a write in flight when the app goes offline, so waiting for sync ends", async () => {
+    const server = await startServer();
+    const db = await thinDb(server);
+    await db.insert(app.notes, { text: "first", done: false }).wait({ tier: "global" });
+    const runtime = db.currentRuntime() as ThinRuntime;
+
+    // Sent, not answered yet: the app's offline toggle cuts the connection.
+    const write = db.insert(app.notes, { text: "in flight", done: false });
+    await db.disconnect();
+
+    // It may have committed, so it is not sent again: its fate is unknown.
+    await expect(write.wait({ tier: "global" })).rejects.toThrow();
+    expect(runtime.pendingUploadCount()).toBe(0);
+    await db.waitForSync({ timeoutMs: 1_000 });
+  }, 60_000);
+
+  it("waits for sync past a rejected write the app already had", async () => {
+    const server = await startServer();
+    const db = await thinDb(server);
+    const other = await thinDb(server);
+    const theirs = await other
+      .insert(app.notes, { text: "theirs", done: false })
+      .wait({ tier: "global" });
+    // Only the row's creator may update it: the server rejects this.
+    await expect(
+      db.update(app.notes, theirs.id, { done: true }).wait({ tier: "global" }),
+    ).rejects.toThrow();
+    await expect(db.waitForSync({ timeoutMs: 5_000 })).resolves.toBeUndefined();
+
+    await db.insert(app.notes, { text: "mine", done: false }).wait({ tier: "global" });
+    await expect(db.waitForSync({ timeoutMs: 5_000 })).resolves.toBeUndefined();
   }, 60_000);
 
   it("fails a transaction its connection took with it, and nothing else", async () => {

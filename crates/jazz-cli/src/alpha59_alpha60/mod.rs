@@ -231,14 +231,16 @@ fn remove_built(dir: &std::path::Path, keep_dir: bool) -> std::io::Result<()> {
 /// Read the whole dump once, so its digest and counts are checked before
 /// anything is built from it.
 fn check_dump(args: &Args) -> Result<(), String> {
-    let file = std::fs::File::open(&args.dump).map_err(err)?;
+    let file = std::fs::File::open(&args.dump)
+        .map_err(|error| format!("{}: {error}", args.dump.display()))?;
     let (mut reader, _) = dump::Reader::open(std::io::BufReader::new(file)).map_err(err)?;
     while reader.next_record().map_err(err)?.is_some() {}
     Ok(())
 }
 
 async fn run(args: &Args) -> Result<Json, String> {
-    let file = std::fs::File::open(&args.dump).map_err(err)?;
+    let file = std::fs::File::open(&args.dump)
+        .map_err(|error| format!("{}: {error}", args.dump.display()))?;
     // The reader refuses another dump format, naming the exporter to use.
     let (mut reader, _) = dump::Reader::open(std::io::BufReader::new(file)).map_err(err)?;
 
