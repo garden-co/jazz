@@ -125,7 +125,8 @@ function decorate<Client>(
   };
 }
 
-async function signedInIdentity(
+/** @internal Who the backend at `registry` says is signed in (null: no one). */
+export async function signedInIdentity(
   registry: string,
   fetcher?: typeof fetch,
 ): Promise<BackendUser | null> {

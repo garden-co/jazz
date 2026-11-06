@@ -25,7 +25,15 @@ import {
 import { createJazzSessionOwner, replaceJazzSessionClient } from "./state.js";
 import { DEFAULT_SERVER_URL, refuseClientAppId } from "../runtime/client-scope.js";
 import { browserBackendWatchEvents } from "./backend-watch.js";
-import { firstBackendAnswer, followUser, type UserFollowingSession } from "./follow-user.js";
+import {
+  firstBackendAnswer,
+  followUser,
+  signedInIdentity,
+  type UserFollowingSession,
+} from "./follow-user.js";
+import { leftBehindReplicas, wipeLeftBehindReplicas } from "./left-behind-replicas.js";
+import type { RememberedBackendUser } from "../accounts/enrollment.js";
+import type { AccountStore } from "../accounts/persistence.js";
 
 export type { LocalFirstLoader };
 
@@ -70,7 +78,10 @@ export type JazzClientConfig = Omit<OpenJazzClientConfig, "account" | "serverUrl
      * On sign-out (or a switch to another user), wipe the account's local
      * storage instead of keeping it for that user's next sign-in. For shared
      * devices. Jazz first waits up to 5 seconds for pending writes to upload;
-     * writes still unsynced then are lost.
+     * writes still unsynced then are lost. A sign-out the page doesn't see
+     * (on your server, or another user signing in, before a reload) is
+     * wiped on the next page load, once your backend names someone else or
+     * no one.
      */
     clearOnSignOut?: boolean;
     /**
@@ -112,6 +123,17 @@ export async function createJazzClient(config: JazzClientConfig): Promise<Browse
   );
   const registry = clientRegistryUrl({ ...config, serverUrl });
   const upgrades = localFirstMemory(registry);
+  // A memory-only client has no storage to wipe.
+  const wipesOnSignOut = !!clearOnSignOut && (config.driver?.type ?? "persistent") === "persistent";
+  // Local-first replicas a sign-out may leave behind (see `leftBehindReplicas`).
+  const leftBehind = wipesOnSignOut && loadLocalFirst ? leftBehindReplicas(registry) : undefined;
+  // Accounts whose local-first client this page opened: signing them out here wipes them.
+  const openedHere = new Set<string>();
+  const holdsReplica = (account: AccountHandle) => {
+    if (!leftBehind) return;
+    leftBehind.remember(account);
+    openedHere.add(account.id);
+  };
   let session: BrowserJazzSession | undefined;
 
   const openLocalFirst = (createDb: CreateAccountDb, account: AccountHandle) =>
@@ -137,7 +159,10 @@ export async function createJazzClient(config: JazzClientConfig): Promise<Browse
     );
     // Only once the session took the new client: a superseded upgrade
     // (a logout or account switch meanwhile) is not remembered.
-    if (upgraded) upgrades.remember(upgraded);
+    if (upgraded) {
+      upgrades.remember(upgraded);
+      holdsReplica(upgraded);
+    }
   };
 
   const openThin = async (account: AccountHandle) => {
@@ -168,7 +193,9 @@ export async function createJazzClient(config: JazzClientConfig): Promise<Browse
         console.warn("Jazz could not load the local-first client; starting thin.", error);
         return openThin(account);
       }
-      return openLocalFirst(module.createClient, account);
+      const client = await openLocalFirst(module.createClient, account);
+      holdsReplica(account);
+      return client;
     }
     return openThin(account);
   };
@@ -177,7 +204,7 @@ export async function createJazzClient(config: JazzClientConfig): Promise<Browse
     accounts,
     initial,
     // A memory-only client has no storage to wipe.
-    clearOnSignOut: clearOnSignOut && (config.driver?.type ?? "persistent") === "persistent",
+    clearOnSignOut: wipesOnSignOut,
     openClient,
     decorate: followUser({
       registry,
@@ -186,8 +213,60 @@ export async function createJazzClient(config: JazzClientConfig): Promise<Browse
     }),
   });
   if (loadLocalFirst) upgradeInBackground(session, loadLocalFirst);
+  if (leftBehind && loadLocalFirst) {
+    const record = leftBehind;
+    // Signed out in this page: the session wiped the replica as it did.
+    session.subscribe(() => {
+      const { status, account } = session.getSnapshot();
+      if (status !== "ready" && status !== "signed-out") return;
+      for (const id of openedHere) {
+        if (id === account?.id) continue;
+        openedHere.delete(id);
+        record.forget(id);
+      }
+    });
+    // Signed out where this page didn't see it (on the server, or another
+    // user signed in through the app) before this load: wipe what is left.
+    void wipeLeftBehindReplicas({
+      record,
+      signedIn: () => signedInIdentity(registry),
+      wipe: async (user) => {
+        const remembered = await createAccountManagerWithMinter(
+          { ...config, serverUrl, store: rememberedUserStore(user) },
+          mintLocalFirstTokenInJs,
+        );
+        const account = remembered.getLoggedIn();
+        if (!account) throw new Error("Jazz could not reopen the signed-out user to wipe");
+        const { createClient } = await loadLocalFirst();
+        const client = await openLocalFirst(createClient, account);
+        try {
+          await client.db.deleteClientStorage();
+        } finally {
+          await client.shutdown();
+        }
+      },
+    });
+  }
   await firstBackendAnswer(session);
   return session;
+}
+
+/** An account store holding `user` as the remembered backend user, and nothing else. */
+function rememberedUserStore(user: RememberedBackendUser): AccountStore {
+  let stored: string | null = JSON.stringify({
+    format: "jazz-account-selection-v1",
+    roots: [],
+    selected: null,
+    backendUser: { format: "jazz-backend-user-v1", ...user },
+  });
+  return {
+    async read() {
+      return stored;
+    },
+    async update(transform) {
+      stored = transform(stored);
+    },
+  };
 }
 
 const upgradesInPlace = new WeakMap<JazzClient, (next: JazzClient) => void>();
