@@ -33,7 +33,13 @@ getrandom = { version = "0.3", features = ["wasm_js"] }
 getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
 talc = "5.0.4"
 sqlite-wasm-rs = { version = "0.5", default-features = false }
+# Only for its OPFS pool; the IndexedDB VFS is `src/idb_vfs.rs`.
 sqlite-wasm-vfs = "0.2"
+# The IndexedDB VFS's own dependencies (all already under sqlite-wasm-vfs).
+indexed_db_futures = "0.6.4"
+rsqlite-vfs = "0.1"
+thiserror = "2"
+tokio = { version = "1", default-features = false, features = ["sync"] }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"

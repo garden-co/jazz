@@ -35,6 +35,8 @@ mod column_defaults;
 mod commit_atomicity_frames;
 #[path = "../composite_indexes.rs"]
 mod composite_indexes;
+#[path = "../deferred_durability_acks.rs"]
+mod deferred_durability_acks;
 #[path = "../deleted_rows.rs"]
 mod deleted_rows;
 #[path = "../deployment_preparation.rs"]
