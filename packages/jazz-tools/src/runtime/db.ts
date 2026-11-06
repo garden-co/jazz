@@ -1500,7 +1500,11 @@ function transformInputColumns(
 
 const noWriteDependencies: readonly string[] = [];
 
-/** Read one row by id so this replica holds it before a write stages against it. */
+/**
+ * Read one row by id from the server, through the caller's session, so this
+ * replica holds it before a write stages against it. A local read would
+ * miss a row whose read policy depends on rows this replica hasn't loaded.
+ */
 function loadRow(
   client: JazzClient,
   table: TableProxy<any, any>,
@@ -1515,7 +1519,7 @@ function loadRow(
   });
   return client.queryInternal(
     translateQuery(built, table._schema),
-    branch ? { branch } : {},
+    branch ? { tier: "remote", branch } : { tier: "remote" },
     session,
   );
 }
