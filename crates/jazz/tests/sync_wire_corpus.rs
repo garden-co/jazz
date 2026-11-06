@@ -513,7 +513,7 @@ fn subject(n: u8) -> Value {
     Value::String(user(n).principal_parts().1)
 }
 
-const ME: [&str; 3] = ["user", "identity", "subject"];
+const ME: [&str; 2] = ["identity", "subject"];
 
 /// `notes.kind`: an enum, which rows carry by variant name whatever tags a
 /// store keeps it as.

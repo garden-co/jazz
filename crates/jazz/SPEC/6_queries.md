@@ -329,9 +329,10 @@ inference, not generic or polymorphic parameter solving.
 Claims are a separate input channel. `Operand::Claim` is _not_
 client-supplied binding data: claim bindings are injected server-side from the
 subscriber's authenticated identity and admission/session claims by policy
-composition (ch. 7). `session.user` is the reserved structured admitted
-account/identity claim. Its non-null account author descriptor matches row
-provenance; accountless readers have no ownership authority. Provider claims
+composition (ch. 7). `session.user` is the reserved admitted account UUID
+claim and `session.identity` (with `identity.issuer`/`identity.subject`) the
+exact login; accountless readers have no `session.user` and no ownership
+authority. Provider claims
 such as `sub` and `user_id` retain their admission-defined values. Additional claim names are product/admission-defined
 and must come from the trusted admission/session context, never from ordinary
 query bindings.

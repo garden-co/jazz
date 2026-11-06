@@ -1598,15 +1598,16 @@ mod tests {
 
         assert_eq!(
             claims.get("user"),
-            Some(
-                &RowAuthor::from_persisted_subject(
+            Some(&CoreValue::Uuid(
+                RowAuthor::from_persisted_subject(
                     AuthorSubject::authenticated("https://issuer.example", "verified-subject")
                         .expect("authenticated author")
                         .with_account(account),
                 )
                 .expect("admitted row author")
-                .to_value()
-            )
+                .account_id()
+                .0
+            ))
         );
         assert_eq!(
             claims.get("\0claims:user"),
@@ -1721,11 +1722,7 @@ mod tests {
                     .column("owner", ColumnType::Text)
                     .policies(public_table_policies().with_select(PolicyExpr::eq_session(
                         "owner",
-                        vec![
-                            "user".to_owned(),
-                            "identity".to_owned(),
-                            "subject".to_owned(),
-                        ],
+                        vec!["identity".to_owned(), "subject".to_owned()],
                     ))),
             )
             .build();
@@ -2247,11 +2244,12 @@ mod tests {
         );
         assert_eq!(
             admission.claims.get("user"),
-            Some(
-                &RowAuthor::from_persisted_subject(identity)
+            Some(&CoreValue::Uuid(
+                RowAuthor::from_persisted_subject(identity)
                     .expect("admitted row author")
-                    .to_value()
-            )
+                    .account_id()
+                    .0
+            ))
         );
         assert!(!admission.claims.contains_key("\0claims:authMode"));
     }
@@ -4740,11 +4738,7 @@ mod tests {
         let addr = start_ws_test_server(state.clone()).await;
         let policies = public_table_policies().with_select(PolicyExpr::eq_session(
             "title",
-            vec![
-                "user".to_owned(),
-                "identity".to_owned(),
-                "subject".to_owned(),
-            ],
+            vec!["identity".to_owned(), "subject".to_owned()],
         ));
         let response = reqwest::Client::new()
             .post(format!("http://{addr}/apps/{}/admin/bundles", state.app_id))
@@ -5279,11 +5273,7 @@ mod tests {
                     .column("owner", ColumnType::Text)
                     .policies(public_table_policies().with_select(PolicyExpr::eq_session(
                         "owner",
-                        vec![
-                            "user".to_owned(),
-                            "identity".to_owned(),
-                            "subject".to_owned(),
-                        ],
+                        vec!["identity".to_owned(), "subject".to_owned()],
                     ))),
             )
             .build()

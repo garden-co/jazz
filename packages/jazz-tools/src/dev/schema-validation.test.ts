@@ -11,7 +11,7 @@ describe.each(["native", "wasm"])("%s schema validation binding", (runtime) => {
       runtime === "native" ? await import("jazz-napi") : await loadWasmModuleForTest();
     const app = s.defineApp({ notes: s.table({ owner: s.string() }, {}) }, { migrations: "none" });
     const permissions = s.definePermissions(app, ({ policy, session }) => {
-      policy.notes.allowRead.where({ owner: session.user.identity.subject });
+      policy.notes.allowRead.where({ owner: session.identity.subject });
     });
     expect(() =>
       binding.validateSchema(
@@ -84,7 +84,7 @@ describe.each(["native", "wasm"])("%s schema validation binding", (runtime) => {
       });
 
     for (const permissions of [
-      seededFrom("user_id", (session) => session.user.account),
+      seededFrom("user_id", (session) => session.user),
       seededFrom("user_sub", (session) => session.claims["sub"]),
     ]) {
       expect(() =>

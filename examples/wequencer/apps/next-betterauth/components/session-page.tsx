@@ -29,7 +29,7 @@ import { TransportBar } from "@/components/transport-bar";
 import { usePlayhead, useSequencerAudio } from "@/components/use-sequencer-audio";
 
 export function SessionPage({ sessionId }: { sessionId: string }) {
-  const author = useSession()?.user.account;
+  const author = useSession()?.user;
   const {
     data: sessions = [],
     isLoading,

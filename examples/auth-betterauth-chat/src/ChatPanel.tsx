@@ -27,7 +27,7 @@ export function ChatPanel({
   readOnlyNotice,
 }: ChatPanelProps) {
   const session = useSession();
-  const sessionUserId = session?.user.account ?? null;
+  const sessionUserId = session?.user ?? null;
 
   const { data: rows = [], db } = useAll(
     app.messages

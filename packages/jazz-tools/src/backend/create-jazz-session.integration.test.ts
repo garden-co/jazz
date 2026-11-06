@@ -163,16 +163,16 @@ describe("Node shared backend session", () => {
       expect(first.account?.identity.issuer).toBe("urn:jazz:system");
       expect(JSON.stringify(first.account)).not.toContain(backendSecret);
       const backend = first.client!;
-      expect(backend.session?.user).toEqual({
-        account: first.account!.id,
-        identity: first.account!.identity,
-      });
+      expect(backend.session?.user).toBe(first.account!.id);
+      expect(backend.session?.identity).toEqual(first.account!.identity);
       const initial = await backend.db
         .insert(app.notes, { text: "service" })
         .wait({ tier: "global" });
       expect(
         await backend.db.one(app.notes.select("$createdBy").where({ id: initial.id })),
-      ).toMatchObject({ $createdBy: backend.session?.user });
+      ).toMatchObject({
+        $createdBy: { account: backend.session?.user, identity: backend.session?.identity },
+      });
 
       // Its core admits no guests: becoming one is refused, and the backend stays.
       await expect(session.createLocalFirst()).rejects.toThrow("not supported");
