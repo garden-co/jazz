@@ -2178,19 +2178,44 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       for (const item of Array.isArray(value) ? value : [value]) headers.append(name, item);
     }
     const hasBody = req.method !== "GET" && req.method !== "HEAD";
+    // A body parser mounted before nodeHandler (express.json(), express.raw())
+    // has read the stream already: its buffer is the body, or nothing is.
+    const parsed = (req as { body?: unknown }).body;
+    let body: BodyInit | undefined;
+    if (hasBody && req.readableEnded) {
+      if (!(parsed instanceof Uint8Array)) {
+        throw new Error(
+          "jazz: the request body was already read by another handler; mount jazz.nodeHandler before body parsers such as express.json()",
+        );
+      }
+      body = parsed as BodyInit;
+    } else if (hasBody) {
+      body = req as unknown as BodyInit;
+    }
     return new Request(`http://${host}${req.url ?? "/"}`, {
       method: req.method,
       headers,
-      ...(hasBody ? { body: req as unknown as BodyInit, duplex: "half" } : {}),
+      ...(body === undefined ? {} : { body, duplex: "half" }),
     } as RequestInit);
   }
 
   function nodeHandler(req: IncomingMessage, res: ServerResponse, next?: () => void): void {
-    const request = nodeRequest(req);
-    if (innerPath(request) === null) {
+    // Only Jazz's own paths: a request for the app passes on untouched, its
+    // body unread, whatever read it before.
+    const { pathname } = new URL(req.url ?? "/", "http://localhost");
+    if (pathname !== basePath && !pathname.startsWith(`${basePath}/`)) {
       if (next) return next();
       res.statusCode = 404;
       res.end();
+      return;
+    }
+    let request: Request;
+    try {
+      request = nodeRequest(req);
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : error);
+      res.statusCode = 500;
+      res.end("Internal error");
       return;
     }
     void handle(request).then(
