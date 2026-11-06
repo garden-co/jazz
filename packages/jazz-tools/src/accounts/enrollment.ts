@@ -16,6 +16,14 @@ import {
   type AccountSelectionDurability,
 } from "./state.js";
 
+/**
+ * The backend refuses a link for good when the signed-in user already has an
+ * account of their own (most often: they signed up on another device), or
+ * when this guest's key was retired or is another app's.
+ */
+const LINK_REFUSED_MESSAGE =
+  "link_refused: the backend won't link this guest to the signed-in user, most likely because they already have an account (from another device). Call loginWithBackend() to open their account instead. The guest stays signed in on this device until then, and linking never moves its data into an existing account.";
+
 /** @internal A local-first account's self-minted token, or its refresh callback. */
 export type JWTAuth = string | { getToken(): Promise<string> };
 
@@ -350,6 +358,10 @@ export function createAccountManagerWithRuntime(options: {
               proof: signChallenge(secret, challenge),
               ...(typeof audience === "string" ? { audience } : {}),
             },
+          }).catch((error: unknown) => {
+            if (error instanceof AccountAuthError && error.code === "link_refused")
+              throw new AccountAuthError(error.code, error.status, LINK_REFUSED_MESSAGE);
+            throw error;
           });
         });
         if (linked.id !== account.id) throw new AccountAuthError("linked_account_mismatch");

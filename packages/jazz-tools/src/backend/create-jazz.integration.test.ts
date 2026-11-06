@@ -1,10 +1,23 @@
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
-import { createServer, request as httpRequest, type IncomingMessage, type Server } from "node:http";
+import {
+  Agent as HttpAgent,
+  createServer,
+  request as httpRequest,
+  type IncomingMessage,
+  type Server,
+} from "node:http";
+import {
+  createServer as createHttp2Server,
+  createSecureServer as createSecureHttp2Server,
+  type Http2SecureServer,
+  type Http2Server,
+} from "node:http2";
 import { createRequire } from "node:module";
 import type { AddressInfo, Socket } from "node:net";
 import { tmpdir } from "node:os";
+import type { Duplex } from "node:stream";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { generateSecret, identityOf, signChallenge, signToken } from "../local-first-auth/index.js";
@@ -26,6 +39,7 @@ import {
   vercel,
   type Jazz,
   type RequestAuthenticationError,
+  type WsLikeSocket,
 } from "./index.js";
 import { localFirstAccountId } from "../accounts/local-first.js";
 import {
@@ -77,8 +91,17 @@ async function serve(
       res.end("app route");
     });
   });
-  if (options.onUpgrade) server.on("upgrade", options.onUpgrade);
   if (options.sockets) await jazz.attach(server);
+  // attach() keeps Jazz's sockets from other upgrade listeners: count them
+  // as the server emits them.
+  const onUpgrade = options.onUpgrade;
+  if (onUpgrade) {
+    const emit = server.emit;
+    server.emit = function (this: Server, event: string | symbol, ...args: unknown[]) {
+      if (event === "upgrade") onUpgrade();
+      return emit.apply(this, [event, ...args] as Parameters<typeof emit>);
+    } as typeof server.emit;
+  }
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   cleanups.push(
     () =>
@@ -143,6 +166,17 @@ async function userSession(appId: string, origin: string, userId: string) {
   if (status !== "ready") throw error ?? new Error(status);
   return client!;
 }
+
+const randomBytesBase64 = () => randomBytes(16).toString("base64");
+
+// Hono's `serve()` returns any of these, and `attach()` takes each.
+export type AttachesHonoServers = [Server | Http2Server | Http2SecureServer] extends [
+  Parameters<Jazz["attach"]>[0],
+]
+  ? true
+  : never;
+const attachesHonoServers: AttachesHonoServers = true;
+void attachesHonoServers;
 
 describe("createJazz", () => {
   it("serves sync and sign-in from the app's backend with permissions from code", async () => {
@@ -378,14 +412,20 @@ describe("createJazz", () => {
   it("leaves a body a parser read before nodeHandler to the app's routes", async () => {
     const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
     cleanups.push(() => jazz.close());
-    // What express.json() does before the app's handlers: read the stream
-    // whole and leave the result on `req.body`.
+    // What express.json() and express.text() do before the app's handlers:
+    // read the stream whole and leave the result on `req.body`.
     const parse = (req: IncomingMessage & { body?: unknown }, done: () => void) => {
       const chunks: Buffer[] = [];
       req.on("data", (chunk: Buffer) => chunks.push(chunk));
       req.on("end", () => {
         const raw = Buffer.concat(chunks);
-        req.body = req.headers["content-type"] === "application/json" ? JSON.parse(`${raw}`) : raw;
+        const type = req.headers["content-type"];
+        req.body =
+          type === "application/json"
+            ? JSON.parse(`${raw}`)
+            : type === "text/plain"
+              ? `${raw}`
+              : raw;
         done();
       });
     };
@@ -409,22 +449,98 @@ describe("createJazz", () => {
     expect(echoed.status).toBe(200);
     expect(await echoed.json()).toEqual({ got: { a: 1 } });
 
-    // A Jazz route whose body a JSON parser took fails plainly, naming the
-    // fix, instead of with a locked-stream error.
+    // A JSON body express.json() parsed serves Jazz's JSON routes as JSON:
+    // the link route gets to judge it (no proof here), not a parser error.
+    const linked = await fetch(`${origin}/jazz/apps/${jazz.appId}/accounts/backend-link`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-test-user": "alice" },
+      body: JSON.stringify({ challenge: "c", proof: "p" }),
+    });
+    expect(linked.status).toBeGreaterThanOrEqual(400);
+    expect(linked.status).toBeLessThan(500);
+    expect(await linked.text()).not.toBe("request_body_already_read");
+
+    // A Jazz route whose body another parser took (as a string) fails
+    // plainly, naming the fix, instead of with a locked-stream error.
     const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
     try {
       const taken = await fetch(`${origin}/jazz/auth/sign-in`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "text/plain" },
         body: "{}",
       });
       expect(taken.status).toBe(500);
+      // A code the browser's client reports, not a bare "Internal error".
+      expect(await taken.text()).toBe("request_body_already_read");
       expect(errors.mock.calls.flat().join(" ")).toMatch(
         /mount jazz.nodeHandler before body parsers/,
       );
     } finally {
       errors.mockRestore();
     }
+  });
+
+  it("signs a browser in behind a host's JSON body parser", async () => {
+    const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    cleanups.push(() => jazz.close());
+    const parsed: string[] = [];
+    let strict = true;
+    // What Fastify does to a JSON request (400 on an empty one), or else
+    // what express.json() does (read it whole onto `req.body`), before Jazz.
+    const server: Server = createServer((req, res) => {
+      if (req.headers["content-type"] === "application/json") {
+        const chunks: Buffer[] = [];
+        req.on("data", (chunk: Buffer) => chunks.push(chunk));
+        req.on("end", () => {
+          const raw = Buffer.concat(chunks);
+          parsed.push(req.url ?? "");
+          if (raw.length === 0 && strict) {
+            res.statusCode = 400;
+            return void res.end("FST_ERR_CTP_EMPTY_JSON_BODY");
+          }
+          (req as { body?: unknown }).body = raw.length ? JSON.parse(`${raw}`) : {};
+          jazz.nodeHandler(req, res);
+        });
+        return;
+      }
+      jazz.nodeHandler(req, res);
+    });
+    await jazz.attach(server);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    cleanups.push(
+      () =>
+        new Promise((resolve) => {
+          server.closeAllConnections();
+          server.close(resolve);
+        }),
+    );
+    const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    // Sign-in asks the backend with empty POSTs: no JSON body, no JSON type.
+    const alice = await userSession(jazz.appId, origin, "alice");
+    await alice.db
+      .insert(app.todos, { title: "signed in", owner: alice.session!.user! })
+      .wait({ tier: "global" });
+    expect(parsed).toEqual([]);
+    // A parser that read an empty JSON body whole (an older client sends
+    // one) leaves Jazz nothing to miss.
+    strict = false;
+    const read = await new Promise<number | undefined>((resolve, reject) => {
+      const req = httpRequest(
+        `${origin}/jazz/apps/${jazz.appId}/accounts/backend-user`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-test-user": "alice" },
+        },
+        (res) => {
+          res.resume();
+          resolve(res.statusCode);
+        },
+      );
+      req.on("error", reject);
+      req.end();
+    });
+    expect(read).toBe(200);
+    expect(parsed).toHaveLength(1);
   });
 
   it("signs users in with fromJWT and keeps their account and claims", async () => {
@@ -704,6 +820,20 @@ describe("createJazz", () => {
     expect(upgrades).toBe(reconnected);
   }, 60_000);
 
+  it("answers the client's socket probe as it answers the socket, origin check included", async () => {
+    const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz, { sockets: true });
+    const probe = (headers: Record<string, string>) =>
+      fetch(`${origin}/jazz/apps/${jazz.appId}/ws`, { method: "POST", headers });
+    // This host upgrades: retry the socket.
+    const same = await probe({ origin });
+    expect(same.status).toBe(426);
+    expect(same.headers.get("x-jazz-stream")).toBeNull();
+    // A page whose origin the socket is refused for hears so.
+    expect((await probe({ origin: "http://elsewhere.test" })).status).toBe(403);
+  });
+
   it("refuses local-first guests unless authenticate accepts them", async () => {
     const jazz = await createJazz({
       app,
@@ -737,6 +867,48 @@ describe("createJazz", () => {
       .toMatchObject({ state: "offline", reason: "auth" });
     expect(upgrades).toBeGreaterThan(0);
     expect(await jazz.db.all(app.todos)).toEqual([]);
+  }, 30_000);
+
+  // A guest whose browser just signed up (the app set the user's cookie)
+  // reconnects before it links: its writes still upload as the guest's.
+  it("lets a guest sync while a user's cookie rides on its socket", async () => {
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      // The documented setup: the session cookie's user, else a guest.
+      authenticate: (request) => {
+        const user = /(?:^|; )sid=([^;]+)/.exec(request.headers.get("cookie") ?? "")?.[1];
+        return user ? { userId: user } : acceptLocalFirstAuth(request);
+      },
+    });
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz, { sockets: true });
+    const RealWebSocket = globalThis.WebSocket;
+    globalThis.WebSocket = class extends RealWebSocket {
+      constructor(url: string | URL, options?: { headers?: Record<string, string> }) {
+        const cookie = new URL(url).host === new URL(origin).host ? { cookie: "sid=alice" } : {};
+        super(url, { ...options, headers: { ...options?.headers, ...cookie } } as never);
+      }
+    } as typeof WebSocket;
+    cleanups.push(async () => {
+      globalThis.WebSocket = RealWebSocket;
+    });
+    const guestSession = await createJazzClient({
+      app,
+      permissions,
+      serverUrl: `${origin}/jazz`,
+      driver: { type: "memory" },
+      initial: "local-first",
+    });
+    cleanups.push(() => guestSession.close());
+    const guest = guestSession.getSnapshot().client!;
+    const row = await guest.db
+      .insert(app.todos, { title: "the guest's", owner: guest.session!.user! })
+      .wait({ tier: "global" });
+    expect((await jazz.db.all(app.todos.where({ id: row.id }))).map((t) => t.title)).toEqual([
+      "the guest's",
+    ]);
   }, 30_000);
 
   it("ends a guest's open sync session once authenticate stops accepting guests", async () => {
@@ -1493,6 +1665,104 @@ describe("createJazz", () => {
     expect((await jazz.db.all(app.todos.where({ id: later.id }))).length).toBe(1);
   }, 60_000);
 
+  for (const sockets of [false, true]) {
+    it(`uploads more than a session takes at once over ${sockets ? "a socket" : "the HTTP stream"}, on one session`, async () => {
+      // 24 MB local-first: three times a session's 8 MiB ingress budget,
+      // sent as fast as the client can. The core reads it at its own pace;
+      // it used to drop the session, and the upload restarted forever.
+      const blobs = s.defineApp(
+        { files: s.table({ name: s.string(), owner: s.uuid(), data: s.bytes() }, {}) },
+        { migrations: "none" },
+      );
+      const blobPermissions = s.definePermissions(blobs, ({ policy, session }) => {
+        policy.files.allowRead.where({ owner: session.user });
+        policy.files.allowInsert.where({ owner: session.user });
+        policy.files.allowUpdate.never();
+        policy.files.allowDelete.never();
+      });
+      const jazz = await createJazz({
+        app: blobs,
+        permissions: blobPermissions,
+        store: memory(),
+        authenticate,
+      }).ready();
+      cleanups.push(() => jazz.close());
+      let upgrades = 0;
+      const origin = await serve(
+        jazz,
+        // A host that can't upgrade leaves the upgrade unanswered.
+        sockets ? { sockets, onUpgrade: () => (upgrades += 1) } : { sockets },
+      );
+      const previous = (globalThis as { location?: unknown }).location;
+      (globalThis as { location?: unknown }).location = {
+        host: new URL(origin).host,
+        href: `${origin}/`,
+      };
+      cleanups.push(async () => {
+        (globalThis as { location?: unknown }).location = previous;
+      });
+      signInAs(origin, "alice");
+      const session = await createJazzClient({
+        appId: jazz.appId,
+        app: blobs,
+        permissions: blobPermissions,
+        serverUrl: `${origin}/jazz`,
+        driver: { type: "memory" },
+      });
+      cleanups.push(() => session.close());
+      await session.loginWithBackend();
+      const alice = session.getSnapshot().client!;
+
+      const data = new Uint8Array(24 * 1024 * 1024);
+      for (let i = 0; i < data.length; i += 4096) data[i] = (i * 2654435761) >>> 24;
+      const row = await alice.db
+        .insert(blobs.files, { name: "big", owner: alice.session!.user!, data })
+        .wait({ tier: "global" });
+      const [seen] = await jazz.db.all(blobs.files.where({ id: row.id }));
+      expect(seen?.data.byteLength).toBe(data.byteLength);
+      expect(Buffer.from(seen!.data).equals(Buffer.from(data))).toBe(true);
+      // One session carried it all: none was dropped and opened again.
+      if (sockets) expect(upgrades).toBe(1);
+      else
+        expect(
+          requestPaths.filter((path) => path.endsWith(`/apps/${jazz.appId}/stream`)),
+        ).toHaveLength(1);
+    }, 120_000);
+  }
+
+  it("ends the session of a socket that can't pause once its client sends far ahead of the core", async () => {
+    // Sign-in never finishes, so nothing the client sends is taken.
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate: () => new Promise<never>(() => {}),
+      upgradesSockets: true,
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const listeners: Record<string, (...args: unknown[]) => void> = {};
+    const closes: Array<[number | undefined, string | undefined]> = [];
+    jazz.acceptSocket(new Request(`http://app.test/jazz/apps/${jazz.appId}/ws`), {
+      send() {},
+      close: (code, reason) => closes.push([code, reason]),
+      on(event: string, listener: (...args: never[]) => void) {
+        listeners[event] = listener as (...args: unknown[]) => void;
+      },
+    } as WsLikeSocket);
+    // A prelude stating a user's session: admission waits on authenticate.
+    listeners.message!(
+      new TextEncoder().encode(JSON.stringify({ auth: { backend_session: { user_id: "alice" } } })),
+      true,
+    );
+    const megabyte = new Uint8Array(1024 * 1024);
+    for (let sent = 0; sent < 40 && closes.length === 0; sent += 1) {
+      listeners.message!(megabyte, true);
+      await Promise.resolve();
+    }
+    expect(closes[0]?.[0]).toBe(1013);
+    expect(closes[0]?.[1]).toContain("faster than the server takes");
+  });
+
   it("sends a failed socket to the HTTP stream only through handlers that can't upgrade", async () => {
     const appId = randomUUID();
     const marker = async (response: Promise<Response>) =>
@@ -1820,6 +2090,268 @@ describe("createJazz", () => {
 
     await within(jazz.close(), "close()");
     closed = true;
+  }, 90_000);
+
+  it("closes the connections its routes are asked on once it has closed", async () => {
+    const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    const viaFetch = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    // One host mounts nodeHandler, the other a Fetch handler (Next's route
+    // handlers). That Next passes the header on, and so lets `next start`
+    // stop, was checked by hand against a real `next start` (#4900).
+    const servers = [
+      createServer((req, res) => jazz.nodeHandler(req, res)),
+      createServer(async (req, res) => {
+        const response = await viaFetch.handle(
+          new Request(`http://${req.headers.host}${req.url}`, { method: req.method }),
+        );
+        res.writeHead(response.status, Object.fromEntries(response.headers));
+        res.end(Buffer.from(await response.arrayBuffer()));
+      }),
+    ];
+    await jazz.attach(servers[0]!);
+    for (const server of servers) {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      cleanups.push(
+        () =>
+          new Promise((resolve) => {
+            server.closeAllConnections();
+            server.close(resolve);
+          }),
+      );
+    }
+    await jazz.close();
+    await viaFetch.close();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    cleanups.push(async () => errors.mockRestore());
+    const agent = new HttpAgent({ keepAlive: true });
+    cleanups.push(async () => agent.destroy());
+    for (const server of servers) {
+      const port = (server.address() as AddressInfo).port;
+      // A browser re-opening its sync stream over a kept-alive connection.
+      const answer = await new Promise<{ status?: number; connection?: string }>(
+        (resolve, reject) => {
+          const req = httpRequest(
+            { port, host: "127.0.0.1", path: "/jazz/apps/a1/stream", method: "POST", agent },
+            (res) => {
+              res.resume();
+              resolve({ status: res.statusCode, connection: res.headers.connection });
+            },
+          );
+          req.on("error", reject);
+          req.end();
+        },
+      );
+      expect(answer).toEqual({ status: 503, connection: "close" });
+    }
+    // A socket asked for after the close is refused the same way.
+    const socketAnswer = await new Promise<{ status?: number; connection?: string }>(
+      (resolve, reject) => {
+        const req = httpRequest({
+          host: "127.0.0.1",
+          port: (servers[0]!.address() as AddressInfo).port,
+          path: "/jazz/apps/a1/ws",
+          headers: {
+            connection: "Upgrade",
+            upgrade: "websocket",
+            "sec-websocket-version": "13",
+            "sec-websocket-key": randomBytesBase64(),
+          },
+        });
+        req.on("response", (res) => {
+          res.resume();
+          resolve({ status: res.statusCode, connection: res.headers.connection });
+        });
+        req.on("upgrade", () => resolve({ status: 101 }));
+        req.on("error", reject);
+        req.end();
+      },
+    );
+    expect(socketAnswer).toEqual({ status: 503, connection: "close" });
+    // A closed Jazz answering 503 is how shutdown goes, not an error to log.
+    expect(errors).not.toHaveBeenCalled();
+  });
+
+  it("keeps its sync sockets from the server's other upgrade listeners", async () => {
+    const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    cleanups.push(() => jazz.close());
+    const server: Server = createServer((req, res) => jazz.nodeHandler(req, res));
+    await jazz.attach(server);
+    // What a custom Next.js server adds on its first request: a listener
+    // that ends every upgrade it doesn't route itself.
+    const others: string[] = [];
+    server.on("upgrade", (req: IncomingMessage, socket: Duplex) => {
+      others.push(req.url ?? "");
+      socket.destroy();
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    cleanups.push(
+      () =>
+        new Promise((resolve) => {
+          server.closeAllConnections();
+          server.close(resolve);
+        }),
+    );
+    const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const alice = await userSession(jazz.appId, origin, "alice");
+    await alice.db
+      .insert(app.todos, { title: "over the socket", owner: alice.session!.user! })
+      .wait({ tier: "global" });
+    expect(others).toEqual([]);
+    // Upgrades for the app's own paths still reach its listener.
+    await new Promise<void>((resolve) => {
+      const req = httpRequest(`${origin}/_next/webpack-hmr`, {
+        headers: { connection: "Upgrade", upgrade: "websocket" },
+      });
+      req.on("error", () => resolve());
+      req.on("close", () => resolve());
+      req.end();
+    });
+    expect(others).toEqual(["/_next/webpack-hmr"]);
+    // So does one only looking like Jazz's, and a malformed one doesn't
+    // take the process down.
+    const upgrade = (path: string) =>
+      new Promise<void>((resolve) => {
+        const req = httpRequest({
+          host: "127.0.0.1",
+          port: (server.address() as AddressInfo).port,
+          path,
+          headers: { connection: "Upgrade", upgrade: "websocket" },
+        });
+        req.on("error", () => resolve());
+        req.on("close", () => resolve());
+        req.end();
+      });
+    await upgrade("/jazz/apps/a/b/ws");
+    await upgrade("http://[/jazz/apps/a/ws");
+    // A Host header no URL can be made of gets a 400, not a crash.
+    const badHost = await new Promise<number | undefined>((resolve, reject) => {
+      const req = httpRequest({
+        host: "127.0.0.1",
+        port: (server.address() as AddressInfo).port,
+        path: "/jazz/apps/a/ws",
+        headers: { host: "[", connection: "Upgrade", upgrade: "websocket" },
+      });
+      req.on("response", (res) => resolve(res.statusCode));
+      req.on("error", reject);
+      req.end();
+    });
+    expect(badHost).toBe(400);
+    // And a plain request with a URL like that passes on (here: 404).
+    const badUrl = await new Promise<number | undefined>((resolve, reject) => {
+      const req = httpRequest(
+        { host: "127.0.0.1", port: (server.address() as AddressInfo).port, path: "http://[/x" },
+        (res) => {
+          res.resume();
+          resolve(res.statusCode);
+        },
+      );
+      req.on("error", reject);
+      req.end();
+    });
+    expect(badUrl).toBe(404);
+    expect(others).toEqual(["/_next/webpack-hmr", "/jazz/apps/a/b/ws", "http://[/jazz/apps/a/ws"]);
+    // Attaching again changes nothing.
+    await jazz.attach(server);
+    await upgrade("/_next/again");
+    expect(others.at(-1)).toBe("/_next/again");
+  }, 30_000);
+
+  it("refuses to attach to an HTTP/2 server, which has no WebSocket upgrades", async () => {
+    const jazz = createJazz({ app, permissions, store: memory(), authenticate });
+    cleanups.push(() => jazz.close());
+    const h2 = createHttp2Server();
+    await expect(jazz.attach(h2)).rejects.toThrow(/an HTTP\/2 server has no WebSocket upgrades/);
+    // Over TLS, only one that also serves HTTP/1 can upgrade.
+    await expect(jazz.attach(createSecureHttp2Server())).rejects.toThrow(
+      /an HTTP\/2 server has no WebSocket upgrades/,
+    );
+    await jazz.attach(createSecureHttp2Server({ allowHTTP1: true }));
+  });
+
+  it("attaches with its remote core down at start, names the core, and serves once it is up", async () => {
+    const appId = randomUUID();
+    const adminSecret = `down-admin-${randomUUID().slice(0, 8)}`;
+    // A port nothing listens on yet: the core starts there later.
+    const probe = createServer();
+    await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
+    const corePort = (probe.address() as AddressInfo).port;
+    await new Promise((resolve) => probe.close(resolve));
+    const coreUrl = `http://127.0.0.1:${corePort}`;
+    const jazz = createJazz({
+      app,
+      permissions,
+      store: remote({ url: coreUrl, appId, secret: adminSecret }),
+      authenticate,
+    });
+    cleanups.push(() => jazz.close());
+    const server: Server = createServer((req, res) => jazz.nodeHandler(req, res));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    cleanups.push(
+      () =>
+        new Promise((resolve) => {
+          server.closeAllConnections();
+          server.close(resolve);
+        }),
+    );
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    cleanups.push(async () => errors.mockRestore());
+
+    // The host's startup goes on: attach() doesn't open the store.
+    await jazz.attach(server);
+    const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+    // Jazz routes answer 503 instead of a bare 500. The log names the core;
+    // the client isn't told internal addresses.
+    const signIn = await fetch(`${origin}/jazz/auth/sign-in`, { method: "POST" });
+    expect(signIn.status).toBe(503);
+    expect(Number(signIn.headers.get("retry-after"))).toBeGreaterThanOrEqual(1);
+    const body = await signIn.text();
+    expect(body).toBe("Jazz is unavailable; try again shortly");
+    expect(body).not.toContain(coreUrl);
+    expect(errors.mock.calls.flat().map(String).join(" ")).toContain(
+      `could not reach the Jazz core at ${coreUrl}`,
+    );
+    // So does a socket.
+    const upgraded = await new Promise<number | undefined>((resolve, reject) => {
+      const req = httpRequest(`${origin}/jazz/apps/${appId}/ws`, {
+        headers: {
+          connection: "Upgrade",
+          upgrade: "websocket",
+          "sec-websocket-version": "13",
+          "sec-websocket-key": randomBytesBase64(),
+        },
+      });
+      req.on("response", (res) => resolve(res.statusCode));
+      req.on("upgrade", () => resolve(101));
+      req.on("error", reject);
+      req.end();
+    });
+    expect(upgraded).toBe(503);
+    await expect(jazz.createAccountFor("alice")).rejects.toThrow(
+      new RegExp(`could not reach the Jazz core at ${coreUrl} \\(ECONNREFUSED\\)`),
+    );
+
+    // The core comes up: the next use past the backoff opens the store.
+    const core = await startLocalJazzServer({ appId, port: corePort, inMemory: true, adminSecret });
+    cleanups.push(() => core.stop());
+    const deadline = Date.now() + 30_000;
+    let alice: string | undefined;
+    while (!alice) {
+      alice = await jazz.createAccountFor("alice").catch(async (error: unknown) => {
+        if (Date.now() > deadline) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        return undefined;
+      });
+    }
+    const db = await jazz.forReqUser(
+      new Request("http://app/x", { headers: { "x-test-user": "alice" } }),
+    );
+    await db.insert(app.todos, { title: "after", owner: alice }).wait({ tier: "global" });
+    // Sockets upgrade now: attach() took effect once the store opened.
+    const user = await userSession(jazz.appId, origin, "bob");
+    await user.db
+      .insert(app.todos, { title: "synced", owner: user.session!.user! })
+      .wait({ tier: "global" });
   }, 90_000);
 
   it("closes while its remote core is down, with a write still pending", async () => {

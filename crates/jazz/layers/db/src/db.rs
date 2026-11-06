@@ -41,6 +41,7 @@ pub use large_ops::{
 };
 #[path = "sync.rs"]
 pub(crate) mod sync;
+pub use sync::origin_node;
 
 #[path = "shard.rs"]
 pub mod shard;
@@ -203,6 +204,26 @@ impl WriteHandle {
 /// A committed transaction's sequence number.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TxReceipt(pub u64);
+
+/// What [`Db::write_as_origin`] did.
+#[derive(Debug)]
+pub enum OriginWrite {
+    /// It wrote, as the origin's commit.
+    Written(WriteHandle),
+    /// The origin's commit was already made here, or is known to the
+    /// authority's servers: nothing was written again.
+    Repeat,
+}
+
+/// What a store knows of a commit made as another writer's.
+#[derive(Debug)]
+pub(crate) enum OriginFate {
+    Unseen,
+    /// Made here, its upload not yet decided.
+    Pending,
+    Accepted,
+    Rejected(Error),
+}
 
 impl From<TxReceipt> for u64 {
     fn from(receipt: TxReceipt) -> u64 {
@@ -413,7 +434,12 @@ impl Drop for SubscriptionStream {
     fn drop(&mut self) {
         self.dropped.set(self.dropped.get() + 1);
         if let Some((inner, query, binding, include_deleted, view, reach)) = self.remote.take() {
-            Db { inner, view: None }.detach_remote(&query, &binding, include_deleted, &view, reach);
+            Db {
+                inner,
+                view: None,
+                defer_fetches: false,
+            }
+            .detach_remote(&query, &binding, include_deleted, &view, reach);
         }
     }
 }
@@ -611,6 +637,11 @@ struct Inner {
     /// its HLC is where the commit's versions are ([`Pos::pending`]), its
     /// writer (node, tx) what history keeps them under (`_writer`).
     pub(crate) own_order: HashMap<u64, sync::Order>,
+    /// The writer id the next standalone write commits under instead of
+    /// this store's own: a thin client's write (see [`Db::write_as_origin`]).
+    pub(crate) next_origin: Option<([u8; 16], u64)>,
+    /// That id while its write runs (see `Db::write_unnotified`).
+    commit_origin: Option<([u8; 16], u64)>,
     /// A wall clock tests set (see `Db::set_clock_for_test`).
     clock_for_test: Option<i64>,
     /// The diff steps a text merge may take ([`jazz_text::MERGE_WORK_BUDGET`]
@@ -660,6 +691,8 @@ struct Inner {
     /// whose version was not this replica's image of them (see
     /// `Inner::as_written_images`), asked for whole instead.
     pub(crate) as_written_mismatches: u64,
+    /// Pending commits a rebase replayed (see `Db::rebase`).
+    pub(crate) replayed_commits: u64,
     /// The global authority: what it settles is durable at `Global`.
     authority: bool,
     /// Every session but SYSTEM's must be pinned to a published bundle
@@ -670,6 +703,10 @@ struct Inner {
     upstream_rejections: Option<Vec<UpstreamRejection>>,
     /// Clients this store serves.
     sessions: Vec<sync::Session>,
+    /// Durability acks to sessions held until the host has persisted the
+    /// store, for a host whose file writes complete after the commit
+    /// returns (see [`Db::defer_durability_acks`]).
+    held_acks: Option<sync::HeldAcks>,
     /// Each stored table's column positions, the codes authored-column
     /// bitmasks use (SPEC 4 §4.6), read on first use.
     column_codes: RefCell<HashMap<String, HashMap<String, u32>>>,
@@ -726,7 +763,7 @@ pub struct FileOptions {
     /// Page cache bound per connection, in KiB.
     pub cache_kib: u64,
     /// SQLite VFS the file lives on (`None`: the platform default). Browser
-    /// builds register theirs (IndexedDB, OPFS) before opening.
+    /// builds register theirs (IndexedDB) before opening.
     pub vfs: Option<&'static str>,
     pub journal: Journal,
     /// Page size a new file is created with (`None`: SQLite's default). A
@@ -740,7 +777,7 @@ pub enum Journal {
     /// Write-ahead log: readers never block the writer.
     #[default]
     Wal,
-    /// Rollback journal, for VFSes without shared memory (OPFS). The page
+    /// Rollback journal, for VFSes without shared memory. The page
     /// cache never spills mid-transaction, so the large-value reader
     /// connection sees only committed pages even when the VFS's locks are
     /// no-ops.
@@ -768,6 +805,11 @@ pub struct Db {
     inner: Rc<Store>,
     /// `Some` for a schema-view handle: operations run under this schema.
     view: Option<Rc<Schema>>,
+    /// On a host-run chunk store: a read that waits on offloaded nodes
+    /// returns the missing-chunks error at once, leaving them wanted for
+    /// the host's fetch lane, instead of fetching them on this thread
+    /// ([`Self::deferring_chunk_fetches`]).
+    defer_fetches: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1477,6 +1519,7 @@ impl Db {
         let owner = Rc::new(schema.clone());
         let db = Self {
             view: None,
+            defer_fetches: false,
             inner: Rc::new(Store::new(Inner {
                 conn,
                 mutation_admission_closed: false,
@@ -1521,6 +1564,8 @@ impl Db {
                 last_stamp: (0, 0),
                 hlc_last: 0,
                 own_order: HashMap::new(),
+                next_origin: None,
+                commit_origin: None,
                 clock_for_test: None,
                 merge_budget: jazz_text::MERGE_WORK_BUDGET,
                 authors: RefCell::new(AuthorCodes::default()),
@@ -1546,10 +1591,12 @@ impl Db {
                 non_durable: false,
                 reopenable: path.is_some(),
                 as_written_mismatches: 0,
+                replayed_commits: 0,
                 authority: false,
                 pins_required: false,
                 upstream_rejections: None,
                 sessions: Vec::new(),
+                held_acks: None,
                 column_codes: RefCell::default(),
                 closed: None,
                 slow: RefCell::default(),
@@ -1689,6 +1736,43 @@ impl Db {
     /// own permissions.
     pub fn require_session_pins(&self) {
         self.inner.borrow_mut().pins_required = true;
+    }
+
+    /// Run `write`, one standalone write, under a thin client's own id for
+    /// it, `key` (its node and that node's counter, SPEC 8 §8.14). The
+    /// commit's writer is [`sync::origin_node`] of `author` (the session the
+    /// write runs as) and the client's node, at the client's counter: the
+    /// same on every server, and no other identity's. The authority records
+    /// the commit's fate under it; a replica uploads it under it. A resend
+    /// of the same key by the same author, here or through another server of
+    /// the same authority, is not written again: it returns what this store
+    /// knows of the first. A write that fails, or makes no commit, leaves
+    /// nothing under the id.
+    pub async fn write_as_origin(
+        &self,
+        key: crate::tx::TxId,
+        author: &AuthorSubject,
+        write: impl AsyncFnOnce() -> Result<WriteHandle, Error>,
+    ) -> Result<OriginWrite, Error> {
+        let (node, tx) = (sync::origin_node(author, *key.node.as_bytes()), key.time.0);
+        {
+            let inner = self.inner.borrow();
+            if inner.tx.is_some() {
+                return Err(unsupported(
+                    "a write as another writer's commit inside a transaction",
+                ));
+            }
+            match inner.origin_fate(node, tx, author)? {
+                OriginFate::Unseen => {}
+                OriginFate::Pending | OriginFate::Accepted => return Ok(OriginWrite::Repeat),
+                OriginFate::Rejected(error) => return Err(error),
+            }
+        }
+        self.inner.borrow_mut().next_origin = Some((node, tx));
+        let written = write().await;
+        // Read by each attempt of the write's commit.
+        self.inner.borrow_mut().next_origin = None;
+        written.map(OriginWrite::Written)
     }
 
     /// Whether this store is the global authority.
@@ -2141,6 +2225,11 @@ impl Db {
                         return Err(error);
                     };
                     if chunks.host_io() {
+                        if self.defer_fetches {
+                            // The host's fetch lane reads them, off this
+                            // thread and with its backoff.
+                            return Err(error);
+                        }
                         // Beside the host's batch, which may be out: a
                         // node a read waits on is referenced, so no
                         // delete in that batch removes it.
@@ -2258,6 +2347,20 @@ impl Db {
                  (SELECT count(*) FROM _jazz_lv_root WHERE refs > 0)",
                 [],
                 |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)),
+            )
+            .map_err(storage)
+    }
+
+    /// Diagnostics: stored large-value nodes whose bytes live only in the
+    /// chunk store.
+    #[doc(hidden)]
+    pub fn offloaded_large_value_nodes_for_test(&self) -> Result<u64, Error> {
+        self.inner()
+            .conn
+            .cached_row(
+                "SELECT count(*) FROM _jazz_lv_node WHERE length(bytes) = 0",
+                [],
+                |r| r.get::<_, i64>(0).map(|n| n as u64),
             )
             .map_err(storage)
     }
@@ -2852,14 +2955,53 @@ impl Db {
             let mut inner = self.inner();
             let (seq, standalone) = match &inner.tx {
                 Some((seq, _)) => (*seq, false),
-                None => (inner.next_seq(), true),
+                None => (inner.fresh_seq(), true),
             };
             begin_savepoint(&inner.conn, "w")?;
             let mark = inner.changed.borrow().len();
-            match apply(&mut inner, seq) {
-                Ok(handle) => {
+            // A standalone commit takes the writer id a thin client's write
+            // gave it (`Db::write_as_origin`), on every attempt of the write
+            // (`Db::fetching_with` runs one again). Its seq is not used up
+            // unless it commits, and the next commit takes it: what this one
+            // put in `own_order` for it goes back, so no other commit
+            // inherits its writer id, nor it another's (and `fresh_seq`
+            // drops whatever an exit after this one leaves).
+            let origin = if standalone { inner.next_origin } else { None };
+            let prior = standalone.then(|| inner.own_order.get(&seq).copied());
+            inner.commit_origin = origin;
+            let applied = apply(&mut inner, seq);
+            inner.commit_origin = None;
+            let restore = |inner: &mut Inner| match prior {
+                Some(Some(order)) => {
+                    inner.own_order.insert(seq, order);
+                }
+                Some(None) => {
+                    inner.own_order.remove(&seq);
+                }
+                None => {}
+            };
+            // The authority records the fate of a commit made under a
+            // client's id in the commit itself.
+            let applied = applied.and_then(|handle| {
+                let wrote = handle.seq == inner.own_pos(seq);
+                if let (true, true, Some((node, tx))) =
+                    (standalone && wrote, inner.me == sync::ACCEPTED, origin)
+                {
+                    inner.record_fate(node, tx, &Ok(()))?;
+                    inner.record_settled(node, tx, Some(Pos::at(seq)))?;
+                }
+                Ok((wrote, handle))
+            });
+            match applied {
+                Ok((wrote, handle)) => {
                     end_savepoint(&inner.conn, "w", true)?;
-                    let wrote = handle.seq == inner.own_pos(seq);
+                    if !wrote {
+                        restore(&mut inner);
+                    } else if origin.is_some() {
+                        // The client's write is made: no later commit of the
+                        // same call takes its id.
+                        inner.next_origin = None;
+                    }
                     if wrote {
                         if standalone {
                             inner.seq = inner.seq.max(seq);
@@ -2871,6 +3013,7 @@ impl Db {
                 }
                 Err(error) => {
                     inner.changed.borrow_mut().truncate(mark);
+                    restore(&mut inner);
                     end_savepoint(&inner.conn, "w", false)?;
                     return Err(error);
                 }
@@ -2915,7 +3058,7 @@ impl Db {
             }
             begin_savepoint(&inner.conn, "tx")?;
             inner.changed.borrow_mut().clear();
-            let seq = inner.next_seq();
+            let seq = inner.fresh_seq();
             inner.tx = Some((seq, BTreeSet::new()));
         }
         let mut tx = MergeableTx { db: self, identity };
@@ -7705,7 +7848,28 @@ impl Db {
         Some(Db {
             inner: self.inner.clone(),
             view: Some(view),
+            defer_fetches: self.defer_fetches,
         })
+    }
+
+    /// Grows each time the chunk store answered fetches (or reads of nodes
+    /// it failed to fetch may ask again): a read that failed waiting on
+    /// offloaded nodes ([`Self::deferring_chunk_fetches`]) is worth trying
+    /// again only once this changed.
+    pub fn chunk_fetches_answered(&self) -> u64 {
+        self.inner.staging().chunks.answered()
+    }
+
+    /// This handle, but a read or write that waits on offloaded nodes of a
+    /// host-run chunk store ([`crate::options::DbConfig::with_host_chunk_io`])
+    /// fails at once with the missing-chunks error instead of fetching them
+    /// on this thread; they stay wanted, so the host's next fetches read
+    /// them and the caller tries again once they land. A server serving
+    /// many sessions on one thread uses it, so one session's slow chunk
+    /// store read never stalls the others.
+    pub fn deferring_chunk_fetches(mut self) -> Db {
+        self.defer_fetches = true;
+        self
     }
 
     /// [`Self::governed_view`] for a session pinned to published bundle
@@ -7732,6 +7896,7 @@ impl Db {
         Ok(Some(Db {
             inner: self.inner.clone(),
             view: Some(view),
+            defer_fetches: self.defer_fetches,
         }))
     }
 
@@ -7822,6 +7987,7 @@ impl Db {
         Ok(Db {
             inner: self.inner.clone(),
             view: Some(Rc::new(logical)),
+            defer_fetches: self.defer_fetches,
         })
     }
 
@@ -8132,13 +8298,33 @@ impl Inner {
         self.hlc_last = self.hlc_last.max(self.bounded_hlc(seen));
     }
 
+    /// The seq a new local commit takes ([`Inner::next_seq`]). It is above
+    /// every seq this store committed, so on a replica an `own_order` entry
+    /// already there is stale, left by a commit at it that never happened
+    /// (a write that failed, or whose upload record did): the new commit
+    /// must not inherit its HLC or its writer id.
+    fn fresh_seq(&mut self) -> u64 {
+        let seq = self.next_seq();
+        if self.me != sync::ACCEPTED {
+            self.own_order.remove(&seq);
+        }
+        seq
+    }
+
     /// Give commit `seq` its HLC if it has none yet: its writes are at it,
     /// written by this store's node as tx `seq`.
     fn stamp_commit(&mut self, seq: u64) {
-        if self.me != sync::ACCEPTED && !self.own_order.contains_key(&seq) {
+        if self.me == sync::ACCEPTED {
+            return;
+        }
+        // A commit made under a thin client's id is kept under it: a relay
+        // uploads it so, so a resend of it anywhere gets its fate (SPEC 8
+        // §8.14).
+        let origin = self.commit_origin.filter(|_| self.tx.is_none());
+        if origin.is_some() || !self.own_order.contains_key(&seq) {
             let hlc = self.next_hlc();
-            let node = *self.identity.node.as_bytes();
-            self.own_order.insert(seq, (hlc, node, seq));
+            let (node, tx) = origin.unwrap_or((*self.identity.node.as_bytes(), seq));
+            self.own_order.insert(seq, (hlc, node, tx));
         }
     }
 
@@ -8608,7 +8794,7 @@ impl Db {
         let ops = &batch.ops;
         let (seq, prior, mark) = {
             let mut inner = self.inner();
-            let seq = inner.next_seq();
+            let seq = inner.fresh_seq();
             begin_savepoint(&inner.conn, "commit_batch")?;
             let mark = inner.changed.borrow().len();
             inner.defer_checks();
@@ -9203,15 +9389,21 @@ impl TxRef<'_> {
             }
         }
         // Relations nest inside the overlay, so they see staged rows too.
-        let rows = self.db.in_overlay_prefix(self.id, prefix, |inner, cut| {
-            let read = ReadSpec {
-                include_deleted,
-                cut,
-                ..ReadSpec::default()
-            };
-            let roots = inner.run(prepared, identity, &read)?;
-            inner.nest_relations(prepared, identity, &read, roots)
-        })?;
+        // Offloaded leaves are fetched as for any read.
+        let rows = self
+            .db
+            .fetching_with((), |()| {
+                self.db.in_overlay_prefix(self.id, prefix, |inner, cut| {
+                    let read = ReadSpec {
+                        include_deleted,
+                        cut,
+                        ..ReadSpec::default()
+                    };
+                    let roots = inner.run(prepared, identity, &read)?;
+                    inner.nest_relations(prepared, identity, &read, roots)
+                })
+            })
+            .await?;
         self.db.record_read(self.id, prepared, include_deleted)?;
         Ok(rows)
     }

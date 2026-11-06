@@ -125,6 +125,8 @@ type RuntimeContext = {
   transportStateEpoch: number;
   transportStateWaiters: Set<() => void>;
   authFailureEpoch: number;
+  /** Why writing the store to IndexedDB fails now, or null while it works. */
+  storageFailure: string | null;
 };
 
 function canonicalClaimsJson(value: unknown): string {
@@ -1068,6 +1070,7 @@ function createContext(
     transportStateEpoch: 0,
     transportStateWaiters: new Set(),
     authFailureEpoch: 0,
+    storageFailure: null,
     initialize: Promise.resolve(),
     closing: null,
     idleReleaseTimer: null,
@@ -1148,6 +1151,12 @@ async function initialize(context: RuntimeContext): Promise<void> {
     context.runtime.onAuthFailure((reason) => {
       context.authFailureEpoch += 1;
       broadcast(context, { type: "auth-failure", reason });
+    });
+    context.runtime.onStorageFailure((message) => {
+      // Tabs reject their writes' local waits while it lasts: the worker
+      // keeps those writes in memory and acknowledges none of them.
+      context.storageFailure = message;
+      broadcast(context, { type: "storage-failure", message });
     });
     context.runtime.onMutationError((event) => {
       // A mutation error is a notification for foreground runtimes that are
@@ -1714,6 +1723,9 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
             post(peer.port, { type: "transport-state", explicitlyDisconnected: true });
           } else {
             ensureServerConnection(peer.context);
+          }
+          if (peer.context.storageFailure !== null) {
+            post(peer.port, { type: "storage-failure", message: peer.context.storageFailure });
           }
           post(peer.port, {
             type: "remote-link",

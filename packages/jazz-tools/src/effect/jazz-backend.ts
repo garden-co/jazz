@@ -104,7 +104,9 @@ export class JazzBackend extends Context.Service<JazzBackend, JazzBackendService
 
   /**
    * Provide {@link Jazz} to `self` as the user who sent the current
-   * `HttpServerRequest`, for handlers built with `effect/http`.
+   * `HttpServerRequest`, for handlers built with `effect/http`. Your
+   * `authenticate` gets the request's method, URL and headers but not its
+   * body, which stays for the handler to read.
    */
   static readonly forCurrentReqUser =
     () =>
@@ -119,10 +121,10 @@ export class JazzBackend extends Context.Service<JazzBackend, JazzBackendService
         self,
         Jazz,
         HttpServerRequest.HttpServerRequest.use((request) =>
-          HttpServerRequest.toWeb(request).pipe(
-            Effect.mapError(toJazzError("forReqUser")),
-            Effect.flatMap((web) => JazzBackend.use((backend) => backend.forReqUser(web))),
-          ),
+          Effect.try({
+            try: () => credentialsOf(request),
+            catch: toJazzError("forReqUser"),
+          }).pipe(Effect.flatMap((web) => JazzBackend.use((backend) => backend.forReqUser(web)))),
         ),
       );
 
@@ -135,6 +137,17 @@ export class JazzBackend extends Context.Service<JazzBackend, JazzBackendService
       Jazz,
       JazzBackend.use((backend) => backend.authority),
     );
+}
+
+/**
+ * The request `authenticate` decides on, without its body: `toWeb` would hand
+ * over the body stream, and reading it there (some effect versions start to)
+ * leaves the handler's own body read empty.
+ */
+function credentialsOf(request: HttpServerRequest.HttpServerRequest): Request {
+  const url = HttpServerRequest.toURL(request);
+  if (url._tag === "None") throw new Error(`forCurrentReqUser: invalid request URL ${request.url}`);
+  return new Request(url.value, { method: request.method, headers: request.headers });
 }
 
 function makeJazzBackend(jazz: AppJazz): JazzBackendService {

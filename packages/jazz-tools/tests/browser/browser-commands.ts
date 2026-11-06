@@ -66,6 +66,18 @@ export function jazzStorageCorpusBrowserCommands(): JazzStorageCorpusBrowserComm
   return commands as unknown as JazzStorageCorpusBrowserCommands;
 }
 
+export interface StorageQuotaBrowserCommands {
+  /** Cap `origin`'s storage quota at `quotaSize` bytes, or restore it (`null`). */
+  overrideStorageQuota(origin: string, quotaSize: number | null): Promise<void>;
+}
+
+export function storageQuotaBrowserCommands(): StorageQuotaBrowserCommands {
+  if (!hasFunction(commands, "overrideStorageQuota")) {
+    throw new Error("Browser test project is missing the storage quota command.");
+  }
+  return commands as unknown as StorageQuotaBrowserCommands;
+}
+
 function hasFunction(value: object, key: string): boolean {
   return key in value && typeof Reflect.get(value, key) === "function";
 }
