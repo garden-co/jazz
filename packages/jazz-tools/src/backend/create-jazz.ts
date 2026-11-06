@@ -875,8 +875,10 @@ async function openInProcessCore(
         ),
       );
     },
+    // This process's own clients: no handshake deadline, as a burst of
+    // synchronous writes right after one opens holds its Hello back.
     WebSocket: inProcessWebSocket((_url, onEvent) =>
-      pinnedSocket(core.openSocket([], onEvent), bundle),
+      pinnedSocket(core.openInProcessSocket(onEvent), bundle),
     ),
   });
   const opened: Core = {
