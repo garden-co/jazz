@@ -82,10 +82,35 @@ export async function upgradeToLocalFirst(thin: Db, open: () => Promise<Db>): Pr
 
 const PREFETCH_ROUNDS = 3;
 
-/** @internal Read every query `thin` is subscribed to into `next` from the server. */
+/**
+ * @internal Read every query `thin` is subscribed to into `next` from the
+ * server, until the thin link reports offline or a read fails. The prefetch only spares the
+ * app's live queries a moment without rows: with no server to read from (a
+ * first visit offline, an outage) it must not hold the upgrade, or a
+ * guest's writes would stay in the thin client's memory, never stored,
+ * until the server is back.
+ */
 export async function prefetchThinQueries(thin: Db, next: Db): Promise<void> {
   const runtime = thinRuntimeOf(thin);
   if (!runtime) return;
+  // Still connecting: wait to learn whether the server answers (an outage
+  // reports as offline after a few seconds).
+  let stop!: () => void;
+  const offline = new Promise<void>((resolve) => {
+    stop = thin.onSyncStatusChange(({ link }) => {
+      if (link.state === "offline") resolve();
+    });
+  });
+  try {
+    if (thin.getSyncStatus().link.state === "offline") return;
+    // A read that fails (the server went away) just ends the prefetch.
+    await Promise.race([prefetchRounds(runtime, next).catch(() => {}), offline]);
+  } finally {
+    stop();
+  }
+}
+
+async function prefetchRounds(runtime: ThinRuntime, next: Db): Promise<void> {
   // Queries the app subscribes to while one round reads are read in the
   // next, so each live query opens on the local-first Db with its rows.
   // A few rounds: a component that keeps subscribing with new queries

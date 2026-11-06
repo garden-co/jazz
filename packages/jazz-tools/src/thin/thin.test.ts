@@ -6,7 +6,12 @@ import type { Db } from "../runtime/db.js";
 import { formatAuthSecret } from "../runtime/auth-secret-codec.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { startTestJazz, type TestJazz } from "../testing/index.js";
-import { createAccountManager, createClient, upgradeToLocalFirst } from "./index.js";
+import {
+  createAccountManager,
+  createClient,
+  prefetchThinQueries,
+  upgradeToLocalFirst,
+} from "./index.js";
 import { ThinRuntime } from "./thin-runtime.js";
 import { JazzClient } from "../runtime/client.js";
 import type { Session } from "../runtime/context.js";
@@ -171,6 +176,28 @@ describe("thin client", () => {
         { timeout: 10_000 },
       )
       .toEqual(["from the replica", "from thin"]);
+  }, 60_000);
+
+  // A first visit offline (or an outage): there is nothing to prefetch, and
+  // holding the upgrade would keep a guest's writes in memory only.
+  it("doesn't hold the upgrade for a server that doesn't answer", async () => {
+    const server = await startServer();
+    const secret = formatAuthSecret(new Uint8Array(32).fill(6));
+    const thin = await thinDb(server, secret);
+    const unsubscribe = thin.subscribe(app.notes, () => undefined);
+    await thin.insert(app.notes, { text: "before", done: false }).wait({ tier: "global" });
+    const config = await localAccountConfig(server.appId, server.url, secret);
+    await server.stop();
+    const next = await createLocalFirstDb(config);
+    opened.push(next);
+
+    // Still connecting: the prefetch waits until the outage shows.
+    const prefetch = prefetchThinQueries(thin, next);
+    await expect.poll(() => thin.getSyncStatus().link.state, { timeout: 20_000 }).toBe("offline");
+    await prefetch;
+    // Offline already: it returns at once.
+    await prefetchThinQueries(thin, next);
+    unsubscribe();
   }, 60_000);
 
   it("upgrades to local-first with the app's live queries already loaded", async () => {
