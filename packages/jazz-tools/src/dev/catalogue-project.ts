@@ -46,7 +46,7 @@ import {
 } from "../schema-permissions.js";
 import { collectConventionalProvenanceDiagnostics } from "../provenance-guidance.js";
 import { fetchSchemaHashes, fetchStoredWasmSchema } from "./catalogue-api.js";
-import { renderMigrationStub } from "./migrations.js";
+import { renderMigrationStub, UNFILLED_STUB_TODO } from "./migrations.js";
 import { normalizeSchemaHashInput } from "./schema-utils.js";
 import { legacySchemaHash } from "./legacy-schema-hash.js";
 import {
@@ -212,6 +212,7 @@ export async function validateProject(
   const compiled = ensurePermissionsProject(await loadCompiledSchema(options.schemaDir));
   await validateSchemaAndPermissions(compiled.wasmSchema, compiled.permissions);
   const migrationsDir = resolvedMigrationsDir(options.schemaDir, options.migrationsDir);
+  await refuseUnfilledStubs(migrationsDir);
   let retired: string[] = [];
   let schema: ValidateProjectResult["schema"];
   if (options.check) {
@@ -236,6 +237,24 @@ export async function validateProject(
       ).map((diagnostic) => diagnostic.message),
     ],
   };
+}
+
+/** Refuse a migration file that still holds a step its stub left to fill in. */
+async function refuseUnfilledStubs(migrationsDir: string): Promise<void> {
+  const files = await readdir(migrationsDir).catch(() => [] as string[]);
+  const unfilled: string[] = [];
+  for (const file of files.filter((name) => name.endsWith(".ts")).sort()) {
+    const lines = (await readFile(join(migrationsDir, file), "utf8")).split("\n");
+    lines.forEach((line, index) => {
+      const todo = UNFILLED_STUB_TODO.exec(line);
+      if (todo) unfilled.push(`  ${join(basename(migrationsDir), file)}:${index + 1}: ${todo[1]}`);
+    });
+  }
+  if (unfilled.length === 0) return;
+  throw new Error(
+    `A migration still has steps to fill in, so it cannot deploy:\n${unfilled.join("\n")}\n` +
+      "Replace each TODO with its step (for example `points: m.add.int({ default: 1 })`).",
+  );
 }
 
 /** How `schema` relates to the committed snapshots in `migrationsDir`. */

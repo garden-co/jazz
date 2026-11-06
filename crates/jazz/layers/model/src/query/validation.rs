@@ -269,7 +269,7 @@ pub enum QueryError {
     },
     /// Claim and column operand types do not match.
     #[error(
-        "claim {claim_path} has type {claim_type:?}, but column {column} has type {column_type:?}"
+        "session.{claim_path} has type {claim_type}, but column {column} has type {column_type}{hint}"
     )]
     ClaimTypeMismatch {
         /// Claim path.
@@ -280,6 +280,8 @@ pub enum QueryError {
         claim_type: String,
         /// Column type.
         column_type: String,
+        /// What to compare instead, when there is a likely fix.
+        hint: String,
     },
     /// Relation facade syntax is not yet covered by unified lowering.
     #[error("unsupported relation query: {0}")]
@@ -305,7 +307,11 @@ pub enum QueryError {
         expected: ColumnType,
     },
     /// Join column is not a reference to the current table.
-    #[error("join column {join_table}.{column} does not reference {target_table}")]
+    #[error(
+        "column {join_table}.{column} is matched against the ids of {target_table}, but it does \
+         not declare that it references them: declare the relation on {join_table}, for example \
+         `s.rel(\"<table>\", \"{column}\")`"
+    )]
     JoinNotRefCompatible {
         /// Junction table.
         join_table: String,
@@ -1877,7 +1883,7 @@ fn validate_join(
                 .get(&lookup.value_column)
                 .cloned()
                 .ok_or_else(|| {
-                    not_ref_compatible(&lookup.table, &lookup.value_column, "referenced table")
+                    not_ref_compatible(&lookup.table, &lookup.value_column, "another table")
                 })?
         }
     } else if let Some(source_column) = &join.source_column {
@@ -1886,7 +1892,7 @@ fn validate_join(
         } else {
             planner_column_type(root, source_column)?;
             root.references.get(source_column).cloned().ok_or_else(|| {
-                not_ref_compatible(&root_table, &source_column, "referenced table")
+                not_ref_compatible(&root_table, &source_column, "another table")
             })?
         }
     } else {
@@ -2194,7 +2200,7 @@ fn validate_reachable(
                 not_ref_compatible(
                     &reachable.access_table,
                     &reachable.access_team_column,
-                    "referenced table",
+                    "another table",
                 )
             })?,
         JoinTarget::RowId => {
@@ -2277,7 +2283,7 @@ fn validate_inherits(root: &TableSchema, inherits: &InheritsVia) -> Result<(), Q
     root.references
         .get(&inherits.parent_column)
         .ok_or_else(|| {
-            not_ref_compatible(&root.name, &inherits.parent_column, "referenced table")
+            not_ref_compatible(&root.name, &inherits.parent_column, "another table")
         })?;
     Ok(())
 }
@@ -2750,16 +2756,31 @@ fn claim_type_mismatch_error(
     let Operand::Column(column) = other else {
         return None;
     };
+    let hint = if claim_path == "user"
+        && matches!(non_null_column_type(other_type), ColumnType::String)
+    {
+        ": session.user is the account's id, so store it in an s.uuid() column, or compare a \
+         string column with session.identity.subject"
+            .to_owned()
+    } else {
+        String::new()
+    };
     Some(QueryError::ClaimTypeMismatch {
         claim_path: claim_path.clone(),
         column: column.clone(),
         claim_type: column_type_name(claim_type),
         column_type: column_type_name(other_type),
+        hint,
     })
 }
 
 fn column_type_name(column_type: &ColumnType) -> String {
-    format!("{column_type:?}")
+    match non_null_column_type(column_type) {
+        ColumnType::String => "string".to_owned(),
+        ColumnType::Uuid => "uuid".to_owned(),
+        ColumnType::Bool => "boolean".to_owned(),
+        other => format!("{other:?}"),
+    }
 }
 
 fn check_inferred_param(

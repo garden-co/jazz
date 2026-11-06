@@ -26,7 +26,22 @@ describe.each(["native", "wasm"])("%s schema validation binding", (runtime) => {
       binding.validateSchema(
         encodeSchema(mergePermissionsIntoWasmSchema(app.wasmSchema, wrongType)),
       ),
-    ).toThrow("ClaimTypeMismatch");
+    ).toThrow(
+      "session.user has type uuid, but column owner has type string: session.user is the account's id, so store it in an s.uuid() column, or compare a string column with session.identity.subject",
+    );
+
+    const linked = s.defineApp(
+      { boards: s.table({}, {}), members: s.table({ boardId: s.uuid() }, {}) },
+      { migrations: "none" },
+    );
+    const withoutRelation = s.definePermissions(linked, ({ policy }) => {
+      policy.members.allowInsert.where((m) => policy.boards.exists.where({ id: m.boardId }));
+    });
+    expect(() =>
+      binding.validateSchema(
+        encodeSchema(mergePermissionsIntoWasmSchema(linked.wasmSchema, withoutRelation)),
+      ),
+    ).toThrow('declare the relation on members, for example `s.rel("<table>", "boardId")`');
 
     const changed = s.defineApp(
       { notes: s.table({ title: s.string() }, {}) },

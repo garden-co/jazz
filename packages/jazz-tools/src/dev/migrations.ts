@@ -268,6 +268,23 @@ function renderColumnOperationExpression(
   }
 }
 
+// A column added in another's place starts every existing row at its
+// default: say how to keep the values instead of suggesting a swap that
+// silently drops them.
+const KEEP_VALUES_ADVICE =
+  "A migration can add, drop or rename a column but not convert its values, and a column " +
+  "added in its place starts every existing row at its default. To keep the values, add " +
+  "the new column under another name next to this one, copy the values into it from your " +
+  "backend, and drop this column in a later release.";
+
+/**
+ * The TODOs a generated stub leaves where a step needs the author's value:
+ * a migration file that still holds one does not reproduce its target
+ * schema, so it cannot deploy.
+ */
+export const UNFILLED_STUB_TODO =
+  /\/\/ TODO: ((?:Added|Removed) required column "[^"]+" needs an explicit (?:default|backwardsDefault)\.)/;
+
 /**
  * A column kept under the same name must keep its type and optionality: no
  * migration step changes them in place, so a stub for such a change could
@@ -287,7 +304,7 @@ function refuseUnsupportedSharedColumnChanges(
       throw new Error(
         `Changing column ${JSON.stringify(name)} from ${source.nullable ? "optional" : "required"} ` +
           `to ${column.nullable ? "optional" : "required"} is not supported yet. ` +
-          "Add a column under a new name and drop the old one instead.",
+          KEEP_VALUES_ADVICE,
       );
     }
     if (columnTypeSignature(source.column_type) !== columnTypeSignature(column.column_type)) {
@@ -301,7 +318,7 @@ function refuseUnsupportedSharedColumnChanges(
             : "the type of";
       throw new Error(
         `Changing ${change} column ${JSON.stringify(name)} is not supported yet. ` +
-          "Add a column under a new name and drop the old one instead.",
+          KEEP_VALUES_ADVICE,
       );
     }
   }
@@ -336,9 +353,11 @@ function inferTableSuggestions(
 
   for (const columnName of addedColumns) {
     const column = toColumns.get(columnName)!;
-    if (column.nullable) {
+    if (column.nullable || column.default !== undefined) {
+      // Existing rows take the column's declared default.
+      const fill = column.default === undefined ? "null" : defaultExpression(column.default);
       properties.push(
-        `${JSON.stringify(columnName)}: ${renderColumnOperationExpression("add", column, "null")},`,
+        `${JSON.stringify(columnName)}: ${renderColumnOperationExpression("add", column, fill)},`,
       );
     } else {
       comments.push(

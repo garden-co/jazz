@@ -242,6 +242,30 @@ describe("cli validate", () => {
     expect(await fileExists(join(root, "permissions.test.ts"))).toBe(false);
   });
 
+  it("refuses a migration whose stub still has a step to fill in", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await writeFile(join(root, "permissions.ts"), "export default {};\n");
+    await mkdir(join(root, "migrations"), { recursive: true });
+    await writeFile(
+      join(root, "migrations", "20260101-add-points.ts"),
+      [
+        "export default m.defineMigration({",
+        "  migrate: {",
+        '    "todos": {',
+        '      // TODO: Added required column "points" needs an explicit default.',
+        "    },",
+        "  },",
+        "});",
+        "",
+      ].join("\n"),
+    );
+
+    await expect(validate({ schemaDir: root })).rejects.toThrow(
+      'A migration still has steps to fill in, so it cannot deploy:\n  migrations/20260101-add-points.ts:4: Added required column "points" needs an explicit default.',
+    );
+  });
+
   it("fails when pointed at the legacy ./schema shim directory", async () => {
     const { root, schemaDir } = await createWorkspace();
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
