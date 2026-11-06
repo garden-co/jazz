@@ -1940,6 +1940,10 @@ fn append_exists_rel_policy_clause(
     mut query: Query,
     rel: &RelationExpr,
 ) -> Result<Query, SchemaConversionError> {
+    let mut rel = rel.clone();
+    normalize_author_relation(&mut rel)
+        .map_err(|message| err(policy_path(table, path), message))?;
+    let rel = &rel;
     let mut lowered = lower_exists_rel(schema, table, path, rel)?;
     root_exists_rel_at_correlation(table, path, &mut lowered)?;
     let correlation_index = lowered
@@ -3226,37 +3230,106 @@ fn author_session_column<'a>(
     let PolicyValue::SessionRef(session) = value else {
         return Ok(Cow::Borrowed(column));
     };
-    let record = match column {
-        "$createdBy" | "$updatedBy" | "$deletedBy" => Some(true),
-        "$createdBy.identity" | "$updatedBy.identity" | "$deletedBy.identity" => Some(false),
-        _ => None,
+    let ordered = matches!(op, CmpOp::Eq | CmpOp::Ne);
+    match author_column_for_session(column, ordered, session, &format!("{op:?}")) {
+        Ok(Some(column)) => Ok(Cow::Owned(column)),
+        Ok(None) => Ok(Cow::Borrowed(column)),
+        Err(message) => Err(err(policy_path(table, path), message)),
+    }
+}
+
+/// The shared rule for an author record (`$createdBy`, `$updatedBy`,
+/// `$deletedBy`, or one's `.identity`) compared with a session path:
+/// `Ok(Some(column))` names the column it compares by instead, `Ok(None)`
+/// keeps it, and `Err` names the forms that compare. `eq_or_ne` is whether
+/// the comparison is Eq or Ne; `op` names it otherwise.
+pub fn author_column_for_session(
+    column: &str,
+    eq_or_ne: bool,
+    session: &[String],
+    op: &str,
+) -> Result<Option<String>, String> {
+    let whole = match column {
+        "$createdBy" | "$updatedBy" | "$deletedBy" => true,
+        "$createdBy.identity" | "$updatedBy.identity" | "$deletedBy.identity" => false,
+        _ => return Ok(None),
     };
-    let Some(whole) = record else {
-        return Ok(Cow::Borrowed(column));
-    };
-    if !matches!(op, CmpOp::Eq | CmpOp::Ne) {
-        return Err(err(
-            policy_path(table, path),
-            format!("an author record `{column}` only compares with Eq or Ne, not {op:?}"),
+    if !eq_or_ne {
+        return Err(format!(
+            "an author record `{column}` only compares with Eq or Ne, not {op}"
         ));
     }
     let session: Vec<&str> = session.iter().map(String::as_str).collect();
     match (whole, session.as_slice()) {
-        (true, ["user"]) => Ok(Cow::Owned(format!("{column}.account"))),
-        (false, ["identity"]) => Ok(Cow::Borrowed(column)),
-        (_, ["claims", ..]) => Ok(Cow::Borrowed(column)),
+        (true, ["user"]) => Ok(Some(format!("{column}.account"))),
+        (false, ["identity"]) | (_, ["claims", ..]) => Ok(None),
         _ => {
             let record = column.trim_end_matches(".identity");
-            Err(err(
-                policy_path(table, path),
-                format!(
-                    "comparing `{column}` with `session.{}`: compare `{record}` with \
-                     `session.user` (the account) or `{record}.identity` with \
-                     `session.identity` (the exact login)",
-                    session.join(".")
-                ),
+            Err(format!(
+                "comparing `{column}` with `session.{}`: compare `{record}` with \
+                 `session.user` (the account) or `{record}.identity` with \
+                 `session.identity` (the exact login)",
+                session.join(".")
             ))
         }
+    }
+}
+
+/// Rewrite every author record compared with a session path inside a
+/// relation by [`author_column_for_session`], as plain policy comparisons
+/// are, so `{ $createdBy: session.user }` reads the same inside a relation.
+pub fn normalize_author_relation(rel: &mut RelationExpr) -> Result<(), String> {
+    match rel {
+        RelationExpr::TableScan { .. } => Ok(()),
+        RelationExpr::Filter { input, predicate } => {
+            normalize_author_relation(input)?;
+            normalize_author_relation_predicate(predicate)
+        }
+        RelationExpr::Union { inputs } => inputs
+            .iter_mut()
+            .try_for_each(|arm| normalize_author_relation(&mut arm.input)),
+        RelationExpr::Join { left, right, .. } => {
+            normalize_author_relation(left)?;
+            normalize_author_relation(right)
+        }
+        RelationExpr::Gather { seed, step, .. } => {
+            normalize_author_relation(seed)?;
+            normalize_author_relation(step)
+        }
+        RelationExpr::Project { input, .. }
+        | RelationExpr::Distinct { input, .. }
+        | RelationExpr::OrderBy { input, .. }
+        | RelationExpr::Offset { input, .. }
+        | RelationExpr::Limit { input, .. } => normalize_author_relation(input),
+    }
+}
+
+/// [`normalize_author_relation`] for one predicate.
+pub fn normalize_author_relation_predicate(
+    predicate: &mut RelationPredicate,
+) -> Result<(), String> {
+    match predicate {
+        RelationPredicate::Cmp {
+            left,
+            op,
+            right: RelationValueRef::SessionRef(session),
+        } => {
+            let eq_or_ne = matches!(
+                op,
+                crate::query::RelationCmpOp::Eq | crate::query::RelationCmpOp::Ne
+            );
+            if let Some(column) =
+                author_column_for_session(&left.column, eq_or_ne, session, &format!("{op:?}"))?
+            {
+                left.column = column;
+            }
+            Ok(())
+        }
+        RelationPredicate::And(children) | RelationPredicate::Or(children) => children
+            .iter_mut()
+            .try_for_each(normalize_author_relation_predicate),
+        RelationPredicate::Not(child) => normalize_author_relation_predicate(child),
+        _ => Ok(()),
     }
 }
 

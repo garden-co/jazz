@@ -1078,7 +1078,7 @@ export function definePermissions<TApp extends AppLike>(
 const ISCREATOR_REMOVED =
   "`isCreator` was removed in alpha.60. Write the creator check out as a row condition: " +
   "`{ $createdBy: session.user }` matches rows written through any identity linked to the " +
-  "account (rows imported from alpha.59 included), and " +
+  "account (including alpha.59 rows imported with an account), and " +
   '`{ "$createdBy.identity": session.identity }` only the exact login.';
 
 function collectFkReferencesByTable(app: AppLike): Map<string, Map<string, string>> {

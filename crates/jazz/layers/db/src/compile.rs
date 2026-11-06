@@ -107,12 +107,31 @@ impl Session {
     }
 
     /// `session.<path> IS NULL`: an explicit null. A missing claim path is
-    /// not null (it is absent); a missing user part is.
+    /// not null (it is absent); a missing user part is. `session.identity`
+    /// is null exactly when the session has no login.
     pub fn is_null(&self, path: &[String]) -> bool {
+        if let [identity] = path
+            && identity == "identity"
+        {
+            self.used.set(true);
+            return self.subject.is_none();
+        }
         match self.resolve_raw(path) {
             Some(value) => unwrap_nullable(value).is_none(),
             None => path.first().map(String::as_str) != Some("claims"),
         }
+    }
+
+    /// `session.<path> IS NOT NULL`: present and not null. `session.identity`
+    /// is set exactly when the session has a login.
+    pub fn is_not_null(&self, path: &[String]) -> bool {
+        if let [identity] = path
+            && identity == "identity"
+        {
+            self.used.set(true);
+            return self.subject.is_some();
+        }
+        self.resolve(path).is_some()
     }
 
     pub fn claim(&self, key: &str) -> Option<Value> {
@@ -1996,7 +2015,7 @@ impl<'a> Ctx<'a> {
                 format!("({} IS NOT NULL)", column_sql(table, alias, column)?)
             }
             PolicyExpr::SessionIsNull { path } => bool_sql(session.is_null(path)),
-            PolicyExpr::SessionIsNotNull { path } => bool_sql(session.resolve(path).is_some()),
+            PolicyExpr::SessionIsNotNull { path } => bool_sql(session.is_not_null(path)),
             PolicyExpr::Contains { column, value } => {
                 let left = self.column_term(table, alias, column)?;
                 let right = self.policy_value(value, outer, session)?;
@@ -2501,6 +2520,36 @@ impl<'a> Ctx<'a> {
                 let key = scope.key.expect("key");
                 *key.borrow_mut() = Some(self.resolve(rel, left)?);
                 "1".to_owned()
+            }
+            RelationPredicate::Cmp {
+                left,
+                op,
+                right: RelationValueRef::SessionRef(path),
+            } if crate::values::author_record(&left.column).is_some()
+                && matches!(path.first().map(String::as_str), Some("user" | "identity")) =>
+            {
+                // An author record inside a relation compares as it does in a
+                // plain policy.
+                let schema = self.schema;
+                let src = rel
+                    .from
+                    .iter()
+                    .filter(|src| src.table.is_some())
+                    .find(|src| left.scope.as_ref().is_none_or(|scope| &src.scope == scope))
+                    .ok_or_else(|| {
+                        query_error(format!("relation column {left:?} does not resolve"))
+                    })?;
+                let table = &schema.tables[src.table.as_ref().expect("a table source")];
+                let alias = src.alias.clone();
+                let op = match op {
+                    RelationCmpOp::Eq => CmpOp::Eq,
+                    RelationCmpOp::Ne => CmpOp::Ne,
+                    RelationCmpOp::Lt => CmpOp::Lt,
+                    RelationCmpOp::Le => CmpOp::Le,
+                    RelationCmpOp::Gt => CmpOp::Gt,
+                    RelationCmpOp::Ge => CmpOp::Ge,
+                };
+                self.author_cmp(table, &alias, &left.column, &op, path, scope.session)?
             }
             RelationPredicate::Cmp { left, op, right } => {
                 let left = self.resolve_term(rel, left)?;
@@ -3277,9 +3326,10 @@ impl Ctx<'_> {
     }
 
     /// An author record (`$createdBy`, `$updatedBy.identity`, ...) against
-    /// the session's user (or its identity): equal when every part is, with
-    /// an accountless session standing for the system account as
-    /// [`crate::values::author_key`] stores it.
+    /// `session.user` (compared by account) or `session.identity` (compared
+    /// by issuer and subject). An accountless session matches no whole
+    /// author record, so it is never mistaken for the system account
+    /// [`crate::values::author_key`] stores it under.
     fn author_cmp(
         &mut self,
         table: &Table,

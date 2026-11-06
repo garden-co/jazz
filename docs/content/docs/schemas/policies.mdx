@@ -264,8 +264,8 @@ You can use these edit metadata magic columns directly in `permissions.ts`. This
 "creator can read/edit/delete their own rows" policies without adding explicit `owner_id` columns.
 
 Compare `$createdBy` with `session.user` to scope a rule to the row's creator. `session.user` is
-the account, so the rule matches rows written through any identity linked to it, rows imported from
-alpha.59 included. To match only the exact login that wrote the row, compare
+the account, so the rule matches rows written through any identity linked to it, including
+alpha.59 rows whose author was imported with an account. To match only the exact login that wrote the row, compare
 `$createdBy.identity` with `session.identity` (its `{ issuer, subject }`). Public `session.claims`
 also exposes the complete verified JWT payload, including the raw `iss` and `sub`, but those
 inspectable fields never replace the canonical author identity.

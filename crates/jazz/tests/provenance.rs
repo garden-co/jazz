@@ -714,6 +714,102 @@ fn session_user_matches_the_account_and_session_identity_the_exact_login() {
     assert_eq!(visible(&by_login, a), 1, "the identity that wrote it");
     assert_eq!(visible(&by_login, b), 0, "another login of the account");
 
+    // The same reads hold inside a relation.
+    let in_relation = |column: &str, path: &[&str]| {
+        use jazz::tools::public_schema::{
+            RelationCmpOp, RelationColumnRef, RelationExpr, RelationPredicate, RelationRowIdRef,
+            RelationValueRef,
+        };
+        let note = |column: &str| RelationColumnRef {
+            scope: Some("note".to_owned()),
+            column: column.to_owned(),
+        };
+        PolicyExpr::ExistsRel {
+            rel: RelationExpr::Filter {
+                input: Box::new(RelationExpr::TableScan {
+                    table: "notes".into(),
+                    alias: Some("note".to_owned()),
+                }),
+                predicate: RelationPredicate::And(vec![
+                    RelationPredicate::Cmp {
+                        left: note("id"),
+                        op: RelationCmpOp::Eq,
+                        right: RelationValueRef::RowId(RelationRowIdRef::Outer),
+                    },
+                    RelationPredicate::Cmp {
+                        left: note(column),
+                        op: RelationCmpOp::Eq,
+                        right: RelationValueRef::SessionRef(
+                            path.iter().map(|p| (*p).to_owned()).collect(),
+                        ),
+                    },
+                ]),
+            },
+        }
+    };
+    let by_account = open(in_relation("$createdBy", &["user"]));
+    assert_eq!(visible(&by_account, a), 1, "in a relation, the writer");
+    assert_eq!(
+        visible(&by_account, b),
+        1,
+        "in a relation, a linked identity"
+    );
+    assert_eq!(
+        visible(&by_account, accountless),
+        0,
+        "in a relation, no stranger"
+    );
+    let by_login = open(in_relation("$createdBy.identity", &["identity"]));
+    assert_eq!(visible(&by_login, a), 1, "in a relation, the exact login");
+    assert_eq!(visible(&by_login, b), 0, "in a relation, not another login");
+
+    // Every signed-in session has an identity; only some have an account.
+    let path = |path: &[&str]| path.iter().map(|p| (*p).to_owned()).collect::<Vec<_>>();
+    let identity_null = open(PolicyExpr::SessionIsNull {
+        path: path(&["identity"]),
+    });
+    assert_eq!(
+        visible(&identity_null, a),
+        0,
+        "a signed-in identity is not null"
+    );
+    let identity_set = open(PolicyExpr::SessionIsNotNull {
+        path: path(&["identity"]),
+    });
+    assert_eq!(visible(&identity_set, a), 2, "a signed-in identity is set");
+    let user_null = open(PolicyExpr::SessionIsNull {
+        path: path(&["user"]),
+    });
+    assert_eq!(visible(&user_null, a), 0, "an accounted session has a user");
+    assert_eq!(
+        visible(&user_null, accountless),
+        2,
+        "an accountless one has none"
+    );
+
+    // The removed forms fail to compile, naming the replacement.
+    for (removed, replacement) in [
+        (&["user", "account"][..], "session.user"),
+        (&["user", "identity"][..], "session.identity"),
+    ] {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("body", ColumnType::Text)
+                    .policies(common::read_and_allow_all_writes(PolicyExpr::Cmp {
+                        column: "$createdBy.account".to_owned(),
+                        op: CmpOp::Eq,
+                        value: session(removed),
+                    })),
+            )
+            .build();
+        let error = format!("{:?}", jazz::schema::JazzSchema::new(&schema).unwrap_err());
+        assert!(
+            error.contains(&format!("was removed: use {replacement}")),
+            "{error}"
+        );
+    }
+
     // A comparison of mismatched parts names the forms that compare.
     let schema = SchemaBuilder::new()
         .table(
