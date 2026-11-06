@@ -2273,16 +2273,23 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       req.headers["content-length"] === "0" ||
       (req.headers["content-length"] === undefined &&
         req.headers["transfer-encoding"] === undefined);
+    const json = /^application\/json\b/i.test(req.headers["content-type"] ?? "");
     let body: BodyInit | undefined;
-    if (hasBody && req.readableEnded && empty) {
-      body = undefined;
-    } else if (hasBody && req.readableEnded) {
-      if (!(parsed instanceof Uint8Array)) {
+    if (hasBody && req.readableEnded) {
+      if (parsed instanceof Uint8Array) {
+        body = parsed as BodyInit;
+      } else if (empty) {
+        body = undefined;
+      } else if (json && parsed !== null && typeof parsed === "object") {
+        // express.json()'s result: Jazz's JSON routes read it as JSON again
+        // (none signs its bytes), so it serves as the body.
+        body = JSON.stringify(parsed);
+        headers.delete("content-length");
+      } else {
         throw new Error(
           "jazz: the request body was already read by another handler; mount jazz.nodeHandler before body parsers such as express.json()",
         );
       }
-      body = parsed as BodyInit;
     } else if (hasBody) {
       body = req as unknown as BodyInit;
     }

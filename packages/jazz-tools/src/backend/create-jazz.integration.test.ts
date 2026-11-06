@@ -378,14 +378,20 @@ describe("createJazz", () => {
   it("leaves a body a parser read before nodeHandler to the app's routes", async () => {
     const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
     cleanups.push(() => jazz.close());
-    // What express.json() does before the app's handlers: read the stream
-    // whole and leave the result on `req.body`.
+    // What express.json() and express.text() do before the app's handlers:
+    // read the stream whole and leave the result on `req.body`.
     const parse = (req: IncomingMessage & { body?: unknown }, done: () => void) => {
       const chunks: Buffer[] = [];
       req.on("data", (chunk: Buffer) => chunks.push(chunk));
       req.on("end", () => {
         const raw = Buffer.concat(chunks);
-        req.body = req.headers["content-type"] === "application/json" ? JSON.parse(`${raw}`) : raw;
+        const type = req.headers["content-type"];
+        req.body =
+          type === "application/json"
+            ? JSON.parse(`${raw}`)
+            : type === "text/plain"
+              ? `${raw}`
+              : raw;
         done();
       });
     };
@@ -409,13 +415,24 @@ describe("createJazz", () => {
     expect(echoed.status).toBe(200);
     expect(await echoed.json()).toEqual({ got: { a: 1 } });
 
-    // A Jazz route whose body a JSON parser took fails plainly, naming the
-    // fix, instead of with a locked-stream error.
+    // A JSON body express.json() parsed serves Jazz's JSON routes as JSON:
+    // the link route gets to judge it (no proof here), not a parser error.
+    const linked = await fetch(`${origin}/jazz/apps/${jazz.appId}/accounts/backend-link`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-test-user": "alice" },
+      body: JSON.stringify({ challenge: "c", proof: "p" }),
+    });
+    expect(linked.status).toBeGreaterThanOrEqual(400);
+    expect(linked.status).toBeLessThan(500);
+    expect(await linked.text()).not.toBe("request_body_already_read");
+
+    // A Jazz route whose body another parser took (as a string) fails
+    // plainly, naming the fix, instead of with a locked-stream error.
     const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
     try {
       const taken = await fetch(`${origin}/jazz/auth/sign-in`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "text/plain" },
         body: "{}",
       });
       expect(taken.status).toBe(500);
