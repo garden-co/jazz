@@ -226,17 +226,6 @@ async function verifyJwtSignatureWithJwks(token: string, jwks: LocalJwksDocument
   throw lastError ?? new Error("JWT signature verification failed");
 }
 
-/** Whether `jwks` has a key for the `kid` `token` names (a token naming none: yes). */
-function publishesKeyOf(jwks: LocalJwksDocument, token: string): boolean {
-  let kid: string | undefined;
-  try {
-    kid = readString(decodeProtectedHeader(token).kid);
-  } catch {
-    return true;
-  }
-  return kid === undefined || jwks.keys.some((jwk) => readString(jwk.kid) === kid);
-}
-
 function cacheKeyForStaticJwtPublicKey(
   jwtPublicKey: BackendJwtPublicKey,
   algorithm: string,
@@ -478,17 +467,7 @@ export async function verifyExternalJwt(
       // A refresh that fails throws, so the client retries, and keeps
       // throwing through its cooldown; only a refresh that succeeds can
       // refuse an unknown key.
-      const refreshed = await getRemoteJwksDocument(config.jwksUrl, true);
-      if (refreshed === jwks && !publishesKeyOf(jwks, token)) {
-        // No refetch (one ran moments ago), and the token names a key that
-        // document predates: the issuer may have just rotated to it. Retry
-        // after the cooldown rather than sign a valid user out; only a
-        // fetched document can refuse a key it doesn't publish.
-        throw new Error(
-          `JWT key is not in the JWKS fetched from ${config.jwksUrl} moments ago; it is fetched again within ${JWKS_FORCED_REFRESH_COOLDOWN_MS / 1000} seconds, so retry`,
-        );
-      }
-      jwks = refreshed;
+      jwks = await getRemoteJwksDocument(config.jwksUrl, true);
       try {
         await verifyJwtSignatureWithJwks(token, jwks);
       } catch (refreshError) {
