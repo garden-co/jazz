@@ -124,6 +124,7 @@ describe("browser session", () => {
     const client = session.getSnapshot().client;
     const kept = db(session);
     await kept.insert(app.notes, { text: "before" }).wait({ tier: "global" });
+    expect(kept.isLocalFirst()).toBe(false);
     const seen: string[][] = [];
     const errors: Error[] = [];
     const states: string[] = [];
@@ -141,6 +142,7 @@ describe("browser session", () => {
     expect(session.getSnapshot().client).toBe(client);
     expect(db(session)).toBe(kept);
     expect(isThinDb(kept)).toBe(false);
+    expect(kept.isLocalFirst()).toBe(true);
     expect(states).toEqual([]);
     // The rows were read into the local-first client first.
     expect((await kept.all(app.notes, { tier: "local-first" })).map((row) => row.text)).toEqual([
@@ -155,6 +157,34 @@ describe("browser session", () => {
     await expect(kept.upgradeToLocalFirst(loadLocalFirst)).resolves.toBeUndefined();
     stop();
     stopStates();
+  }, 60_000);
+
+  it("shows the thin Db's own committed writes in local-first reads after the upgrade", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const kept = db(session);
+    await kept.insert(app.notes, { text: "thin" }).wait({ tier: "global" });
+
+    // No live query covers it: only the hand-off reads it into the local-first Db.
+    await kept.upgradeToLocalFirst(loadLocalFirst);
+    expect((await kept.all(app.notes, { tier: "local-first" })).map((row) => row.text)).toEqual([
+      "thin",
+    ]);
+  }, 60_000);
+
+  it("shows a thin write answered after the upgrade in local-first reads once it is global", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const kept = db(session);
+    await kept.disconnect();
+    const write = kept.insert(app.notes, { text: "late" });
+    await kept.upgradeToLocalFirst(loadLocalFirst);
+    await kept.reconnect();
+
+    await write.wait({ tier: "global" });
+    expect((await kept.all(app.notes, { tier: "local-first" })).map((row) => row.text)).toEqual([
+      "late",
+    ]);
   }, 60_000);
 
   it("counts and uploads the thin Db's unsent writes after the upgrade", async () => {
@@ -313,7 +343,9 @@ describe("browser session", () => {
         const next = await createLocalFirstDb(config);
         const prefetch = next.prefetchRuntimeQueries.bind(next);
         next.prefetchRuntimeQueries = async (schema, queries) => {
-          rounds.push(queries.length);
+          // Not the hand-off of the thin write's row (an `id in` read).
+          const live = queries.filter((query) => !query.includes('"In"'));
+          if (live.length > 0) rounds.push(live.length);
           // A component mounts during the first round's read.
           late ??= kept.subscribe(app.notes.where({ text: "before" }), (rows) =>
             seen.push(rows.map((row) => row.text)),

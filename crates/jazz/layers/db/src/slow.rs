@@ -16,6 +16,12 @@ use std::time::Duration;
 /// Default threshold: about ten server ticks' worth of writer time.
 pub const DEFAULT_SLOW_QUERY_THRESHOLD: Duration = Duration::from_millis(50);
 
+/// Fewest rows a slow run must have stepped through in full scans (or
+/// sorted) before its report blames the scan (or the sort): reading or
+/// sorting a few hundred rows takes well under a millisecond, so a slow run
+/// over fewer was slow for some other reason, and no index would help it.
+pub const INDEX_HINT_MIN_ROWS: u64 = 1_000;
+
 /// How often a host reports: each report sums a shape's slow runs since
 /// the last, so a hot slow query is one line per window.
 pub const REPORT_EVERY: Duration = Duration::from_secs(10);
@@ -52,6 +58,8 @@ pub struct SlowQuery {
 impl SlowQuery {
     /// What would most likely make this query fast, read off its plan.
     pub fn hint(&self) -> Option<String> {
+        let scanned_enough = self.scanned >= INDEX_HINT_MIN_ROWS;
+        let sorted_enough = self.rows >= INDEX_HINT_MIN_ROWS;
         let scans: Vec<&str> = self
             .plan
             .lines()
@@ -71,6 +79,7 @@ impl SlowQuery {
                     alias
                 })
             })
+            .filter(|_| scanned_enough)
             .collect();
         let mut hints = Vec::new();
         if !scans.is_empty() {
@@ -79,7 +88,7 @@ impl SlowQuery {
                 scans.join(", ")
             ));
         }
-        if self.sorted || self.plan.contains("USE TEMP B-TREE FOR ORDER BY") {
+        if sorted_enough && (self.sorted || self.plan.contains("USE TEMP B-TREE FOR ORDER BY")) {
             hints.push(
                 "sorts its rows after reading them: an index on the ordering columns would return them in order"
                     .to_owned(),
@@ -264,11 +273,20 @@ mod tests {
             runs: 1,
             total: Duration::ZERO,
             slowest: Duration::ZERO,
-            rows: 0,
-            scanned: 0,
+            rows: INDEX_HINT_MIN_ROWS,
+            scanned: INDEX_HINT_MIN_ROWS,
             sorted,
             plan: plan.into(),
         }
+    }
+
+    #[test]
+    fn a_slow_run_over_few_rows_blames_no_index() {
+        let mut few = shape("SCAN docs\nUSE TEMP B-TREE FOR ORDER BY", true);
+        few.rows = 2;
+        few.scanned = 2;
+        assert_eq!(few.hint(), None);
+        assert!(!few.line(None).contains("index"), "{}", few.line(None));
     }
 
     #[test]

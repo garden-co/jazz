@@ -18,7 +18,9 @@ import type { Db } from "../runtime/db.js";
 import { isThinDb, markThinDb } from "../runtime/local-first-upgrade.js";
 import { LOCAL_FIRST_ISSUER, mintSelfSignedToken } from "./self-signed-token.js";
 import { ThinRuntimeSource } from "./thin-runtime-source.js";
-import { ThinRuntime, type ThinRuntimeOptions } from "./thin-runtime.js";
+import { ThinRuntime, type ThinRuntimeOptions, type WrittenRow } from "./thin-runtime.js";
+import { translateQuery } from "../runtime/query-adapter.js";
+import type { WasmSchema } from "../drivers/types.js";
 
 export { ThinRuntimeSource } from "./thin-runtime-source.js";
 export {
@@ -72,6 +74,7 @@ export async function upgradeToLocalFirst(thin: Db, open: () => Promise<Db>): Pr
   const next = await open();
   try {
     await prefetchThinQueries(thin, next);
+    await handOffThinWrites(thin, next);
   } catch (error) {
     await next.shutdown();
     throw error;
@@ -97,6 +100,35 @@ export async function prefetchThinQueries(thin: Db, next: Db): Promise<void> {
     await next.prefetchRuntimeQueries(runtime.schema, pending);
     for (const query of pending) read.add(query);
   }
+}
+
+/**
+ * @internal The rows `thin` wrote reach `next` too, so a local-first read
+ * there shows them: those already committed now, later ones as they commit.
+ */
+export async function handOffThinWrites(thin: Db, next: Db): Promise<void> {
+  const runtime = thinRuntimeOf(thin);
+  if (!runtime) return;
+  await runtime.handOffWrittenRows((rows) =>
+    next.prefetchRuntimeQueries(runtime.schema, rowQueries(runtime.schema, rows)),
+  );
+}
+
+/** One runtime query per table, for the rows of it in `rows`. */
+function rowQueries(schema: WasmSchema, rows: readonly WrittenRow[]): string[] {
+  const ids = new Map<string, Set<string>>();
+  for (const { table, id } of rows) {
+    if (!schema[table]) continue;
+    let set = ids.get(table);
+    if (!set) ids.set(table, (set = new Set()));
+    set.add(id);
+  }
+  return [...ids].map(([table, set]) =>
+    translateQuery(
+      JSON.stringify({ table, conditions: [{ column: "id", op: "in", value: [...set] }] }),
+      schema,
+    ),
+  );
 }
 
 function thinRuntimeOf(thin: Db): ThinRuntime | null {

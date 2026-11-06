@@ -132,7 +132,7 @@ import {
   type DbForConnection,
 } from "./connection-manager/index.js";
 import { toError } from "./util.js";
-import { upgradeDbToLocalFirst, type LocalFirstLoader } from "./local-first-upgrade.js";
+import { isThinDb, upgradeDbToLocalFirst, type LocalFirstLoader } from "./local-first-upgrade.js";
 import { DbReplacedError, type DbReplacedReason } from "./db-replaced-error.js";
 
 type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
@@ -2840,9 +2840,12 @@ export class Db {
 
   private wrapWriteWait<THandle extends WriteHandle<unknown, unknown>>(handle: THandle): THandle {
     notifyLocalWrite(this);
-    return setWriteWaitReadiness(handle, (tier) =>
-      this.ensureReady(tier === "global" ? "upload" : "runtime"),
-    );
+    return setWriteWaitReadiness(handle, async (tier) => {
+      // A write made before this Db handed over to a successor waits on its
+      // own runtime's last uploads, which the drain keeps going.
+      if (this.drain) return;
+      await this.ensureReady(tier === "global" ? "upload" : "runtime");
+    });
   }
 
   protected getAccessContext(): DbAccessContext | null {
@@ -3765,6 +3768,16 @@ export class Db {
    */
   async upgradeToLocalFirst(loader: LocalFirstLoader): Promise<void> {
     await upgradeDbToLocalFirst(this, loader);
+  }
+
+  /**
+   * Whether this `Db` reads and writes through a local store: true for a
+   * local-first `Db`, and for a thin one once its session has upgraded it
+   * (the same `Db` carries on), false for a thin one before. To wait for the
+   * upgrade, `await db.upgradeToLocalFirst(loader)`.
+   */
+  isLocalFirst(): boolean {
+    return !isThinDb(this);
   }
 
   /**
