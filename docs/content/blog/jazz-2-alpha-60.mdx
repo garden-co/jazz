@@ -13,7 +13,7 @@ Over the course of the v2 alpha, Jazz’s internal architecture has become simpl
 
 This involves a simpler version of IVM that strikes a much better tradeoff between one-shot reads and live subscriptions and benefits from the decades of optimization that have gone into SQLite.
 
-As a result, alpha.60 uses **up to 10x less RAM**. Writes and reads are **5x-500x faster** across our example apps and benchmarks. We think you'll feel a big difference in your apps.
+As a result, the alpha.60 sync server uses **10x-35x less RAM** under load. Reads and opening subscriptions are **20x-600x faster** and everyday writes **4x-30x faster** across our example apps and benchmarks (a median of 27x across 88 benchmarks, none slower). We think you'll feel a big difference in your apps.
 
 In addition to speed, we directly benefit from the correctness and versatility of SQLite that our now much slimmer codebase can rely on.
 
