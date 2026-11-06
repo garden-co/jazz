@@ -64,8 +64,8 @@ async function openLocalFirst(config?: Partial<DbConfig>) {
 // #region follow-session-ts
 /**
  * Run `attach` on the session's current Db, and again each time the session
- * replaces it: after the background upgrade to the local-first client, and
- * when the user signs in, signs out or switches accounts.
+ * replaces it: when the user signs in, signs out or switches accounts. (The
+ * upgrade to the local-first client keeps the same Db.)
  */
 export function followDb(
   session: JazzSession<JazzClient>,
@@ -99,7 +99,7 @@ export async function startApp(
   const fixed = config?.account
     ? await createDb({ ...config, appId: config.appId!, account: config.account })
     : undefined;
-  // Writes go to the current Db: the session swaps it as it upgrades or signs in.
+  // Writes go to the current Db: the session swaps it when the user signs in or out.
   const currentDb = () => fixed ?? session!.getSnapshot().client!.db;
 
   // Build DOM

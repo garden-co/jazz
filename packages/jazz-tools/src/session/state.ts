@@ -67,6 +67,7 @@ export interface JazzSessionConsumer<Client> {
 const consumers = new WeakMap<object, () => JazzSessionConsumer<unknown>>();
 type ClientReplacer = (
   open: (current: unknown, account: AccountHandle) => Promise<unknown>,
+  adopt?: (current: unknown, next: unknown) => void,
 ) => Promise<void>;
 const replacers = new WeakMap<object, ClientReplacer>();
 const switchers = new WeakMap<object, (from: AccountHandle) => Promise<boolean>>();
@@ -102,10 +103,19 @@ export function switchJazzSessionUser<Client>(
 export function replaceJazzSessionClient<Client>(
   session: JazzSession<Client>,
   open: (current: Client, account: AccountHandle) => Promise<Client>,
+  /**
+   * Hand the current client's work to `next` in place, instead of publishing
+   * `next`: the session keeps its client, so the app keeps its handles,
+   * queries and component state.
+   */
+  adopt?: (current: Client, next: Client) => void,
 ): Promise<void> {
   const replace = replacers.get(session);
   if (!replace) return Promise.reject(new Error("Unknown Jazz session"));
-  return replace(open as (current: unknown, account: AccountHandle) => Promise<unknown>);
+  return replace(
+    open as (current: unknown, account: AccountHandle) => Promise<unknown>,
+    adopt as ((current: unknown, next: unknown) => void) | undefined,
+  );
 }
 /** @internal Framework commit acknowledgement; never required by imperative callers. */
 export function attachJazzSessionConsumer<Client>(
@@ -370,7 +380,7 @@ export async function createJazzSessionOwner<
     );
     return true;
   });
-  replacers.set(session, async (open) => {
+  replacers.set(session, async (open, adopt) => {
     if (closed) throw new Error("Jazz session is closed");
     await busy?.catch(() => {});
     await loggingOut?.catch(() => {});
@@ -384,11 +394,15 @@ export async function createJazzSessionOwner<
       await next.shutdown().catch(() => {});
       throw superseded();
     }
+    if (adopt) {
+      adopt(current, next);
+      return;
+    }
     client = next;
     publish({ status: "ready", account: selected, client: next });
     // Code that kept the old Db learns it is gone, instead of its queries
     // going quiet. Framework providers follow the session, not the old Db.
-    (current as WipeableClient).db?.markReplaced?.("upgraded");
+    (current as WipeableClient).db?.markReplaced?.("replaced");
     // Children re-render onto the new client first; the old one finishes
     // uploading its writes before it stops. The swap is done either way: a
     // slow or failing shutdown of the old client neither holds nor fails it.

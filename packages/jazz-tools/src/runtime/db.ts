@@ -381,6 +381,63 @@ export type SubscriptionHandle = (() => void) & {
 
 const dbSubscriptionSources = new WeakMap<Db, DbSubscriptionSource>();
 
+/**
+ * What a Db hands to its successor after the local-first upgrade: everything
+ * an app or framework calls. Its shutdown, and the internals its own runtime
+ * needs to finish uploading, stay with it.
+ */
+const FORWARDED_TO_SUCCESSOR = [
+  "allFromInspectorAttachment",
+  "subscribeFromInspectorAttachment",
+  "currentRuntime",
+  "prefetchRuntimeQueries",
+  "refreshAccountAuth",
+  "updateAuthToken",
+  "updateCookieSession",
+  "getAuthState",
+  "getLocalFirstIdentityProof",
+  "onAuthChanged",
+  "onMutationError",
+  "textAnchors",
+  "getSyncStatus",
+  "onSyncStatusChange",
+  "waitForSync",
+  "getConfig",
+  "setDevMode",
+  "disconnect",
+  "reconnect",
+  "getActiveQuerySubscriptions",
+  "onActiveQuerySubscriptionsChange",
+  "getRuntimeSchema",
+  "openInspectorControlPort",
+  "insert",
+  "insertStreaming",
+  "updateStreaming",
+  "upsertStreaming",
+  "restore",
+  "upsert",
+  "update",
+  "delete",
+  "canInsert",
+  "canRead",
+  "canUpdate",
+  "canDelete",
+  "createTransaction",
+  "captureSnapshot",
+  "beginTransaction",
+  "beginSerializableTransaction",
+  "transaction",
+  "serializableTransaction",
+  "upgradeToLocalFirst",
+  "deleteClientStorage",
+  "logout",
+  "all",
+  "allInternal",
+  "one",
+  "subscribe",
+  "subscribeDelta",
+] as const;
+
 /** @internal Retrieve the incremental source associated with a public Db. */
 export function getDbSubscriptionSource(db: Db): DbSubscriptionSource {
   const source = dbSubscriptionSources.get(db);
@@ -2347,6 +2404,10 @@ export class Db {
   private replaced: DbReplacedError | null = null;
   /** Ends each live subscription with a terminal error. */
   private readonly liveSubscriptionEnders = new Set<(error: Error) => void>();
+  /** The Db this one hands its work to after the local-first upgrade. */
+  private successor: Db | null = null;
+  /** Queries and listeners that move to the successor with the upgrade. */
+  private readonly movable = new Set<{ move(next: Db): void }>();
   private readonly shutdownAbort = new AbortController();
   private syncStatusSnapshot: SyncStatus | null = null;
   private readonly activeQuerySubscriptionTraces = new Map<
@@ -2720,6 +2781,9 @@ export class Db {
   }
 
   private handleMutationError(event: MutationErrorEvent): void {
+    // A write this Db took before the upgrade, rejected while it uploads:
+    // the app's listeners are on the successor now.
+    if (this.successor) return this.successor.handleMutationError(event);
     if (this.mutationErrorListeners.size === 0) {
       console.error("Unhandled Jazz mutation error", event);
       this.pendingMutationErrorEvents.push(event);
@@ -2788,9 +2852,35 @@ export class Db {
   }
 
   onAuthChanged(listener: (state: AuthState) => void): () => void {
-    return this.authStateStore.onChange((state) => {
-      listener(state);
-    });
+    return this.registerMovable((db) =>
+      db.authStateStore.onChange((state) => {
+        listener(state);
+      }),
+    );
+  }
+
+  /**
+   * Register something on this Db that moves to its successor when the
+   * session upgrades it to the local-first client, so code holding the
+   * returned handle keeps hearing from whichever Db does the work.
+   */
+  private registerMovable(register: (db: Db) => () => void): () => void {
+    let detach = register(this);
+    let closed = false;
+    const entry = {
+      move: (next: Db) => {
+        if (closed) return;
+        detach();
+        detach = next.registerMovable(register);
+      },
+    };
+    this.movable.add(entry);
+    return () => {
+      if (closed) return;
+      closed = true;
+      this.movable.delete(entry);
+      detach();
+    };
   }
 
   /**
@@ -2801,13 +2891,15 @@ export class Db {
    */
   onMutationError(listener: (event: MutationErrorEvent) => void): () => void {
     if (this.replaced) throw this.replaced;
-    this.mutationErrorListeners.add(listener);
-    while (this.pendingMutationErrorEvents.length > 0) {
-      listener(this.pendingMutationErrorEvents.shift()!);
-    }
-    return () => {
-      this.mutationErrorListeners.delete(listener);
-    };
+    return this.registerMovable((db) => {
+      db.mutationErrorListeners.add(listener);
+      while (db.pendingMutationErrorEvents.length > 0) {
+        listener(db.pendingMutationErrorEvents.shift()!);
+      }
+      return () => {
+        db.mutationErrorListeners.delete(listener);
+      };
+    });
   }
 
   /**
@@ -2840,6 +2932,10 @@ export class Db {
    * @returns an unsubscribe callback
    */
   onSyncStatusChange(listener: (status: SyncStatus) => void): () => void {
+    return this.registerMovable((db) => db.onSyncStatusChangeHere(listener));
+  }
+
+  private onSyncStatusChangeHere(listener: (status: SyncStatus) => void): () => void {
     const subscription = new AbortController();
     const end = () => subscription.abort();
     this.shutdownAbort.signal.addEventListener("abort", end, { once: true });
@@ -2956,11 +3052,13 @@ export class Db {
    * @internal
    */
   onActiveQuerySubscriptionsChange(listener: ActiveQuerySubscriptionTraceListener): () => void {
-    this.activeQuerySubscriptionTraceListeners.add(listener);
-    listener(this.getActiveQuerySubscriptions());
-    return () => {
-      this.activeQuerySubscriptionTraceListeners.delete(listener);
-    };
+    return this.registerMovable((db) => {
+      db.activeQuerySubscriptionTraceListeners.add(listener);
+      listener(db.getActiveQuerySubscriptions());
+      return () => {
+        db.activeQuerySubscriptionTraceListeners.delete(listener);
+      };
+    });
   }
 
   /**
@@ -3716,9 +3814,47 @@ export class Db {
     options?: InternalDbQueryOptions,
     session?: Session,
   ): SubscriptionHandle {
+    if (this.replaced) throw this.replaced;
     const { onDelta, onError } =
       typeof callbacks === "function" ? { onDelta: callbacks, onError: undefined } : callbacks;
-    if (this.replaced) throw this.replaced;
+    let ready: Promise<void> | undefined;
+    let first = true;
+    const stop = this.registerMovable((db) => {
+      // On the successor the query starts over: its opening result replaces
+      // what the subscriber has, rows the upgrade already read in included.
+      let opening = !first;
+      first = false;
+      const handle = db.subscribeDeltaHere(
+        query,
+        {
+          onDelta: (delta) => {
+            if (opening) {
+              opening = false;
+              onDelta({ delta: delta.delta, all: delta.all ?? [], reset: true });
+              return;
+            }
+            onDelta(delta);
+          },
+          ...(onError === undefined ? {} : { onError }),
+        },
+        options,
+        session,
+      );
+      ready ??= handle.ready;
+      return handle;
+    });
+    const handle = (() => stop()) as SubscriptionHandle;
+    if (ready) Object.defineProperty(handle, "ready", { value: ready });
+    return handle;
+  }
+
+  private subscribeDeltaHere<T extends { id: string }>(
+    query: QueryBuilder<T>,
+    callbacks: DbDeltaSubscriptionCallbacks<T>,
+    options?: InternalDbQueryOptions,
+    session?: Session,
+  ): SubscriptionHandle {
+    const { onDelta, onError } = callbacks;
     // Constructing a browser follower starts its init handshake. Do that before
     // asking whether this is a newly attaching peer.
     const client = this.getClient(query._schema);
@@ -4027,11 +4163,39 @@ export class Db {
    * of going silent.
    */
   markReplaced(reason: DbReplacedReason): void {
+    this.successor?.markReplaced(reason);
     if (this.replaced) return;
     const error = new DbReplacedError(reason);
     this.replaced = error;
     for (const end of Array.from(this.liveSubscriptionEnders)) end(error);
     this.liveSubscriptionEnders.clear();
+  }
+
+  /**
+   * @internal The session upgraded this Db to `next`, the local-first Db of
+   * the same account. This Db becomes a handle on `next`: its live queries
+   * and listeners move there (each query's first result there replaces what
+   * it had, so nothing goes back to loading), and its reads and writes go
+   * there from now on. Only its own runtime stays behind, for the session to
+   * shut down once its writes are uploaded.
+   */
+  adoptSuccessor(next: Db): void {
+    if (this.successor) throw new Error("This Db already has a successor");
+    this.successor = next;
+    for (const name of FORWARDED_TO_SUCCESSOR) {
+      Object.defineProperty(this, name, {
+        configurable: true,
+        value: (...args: unknown[]) =>
+          (next as unknown as Record<string, (...a: unknown[]) => unknown>)[name]!(...args),
+      });
+    }
+    for (const entry of Array.from(this.movable)) entry.move(next);
+    this.movable.clear();
+  }
+
+  /** @internal The Db that does this one's work now: itself, or its successor. */
+  current(): Db {
+    return this.successor?.current() ?? this;
   }
 
   /**
