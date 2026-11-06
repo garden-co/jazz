@@ -692,6 +692,14 @@ impl Editor {
         .unwrap();
         self.seen = self.text.clone();
     }
+
+    /// Types `c` as a controlled textarea whose edits name the value its
+    /// subscription last delivered, which lags its own keystrokes.
+    fn type_char_named_from_render(&mut self, db: &Db, c: char) {
+        let rendered = self.seen.clone();
+        self.type_char(db, c);
+        self.seen = rendered;
+    }
 }
 
 /// Two editors typing at once, a keystroke each per round; with `lag`,
@@ -749,18 +757,93 @@ fn two_people_typing_next_to_each_other_keep_every_character() {
     }
 }
 
-/// Two people typing at the very same spot both keep what they typed, each
-/// word in one piece.
+/// Two people typing at the very same spot both keep every character.
+/// When each sees the other's keystrokes before typing the next, each word
+/// stays whole; typing over keystrokes not yet shown, the letters
+/// interleave in the order the authority sequenced them.
 #[test]
 fn two_people_typing_at_one_spot_keep_every_character() {
     let start = "Start here.\n\nSecond paragraph.";
-    for lag in [false, true] {
-        let merged = type_together(start, (11, "AAAA "), (11, "BBBB "), lag);
-        assert_eq!(merged.matches('A').count(), 4, "{merged:?} (lag: {lag})");
-        assert_eq!(merged.matches('B').count(), 4, "{merged:?} (lag: {lag})");
-        assert!(
-            merged.starts_with("Start here.") && merged.ends_with("\n\nSecond paragraph."),
-            "{merged:?}"
+    for (lag, expected) in [
+        (false, "Start here.AAAA BBBB \n\nSecond paragraph."),
+        (true, "Start here.ABABABAB \n\nSecond paragraph."),
+    ] {
+        assert_eq!(
+            type_together(start, (11, "AAAA "), (11, "BBBB "), lag),
+            expected,
+            "lag: {lag}"
         );
     }
+}
+
+/// An editor whose edits name the value it last rendered, a few of its own
+/// keystrokes behind, types each character once: the store knows those
+/// values are ones its own writes already edited past.
+#[test]
+fn edits_named_from_a_lagging_render_apply_once() {
+    for start in ["Hello world", "x".repeat(6 * 1024).as_str()] {
+        let db = block_on(Db::open(config(0x61))).unwrap();
+        insert(&db, start);
+        let mut editor = Editor::new(start, start.len());
+        for (i, c) in ". And more".chars().enumerate() {
+            editor.type_char_named_from_render(&db, c);
+            if i % 4 == 3 {
+                editor.refresh(body(&db));
+            }
+        }
+        assert_eq!(body(&db), format!("{start}. And more"));
+    }
+}
+
+/// The same, while someone else types elsewhere in the value: their text
+/// is merged in once, and so is every own keystroke.
+#[test]
+fn edits_named_from_a_lagging_render_keep_the_other_writer() {
+    let server = block_on(Db::open(config(0x62))).unwrap();
+    let mut da = connect(block_on(Db::open(config(0x93))).unwrap(), &server);
+    let mut db = connect(block_on(Db::open(config(0x94))).unwrap(), &server);
+    let start = "Start here.\n\nSecond paragraph.";
+    insert(&da.db, start);
+    settle(&server, &mut [&mut da, &mut db]);
+    let mut ea = Editor::new(start, 11);
+    let mut eb = Editor::new(start, 13);
+    let (a, b) = (" Alice was here.", "Bob says hi. ");
+    for i in 0..a.len().max(b.len()) {
+        if let Some(c) = a.chars().nth(i) {
+            ea.type_char_named_from_render(&da.db, c);
+        }
+        if let Some(c) = b.chars().nth(i) {
+            eb.type_char(&db.db, c);
+        }
+        settle(&server, &mut [&mut da, &mut db]);
+        if i % 3 == 2 {
+            ea.refresh(body(&da.db));
+            eb.refresh(body(&db.db));
+        }
+    }
+    settle(&server, &mut [&mut da, &mut db]);
+    assert_eq!(
+        body(&server),
+        "Start here. Alice was here.\n\nBob says hi. Second paragraph."
+    );
+}
+
+/// An edit from the value the store holds is written as it is, even when
+/// that value equals one of the store's own earlier writes (someone undid
+/// its last edit, and the editor shows that).
+#[test]
+fn an_edit_from_the_held_value_is_written_as_is() {
+    let db = block_on(Db::open(config(0x63))).unwrap();
+    insert(&db, "Bring the ");
+    let mut editor = Editor::new("Bring the ", 10);
+    for c in "van".chars() {
+        editor.type_char(&db, c);
+    }
+    write_whole(&db, "Bring the ");
+    editor.refresh(body(&db));
+    editor.cursor = editor.text.len();
+    for c in "keys".chars() {
+        editor.type_char(&db, c);
+    }
+    assert_eq!(body(&db), "Bring the keys");
 }
