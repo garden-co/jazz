@@ -61,6 +61,13 @@ export interface TestJazz {
    */
   proxyOrigin(userUrl: string, host: string): boolean;
   /**
+   * Sign the user whose origin is `userUrl` (from {@link as}) out, as the
+   * app's logout clears their cookie: the app's `authenticate` names no one
+   * there from now on. Returns false when `userUrl` is not one of this app's
+   * user origins.
+   */
+  signOut(userUrl: string): boolean;
+  /**
    * Deploy a new version of the app, as a real redeploy does: publish it to
    * the core (with its migration), then restart the app's Jazz on it. Every
    * origin keeps its port, so clients reconnect where they were.
@@ -183,6 +190,9 @@ export async function startTestJazz(options: StartTestJazzOptions): Promise<Test
       if (!user) return false;
       users.set(host, user);
       return true;
+    },
+    signOut(userUrl) {
+      return users.delete(new URL(userUrl).host);
     },
     async as(userId, claims) {
       const host = await serve();
