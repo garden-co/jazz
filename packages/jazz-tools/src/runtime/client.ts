@@ -1,5 +1,6 @@
 import {
   validateAcceptedReadTimeout,
+  isAcceptedReadCapability,
   type AcceptedRows,
   type TransactionReadCapability,
 } from "./accepted-read.js";
@@ -48,7 +49,15 @@ export type TransactionPreparationIO = Pick<
   | "updateInternal"
   | "upsertInternal"
   | "restoreInternal"
-> & { assertActive(): void };
+> & {
+  assertActive(): void;
+  /** @internal Ordinary policy-checked query outside this transaction's overlay. */
+  queryGlobal(
+    query: string,
+    options?: InternalQueryExecutionOptions,
+    session?: Session,
+  ): Promise<Row[]>;
+};
 
 type RuntimeSerializedSession = Pick<
   Session,
@@ -1283,7 +1292,7 @@ export class JazzClient {
   ): OpenTransactionId {
     if (
       readCapability !== undefined &&
-      (readCapability !== "accepted-evidence" ||
+      (!isAcceptedReadCapability(readCapability) ||
         kind !== "serializable" ||
         attribution !== undefined ||
         !this.runtime.queryAccepted)
@@ -1291,6 +1300,8 @@ export class JazzClient {
       throw new Error(
         "Accepted evidence requires a supported session-bound serializable transaction",
       );
+    if (readCapability === "client-accepted-evidence" && session !== undefined)
+      throw new Error("Own-client evidence cannot select a session");
     const id = reservedId ?? createOpenTransactionId();
     if (prerequisite) {
       const context =
@@ -1389,6 +1400,19 @@ export class JazzClient {
               { ...options, openTransactionId: id },
               session,
             );
+          },
+          queryGlobal: (query, options, session) => {
+            assertActive();
+            const { openTransactionId: _transaction, ...ordinaryOptions } = options ?? {};
+            const reading = this.queryWithoutPreparation(query, ordinaryOptions, session).then(
+              (rows) => {
+                assertActive();
+                return rows;
+              },
+            );
+            acceptedReads.push(reading);
+            reading.catch(() => {});
+            return reading;
           },
           queryAcceptedInternal: (query, transaction, timeoutMs, session) => {
             assertActive();

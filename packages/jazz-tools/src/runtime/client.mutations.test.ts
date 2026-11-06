@@ -747,3 +747,93 @@ describe("registered accepted preparation", () => {
     expect(commitTransaction).not.toHaveBeenCalled();
   });
 });
+
+describe("registered ordinary preflight reads", () => {
+  it.each([undefined, {}, { role: "reader" }])(
+    "drains ordinary reads outside the batch and preserves supplied claims (%j)",
+    async (claims) => {
+      let release!: () => void;
+      let entered!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const started = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const query = vi.fn<Runtime["query"]>(async () => {
+        entered();
+        await ready;
+        return [];
+      });
+      const commitTransaction = vi.fn(() => "ordinary-preflight" as TxId);
+      const { client } = makeClient({ query, commitTransaction });
+      const id = client.beginTransaction("serializable");
+      const session: Session | undefined =
+        claims === undefined
+          ? undefined
+          : {
+              account_id: "00000000-0000-0000-0000-000000000001",
+              issuer: "fixture",
+              user_id: "reader",
+              authMode: "external",
+              claims,
+            };
+      const prepared = client.prepareTransaction(id, async (io) => {
+        await io.queryGlobal(
+          "fixture-query",
+          { tier: "local-first", openTransactionId: id },
+          session,
+        );
+      });
+      const committed = client.commitTransaction(id).txId;
+      await started;
+      expect(commitTransaction).not.toHaveBeenCalled();
+      const supplied = query.mock.calls[0]?.[1];
+      if (session) expect(JSON.parse(supplied!)).toEqual(session);
+      const options = query.mock.calls[0]?.[3];
+      expect(options ? JSON.parse(options) : {}).not.toHaveProperty("openTransactionId");
+      expect(options ? JSON.parse(options) : {}).not.toHaveProperty("transaction_id");
+      release();
+      await prepared;
+      await committed;
+      expect(commitTransaction).toHaveBeenCalledTimes(1);
+      await client.query("ordinary-control", { tier: "local-first" }, session);
+      expect(supplied).toBe(query.mock.calls[1]?.[1]);
+    },
+  );
+
+  it.each(["rollback", "shutdown", "discard"])(
+    "refuses a suspended ordinary preflight after %s",
+    async (close) => {
+      let release!: () => void;
+      let entered!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const started = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const { client } = makeClient({
+        query: async () => {
+          entered();
+          await ready;
+          return [];
+        },
+      });
+      const id = client.beginTransaction("serializable");
+      let published = false;
+      const prepared = client.prepareTransaction(id, async (io) => {
+        await io.queryGlobal("fixture-query");
+        published = true;
+      });
+      prepared.catch(() => {});
+      await started;
+      if (close === "rollback") await client.rollbackTransaction(id);
+      else if (close === "shutdown") await client.shutdown();
+      else client.discard();
+      release();
+      await expect(prepared).rejects.toThrow("no longer active");
+      expect(published).toBe(false);
+    },
+  );
+});

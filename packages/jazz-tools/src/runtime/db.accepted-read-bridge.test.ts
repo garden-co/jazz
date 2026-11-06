@@ -14,6 +14,7 @@ import { createAccountDbWithRuntimeSource } from "../accounts/context.js";
 import { DefaultRuntimeSource } from "./default-runtime-source.js";
 import type { RuntimeClientContext } from "./runtime-source.js";
 import type { JazzClient } from "./client.js";
+import { nativeCoreErrorCode } from "./native-runtime/native-error-code.js";
 
 const app = s.defineApp({ notes: s.table({ body: s.string() }, {}) }, { migrations: "none" });
 const permissions = definePermissions(app, ({ policy }) => {
@@ -292,3 +293,60 @@ it.each(["accepted-id", "accepted-full", "ordinary-id"] as const)(
   },
   60000,
 );
+
+it("keeps the public own snapshot separate from accepted evidence for the actual account", async () => {
+  const modeApp = s.defineApp(
+    {
+      visible: s.table({ body: s.string() }, {}),
+      private_notes: s.table({ body: s.string() }, {}),
+    },
+    { migrations: "none" },
+  );
+  const modePermissions = definePermissions(modeApp, ({ policy }) => {
+    policy.visible.allowRead.always();
+    policy.visible.allowInsert.always();
+    policy.private_notes.allowInsert.always();
+    // An authenticated SELECT has no private_notes grant. Ordinary own-client
+    // reads must still preserve the public transaction's pending-own snapshot.
+  });
+  const server = await startTestJazz({
+    app: modeApp,
+    permissions: modePermissions,
+    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+  });
+  let db: Awaited<ReturnType<typeof createDb>> | undefined;
+  let stopped = false;
+  try {
+    db = await createDb(await localAccountConfig(server.appId, server.url));
+    // Establish the ordinary authenticated client before opening any batch.
+    // This setup never reads the later pending private row outside its batch.
+    await db.all(modeApp.visible, { tier: "remote" });
+    expect(await db.tableIdentity(modeApp.visible)).not.toBeNull();
+    const accepted = beginDbTransactionAfter(db, async () => {}, "client-accepted-evidence");
+    const empty = await readAcceptedTransactionRows(accepted, modeApp.visible, 5000);
+    expect(empty.rows).toEqual([]);
+    expect(empty.evidence).toEqual([]);
+    await accepted.commit().wait({ tier: "global", timeoutMs: 10000 });
+
+    await server.stop();
+    stopped = true;
+    const before = db.insert(modeApp.private_notes, { body: "before" });
+    await before.wait({ tier: "local" });
+    const tx = beginDbTransactionAfter(db, async () => {}, "client-accepted-evidence");
+    expect(await tx.all(modeApp.private_notes, { tier: "local-first" })).toEqual([before.value]);
+    const failure: unknown = await readAcceptedTransactionRows(
+      tx,
+      modeApp.private_notes,
+      1000,
+    ).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(nativeCoreErrorCode(failure)).toBe("not_observed");
+    expect(String(failure)).toContain("ordinary reads of unsettled own commits");
+    await tx.rollback();
+  } finally {
+    await db?.shutdown();
+    if (!stopped) await server.stop();
+  }
+}, 60000);

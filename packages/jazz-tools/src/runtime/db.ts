@@ -1,5 +1,6 @@
 import {
   validateAcceptedReadTimeout,
+  isAcceptedReadCapability,
   type AcceptedRows,
   type TransactionReadCapability,
 } from "./accepted-read.js";
@@ -55,6 +56,7 @@ import {
   type OpenTransactionId,
   type TxId,
   type PermissionAdvice,
+  type TransactionPreparationIO,
   type StreamingMutationKind,
   type StreamingValueSource,
   validateWriteWaitTimeout,
@@ -2246,7 +2248,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
 
   [acceptedRows]<T>(query: QueryBuilder<T>, timeoutMs: number): Promise<AcceptedRows<T>> {
     validateAcceptedReadTimeout(timeoutMs);
-    if (this.kind !== "serializable" || this.openingReadCapability !== "accepted-evidence")
+    if (this.kind !== "serializable" || !isAcceptedReadCapability(this.openingReadCapability))
       return Promise.reject(
         new Error("Accepted evidence was not selected before transaction opening"),
       );
@@ -2370,7 +2372,7 @@ export type PreparedTransactionScope = Pick<
 /** @internal Register synchronously; both preparation queues drain before commit. */
 export function prepareDbTransaction(
   transaction: Transaction<"serializable">,
-  prepare: (scope: PreparedTransactionScope) => Promise<void>,
+  prepare: (scope: PreparedTransactionScope, io: TransactionPreparationIO) => Promise<void>,
 ): Promise<void> {
   if (transaction.kind !== "serializable")
     throw new Error("Typed preparation requires a serializable transaction");
@@ -2415,7 +2417,7 @@ export function prepareDbTransaction(
           const output = resolveQueryOutputTable(schema, built);
           const planned = prepareTransformRead(query, built, output);
           if (acceptedTimeout !== undefined) {
-            if (binding.readCapability !== "accepted-evidence")
+            if (!isAcceptedReadCapability(binding.readCapability))
               throw new Error("Accepted evidence was not selected before transaction opening");
             if (planned.computedState)
               throw new Error("Accepted evidence does not support computed preparation");
@@ -2506,7 +2508,7 @@ export function prepareDbTransaction(
         let callbackFailed = false;
         let callbackError: unknown;
         try {
-          await prepare(scope);
+          await prepare(scope, io);
         } catch (error) {
           callbackFailed = true;
           callbackError = error;
@@ -3043,6 +3045,43 @@ export class Db {
     )
       throw new Error("Invalid catalogue table identity");
     return result.identity;
+  }
+
+  /** @internal Fresh structural column identity, never row or membership proof. */
+  async columnIdentity<T, Init>(
+    table: TableProxy<T, Init>,
+    column: string,
+  ): Promise<string | null> {
+    this.assertOpen();
+    const client = this.getClient(table._schema);
+    const readSession = this.getAccessContext()?.readSession;
+    await this.ensureReady("server");
+    this.assertOpen();
+    if (this.getClient(table._schema) !== client)
+      throw new Error("Catalogue preparation owner changed");
+    const prepared = await client.prepareCatalogueIdentitiesInternal(
+      [{ table: table._table, columns: [column] }],
+      readSession,
+    );
+    this.assertOpen();
+    if (this.getClient(table._schema) !== client)
+      throw new Error("Catalogue preparation owner changed");
+    const result = prepared[0];
+    if (
+      prepared.length !== 1 ||
+      result?.table !== table._table ||
+      Object.keys(result.columns).length !== 1 ||
+      !Object.hasOwn(result.columns, column)
+    )
+      throw new Error("Invalid catalogue column preparation result");
+    const identity = result.columns[column]!;
+    if (
+      identity !== null &&
+      (!result.identity ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(identity))
+    )
+      throw new Error("Invalid catalogue column identity");
+    return identity;
   }
 
   /**

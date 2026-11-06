@@ -309,3 +309,14 @@ fn mixed_reads_inherit_live_claims_without_erasing_explicit_overrides() {
         }
     }
 }
+
+/// Alice’s backend or authority-side binding cannot request own-client reads.
+#[test]
+fn own_client_evidence_binding_refuses_authority_and_backend_modes() {
+    for (system, backend) in [(false, false), (true, false), (true, true)] {
+        let host = open(1, system, backend);
+        let id = OpenTransactionId::new().to_string();
+        assert!(host.begin_client_evidence_transaction(&id).is_err());
+        assert!(host.commit_transaction(&id, Some("serializable")).is_err());
+    }
+}

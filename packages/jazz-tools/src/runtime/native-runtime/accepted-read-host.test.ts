@@ -3,6 +3,7 @@ import { mergePermissionsIntoWasmSchema } from "../../schema-permissions.js";
 import { schema as s } from "../../index.js";
 import { JazzClient, createOpenTransactionId } from "../client.js";
 import { startLocalJazzServer } from "../../testing/index.js";
+import { deploy } from "../../dev/catalogue.js";
 import { allowAll } from "../testing/allow-all.js";
 import { testAuthorBytes } from "../testing/account-fixtures.js";
 import { loadNapiModule } from "../testing/napi-runtime-test-utils.js";
@@ -29,6 +30,7 @@ type RawDb = {
     attribution?: Uint8Array,
     acceptedEvidence?: boolean,
   ): void;
+  beginClientEvidenceTransaction(id: string): void;
   rollbackTransaction(id: string): void;
   commitTransaction(id: string, kind: string): { wait(tier: string): Promise<unknown> };
   registerSchema(schema: Uint8Array): RawDb;
@@ -44,6 +46,28 @@ const app = s.defineApp({ notes: s.table({ body: s.string() }, {}) }, { migratio
 const author = testAuthorBytes("accepted-read-host:alice");
 const node = new Uint8Array(16).fill(7);
 const query = queryFromTable("notes");
+
+// Normal privileged backend links must name the permissions they published.
+async function startPinnedAuthority() {
+  const server = await startLocalJazzServer({
+    inMemory: true,
+    schema: app.wasmSchema,
+    permissions: allowAll(app.wasmSchema),
+  });
+  try {
+    const { bundle } = await deploy({
+      appId: server.appId,
+      serverUrl: server.url,
+      adminSecret: server.adminSecret,
+      schema: app,
+      permissions: allowAll(app.wasmSchema),
+    });
+    return { ...server, bundle };
+  } catch (error) {
+    await server.stop();
+    throw error;
+  }
+}
 
 async function open(
   host: "NAPI" | "WASM",
@@ -91,6 +115,68 @@ function deferred<T>() {
 
 for (const host of ["NAPI", "WASM"] as const) {
   describe(`${host} accepted host lifecycle`, () => {
+    it("keeps implicit own-client admission separate without selecting or reinstalling a session", async () => {
+      const raw = await open(host);
+      await raw.connectUpstream();
+      raw.setRemoteLinkHint("live");
+      raw.setSessionClaims({ team: "live" });
+      let clientBegins = 0;
+      let ordinaryBegins = 0;
+      let registrations = 0;
+      const adapter = runtime(
+        observe(raw, {
+          beginClientEvidenceTransaction(id) {
+            clientBegins++;
+            raw.beginClientEvidenceTransaction(id);
+          },
+          beginTransaction(...args) {
+            ordinaryBegins++;
+            raw.beginTransaction(...args);
+          },
+          setIdentityClaims(identity, claims) {
+            registrations++;
+            raw.setIdentityClaims(identity, claims);
+          },
+        }),
+      );
+      const id = createOpenTransactionId();
+      const [account_id, issuer, user_id] = JSON.parse(new TextDecoder().decode(author));
+      const explicit = JSON.stringify({ account_id, issuer, user_id, claims: {} });
+      try {
+        expect(() =>
+          adapter.beginTransaction("serializable", id, explicit, "client-accepted-evidence"),
+        ).toThrow(/implicit replica owner/);
+        expect(() =>
+          adapter.beginTransaction("mergeable", id, undefined, "client-accepted-evidence"),
+        ).toThrow(/serializable/);
+        expect(clientBegins).toBe(0);
+        adapter.beginTransaction("serializable", id, undefined, "client-accepted-evidence");
+        expect(clientBegins).toBe(1);
+        expect(ordinaryBegins).toBe(0);
+        expect(registrations).toBe(0);
+        await expect(
+          adapter.queryAccepted(JSON.stringify({ table: "notes" }), id, explicit, 1000),
+        ).rejects.toThrow(/cannot select a read session/);
+        expect(() => raw.acceptedRead(query, id, false, 1000, author, {})).toThrow(
+          /cannot select a session/,
+        );
+        const read = pending(raw.acceptedRead(query, id, false, 1000));
+        read.cancel();
+        await adapter.rollbackTransaction(id);
+      } finally {
+        await adapter.close();
+      }
+
+      const backend = await open(host, true);
+      try {
+        expect(() => backend.beginClientEvidenceTransaction(createOpenTransactionId())).toThrow(
+          /backend/,
+        );
+      } finally {
+        await backend.close();
+      }
+    });
+
     for (const installAfterRead of [false, true]) {
       it(`finishes a quiet accepted deadline with the existing SDK timer (${installAfterRead ? "late" : "early"} hook)`, async () => {
         const raw = await open(host);
@@ -203,7 +289,13 @@ for (const host of ["NAPI", "WASM"] as const) {
           const results = await Promise.all(outcomes);
           expect(results.every((result) => result.includes("runtime shutdown"))).toBe(true);
           for (const read of reads) expect(() => read.poll()).toThrow(/complete|cancelled/i);
-          await transport.tick();
+          if (stop === "discard") await transport.tick();
+          else if (host === "WASM")
+            await expect(Promise.resolve().then(() => transport.tick())).rejects.toThrow(
+              /retired|closed/i,
+            );
+          // Close itself queues cancellation. Retired owners cannot be ticked
+          // to produce it; discard retains its separate transport-drain path.
           const cleanup = transport.recvWireFrames() as Uint8Array[];
           expect(cleanup.filter((frame) => frame[0] === 0)).toHaveLength(0);
           const unsubscribes = cleanup.filter((frame) => frame[0] === 1);
@@ -390,11 +482,7 @@ for (const host of ["NAPI", "WASM"] as const) {
   });
 
   it(`${host} decodes real paired evidence through the authority and commits a read-only explicit session`, async () => {
-    const server = await startLocalJazzServer({
-      inMemory: true,
-      schema: app.wasmSchema,
-      permissions: allowAll(app.wasmSchema),
-    });
+    const server = await startPinnedAuthority();
     const adapter = runtime(await open(host));
     const client = await JazzClient.connectWithRuntime(adapter, {
       appId: server.appId,
@@ -402,7 +490,10 @@ for (const host of ["NAPI", "WASM"] as const) {
       serverUrl: server.url,
     });
     try {
-      client.connectTransport(server.url, { admin_secret: server.adminSecret });
+      client.connectTransport(server.url, {
+        admin_secret: server.adminSecret,
+        bundle: server.bundle,
+      });
       const inserted = client.insert("notes", {
         body: { type: "Text", value: "paired authority row" },
       });
@@ -495,11 +586,7 @@ for (const host of ["NAPI", "WASM"] as const) {
   });
 
   it(`${host} never reinstalls stale explicit claims during accepted queries`, async () => {
-    const server = await startLocalJazzServer({
-      inMemory: true,
-      schema: app.wasmSchema,
-      permissions: allowAll(app.wasmSchema),
-    });
+    const server = await startPinnedAuthority();
     const raw = await open(host);
     let registrations = 0;
     const adapter = runtime(
@@ -519,7 +606,10 @@ for (const host of ["NAPI", "WASM"] as const) {
     const session = JSON.stringify({ account_id, issuer, user_id, claims: { team: "before" } });
     const id = createOpenTransactionId();
     try {
-      client.connectTransport(server.url, { admin_secret: server.adminSecret });
+      client.connectTransport(server.url, {
+        admin_secret: server.adminSecret,
+        bundle: server.bundle,
+      });
       await client
         .insert("notes", { body: { type: "Text", value: "scope admission" } })
         .wait({ tier: "global", timeoutMs: 5000 });
@@ -554,11 +644,7 @@ for (const host of ["NAPI", "WASM"] as const) {
   for (const operation of ["insert", "restore", "update", "upsert", "delete", "partial"] as const) {
     for (const mode of ["same-peer", "drift", "empty-drift"] as const) {
       it(`${host} accepted ${operation} preserves ${mode} identity and live claims`, async () => {
-        const server = await startLocalJazzServer({
-          inMemory: true,
-          schema: app.wasmSchema,
-          permissions: allowAll(app.wasmSchema),
-        });
+        const server = await startPinnedAuthority();
         const raw = await open(
           host,
           false,
@@ -584,7 +670,10 @@ for (const host of ["NAPI", "WASM"] as const) {
         const scope = { account_id, issuer, user_id, claims: { team: "before" } };
         const id = createOpenTransactionId();
         try {
-          client.connectTransport(server.url, { admin_secret: server.adminSecret });
+          client.connectTransport(server.url, {
+            admin_secret: server.adminSecret,
+            bundle: server.bundle,
+          });
           const row = await client
             .insert("notes", { body: { type: "Text", value: "seed" } })
             .wait({ tier: "global", timeoutMs: 5000 });
@@ -641,11 +730,7 @@ for (const host of ["NAPI", "WASM"] as const) {
     for (const explicit of [false, true]) {
       for (const readMode of ["omitted", "cached-client", "cached-serving"] as const) {
         it(`${host} stable mixed reads inherit live claims (${retained ? "view" : "owner"}/${explicit ? "explicit" : "implicit"}/${readMode})`, async () => {
-          const server = await startLocalJazzServer({
-            inMemory: true,
-            schema: app.wasmSchema,
-            permissions: allowAll(app.wasmSchema),
-          });
+          const server = await startPinnedAuthority();
           const owner = await open(
             host,
             false,
@@ -673,7 +758,10 @@ for (const host of ["NAPI", "WASM"] as const) {
           const scope = { account_id, issuer, user_id, claims: { team: "before" } };
           const id = createOpenTransactionId();
           try {
-            client.connectTransport(server.url, { admin_secret: server.adminSecret });
+            client.connectTransport(server.url, {
+              admin_secret: server.adminSecret,
+              bundle: server.bundle,
+            });
             await client
               .insert("notes", { body: { type: "Text", value: "settle session" } })
               .wait({ tier: "global", timeoutMs: 5000 });

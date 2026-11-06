@@ -1,9 +1,12 @@
 import { expect, it } from "vitest";
 import { schema as s } from "../../schema-namespace.js";
 import { mergePermissionsIntoWasmSchema } from "../../schema-permissions.js";
-import { startLocalJazzServer } from "../../testing/index.js";
+import { startLocalJazzServer, startTestJazz } from "../../testing/index.js";
+import { deploy } from "../../dev/catalogue.js";
+import { definePermissions } from "../../permissions/index.js";
+import { createDb } from "../default-create-db.js";
 import { allowAll } from "../testing/allow-all.js";
-import { testAuthorBytes } from "../testing/account-fixtures.js";
+import { localAccountConfig, testAuthorBytes } from "../testing/account-fixtures.js";
 import { loadNapiModule } from "../testing/napi-runtime-test-utils.js";
 import { loadWasmModuleForTest } from "../testing/wasm-runtime-test-utils.js";
 import { openConfig } from "./native-codec.js";
@@ -38,6 +41,24 @@ async function open(host: "NAPI" | "WASM"): Promise<Raw> {
     host === "NAPI" ? (await loadNapiModule()).NapiDb : (await loadWasmModuleForTest()).WasmDb;
   return ctor.openMemory(encodeSchema(schema), openConfig(node, author, 1, false));
 }
+// Privileged core links use the exact permission bundle they published.
+async function startPinnedAuthority() {
+  const server = await startLocalJazzServer({ inMemory: true, schema, permissions });
+  try {
+    const { bundle } = await deploy({
+      appId: server.appId,
+      serverUrl: server.url,
+      adminSecret: server.adminSecret,
+      schema: app,
+      permissions,
+    });
+    return { ...server, bundle };
+  } catch (error) {
+    await server.stop();
+    throw error;
+  }
+}
+
 function observe(raw: Raw, overrides: Partial<Raw>): Raw {
   return new Proxy(raw, {
     get(target, key) {
@@ -110,7 +131,7 @@ for (const host of ["NAPI", "WASM"] as const) {
   }
 
   it(`${host} prepares several identities once per actual-peer schema handle without registering claims`, async () => {
-    const server = await startLocalJazzServer({ inMemory: true, schema, permissions });
+    const server = await startPinnedAuthority();
     const owner = await open(host);
     const raw = owner.registerSchema(encodeSchema(schema));
     let calls = 0;
@@ -135,7 +156,10 @@ for (const host of ["NAPI", "WASM"] as const) {
       serverUrl: server.url,
     });
     try {
-      client.connectTransport(server.url, { admin_secret: server.adminSecret });
+      client.connectTransport(server.url, {
+        admin_secret: server.adminSecret,
+        bundle: server.bundle,
+      });
       // Finish normal authenticated startup before deliberately registering
       // this probe's scope. Changing startup claims during admission correctly
       // refuses coverage and is a separate core regression.
@@ -227,3 +251,38 @@ for (const host of ["NAPI", "WASM"] as const) {
     });
   }
 }
+
+// These are structural identifiers, never row content or membership evidence.
+it("prepares distinct public SDK column identities and refuses retained access after shutdown", async () => {
+  const publicPermissions = definePermissions(app, ({ policy }) => {
+    policy.notes.allowRead.always();
+  });
+  const server = await startTestJazz({
+    app,
+    permissions: publicPermissions,
+    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+  });
+  let db: Awaited<ReturnType<typeof createDb>> | undefined;
+  try {
+    db = await createDb(await localAccountConfig(server.appId, server.url));
+    // Complete normal authenticated startup. Metadata never installs cached
+    // session claims; each getter still requests its own fresh coverage.
+    await db.all(app.notes, { tier: "remote" });
+    const title = await db.columnIdentity(app.notes, "title");
+    const body = await db.columnIdentity(app.notes, "body");
+    const table = await db.tableIdentity(app.notes);
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+    expect(title).toMatch(uuid);
+    expect(body).toMatch(uuid);
+    expect(table).toMatch(uuid);
+    expect(title).not.toBe(body);
+    expect(title).not.toBe(table);
+    expect(body).not.toBe(table);
+    expect(await db.columnIdentity(app.notes, "missing")).toBeNull();
+    await db.shutdown();
+    await expect(db.columnIdentity(app.notes, "title")).rejects.toThrow(/closed|shutdown/i);
+  } finally {
+    await db?.shutdown();
+    await server.stop();
+  }
+}, 60000);
