@@ -317,6 +317,9 @@ it("keeps the public own snapshot separate from accepted evidence for the actual
   let stopped = false;
   try {
     db = await createDb(await localAccountConfig(server.appId, server.url));
+    // Establish the ordinary authenticated client before opening any batch.
+    // This setup never reads the later pending private row outside its batch.
+    await db.all(modeApp.visible, { tier: "remote" });
     expect(await db.tableIdentity(modeApp.visible)).not.toBeNull();
     const accepted = beginDbTransactionAfter(db, async () => {}, "client-accepted-evidence");
     const empty = await readAcceptedTransactionRows(accepted, modeApp.visible, 5000);
