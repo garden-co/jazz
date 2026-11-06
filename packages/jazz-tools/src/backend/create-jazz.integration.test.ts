@@ -279,7 +279,7 @@ describe("createJazz", () => {
       }
       const alice = await userSession(jazz.appId, origin, "alice");
       await alice.db
-        .insert(app.todos, { title: "synced", owner: alice.session!.user!.account })
+        .insert(app.todos, { title: "synced", owner: alice.session!.user! })
         .wait({ tier: "global" });
 
       await jazz.close();
