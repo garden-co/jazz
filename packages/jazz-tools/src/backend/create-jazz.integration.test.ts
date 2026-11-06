@@ -1694,30 +1694,33 @@ describe("createJazz", () => {
     const note = await first.db.insert(shared.notes, { body: "initial" }).wait({ tier: "global" });
     await first.close();
 
-    const second = await open();
-    cleanups.push(() => second.close());
-    // A fresh backend filters a session's reads itself, so until it holds
-    // the rows a read policy depends on, a session can't see the note on it.
-    // Each session reads its own grants first.
-    const asAlice = await as(second, "alice");
-    const asBob = await as(second, "bob");
-    const asCarol = await as(second, "carol");
-    for (const session of [asAlice, asBob, asCarol]) {
+    // Each session writes from a backend of its own that has loaded nothing,
+    // so each update reads the note through the retry path first. A fresh
+    // backend filters a session's reads itself, so until it holds the rows a
+    // read policy depends on, the session can't see the note on it: each
+    // session reads its own grants first.
+    const fresh = async (user: string) => {
+      const jazz = await open();
+      cleanups.push(() => jazz.close());
+      const session = await as(jazz, user);
       await session.all(shared.readers, { tier: "remote" });
       await session.all(shared.editors, { tier: "remote" });
-    }
+      return session;
+    };
     // An editor's update goes through.
+    const asAlice = await fresh("alice");
     await asAlice.update(shared.notes, note.id, { body: "alice" }).wait({ tier: "global" });
-    // A reader may read the note but not update it: the core refuses the
-    // update the backend staged, and the wait says so.
+    // A reader may read the note but not update it: the backend stages the
+    // update it can't decide, the core refuses it, and the wait says so.
+    const asBob = await fresh("bob");
     await expect(
       asBob.update(shared.notes, note.id, { body: "bob" }).wait({ tier: "global" }),
     ).rejects.toThrow(/permission_denied|Write rejected by server authorization/);
-    // So is a session the core won't show the note to: the backend holds the
-    // note now, but can't tell whether carol may read it.
+    // A session the core won't show the note to finds no row to update.
+    const asCarol = await fresh("carol");
     await expect(
       asCarol.update(shared.notes, note.id, { body: "carol" }).wait({ tier: "global" }),
-    ).rejects.toThrow(/permission_denied|Write rejected by server authorization/);
+    ).rejects.toThrow(/does not exist or this session cannot read it/);
     expect((await asAlice.one(shared.notes.where({ id: note.id })))?.body).toBe("alice");
   }, 60_000);
 

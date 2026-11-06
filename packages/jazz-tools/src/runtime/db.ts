@@ -1501,9 +1501,15 @@ function transformInputColumns(
 const noWriteDependencies: readonly string[] = [];
 
 /**
- * Read one row by id from the server, through the caller's session, so this
- * replica holds it before a write stages against it. A local read would
- * miss a row whose read policy depends on rows this replica hasn't loaded.
+ * How long an update of a row this replica hasn't loaded waits for the
+ * server to send it, before it is refused as a row the session can't find.
+ */
+const LOAD_ROW_WAIT_MS = 10_000;
+
+/**
+ * Read one row by id through the caller's session, waiting a bounded time
+ * for the server, so this replica holds it before a write stages against
+ * it. Offline, the wait ends and the update fails instead of hanging.
  */
 function loadRow(
   client: JazzClient,
@@ -1519,7 +1525,11 @@ function loadRow(
   });
   return client.queryInternal(
     translateQuery(built, table._schema),
-    branch ? { tier: "remote", branch } : { tier: "remote" },
+    {
+      tier: "local-first",
+      firstLoadRemoteWaitMs: LOAD_ROW_WAIT_MS,
+      ...(branch ? { branch } : {}),
+    },
     session,
   );
 }
