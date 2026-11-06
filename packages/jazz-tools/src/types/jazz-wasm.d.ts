@@ -261,6 +261,7 @@ declare module "jazz-wasm" {
       callback: (urgency: "immediate" | "deferred" | `after:${number}`) => void,
     ): void;
     onMutationError(callback: (event: any) => void): void;
+    onStorageFailure(callback: (message: string | null) => void): void;
     tick(): Promise<void>;
     setNonDurableClient(): void;
     /** How many local commits still wait for the server's verdict. */

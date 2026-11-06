@@ -388,6 +388,11 @@ type NativeDb = {
       | ((error: Error | null, urgency: string) => void),
   ): void;
   onMutationError(callback: (event: MutationErrorEvent) => void): void;
+  /**
+   * A durable browser store's writes to its backing storage started failing
+   * (`message`) or work again (`null`); only the browser WASM host has one.
+   */
+  onStorageFailure?(callback: (message: string | null) => void): void;
   /** A native host's upstream refused the credential; ticks keep running. */
   onAuthRejected?(callback: (reason: string) => void): void;
   /**
@@ -896,6 +901,13 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverReplacementRetirement: Promise<void> | null = null;
   private serverTransportError: Error | null = null;
   private serverTransportErrorWaiters: ServerTransportErrorWaiter[] = [];
+  /**
+   * Why the durable worker cannot write its store now (storage full, most
+   * often), as relayed to this non-durable client. While set, its writes'
+   * `local` waits reject: the worker holds them only in memory.
+   */
+  private localStorageFailure: Error | null = null;
+  private readonly localStorageFailureWaiters = new Set<(error: Error) => void>();
   private serverTransportWorkEpoch = 0;
   private serverTransportWorkWaiters: ServerTransportWorkWaiter[] = [];
   private serverEndpointUrl: string | null = null;
@@ -2411,10 +2423,12 @@ export class NativeRuntimeAdapter implements Runtime {
       this.throwServerTransportErrorForTier(tier, true);
       const transportError = this.waitForServerTransportError(tier, true);
       const transportWork = this.waitForServerTransportWork(tier, observedServerWorkEpoch);
+      const storageFailure = this.waitForLocalStorageFailure(tier);
       let stopAbortWake: (() => void) | undefined;
       try {
         const wakes: Array<Promise<"settled" | "work"> | Promise<never>> = [settled];
         if (transportError) wakes.push(transportError.promise);
+        if (storageFailure) wakes.push(storageFailure.promise);
         if (transportWork) wakes.push(transportWork.promise.then(() => "work" as const));
         if (signal) {
           wakes.push(
@@ -2439,6 +2453,7 @@ export class NativeRuntimeAdapter implements Runtime {
         stopAbortWake?.();
         transportError?.cancel();
         transportWork?.cancel();
+        storageFailure?.cancel();
       }
     }
   }
@@ -3079,6 +3094,15 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   /**
+   * A durable browser store's host reports `message` when writing the store
+   * to its backing storage starts failing, and `null` once it works again.
+   */
+  onStorageFailure(callback: (message: string | null) => void): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.onStorageFailure(callback);
+    this.db.onStorageFailure?.(callback);
+  }
+
+  /**
    * Observe the first upstream transport failure, and whether the client
    * keeps reconnecting through it. This has no fate semantics: it only wakes
    * remote waits and subscriptions that are active in this runtime.
@@ -3119,6 +3143,39 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!this.serverTransportError) return;
     this.forgetServerTransportError();
     this.linkChanged();
+  }
+
+  /**
+   * The durable worker this client writes through reports that writing its
+   * store failed (`message`), or works again (`null`). Meanwhile the worker
+   * keeps the writes in memory and acknowledges none of them, so every
+   * `local` wait rejects with code `storage` instead of waiting.
+   */
+  reportLocalStorageFailure(message: string | null): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.reportLocalStorageFailure(message);
+    if (message === null) {
+      this.localStorageFailure = null;
+      return;
+    }
+    const error = Object.assign(new Error(message), { code: "storage" });
+    this.localStorageFailure = error;
+    for (const reject of this.localStorageFailureWaiters) reject(error);
+    this.localStorageFailureWaiters.clear();
+  }
+
+  private waitForLocalStorageFailure(
+    tier: string,
+  ): { promise: Promise<never>; cancel: () => void } | null {
+    if (tier !== "local" || !this.nonDurableClient) return null;
+    if (this.localStorageFailure) {
+      return { promise: Promise.reject(this.localStorageFailure), cancel: () => {} };
+    }
+    let reject!: (error: Error) => void;
+    const promise = new Promise<never>((_, rejectWith) => {
+      reject = rejectWith;
+    });
+    this.localStorageFailureWaiters.add(reject);
+    return { promise, cancel: () => this.localStorageFailureWaiters.delete(reject) };
   }
 
   reportRemoteMutationError(event: MutationErrorEvent): void {
