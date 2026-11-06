@@ -92,6 +92,16 @@ const RESPONSES: Record<string, ThinBody> = {
   error: { type: "error", code: "Argument", message: "no" },
 };
 
+function leb128(value: number): Uint8Array {
+  const out: number[] = [];
+  do {
+    const low = value % 128;
+    value = Math.floor(value / 128);
+    out.push(value > 0 ? low | 0x80 : low);
+  } while (value > 0);
+  return new Uint8Array(out);
+}
+
 function hex(frame: Uint8Array): string {
   return Array.from(frame, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
@@ -165,6 +175,15 @@ describe("thin frames over a wire frame", () => {
     expect(assembler.joining).toBe(false);
     // A frame small enough to go whole, or past the most a frame takes.
     expect(() => assembler.push(new Uint8Array([6, 3, 3, 1, 2, 3]))).toThrow("out of bounds");
+    // A part short of a full one that does not end its frame. A full
+    // part's length takes three LEB128 bytes.
+    const total = leb128(3 * 1024 * 1024);
+    const fullBytes = first!.byteLength - 1 - total.byteLength - 3;
+    const header = [6, ...total, ...leb128(fullBytes - 1)];
+    const shortPart = new Uint8Array(header.length + fullBytes - 1);
+    shortPart.set(header);
+    expect(() => assembler.push(shortPart)).toThrow("does not fit its frame");
+    expect(assembler.joining).toBe(false);
     // Starting over, the frame joins.
     expect(assembler.push(first!)).toBeUndefined();
     expect(assembler.push(second!)?.byteLength).toBe(3 * 1024 * 1024);

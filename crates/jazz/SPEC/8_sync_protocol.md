@@ -964,8 +964,10 @@ writes. The room is held until the request has run. Without room the
 connection reads nothing more of its socket, so the client's sends back up
 and a burst of large writes slows down instead of ending the session; it
 goes on writing answers, pinging and closing on shutdown meanwhile, and the
-wait does not count as the peer idling. A split whose next part does not
-arrive within `THIN_PART_TIMEOUT` (30 s) ends its connection with a
+wait does not count as the peer idling. Because the connection reads nothing
+while one request waits, that session's later requests wait behind it too,
+even small ones that would have room. A split whose next part does not
+arrive within `THIN_PART_TIMEOUT` (90 s) ends its connection with a
 retryable `Backpressure` error, releasing its room. These budgets bound
 what the server holds of incoming requests; answers waiting for a client
 that does not read are not bounded yet (#4865).

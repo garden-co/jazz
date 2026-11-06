@@ -1109,7 +1109,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
 /// for splits. Every part but the last is full, so this is also the
 /// slowest a split may arrive (one wire frame per timeout).
 #[cfg(not(test))]
-const THIN_PART_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const THIN_PART_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 #[cfg(test)]
 const THIN_PART_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
