@@ -2095,15 +2095,57 @@ fn parse_jazz_server_start_options(options: JsonValue) -> napi::Result<JazzServe
         .map_err(|error| napi::Error::from_reason(format!("Invalid JazzServer options: {error}")))
 }
 
+/// Where a server this process runs reports: to `collector_url` when one
+/// is given, else to stderr ([`init_server_logs`]).
 pub(crate) fn init_jazz_server_telemetry(collector_url: Option<&str>) {
     let Some(collector_url) = collector_url else {
+        init_server_logs("warn");
         return;
     };
+    // The first collector this process reports to; a later core naming the
+    // same one shares it.
+    static COLLECTOR: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    if let Some(installed) = COLLECTOR.get() {
+        if installed != collector_url {
+            tracing::warn!(
+                "telemetry: this process already reports to {installed}; the collector at {collector_url} gets nothing"
+            );
+        }
+        return;
+    }
+    if tracing::dispatcher::has_been_set() {
+        tracing::warn!(
+            "telemetry: this process already reports its logs elsewhere; the collector at {collector_url} gets nothing"
+        );
+        return;
+    }
+    let _ = COLLECTOR.set(collector_url.to_owned());
     jazz_otel::init_process_tracing_with_endpoint_once(
         "jazz-server",
         collector_url,
         &["jazz_tools=trace", "tower_http=debug"],
     );
+}
+
+/// Print Jazz's logs at `level` and up to stderr (`RUST_LOG` replaces the
+/// filter), unless the process already reports elsewhere. Without it, a
+/// server inside a Node process says nothing: a blob store refusing its
+/// credentials, or a failing upload, goes unnoticed. An in-process core
+/// passes `warn`, to stay quiet in the app's own output; a served core
+/// passes `info`, as the standalone server logs.
+pub(crate) fn init_server_logs(level: &str) {
+    use std::io::IsTerminal;
+    let filter = match std::env::var("RUST_LOG") {
+        Ok(directives) if !directives.trim().is_empty() => {
+            tracing_subscriber::EnvFilter::new(directives)
+        }
+        _ => tracing_subscriber::EnvFilter::new(format!("error,jazz={level}")),
+    };
+    let _ = tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_ansi(std::io::stderr().is_terminal())
+        .with_env_filter(filter)
+        .try_init();
 }
 
 // ============================================================================
