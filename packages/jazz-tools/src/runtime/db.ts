@@ -1507,9 +1507,10 @@ const noWriteDependencies: readonly string[] = [];
 const LOAD_ROW_WAIT_MS = 10_000;
 
 /**
- * Read one row by id through the caller's session, waiting a bounded time
- * for the server, so this replica holds it before a write stages against
- * it. Offline, the wait ends and the update fails instead of hanging.
+ * Read one row by id from the server through the caller's session, so this
+ * replica holds it before a write stages against it. The read waits for the
+ * server at most {@link LOAD_ROW_WAIT_MS}: offline, it finds no row and the
+ * update fails instead of hanging, with the writes queued behind it.
  */
 function loadRow(
   client: JazzClient,
@@ -1523,15 +1524,16 @@ function loadRow(
     conditions: [{ column: "id", op: "eq", value: id }],
     limit: 1,
   });
-  return client.queryInternal(
+  const read = client.queryInternal(
     translateQuery(built, table._schema),
-    {
-      tier: "local-first",
-      firstLoadRemoteWaitMs: LOAD_ROW_WAIT_MS,
-      ...(branch ? { branch } : {}),
-    },
+    branch ? { tier: "remote", branch } : { tier: "remote" },
     session,
   );
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<unknown[]>((resolve) => {
+    timer = setTimeout(() => resolve([]), LOAD_ROW_WAIT_MS);
+  });
+  return Promise.race([read, timeout]).finally(() => clearTimeout(timer));
 }
 
 function missingWriteDependencies(
