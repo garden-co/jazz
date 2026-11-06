@@ -176,6 +176,19 @@ describe("textFieldSync", () => {
     expect(field.value).toBe("x");
   });
 
+  it("applies values to an input without a selection", () => {
+    const field = document.createElement("input");
+    field.type = "email";
+    field.value = "a@example.test";
+    document.body.append(field);
+    field.focus();
+    expect(field.selectionStart).toBeNull();
+    const sync = textFieldSync(field, { onChange: () => {} });
+    sync.apply("b@example.test");
+    expect(field.value).toBe("b@example.test");
+    field.remove();
+  });
+
   it("syncs a single-line input too", () => {
     const field = document.createElement("input");
     field.value = "title";

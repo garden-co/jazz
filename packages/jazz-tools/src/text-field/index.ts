@@ -1,8 +1,10 @@
 import { mapOffset } from "../prosemirror/text-map.js";
 
-/** A `<textarea>` or `<input>` that edits a text merge column. */
+/** A `<textarea>` or `<input>` that edits a text merge column. An input
+ * whose type has no selection (such as `email`) reports `null` for it; its
+ * text is then applied without moving a cursor. */
 export type TextField = Pick<
-  HTMLTextAreaElement,
+  HTMLTextAreaElement | HTMLInputElement,
   | "value"
   | "selectionStart"
   | "selectionEnd"
