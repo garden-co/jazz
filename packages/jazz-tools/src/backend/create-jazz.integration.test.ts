@@ -87,7 +87,7 @@ async function serve(
     const emit = server.emit;
     server.emit = function (this: Server, event: string | symbol, ...args: unknown[]) {
       if (event === "upgrade") onUpgrade();
-      return emit.call(this, event, ...args);
+      return emit.apply(this, [event, ...args] as Parameters<typeof emit>);
     } as typeof server.emit;
   }
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
