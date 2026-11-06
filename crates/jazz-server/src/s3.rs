@@ -997,7 +997,12 @@ impl Inner {
             code.as_str(),
             "ExpiredToken" | "InvalidToken" | "TokenRefreshRequired"
         ) {
-            self.drop_keys().await;
+            if matches!(self.options.credentials, S3Credentials::Static(_)) {
+                // Static keys are never assumed again: the token stays bad.
+                self.refuse("check the S3 session token (AWS_SESSION_TOKEN)");
+            } else {
+                self.drop_keys().await;
+            }
         } else if let Some(hint) = refusal_hint(status, &code) {
             self.refuse(hint);
         }
@@ -1026,9 +1031,7 @@ fn refusal_hint(status: reqwest::StatusCode, code: &str) -> Option<&'static str>
         return None;
     }
     Some(match code {
-        "InvalidAccessKeyId" | "SignatureDoesNotMatch" | "InvalidToken" => {
-            "check the S3 access key and secret"
-        }
+        "InvalidAccessKeyId" | "SignatureDoesNotMatch" => "check the S3 access key and secret",
         "RequestTimeTooSkewed" => "check this host's clock",
         "AccessDenied" | "AllAccessDisabled" => {
             "check the bucket policy: the keys need s3:GetObject and s3:PutObject on the prefix"

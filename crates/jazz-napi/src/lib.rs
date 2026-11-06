@@ -2102,12 +2102,24 @@ pub(crate) fn init_jazz_server_telemetry(collector_url: Option<&str>) {
         init_server_logs("warn");
         return;
     };
+    // The first collector this process reports to; a later core naming the
+    // same one shares it.
+    static COLLECTOR: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    if let Some(installed) = COLLECTOR.get() {
+        if installed != collector_url {
+            tracing::warn!(
+                "telemetry: this process already reports to {installed}; the collector at {collector_url} gets nothing"
+            );
+        }
+        return;
+    }
     if tracing::dispatcher::has_been_set() {
         tracing::warn!(
-            "telemetry: this process already reports its logs elsewhere; the collector at {collector_url} gets none"
+            "telemetry: this process already reports its logs elsewhere; the collector at {collector_url} gets nothing"
         );
         return;
     }
+    let _ = COLLECTOR.set(collector_url.to_owned());
     jazz_otel::init_process_tracing_with_endpoint_once(
         "jazz-server",
         collector_url,
