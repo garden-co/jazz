@@ -2338,9 +2338,16 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
   }
 
   function upgrade(wss: SocketUpgrader, req: IncomingMessage, socket: Duplex, head: Buffer): void {
-    const request = nodeRequest(req);
+    let request: Request;
+    try {
+      request = nodeRequest(req);
+    } catch {
+      // A request no URL can be made of (a bad Host header).
+      socket.end(BAD_UPGRADE);
+      return;
+    }
     const path = innerPath(request);
-    if (path === null || !/^\/apps\/[^/]+\/ws$/.test(path)) return;
+    if (path === null || !SOCKET_PATH.test(path)) return void socket.end(BAD_UPGRADE);
     if (!originAllowed(request)) {
       socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
       return;
@@ -2833,20 +2840,42 @@ async function socketUpgrader(): Promise<SocketUpgrader> {
   return new WebSocketServer({ noServer: true, maxPayload: MAX_STREAM_MESSAGE_BYTES });
 }
 
-/** Why a Jazz route can't be served: the store's open failure, for the client and logs. */
-function unavailableReason(error: unknown): string {
-  return `Jazz is unavailable: ${error instanceof Error ? error.message : String(error)}`;
+/** A sync socket's path below `basePath`. */
+const SOCKET_PATH = /^\/apps\/[^/]+\/ws$/;
+
+/** Whether an upgrade's URL is a sync socket of this Jazz (`<basePath>/apps/<app>/ws`). */
+function isSocketUpgrade(url: string | undefined, basePath: string): boolean {
+  let pathname: string;
+  try {
+    pathname = new URL(url ?? "/", "http://localhost").pathname;
+  } catch {
+    return false;
+  }
+  return pathname.startsWith(`${basePath}/`) && SOCKET_PATH.test(pathname.slice(basePath.length));
 }
 
-function storeUnavailable(error: unknown): Response {
-  return new Response(unavailableReason(error), {
+/**
+ * What a 503 tells the client to wait: until the store is tried again. The
+ * reason stays in the backend's logs; it can name internal hosts.
+ */
+function retryAfterSeconds(entry: Entry): number {
+  const at = entry.failure?.retryAt;
+  return at === undefined ? 1 : Math.max(1, Math.ceil((at - Date.now()) / 1000));
+}
+
+const UNAVAILABLE_BODY = "Jazz is unavailable; try again shortly";
+
+function storeUnavailable(retryAfter: number): Response {
+  return new Response(UNAVAILABLE_BODY, {
     status: 503,
-    headers: { "content-type": "text/plain", "retry-after": "1" },
+    headers: { "content-type": "text/plain", "retry-after": String(retryAfter) },
   });
 }
 
-const STORE_UNAVAILABLE_UPGRADE =
-  "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\nConnection: close\r\n\r\n";
+const storeUnavailableUpgrade = (retryAfter: number) =>
+  `HTTP/1.1 503 Service Unavailable\r\nRetry-After: ${retryAfter}\r\nConnection: close\r\n\r\n`;
+
+const BAD_UPGRADE = "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n";
 
 /** The `Jazz` every `createJazz` for one store returns. */
 function facade(entry: Entry): Jazz {
@@ -2858,7 +2887,7 @@ function facade(entry: Entry): Jazz {
       return await use();
     } catch (error) {
       console.error("jazz: the store did not open", error);
-      return storeUnavailable(error);
+      return storeUnavailable(retryAfterSeconds(entry));
     }
   };
   const handle = async (request: Request) => {
@@ -2876,6 +2905,8 @@ function facade(entry: Entry): Jazz {
   );
   const db = early.db;
   let heldSockets = 0;
+  /** The servers `attach()` took the upgrades of: a second call changes nothing. */
+  const attachedTo = new WeakSet<object>();
   const jazz = {
     get basePath() {
       return basePath();
@@ -2883,26 +2914,38 @@ function facade(entry: Entry): Jazz {
     handle,
     next: () => ({ GET: nextHandler, POST: nextHandler, DELETE: nextHandler }),
     async attach(server) {
+      // An HTTP/2 server without HTTP/1 (h2c) never sees a WebSocket upgrade.
+      if (server.constructor?.name === "Http2Server") {
+        throw new Error(
+          "attach(): an HTTP/2 server has no WebSocket upgrades; pass an HTTP/1 server (or an HTTPS one with allowHTTP1), or serve Jazz with handle() alone, over its HTTP stream",
+        );
+      }
+      if (attachedTo.has(server)) return;
+      attachedTo.add(server);
       const wss = await socketUpgrader();
       // Upgrades work from now on, opened or not: the store opens on the
       // first socket (or request), and one that can't open is refused with
       // a 503 the client retries, instead of failing the host's startup.
       entry.attached = true;
       entry.opened?.markAttached();
+      const take = (opened: OpenedJazz, req: IncomingMessage, socket: Duplex, head: Buffer) => {
+        try {
+          opened.upgrade(wss, req, socket, head);
+        } catch (error) {
+          console.error("jazz: a socket upgrade failed", error);
+          socket.destroy();
+        }
+      };
       const upgradeJazz = (req: IncomingMessage, socket: Duplex, head: Buffer) => {
         const now = settledNow(entry);
-        if (now) return now.upgrade(wss, req, socket, head);
+        if (now) return take(now, req, socket, head);
         use().then(
-          (opened) => opened.upgrade(wss, req, socket, head),
+          (opened) => take(opened, req, socket, head),
           (error: unknown) => {
             console.error("jazz: the store did not open", error);
-            socket.end(STORE_UNAVAILABLE_UPGRADE);
+            socket.end(storeUnavailableUpgrade(retryAfterSeconds(entry)));
           },
         );
-      };
-      const jazzSocket = (req: IncomingMessage) => {
-        const { pathname } = new URL(req.url ?? "/", "http://localhost");
-        return pathname.startsWith(`${basePath()}/apps/`) && pathname.endsWith("/ws");
       };
       const events = server as unknown as NodeJS.EventEmitter;
       // Jazz's own sync sockets go to Jazz alone: another upgrade listener
@@ -2916,7 +2959,7 @@ function facade(entry: Entry): Jazz {
         event: string | symbol,
         ...args: unknown[]
       ) {
-        if (event === "upgrade" && jazzSocket(args[0] as IncomingMessage)) {
+        if (event === "upgrade" && isSocketUpgrade((args[0] as IncomingMessage).url, basePath())) {
           upgradeJazz(...(args as [IncomingMessage, Duplex, Buffer]));
           return true;
         }
@@ -2941,9 +2984,9 @@ function facade(entry: Entry): Jazz {
         (error: unknown) => {
           console.error("jazz: the store did not open", error);
           res.statusCode = 503;
-          res.setHeader("retry-after", "1");
+          res.setHeader("retry-after", String(retryAfterSeconds(entry)));
           res.setHeader("content-type", "text/plain");
-          res.end(unavailableReason(error));
+          res.end(UNAVAILABLE_BODY);
         },
       );
     },
