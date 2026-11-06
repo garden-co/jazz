@@ -56,16 +56,24 @@ pub async fn migrate_import_login(
     })
 }
 
-/// The permissions bundle published last: `{"schema_hash", "bundle",
-/// "permissions"}`. A deployment publishes a bundle; nothing is activated.
-pub fn migrate_import_active_permissions(state: &ServerState) -> Result<serde_json::Value, String> {
-    let Some(bundle) = state.catalogue_store.published_bundles().pop() else {
-        return Ok(serde_json::Value::Null);
-    };
-    let permissions: std::collections::BTreeMap<_, _> = bundle.permissions.into_iter().collect();
-    Ok(serde_json::json!({
-        "schema_hash": bundle.schema.to_string(),
-        "bundle": bundle.id.to_hex(),
-        "permissions": permissions,
-    }))
+/// Every published permissions bundle, oldest first, each as
+/// `{"schema_hash", "bundle", "permissions"}`. The import publishes one; the
+/// app's own deployments, such as a backend's first start, add theirs.
+pub fn migrate_import_published_permissions(
+    state: &ServerState,
+) -> Result<Vec<serde_json::Value>, String> {
+    Ok(state
+        .catalogue_store
+        .published_bundles()
+        .into_iter()
+        .map(|bundle| {
+            let permissions: std::collections::BTreeMap<_, _> =
+                bundle.permissions.into_iter().collect();
+            serde_json::json!({
+                "schema_hash": bundle.schema.to_string(),
+                "bundle": bundle.id.to_hex(),
+                "permissions": permissions,
+            })
+        })
+        .collect())
 }

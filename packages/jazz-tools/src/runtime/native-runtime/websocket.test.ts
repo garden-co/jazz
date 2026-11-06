@@ -909,7 +909,8 @@ describe("websocket frame carrier", () => {
 
     expect(encoded[0]).toBe(1);
     const nonminimalTag = Uint8Array.from([0x81, 0x00, ...encoded.slice(1)]);
-    expect(() => isWireError(nonminimalTag)).toThrow("postcard u64 is not minimally encoded");
+    // Frames are told apart by their first byte, so this is no Error frame.
+    expect(isWireError(nonminimalTag)).toBe(false);
     expect(() => decodeWireError(nonminimalTag)).toThrow("postcard u64 is not minimally encoded");
 
     const unknownCode = encodeWireError(7, 3, "future code");
@@ -946,6 +947,39 @@ describe("websocket frame carrier", () => {
 
     expect(frames).toEqual([]);
     expect(errors).toEqual([{ code: "auth_failed", retry: "after_auth", message: "expired" }]);
+  });
+
+  it("passes the parts of a split sync message on, whatever bytes follow their marker", async () => {
+    let socket: MessageWebSocket | undefined;
+    const frames: Uint8Array[] = [];
+    const errors: unknown[] = [];
+    const carrier = new WebSocketCarrier({
+      endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
+      peerIdentity: new Uint8Array(16),
+      onFrame: (frame) => frames.push(frame),
+      onError: (error) => errors.push(error),
+      WebSocket: class extends MessageWebSocket {
+        constructor(url: string) {
+          super(url, (created) => {
+            socket = created;
+          });
+        }
+      },
+    });
+    socket!.emitMessage(encodeWebSocketFrameBatch([encodeServerHello(1n)]));
+    await carrier.ready();
+
+    // A message too large for one frame travels as parts behind a marker
+    // byte (`encode_frames` in sync.rs). A last part whose bytes start with
+    // 0 reads as a non-minimal varint if taken for a postcard tag: a large
+    // query answer did, and the link closed for good.
+    const parts = [Uint8Array.of(0xff, 0x08, 0xca), Uint8Array.of(0xfe, 0x00, 0x00, 0x1a)];
+    socket!.emitMessage(encodeWebSocketFrameBatch(parts));
+    await Promise.resolve();
+
+    expect(errors).toEqual([]);
+    expect(frames).toEqual(parts);
+    expect(socket!.closed).toBe(false);
   });
 
   it("round-trips channel batches from Rust wire fixtures through the TS websocket codec", () => {

@@ -1,9 +1,12 @@
 import { randomUUID } from "node:crypto";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { exportJWK, generateKeyPair, SignJWT, type JWTPayload } from "jose";
 import { startLocalJazzServer } from "../dev/dev-server.js";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
 import {
   createJazz,
@@ -571,4 +574,96 @@ describe("trusted backend clients", () => {
     );
     expect(code).toBe(1008);
   });
+});
+
+describe("a backend client's close()", () => {
+  it("uploads the writes it holds first", async () => {
+    const { jazz, appId, origin } = await appWith([
+      trustWorkload({ issuer, audience: AUDIENCE, claims: { sub: "importer" }, as: "backend" }),
+    ]);
+    const session = await createJazzClient({
+      appId,
+      app,
+      permissions,
+      serverUrl: `${origin}/jazz`,
+      driver: { type: "memory" },
+      credential: () => sign({ sub: "importer" }),
+    });
+    const { client } = session.getSnapshot();
+    const owner = randomUUID();
+    // A script's import: writes, none waited for, then close() and exit.
+    for (let i = 0; i < 200; i++) client!.db.insert(app.todos, { title: `row ${i}`, owner });
+    await session.close();
+    expect(await jazz.db.all(app.todos.where({ owner }))).toHaveLength(200);
+  }, 60_000);
+
+  it("closes a guest the backend refused, saying the writes it couldn't upload are lost", async () => {
+    const { appId, origin } = await appWith([]);
+    const session = await createJazzClient({
+      appId,
+      app,
+      permissions,
+      serverUrl: `${origin}/jazz`,
+      driver: { type: "memory" },
+      initial: "local-first",
+    });
+    const { client } = session.getSnapshot();
+    const me = client!.session!.user!;
+    client!.db.insert(app.todos, { title: "kept nowhere", owner: me });
+    const started = Date.now();
+    await expect(session.close()).rejects.toThrow(
+      /closed with 1 write the server never accepted, which are lost/,
+    );
+    // Refused for good: no point waiting out the deadline.
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(session.getSnapshot().status).toBe("closed");
+  }, 30_000);
+
+  it("closes at once with timeoutMs 0, warning about the writes it drops", async () => {
+    const { appId, origin } = await appWith([]);
+    const session = await createJazzClient({
+      appId,
+      app,
+      permissions,
+      serverUrl: `${origin}/jazz`,
+      driver: { type: "memory" },
+      initial: "local-first",
+    });
+    const { client } = session.getSnapshot();
+    client!.db.insert(app.todos, { title: "dropped", owner: client!.session!.user! });
+    await expect(session.close({ timeoutMs: -1 })).rejects.toThrow(/timeoutMs/);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await session.close({ timeoutMs: 0 });
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/1 write the server never accepted/));
+    } finally {
+      warn.mockRestore();
+    }
+    expect(session.getSnapshot().status).toBe("closed");
+  }, 30_000);
+
+  it("only warns when its persistent driver keeps the writes it couldn't upload", async () => {
+    const { appId, origin } = await appWith([]);
+    const dataPath = join(mkdtempSync(join(tmpdir(), "jazz-client-close-")), "client.db");
+    const session = await createJazzClient({
+      appId,
+      app,
+      permissions,
+      serverUrl: `${origin}/jazz`,
+      driver: { type: "persistent", dataPath },
+      initial: "local-first",
+    });
+    const { client } = session.getSnapshot();
+    client!.db.insert(app.todos, { title: "kept on disk", owner: client!.session!.user! });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await session.close();
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringMatching(/1 write not uploaded yet .*driver keeps them/),
+      );
+    } finally {
+      warn.mockRestore();
+    }
+    expect(session.getSnapshot().status).toBe("closed");
+  }, 30_000);
 });
