@@ -228,8 +228,8 @@ session state (`Owner`). The latter accepts an already-open `Db` and exposes an
 awaitable advance followed by output draining. Native execution preserves the
 existing tick → chunk-I/O scheduling → output order, thread, and panic recovery.
 Chunk runners now belong to the native adapter. This is not yet a Workers host:
-Tokio session output, clock access, and DO event scheduling still need
-adaptation before DO integration.
+Socket output and DO event scheduling still need adaptation before DO
+integration.
 Validated with `cargo test -p jazz-server --features test`: 294 tests passed,
 2 ignored, including direct owner driving without StoreLoop and native socket,
 restart, thin-client, and network chunk-store coverage.
@@ -253,6 +253,18 @@ handler uses `block_on`; native startup/tick execution still does.
 Validated with 297 server tests passed, 2 ignored, including a delayed offloaded
 read alongside another session and sync input, ordered completion, and cancellation.
 This does not implement the deferred transaction overlay or a DO event adapter.
+
+Shared-runtime WASM compilation is complete. `runtime/core.rs` and `thin.rs`
+build without the default `native` feature; native command/file/thread hosting
+lives in `runtime/host.rs` and `runtime/native.rs`. Catalogue mutation and
+schema/lens admission use shared async methods. `ServerCore` takes an open `Db`
+and a host waker; it uses `web-time`, while the native adapter applies its
+existing environment-based slow-query configuration. Native API paths remain
+re-exported. The isolated `server-core-check` consumer compiles for
+`wasm32-unknown-unknown` without native networking or runtime dependencies.
+See the README's compile command. All 297 native server tests pass (2 ignored).
+The DO harness has not switched to this core; startup, authenticated admission,
+account/catalogue access, transport, and DO wakeups remain in sections 8–10.
 
 ### 8.2 Catalogue reads and the separate connection
 

@@ -4,15 +4,40 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = []
-otel = ["dep:jazz-otel", "dep:opentelemetry"]
-embedded-server = ["jazz/runtime", "dep:tower"]
+default = ["native"]
+# Process hosting is optional; managed WASM hosts use the shared runtime only.
+native = [
+  "jazz/runtime",
+  "jazz/sqlite",
+  "dep:axum",
+  "dep:base64",
+  "dep:http",
+  "dep:jsonwebtoken",
+  "dep:hex",
+  "dep:hmac",
+  "dep:rusqlite",
+  "dep:reqwest",
+  "dep:sha2",
+  "dep:thiserror",
+  "dep:tower-http",
+  "dep:tokio-tungstenite",
+  "dep:tungstenite",
+  "dep:uuid",
+  "tokio/macros",
+  "tokio/net",
+  "tokio/rt",
+  "tokio/rt-multi-thread",
+  "tokio/signal",
+  "tokio/time",
+]
+otel = ["native", "dep:jazz-otel", "dep:opentelemetry"]
+embedded-server = ["native", "dep:tower"]
 test = ["embedded-server", "jazz/testing"]
 
 [dependencies]
-jazz = { workspace = true, default-features = false, features = ["runtime"] }
+jazz = { workspace = true, default-features = false }
 jazz-otel = { workspace = true, optional = true }
-axum = { version = "0.8.9", default-features = false, features = [
+axum = { optional = true, version = "0.8.9", default-features = false, features = [
   "http1",
   "json",
   "matched-path",
@@ -22,41 +47,34 @@ axum = { version = "0.8.9", default-features = false, features = [
   "tracing",
   "ws",
 ] }
-base64 = "0.22"
+base64 = { version = "0.22", optional = true }
 bytes = "1"
 futures = "0.3"
 futures-util = "0.3"
-http = "1"
-jsonwebtoken = { version = "10.4", default-features = false, features = ["rust_crypto", "use_pem"] }
-hex = "0.4"
-hmac = "0.12"
+http = { version = "1", optional = true }
+jsonwebtoken = { optional = true, version = "10.4", default-features = false, features = ["rust_crypto", "use_pem"] }
+hex = { version = "0.4", optional = true }
+hmac = { version = "0.12", optional = true }
 opentelemetry = { version = "0.31", optional = true }
 postcard = { version = "1.1.3", features = ["alloc"] }
-rusqlite = { version = "0.40", features = ["bundled"] }
-thiserror = "2"
-reqwest = { version = "0.12", default-features = false, features = [
+rusqlite = { optional = true, version = "0.40", features = ["bundled"] }
+thiserror = { version = "2", optional = true }
+reqwest = { optional = true, version = "0.12", default-features = false, features = [
   "json",
   "stream",
   "rustls-tls",
 ] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
-sha2 = "0.10"
-tokio = { version = "1", features = [
-  "macros",
-  "net",
-  "rt",
-  "rt-multi-thread",
-  "signal",
-  "sync",
-  "time",
-] }
+sha2 = { version = "0.10", optional = true }
+tokio = { version = "1", default-features = false, features = ["sync"] }
+web-time = "1.1"
 tower = { version = "0.5", features = ["util"], optional = true }
-tower-http = { version = "0.6.8", default-features = false, features = ["cors", "trace"] }
-tokio-tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
+tower-http = { optional = true, version = "0.6.8", default-features = false, features = ["cors", "trace"] }
+tokio-tungstenite = { optional = true, version = "0.29", default-features = false, features = ["handshake"] }
 tracing = "0.1"
-tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
-uuid = { version = "1.18.1", features = ["serde", "v4", "v5", "v7"] }
+tungstenite = { optional = true, version = "0.29", default-features = false, features = ["handshake"] }
+uuid = { optional = true, version = "1.18.1", features = ["serde", "v4", "v5", "v7"] }
 
 [dev-dependencies]
 flate2 = "1"

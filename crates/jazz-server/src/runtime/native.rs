@@ -2,7 +2,12 @@
 //! Db; only this adapter opens a StoreFile, blocks on futures, and owns the
 //! background chunk-I/O threads. StoreLoop schedules calls to this adapter.
 
+use super::host::*;
 use super::*;
+use jazz::db::{Db, block_on};
+use jazz::host::{HostTables, StoreFile};
+use jazz::schema::JazzSchema;
+use std::sync::{Arc, mpsc as std_mpsc};
 
 pub(super) struct NativeOwner {
     pub(super) core: Owner,
@@ -74,8 +79,8 @@ impl NativeOwner {
         };
         let db = block_on(Db::open_file(config, file))
             .map_err(|error| format!("open server store: {error}"))?;
-        let mut core = Owner::from_db(db, app)?;
-        core.wake = std::task::Waker::from(Arc::new(StoreWake(wake)));
+        db.set_slow_query_threshold(slow_query_threshold());
+        let core = Owner::from_db(db, app, std::task::Waker::from(Arc::new(StoreWake(wake))))?;
         Ok(Self { core, chunk_io })
     }
 

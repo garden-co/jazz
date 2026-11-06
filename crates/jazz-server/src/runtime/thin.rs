@@ -319,7 +319,7 @@ fn stream_options(options: &serde_json::Value) -> Result<StreamOptions, ThinBody
 }
 
 impl Owner {
-    pub(super) fn open_thin_session(
+    pub fn open_thin_session(
         &mut self,
         session: ServerSession,
         identity: AuthorSubject,
@@ -382,12 +382,12 @@ impl Owner {
         ending.len()
     }
 
-    pub(super) fn close_thin_session(&mut self, session: ServerSession) {
+    pub fn close_thin_session(&mut self, session: ServerSession) {
         // Dropping the streams ends the subscriptions.
         self.thin.remove(&session);
     }
 
-    pub(super) fn thin_request(
+    pub fn thin_request(
         &mut self,
         session: ServerSession,
         request: ThinRequest,
@@ -1087,5 +1087,5 @@ async fn serve_thin_op(
     Ok(Some(body))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 mod tests;

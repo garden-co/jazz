@@ -91,7 +91,7 @@ fn suspended_thin_reads_preserve_order_progress_and_cancellation() {
             let db = Db::open_at(configuration(), &path, FileOptions::default())
                 .await
                 .unwrap();
-            let mut owner = Owner::from_db(db, None).unwrap();
+            let mut owner = Owner::from_db(db, None, Waker::noop().clone()).unwrap();
             let alice = ServerSession(1);
             let bob = ServerSession(2);
             let (output, mut received) = tokio_mpsc::unbounded_channel();

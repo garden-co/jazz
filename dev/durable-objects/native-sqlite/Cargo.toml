@@ -4,7 +4,7 @@
 # in the build, which the main workspace's browser build must not see.
 [workspace]
 resolver = "2"
-members = ["jazz-do"]
+members = ["jazz-do", "server-core-check"]
 
 [patch.crates-io]
 sqlite-wasm-rs = { path = "sqlite-wasm-rs-decls" }

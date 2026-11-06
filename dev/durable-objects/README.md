@@ -110,6 +110,31 @@ rows are read. No performance, full engine compatibility, or deployed Cloudflare
 claim is made. Persisted encodings are unchanged. For actual adapter coverage, use the
 Rust/WASM checks below; the standalone probe remains independent of the adapter.
 
+## Shared server runtime compile check
+
+`jazz-server` now has a default `native` feature for process startup, file
+storage, threads, Axum, and native network clients. With default features
+omitted, `runtime::ServerCore` accepts an already-open `Db` and a host waker;
+it contains the same sync sessions, async thin requests, and catalogue mutation
+logic used by the native host. Its clock uses `web-time`. Tokio is used only
+for channel/semaphore primitives in this build, without its native executor.
+
+```sh
+cargo check --locked \
+  --manifest-path dev/durable-objects/native-sqlite/Cargo.toml \
+  -p jazz-do-server-core-check --target wasm32-unknown-unknown
+```
+
+This compile-only consumer uses the DO workspace's declarations-only SQLite
+patch. It does not include Axum, reqwest, Jazz's native runtime, or the native
+SQLite execution adapter. Existing native imports remain available through
+re-exports and the default feature.
+
+This is not a DO server deployment. The core accepts identities admitted by
+its host; HTTP authentication, protocol handshake, account-registry access,
+object startup, event scheduling, and WebSocket output still need the host
+integration described in the plan. The existing harness still uses `WasmDb`.
+
 ## Experimental WASM build and WebSocket harness
 
 `native-sqlite/` ports the isolated build from
