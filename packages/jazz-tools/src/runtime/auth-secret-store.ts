@@ -64,7 +64,7 @@ export class BrowserAuthSecretStore implements AuthSecretStore {
   >();
   private readonly key: string;
   private readonly explicitStorage: Pick<Storage, "getItem" | "setItem" | "removeItem"> | undefined;
-  private cachedPromise: Promise<string> | null = null;
+  private cached: { secret: string; promise: Promise<string> } | null = null;
 
   constructor(options: BrowserAuthSecretStoreOptions = {}) {
     this.key = resolveBrowserAuthSecretKey(options);
@@ -119,28 +119,29 @@ export class BrowserAuthSecretStore implements AuthSecretStore {
   async saveSecret(secret: string): Promise<void> {
     parseAuthSecret(secret);
     this.requireStorage().setItem(this.key, secret);
-    this.cachedPromise = Promise.resolve(secret);
+    this.cached = { secret, promise: Promise.resolve(secret) };
   }
 
   async clearSecret(): Promise<void> {
     this.requireStorage().removeItem(this.key);
-    this.cachedPromise = null;
+    this.cached = null;
   }
 
   getOrCreateSecret(): Promise<string> {
-    if (!this.cachedPromise) {
-      const storage = this.requireStorage();
-      const existing = storage.getItem(this.key);
-      if (existing !== null) {
-        parseAuthSecret(existing);
-        this.cachedPromise = Promise.resolve(existing);
-      } else {
-        const secret = generateAuthSecret();
-        storage.setItem(this.key, secret);
-        this.cachedPromise = Promise.resolve(secret);
-      }
+    // Storage owns the value: another instance or tab can replace it without
+    // touching this instance. Memoize only the promise for an unchanged value.
+    const storage = this.requireStorage();
+    let secret = storage.getItem(this.key);
+    if (secret === null) {
+      secret = generateAuthSecret();
+      storage.setItem(this.key, secret);
+    } else {
+      parseAuthSecret(secret);
     }
-    return this.cachedPromise;
+    if (this.cached?.secret !== secret) {
+      this.cached = { secret, promise: Promise.resolve(secret) };
+    }
+    return this.cached.promise;
   }
 
   static loadSecret(options: BrowserAuthSecretStoreOptions = {}): Promise<string | null> {
