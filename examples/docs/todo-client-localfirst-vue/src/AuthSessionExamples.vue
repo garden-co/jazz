@@ -8,7 +8,7 @@ const session = useSession();
 // #endregion auth-session-vue-hook
 
 // #region auth-session-vue-user
-const sessionUser = computed(() => session.value?.user.account ?? null);
+const sessionUser = computed(() => session.value?.user ?? null);
 // #endregion auth-session-vue-user
 
 // #region auth-session-vue-query

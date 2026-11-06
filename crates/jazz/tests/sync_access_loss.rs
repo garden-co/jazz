@@ -25,7 +25,7 @@ use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSch
 
 use common::{allow_all_policies, compile_schema, exists, outer_eq, session_eq};
 
-const ME: [&str; 3] = ["user", "identity", "subject"];
+const ME: [&str; 2] = ["identity", "subject"];
 
 /// Members read and post a room's messages.
 fn schema() -> JazzSchema {

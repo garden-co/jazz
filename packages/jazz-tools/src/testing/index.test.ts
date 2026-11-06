@@ -31,10 +31,8 @@ const testSchema = {
 type TestSchema = s.Schema<typeof testSchema>;
 const testApp: s.App<TestSchema> = s.defineApp(testSchema, { migrations: "none" });
 const testPermissions = definePermissions(testApp, ({ policy, session }) => {
-  policy.todos.allowRead.where(
-    anyOf([{ ownerId: session.user.account }, { ownerId: { isNull: true } }]),
-  );
-  policy.todos.allowInsert.where({ ownerId: session.user.account });
+  policy.todos.allowRead.where(anyOf([{ ownerId: session.user }, { ownerId: { isNull: true } }]));
+  policy.todos.allowInsert.where({ ownerId: session.user });
 });
 
 afterEach(async () => {
@@ -473,9 +471,9 @@ describe("createPolicyTestApp", () => {
       );
       policy.products.allowInsert.where(session.where({ authMode: "external" }));
       policy.staffNotes.allowRead.where(session.where({ authMode: "external" }));
-      policy.carts.allowRead.where({ ownerId: session.user.account });
+      policy.carts.allowRead.where({ ownerId: session.user });
       policy.carts.allowInsert.where(
-        allOf([{ ownerId: session.user.account }, session.where({ authMode: "local-first" })]),
+        allOf([{ ownerId: session.user }, session.where({ authMode: "local-first" })]),
       );
     });
     const policyTestApp = await createPolicyTestApp(guestApp, guestPermissions, expect);
@@ -527,8 +525,8 @@ describe("createPolicyTestApp", () => {
       migrations: "none",
     });
     const actorPermissions = definePermissions(actorApp, ({ policy, session }) => {
-      policy.carts.allowRead.where({ ownerId: session.user.account });
-      policy.carts.allowInsert.where({ ownerId: session.user.account });
+      policy.carts.allowRead.where({ ownerId: session.user });
+      policy.carts.allowInsert.where({ ownerId: session.user });
     });
     const policyTestApp = await createPolicyTestApp(actorApp, actorPermissions, expect);
 
@@ -633,9 +631,9 @@ describe("createPolicyTestApp", () => {
     // admitted. The first upsert stays suspended on the owner, so the second
     // write's claims must queue behind it instead of re-entering it.
     const upsertPermissions = definePermissions(testApp, ({ policy, session }) => {
-      policy.todos.allowRead.where({ ownerId: session.user.account });
-      policy.todos.allowInsert.where({ ownerId: session.user.account });
-      policy.todos.allowUpdate.where({ ownerId: session.user.account });
+      policy.todos.allowRead.where({ ownerId: session.user });
+      policy.todos.allowInsert.where({ ownerId: session.user });
+      policy.todos.allowUpdate.where({ ownerId: session.user });
     });
     const policyTestApp = await createPolicyTestApp(testApp, upsertPermissions, expect);
 
@@ -734,7 +732,7 @@ describe("policies that correlate optional and required columns", () => {
   const inviteApp: s.App<InviteSchema> = s.defineApp(inviteSchema, { migrations: "none" });
   const invitePermissions = definePermissions(inviteApp, ({ policy, session }) => {
     policy.shows.allowRead.always();
-    policy.members.allowRead.where({ account: session.user.account });
+    policy.members.allowRead.where({ account: session.user });
     policy.members.allowInsert.where((member) =>
       policy.invites.exists.where({
         showId: member.showId,

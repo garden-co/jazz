@@ -289,7 +289,8 @@ describe("backend/create-jazz-context", () => {
     expect(sessionDb.getAuthState()).toMatchObject({
       authMode: "external",
       session: {
-        user: { account: null, identity: { issuer: session.issuer, subject: session.user_id } },
+        user: null,
+        identity: { issuer: session.issuer, subject: session.user_id },
       },
     });
     expect(mocks.clients).toHaveLength(1);

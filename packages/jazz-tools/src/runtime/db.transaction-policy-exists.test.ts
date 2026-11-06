@@ -18,12 +18,12 @@ const app = s.defineApp(
   { migrations: "none" },
 );
 const permissions = definePermissions(app, ({ policy, session }) => {
-  policy.shows.allowRead.where({ chiefAccount: session.user.account });
-  policy.shows.allowInsert.where({ chiefAccount: session.user.account });
-  policy.shows.allowDelete.where({ chiefAccount: session.user.account });
+  policy.shows.allowRead.where({ chiefAccount: session.user });
+  policy.shows.allowInsert.where({ chiefAccount: session.user });
+  policy.shows.allowDelete.where({ chiefAccount: session.user });
   policy.tasks.allowRead.always();
   policy.tasks.allowInsert.where((task) =>
-    policy.shows.exists.where({ id: task.showId, chiefAccount: session.user.account }),
+    policy.shows.exists.where({ id: task.showId, chiefAccount: session.user }),
   );
 });
 

@@ -139,14 +139,14 @@ const relatedWritePermissions = s.definePermissions(
         { $createdBy: session.user },
         policy.invitations.exists.where({
           playlist_id: playlistId,
-          subject: session.user.account,
+          subject: session.user,
           status: "accepted",
         }),
       ]);
     const hasEditorInvitation = (playlistId: RowRefValue) =>
       policy.invitations.exists.where({
         playlist_id: playlistId,
-        subject: session.user.account,
+        subject: session.user,
         role: "editor",
         status: "accepted",
       });
@@ -434,7 +434,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
         return [
           policy.teams.allowRead.where((team) =>
             anyOf([
-              { identity_key: session.user.account },
+              { identity_key: session.user },
               policy.team_access_edges.exists.where({
                 target_team: team.id,
                 ...readableNonAdminTeamGrant,
@@ -506,7 +506,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
     const context = await createReproContext(({ policy, session, allOf }) => {
       const reachableTeams = policy.teams.gather({
         start: {
-          "user_team_edges.user_id": session.user.account,
+          "user_team_edges.user_id": session.user,
         },
         step: ({ current }) =>
           policy.team_team_edges
@@ -523,7 +523,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
           allOf([
             { route_key: "base-direct" },
             policy.user_team_edges.exists.where({
-              user_id: session.user.account,
+              user_id: session.user,
               team: team.id,
             }),
           ]),
@@ -532,18 +532,15 @@ describe("runtime permission repros for recursive gather and qualified predicate
           allOf([
             { route_key: "relation-direct" },
             policy.exists(
-              policy.user_team_edges
-                .where({ user_id: session.user.account })
-                .hopTo("teamRelation")
-                .where({
-                  id: team.id,
-                }),
+              policy.user_team_edges.where({ user_id: session.user }).hopTo("teamRelation").where({
+                id: team.id,
+              }),
             ),
           ]),
         ),
         policy.teams.allowRead.where({
           route_key: "qualified-predicate",
-          "user_team_edges.user_id": session.user.account,
+          "user_team_edges.user_id": session.user,
         }),
         policy.teams.allowRead.where((team) =>
           allOf([
@@ -601,9 +598,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
     const dataRoot = await mkdtemp(join(tmpdir(), "jazz-double-ref-permissions-repro-"));
     const dataPath = join(dataRoot, "runtime.db");
     const permissions = definePermissions(doubleRefReproApp, ({ policy, session }) => {
-      const directTeams = policy.team_entry
-        .where({ user_id: session.user.account })
-        .hopTo("target");
+      const directTeams = policy.team_entry.where({ user_id: session.user }).hopTo("target");
       const reachableTeams = policy.teams.gather({
         start: directTeams,
         step: ({ current }) =>
@@ -723,7 +718,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
         return [
           policy.teams.allowRead.where((team) =>
             anyOf([
-              { identity_key: session.user.account },
+              { identity_key: session.user },
               policy.team_access_edges.exists.where({
                 target_team: team.id,
                 ...readableNonAdminTeamGrant,

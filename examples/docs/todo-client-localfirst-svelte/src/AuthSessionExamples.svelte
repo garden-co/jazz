@@ -8,7 +8,7 @@
   // #endregion auth-session-svelte-hook
 
   // #region auth-session-svelte-user
-  const sessionUser = $derived(session.current?.user.account ?? null);
+  const sessionUser = $derived(session.current?.user ?? null);
   // #endregion auth-session-svelte-user
 
   // #region auth-session-svelte-query

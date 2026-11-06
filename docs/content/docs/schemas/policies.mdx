@@ -263,10 +263,12 @@ Jazz always tracks this metadata; select the columns explicitly to include them 
 You can use these edit metadata magic columns directly in `permissions.ts`. This is useful for simple
 "creator can read/edit/delete their own rows" policies without adding explicit `owner_id` columns.
 
-Compare `$createdBy` with `session.user` to scope a rule to the row's creator. `session.user` is the
-structured `{ account, identity: { issuer, subject } }` author. Public `session.claims` also exposes the complete verified
-JWT payload, including the raw `iss` and `sub`, but those inspectable fields never replace the
-canonical author identity. To share ownership across linked identities, compare `$createdBy.account` with `session.user.account` instead; whole-author equality distinguishes the identities.
+Compare `$createdBy` with `session.user` to scope a rule to the row's creator. `session.user` is
+the account, so the rule matches rows written through any identity linked to it, including
+alpha.59 rows whose author was imported with an account. To match only the exact login that wrote the row, compare
+`$createdBy.identity` with `session.identity` (its `{ issuer, subject }`). Public `session.claims`
+also exposes the complete verified JWT payload, including the raw `iss` and `sub`, but those
+inspectable fields never replace the canonical author identity.
 
 <include cwd lang="ts" meta='title="permissions.ts"'>
   ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-created-by-ts

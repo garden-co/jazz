@@ -6,7 +6,7 @@
   import { createShow, type Me } from "$lib/model/actions";
 
   const session = getSession();
-  const account = $derived(session.current?.user.account ?? null);
+  const account = $derived(session.current?.user ?? null);
   const profiles = new QuerySubscription(() =>
     account ? app.crew.where({ account }) : undefined,
   );

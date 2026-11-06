@@ -28,10 +28,10 @@ const todoApp = s.defineApp(
 );
 
 const todoAppPermissions = s.definePermissions(todoApp, ({ policy, session }) => {
-  policy.todos.allowRead.where({ owner_id: session.user.account });
-  policy.todos.allowInsert.where({ owner_id: session.user.account });
-  policy.todos.allowUpdate.where({ owner_id: session.user.account });
-  policy.todos.allowDelete.where({ owner_id: session.user.account });
+  policy.todos.allowRead.where({ owner_id: session.user });
+  policy.todos.allowInsert.where({ owner_id: session.user });
+  policy.todos.allowUpdate.where({ owner_id: session.user });
+  policy.todos.allowDelete.where({ owner_id: session.user });
 });
 
 // ---------------------------------------------------------------------------
@@ -190,7 +190,7 @@ describe("forSession auth and policy", () => {
       { migrations: "none" },
     );
     const permissions = s.definePermissions(app, ({ policy, session }) => {
-      policy.products.allowRead.where({ owner_id: session.user.account });
+      policy.products.allowRead.where({ owner_id: session.user });
       policy.products.allowInsert.where({});
       policy.products.allowUpdate.where({});
     });

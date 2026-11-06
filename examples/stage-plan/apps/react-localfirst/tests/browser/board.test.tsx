@@ -155,7 +155,7 @@ describe("StagePlan board", () => {
       account: crewAccount,
       driver: { type: "memory" },
     });
-    const crewId = crewDb.getAuthState().session?.user.account;
+    const crewId = crewDb.getAuthState().session?.user;
     if (!crewId) throw new Error("crew client has no session");
     const profile = await crewDb
       .insert(app.crew, { account: crewId, name: "Cole" })

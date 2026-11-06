@@ -22,13 +22,13 @@ const permissions = s.definePermissions(app, ({ policy, session, allOf }) => {
     table.allowDelete.never();
   }
   policy.users.allowRead.always();
-  policy.users.allowInsert.where({ accountId: session.user.account });
+  policy.users.allowInsert.where({ accountId: session.user });
   policy.topics.allowInsert.always();
   policy.topics.allowRead.where(session.where({ "claims.role": "editor" }));
   policy.notes.allowRead.always();
   policy.notes.allowInsert.where((row) =>
     allOf([
-      policy.users.exists.where({ id: row.userId, accountId: session.user.account }),
+      policy.users.exists.where({ id: row.userId, accountId: session.user }),
       policy.topics.exists.where({ id: row.topicId }),
     ]),
   );

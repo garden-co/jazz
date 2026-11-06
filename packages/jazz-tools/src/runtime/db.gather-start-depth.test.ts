@@ -23,8 +23,8 @@ const app = s.defineApp(
   { migrations: "none" },
 );
 const permissions = definePermissions(app, ({ policy, session }) => {
-  policy.todos.allowRead.where({ owner: session.user.account });
-  policy.todos.allowInsert.where({ owner: session.user.account });
+  policy.todos.allowRead.where({ owner: session.user });
+  policy.todos.allowInsert.where({ owner: session.user });
 });
 
 let server: Awaited<ReturnType<typeof startTestJazz>>;
