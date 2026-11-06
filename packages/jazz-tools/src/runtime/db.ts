@@ -1515,7 +1515,7 @@ function loadRow(
   });
   return client.queryInternal(
     translateQuery(built, table._schema),
-    (branch ? { branch } : {}),
+    branch ? { branch } : {},
     session,
   );
 }
