@@ -127,6 +127,24 @@ impl EmbeddedServer {
     /// `headers` are the upgrade request's headers, used for admission the
     /// same way as on a listener (cookies, origin).
     pub fn open_socket(&self, headers: HeaderMap) -> Result<EmbeddedSocketPeer, OpenSocketRefused> {
+        self.open(headers, super::routes::Handshake::Network)
+    }
+
+    /// Start a sync session for a client in this process, which the host
+    /// carries without a network in between. Unlike [`Self::open_socket`]
+    /// it has no handshake deadline: the client's Hello waits on the host's
+    /// event loop, which synchronous work (a burst of writes right after
+    /// the client opens) can hold for seconds, and a peer in this process
+    /// cannot be a stalled upgrade.
+    pub fn open_in_process_socket(&self) -> Result<EmbeddedSocketPeer, OpenSocketRefused> {
+        self.open(HeaderMap::new(), super::routes::Handshake::InProcess)
+    }
+
+    fn open(
+        &self,
+        headers: HeaderMap,
+        handshake: super::routes::Handshake,
+    ) -> Result<EmbeddedSocketPeer, OpenSocketRefused> {
         let state = self.built.state.clone();
         let guard = state
             .shutdown
@@ -137,7 +155,7 @@ impl EmbeddedServer {
             })?;
         let (peer, socket) = socket_pair();
         self.runtime.spawn(super::routes::handle_ws_connection(
-            socket, state, headers, guard,
+            socket, state, headers, guard, handshake,
         ));
         Ok(peer)
     }
