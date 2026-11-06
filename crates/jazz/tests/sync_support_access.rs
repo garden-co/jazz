@@ -617,3 +617,145 @@ fn a_cold_remote_read_through_an_inherited_parent_ships_what_the_parent_policy_c
         "the membership the room's read policy consults ships too"
     );
 }
+
+/// A backend writing for a request's user updates a row it read for that
+/// user, whose update policy inherits through a parent the user reaches by
+/// a membership: the read brought what the policy consults (alpha.60
+/// adopter pass V16).
+#[test]
+fn a_backend_updates_for_its_user_through_an_inherited_parent_after_reading_the_row() {
+    let schema = || {
+        compile_schema(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("rooms")
+                        .column("name", ColumnType::Text)
+                        .policies(read_and_allow_all_writes(exists(
+                            "memberships",
+                            vec![outer_eq("room", "id"), session_eq("member", &ME)],
+                        ))),
+                )
+                .table(
+                    TableSchemaBuilder::new("memberships")
+                        .fk_column("room", "rooms")
+                        .column("member", ColumnType::Text)
+                        .policies(allow_all_policies()),
+                )
+                .table(
+                    TableSchemaBuilder::new("messages")
+                        .fk_column("room", "rooms")
+                        .column("body", ColumnType::Text)
+                        .policies({
+                            let inherit = PolicyExpr::Inherits {
+                                operation: Operation::Select,
+                                via_column: "room".to_owned(),
+                                max_depth: None,
+                            };
+                            let mut policies = TablePolicies::new().with_select(inherit.clone());
+                            policies.update.using = Some(inherit.clone());
+                            policies.update.with_check = Some(inherit);
+                            policies
+                        }),
+                )
+                .build(),
+        )
+    };
+    let open = |node: u8| {
+        let config = DbConfig::new(
+            schema(),
+            DbIdentity {
+                node: NodeUuid::from_bytes([node; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        );
+        if node == 0 {
+            block_on(Db::open_history_complete(config))
+        } else {
+            block_on(Db::open(config))
+        }
+        .unwrap()
+    };
+    let server = open(0);
+    let seed = |table: &str, row: RowUuid, values: BTreeMap<String, Value>| {
+        server
+            .seed_settled_mergeable_for_bootstrap(table, row, AuthorSubject::SYSTEM, values)
+            .unwrap();
+    };
+    let me = Value::String(alice().principal_parts().1);
+    seed(
+        "rooms",
+        id(1, 1),
+        cells(&[("name", Value::String("room".into()))]),
+    );
+    seed(
+        "memberships",
+        id(2, 1),
+        cells(&[("room", Value::Uuid(id(1, 1).0)), ("member", me)]),
+    );
+    seed(
+        "messages",
+        id(3, 1),
+        cells(&[
+            ("room", Value::Uuid(id(1, 1).0)),
+            ("body", Value::String("m".into())),
+        ]),
+    );
+    // A freshly started backend that has read nothing.
+    let backend = open(1);
+    let (client_side, server_side) = duplex();
+    let _upstream = block_on(backend.connect_upstream(client_side));
+    server
+        .accept_subscriber(server_side, AuthorSubject::SYSTEM)
+        .unwrap();
+    backend.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+    // The handler reads the row for its user first, as an update needs the
+    // current row; it never reads the room or the membership.
+    let bytes = postcard::to_allocvec(&Query::from("messages")).unwrap();
+    let read = backend.all_serialized_query(
+        &bytes,
+        ReadOpts::for_read_tier(ReadTier::Remote),
+        None,
+        Some((alice(), BTreeMap::new())),
+        None,
+    );
+    let mut read = std::pin::pin!(read);
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    let mut answered = false;
+    for _ in 0..50 {
+        if let std::task::Poll::Ready(result) = read.as_mut().poll(&mut context) {
+            let jazz::db::SerializedReadResult::Rows(rows) = result.unwrap() else {
+                panic!("the remote read answered with something other than rows");
+            };
+            assert_eq!(rows.len(), 1, "she reads the message through her room");
+            answered = true;
+            break;
+        }
+        pump(&server, &backend);
+    }
+    assert!(answered, "the remote read did not answer");
+    let update = backend.update(
+        "messages",
+        id(3, 1),
+        cells(&[("body", Value::String("edited".into()))]),
+        jazz::db::UpdateOptions {
+            identity: jazz::db::WriteIdentity::Session(alice()),
+            ..Default::default()
+        },
+    );
+    let mut update = std::pin::pin!(update);
+    let mut result = None;
+    for _ in 0..50 {
+        if let std::task::Poll::Ready(outcome) = update.as_mut().poll(&mut context) {
+            result = Some(outcome);
+            break;
+        }
+        pump(&server, &backend);
+    }
+    result
+        .expect("the update did not finish")
+        .expect("alice may update the message through her room");
+    pump(&server, &backend);
+    let prepared = server.prepare_query(&Query::from("messages")).unwrap();
+    let rows = block_on(server.all(&prepared, ReadOpts::default())).unwrap();
+    assert_eq!(rows[0].cell("body"), Some(Value::String("edited".into())));
+}
