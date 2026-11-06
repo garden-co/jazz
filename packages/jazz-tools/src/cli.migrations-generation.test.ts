@@ -393,7 +393,8 @@ describe("cli migrations", () => {
                 nullable: false,
                 merge_strategy: "Counter",
               },
-              { name: "addedValue", column_type: { type: "BigInt" }, nullable: true },
+              // Another type than removedValue, so it can't be its rename.
+              { name: "addedValue", column_type: { type: "Text" }, nullable: true },
               { name: "label", column_type: { type: "Text" }, nullable: false },
             ],
           },
@@ -421,7 +422,7 @@ describe("cli migrations", () => {
     }
 
     const generated = await readFile(filePath, "utf8");
-    expect(generated).toContain('"addedValue": m.add.bigint({ default: null }),');
+    expect(generated).toContain('"addedValue": m.add.string({ default: null }),');
     expect(generated).toContain('"removedValue": m.drop.bigint({ backwardsDefault: null }),');
     expect(generated).toContain('"value": s.bigint().merge("counter"),');
     await typecheckGeneratedMigration(filePath);

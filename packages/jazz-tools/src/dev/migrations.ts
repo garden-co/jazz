@@ -284,7 +284,7 @@ const KEEP_VALUES_ADVICE =
  * schema, so it cannot deploy.
  */
 export const UNFILLED_STUB_TODO =
-  /\/\/ TODO: ((?:Added|Removed) required column "([^"]+)" needs an explicit (?:default|backwardsDefault)\.)/;
+  /\/\/ TODO: ((?:Added|Removed)(?: required)? column "([^"]+)" (?:needs an explicit (?:default|backwardsDefault)|may be a rename of [^:]+:[^\n]*)\.)/;
 
 /**
  * A column kept under the same name must keep its type and optionality: no
@@ -338,21 +338,31 @@ function inferTableSuggestions(
   const removedColumns = [...fromColumns.keys()].filter((name) => !toColumns.has(name));
   const addedColumns = [...toColumns.keys()].filter((name) => !fromColumns.has(name));
 
-  if (removedColumns.length === 1 && addedColumns.length === 1) {
-    const removed = fromColumns.get(removedColumns[0]!)!;
-    const added = toColumns.get(addedColumns[0]!)!;
-    if (
-      removed.nullable === added.nullable &&
-      removed.references === added.references &&
-      columnTypeSignature(removed.column_type) === columnTypeSignature(added.column_type)
-    ) {
-      comments.push(
-        `Possible rename detected: ${JSON.stringify(removed.name)} -> ${JSON.stringify(added.name)}.`,
-      );
-    }
+  // An added column with the same shape as a removed one may be that column
+  // renamed. Adding one and dropping the other would start every row empty,
+  // so neither gets a step: the author says which it is, and validate
+  // refuses the file until they do.
+  const sameShape = (removed: ColumnDescriptor, added: ColumnDescriptor) =>
+    removed.nullable === added.nullable &&
+    removed.references === added.references &&
+    columnTypeSignature(removed.column_type) === columnTypeSignature(added.column_type);
+  const undecided = new Set<string>();
+  for (const addedName of addedColumns) {
+    const added = toColumns.get(addedName)!;
+    const candidates = removedColumns.filter((name) => sameShape(fromColumns.get(name)!, added));
+    if (candidates.length === 0) continue;
+    undecided.add(addedName);
+    for (const name of candidates) undecided.add(name);
+    const of = candidates.map((name) => JSON.stringify(name)).join(" or ");
+    comments.push(
+      `Added column ${JSON.stringify(addedName)} may be a rename of ${of}: to keep its values, ` +
+        `give it the step m.renameFrom(${JSON.stringify(candidates[0])}); to start it empty, ` +
+        `add it with m.add and drop the old column with m.drop.`,
+    );
   }
 
   for (const columnName of addedColumns) {
+    if (undecided.has(columnName)) continue;
     const column = toColumns.get(columnName)!;
     if (column.nullable || column.default !== undefined) {
       // Existing rows take the column's declared default.
@@ -368,6 +378,7 @@ function inferTableSuggestions(
   }
 
   for (const columnName of removedColumns) {
+    if (undecided.has(columnName)) continue;
     const column = fromColumns.get(columnName)!;
     if (column.nullable || column.default !== undefined) {
       // Older clients read the dropped column back as its declared default.
