@@ -10,6 +10,7 @@
 // the frames that caused it; each tick's wall time is recorded.
 import {
   WasmDb,
+  WasmServerCore,
   durableObjectSqlQueries,
   durableObjectSqlStats,
   durableObjectSqlTrace,
@@ -39,13 +40,22 @@ export class Authority {
     this.schedules = 0;
   }
 
-  open(schema, config) {
+  async open(schema, config) {
+    if (this.db || this.opening) throw new Error("authority is already open");
+    this.opening = true;
     wasm ??= initSync({ module: wasmModule });
     if (this.trace) durableObjectSqlTrace(true);
     const start = performance.now();
-    this.db = WasmDb.openDurableObject(this.ctx.storage, bytes(schema), bytes(config));
-    this.db.setTickScheduler(() => this.schedule());
-    this.db.onMutationError?.((error) => this.errors.push(`mutation: ${error}`));
+    try {
+      this.db = await WasmServerCore.openDurableObject(
+        this.ctx.storage,
+        bytes(schema),
+        bytes(config),
+        () => this.schedule(),
+      );
+    } finally {
+      this.opening = false;
+    }
     return performance.now() - start;
   }
 
@@ -56,35 +66,61 @@ export class Authority {
       return;
     }
     this.ticking = true;
+    this.idle = new Promise((resolve) => {
+      this.finishTick = resolve;
+    });
     queueMicrotask(() => this.tick());
   }
 
+  async waitForIdle() {
+    while (this.ticking) await this.idle;
+  }
+
+  detach(session) {
+    if (!this.sessions.delete(session)) return;
+    session.transport.close();
+    session.transport.free();
+  }
+
   async tick() {
-    do {
-      this.again = false;
-      const start = performance.now();
-      try {
+    try {
+      do {
+        this.again = false;
+        const start = performance.now();
         await this.db.tick();
-      } catch (error) {
-        this.errors.push(String(error?.stack ?? error));
-        console.error("tick failed", error);
-      }
-      for (const session of this.sessions) {
-        for (const frame of session.transport.recvWireFrames()) {
-          this.frames.out += 1;
-          this.frames.outBytes += frame.byteLength;
-          session.ws.send(frame);
+        for (const session of this.sessions) {
+          try {
+            for (const frame of session.transport.recvWireFrames()) {
+              this.frames.out += 1;
+              this.frames.outBytes += frame.byteLength;
+              session.ws.send(frame);
+            }
+            if (session.transport.isClosed()) {
+              session.ws.close(1000, "session ended");
+              this.detach(session);
+            }
+          } catch (error) {
+            this.errors.push(String(error?.stack ?? error));
+            session.ws.close(1011, "session failed");
+            this.detach(session);
+          }
         }
-      }
-      this.ticks.push(performance.now() - start);
-    } while (this.again);
-    this.ticking = false;
+        this.ticks.push(performance.now() - start);
+      } while (this.again);
+    } catch (error) {
+      this.errors.push(String(error?.stack ?? error));
+      console.error("tick failed", error);
+    } finally {
+      this.ticking = false;
+      this.finishTick();
+    }
   }
 
   stats(reset) {
     const ticks = [...this.ticks].sort((a, b) => a - b);
     const at = (p) => ticks[Math.min(ticks.length - 1, Math.floor(p * ticks.length))] ?? 0;
     const out = {
+      runtime: "ServerCore",
       ticks: ticks.length,
       tickMsTotal: ticks.reduce((a, b) => a + b, 0),
       tickMsP50: at(0.5),
@@ -122,12 +158,13 @@ export class Authority {
     // Frames as ArrayBuffers: newer compatibility dates default to Blob.
     server.binaryType = "arraybuffer";
     if (url.pathname === "/control") {
-      server.addEventListener("message", (event) => {
+      server.addEventListener("message", async (event) => {
         const message = JSON.parse(event.data);
         try {
+          await this.waitForIdle();
           if (message.op === "open") {
             server.send(
-              JSON.stringify({ ok: true, openMs: this.open(message.schema, message.config) }),
+              JSON.stringify({ ok: true, openMs: await this.open(message.schema, message.config) }),
             );
           } else if (message.op === "checkRejected") {
             this.db.checkRejectedRow(new Uint8Array(message.row), message.table);
@@ -146,7 +183,9 @@ export class Authority {
       });
     } else if (url.pathname === "/session") {
       const author = new TextEncoder().encode(url.searchParams.get("author"));
-      const transport = await this.db.acceptSubscriber(author, null);
+      await this.waitForIdle();
+      if (!this.db) return new Response("authority is not open", { status: 503 });
+      const transport = this.db.acceptSubscriber(author);
       const session = { ws: server, transport };
       this.sessions.add(session);
       server.addEventListener("message", (event) => {
@@ -157,13 +196,17 @@ export class Authority {
         const frame = new Uint8Array(event.data);
         this.frames.in += 1;
         this.frames.inBytes += frame.byteLength;
-        transport.sendWireFrame(frame);
-        this.schedule();
+        try {
+          transport.sendWireFrame(frame);
+          this.schedule();
+        } catch (error) {
+          this.errors.push(String(error?.stack ?? error));
+          server.close(1008, "input refused");
+          this.detach(session);
+        }
       });
-      server.addEventListener("close", () => {
-        this.sessions.delete(session);
-        transport.close?.();
-      });
+      server.addEventListener("close", () => this.detach(session));
+      server.addEventListener("error", () => this.detach(session));
     } else {
       return new Response("not found", { status: 404 });
     }

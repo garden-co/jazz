@@ -263,8 +263,16 @@ existing environment-based slow-query configuration. Native API paths remain
 re-exported. The isolated `server-core-check` consumer compiles for
 `wasm32-unknown-unknown` without native networking or runtime dependencies.
 See the README's compile command. All 297 native server tests pass (2 ignored).
-The DO harness has not switched to this core; startup, authenticated admission,
-account/catalogue access, transport, and DO wakeups remain in sections 8–10.
+The local DO harness now hosts `ServerCore` over the owned DO storage backend.
+A dev-only WASM adapter admits fixture identities against a published schema and
+permissions bundle, queues socket input, serializes async ticks, forwards output,
+and schedules wakeups through microtasks. Disconnects close the core's input.
+`test-server-core.mjs` passes numeric sync, atomic rejection, two-object isolation,
+disconnect cleanup, and reconstruction with persisted SQLite. `test-values.mjs --sync` also passes. The scope suite passes after updating its
+obsolete pre-section-4 assertion: callbacks can run, overlay reads fail explicitly,
+and failed callbacks leave ordinary reads usable. Its rejected-write, two-object,
+and persisted-restart checks pass. Production startup, authenticated admission, account access,
+and full transport/lifecycle integration remain in sections 8–10.
 
 ### 8.2 Catalogue reads and the separate connection
 

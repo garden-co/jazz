@@ -802,7 +802,15 @@ dependencies = [
 name = "jazz-do"
 version = "0.1.0"
 dependencies = [
+ "futures-channel",
+ "futures-util",
+ "jazz",
+ "jazz-server",
  "jazz-wasm",
+ "js-sys",
+ "tokio",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
 ]
 
 [[package]]

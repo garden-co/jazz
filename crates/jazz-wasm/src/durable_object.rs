@@ -655,6 +655,12 @@ pub fn durable_object_sql_stats() -> JsValue {
     })
 }
 
+/// Construct the managed storage owner for a Rust host such as ServerCore.
+pub fn durable_object_storage(storage: ObjectStorage) -> Storage {
+    crate::initialize_wasm_tracing();
+    Storage::from_backend(ObjectSql { storage })
+}
+
 // ---- SQLite's constants ----------------------------------------------------
 
 #[wasm_bindgen]
@@ -682,7 +688,7 @@ impl WasmDb {
         .map_err(|error| crate::host_error(binding_host::HostError::Argument(error)))?;
         let db = crate::block_on(jazz::db::Db::open_storage(
             db_config,
-            Storage::from_backend(ObjectSql { storage }),
+            durable_object_storage(storage),
         ))
         .map_err(crate::to_js_error)?;
         db.set_authority();
@@ -709,29 +715,37 @@ impl WasmDb {
 
     #[wasm_bindgen(js_name = checkSqlScopes)]
     pub fn check_sql_scopes(&self) -> Result<(), JsValue> {
-        let binding = self.binding()?;
-        let db = &binding.db;
-        db.check_sql_scopes_for_test().map_err(crate::to_js_error)?;
-        // Unsupported lifetimes must fail before a callback runs or an
-        // overlay modifies storage, rather than count fictitious savepoints.
-        let error = crate::block_on(
-            db.transaction::<()>(async |_| panic!("unsupported async transaction callback ran")),
-        )
-        .unwrap_err();
-        assert_eq!(error.code, jazz::db::ErrorCode::Query);
-        assert!(error.message.contains("SQL savepoint `tx`"));
-        let id = jazz::tools::OpenTransactionId::new();
-        crate::block_on(db.begin_mergeable(id)).map_err(crate::to_js_error)?;
-        let query = db
-            .prepare_query(&jazz::query::Query::from("tasks"))
-            .map_err(crate::to_js_error)?;
-        let error = crate::block_on(db.tx_ref(id).all_prepared(&query)).unwrap_err();
-        assert_eq!(error.code, jazz::db::ErrorCode::Query);
-        assert!(error.message.contains("SQL savepoint `overlay`"));
-        db.abandon_transaction_handle(id)
-            .map_err(crate::to_js_error)?;
-        Ok(())
+        check_durable_object_scopes(&self.binding()?.db)
     }
+}
+
+#[cfg(feature = "durable-object-tests")]
+pub fn check_durable_object_scopes(db: &jazz::db::Db) -> Result<(), JsValue> {
+    db.check_sql_scopes_for_test().map_err(crate::to_js_error)?;
+    // Rust callbacks use staged transactions too: entering the callback does
+    // not require an open SQL scope. A read still needs the deferred overlay.
+    let (value, _) =
+        crate::block_on(db.transaction(async |_| Ok(42))).map_err(crate::to_js_error)?;
+    assert_eq!(value, 42);
+    let query = db
+        .prepare_query(&jazz::query::Query::from("tasks"))
+        .map_err(crate::to_js_error)?;
+    let error = crate::block_on(db.transaction(async |_| db.read(&query))).unwrap_err();
+    assert_eq!(error.code, jazz::db::ErrorCode::Query);
+    assert!(error.message.contains("SQL savepoint `overlay`"));
+    // A failed callback must abandon its batch and leave ordinary reads usable.
+    db.read(&query).map_err(crate::to_js_error)?;
+    let id = jazz::tools::OpenTransactionId::new();
+    crate::block_on(db.begin_mergeable(id)).map_err(crate::to_js_error)?;
+    let query = db
+        .prepare_query(&jazz::query::Query::from("tasks"))
+        .map_err(crate::to_js_error)?;
+    let error = crate::block_on(db.tx_ref(id).all_prepared(&query)).unwrap_err();
+    assert_eq!(error.code, jazz::db::ErrorCode::Query);
+    assert!(error.message.contains("SQL savepoint `overlay`"));
+    db.abandon_transaction_handle(id)
+        .map_err(crate::to_js_error)?;
+    Ok(())
 }
 
 /// Exercise the actual Rust/JS value bridge in workerd. A backend-level test
@@ -969,7 +983,7 @@ impl WasmDb {
                     author: AuthorSubject::SYSTEM,
                 },
             ),
-            Storage::from_backend(ObjectSql { storage }),
+            durable_object_storage(storage),
         ))
         .map_err(crate::to_js_error)?;
         db.set_authority();

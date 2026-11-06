@@ -132,8 +132,9 @@ re-exports and the default feature.
 
 This is not a DO server deployment. The core accepts identities admitted by
 its host; HTTP authentication, protocol handshake, account-registry access,
-object startup, event scheduling, and WebSocket output still need the host
-integration described in the plan. The existing harness still uses `WasmDb`.
+and production object startup still need the host integration described in the
+plan. The local harness now exercises event scheduling and WebSocket output
+through this core, as described below.
 
 ## Experimental WASM build and WebSocket harness
 
@@ -163,6 +164,26 @@ The default optimized build additionally needs wasm-opt. `PERSIST=<directory>`
 retains DO storage, `TRACE=1` counts SQL statements, and `INSPECTOR_PORT=9229`
 enables the optional CPU profiler. The harness accepts fixture identities from
 its caller; bind it only to local loopback. It is not production authentication.
+
+The sync authority uses the dev-only `WasmServerCore` adapter in
+`native-sqlite/jazz-do/src/server.rs`. It opens a DO-backed `Db`, publishes the
+fixture schema and permissions bundle, and hands ownership to `ServerCore`.
+Socket frames enter session queues; one async tick advances and flushes the
+core before the host sends output. Microtask wakeups avoid re-entering Rust;
+disconnects close session input. `WasmDb` remains only for standalone value probes.
+Reconstruction still requires the test client to supply the fixture schema and
+config; this is not production startup or authentication.
+
+```sh
+# After the scope-tests build and native client build below:
+node dev/durable-objects/native-sqlite/harness/test-server-core.mjs
+```
+
+Validated locally: numeric sync and atomic rejection on two objects, disconnected
+session cleanup, and fresh replicas reading persisted values after workerd restart.
+`test-scopes.mjs` also passes: Rust callbacks can run without an open SQL scope;
+reads requiring a persistent overlay fail explicitly and clean up their batch.
+It additionally validates nested scopes, rejected writes, and persisted restart.
 
 Synchronous callback scopes now use the owning `ctx.storage.transactionSync`.
 `WasmDb.openDurableObject` takes `ctx.storage`, not just `ctx.storage.sql`.

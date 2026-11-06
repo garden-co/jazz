@@ -35,6 +35,10 @@ mod browser;
 pub mod browser_bench;
 #[cfg(all(target_arch = "wasm32", feature = "durable-object"))]
 mod durable_object;
+#[cfg(all(target_arch = "wasm32", feature = "durable-object-tests"))]
+pub use durable_object::check_durable_object_scopes;
+#[cfg(all(target_arch = "wasm32", feature = "durable-object"))]
+pub use durable_object::{durable_object_storage, ObjectStorage};
 mod identity;
 mod text;
 
