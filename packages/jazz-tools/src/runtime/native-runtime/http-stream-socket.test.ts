@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   STREAM_RECORD_SESSION,
+  UPGRADE_FAILURES_BEFORE_STREAM,
   encodeStreamRecord,
   sameOriginWebSocketConstructor,
   streamUrlForSocketUrl,
@@ -21,6 +22,26 @@ function failingNative(): WebSocketConstructor {
         for (const listener of this.listeners.get("error") ?? []) listener({});
         for (const listener of this.listeners.get("close") ?? [])
           listener({ code: 1006, reason: "" });
+      });
+    }
+    addEventListener(type: string, listener: Listener) {
+      this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
+    }
+    send() {}
+    close() {}
+  } as unknown as WebSocketConstructor;
+}
+
+/** A native socket that opens, as one a host upgrades. */
+function openingNative(): WebSocketConstructor {
+  return class OpeningSocket {
+    binaryType = "blob";
+    readyState = 0;
+    private listeners = new Map<string, Listener[]>();
+    constructor(_url: string) {
+      queueMicrotask(() => {
+        this.readyState = 1;
+        for (const listener of this.listeners.get("open") ?? []) listener({});
       });
     }
     addEventListener(type: string, listener: Listener) {
@@ -63,7 +84,7 @@ describe("same-origin socket fallback", () => {
     const url = "ws://app.test/jazz/apps/a1/ws";
     const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const target = String(input);
-      if (init?.method === "GET" && target === "http://app.test/jazz/apps/a1/ws") {
+      if (init?.method === "POST" && target === "http://app.test/jazz/apps/a1/ws") {
         return new Response("use the stream", { status: 426, headers: { "x-jazz-stream": "1" } });
       }
       if (init?.method === "POST" && target === streamUrlForSocketUrl(url)) {
@@ -81,7 +102,93 @@ describe("same-origin socket fallback", () => {
     const next = new Socket(url);
     expect(await outcome(next)).toBe("open");
     next.close();
-    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "GET")).toHaveLength(1);
+    expect(
+      fetchMock.mock.calls.filter(([input]) => String(input) === "http://app.test/jazz/apps/a1/ws"),
+    ).toHaveLength(1);
+  });
+
+  it("switches to the HTTP stream when upgrades never get through to a backend that upgrades", async () => {
+    // A proxy that passes plain requests and streams on, but not upgrades.
+    const url = "ws://behind-proxy.test/jazz/apps/a1/ws";
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const target = String(input);
+      if (init?.method === "POST" && target === "http://behind-proxy.test/jazz/apps/a1/ws") {
+        return new Response("Upgrade to a WebSocket", { status: 426 });
+      }
+      if (init?.method === "POST" && target === streamUrlForSocketUrl(url)) {
+        return openStreamResponse("s2");
+      }
+      return new Response(null, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    const Socket = sameOriginWebSocketConstructor(failingNative());
+    // A restart or a draining instance fails a socket or two: retried as sockets.
+    for (let attempt = 1; attempt < UPGRADE_FAILURES_BEFORE_STREAM; attempt++) {
+      expect(await outcome(new Socket(url))).toBe("closed");
+    }
+    expect(warn).not.toHaveBeenCalled();
+    // One more in a row, and the stream takes over, saying why.
+    const socket = new Socket(url);
+    expect(await outcome(socket)).toBe("open");
+    socket.close();
+    expect(warn.mock.calls.flat().join(" ")).toMatch(/doesn't pass WebSocket upgrades on/);
+    warn.mockRestore();
+  });
+
+  it("starts the count of failed upgrades again once a socket opens", async () => {
+    const url = "ws://flaky.test/jazz/apps/a1/ws";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("Upgrade to a WebSocket", { status: 426 })),
+    );
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const Failing = sameOriginWebSocketConstructor(failingNative());
+    const Opening = sameOriginWebSocketConstructor(openingNative());
+    for (let round = 0; round < 2; round++) {
+      for (let attempt = 1; attempt < UPGRADE_FAILURES_BEFORE_STREAM; attempt++) {
+        expect(await outcome(new Failing(url))).toBe("closed");
+      }
+      const opened = new Opening(url);
+      expect(await outcome(opened)).toBe("open");
+      opened.close();
+    }
+    // Never three failures in a row: it stayed on sockets.
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it("starts the count again when the backend is down or refuses the origin in between", async () => {
+    const url = "ws://between.test/jazz/apps/a1/ws";
+    const answers: Array<() => Response> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => answers.shift()!()),
+    );
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const Socket = sameOriginWebSocketConstructor(failingNative());
+    const fail = async (answer: () => Response) => {
+      answers.push(answer);
+      expect(await outcome(new Socket(url))).toBe("closed");
+    };
+    const upgrades = () => new Response("Upgrade to a WebSocket", { status: 426 });
+    // Two failures, then a restart (503), then two more: never three in a row.
+    await fail(upgrades);
+    await fail(upgrades);
+    await fail(() => new Response("Jazz is unavailable", { status: 503 }));
+    await fail(upgrades);
+    await fail(upgrades);
+    // An origin the backend refuses (a proxy that rewrites Host) is said as
+    // such, once, and isn't counted as upgrades not getting through.
+    await fail(() => new Response("origin not allowed", { status: 403 }));
+    await fail(() => new Response("origin not allowed", { status: 403 }));
+    await fail(upgrades);
+    await fail(upgrades);
+    expect(warn.mock.calls.flat()).toEqual([
+      expect.stringMatching(/refuses this page's origin \(403\)/),
+    ]);
+    warn.mockRestore();
   });
 
   it("fails as a socket when the endpoint is not a createJazz backend", async () => {
@@ -97,7 +204,10 @@ describe("same-origin socket fallback", () => {
     expect(await outcome(new Socket(url))).toBe("closed");
     // Not remembered: the next session tries a native socket again.
     expect(await outcome(new Socket(url))).toBe("closed");
-    expect(fetchMock.mock.calls.every(([, init]) => init?.method === "GET")).toBe(true);
+    // Only probes of the socket path: no stream was tried.
+    expect(
+      fetchMock.mock.calls.every(([input]) => String(input) === "http://proxy.test/apps/a1/ws"),
+    ).toBe(true);
   });
 
   it("fails as a socket when the backend can't be reached at all", async () => {
