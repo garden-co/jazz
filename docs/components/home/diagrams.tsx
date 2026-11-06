@@ -429,9 +429,10 @@ function ClientBox({
 /**
  * Fig. 1: where Jazz runs, drawn narrow enough for a phone. Your platform
  * account on top (the large-value store, then the shards), your backend with
- * the jazz core and its /jazz mount behind your auth, then the clients in two
- * rows of three. Sync wires from the lower row climb the gutters between the
- * upper row's boxes; the dashed large-value reads come down the left edge.
+ * the jazz core and its /jazz mount behind your auth, then a row of three
+ * client slots. Each slot takes turns between two of the six kinds of client
+ * (staggered, so one changes at a time), bringing its own wire along; the
+ * dashed large-value reads come down the left edge.
  * In this figure blue marks Jazz's own parts and mint your auth.
  */
 export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }) {
@@ -450,60 +451,20 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
   const cw = 168;
   const colX = [16, 196, 376];
   const center = (col: number) => colX[col] + cw / 2;
-  const rowY = [480, 632];
-  const clientH = 108;
-  // Upper row: traditional, web app, native app; lower row: web page,
-  // backend worker, agent VM.
-  const grid = [
-    { client: clients[0], col: 0, row: 0 },
-    { client: clients[2], col: 1, row: 0 },
-    { client: clients[3], col: 2, row: 0 },
-    { client: clients[1], col: 0, row: 1 },
-    { client: clients[4], col: 1, row: 1 },
-    { client: clients[5], col: 2, row: 1 },
+  const rowY = 480;
+  const clientH = 120;
+  // Three slots, each alternating between two clients. Slot 0 swaps the
+  // traditional client (plain requests to your API) for a web page (sync).
+  const slots = [
+    [clients[0], clients[1]],
+    [clients[2], clients[4]],
+    [clients[3], clients[5]],
   ];
   const gap = shard.count > 4 ? 6 : 10;
   const sw = shard.count ? (shardRow.w - gap * (shard.count - 1)) / shard.count : 0;
   const shardXs = Array.from({ length: shard.count }, (_, i) => shardRow.x + i * (sw + gap));
-  const below = rowY[1] - 20;
-  const syncWires: Point[][] = [
-    // Upper row: straight up into the auth band under the mount.
-    [
-      [center(1), rowY[0]],
-      [center(1), authBottom],
-    ],
-    [
-      [center(2), rowY[0]],
-      [center(2), authBottom],
-    ],
-    // Lower row: across under the upper row, then up a gutter.
-    [
-      [center(0), rowY[1]],
-      [center(0), below],
-      [190, below],
-      [190, 430],
-      [240, 430],
-      [240, authBottom],
-    ],
-    [
-      [center(1), rowY[1]],
-      [center(1), below],
-      [370, below],
-      [370, 430],
-      [330, 430],
-      [330, authBottom],
-    ],
-    [
-      [center(2), rowY[1]],
-      [center(2), below],
-      [552, below],
-      [552, 426],
-      [480, 426],
-      [480, authBottom],
-    ],
-  ];
   return (
-    <Diagram viewBox={`0 0 ${W} 714`} label={label}>
+    <Diagram viewBox={`0 0 ${W} ${rowY + clientH + 6}`} label={label}>
       {account ? <rect x={4} y={4} width={552} height={418} rx={2} className="dg-region" /> : null}
       <Frame x={backend.x} y={backend.y} w={backend.w} h={backendBottom - backend.y} tone="ink" />
       <Lines
@@ -558,59 +519,41 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
             dashed
             start
           />
-          {/* Clients read large values from the store directly. */}
+          {/* Clients read large values from the store directly (all but
+              the traditional client). */}
           <Wire
             points={[
               [storeBox.x, storeBox.y + storeBox.h / 2],
               [8, storeBox.y + storeBox.h / 2],
-              [8, rowY[1] - 8],
-              [colX[0] + 12, rowY[1] - 8],
-              [colX[0] + 12, rowY[1]],
+              [8, 470],
+              [colX[2] + 12, 470],
             ]}
             tone="blue"
             dashed
             start
+            end={false}
           />
+          <g className="dg-cycle dg-cycle-b">
+            <Wire
+              points={[
+                [colX[0] + 12, 470],
+                [colX[0] + 12, rowY],
+              ]}
+              tone="blue"
+              dashed
+            />
+          </g>
           {[1, 2].map((col) => (
             <Wire
-              key={`d1${col}`}
+              key={`d${col}`}
               points={[
-                [colX[col] - 8 + 20, rowY[1] - 8],
-                [colX[col] + 12, rowY[1]],
+                [colX[col] + 12, 470],
+                [colX[col] + 12, rowY],
               ]}
               tone="blue"
               dashed
             />
           ))}
-          <Wire
-            points={[
-              [8, 474],
-              [colX[2] + 12, 474],
-            ]}
-            tone="blue"
-            dashed
-            end={false}
-          />
-          {[1, 2].map((col) => (
-            <Wire
-              key={`d0${col}`}
-              points={[
-                [colX[col] + 12, 474],
-                [colX[col] + 12, rowY[0]],
-              ]}
-              tone="blue"
-              dashed
-            />
-          ))}
-          <Wire
-            points={[
-              [8, rowY[1] - 8],
-              [colX[2] + 12, rowY[1] - 8],
-            ]}
-            tone="blue"
-            dashed
-            end={false}
-          />
         </g>
       ) : (
         <g>
@@ -660,22 +603,16 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
       </Label>
       {/* The traditional client makes ordinary requests (and streams) to your
           API routes; every other client keeps a live sync connection. */}
-      <Wire
-        points={[
-          [center(0), rowY[0]],
-          [center(0), api.y + api.h],
-        ]}
-        start
-      />
-      <Lines
-        x={center(0) + 6}
-        y={432}
-        lines={["manual http", "requests &", "streaming"]}
-        step={14}
-        className="dg-label dg-fill-ink"
-      />
-      {syncWires.map((points) => (
-        <Wire key={points[0].join()} points={points} tone="blue" start />
+      {[1, 2].map((col) => (
+        <Wire
+          key={`s${col}`}
+          points={[
+            [center(col), rowY],
+            [center(col), authBottom],
+          ]}
+          tone="blue"
+          start
+        />
       ))}
       <Lines
         x={center(2) + 8}
@@ -684,16 +621,47 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
         step={14}
         className="dg-label dg-fill-blue"
       />
-      {grid.map(({ client, col, row }) => (
-        <ClientBox
-          key={client.name.join(" ")}
-          x={colX[col]}
-          y={rowY[row]}
-          w={cw}
-          h={clientH}
-          client={client}
-        />
-      ))}
+      {slots.map((pair, col) =>
+        pair.map((client, turn) => (
+          <g
+            key={client.name.join(" ")}
+            className={`dg-cycle ${turn ? "dg-cycle-b" : "dg-cycle-a"}`}
+            style={{ animationDelay: `${col * 2}s` }}
+          >
+            {col === 0 && turn === 0 ? (
+              <g>
+                <Wire
+                  points={[
+                    [center(0), rowY],
+                    [center(0), api.y + api.h],
+                  ]}
+                  start
+                />
+                <Lines
+                  x={center(0) + 6}
+                  y={432}
+                  lines={["manual http", "requests &", "streaming"]}
+                  step={14}
+                  className="dg-label dg-fill-ink"
+                />
+              </g>
+            ) : null}
+            {col === 0 && turn === 1 ? (
+              <Wire
+                points={[
+                  [center(0), rowY],
+                  [center(0), 446],
+                  [240, 446],
+                  [240, authBottom],
+                ]}
+                tone="blue"
+                start
+              />
+            ) : null}
+            <ClientBox x={colX[col]} y={rowY} w={cw} h={clientH} client={client} />
+          </g>
+        )),
+      )}
     </Diagram>
   );
 }
