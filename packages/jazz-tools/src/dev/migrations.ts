@@ -258,7 +258,9 @@ function renderColumnOperationExpression(
     case "EnumPayload":
       throw new Error("Migration stub generation does not yet support payload enums.");
     case "Uuid":
-      return `${m}.ref(${column.references ? JSON.stringify(column.references) : '"TODO_TABLE"'}, { ${defaultEntry} })`;
+      return column.references
+        ? `${m}.ref(${JSON.stringify(column.references)}, { ${defaultEntry} })`
+        : `${m}.uuid({ ${defaultEntry} })`;
     case "Array":
       return `${m}.array({ of: ${baseBuilderExpression(columnType.element)}, ${defaultEntry} })`;
     case "BigInt":
