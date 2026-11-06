@@ -1569,76 +1569,6 @@ impl Binding {
         ))
     }
 
-    /// Synchronous local candidates for nonempty metadata queries at ONE cut.
-    /// This neither opens a transaction nor retains a cut across host turns;
-    /// every error drops it. Pending overlays and authority inference are excluded.
-    pub fn observe_local_batch(
-        &self,
-        queries: Vec<Vec<u8>>,
-        author: Option<&[u8]>,
-        claims: Option<serde_json::Value>,
-    ) -> HostResult<serde_json::Value> {
-        let explicit = author.is_some();
-        let author = self.read_author(author)?;
-        let claims = if explicit {
-            author
-                .map(|author| self::claims(author, claims.unwrap_or(serde_json::Value::Null)))
-                .transpose()?
-        } else {
-            None
-        };
-        Self::observe_local_batch_as(&self.db, queries, author, claims, |db, prepared| {
-            db.local_observation_cut(prepared, author)
-        })
-    }
-
-    fn observe_local_batch_as(
-        db: &Db,
-        queries: Vec<Vec<u8>>,
-        author: Option<AuthorSubject>,
-        claims: Option<Cells>,
-        capture: impl FnOnce(
-            &Db,
-            &crate::db::PreparedQuery,
-        ) -> Result<crate::db::LocalObservationCut, Error>,
-    ) -> HostResult<serde_json::Value> {
-        if queries.is_empty() {
-            return Err("local observation requires queries".into());
-        }
-        let mut prepared = Vec::with_capacity(queries.len());
-        for bytes in queries {
-            let query: Query = postcard::from_bytes(&bytes)?;
-            let mut query = db.prepare_query(&query)?;
-            if let (Some(author), Some(claims)) = (author, &claims) {
-                query = query.with_identity_claims(author, claims.clone());
-            }
-            prepared.push(query);
-        }
-        let cut = capture(db, &prepared[0])?;
-        let mut output = Vec::with_capacity(prepared.len());
-        for query in &prepared {
-            let observed = db.observe_local(&cut, query, false)?;
-            let evidence: Vec<_> = observed.evidence.iter().map(|pair| {
-                let origin = |value: crate::db::AcceptedVersion| serde_json::json!({
-                    "transactionId": TransactionId::from_committed_tx(value.transaction).to_string(),
-                    "position": value.sequence.to_string()
-                });
-                serde_json::json!({"rowId": pair.row.0.to_string(), "state": origin(pair.state), "content": origin(pair.content)})
-            }).collect();
-            let provenance: Vec<_> = observed
-                .provenance
-                .iter()
-                .map(|value| match value {
-                    crate::db::LocalEvidenceProvenance::LocalSubmission => "local-submission",
-                    crate::db::LocalEvidenceProvenance::AuthorityRead => "authority-read",
-                })
-                .collect();
-            output.push(serde_json::json!({"rows": crate::binding_codec::encode_rows(&observed.rows)?,
-                "through": observed.through.to_string(), "evidence": evidence, "provenance": provenance}));
-        }
-        Ok(serde_json::Value::Array(output))
-    }
-
     /// Subscribe to a postcard query. A remote attachment goes upstream on
     /// the next tick.
     pub fn subscribe<O: HostObject>(
@@ -1973,7 +1903,6 @@ impl Binding {
             binding: self.clone(),
             queues,
             kind: LinkKind::Upstream(Some(upstream)),
-            local: RefCell::default(),
         }
     }
 
@@ -1994,7 +1923,6 @@ impl Binding {
                 id: Some(subscriber),
                 identity,
             },
-            local: RefCell::default(),
         })
     }
 
@@ -2279,18 +2207,6 @@ pub struct Link {
     binding: Binding,
     queues: WireQueues,
     kind: LinkKind,
-    local: RefCell<LocalLink>,
-}
-
-#[derive(Default)]
-struct LocalLink {
-    enabled: bool,
-    retired: bool,
-    source: Option<crate::db::LocalSubmissionSource>,
-    port: Option<crate::db::LocalSubmissionPort>,
-    descriptor: Vec<u8>,
-    joiner: crate::db::FrameJoiner,
-    outbound: Vec<Vec<u8>>,
 }
 
 impl Link {
@@ -2307,134 +2223,7 @@ impl Link {
 
     /// Frames to send to the peer, oldest first.
     pub fn take_outbound(&self) -> Vec<Vec<u8>> {
-        let frames: Vec<_> = self.queues.outbound.borrow_mut().drain(..).collect();
-        let mut local = self.local.borrow_mut();
-        if local.enabled && matches!(self.kind, LinkKind::Upstream(Some(_))) {
-            for frame in &frames {
-                match local.joiner.push(frame) {
-                    Ok(Some(crate::db::SyncMessage::Commit { id, .. })) => {
-                        // Capture outside the core tick/Store borrow, from the
-                        // actual pending transaction that emitted these frames.
-                        if local.source.is_none() {
-                            local.source = self.binding.db.local_submission_source().ok();
-                        }
-                        if let Some(source) = &local.source
-                            && let Ok(Some(bytes)) = source.export(crate::db::TxReceipt(id.time.0))
-                        {
-                            if local.outbound.len() < 64 {
-                                local.outbound.push(bytes);
-                            } else {
-                                local.enabled = false;
-                                local.outbound.clear();
-                            }
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(_) => {
-                        local.enabled = false;
-                        local.outbound.clear();
-                    }
-                }
-            }
-        }
-        frames
-    }
-
-    /// Observe with this actual admitted identity/claims/governance. No host
-    /// session token or requested policy context crosses this entrypoint.
-    pub fn observe_local_batch(
-        &self,
-        queries: Vec<Vec<u8>>,
-        expected_claims: Option<serde_json::Value>,
-    ) -> HostResult<serde_json::Value> {
-        if self.local.borrow().retired {
-            return Err(
-                Error::new(ErrorCode::NotObserved, "local observation link retired").into(),
-            );
-        }
-        let LinkKind::Subscriber { id: Some(id), .. } = self.kind else {
-            return Err(Error::new(
-                ErrorCode::NotObserved,
-                "local observation requires an admitted subscriber",
-            )
-            .into());
-        };
-        let (db, identity, claims, _) = self.binding.db.admitted_observation_context(id)?;
-        if let Some(expected) = expected_claims
-            && self::claims(identity, expected)? != claims
-        {
-            return Err(Error::new(
-                ErrorCode::NotObserved,
-                "local observation admission claims changed",
-            )
-            .into());
-        }
-        Binding::observe_local_batch_as(
-            &db,
-            queries,
-            Some(identity),
-            Some(claims),
-            |db, prepared| db.local_observation_cut_for_admitted_session(prepared, id),
-        )
-    }
-
-    /// Privileged browser-local upstream capture; never enable for a network link.
-    pub fn enable_local_submission_source(&self) -> HostResult<()> {
-        if !matches!(self.kind, LinkKind::Upstream(Some(_))) {
-            return Err("local submission source requires an open upstream link".into());
-        }
-        if self.local.borrow().retired {
-            return Err("local submission link retired".into());
-        }
-        self.local.borrow_mut().enabled = true;
-        Ok(())
-    }
-
-    /// Synchronous capability revocation, safe while normal core retirement
-    /// waits for an evaluator pass. Already-dispatched ordinary I/O is untouched.
-    pub fn retire_local_submission_port(&self) {
-        let mut local = self.local.borrow_mut();
-        if let Some(port) = &local.port {
-            port.retire();
-        }
-        local.enabled = false;
-        local.retired = true;
-        local.source = None;
-        local.outbound.clear();
-    }
-
-    /// Drain immediately after take_outbound; send on the private local channel
-    /// before the matching frames. No companion is added to normal wire bytes.
-    pub fn take_local_submission_companions(&self) -> Vec<Vec<u8>> {
-        std::mem::take(&mut self.local.borrow_mut().outbound)
-    }
-
-    /// Privileged local MessagePort ingress, deliberately separate from receive.
-    pub fn attach_local_submission_companion(&self, bytes: &[u8]) -> HostResult<bool> {
-        let LinkKind::Subscriber { id: Some(id), .. } = self.kind else {
-            return Ok(false);
-        };
-        if self.local.borrow().retired || bytes.len() < 88 {
-            return Ok(false);
-        }
-        let mut local = self.local.borrow_mut();
-        if local.port.is_none() {
-            let Ok(port) = self
-                .binding
-                .db
-                .trusted_local_submission_port(id, &bytes[..88])
-            else {
-                return Ok(false);
-            };
-            local.descriptor = bytes[..88].to_vec();
-            local.port = Some(port);
-        }
-        let port = local.port.as_ref().unwrap();
-        if local.descriptor != bytes[..88] {
-            port.retire();
-            return Ok(false);
-        }
-        Ok(self.binding.db.attach_host_local_submission(port, bytes)?)
+        self.queues.outbound.borrow_mut().drain(..).collect()
     }
 
     /// How many frames are waiting to be sent.
@@ -2467,7 +2256,6 @@ impl Link {
 
     /// Detach the link; `false` when already closed.
     pub fn close(&mut self) -> bool {
-        self.retire_local_submission_port();
         match &mut self.kind {
             LinkKind::Upstream(upstream) => upstream
                 .take()

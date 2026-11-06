@@ -1,7 +1,7 @@
 import type { ClientMigrations } from "../client-migrations.js";
 import type { WasmSchema, Value } from "../../drivers/types.js";
 import type { RuntimeSourcesConfig } from "../context.js";
-import type { LocalObservationSnapshot, MutationErrorEvent } from "../client.js";
+import type { MutationErrorEvent } from "../client.js";
 import type { RemoteLinkState } from "../remote-link-state.js";
 import type { LinkStatus } from "../sync-status.js";
 import type { NativeSelfSignedClientProof } from "./native-codec.js";
@@ -530,21 +530,13 @@ export type BrowserFollowerPortRequest =
       binding: InspectorAttachmentBinding;
       leasePort?: MessagePort;
     }
-  /** Privileged local carrier only. Companions are never network wire frames. */
-  | { type: "frames"; frames: Uint8Array[]; localCompanions?: Uint8Array[] }
+  | { type: "frames"; frames: Uint8Array[] }
   /** @internal Trace-only redacted query-coverage progress from a foreground tab. */
   | {
       type: "diagnostic-query-coverage";
       stage: "attach" | "covered";
       peerActivityEpoch: number;
       peerProcessedActivityEpoch: number;
-    }
-  | {
-      type: "observe-local";
-      id: number;
-      queries: readonly string[];
-      sessionClaims: Record<string, unknown>;
-      schema: Uint8Array;
     }
   | { type: "update-auth"; authJson: string; sessionClaims: Record<string, unknown> }
   | { type: "wait-server"; id: number }
@@ -659,7 +651,6 @@ export type BrowserFollowerPortEvent =
   | {
       type: "result";
       id: number;
-      observations?: LocalObservationSnapshot[];
       error?: BrowserRelayError;
       /** Present only on an init reply for a worker-authenticated Inspector peer. */
       inspectorAttachmentPhysicalDbName?: string;

@@ -65,12 +65,12 @@ pub use accepted_read::{
 pub use sync::{
     ACCEPTED, AccessProof, Acting, BuiltOn, CatalogueCoverage, Cell as SyncCell, CellDelta,
     CorpusReader, FirstLoad, FrameJoiner, Image, LocalEvidenceProvenance, LocalObservation,
-    LocalObservationCut, LocalSubmissionExport, LocalSubmissionPort, LocalSubmissionRoute,
-    LocalSubmissionSource, MAX_SEQ, Outcome, PENDING, Pos, ReadSpan, RejectedTransaction,
-    RelationSnapshot, RemoteLinkHint, SerializedReadResult, SubscriberId, SyncMessage, Transport,
-    TransportError, TxName, Upstream, WireBase, WireChunk, WireChunkRef, WireDelta, WireError,
-    WireKind, WireOp, WirePull, WireTarget, WireTransport, WireTransportAdapter, WireWrite,
-    WriteConflict, decode_message, duplex, encode_frames, validate_frame_batch_for_corpus,
+    LocalObservationCut, LocalSubmissionExport, LocalSubmissionRoute, MAX_SEQ, Outcome, PENDING,
+    Pos, ReadSpan, RejectedTransaction, RelationSnapshot, RemoteLinkHint, SerializedReadResult,
+    SubscriberId, SyncMessage, Transport, TransportError, TxName, Upstream, WireBase, WireChunk,
+    WireChunkRef, WireDelta, WireError, WireKind, WireOp, WirePull, WireTarget, WireTransport,
+    WireTransportAdapter, WireWrite, WriteConflict, decode_message, duplex, encode_frames,
+    validate_frame_batch_for_corpus,
 };
 
 /// Shape identity: equal for bindings of one query against one schema.
@@ -492,9 +492,9 @@ pub struct SchemaPublication {
 
 struct Inner {
     conn: Connection,
+    retired: bool,
     scheduler: Option<Rc<dyn TickScheduler>>,
     read_deadlines: Vec<Weak<sync::ReadDeadline>>,
-    retired: bool,
     /// One-way, owner-wide fence for new application mutations during close.
     mutation_admission_closed: bool,
     /// Errors the next ticks fail with, for tests of a tick driver.
@@ -1449,9 +1449,9 @@ impl Db {
             governance: Governance::CurrentOwner,
             inner: Rc::new(Store::new(Inner {
                 conn,
+                retired: false,
                 scheduler: None,
                 read_deadlines: Vec::new(),
-                retired: false,
                 mutation_admission_closed: false,
                 #[cfg(any(test, feature = "testing"))]
                 failing_ticks: VecDeque::new(),

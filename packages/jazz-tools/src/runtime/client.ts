@@ -48,7 +48,15 @@ export type TransactionPreparationIO = Pick<
   | "updateInternal"
   | "upsertInternal"
   | "restoreInternal"
-> & { assertActive(): void };
+> & {
+  assertActive(): void;
+  /** @internal Ordinary policy-checked query outside this transaction's overlay. */
+  queryGlobal(
+    query: string,
+    options?: InternalQueryExecutionOptions,
+    session?: Session,
+  ): Promise<Row[]>;
+};
 
 type RuntimeSerializedSession = Pick<
   Session,
@@ -172,25 +180,7 @@ export type AuthUpdate =
 /**
  * Common interface for the runtime backing `JazzClient`.
  */
-/** @internal Partial accepted local candidates; never SELECT or completeness proof. */
-export type LocalObservationSnapshot = {
-  rows: Row[];
-  through: string;
-  evidence: {
-    rowId: string;
-    state: { transactionId: string; position: string };
-    content: { transactionId: string; position: string };
-  }[];
-  provenance: ("local-submission" | "authority-read")[];
-};
-
 export interface Runtime {
-  /** @internal One shared cut on the actual durable owner, excluding pending prefixes. */
-  observeLocalBatch?(
-    queries: readonly string[],
-    sessionJson?: string | null,
-  ): Promise<LocalObservationSnapshot[]>;
-
   /**
    * Wait until every write committed so far reaches `tier`. `throughOutage`
    * keeps the wait pending through outages until a terminal failure.
@@ -1390,6 +1380,19 @@ export class JazzClient {
               session,
             );
           },
+          queryGlobal: (query, options, session) => {
+            assertActive();
+            const { openTransactionId: _transaction, ...ordinaryOptions } = options ?? {};
+            const reading = this.queryWithoutPreparation(query, ordinaryOptions, session).then(
+              (rows) => {
+                assertActive();
+                return rows;
+              },
+            );
+            acceptedReads.push(reading);
+            reading.catch(() => {});
+            return reading;
+          },
           queryAcceptedInternal: (query, transaction, timeoutMs, session) => {
             assertActive();
             if (transaction !== id)
@@ -1987,20 +1990,6 @@ export class JazzClient {
       : undefined;
     if (preparation) await preparation;
     return this.queryWithoutPreparation(query, options, session);
-  }
-
-  /** @internal Keep the same effective session selection as ordinary queries. */
-  async observeLocalBatch(
-    queries: readonly string[],
-    session?: Session,
-  ): Promise<LocalObservationSnapshot[]> {
-    if (!this.runtime.observeLocalBatch)
-      throw new Error("Runtime does not expose local accepted observations");
-    const effective = session ?? this.resolvedSession;
-    return this.runtime.observeLocalBatch(
-      queries,
-      effective ? JSON.stringify(serializeRuntimeSession(effective)) : undefined,
-    );
   }
 
   private async queryWithoutPreparation(

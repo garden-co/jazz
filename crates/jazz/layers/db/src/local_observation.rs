@@ -4,11 +4,6 @@ use super::*;
 use crate::db::Store;
 use std::rc::Weak;
 
-#[path = "local_submission_port.rs"]
-mod port;
-pub(crate) use port::HostSubmission;
-pub use port::{LocalSubmissionPort, LocalSubmissionSource};
-
 /// Effective operands for this local observation, not a transport capability
 /// or evidence that a caller-selected policy bundle was authenticated.
 #[derive(Clone, Debug, PartialEq)]
@@ -229,9 +224,6 @@ impl Db {
         index: usize,
         message: &SyncMessage,
     ) -> Result<Option<Vec<Option<SubmissionProvenance>>>, Error> {
-        if let Some(provenance) = self.host_local_submission_for(index, message)? {
-            return Ok(Some(provenance));
-        }
         let export = self.inner.borrow().sessions[index].local_submission.clone();
         let Some(export) = export else {
             return Ok(None);
@@ -703,8 +695,6 @@ pub struct LocalObservationCut {
     schema: [u8; 16],
     scope: ObservationScope,
     digest: [u8; 32],
-    read_policy: Option<AuthorSubject>,
-    admitted: Option<SubscriberId>,
     through: u64,
     admission: i64,
 }
@@ -757,29 +747,9 @@ impl Db {
             schema: *schema.jazz.version_id().as_bytes(),
             scope,
             digest,
-            read_policy: Some(author),
-            admitted: None,
             through: inner.served_through().max(evidence_through),
             admission,
         })
-    }
-
-    /// Only core admission chooses this policy mode. In particular, normal
-    /// serving of an own-identity replica uses permissive-local reads; that
-    /// mode is distinct from provenance identity and conveys no SELECT proof.
-    pub(crate) fn local_observation_cut_for_admitted_session(
-        &self,
-        prepared: &PreparedQuery,
-        subscriber: SubscriberId,
-    ) -> Result<LocalObservationCut, Error> {
-        let (handle, author, claims, policy) = self.admitted_observation_context(subscriber)?;
-        let mut cut = handle.local_observation_cut(prepared, Some(author))?;
-        if cut.scope.claims != claims {
-            return Err(unobserved("observation session claims changed"));
-        }
-        cut.read_policy = policy;
-        cut.admitted = Some(subscriber);
-        Ok(cut)
     }
 
     /// Run against an existing local cut with current applicable policies.
@@ -801,19 +771,6 @@ impl Db {
         {
             return Err(unobserved("observation owner was retired or replaced"));
         }
-        if let Some(subscriber) = cut.admitted {
-            let (handle, author, claims, policy) = self.admitted_observation_context(subscriber)?;
-            let inner = handle.inner.borrow();
-            let schema = handle.view.as_ref().unwrap_or(&inner.owner);
-            if author != cut.scope.author
-                || claims != cut.scope.claims
-                || policy != cut.read_policy
-                || schema.jazz.version_id().as_bytes() != &cut.schema
-                || handle.governance.key() != self.governance.key()
-            {
-                return Err(unobserved("local observation session changed"));
-            }
-        }
         let inner = self.inner();
         let schema = prepared.schema.as_ref().unwrap_or(&inner.owner);
         crate::db::accepted_read::check_accepted_shape(prepared, schema)?;
@@ -833,7 +790,7 @@ impl Db {
             settled_only: true,
             ..ReadSpec::new(self.governance.clone())
         };
-        let rows = inner.run(prepared, cut.read_policy, &read)?;
+        let rows = inner.run(prepared, Some(scope.author), &read)?;
         let table = schema.table(&prepared.query.table)?;
         let mut evidence = Vec::with_capacity(rows.len());
         let mut provenance = Vec::with_capacity(rows.len());

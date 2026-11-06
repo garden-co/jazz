@@ -145,7 +145,6 @@ export declare class NapiDb {
   acceptedRead(query: Uint8Array, openTransactionId: string, includeDeleted: boolean, timeoutMs: number, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): Uint8Array | PendingNativeRead
   /** Bind receipt-correlation claims to this client's own admitted identity. */
   setSessionClaims(claims?: Record<string, unknown> | undefined | null): void
-  observeLocalBatch(queries: Array<Uint8Array>, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): JsonValue
   /** Set the claims reads and writes as `author` are checked with. */
   setIdentityClaims(author: Uint8Array, claims?: Record<string, unknown> | undefined | null): void
   /**
@@ -279,12 +278,6 @@ export declare class Transport {
   auxiliaryReceiveTimeoutMs(): number | null
   expireAuxiliaryReceive(): void
   auxiliaryOutboundReady(): boolean
-  observeLocalBatch(queries: Array<Uint8Array>, claims: JsonValue): JsonValue
-  /** Private trusted local-host channel, never enable for a network link. */
-  enableLocalSubmissionSource(): void
-  retireLocalSubmissionPort(): void
-  takeLocalSubmissionCompanions(): Array<Uint8Array>
-  attachLocalSubmissionCompanion(bytes: Uint8Array): boolean
   sendWireFrame(frame: Uint8Array): void
   sendWireFrames(frames: Array<Uint8Array>): void
   recvWireFrames(): Array<Uint8Array>

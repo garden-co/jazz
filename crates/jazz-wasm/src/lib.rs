@@ -418,13 +418,6 @@ struct Host {
 }
 
 impl Host {
-    fn request_tick(&self, wake: &str) {
-        let scheduler = self.tick_scheduler.borrow().clone();
-        if let Some(scheduler) = scheduler {
-            let _ = scheduler.call1(&JsValue::NULL, &JsValue::from_str(wake));
-        }
-    }
-
     fn is_flushed(&self) -> Result<bool, JsValue> {
         #[cfg(target_arch = "wasm32")]
         if let Some(store) = self.store.borrow().as_ref() {
@@ -440,6 +433,13 @@ impl Host {
         }
         #[cfg(not(target_arch = "wasm32"))]
         false
+    }
+
+    fn request_tick(&self, wake: &str) {
+        let scheduler = self.tick_scheduler.borrow().clone();
+        if let Some(scheduler) = scheduler {
+            let _ = scheduler.call1(&JsValue::NULL, &JsValue::from_str(wake));
+        }
     }
 
     /// Resolve once every commit so far is in the browser store's backing
@@ -1443,24 +1443,6 @@ impl WasmDb {
         wasm_read_or_pending(Box::pin(async move { read.await.map_err(host_error) }))
     }
 
-    #[wasm_bindgen(js_name = observeLocalBatch)]
-    pub fn observe_local_batch(
-        &self,
-        queries: js_sys::Array,
-        author: Option<Vec<u8>>,
-        claims: JsValue,
-    ) -> Result<JsValue, JsValue> {
-        let queries = queries
-            .iter()
-            .map(|value| js_sys::Uint8Array::new(&value).to_vec())
-            .collect();
-        let value = self
-            .binding()?
-            .observe_local_batch(queries, author.as_deref(), json(claims)?)
-            .map_err(host_error)?;
-        js_sys::JSON::parse(&value.to_string())
-    }
-
     /// Bind correlation claims to this already-open client's own identity.
     /// This does not grant a different author or enable serving reads.
     #[wasm_bindgen(js_name = setSessionClaims)]
@@ -2015,52 +1997,6 @@ impl WasmTransport {
 
     #[wasm_bindgen(js_name = setAuxiliaryTraceEnabled)]
     pub fn set_auxiliary_trace_enabled(&self, _enabled: bool) {}
-
-    #[wasm_bindgen(js_name = observeLocalBatch)]
-    pub fn observe_local_batch(
-        &self,
-        queries: js_sys::Array,
-        claims: JsValue,
-    ) -> Result<JsValue, JsValue> {
-        let queries = queries
-            .iter()
-            .map(|value| js_sys::Uint8Array::new(&value).to_vec())
-            .collect();
-        let value = self
-            .link
-            .observe_local_batch(queries, Some(json_or_null(claims)?))
-            .map_err(host_error)?;
-        js_sys::JSON::parse(&value.to_string())
-    }
-
-    /// Private trusted local-host channel, never call for network transports.
-    #[wasm_bindgen(js_name = enableLocalSubmissionSource)]
-    pub fn enable_local_submission_source(&self) -> Result<(), JsValue> {
-        self.link
-            .enable_local_submission_source()
-            .map_err(host_error)
-    }
-
-    #[wasm_bindgen(js_name = retireLocalSubmissionPort)]
-    pub fn retire_local_submission_port(&self) {
-        self.link.retire_local_submission_port();
-    }
-
-    #[wasm_bindgen(js_name = takeLocalSubmissionCompanions)]
-    pub fn take_local_submission_companions(&self) -> js_sys::Array {
-        self.link
-            .take_local_submission_companions()
-            .into_iter()
-            .map(|bytes| JsValue::from(js_sys::Uint8Array::from(bytes.as_slice())))
-            .collect()
-    }
-
-    #[wasm_bindgen(js_name = attachLocalSubmissionCompanion)]
-    pub fn attach_local_submission_companion(&self, bytes: Vec<u8>) -> Result<bool, JsValue> {
-        self.link
-            .attach_local_submission_companion(&bytes)
-            .map_err(host_error)
-    }
 
     #[wasm_bindgen(js_name = sendWireFrame)]
     pub fn send_wire_frame(&self, frame: Vec<u8>) {

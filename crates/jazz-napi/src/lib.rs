@@ -1081,52 +1081,6 @@ impl Transport {
         false
     }
 
-    #[napi(js_name = "observeLocalBatch")]
-    pub fn observe_local_batch(
-        &self,
-        queries: Vec<Uint8Array>,
-        claims: JsonValue,
-    ) -> js::Result<JsonValue> {
-        Ok(self
-            .link
-            .observe_local_batch(
-                queries.into_iter().map(|q| q.to_vec()).collect(),
-                Some(claims),
-            )
-            .map_err(host_error)?)
-    }
-
-    /// Private trusted local-host channel, never enable for a network link.
-    #[napi(js_name = "enableLocalSubmissionSource")]
-    pub fn enable_local_submission_source(&self) -> js::Result<()> {
-        Ok(self
-            .link
-            .enable_local_submission_source()
-            .map_err(host_error)?)
-    }
-
-    #[napi(js_name = "retireLocalSubmissionPort")]
-    pub fn retire_local_submission_port(&self) {
-        self.link.retire_local_submission_port();
-    }
-
-    #[napi(js_name = "takeLocalSubmissionCompanions")]
-    pub fn take_local_submission_companions(&self) -> Vec<Uint8Array> {
-        self.link
-            .take_local_submission_companions()
-            .into_iter()
-            .map(Uint8Array::from)
-            .collect()
-    }
-
-    #[napi(js_name = "attachLocalSubmissionCompanion")]
-    pub fn attach_local_submission_companion(&self, bytes: Uint8Array) -> js::Result<bool> {
-        Ok(self
-            .link
-            .attach_local_submission_companion(&bytes)
-            .map_err(host_error)?)
-    }
-
     #[napi(js_name = "sendWireFrame")]
     pub fn send_wire_frame(&self, frame: Uint8Array) {
         self.link.receive([frame.to_vec()]);
@@ -1942,23 +1896,6 @@ impl NapiDb {
             .map_err(host_error)?;
         settle_promises();
         Ok(())
-    }
-
-    #[napi(js_name = "observeLocalBatch")]
-    pub fn observe_local_batch(
-        &self,
-        queries: Vec<Uint8Array>,
-        author: Option<Uint8Array>,
-        claims: Option<JsonValue>,
-    ) -> js::Result<JsonValue> {
-        Ok(self
-            .binding()?
-            .observe_local_batch(
-                queries.into_iter().map(|q| q.to_vec()).collect(),
-                author.as_deref(),
-                claims,
-            )
-            .map_err(host_error)?)
     }
 
     /// Set the claims reads and writes as `author` are checked with.

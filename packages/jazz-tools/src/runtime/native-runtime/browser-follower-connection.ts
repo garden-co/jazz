@@ -1,4 +1,3 @@
-import type { LocalObservationSnapshot } from "../client.js";
 import type { AuthFailureReason } from "../auth-state.js";
 import type {
   BrowserFollowerConnection,
@@ -23,7 +22,7 @@ import { toError } from "../util.js";
 
 type PendingRequest = {
   type: BrowserFollowerPortRpcRequest["type"] | "open-inspector-control";
-  resolve: (observations?: LocalObservationSnapshot[]) => void;
+  resolve: () => void;
   reject: (error: Error) => void;
 };
 
@@ -32,12 +31,6 @@ type BrowserFollowerPortRpcRequest =
       type: "init";
       sessionClaims: Record<string, unknown>;
       inspectorBinding?: InspectorAttachmentBinding;
-    }
-  | {
-      type: "observe-local";
-      queries: readonly string[];
-      sessionClaims: Record<string, unknown>;
-      schema: Uint8Array;
     }
   | { type: "wait-server" }
   | { type: "disconnect" }
@@ -72,7 +65,6 @@ const CALLBACK_SUSPENSION_SLACK_MS = 1_000;
 /** Connects one tab's non-durable in-memory runtime to the elected worker. */
 export class MessagePortBrowserFollowerConnection implements BrowserFollowerConnection {
   private pump: BrowserWorkerTransportPump | null = null;
-  private disposeLocalObservationRelay: (() => void) | null = null;
   private readonly pendingFrames: Uint8Array[][] = [];
   private readonly readyPromise: Promise<void>;
   private inspectorAttachmentPhysicalDbName: string | null = null;
@@ -134,18 +126,6 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     // Establish the accepted peer with this tab's claims before any runtime
     // frames can be delivered. MessagePort ordering keeps the handshake ahead
     // of the pump's first outbound frame.
-    this.disposeLocalObservationRelay =
-      runtime.setLocalObservationRelay?.(async (queries, sessionClaims, schema) => {
-        await this.ready();
-        const value = await this.request<LocalObservationSnapshot[]>({
-          type: "observe-local",
-          queries,
-          sessionClaims,
-          schema,
-        });
-        if (!value) throw new Error("Durable worker omitted local observations");
-        return value;
-      }) ?? null;
     const initialized = this.request({
       type: "init",
       sessionClaims,
@@ -158,24 +138,14 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
         await runtime.retirePeerTransport(transport);
         throw this.failed ?? new Error("Browser follower connection is closed");
       }
-      // This connection was established by the local worker bootstrap. Never
-      // enable companion export on ordinary server/relay transports.
-      transport.enableLocalSubmissionSource?.();
       this.pump = new BrowserWorkerTransportPump(
         runtime,
         transport,
         (frames) => {
           const copies = transferableFrames(frames);
-          const localCompanions = transferableFrames(
-            transport.takeLocalSubmissionCompanions?.() ?? [],
-          );
           this.port.postMessage(
-            {
-              type: "frames",
-              frames: copies,
-              localCompanions,
-            } satisfies BrowserFollowerPortRequest,
-            [...copies, ...localCompanions].map((frame) => frame.buffer),
+            { type: "frames", frames: copies } satisfies BrowserFollowerPortRequest,
+            copies.map((frame) => frame.buffer),
           );
         },
         (error) => {
@@ -244,7 +214,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     let rejectPending: (error: Error) => void = () => {};
     const promise = new Promise<void>((resolve, reject) => {
       rejectPending = reject;
-      this.pending.set(id, { type: "open-inspector-control", resolve: () => resolve(), reject });
+      this.pending.set(id, { type: "open-inspector-control", resolve, reject });
     });
     let controlClosed = false;
     const closeControl = () => {
@@ -335,13 +305,13 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     this.dispose(new Error("Browser follower connection is reconnecting"));
   }
 
-  private request<T = void>(request: BrowserFollowerPortRpcRequest): Promise<T> {
+  private request(request: BrowserFollowerPortRpcRequest): Promise<void> {
     if (this.failed) return Promise.reject(this.failed);
     if (this.closed) return Promise.reject(new Error("Browser follower connection is closed"));
     const id = this.nextRequestId++;
     const message = { ...request, id };
-    const promise = new Promise<T>((resolve, reject) => {
-      this.pending.set(id, { type: request.type, resolve: (value) => resolve(value as T), reject });
+    const promise = new Promise<void>((resolve, reject) => {
+      this.pending.set(id, { type: request.type, resolve, reject });
     });
     this.armWatchdog();
     try {
@@ -509,7 +479,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
         this.peerAuthority = message.peerAuthority;
         this.workerRealmId = message.workerRealmId;
       }
-      pending.resolve(message.observations);
+      pending.resolve();
     }
   };
 
@@ -540,8 +510,6 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
   }
 
   private dispose(error: Error): void {
-    this.disposeLocalObservationRelay?.();
-    this.disposeLocalObservationRelay = null;
     if (this.closed) return;
     this.closed = true;
     this.clearWatchdog();
