@@ -2841,7 +2841,7 @@ export class Db {
   private wrapWriteWait<THandle extends WriteHandle<unknown, unknown>>(handle: THandle): THandle {
     notifyLocalWrite(this);
     return setWriteWaitReadiness(handle, (tier) =>
-      this.ensureReady(tier === "global" ? "server" : "runtime"),
+      this.ensureReady(tier === "global" ? "upload" : "runtime"),
     );
   }
 
