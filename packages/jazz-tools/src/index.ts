@@ -1,5 +1,4 @@
 // Public exports
-export type { E2eeConfig, DeviceInfo, RecoveryStatus } from "./e2ee/lifecycle.js";
 export type { RowAuthor } from "./magic-columns.js";
 export { SYSTEM_ACCOUNT_ID, SYSTEM_ISSUER } from "./magic-columns.js";
 

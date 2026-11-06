@@ -10,7 +10,6 @@ import type { DbAccessContext } from "./db-access-context.js";
 import { Utf8Decoder } from "./utf8.js";
 import { parseSnapshotRef, type SnapshotRef } from "./snapshot-ref.js";
 import { runtimeRandomBytes } from "./runtime-entropy.js";
-import { e2eeForDb, type E2ee } from "../e2ee/lifecycle.js";
 import type { AccountHandle } from "../accounts/state.js";
 import { GracefulShutdownSyncError } from "./graceful-shutdown-error.js";
 import { accountToken, accountRegistry } from "../accounts/enrollment.js";
@@ -55,6 +54,7 @@ import {
   type OpenTransactionId,
   type TxId,
   type PermissionAdvice,
+  type TransactionPreparationIO,
   type StreamingMutationKind,
   type StreamingValueSource,
   validateWriteWaitTimeout,
@@ -127,6 +127,7 @@ import { notifyLocalWrite } from "./local-write-observer.js";
 import { analyzeRelations } from "../codegen/relation-analyzer.js";
 import {
   normalizeBuiltQuery,
+  type BuiltRelation,
   type NormalizedBuiltQuery,
   type NormalizedIncludeSpec,
 } from "./query-builder-shape.js";
@@ -2370,7 +2371,7 @@ export type PreparedTransactionScope = Pick<
 /** @internal Register synchronously; both preparation queues drain before commit. */
 export function prepareDbTransaction(
   transaction: Transaction<"serializable">,
-  prepare: (scope: PreparedTransactionScope) => Promise<void>,
+  prepare: (scope: PreparedTransactionScope, io: TransactionPreparationIO) => Promise<void>,
 ): Promise<void> {
   if (transaction.kind !== "serializable")
     throw new Error("Typed preparation requires a serializable transaction");
@@ -2506,7 +2507,7 @@ export function prepareDbTransaction(
         let callbackFailed = false;
         let callbackError: unknown;
         try {
-          await prepare(scope);
+          await prepare(scope, io);
         } catch (error) {
           callbackFailed = true;
           callbackError = error;
@@ -2559,9 +2560,6 @@ export interface ShutdownOptions {
 }
 
 export class Db {
-  get e2ee(): E2ee {
-    return e2eeForDb(this);
-  }
   private config: DbConfig;
   private readonly runtimeSource: AnyRuntimeSource;
   private readonly authStateStore;
@@ -3802,46 +3800,6 @@ export class Db {
     }
 
     await this.shutdown();
-  }
-
-  /** @internal Partial metadata observations, never authority SELECT or completeness. */
-  async observeE2eeHistory(queries: readonly QueryBuilder<{ id: string }>[]) {
-    this.assertOpen();
-    if (!queries.length || queries.some((query) => !query._table.startsWith("__e2ee_")))
-      throw new Error("E2EE observations require metadata queries");
-    const client = this.getClient(queries[0]!._schema);
-    if (queries.some((query) => this.getClient(query._schema) !== client))
-      throw new Error("E2EE observations require one executing schema handle");
-    // Hydration is ordinary local-first work and may see pending rows. Discard
-    // them. Only the subsequent ONE core cut supplies rows paired with origins.
-    await Promise.all(queries.map((query) => this.all(query, { tier: "local-first" })));
-    this.assertOpen();
-    const plans = queries.map((query) => {
-      const builderJson = query._build();
-      const built = normalizeBuiltQuery(JSON.parse(builderJson));
-      const schema = requireSchemaWithTable(query._schema, built.table);
-      const output = resolveQueryOutputTable(schema, built);
-      const prepared = prepareTransformRead(query, built, output);
-      if (prepared.computedState)
-        throw new Error("Computed E2EE observation queries are not supported");
-      return {
-        query: translateQuery(builderJson, schema, prepared.physical),
-        transform: prepared.transform,
-      };
-    });
-    const snapshots = await client.observeLocalBatch(
-      plans.map((plan) => plan.query),
-      this.getAccessContext()?.readSession,
-    );
-    this.assertOpen();
-    // The synchronous core batch drops its cut on every return/error and opens
-    // no ordinary transaction, so no pending prefix or rollback state escapes.
-    return snapshots.map((snapshot, index) => ({
-      rows: snapshot.rows.map(plans[index]!.transform),
-      settlements: snapshot.evidence,
-      through: snapshot.through,
-      provenance: snapshot.provenance,
-    }));
   }
 
   /**

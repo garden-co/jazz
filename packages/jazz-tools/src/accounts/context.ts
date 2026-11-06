@@ -1,7 +1,6 @@
 import { clientScope } from "../runtime/client-scope.js";
 import { PlatformURL } from "../runtime/platform-url.js";
 import { resolveServerUrl } from "../runtime/url.js";
-import { attachE2ee, type E2eeConfig } from "../e2ee/lifecycle.js";
 import { admitAccountConfig } from "./config-capability.js";
 import type { AccountHandle } from "./state.js";
 import {
@@ -26,7 +25,6 @@ import {
   parseJwtPayload,
 } from "../runtime/client-session.js";
 import { setTrustedReservedSession } from "../runtime/db-internal-session.js";
-import { GracefulShutdownSyncError } from "../runtime/graceful-shutdown-error.js";
 import { AuthRenewalBackoff, authRetryDelay } from "../runtime/auth-renewal-backoff.js";
 import { isRenewableAuthFailure } from "../runtime/auth-state.js";
 
@@ -36,7 +34,6 @@ export type AccountDbConfig = Omit<
   "secret" | "jwtToken" | "cookieSession" | "adminSecret" | "accountId" | "accountRegistryAuthority"
 > & {
   account: AccountHandle;
-  e2ee?: E2eeConfig;
 };
 
 /** One canonical application endpoint for enrollment and context scope validation. */
@@ -81,7 +78,7 @@ function accountContextScope(config: AccountDbConfig): string {
 /** @internal Resolve a handle for a host adapter; never accept copied credentials. */
 export async function resolveAccountRuntimeConfig(config: AccountDbConfig): Promise<DbConfig> {
   const registry = accountContextScope(config);
-  const { account, e2ee: _e2ee, ...runtimeConfig } = config;
+  const { account, ...runtimeConfig } = config;
   const delegatedClaims = delegatedAccountClaims(account, registry);
   if (delegatedClaims) {
     // Signed in through the app's backend: no credential leaves this client.
@@ -159,7 +156,6 @@ export async function createAccountDbWithRuntimeSource(
       throw new AccountAuthError("account_logged_out");
     }
     const opened = db;
-    if (config.e2ee) attachE2ee(opened, account, config.e2ee, config.env ?? "dev");
     let timer: ReturnType<typeof setTimeout> | undefined;
     let refreshing = false;
     let stopped = false;
@@ -230,22 +226,7 @@ export async function createAccountDbWithRuntimeSource(
     // Return a lease the runtime never received before tearing it down.
     await releaseUnusedLease(lease);
     unsubscribe();
-    try {
-      if (db) {
-        db.abortGracefulShutdown();
-        try {
-          await db.shutdown();
-        } catch (cleanupError) {
-          // A cancelled sync wait resets the shutdown gate before disposal.
-          // Only that recoverable phase needs a second, non-graceful close.
-          if (cleanupError instanceof GracefulShutdownSyncError) await db.shutdown();
-        }
-      } else {
-        await runtimeSource.shutdown();
-      }
-    } catch {
-      // The initialization failure remains the caller's actionable error.
-    }
+    if (!db) await runtimeSource.shutdown();
     throw error;
   }
 }

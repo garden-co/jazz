@@ -73,10 +73,10 @@ use super::*;
 
 #[path = "local_observation.rs"]
 mod local_observation;
-pub(super) use local_observation::{HostSubmission, SubmissionProvenance};
+pub(super) use local_observation::SubmissionProvenance;
 pub use local_observation::{
     LocalEvidenceProvenance, LocalObservation, LocalObservationCut, LocalSubmissionExport,
-    LocalSubmissionPort, LocalSubmissionRoute, LocalSubmissionSource,
+    LocalSubmissionRoute,
 };
 
 #[path = "large_delta.rs"]
@@ -2172,7 +2172,6 @@ pub(crate) struct Session {
     claims: Option<BTreeMap<String, Value>>,
     // One opaque local companion; ordinary wire messages cannot construct it.
     local_submission: Option<LocalSubmissionExport>,
-    host_submissions: VecDeque<HostSubmission>,
     /// Per client subscription: its queue, its group, whether it is
     /// windowed, and whether its opening's row ids were sent.
     subs: BTreeMap<u64, (fanout::Queue, Weak<RefCell<fanout::Group>>, bool, bool)>,
@@ -2309,7 +2308,6 @@ impl Session {
             identity,
             claims: None,
             local_submission: None,
-            host_submissions: VecDeque::new(),
             subs: BTreeMap::new(),
             outbox: Vec::new(),
             touched: BTreeSet::new(),
@@ -7592,6 +7590,7 @@ impl Db {
         strict: bool,
         view: &ReadViewSourceSpec,
     ) -> Result<Option<Pos>, Error> {
+        self.ensure_storage_owner_active()?;
         match self
             .fetch_once(
                 prepared,
