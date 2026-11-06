@@ -36,14 +36,15 @@ describe.runIf(chromium)("IndexedDB storage quota", () => {
       secret: generateAuthSecret(),
       driver: { type: "persistent" as const, dbName: uniqueDbName("storage-quota") },
     };
+    // Set before the worker opens IndexedDB: Chromium applies a quota
+    // override to storage already open in a realm only lazily.
+    await quota.overrideStorageQuota(origin, (await usage()) + 4_000_000);
     let db = track(await createDb(config));
     const saved: string[] = [];
     try {
       await db.insert(todos, { title: "before the quota", done: false }).wait({ tier: "local" });
       saved.push("before the quota");
 
-      // Room for a few of the writes below, not all of them.
-      await quota.overrideStorageQuota(origin, (await usage()) + 3_000_000);
       let refusal: unknown = null;
       for (let index = 0; index < 40 && refusal === null; index++) {
         const title = `${index} ${incompressible(400_000)}`;
