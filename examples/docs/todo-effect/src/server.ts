@@ -122,5 +122,10 @@ const { handler, dispose } = HttpRouter.toWebHandler(Routes);
 const server = serve({ fetch: (request) => handler(request, services), port: 3000 }, (info) => {
   console.log(`Server running on http://localhost:${info.port}`);
 });
-process.on("SIGTERM", () => server.close(() => void dispose().then(() => jazzRuntime.dispose())));
+// Close Jazz first: it ends the sync connections that server.close() waits for.
+process.on("SIGTERM", () => {
+  void dispose()
+    .then(() => jazzRuntime.dispose())
+    .then(() => server.close());
+});
 // #endregion quickstart-server-listen-effect
