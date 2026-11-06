@@ -16,6 +16,7 @@ import {
   SchemaDiagram,
 } from "@/components/home/diagrams";
 import { AdopterQuotes } from "@/components/home/adopter-quotes";
+import { HeroPattern } from "@/components/home/hero-pattern";
 import { DeploymentCarousel } from "@/components/home/deployment-carousel";
 import { CodeWindow } from "@/components/home/code-window";
 import { PricingCalculator } from "@/components/home/pricing-calculator";
@@ -25,7 +26,6 @@ import { FrameworkLogos } from "@/components/home/framework-logos";
 import { WalkthroughVideo } from "@/components/showcase/walkthrough-video";
 import { adopterQuotes } from "@/lib/home-quotes";
 import { blogSource } from "@/lib/source";
-import { StippleCanvas, heroPattern } from "@garden-co/design/stipple";
 
 /** The agent quickstart, shown in full in the call to action. */
 const quickstart = readFileSync(join(process.cwd(), "public/quickstart.md"), "utf8").trim();
@@ -346,7 +346,7 @@ export default function HomePage() {
   return (
     <div className="w-full">
       <section className="home-hero h-[80vh] w-full">
-        <StippleCanvas pattern={heroPattern} className="home-hero-pattern" />
+        <HeroPattern className="home-hero-pattern" />
         <div aria-hidden className="home-hero-fade" />
         <div className="mx-auto flex h-full w-full max-w-(--fd-layout-width) items-end px-4 relative">
           <div className="w-full max-w-[48rem] space-y-6 pb-2 sm:space-y-10">
