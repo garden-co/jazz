@@ -159,10 +159,12 @@ pub(super) fn validate_compatible_graph(
                     }
                 })
             };
-            if projection(previous)? != projection(lens)? {
+            let (first, second) = (projection(previous)?, projection(lens)?);
+            if first != second {
                 return Err(DeploymentError::ConflictingPaths {
                     first: vec![previous.source_hash, previous.target_hash],
                     second: vec![lens.source_hash, lens.target_hash],
+                    difference: super::projection_difference(&first, &second),
                 });
             }
         } else {
