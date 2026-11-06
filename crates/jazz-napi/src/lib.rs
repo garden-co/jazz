@@ -866,7 +866,7 @@ impl Write {
             .binding
             .wait_for_write(&self.write, &tier)
             .map_err(host_error)?;
-        if !observe_only.unwrap_or(false) {
+        if !observe_only.unwrap_or(false) && binding_host::wait_claims_rejection(&tier) {
             self.claimed.set(true);
         }
         Ok(host_promise(&env, fate)?)

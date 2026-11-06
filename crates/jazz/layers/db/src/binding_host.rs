@@ -710,6 +710,18 @@ impl Hooks {
     }
 }
 
+/// Whether a wait for a write at `tier` claims reporting the write's
+/// rejection. Only a wait for the authority's verdict can see it: one at
+/// `none` or `local` resolves when the write is committed here, so a
+/// refusal that arrives later (after an offline write reconnects) still
+/// goes to the mutation-error listener.
+pub fn wait_claims_rejection(tier: &str) -> bool {
+    matches!(
+        crate::binding_args::durability_tier(tier),
+        Ok(DurabilityTier::Global)
+    )
+}
+
 /// The public `kind` of a transaction in a mutation-error event.
 pub fn transaction_kind(serializable: bool) -> &'static str {
     if serializable {

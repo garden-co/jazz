@@ -1789,7 +1789,7 @@ fn wait_for_write(
         .get(&TransactionId(tx_id))
         .ok_or_else(|| HostError::Argument("unknown foreground transaction id".to_owned()))?;
     let wait = client.binding.wait_for_write(&tracked.write, tier)?;
-    if !observe_only {
+    if !observe_only && binding_host::wait_claims_rejection(tier) {
         tracked.claimed.set(true);
     }
     client.pending_or_ready(

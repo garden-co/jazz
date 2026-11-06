@@ -30,6 +30,8 @@ import {
   unblockJazzServerTransport,
   createJazzServerTransportControl,
   stopJazzServerTransportControl,
+  downJazzServerTransport,
+  upJazzServerTransport,
 } from "./tests/browser/testing-server-node.js";
 import {
   closeRemoteBrowserDb,
@@ -195,6 +197,9 @@ export default defineConfig({
         jazzServerTransportControlBlock: async (_context, url, direction: "both" | "inbound") =>
           blockJazzServerTransport(url, direction),
         jazzServerTransportControlUnblock: async (_context, url) => unblockJazzServerTransport(url),
+        jazzServerTransportControlDown: async (_context, url) => downJazzServerTransport(url),
+        jazzServerTransportControlUp: async (_context, url, serverUrl?: string) =>
+          upJazzServerTransport(url, serverUrl),
         jazzServerTransportControlStop: async (_context, proxyUrl) =>
           stopJazzServerTransportControl(proxyUrl),
         createRemoteBrowserDb: async ({ context, page }, input) =>
