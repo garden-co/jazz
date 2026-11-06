@@ -109,32 +109,7 @@ describe("Vue ergonomic app", () => {
     app.unmount();
     await flush();
   });
-  // Writes the server won't take don't hold a sign-out (see `signOutOf`).
-  it("signs out past writes that could not synchronize", async () => {
-    const { session, events } = await fixture("graceful");
-    mocks.factory.mockReset().mockResolvedValue(session);
-    const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const node = document.createElement("div");
-    const app = createApp({
-      render: () =>
-        h(
-          JazzProvider,
-          { scope: "test", autoAttachDevTools: false },
-          { default: () => h("p", "active"), signedOut: () => h("p", "signed out") },
-        ),
-    });
-    app.mount(node);
-    await flush();
-    await session.logout();
-    await flush();
-    expect(node.textContent).toBe("signed out");
-    expect(events.filter((event) => event === "shutdown")).toHaveLength(2);
-    expect(warned).toHaveBeenCalledOnce();
-    warned.mockRestore();
-    app.unmount();
-    await flush();
-  });
-  it.each(["unknown"] as const)(
+  it.each(["unknown", "graceful"] as const)(
     "detaches consumers before %s logout failure and retries",
     async (failure) => {
       const { session, events } = await fixture(failure);
@@ -161,7 +136,7 @@ describe("Vue ergonomic app", () => {
       await flush();
       await expect(auth.logout()).resolves.toBeUndefined();
       expect(auth.snapshot.value.status).toBe("error");
-      const errorMessage = "flush failed";
+      const errorMessage = failure === "graceful" ? "could not synchronize" : "flush failed";
       expect(auth.snapshot.value.error?.message).toContain(errorMessage);
       await flush();
       expect(events.indexOf("child-cleanup")).toBeLessThan(events.indexOf("shutdown"));

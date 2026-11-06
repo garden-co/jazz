@@ -332,8 +332,9 @@ describe("signing out with writes the server won't take", () => {
     cleanups.push(async () => warned.mockRestore());
     await (session as unknown as { reauthenticate(): Promise<void> }).reauthenticate();
     expect(session.getSnapshot().status).toBe("signed-out");
+    // In memory, it says so: those writes are gone.
     expect(warned).toHaveBeenCalledWith(
-      expect.stringContaining("writes the server didn't accept"),
+      expect.stringMatching(/dropped 1 write\(s\) the server refused/),
       expect.anything(),
     );
     await session.close();
