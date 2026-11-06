@@ -1015,6 +1015,18 @@ test("React Native docs advertise the supported alpha session and account-handle
     /Remote tiers and structured relation terminal\s+operations remain unavailable/,
   );
   assert.match(readme, /rn-preview-release/);
+  // The README ships inside the npm package, where relative links resolve to nothing.
+  assert.doesNotMatch(readme, /\]\(\.\.?\//, "jazz-rn README links must be absolute");
+  const abi = (
+    await readFile(
+      new URL("../../../crates/jazz-rn/src/native-relay-abi.ts", import.meta.url),
+      "utf8",
+    )
+  ).match(/NATIVE_RELAY_ABI_V1 = (\d+)/)?.[1];
+  assert.ok(abi, "native-relay-abi.ts must export NATIVE_RELAY_ABI_V1");
+  assert.match(readme, new RegExp(`\\(currently\\s+${abi},`), "README must name the current ABI");
+  assert.doesNotMatch(readme, /ABI V1|build pipeline exists/);
+  assert.match(readme, /A release candidate is not on npm/);
   assert.match(
     previewWorkflow,
     /contains\(github\.event\.pull_request\.labels\.\*\.name, 'rn-preview-release'\)/,
