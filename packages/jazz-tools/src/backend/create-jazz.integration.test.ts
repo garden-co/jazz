@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
-import { createServer, request as httpRequest, type Server } from "node:http";
+import { createServer, request as httpRequest, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -242,6 +242,58 @@ describe("createJazz", () => {
     expect(probe.status).toBe(426);
     expect(probe.headers.get("x-jazz-stream")).toBeNull();
   }, 60_000);
+
+  it("leaves a body a parser read before nodeHandler to the app's routes", async () => {
+    const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    cleanups.push(() => jazz.close());
+    // What express.json() does before the app's handlers: read the stream
+    // whole and leave the result on `req.body`.
+    const parse = (req: IncomingMessage & { body?: unknown }, done: () => void) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk: Buffer) => chunks.push(chunk));
+      req.on("end", () => {
+        const raw = Buffer.concat(chunks);
+        req.body = req.headers["content-type"] === "application/json" ? JSON.parse(`${raw}`) : raw;
+        done();
+      });
+    };
+    const server: Server = createServer((req, res) =>
+      parse(req, () =>
+        jazz.nodeHandler(req, res, () => {
+          res.setHeader("content-type", "application/json");
+          res.end(JSON.stringify({ got: (req as { body?: unknown }).body }));
+        }),
+      ),
+    );
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise((resolve) => server.close(resolve)));
+    const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+    const echoed = await fetch(`${origin}/api/echo`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: '{"a":1}',
+    });
+    expect(echoed.status).toBe(200);
+    expect(await echoed.json()).toEqual({ got: { a: 1 } });
+
+    // A Jazz route whose body a JSON parser took fails plainly, naming the
+    // fix, instead of with a locked-stream error.
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const taken = await fetch(`${origin}/jazz/auth/sign-in`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      expect(taken.status).toBe(500);
+      expect(errors.mock.calls.flat().join(" ")).toMatch(
+        /mount jazz.nodeHandler before body parsers/,
+      );
+    } finally {
+      errors.mockRestore();
+    }
+  });
 
   it("signs users in with fromJWT and keeps their account and claims", async () => {
     const { privateKey, publicKey } = await generateKeyPair("ES256", { extractable: true });
