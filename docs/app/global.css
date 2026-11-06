@@ -847,19 +847,19 @@ h6 {
   fill: currentColor;
 }
 .home-carousel-tabs {
-  position: absolute;
   display: flex;
+  flex-wrap: wrap;
   gap: 0.4em;
-  /* Text in step with the diagram's 12-unit labels at any width. */
+  margin-top: var(--spacing-4);
   font-family: var(--font-family-code);
-  font-size: calc(12 / 552 * 100cqw);
+  font-size: 0.8125rem;
 }
 .home-carousel-tab {
   display: inline-flex;
   align-items: center;
   gap: 0.5em;
   min-width: 0;
-  padding: 0 0.6em;
+  padding: 0.35em 0.6em;
   border-radius: 2px;
   color: var(--color-text-secondary);
   white-space: nowrap;
@@ -887,8 +887,6 @@ h6 {
 /* All slides share one grid cell, so the tallest sets the height and they
    cross-fade in place. */
 .home-carousel-slides {
-  position: relative;
-  container-type: inline-size;
   display: grid;
   /* The figure is drawn narrow for phones; cap it so it isn't huge on desktop. */
   max-width: 640px;

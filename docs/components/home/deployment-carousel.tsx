@@ -2,7 +2,15 @@
 
 import { Cloud, Server } from "lucide-react";
 import { siCloudflare, siVercel } from "simple-icons";
-import { type CSSProperties, useEffect, useRef, useState } from "react";
+import {
+  type CSSProperties,
+  type ReactNode,
+  createContext,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import {
   DEPLOYMENT_LAYOUT,
   DeploymentDiagram,
@@ -19,31 +27,51 @@ const shortNames: Record<DeploymentScenario, string> = {
   server: "Single Server",
 };
 
-// Place the switcher over its space in the diagram, in percentages of the
-// diagram, so it scales with it.
-const { width, height, switcher } = DEPLOYMENT_LAYOUT;
-const stageStyle: CSSProperties = { aspectRatio: `${width} / ${height}` };
-const switcherStyle: CSSProperties = {
-  left: `${(switcher.x / width) * 100}%`,
-  top: `${(switcher.y / height) * 100}%`,
-  width: `${(switcher.w / width) * 100}%`,
-  height: `${(switcher.h / height) * 100}%`,
+const stageStyle: CSSProperties = {
+  aspectRatio: `${DEPLOYMENT_LAYOUT.width} / ${DEPLOYMENT_LAYOUT.height}`,
 };
+
+type CarouselState = {
+  active: number;
+  pick: (index: number) => void;
+  setPaused: (paused: boolean) => void;
+  slidesRef: React.RefObject<HTMLDivElement | null>;
+};
+
+const CarouselContext = createContext<CarouselState | null>(null);
+
+function useCarousel() {
+  const state = useContext(CarouselContext);
+  if (!state) throw new Error("DeploymentSlides and DeploymentPicker need a DeploymentCarousel");
+  return state;
+}
+
+/** Hovering or focusing the slides or the picker holds the current scenario. */
+function pauseHandlers(setPaused: (paused: boolean) => void) {
+  return {
+    onMouseEnter: () => setPaused(true),
+    onMouseLeave: () => setPaused(false),
+    onFocus: () => setPaused(true),
+    onBlur: () => setPaused(false),
+  };
+}
 
 /**
  * Fig. 1: the same app deployed four ways, cross-fading from one to the next.
- * It starts once it scrolls into view, stops for good when the reader picks a
- * scenario, and never moves on its own for readers who prefer reduced motion.
+ * Holds the shared state for the slides and the picker, which may sit apart
+ * on the page. It starts once the slides scroll into view, stops for good when
+ * the reader picks a scenario, and never moves on its own for readers who
+ * prefer reduced motion.
  */
-export function DeploymentCarousel() {
+export function DeploymentCarousel({ children }: { children: ReactNode }) {
   const [active, setActive] = useState(0);
   const [visible, setVisible] = useState(false);
   const [paused, setPaused] = useState(false);
   const [picked, setPicked] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
+  const slidesRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    const element = ref.current;
+    const element = slidesRef.current;
     if (!element) return;
     const observer = new IntersectionObserver(([entry]) => setVisible(entry.isIntersecting), {
       threshold: 0.5,
@@ -62,57 +90,70 @@ export function DeploymentCarousel() {
     return () => window.clearInterval(timer);
   }, [visible, paused, picked]);
 
+  const pick = (index: number) => {
+    setActive(index);
+    setPicked(true);
+  };
+
+  return (
+    <CarouselContext.Provider value={{ active, pick, setPaused, slidesRef }}>
+      {children}
+    </CarouselContext.Provider>
+  );
+}
+
+/** The four diagrams, sharing one grid cell so they cross-fade in place. */
+export function DeploymentSlides() {
+  const { active, setPaused, slidesRef } = useCarousel();
   return (
     <div
-      ref={ref}
-      className="home-carousel"
-      onMouseEnter={() => setPaused(true)}
-      onMouseLeave={() => setPaused(false)}
-      onFocus={() => setPaused(true)}
-      onBlur={() => setPaused(false)}
+      ref={slidesRef}
+      className="home-carousel-slides"
+      style={stageStyle}
+      {...pauseHandlers(setPaused)}
     >
-      <div className="home-carousel-slides" style={stageStyle}>
-        {scenarios.map((scenario, index) => (
-          <div
-            key={scenario}
-            id={`deployment-${scenario}`}
-            role="tabpanel"
-            aria-hidden={index !== active}
-            className="home-carousel-slide"
-            data-active={index === active}
-          >
-            <DeploymentDiagram scenario={scenario} />
-          </div>
-        ))}
-        {/* The switcher sits in the space the diagram leaves for it, under
-            "Your own cloud:", and stays put while the diagrams cross-fade. */}
+      {scenarios.map((scenario, index) => (
         <div
-          className="home-carousel-tabs"
-          role="tablist"
-          aria-label="Where Jazz runs"
-          style={switcherStyle}
+          key={scenario}
+          id={`deployment-${scenario}`}
+          role="tabpanel"
+          aria-hidden={index !== active}
+          className="home-carousel-slide"
+          data-active={index === active}
         >
-          {scenarios.map((scenario, index) => (
-            <button
-              key={scenario}
-              type="button"
-              role="tab"
-              aria-selected={index === active}
-              aria-controls={`deployment-${scenario}`}
-              aria-label={deploymentScenarioNames[scenario]}
-              className="home-carousel-tab"
-              onClick={() => {
-                setActive(index);
-                setPicked(true);
-              }}
-            >
-              <ScenarioIcon scenario={scenario} />
-              {shortNames[scenario]}
-              {scenario === "cloudflare" ? <span className="home-carousel-soon">soon</span> : null}
-            </button>
-          ))}
+          <DeploymentDiagram scenario={scenario} />
         </div>
-      </div>
+      ))}
+    </div>
+  );
+}
+
+/** Picks the scenario the slides show. */
+export function DeploymentPicker() {
+  const { active, pick, setPaused } = useCarousel();
+  return (
+    <div
+      className="home-carousel-tabs"
+      role="tablist"
+      aria-label="Where Jazz runs"
+      {...pauseHandlers(setPaused)}
+    >
+      {scenarios.map((scenario, index) => (
+        <button
+          key={scenario}
+          type="button"
+          role="tab"
+          aria-selected={index === active}
+          aria-controls={`deployment-${scenario}`}
+          aria-label={deploymentScenarioNames[scenario]}
+          className="home-carousel-tab"
+          onClick={() => pick(index)}
+        >
+          <ScenarioIcon scenario={scenario} />
+          {shortNames[scenario]}
+          {scenario === "cloudflare" ? <span className="home-carousel-soon">soon</span> : null}
+        </button>
+      ))}
     </div>
   );
 }

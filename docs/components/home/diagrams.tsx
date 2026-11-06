@@ -449,19 +449,17 @@ function cycleDelay(count: number, turn: number, col: number): string {
 }
 
 /**
- * Fig. 1's layout, shared with the carousel so its scenario switcher (HTML,
- * laid over the diagram) lands in the space left for it at the top left.
+ * Fig. 1's size, shared with the carousel so its stage keeps the diagram's
+ * aspect ratio while the slides cross-fade.
  */
 export const DEPLOYMENT_LAYOUT = {
   width: 552,
-  height: 528,
-  switcher: { x: 16, y: 30, w: 520, h: 26 },
+  height: 478,
 };
 
 /**
  * Fig. 1: where Jazz runs, drawn narrow enough for a phone. Your own platform
- * on top (room for the scenario switcher, then the shards and the
- * large-value store in one row), your backend with the jazz core and its /jazz mount behind your
+ * on top (the shards and the large-value store in one row), your backend with the jazz core and its /jazz mount behind your
  * auth, then three clients, getting simpler to the right: the traditional
  * one, a local-first one (web app, native app in turn) and a thin client (web
  * page, backend worker, agent VM in turn). Sync goes through your auth into
@@ -471,26 +469,26 @@ export const DEPLOYMENT_LAYOUT = {
  */
 export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }) {
   const { label, runtime, shard, store } = deploymentScenarios[scenario];
-  const { width: W, height: H, switcher } = DEPLOYMENT_LAYOUT;
+  const { width: W, height: H } = DEPLOYMENT_LAYOUT;
   // The store closes the shard row, as wide as a Vercel Sandbox (one of
   // four, 10 apart) and set off from the shards by a wider gap.
   const storeGap = 16;
   const unit = (520 - storeGap - 3 * 10) / 5;
-  const shardRow = { x: 16, y: 66, w: 4 * unit + 3 * 10, h: 80 };
+  const shardRow = { x: 16, y: 16, w: 4 * unit + 3 * 10, h: 80 };
   const storeBox = { x: 536 - unit, y: shardRow.y, w: unit, h: shardRow.h };
-  const backend = { x: 16, y: 186, w: 484 };
-  const backendBottom = 314;
+  const backend = { x: 16, y: 136, w: 484 };
+  const backendBottom = 264;
   const authH = 24;
-  const api = { x: 32, y: 258, w: 180, h: 44 };
+  const api = { x: 32, y: 208, w: 180, h: 44 };
   // The jazz core above, its mounted /jazz route below the divider, level
   // with the normal API route.
-  const jazz = { x: 224, y: 198, w: 264, h: 104, divider: api.y };
+  const jazz = { x: 224, y: 148, w: 264, h: 104, divider: api.y };
   const cws = [168, 168, 168];
   const colX = [16, 192, 368];
   // The one large-value lane, right of your backend.
   const lane = 512;
   const center = (col: number) => colX[col] + cws[col] / 2;
-  const rowY = 402;
+  const rowY = 352;
   // Shorter to the right, as each kind of client does less itself.
   const clientH = [H - rowY - 6, 98, 76];
   // The traditional client stays; the local-first and thin slots take
@@ -504,14 +502,11 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
   // local files sit inside your backend, on top of the core. Everything else
   // stays where it is in the other variants.
   const single = scenario === "server";
-  const local = { y: 100, h: 76, sqlite: { x: 224, w: 124 }, files: { x: 364, w: 124 } };
+  const local = { y: 50, h: 76, sqlite: { x: 224, w: 124 }, files: { x: 364, w: 124 } };
   // Snug around the local boxes on a single server.
   const backendTop = single ? local.y - 12 : backend.y;
   return (
     <Diagram viewBox={`0 0 ${W} ${H}`} label={label}>
-      <Label x={switcher.x} y={22} tone="ink">
-        Your own cloud:
-      </Label>
       <Frame x={backend.x} y={backendTop} w={backend.w} h={backendBottom - backendTop} tone="ink" />
       <Lines
         x={backend.x + 16}
@@ -569,8 +564,8 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
               points={[
                 // A lone shard spans the row; drop straight into the core.
                 [shard.count === 1 ? 360 : x + sw / 2, shardRow.y + shardRow.h],
-                [shard.count === 1 ? 360 : x + sw / 2, 166],
-                [360, 166],
+                [shard.count === 1 ? 360 : x + sw / 2, 116],
+                [360, 116],
                 [360, jazz.y],
               ]}
               start
@@ -600,8 +595,8 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
           />
           <Wire
             points={[
-              [lane, 388],
-              [colX[1] + cws[1] - 16, 388],
+              [lane, 338],
+              [colX[1] + cws[1] - 16, 338],
               [colX[1] + cws[1] - 16, rowY],
             ]}
             tone="blue"
@@ -659,7 +654,7 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
       />
       <Lines
         x={center(0) + 6}
-        y={354}
+        y={304}
         lines={["manual http", "requests &", "streaming"]}
         step={14}
         className="dg-label dg-fill-ink"
@@ -677,7 +672,7 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
       ))}
       <Lines
         x={(center(1) + center(2)) / 2}
-        y={360}
+        y={310}
         lines={
           single
             ? ["efficient realtime sync"]

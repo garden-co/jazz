@@ -17,7 +17,11 @@ import {
 } from "@/components/home/diagrams";
 import { AdopterQuotes } from "@/components/home/adopter-quotes";
 import { HeroPattern } from "@/components/home/hero-pattern";
-import { DeploymentCarousel } from "@/components/home/deployment-carousel";
+import {
+  DeploymentCarousel,
+  DeploymentPicker,
+  DeploymentSlides,
+} from "@/components/home/deployment-carousel";
 import { CodeWindow } from "@/components/home/code-window";
 import { PricingCalculator } from "@/components/home/pricing-calculator";
 import { jazzTiers } from "@/lib/home-pricing";
@@ -370,21 +374,31 @@ export default function HomePage() {
             id="how-it-works"
             title="One database, from your backend to every client"
           />
-          <div className="home-overview mt-6">
-            <Figure className="home-figure-wide">
-              <DeploymentCarousel />
-            </Figure>
-            <div className="home-facts">
-              {principles.map((item) => (
-                <div key={item.title} className="home-fact">
-                  <Heading level={3}>{item.title}</Heading>
+          <DeploymentCarousel>
+            <div className="home-overview mt-6">
+              <Figure className="home-figure-wide">
+                <DeploymentSlides />
+              </Figure>
+              <div className="home-facts">
+                <div className="home-fact">
+                  <Heading level={3}>Runs in your own cloud</Heading>
                   <Text as="p" display="block" color="secondary" className="mt-2">
-                    {item.body}
+                    Jazz makes use of your platform&apos;s native serverless primitives, sharding
+                    and scaling to zero as needed.
                   </Text>
+                  <DeploymentPicker />
                 </div>
-              ))}
+                {principles.map((item) => (
+                  <div key={item.title} className="home-fact">
+                    <Heading level={3}>{item.title}</Heading>
+                    <Text as="p" display="block" color="secondary" className="mt-2">
+                      {item.body}
+                    </Text>
+                  </div>
+                ))}
+              </div>
             </div>
-          </div>
+          </DeploymentCarousel>
         </div>
       </section>
 
