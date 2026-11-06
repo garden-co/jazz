@@ -1,6 +1,7 @@
-import { JazzProvider, useJazzAuth, useDb } from "./index.js";
+import { JazzProvider, useJazzAuth, useDb, useSyncStatus, type SyncStatus } from "./index.js";
 function Data() {
   useDb();
+  useSyncStatus() satisfies SyncStatus;
   const { logout, retry, reauthenticate, user, status } = useJazzAuth();
   void logout;
   void retry;
