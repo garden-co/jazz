@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import test from "node:test";
 import { createRequire } from "node:module";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { cp, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -683,7 +683,19 @@ test("jazz-rn publishes an Expo config plugin for a New Architecture development
   };
   const configured = withJazzRn(original);
 
-  assert.equal(configured.newArchEnabled, true);
+  // Expo SDK 55+ has no legacy architecture and its config schema rejects a
+  // top-level newArchEnabled, so injecting it fails expo-doctor (rc.3 adopter
+  // finding V13). SDK 54 defaults to the New Architecture on its own.
+  assert.equal(
+    Object.hasOwn(configured, "newArchEnabled"),
+    false,
+    "plugin must not inject newArchEnabled into the Expo config",
+  );
+  assert.equal(
+    withJazzRn({ ...original, newArchEnabled: false }).newArchEnabled,
+    false,
+    "an explicit opt-out stays visible so the native gates can reject it",
+  );
   assert.equal(original.newArchEnabled, undefined, "plugin must not mutate Expo's input config");
   assert.equal(configured.ios, original.ios, "unrelated Expo configuration is preserved");
   assert.equal(packageJson.exports["./app.plugin"], "./app.plugin.js");
@@ -696,6 +708,135 @@ test("jazz-rn publishes an Expo config plugin for a New Architecture development
     "the published package must point install users at its maintained source repository",
   );
   assert.equal(packageJson.bugs.url, "https://github.com/garden-co/jazz/issues");
+});
+
+// Evaluate JazzRn.podspec's top level the way CocoaPods does during
+// autolinking, with Pod stubbed so the Pod::Spec block (payload resolution)
+// does not run. `helper` is the NewArchitectureHelper the host Podfile loaded:
+// "rn081" is React Native 0.81's real helper, "rn082" mirrors 0.82+ (always
+// true), "none" is evaluation outside a React Native Podfile.
+function evaluatePodspecNewArchGate({ helper, podfileProperties, env = {} }) {
+  const installationRoot = mkdtempSync(join(tmpdir(), "jazz-rn-podspec-"));
+  try {
+    if (podfileProperties !== undefined) {
+      writeFileSync(
+        join(installationRoot, "Podfile.properties.json"),
+        JSON.stringify(podfileProperties),
+      );
+    }
+    const rn081Helper = fileURLToPath(
+      new URL(
+        "../../../crates/jazz-rn/node_modules/react-native/scripts/cocoapods/new_architecture.rb",
+        import.meta.url,
+      ),
+    );
+    const podspecPath = fileURLToPath(
+      new URL("../../../crates/jazz-rn/JazzRn.podspec", import.meta.url),
+    );
+    const script = `
+      module Pod
+        class Informative < StandardError; end
+        class Config
+          def self.instance; self; end
+          def self.installation_root; ENV.fetch("JAZZ_RN_TEST_INSTALLATION_ROOT"); end
+        end
+        class Spec
+          def self.new(*); :spec; end
+        end
+      end
+      case ENV.fetch("JAZZ_RN_TEST_HELPER")
+      when "rn081" then require ENV.fetch("JAZZ_RN_TEST_RN081_HELPER")
+      when "rn082" then class NewArchitectureHelper; def self.new_arch_enabled; true; end; end
+      end
+      begin
+        eval(File.read(ENV.fetch("JAZZ_RN_TEST_PODSPEC")), binding, ENV.fetch("JAZZ_RN_TEST_PODSPEC"))
+        puts "loaded"
+      rescue Pod::Informative => error
+        puts "rejected: #{error.message}"
+      end
+    `;
+    return execFileSync("ruby", ["-e", script], {
+      encoding: "utf8",
+      env: {
+        PATH: process.env.PATH,
+        HOME: process.env.HOME,
+        ...env,
+        JAZZ_RN_TEST_HELPER: helper,
+        JAZZ_RN_TEST_RN081_HELPER: rn081Helper,
+        JAZZ_RN_TEST_PODSPEC: podspecPath,
+        JAZZ_RN_TEST_INSTALLATION_ROOT: installationRoot,
+      },
+    }).trim();
+  } finally {
+    rmSync(installationRoot, { recursive: true, force: true });
+  }
+}
+
+test("JazzRn.podspec accepts every New Architecture host autolinking evaluates it in", () => {
+  // Expo SDK 58 (React Native 0.88) prebuild: no newArchEnabled in
+  // Podfile.properties.json, and use_react_native! sets RCT_NEW_ARCH_ENABLED
+  // only after autolinking has evaluated the podspec (rc.3 adopter finding V13).
+  assert.equal(
+    evaluatePodspecNewArchGate({
+      helper: "rn082",
+      podfileProperties: { "expo.jsEngine": "hermes" },
+    }),
+    "loaded",
+  );
+  assert.equal(
+    evaluatePodspecNewArchGate({
+      helper: "rn082",
+      podfileProperties: undefined,
+    }),
+    "loaded",
+    "a bare React Native 0.82+ host has no Podfile.properties.json at all",
+  );
+  // Expo SDK 54 (React Native 0.81): Podfile.properties.json says true and the
+  // Podfile leaves RCT_NEW_ARCH_ENABLED unset.
+  assert.equal(
+    evaluatePodspecNewArchGate({
+      helper: "rn081",
+      podfileProperties: { newArchEnabled: "true" },
+    }),
+    "loaded",
+  );
+  assert.equal(
+    evaluatePodspecNewArchGate({
+      helper: "rn081",
+      podfileProperties: undefined,
+    }),
+    "loaded",
+    "a bare React Native 0.81 host defaults to the New Architecture",
+  );
+  // SDK 54 with newArchEnabled: false: its Podfile sets RCT_NEW_ARCH_ENABLED=0.
+  const legacy = evaluatePodspecNewArchGate({
+    helper: "rn081",
+    podfileProperties: { newArchEnabled: "false" },
+    env: { RCT_NEW_ARCH_ENABLED: "0" },
+  });
+  assert.match(legacy, /^rejected: jazz-rn requires the React Native New Architecture/);
+  assert.match(legacy, /newArchEnabled: false/);
+
+  // Outside a React Native Podfile only explicit signals count.
+  assert.equal(
+    evaluatePodspecNewArchGate({
+      helper: "none",
+      podfileProperties: { newArchEnabled: "true" },
+    }),
+    "loaded",
+  );
+  assert.equal(
+    evaluatePodspecNewArchGate({
+      helper: "none",
+      podfileProperties: undefined,
+      env: { RCT_NEW_ARCH_ENABLED: "1" },
+    }),
+    "loaded",
+  );
+  assert.match(
+    evaluatePodspecNewArchGate({ helper: "none", podfileProperties: {} }),
+    /^rejected: /,
+  );
 });
 
 test("the canonical Expo scaffold documents the account-handle client and direct native-package contract", async () => {
@@ -838,7 +979,8 @@ test("React Native docs advertise the supported alpha session and account-handle
   assert.match(readme, /"plugins": \["jazz-rn"\]/);
   assert.match(readme, /npx expo prebuild --clean/);
   assert.match(readme, /newArchEnabled=true/);
-  assert.match(readme, /RCT_NEW_ARCH_ENABLED=1 bundle exec pod install/);
+  assert.match(readme, /RCT_NEW_ARCH_ENABLED=0/);
+  assert.doesNotMatch(readme, /plugin\s+sets\s+`newArchEnabled`/);
   assert.match(readme, /Expo Go is not\s+supported/);
   assert.match(readme, /supported React Native\s+alpha/);
   assert.match(readme, /`jazz-tools\/react-native`/);
@@ -2485,10 +2627,19 @@ test("relay verification rejects a manifest-sealed XCFramework without its devic
     bytes.writeUInt16LE(machine, 18);
     return bytes;
   };
-  const machObject = (cpu) => {
-    const bytes = Buffer.alloc(8);
+  // A 64-bit Mach-O header plus one LC_BUILD_VERSION (iOS, minos 15.1 unless
+  // given) — what rustc and cc-rs emit for each archive member.
+  const machObject = (cpu, minos = 0x000f0100) => {
+    const bytes = Buffer.alloc(32 + 24);
     bytes.writeUInt32LE(0xfeedfacf, 0);
     bytes.writeUInt32LE(cpu, 4);
+    bytes.writeUInt32LE(1, 16);
+    bytes.writeUInt32LE(24, 20);
+    bytes.writeUInt32LE(0x32, 32);
+    bytes.writeUInt32LE(24, 36);
+    bytes.writeUInt32LE(2, 40);
+    bytes.writeUInt32LE(minos, 44);
+    bytes.writeUInt32LE(0x00120500, 48);
     return bytes;
   };
   const fatMachO = (slices, mutate = () => {}) => {
@@ -2690,6 +2841,44 @@ ${
       [verifier.pathname, "--package-root", packageRoot, "android", "ios"],
       { env: environment, stdio: "pipe" },
     );
+
+    // rc.3 shipped ring and SQLite objects compiled for the Xcode SDK's iOS
+    // (18.5) while apps target 15.1: every object must load on the pinned
+    // deployment target, and every object must declare one.
+    const deviceLibrary = join(iosRoot, "ios-arm64/libjazz_native_relay.a");
+    for (const [object, message] of [
+      [
+        machObject(0x0100000c, 0x00120500),
+        /iOS device relay static library has 1 objects built for a newer iOS than 15\.1: sqlite3\.o \(18\.5\)/,
+      ],
+      [
+        Buffer.concat([machObject(0x0100000c).subarray(0, 16), Buffer.alloc(16)]),
+        /iOS device relay static library has objects without a minimum iOS version: sqlite3\.o/,
+      ],
+    ]) {
+      await writeFile(
+        deviceLibrary,
+        archive([
+          ["device.o", machObject(0x0100000c)],
+          ["sqlite3.o", object],
+        ]),
+      );
+      await writeManifest(iosRoot, join(packageRoot, "ios/jazz-native-relay.manifest.json"));
+      assert.throws(
+        () =>
+          execFileSync(
+            process.execPath,
+            [verifier.pathname, "--package-root", packageRoot, "ios"],
+            {
+              env: environment,
+              stdio: "pipe",
+            },
+          ),
+        message,
+      );
+    }
+    await writeFile(deviceLibrary, artifactBytes("ios-arm64/libjazz_native_relay.a"));
+    await writeManifest(iosRoot, join(packageRoot, "ios/jazz-native-relay.manifest.json"));
 
     await writeFile(
       join(androidRoot, "arm64-v8a/libjazz_native_relay.a"),

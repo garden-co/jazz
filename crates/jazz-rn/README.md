@@ -32,9 +32,11 @@ install-time wiring; they are not a substitute for an installed-device receipt.
 
 `jazz-rn` requires the React Native **New Architecture**. Android Gradle and
 iOS CocoaPods fail early with an install/configuration instruction otherwise.
-For Expo, add `"plugins": ["jazz-rn"]` and run `expo prebuild`; the plugin
-sets `newArchEnabled`. Bare React Native apps must enable the New Architecture
-themselves. This requirement does not make Expo Go capable of loading Jazz.
+For Expo, add `"plugins": ["jazz-rn"]` and run `expo prebuild`. Expo SDK 54
+uses the New Architecture by default (do not set `newArchEnabled: false`), and
+SDK 55+ (React Native 0.82+) has no legacy architecture, so the plugin does not
+touch `newArchEnabled`. Bare React Native 0.81 apps must keep the New
+Architecture enabled themselves. This requirement does not make Expo Go capable of loading Jazz.
 
 The repository runs source/package receipts plus label-gated Android-emulator
 and iOS-simulator installed-device workflows. They prove native admission,
@@ -93,12 +95,13 @@ pnpm add jazz-tools@alpha jazz-rn@alpha
 ```
 
 Then run `npx expo prebuild --clean` and make a development or release build.
-The plugin turns on the New Architecture, and native autolinking registers
+The New Architecture is Expo's default, and native autolinking registers
 `JazzRelayPackage` on Android and the `JazzRn` pod on iOS. Do not use Expo Go:
 it cannot contain the relay module.
 
-Expo Go is not supported. For a bare Android host set `newArchEnabled=true`;
-for iOS install pods with `RCT_NEW_ARCH_ENABLED=1 bundle exec pod install`.
+Expo Go is not supported. React Native 0.82+ always uses the New
+Architecture. For a bare React Native 0.81 host keep `newArchEnabled=true` on
+Android and do not install pods with `RCT_NEW_ARCH_ENABLED=0`.
 Use the `rn-preview-release` pull-request label when a preview must run the
 expensive native artifact and device workflows. Then open a client with
 `createJazzClient` from `jazz-tools/react-native` (in a bare host, pass an
