@@ -262,35 +262,35 @@ type Platform = {
   store: string;
 };
 
-const LARGE_VALUES = ["jazz large", "values"];
+const LARGE_VALUES = ["Jazz large", "values"];
 
 const deploymentScenarios: Record<DeploymentScenario, Platform> = {
   vercel: {
     label:
-      "On Vercel, everything stays in your Vercel account: jazz SQLite shards in Vercel Sandboxes, auto-scaling and hibernating, jazz large value chunks in Vercel Blobs, and the jazz core in your backend's Vercel functions, next to your normal API routes and behind your auth. Web pages, web apps, native apps, backend workers and agent VMs get efficient realtime sync through the mounted /jazz route; traditional clients make manual HTTP requests and streaming.",
+      "On Vercel, everything stays in your Vercel account: Jazz SQLite shards in Vercel Sandboxes, auto-scaling and hibernating, Jazz large value chunks in Vercel Blobs, and the Jazz core in your backend's Vercel functions, next to your normal API routes and behind your auth. Web pages, web apps, native apps, backend workers and agent VMs get efficient realtime sync through the mounted /jazz route; traditional clients make manual HTTP requests and streaming.",
     runtime: ["(Functions)"],
-    shard: { title: ["Sandbox"], inner: ["jazz SQLite", "shard"], count: 4 },
+    shard: { title: ["Sandbox"], inner: ["Jazz SQLite", "shard"], count: 4 },
     store: "Blobs",
   },
   cloudflare: {
     label:
-      "On Cloudflare, coming soon: everything stays in your Cloudflare account: jazz shards in Durable Objects with their own SQLite, auto-scaling and hibernating, jazz large value chunks in R2, and the jazz core in your backend's Workers, next to your normal API routes and behind your auth. Clients get efficient realtime sync through the mounted /jazz route; traditional clients make manual HTTP requests and streaming.",
+      "On Cloudflare, coming soon: everything stays in your Cloudflare account: Jazz shards in Durable Objects with their own SQLite, auto-scaling and hibernating, Jazz large value chunks in R2, and the Jazz core in your backend's Workers, next to your normal API routes and behind your auth. Clients get efficient realtime sync through the mounted /jazz route; traditional clients make manual HTTP requests and streaming.",
     runtime: ["(CF Workers)"],
-    shard: { title: ["durable", "object"], small: true, inner: ["jazz", "shard"], count: 6 },
+    shard: { title: ["Durable", "Object"], small: true, inner: ["Jazz", "shard"], count: 6 },
     store: "R2",
   },
   aws: {
     label:
-      "On AWS, everything stays in your AWS account: jazz SQLite shards on EC2 instances, manually scaled and long running, jazz large value chunks in S3, and the jazz core in your backend on AWS Lambda, next to your normal API routes and behind your auth. Clients get efficient realtime sync through the mounted /jazz route; traditional clients make manual HTTP requests and streaming.",
+      "On AWS, everything stays in your AWS account: Jazz SQLite shards on EC2 instances, manually scaled and long running, Jazz large value chunks in S3, and the Jazz core in your backend on AWS Lambda, next to your normal API routes and behind your auth. Clients get efficient realtime sync through the mounted /jazz route; traditional clients make manual HTTP requests and streaming.",
     runtime: ["(AWS Lambda)"],
-    shard: { title: ["EC2 instance"], inner: ["jazz SQLite", "shard"], count: 2 },
+    shard: { title: ["EC2 instance"], inner: ["Jazz SQLite", "shard"], count: 2 },
     store: "S3",
   },
   server: {
     label:
-      "On a local machine or your own server: a jazz SQLite shard on local disk, jazz large value chunks in local files, and the jazz core in your backend next to your normal API routes, behind your auth. Clients get efficient realtime sync through the mounted /jazz route; traditional clients make manual HTTP requests and streaming.",
+      "On a local machine or your own server: a Jazz SQLite shard on local disk, Jazz large value chunks in local files, and the Jazz core in your backend next to your normal API routes, behind your auth. Clients get efficient realtime sync through the mounted /jazz route; traditional clients make manual HTTP requests and streaming.",
     runtime: ["(local machine", "or your server)"],
-    shard: { title: ["local disk"], inner: ["jazz SQLite", "shard"], count: 1 },
+    shard: { title: ["local disk"], inner: ["Jazz SQLite", "shard"], count: 1 },
     store: "local files",
   },
 };
@@ -381,19 +381,19 @@ const clients: Client[] = [
     inner: ["your own request", "& state handling"],
     tone: "ink",
   },
-  { name: ["web page"], inner: ["thin jazz client"], tone: "blue" },
+  { name: ["web page"], inner: ["thin Jazz client"], tone: "blue" },
   {
     name: ["web app"],
-    inner: ["local-first jazz client", "(SQLite on indexeddb)"],
+    inner: ["local-first Jazz client", "(SQLite on IndexedDB)"],
     tone: "blue",
   },
   {
     name: ["native app"],
-    inner: ["local-first jazz client", "(native SQLite)"],
+    inner: ["local-first Jazz client", "(native SQLite)"],
     tone: "blue",
   },
-  { name: ["backend worker"], inner: ["thin jazz client"], tone: "blue" },
-  { name: ["agent VM"], inner: ["thin jazz client"], tone: "blue" },
+  { name: ["backend worker"], inner: ["thin Jazz client"], tone: "blue" },
+  { name: ["agent VM"], inner: ["thin Jazz client"], tone: "blue" },
 ];
 
 /** A client: its name, then its Jazz client (or your own code) below. */
@@ -459,7 +459,7 @@ export const DEPLOYMENT_LAYOUT = {
 
 /**
  * Fig. 1: where Jazz runs, drawn narrow enough for a phone. Your own platform
- * on top (the shards and the large-value store in one row), your backend with the jazz core and its /jazz mount behind your
+ * on top (the shards and the large-value store in one row), your backend with the Jazz core and its /jazz mount behind your
  * auth, then three clients, getting simpler to the right: the traditional
  * one, a local-first one (web app, native app in turn) and a thin client (web
  * page, backend worker, agent VM in turn). Sync goes through your auth into
@@ -480,7 +480,7 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
   const backendBottom = 264;
   const authH = 24;
   const api = { x: 32, y: 208, w: 180, h: 44 };
-  // The jazz core above, its mounted /jazz route below the divider, level
+  // The Jazz core above, its mounted /jazz route below the divider, level
   // with the normal API route.
   const jazz = { x: 224, y: 148, w: 264, h: 104, divider: api.y };
   const cws = [168, 168, 168];
@@ -511,7 +511,7 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
       <Lines
         x={backend.x + 16}
         y={backendTop + 24}
-        lines={["Your Backend", ...runtime]}
+        lines={["your backend", ...runtime]}
         step={18}
         className="dg-title dg-fill-ink"
       />
@@ -522,7 +522,7 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
             y={local.y}
             h={local.h}
             title={["local SQLite"]}
-            inner={["jazz SQLite", "shard"]}
+            inner={["Jazz SQLite", "shard"]}
           />
           <Nested
             {...local.files}
@@ -618,7 +618,7 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
         textAnchor="middle"
         className="dg-title dg-fill-blue"
       >
-        {single ? "jazz core" : "jazz serverless core"}
+        {single ? "Jazz core" : "Jazz serverless core"}
       </text>
       <text
         x={jazz.x + jazz.w / 2}
