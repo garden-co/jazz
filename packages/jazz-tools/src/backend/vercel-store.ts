@@ -446,6 +446,41 @@ export function resolveCoreBlobs(
   return resolveVercelS3(blobs, options.region ?? "iad1", env);
 }
 
+/**
+ * Refuse a Blob store that another environment claimed, so a preview
+ * deployment given production's store (an API- or CLI-created store is
+ * connected to every environment) fails at start and says why. The core
+ * checks the same claim, but only at its first large value, since no token
+ * reaches it before a request does, and then it only retries in the
+ * background while writes are acknowledged. A store nobody claimed yet, or
+ * a read that fails, is left to the core's own check.
+ */
+export async function refuseOtherEnvironmentsBlobStore(
+  storeId: string,
+  environment: string | undefined,
+  token: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  if (environment === undefined) return;
+  const id = storeId.replace(/^store_/, "").toLowerCase();
+  const response = await fetchImpl(
+    `https://${id}.private.blob.vercel-storage.com/${BLOB_ENVIRONMENT_MARKER}?cache=0`,
+    { headers: { authorization: `Bearer ${token}` } },
+  ).catch(() => undefined);
+  if (!response?.ok) return;
+  const claimed = (await response.text().catch(() => "")).trim();
+  if (claimed && claimed !== environment) {
+    throw new Error(
+      `vercel(): Blob store ${storeId} serves the ${claimed} environment, not ${environment}; ` +
+        "connect a separate Blob store to each environment (a store connected through the API or " +
+        "CLI is connected to all of them)",
+    );
+  }
+}
+
+/** Where a core claims a bucket or Blob store for its environment (jazz-server's `ENVIRONMENT_OBJECT`). */
+const BLOB_ENVIRONMENT_MARKER = ".jazz-environment";
+
 /** The workload an OIDC token names: whoever holds such a token is trusted. */
 export function workloadOf(token: string): TrustedWorkload {
   let claims: { iss?: unknown; aud?: unknown; sub?: unknown };
@@ -602,6 +637,8 @@ export interface OpenVercelCoreOptions {
   sdk?: SandboxSdk;
   version?: string;
   env?: Record<string, string | undefined>;
+  /** Reads the Blob store's environment claim (tests). */
+  fetch?: typeof fetch;
 }
 
 /**
@@ -638,7 +675,8 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   const backendCredential = options.backendCredential ?? functionOidcToken;
   // The core trusts the workload this function's token names, so every
   // instance of this project and environment reaches it, and nothing else.
-  const trust = workloadOf(await backendCredential());
+  const token = await backendCredential();
+  const trust = workloadOf(token);
   // Skipped for a `backendCredential` of your own, which names whatever
   // workload you chose.
   if (!options.backendCredential) refuseOtherEnvironment(trust, env);
@@ -649,6 +687,12 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
       `vercel(): the core's workload ${trust.subject} names no Vercel environment, so its blob store is not claimed for one; make sure no other environment uses that store`,
     );
   }
+  // Read while the core wakes; refused before anything is served.
+  const storeChecked =
+    blobs && "storeId" in blobs
+      ? refuseOtherEnvironmentsBlobStore(blobs.storeId, environmentOf(trust), token, params.fetch)
+      : undefined;
+  void storeChecked?.catch(() => {});
   const script = Buffer.from(startScript(version, tarballUrl, trust, blobs));
 
   /** This instance's recent starts, by id (its script's file name). */
@@ -947,7 +991,14 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   }, KEEPALIVE_MS);
   (keepalive as { unref?: () => void }).unref?.();
 
-  const first = await ensure();
+  let first: Awaited<ReturnType<typeof ensure>>;
+  try {
+    [first] = await Promise.all([ensure(), storeChecked]);
+  } catch (error) {
+    clearInterval(keepalive);
+    void live?.core.close().catch(() => {});
+    throw error;
+  }
   // Clients in this process (the backend's own session) reach the core through
   // an in-process origin, so each of their requests and reconnects wakes it;
   // they go on through the current remote core's own in-process origin, which
