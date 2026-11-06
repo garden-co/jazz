@@ -78,7 +78,8 @@ Each is an explicit "not supported" error:
 ## Upgrading to local-first
 
 Hand the provider a loader for the local-first client. It starts thin, then upgrades in the
-background after the first load. The thin client finishes its writes before it shuts down:
+background after the first load. The session keeps the same `Db`: live queries and listeners carry on, restarting from the
+local-first client's first result, and the thin client's pending writes finish first:
 
 ```tsx
 <JazzProvider client={() => import("jazz-tools/local-first")}>

@@ -5,7 +5,10 @@ import type { AuthMode } from "../runtime/context.js";
 
 export interface AuthStateInfo {
   authMode: AuthMode;
-  user: import("../runtime/context.js").PublicSession["user"] | null;
+  /** The account, as `session.user` in policies. */
+  user: import("../runtime/context.js").PublicSession["user"];
+  /** The exact login, as `session.identity` in policies. */
+  identity: import("../runtime/context.js").PublicSession["identity"] | null;
   claims: Record<string, unknown>;
   error?: AuthFailureReason;
 }
@@ -23,6 +26,7 @@ export function useAuthState(): AuthStateInfo {
   return {
     authMode: state.authMode,
     user: state.session?.user ?? null,
+    identity: state.session?.identity ?? null,
     claims: state.session?.claims ?? EMPTY_CLAIMS,
     error: state.error,
   };

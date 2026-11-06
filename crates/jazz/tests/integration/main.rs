@@ -75,6 +75,8 @@ mod large_value_sync;
 mod large_value_tx_update;
 #[path = "../large_values.rs"]
 mod large_values;
+#[path = "../latest_only_tables.rs"]
+mod latest_only_tables;
 #[path = "../link_identities.rs"]
 mod link_identities;
 #[path = "../local_first_first_load_gate.rs"]
@@ -193,6 +195,8 @@ mod sync_untrusted_clients;
 mod sync_wire_corpus;
 #[path = "../text_merge.rs"]
 mod text_merge;
+#[path = "../text_splices.rs"]
+mod text_splices;
 #[path = "../transaction_commit_kind.rs"]
 mod transaction_commit_kind;
 #[path = "../transaction_handles.rs"]

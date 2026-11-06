@@ -4,7 +4,7 @@ import { app } from "../session-app.js";
 
 export function AuthSessionExamples() {
   const session = useSession();
-  const sessionUser = createMemo(() => session()?.user.account ?? null);
+  const sessionUser = createMemo(() => session()?.user ?? null);
   const ownedTodos = useAll(() => ({
     query: sessionUser() ? app.todos.where({ owner_id: sessionUser()! }) : undefined,
   }));

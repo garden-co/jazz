@@ -177,6 +177,10 @@ export interface JazzServerTransportControl {
   block(): Promise<void>;
   blockInbound(): Promise<void>;
   unblock(): Promise<void>;
+  /** The server goes away: connections close and new ones are refused. */
+  down(): Promise<void>;
+  /** The server is back, at `serverUrl` if given (a restarted front). */
+  up(serverUrl?: string): Promise<void>;
   stop(): Promise<void>;
 }
 
@@ -190,6 +194,8 @@ export async function createJazzServerTransportControl(
     block: () => commands.jazzServerTransportControlBlock(url, "both"),
     blockInbound: () => commands.jazzServerTransportControlBlock(url, "inbound"),
     unblock: () => commands.jazzServerTransportControlUnblock(url),
+    down: () => commands.jazzServerTransportControlDown(url),
+    up: (serverUrl?: string) => commands.jazzServerTransportControlUp(url, serverUrl),
     stop: () => commands.jazzServerTransportControlStop(url),
   };
 }

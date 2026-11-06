@@ -129,3 +129,5 @@ removed columns are omitted.
 - History tables cannot be mutation targets or used on either side of
   `.include()`, `.hopTo()`, or `.gather()`.
 - History queries do not yet support using `base` branches.
+- Tables declared [latest-only](/docs/schemas/defining-tables#latest-only-tables) keep no
+  history and refuse history queries.

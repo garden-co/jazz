@@ -105,6 +105,11 @@ export interface DeployOptions extends CatalogueProjectOptions {
    * Directory containing migration files. Defaults to `<schemaDir>/migrations`.
    */
   migrationsDir?: string;
+  /**
+   * Confirms switching tables of the active schema to latest-only history,
+   * which drops their past versions for good.
+   */
+  allowDroppingHistory?: boolean;
 }
 
 export interface ValidateProjectOptions {
@@ -119,6 +124,16 @@ export interface ValidateProjectResult {
   permissionsFile?: string;
   tableCount: number;
   warnings: string[];
+  /**
+   * How schema.ts relates to the project's committed snapshots:
+   * `snapshotted` when one is of it, `changed` when it differs from every
+   * one (a schema change that needs `migrations create`), `unsnapshotted`
+   * when the project has none yet.
+   */
+  schema: {
+    hash: string;
+    status: "snapshotted" | "changed" | "unsnapshotted";
+  };
 }
 
 interface CompileSchemaOptions {
@@ -146,6 +161,12 @@ interface CreateMigrationOptions {
 type CreateMigrationResult =
   | {
       status: "unchanged";
+    }
+  | {
+      /** The project had no snapshot: the current schema became its first. */
+      status: "initial-snapshot";
+      hash: string;
+      snapshotPath: string;
     }
   | {
       status: "migration-not-required";
@@ -192,13 +213,17 @@ export async function validateProject(
   await validateSchemaAndPermissions(compiled.wasmSchema, compiled.permissions);
   const migrationsDir = resolvedMigrationsDir(options.schemaDir, options.migrationsDir);
   let retired: string[] = [];
+  let schema: ValidateProjectResult["schema"];
   if (options.check) {
     await checkLegacyMigrations(migrationsDir, compiled.wasmSchema);
+    schema = await schemaSnapshotStatus(migrationsDir, compiled.wasmSchema);
   } else {
     retired = await retireLegacyMigrations(migrationsDir, compiled.wasmSchema);
+    schema = await schemaSnapshotStatus(migrationsDir, compiled.wasmSchema);
     await writeLocalClientMigrations(options.schemaDir, migrationsDir);
   }
   return {
+    schema,
     schemaFile: compiled.schemaFile,
     permissionsFile: compiled.permissionsFile,
     tableCount: compiled.schema.tables.length,
@@ -211,6 +236,19 @@ export async function validateProject(
       ).map((diagnostic) => diagnostic.message),
     ],
   };
+}
+
+/** How `schema` relates to the committed snapshots in `migrationsDir`. */
+async function schemaSnapshotStatus(
+  migrationsDir: string,
+  schema: WasmSchema,
+): Promise<ValidateProjectResult["schema"]> {
+  const hash = await computeSchemaHash(schema);
+  const committed = (await new MigrationStorage(migrationsDir).listSnapshots()).filter((entry) =>
+    isCommittedSnapshotFileName(entry.fileName),
+  );
+  if (committed.some((entry) => entry.hash === hash)) return { hash, status: "snapshotted" };
+  return { hash, status: committed.length === 0 ? "unsnapshotted" : "changed" };
 }
 
 export async function compileSchema(options: CompileSchemaOptions): Promise<CompileSchemaResult> {
@@ -865,6 +903,12 @@ async function resolveHistoricalSchemaForCreateMigration(
   );
 }
 
+const NO_BASELINE =
+  "No schema snapshot in migrations/snapshots to diff against. Run `jazz-tools migrations create` " +
+  "without --fromHash/--toHash on the schema.ts your backend runs to snapshot it as the first " +
+  "version. With Jazz Cloud (`remote()`), --server-url and --admin-secret use the schema of the " +
+  "app's latest bundle instead.";
+
 async function loadMigrationBaseline(
   options: CreateMigrationOptions,
   storage: MigrationStorage,
@@ -872,9 +916,7 @@ async function loadMigrationBaseline(
   const local = await loadLatestCommittedSnapshot(storage);
   if (local) return local;
   if (!options.serverUrl) {
-    throw new Error(
-      "No local schema snapshot found. Pass --server-url and --admin-secret to use the schema of the server's latest bundle as the migration baseline.",
-    );
+    throw new Error(NO_BASELINE);
   }
   const appId = requireAppId(options.appId);
   const adminSecret = requireServerValue(options.adminSecret, "adminSecret");
@@ -932,6 +974,21 @@ async function createMigrationUnlocked(
       : currentSchema!;
     shouldWriteCommittedSnapshot = !options.toHash;
   } else {
+    if (!options.serverUrl && !(await loadLatestCommittedSnapshot(storage))) {
+      // The project's first snapshot: there is nothing to diff against yet.
+      const publication = await committedSnapshotPublication(
+        storage,
+        currentSchema!,
+        await nextCommittedSnapshotTimestamp(storage),
+      );
+      if (!publication) throw new Error(NO_BASELINE);
+      await publishMigrationFilesRecoverably(storage, [publication]);
+      return {
+        status: "initial-snapshot",
+        hash: currentSchema!.hash,
+        snapshotPath: publication.finalPath,
+      };
+    }
     fromSchema = await loadMigrationBaseline(options, storage);
     toSchema = currentSchema!;
     shouldWriteCommittedSnapshot = true;
@@ -1177,7 +1234,15 @@ export async function createMigration(
 ): Promise<CreateMigrationResult> {
   const storage = new MigrationStorage(options.migrationsDir);
   await storage.initialize();
-  return withMigrationDirectoryLock(storage, async () => createMigrationUnlocked(options, storage));
+  const result = await withMigrationDirectoryLock(storage, async () =>
+    createMigrationUnlocked(options, storage),
+  );
+  // The app ships migrations/index.ts: what this wrote belongs in it now,
+  // not only after the next `validate`.
+  if (result.status !== "unchanged" && (await hasRootSchema(options.schemaDir))) {
+    await writeLocalClientMigrations(options.schemaDir, options.migrationsDir);
+  }
+  return result;
 }
 
 function isDefinedMigration(value: unknown): value is DefinedMigration {

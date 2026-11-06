@@ -22,7 +22,7 @@ export interface BandChatProps {
 /** Rendered inside the external-auth provider in the Next dashboard. */
 export function BandChat(props: BandChatProps) {
   const session = useSession();
-  const author = session?.user.account;
+  const author = session?.user;
   return author ? <Workspace author={author} {...props} /> : <Loading label="Loading identity…" />;
 }
 

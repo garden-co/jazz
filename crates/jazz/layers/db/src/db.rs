@@ -569,6 +569,19 @@ struct Inner {
     /// Admitted structural schemas with their version ids (hashing a
     /// whole schema is too slow to repeat per session per tick).
     admitted: Vec<(crate::ids::SchemaVersionId, JazzSchema)>,
+    /// [`Inner::retention`], keyed by how many versions were named and
+    /// admitted and the owner's version.
+    retention: RefCell<
+        Option<(
+            (usize, usize, crate::ids::SchemaVersionId),
+            Rc<BTreeSet<String>>,
+        )>,
+    >,
+    /// [`Inner::retention_of`], by version.
+    retention_by_version: RefCell<HashMap<crate::ids::SchemaVersionId, Rc<BTreeSet<String>>>>,
+    /// What the write being applied prunes ([`Inner::writing_under`]):
+    /// `None` goes by the owner's schema.
+    writing: RefCell<Option<Rc<BTreeSet<String>>>>,
     /// Where each admitted version stores its tables and columns.
     names: crate::names::Names,
     views: BTreeMap<SchemaViewId, JazzSchema>,
@@ -1494,6 +1507,9 @@ impl Db {
                     admitted.push((version, config.schema.clone()));
                     admitted
                 },
+                retention: RefCell::default(),
+                retention_by_version: RefCell::default(),
+                writing: RefCell::default(),
                 names,
                 views: BTreeMap::new(),
                 bundles: HashMap::new(),
@@ -2778,6 +2794,7 @@ impl Db {
             let (notify, handle) = self.write_unnotified(&table, |inner, seq| {
                 let edits = inner.chunk_large_cells(&mut op)?;
                 inner.counter_deltas(&mut op)?;
+                inner.derived.extend(edits.derived);
                 inner.pending_nodes.extend(edits.pending_nodes);
                 let applied = inner.apply_as(&op, who, seq);
                 inner.clear_derived();
@@ -4083,8 +4100,42 @@ impl Inner {
         read: &ReadSpec,
     ) -> Result<Compiled, Error> {
         let (policy, claims) = self.read_sessions(prepared, identity);
-        self.read_ctx(prepared, policy.as_ref(), &claims, read)
-            .compile_query(&prepared.query, read.include_deleted)
+        let compiled = self
+            .read_ctx(prepared, policy.as_ref(), &claims, read)
+            .compile_query(&prepared.query, read.include_deleted)?;
+        self.refuse_latest_only_cut(&compiled, read)?;
+        Ok(compiled)
+    }
+
+    /// A read at a past cut (a serializable snapshot, a snapshot reference,
+    /// an explicit seq) needs the versions a latest-only table drops, so it
+    /// is refused rather than answered from another version (SPEC 4 §4.9,
+    /// `INV-HIST-27`). A replica's settled read is not a past cut: it
+    /// reads the superseded version the table keeps.
+    pub(crate) fn refuse_latest_only_cut(
+        &self,
+        compiled: &Compiled,
+        read: &ReadSpec,
+    ) -> Result<(), Error> {
+        let past = read.cut.is_some() && !read.settled_only;
+        if !past && !compiled.versioned {
+            return Ok(());
+        }
+        // The reading schema may predate the deploy that made the table
+        // latest-only: the store's retention decides, not its declaration.
+        match compiled.tables.iter().find(|table| self.latest_only(table)) {
+            Some(stored) => {
+                let name = self
+                    .owner
+                    .by_stored(stored)
+                    .map_or(stored.as_str(), |t| &t.name);
+                Err(unsupported(match past {
+                    true => format!("reading latest-only table `{name}` at a snapshot"),
+                    false => format!("reading the history of latest-only table `{name}`"),
+                }))
+            }
+            None => Ok(()),
+        }
     }
 
     /// The compile context of a read of `prepared` (or of one of its
@@ -5505,14 +5556,17 @@ impl Inner {
         let logical = match inner {
             Value::String(text) => text.as_bytes(),
             Value::Bytes(bytes) => bytes.as_slice(),
-            Value::Large(large) => return self.bind_large(column, large, cells),
+            Value::Large(large) => {
+                self.refuse_latest_only_large(table)?;
+                return self.bind_large(column, large, cells);
+            }
             _ => return Self::bind_value(value),
         };
-        if logical.len() <= jazz_types::large_values::INLINE_VALUE_MAX_BYTES
-            || !crate::large::large_capable(column)
+        if logical.len() <= crate::large::inline_max(column) || !crate::large::large_capable(column)
         {
             return Self::bind_value(value);
         }
+        self.refuse_latest_only_large(table)?;
         let prepared = jazz_types::large_values::prepare(crate::large::kind(column), logical)
             .map_err(|e| rejected(format!("`{}`: {e}", column.name)))?;
         crate::large::store(&self.conn, &self.chunks, &prepared, self.client.is_some())?;
@@ -5521,6 +5575,20 @@ impl Inner {
             &self.chunks,
             &prepared.value_ref,
         )?))
+    }
+
+    /// A chunked value names the version it extends (a delta) or proves
+    /// access through (SPEC 19.4, 19.8), which a latest-only table drops
+    /// (SPEC 4 §4.9), so such a table holds inline values only.
+    fn refuse_latest_only_large(&self, table: &Table) -> Result<(), Error> {
+        if self.latest_only(&table.stored) {
+            return Err(unsupported(format!(
+                "a value over {} bytes in latest-only table `{}`",
+                jazz_types::large_values::INLINE_VALUE_MAX_BYTES,
+                table.name
+            )));
+        }
+        Ok(())
     }
 
     /// A chunked value written by reference: an edit's consolidated tree
@@ -5591,7 +5659,7 @@ impl Inner {
         if let Some(possession) = &self.possession {
             possession.settle.borrow_mut().push(large.root.object_hash);
         }
-        self.large_cell(large)
+        self.large_cell(large, crate::large::inline_max(column))
     }
 
     /// Settle the receipts of the trees the applied commit's cells proved
@@ -5606,14 +5674,33 @@ impl Inner {
         Ok(())
     }
 
-    /// The cell of a chunked value this store holds the chunks for. A value
-    /// an edit shrank to the inline threshold is stored inline, so each
-    /// logical value has exactly one inline cell.
-    pub(crate) fn large_cell(
+    /// The cell of a chunked value received from upstream: always the
+    /// chunked cell. Receiving a descriptor never pulls nodes (SPEC 19.8),
+    /// so one at or under this column's threshold (from a peer under
+    /// another threshold or schema) is not read to inline it; cells are
+    /// store-local, and its first local write stores it canonically.
+    pub(crate) fn received_cell(
         &self,
         large: &jazz_types::large_values::LargeValueRef,
     ) -> Result<Sql, Error> {
-        if large.byte_length <= jazz_types::large_values::INLINE_VALUE_MAX_BYTES as u64 {
+        Ok(Sql::Integer(crate::large::intern(
+            &self.conn,
+            &self.chunks,
+            large,
+        )?))
+    }
+
+    /// The cell of a chunked value this store holds the chunks for, in a
+    /// column whose inline threshold is `inline_max`
+    /// ([`crate::large::inline_max`]). A value an edit shrank to the
+    /// threshold is stored inline, so each logical value has exactly one
+    /// inline cell.
+    pub(crate) fn large_cell(
+        &self,
+        large: &jazz_types::large_values::LargeValueRef,
+        inline_max: usize,
+    ) -> Result<Sql, Error> {
+        if large.byte_length <= inline_max as u64 {
             let bytes = self.chunks.value_bytes(large)?;
             return Ok(crate::large::inline_cell(large.kind, bytes));
         }
@@ -5645,21 +5732,7 @@ impl Inner {
         let Some(column) = table.columns.iter().find(|c| c.name == column) else {
             return Ok(None);
         };
-        let sql = format!(
-            "SELECT {} FROM {} WHERE id = ?1 AND _branch = ?2",
-            quote(&column.stored),
-            quote(&table.stored)
-        );
-        let cell: Option<Sql> = self
-            .conn
-            .cached_row(
-                &sql,
-                rusqlite::params![row.0.as_bytes().to_vec(), key],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(storage)?;
-        match cell {
+        match self.stored_cell(table, row, key, column)? {
             Some(cell) => column_from_sql(column, cell.as_ref(), &self.chunks),
             None => Ok(None),
         }
@@ -5671,13 +5744,24 @@ impl Inner {
     /// write then travels (to the authority, in a pending upload, through
     /// every overlay replay) as that reference instead of the whole value,
     /// and its nodes are pushed as chunks ahead of it.
-    pub(crate) fn chunk_large_cells(&self, op: &mut StagedOp) -> Result<LargeEdits, Error> {
+    ///
+    /// A root update over a chunked value writes the edit that makes it
+    /// ([`Self::whole_write_as_edit`]): an editor that writes its document
+    /// whole on every keystroke costs a few bytes per keystroke, on the wire
+    /// and in history.
+    pub(crate) fn chunk_large_cells(&mut self, op: &mut StagedOp) -> Result<LargeEdits, Error> {
         let mut edits = LargeEdits::default();
-        let (table_name, cells) = match op {
-            StagedOp::Insert(t, c, _)
-            | StagedOp::Update(t, _, c, _)
-            | StagedOp::Upsert(t, _, c, _, _) => (t.clone(), c),
-            StagedOp::Restore(t, _, Some(c), _) => (t.clone(), c),
+        let (table_name, row, cells) = match op {
+            StagedOp::Insert(t, c, _) => (t.clone(), None, c),
+            StagedOp::Update(t, r, c, o) => {
+                let root = matches!(o.target, crate::options::WriteTarget::Root);
+                (t.clone(), root.then_some((*r, o.identity)), c)
+            }
+            StagedOp::Upsert(t, r, c, _, o) => {
+                let root = matches!(o.target, crate::options::WriteTarget::Root);
+                (t.clone(), root.then_some((*r, o.identity)), c)
+            }
+            StagedOp::Restore(t, _, Some(c), _) => (t.clone(), None, c),
             _ => return Ok(edits),
         };
         let schema = self.schema.clone();
@@ -5697,8 +5781,22 @@ impl Inner {
                 Value::Bytes(bytes) => bytes.as_slice(),
                 _ => continue,
             };
-            if logical.len() <= jazz_types::large_values::INLINE_VALUE_MAX_BYTES {
+            if logical.len() <= crate::large::inline_max(column) {
                 continue;
+            }
+            if let Some((row, identity)) = &row {
+                let marks = (self.derived.len(), self.pending_nodes.len());
+                if let Some(edited) =
+                    self.whole_write_as_edit(&table_name, *row, column, logical, *identity)
+                {
+                    // The write carries what the edit made, as any edit's does.
+                    edits.derived.extend(self.derived.drain(marks.0..));
+                    edits
+                        .pending_nodes
+                        .extend(self.pending_nodes.drain(marks.1..));
+                    *value = edited;
+                    continue;
+                }
             }
             let prepared = jazz_types::large_values::prepare(crate::large::kind(column), logical)
                 .map_err(|e| rejected(format!("`{}`: {e}", column.name)))?;
@@ -5757,7 +5855,7 @@ impl Inner {
     /// merged over the write's base. `at` is the branch key and seq the
     /// write lands at.
     fn merged_cells(
-        &self,
+        &mut self,
         table: &Table,
         row: RowUuid,
         held: Option<&[u8]>,
@@ -5772,10 +5870,7 @@ impl Inner {
                 MergeStrategy::Lww => continue,
                 MergeStrategy::Text | MergeStrategy::Markdown | MergeStrategy::Html => {
                     match self.text_merged(table, row, held, at, column, value)? {
-                        Some(merged) if column.nullable() => {
-                            Value::Nullable(Some(Box::new(Value::String(merged))))
-                        }
-                        Some(merged) => Value::String(merged),
+                        Some(merged) => self.merged_text(table, row, held, column, merged)?,
                         None => continue,
                     }
                 }
@@ -5799,6 +5894,60 @@ impl Inner {
             cells.insert(column.name.clone(), merged);
         }
         Ok(cells)
+    }
+
+    /// A text merge's result as the column stores it. Over a chunked held
+    /// value, it is that value with the one splice that makes the merge, so
+    /// the merge costs its epoch a few bytes and travels as an edit, as the
+    /// keystrokes it merges did; any other merge is written whole.
+    fn merged_text(
+        &mut self,
+        table: &Table,
+        row: RowUuid,
+        held: Option<&[u8]>,
+        column: &crate::values::Column,
+        merged: String,
+    ) -> Result<Value, Error> {
+        // A held value this store cannot read here (its chunks not fetched)
+        // leaves the merge whole, as a whole write is left.
+        let edited = match held {
+            Some(held) if merged.len() > crate::large::inline_max(column) => self
+                .stored_cell(table, row, held, column)
+                .ok()
+                .flatten()
+                .and_then(|cell| self.as_edit_of(&table.name, column, cell, merged.as_bytes())),
+            _ => None,
+        };
+        let value = edited.unwrap_or(Value::String(merged));
+        Ok(if column.nullable() {
+            Value::Nullable(Some(Box::new(value)))
+        } else {
+            value
+        })
+    }
+
+    /// A column's stored cell in branch `key` of a row: its SQLite value,
+    /// before chunks are read.
+    fn stored_cell(
+        &self,
+        table: &Table,
+        row: RowUuid,
+        key: &[u8],
+        column: &crate::values::Column,
+    ) -> Result<Option<Sql>, Error> {
+        let sql = format!(
+            "SELECT {} FROM {} WHERE id = ?1 AND _branch = ?2",
+            quote(&column.stored),
+            quote(&table.stored)
+        );
+        self.conn
+            .cached_row(
+                &sql,
+                rusqlite::params![row.0.as_bytes().to_vec(), key],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(storage)
     }
 
     /// A text write merged on the authority (SPEC 4 §4.3): when a version
@@ -6076,6 +6225,138 @@ impl Inner {
         );
         self.exec(&sql, rusqlite::params![id, key])
             .map_err(storage)?;
+        self.prune_history(&table.stored, row, key)
+    }
+
+    /// Whether stored table `stored` may have dropped history: some
+    /// admitted version, or the owner's schema, keeps only its latest
+    /// version (SPEC 4 §4.9). Reads that need history refuse such a table
+    /// and its writes count as blind, even once every bundle that declared
+    /// it so is rolled back: what was pruned stays pruned.
+    pub(crate) fn latest_only(&self, stored: &str) -> bool {
+        self.retention().contains(stored)
+    }
+
+    /// The stored tables that may have dropped history: those any admitted
+    /// version, or the owner's schema, declares latest-only. Cached, keyed
+    /// by what was admitted: a version id names its schema's content.
+    pub(crate) fn retention(&self) -> Rc<BTreeSet<String>> {
+        let key = (self.names.len(), self.admitted.len(), self.owner_version);
+        if let Some((cached, set)) = &*self.retention.borrow()
+            && *cached == key
+        {
+            return set.clone();
+        }
+        let mut latest = (*self.retention_of(self.owner_version)).clone();
+        for (version, _) in &self.admitted {
+            latest.extend(self.retention_of(*version).iter().cloned());
+        }
+        let latest = Rc::new(latest);
+        *self.retention.borrow_mut() = Some((key, latest.clone()));
+        latest
+    }
+
+    /// The stored tables schema `version` declares latest-only: the ones a
+    /// write made under it prunes (SPEC 4 §4.9). The owner's version, and a
+    /// version this store has not admitted, go by the owner's schema.
+    pub(crate) fn retention_of(
+        &self,
+        version: crate::ids::SchemaVersionId,
+    ) -> Rc<BTreeSet<String>> {
+        if let Some(set) = self.retention_by_version.borrow().get(&version) {
+            return set.clone();
+        }
+        let admitted = match (
+            self.admitted.iter().find(|(id, _)| *id == version),
+            self.names.get(&version),
+        ) {
+            (Some((_, jazz)), Some(names)) if version != self.owner_version => Some(
+                jazz.tables()
+                    .iter()
+                    .filter(|table| table.history == jazz_model::schema::HistoryRetention::Latest)
+                    .filter_map(|table| {
+                        names
+                            .tables
+                            .get(&table.name)
+                            .map(|(stored, _)| stored.clone())
+                    })
+                    .collect::<BTreeSet<String>>(),
+            ),
+            _ => None,
+        };
+        let cached = admitted.is_some() || version == self.owner_version;
+        let declared = Rc::new(admitted.unwrap_or_else(|| {
+            self.owner
+                .tables
+                .values()
+                .filter(|table| table.latest_only)
+                .map(|table| table.stored.clone())
+                .collect()
+        }));
+        // A version's content is fixed, but one not admitted yet may be
+        // later: only an admitted version's (or the owner's) is kept.
+        if cached {
+            self.retention_by_version
+                .borrow_mut()
+                .insert(version, declared.clone());
+        }
+        declared
+    }
+
+    /// Whether the write being applied prunes stored table `stored`'s
+    /// history: the schema it was written under declares the table
+    /// latest-only. A session's commit is written under its declared
+    /// version, else its bundle's ([`Inner::writing`]); any other write
+    /// under the owner's schema.
+    pub(crate) fn prunes(&self, stored: &str) -> bool {
+        match &*self.writing.borrow() {
+            Some(set) => set.contains(stored),
+            None => self.retention_of(self.owner_version).contains(stored),
+        }
+    }
+
+    /// Apply what follows as writes made under schema `version` (`None`:
+    /// the owner's), which decides what they prune ([`Inner::prunes`]),
+    /// until [`Inner::restore_writing`] gets back what this returns.
+    pub(crate) fn set_writing(
+        &self,
+        version: Option<crate::ids::SchemaVersionId>,
+    ) -> Option<Rc<BTreeSet<String>>> {
+        let set = version.map(|version| self.retention_of(version));
+        self.writing.replace(set)
+    }
+
+    pub(crate) fn restore_writing(&self, prior: Option<Rc<BTreeSet<String>>>) {
+        *self.writing.borrow_mut() = prior;
+    }
+
+    /// For a latest-only table, drop the row's accepted versions in history
+    /// older than its newest one there (`INV-HIST-26`). That one stays: it
+    /// is the image just superseded, which keyed fanout and a commit's
+    /// write checks read, or on a replica the settled image under its
+    /// pending writes. Pending versions (a writer's, past every accepted
+    /// `_clock`) stay. Through the history table's key, so it touches only
+    /// this row.
+    pub(crate) fn prune_history(
+        &self,
+        stored: &str,
+        row: RowUuid,
+        key: &[u8],
+    ) -> Result<(), Error> {
+        if !self.prunes(stored) {
+            return Ok(());
+        }
+        let history = quote(&format!("{stored}__h"));
+        let pending = Pos::UNSETTLED.t();
+        self.exec(
+            &format!(
+                "DELETE FROM {history} WHERE id = ?1 AND _branch = ?2 AND _writer = X'' \
+                 AND _clock >= 0 AND _clock < (SELECT max(_clock) FROM {history} \
+                 WHERE id = ?1 AND _branch = ?2 AND _writer = X'' AND _clock BETWEEN 0 AND ?3 - 1)"
+            ),
+            rusqlite::params![row.0.as_bytes().to_vec(), key, pending],
+        )
+        .map_err(storage)?;
         Ok(())
     }
 
@@ -8590,11 +8871,14 @@ impl Db {
         mut op: StagedOp,
         mut edits: LargeEdits,
     ) -> Result<(), Error> {
+        // A whole write over a chunked value becomes its edit of the value
+        // the batch sees: its earlier writes applied, no other batch's.
+        let chunked = self.in_overlay(id, None, |inner, _| inner.chunk_large_cells(&mut op))?;
         let marks = {
             let mut inner = self.inner.staging();
             inner.require_mutation_admission()?;
             inner.schema = self.view.clone().unwrap_or_else(|| inner.owner.clone());
-            let chunked = inner.chunk_large_cells(&mut op)?;
+            edits.derived.extend(chunked.derived);
             edits.pending_nodes.extend(chunked.pending_nodes);
             let batch = inner
                 .batches

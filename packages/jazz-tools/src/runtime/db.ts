@@ -133,6 +133,7 @@ import {
 } from "./connection-manager/index.js";
 import { toError } from "./util.js";
 import { upgradeDbToLocalFirst, type LocalFirstLoader } from "./local-first-upgrade.js";
+import { DbReplacedError, type DbReplacedReason } from "./db-replaced-error.js";
 
 type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
 type AnyRuntimeSource = RuntimeSource<any>;
@@ -380,6 +381,62 @@ export type SubscriptionHandle = (() => void) & {
 
 const dbSubscriptionSources = new WeakMap<Db, DbSubscriptionSource>();
 
+/**
+ * What a Db hands to its successor after the local-first upgrade: everything
+ * an app or framework calls. Its shutdown, and the internals its own runtime
+ * needs to finish uploading, stay with it.
+ */
+const FORWARDED_TO_SUCCESSOR = [
+  "allFromInspectorAttachment",
+  "subscribeFromInspectorAttachment",
+  "currentRuntime",
+  "prefetchRuntimeQueries",
+  "refreshAccountAuth",
+  "updateAuthToken",
+  "updateCookieSession",
+  "getAuthState",
+  "getLocalFirstIdentityProof",
+  "onAuthChanged",
+  "onMutationError",
+  "textAnchors",
+  "getSyncStatus",
+  "waitForSync",
+  "getConfig",
+  "setDevMode",
+  "disconnect",
+  "reconnect",
+  "getActiveQuerySubscriptions",
+  "onActiveQuerySubscriptionsChange",
+  "getRuntimeSchema",
+  "openInspectorControlPort",
+  "insert",
+  "insertStreaming",
+  "updateStreaming",
+  "upsertStreaming",
+  "restore",
+  "upsert",
+  "update",
+  "delete",
+  "canInsert",
+  "canRead",
+  "canUpdate",
+  "canDelete",
+  "createTransaction",
+  "captureSnapshot",
+  "beginTransaction",
+  "beginSerializableTransaction",
+  "transaction",
+  "serializableTransaction",
+  "upgradeToLocalFirst",
+  "deleteClientStorage",
+  "logout",
+  "all",
+  "allInternal",
+  "one",
+  "subscribe",
+  "subscribeDelta",
+] as const;
+
 /** @internal Retrieve the incremental source associated with a public Db. */
 export function getDbSubscriptionSource(db: Db): DbSubscriptionSource {
   const source = dbSubscriptionSources.get(db);
@@ -406,8 +463,29 @@ export interface UpdateOptions extends TimestampOverrideOptions {
   base?: BranchBase;
 }
 
-type TypedUpdateOptionsWithDiffs<TReplacements extends object, TDiffs> = UpdateOptions & {
+/** `update` options, with `editedFrom` for the columns `TReplacements` writes. */
+export type UpdateEditOptions<TReplacements extends object> = UpdateOptions & {
+  /**
+   * For text-merge columns written whole by an editor: the value each was
+   * edited from, which the editor last showed or wrote. When the column
+   * holds a newer value (a merge that reached this store before the editor
+   * showed it), the write is merged over it instead of undoing it. A column
+   * left `undefined` here is written as usual.
+   */
+  editedFrom?: { readonly [TColumn in keyof TReplacements]?: string };
+};
+
+type TypedUpdateOptionsWithDiffs<
+  TReplacements extends object,
+  TDiffs,
+> = UpdateEditOptions<TReplacements> & {
   applyDiffs?: TDiffs & { [TColumn in keyof TReplacements]?: never };
+};
+
+/** The options an untyped `update` call is lowered from. */
+type LoweredUpdateOptions = UpdateOptions & {
+  applyDiffs?: object;
+  editedFrom?: { readonly [column: string]: string | undefined };
 };
 
 export interface DeleteOptions extends TimestampOverrideOptions {
@@ -734,6 +812,12 @@ type WireLargeValueUpdate =
       kind: "json_set";
       column: string;
       edits: Array<{ at: string; value: unknown }>;
+    }
+  | {
+      kind: "text_edit";
+      column: string;
+      text: string;
+      edited_from: string;
     };
 
 function isPartialLargeValueUpdate(value: unknown): value is Record<string, unknown> {
@@ -759,6 +843,58 @@ function requirePageRange(from: number, to: number, column: string): void {
   if (from > to) {
     throw new Error(`Large-value page for "${column}" must have from <= to.`);
   }
+}
+
+/**
+ * An `update` call's replacements and wire descriptors: its `applyDiffs`,
+ * and each `editedFrom` column's replacement as a text edit of that value.
+ */
+function lowerUpdate(
+  table: TableProxy<any, any, any, any, any>,
+  data: Record<string, unknown>,
+  options: LoweredUpdateOptions | undefined,
+): { replacements: Record<string, unknown>; descriptors: WireLargeValueUpdate[] } {
+  const descriptors = lowerApplyDiffs(table, data, options?.applyDiffs);
+  const editedFrom = options?.editedFrom;
+  if (editedFrom === undefined) {
+    rejectIncompleteDependencies(table, data, Object.keys(options?.applyDiffs ?? {}));
+    return { replacements: data, descriptors };
+  }
+  if (typeof editedFrom !== "object" || editedFrom === null || Array.isArray(editedFrom)) {
+    throw new Error("update option editedFrom must be an object keyed by column name.");
+  }
+  const replacements = { ...data };
+  const edited: string[] = [];
+  for (const [column, from] of Object.entries(editedFrom)) {
+    if (from === undefined) continue;
+    const transform = table._columnTransforms?.[column];
+    if (transform && !transform.computed) {
+      throw new Error(
+        `update option editedFrom is not supported yet on "${column}", which has a transform.`,
+      );
+    }
+    const text = replacements[column];
+    if (typeof text !== "string" || typeof from !== "string") {
+      throw new Error(
+        `update option editedFrom.${column} needs a string, and a string replacement for "${column}".`,
+      );
+    }
+    delete replacements[column];
+    edited.push(column);
+    descriptors.push({ kind: "text_edit", column, text, edited_from: from });
+  }
+  rejectIncompleteDependencies(table, replacements, [
+    ...Object.keys(options?.applyDiffs ?? {}),
+    ...edited,
+  ]);
+  return { replacements, descriptors };
+}
+
+/** `options` without `editedFrom`, which {@link lowerUpdate} turned into descriptors. */
+function withoutEditedFrom(options: LoweredUpdateOptions | undefined) {
+  if (options?.editedFrom === undefined) return options;
+  const { editedFrom: _, ...rest } = options;
+  return rest;
 }
 
 /** Validate an `update` call's `applyDiffs` option and lower it to wire descriptors. */
@@ -2100,54 +2236,47 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     table: TableProxy<T, Init>,
     id: string,
     data: Partial<Init>,
-    options?: UpdateOptions,
+    options?: UpdateEditOptions<Partial<Init>>,
   ): void;
   update(
     table: TableProxy<any, any, any, any, any>,
     id: string,
     data: Record<string, unknown>,
-    options?: UpdateOptions & { applyDiffs?: object },
+    options?: LoweredUpdateOptions,
   ): void {
     assertWritableTable(table);
     this.bindTable(table);
-    const descriptors = lowerApplyDiffs(table, data, options?.applyDiffs);
-    rejectIncompleteDependencies(table, data, Object.keys(options?.applyDiffs ?? {}));
+    const { replacements, descriptors } = lowerUpdate(table, data, options);
+    options = withoutEditedFrom(options);
     const client = this.resolveClient(table._schema);
     const { openTransactionId, session, attribution } = this.requireBinding("update");
     const normalizedOptions = normalizeViewOptions(table._schema, table._table, options);
-    this.prepareMutation(
-      table,
-      id,
-      data as Record<string, unknown>,
-      "Update",
-      options,
-      (updates) => {
-        if (descriptors.length > 0) {
-          client.updateLargeValuesInternal(
-            table._table,
-            id,
-            updates,
-            descriptors,
-            normalizedOptions?.updatedAt,
-            session,
-            attribution,
-            openTransactionId,
-            normalizedOptions?.branch,
-          );
-          return;
-        }
-        client.updateInternal(
+    this.prepareMutation(table, id, replacements, "Update", options, (updates) => {
+      if (descriptors.length > 0) {
+        client.updateLargeValuesInternal(
           table._table,
           id,
           updates,
+          descriptors,
           normalizedOptions?.updatedAt,
           session,
           attribution,
           openTransactionId,
           normalizedOptions?.branch,
         );
-      },
-    );
+        return;
+      }
+      client.updateInternal(
+        table._table,
+        id,
+        updates,
+        normalizedOptions?.updatedAt,
+        session,
+        attribution,
+        openTransactionId,
+        normalizedOptions?.branch,
+      );
+    });
   }
 
   private prepareMutation(
@@ -2342,6 +2471,14 @@ export class Db {
   private readonly localFirstRenewals = new AuthRenewalBackoff();
   private localFirstRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private shutdownPromise: Promise<void> | null = null;
+  /** Set once the session that owned this Db moved on to another one. */
+  private replaced: DbReplacedError | null = null;
+  /** Ends each live subscription with a terminal error. */
+  private readonly liveSubscriptionEnders = new Set<(error: Error) => void>();
+  /** The Db this one hands its work to after the local-first upgrade. */
+  private successor: Db | null = null;
+  /** Queries and listeners that move to the successor with the upgrade. */
+  private readonly movable = new Set<{ move(next: Db): void }>();
   private readonly shutdownAbort = new AbortController();
   private syncStatusSnapshot: SyncStatus | null = null;
   private readonly activeQuerySubscriptionTraces = new Map<
@@ -2714,9 +2851,12 @@ export class Db {
     return null;
   }
 
-  private handleMutationError(event: MutationErrorEvent): void {
+  private handleMutationError(event: MutationErrorEvent, logged = false): void {
+    // A write this Db took before the upgrade, rejected while it uploads:
+    // the app's listeners are on the successor now.
+    if (this.successor) return this.successor.handleMutationError(event, logged);
     if (this.mutationErrorListeners.size === 0) {
-      console.error("Unhandled Jazz mutation error", event);
+      if (!logged) console.error("Unhandled Jazz mutation error", event);
       this.pendingMutationErrorEvents.push(event);
       return;
     }
@@ -2727,6 +2867,16 @@ export class Db {
 
   /** @internal Refresh only through the immutable handle that owns this context. */
   async refreshAccountAuth(account: AccountHandle): Promise<string> {
+    return this.refreshOwnAccountAuth(account);
+  }
+
+  /**
+   * @internal Renew this Db's own runtime's credential. Its account context
+   * calls this rather than {@link refreshAccountAuth}, which after the
+   * local-first upgrade renews the successor: the thin runtime still needs
+   * its own credential to finish uploading.
+   */
+  async refreshOwnAccountAuth(account: AccountHandle): Promise<string> {
     assertAccountConfig(this.config);
     const current = getDbInternalSession(this);
     if (
@@ -2782,10 +2932,47 @@ export class Db {
     return this.mintLocalFirstToken(this._localFirstSecret, audience, ttl);
   }
 
+  /** @internal This Db's own runtime's auth state changes, which never move to a successor. */
+  onOwnAuthChanged(listener: (state: AuthState) => void): () => void {
+    return this.authStateStore.onChange((state) => listener(state));
+  }
+
   onAuthChanged(listener: (state: AuthState) => void): () => void {
-    return this.authStateStore.onChange((state) => {
-      listener(state);
-    });
+    return this.registerMovable((db) =>
+      db.authStateStore.onChange((state) => {
+        listener(state);
+      }),
+    );
+  }
+
+  /**
+   * Register something on this Db that moves to its successor when the
+   * session upgrades it to the local-first client, so code holding the
+   * returned handle keeps hearing from whichever Db does the work.
+   */
+  private registerMovable(
+    register: (db: Db) => () => void,
+    // Register again on this Db rather than on its successor: for what this
+    // Db answers itself after the upgrade (its sync status covers the writes
+    // its own runtime is still uploading).
+    reregisterHere = false,
+  ): () => void {
+    let detach = register(this);
+    let closed = false;
+    const entry = {
+      move: (next: Db) => {
+        if (closed) return;
+        detach();
+        detach = reregisterHere ? register(this) : next.registerMovable(register);
+      },
+    };
+    this.movable.add(entry);
+    return () => {
+      if (closed) return;
+      closed = true;
+      this.movable.delete(entry);
+      detach();
+    };
   }
 
   /**
@@ -2795,13 +2982,16 @@ export class Db {
    * @returns an unsubscribe callback
    */
   onMutationError(listener: (event: MutationErrorEvent) => void): () => void {
-    this.mutationErrorListeners.add(listener);
-    while (this.pendingMutationErrorEvents.length > 0) {
-      listener(this.pendingMutationErrorEvents.shift()!);
-    }
-    return () => {
-      this.mutationErrorListeners.delete(listener);
-    };
+    if (this.replaced) throw this.replaced;
+    return this.registerMovable((db) => {
+      db.mutationErrorListeners.add(listener);
+      while (db.pendingMutationErrorEvents.length > 0) {
+        listener(db.pendingMutationErrorEvents.shift()!);
+      }
+      return () => {
+        db.mutationErrorListeners.delete(listener);
+      };
+    });
   }
 
   /**
@@ -2834,6 +3024,26 @@ export class Db {
    * @returns an unsubscribe callback
    */
   onSyncStatusChange(listener: (status: SyncStatus) => void): () => void {
+    let last = this.getSyncStatus();
+    const deliver = (status: SyncStatus) => {
+      if (status === last || sameSyncStatus(status, last)) return;
+      last = status;
+      listener(status);
+    };
+    return this.registerMovable((db) => {
+      const stop = db.syncStatusChangeRegistration(deliver);
+      // Moved at the upgrade: the status now covers both runtimes.
+      if (db.successor) deliver(db.getSyncStatus());
+      return stop;
+    }, true);
+  }
+
+  /** How this Db reports sync status changes: its own, or combined with its successor's. */
+  private syncStatusChangeRegistration(listener: (status: SyncStatus) => void): () => void {
+    return this.onSyncStatusChangeHere(listener);
+  }
+
+  private onSyncStatusChangeHere(listener: (status: SyncStatus) => void): () => void {
     const subscription = new AbortController();
     const end = () => subscription.abort();
     this.shutdownAbort.signal.addEventListener("abort", end, { once: true });
@@ -2874,7 +3084,9 @@ export class Db {
     signal?.addEventListener("abort", forward, { once: true });
     // Shutdown ends the wait instead of leaving it parked on a closed runtime.
     const shutdown = () => control.abort(new Error("Db was shut down"));
-    this.shutdownAbort.signal.addEventListener("abort", shutdown, { once: true });
+    this.shutdownAbort.signal.addEventListener("abort", shutdown, {
+      once: true,
+    });
     const timer =
       timeoutMs === undefined
         ? undefined
@@ -2920,6 +3132,7 @@ export class Db {
       throw new Error("Cannot disconnect a Db that is shutting down.");
     }
 
+    this.offlineRequested = true;
     await this.connection.disconnect();
   }
 
@@ -2934,6 +3147,7 @@ export class Db {
       throw new Error("Cannot reconnect a Db that is shutting down.");
     }
 
+    this.offlineRequested = false;
     await this.connection.reconnect();
   }
 
@@ -2950,11 +3164,13 @@ export class Db {
    * @internal
    */
   onActiveQuerySubscriptionsChange(listener: ActiveQuerySubscriptionTraceListener): () => void {
-    this.activeQuerySubscriptionTraceListeners.add(listener);
-    listener(this.getActiveQuerySubscriptions());
-    return () => {
-      this.activeQuerySubscriptionTraceListeners.delete(listener);
-    };
+    return this.registerMovable((db) => {
+      db.activeQuerySubscriptionTraceListeners.add(listener);
+      listener(db.getActiveQuerySubscriptions());
+      return () => {
+        db.activeQuerySubscriptionTraceListeners.delete(listener);
+      };
+    });
   }
 
   /**
@@ -3347,21 +3563,21 @@ export class Db {
     table: TableProxy<T, Init>,
     id: string,
     data: Partial<Init>,
-    options?: UpdateOptions,
+    options?: UpdateEditOptions<Partial<Init>>,
   ): WriteHandle;
   update(
     table: TableProxy<any, any, any, any, any>,
     id: string,
     data: Record<string, unknown>,
-    options?: UpdateOptions & { applyDiffs?: object },
+    options?: LoweredUpdateOptions,
   ): WriteHandle {
     assertWritableTable(table);
     const client = this.getClient(table._schema);
-    const descriptors = lowerApplyDiffs(table, data, options?.applyDiffs);
-    rejectIncompleteDependencies(table, data, Object.keys(options?.applyDiffs ?? {}));
+    const { replacements, descriptors } = lowerUpdate(table, data, options);
+    options = withoutEditedFrom(options);
     const context = this.getAccessContext();
     if (descriptors.length > 0) {
-      return this.prepareMutation(table, id, data, "Update", options, (updates) =>
+      return this.prepareMutation(table, id, replacements, "Update", options, (updates) =>
         client.updateLargeValues(
           table._table,
           id,
@@ -3710,8 +3926,51 @@ export class Db {
     options?: InternalDbQueryOptions,
     session?: Session,
   ): SubscriptionHandle {
+    if (this.replaced) throw this.replaced;
     const { onDelta, onError } =
       typeof callbacks === "function" ? { onDelta: callbacks, onError: undefined } : callbacks;
+    let ready: Promise<void> | undefined;
+    let first = true;
+    const stop = this.registerMovable((db) => {
+      // On the successor the query starts over: its opening result replaces
+      // what the subscriber has, rows the upgrade already read in included.
+      let opening = !first;
+      first = false;
+      const handle = db.subscribeDeltaHere(
+        query,
+        {
+          onDelta: (delta) => {
+            if (opening) {
+              opening = false;
+              onDelta({
+                delta: delta.delta,
+                all: delta.all ?? [],
+                reset: true,
+              });
+              return;
+            }
+            onDelta(delta);
+          },
+          ...(onError === undefined ? {} : { onError }),
+        },
+        options,
+        session,
+      );
+      ready ??= handle.ready;
+      return handle;
+    });
+    const handle = (() => stop()) as SubscriptionHandle;
+    if (ready) Object.defineProperty(handle, "ready", { value: ready });
+    return handle;
+  }
+
+  private subscribeDeltaHere<T extends { id: string }>(
+    query: QueryBuilder<T>,
+    callbacks: DbDeltaSubscriptionCallbacks<T>,
+    options?: InternalDbQueryOptions,
+    session?: Session,
+  ): SubscriptionHandle {
+    const { onDelta, onError } = callbacks;
     // Constructing a browser follower starts its init handshake. Do that before
     // asking whether this is a newly attaching peer.
     const client = this.getClient(query._schema);
@@ -3789,6 +4048,7 @@ export class Db {
         subscription.predecessor = null;
       }
       readyAbort.abort();
+      this.liveSubscriptionEnders.delete(endLive);
       this.unregisterActiveQuerySubscriptionTrace(traceId);
       manager.clear();
       notifyTerminalError(terminalError);
@@ -3944,6 +4204,7 @@ export class Db {
     const unsubscribe = () => {
       if (unsubscribed) return;
       unsubscribed = true;
+      this.liveSubscriptionEnders.delete(endLive);
       deliveryReady = false;
       bufferedDeltas.length = 0;
       readyAbort.abort();
@@ -3984,6 +4245,10 @@ export class Db {
     // and public Db.subscribe callers are not required to consume it.
     if (ready) void ready.catch(() => undefined);
     const initialSubscription = createSubscriptionGeneration();
+    const endLive = (error: Error) => {
+      if (activeSubscription !== null) terminalizeSubscription(activeSubscription, error);
+    };
+    this.liveSubscriptionEnders.add(endLive);
     // The native maintained stream owns both the opening snapshot and later
     // changes. Do not fabricate an empty opening or race it with a one-shot
     // cache read: that snapshot may be older than deltas already delivered.
@@ -4005,6 +4270,177 @@ export class Db {
     const handle = unsubscribe as SubscriptionHandle;
     if (ready) Object.defineProperty(handle, "ready", { value: ready });
     return handle;
+  }
+
+  /**
+   * @internal The session that owned this Db replaced it. Its live queries
+   * end with a {@link DbReplacedError} naming the fix, and its reads, writes
+   * and listeners throw it, so code that kept the handle fails loudly instead
+   * of going silent.
+   */
+  markReplaced(reason: DbReplacedReason): void {
+    this.successor?.markReplaced(reason);
+    if (this.replaced) return;
+    const error = new DbReplacedError(reason);
+    this.replaced = error;
+    for (const end of Array.from(this.liveSubscriptionEnders)) end(error);
+    this.liveSubscriptionEnders.clear();
+  }
+
+  /**
+   * @internal The session upgraded this Db to `next`, the local-first Db of
+   * the same account. This Db becomes a handle on `next`: its live queries
+   * and listeners move there (each query's first result there replaces what
+   * it had, so nothing goes back to loading), and its reads and writes go
+   * there from now on. Only its own runtime stays behind, for the session to
+   * shut down once its writes are uploaded.
+   */
+  adoptSuccessor(next: Db): void {
+    if (this.successor) throw new Error("This Db already has a successor");
+    this.successor = next;
+    // Upload what this runtime still holds, then stop it. Until then its
+    // writes count in the sync status and in waitForSync.
+    let draining = true;
+    const drainListeners = new Set<() => void>();
+    const drained = this.shutdown({ waitForSync: true }).finally(() => {
+      draining = false;
+      for (const listener of Array.from(drainListeners)) listener();
+    });
+    void drained.catch(() => {});
+    this.drain = {
+      done: drained,
+      abort: () => {
+        if (draining) this.abortGracefulShutdown();
+      },
+    };
+    let combined: SyncStatus | null = null;
+    const syncStatus = (): SyncStatus => {
+      const ahead = next.getSyncStatus();
+      if (!draining) return ahead;
+      const own = Db.prototype.getSyncStatus.call(this);
+      const status: SyncStatus = {
+        link: ahead.link,
+        pendingUploads: ahead.pendingUploads + own.pendingUploads,
+        synced: ahead.synced && own.pendingUploads === 0,
+      };
+      if (combined && sameSyncStatus(status, combined)) return combined;
+      return (combined = status);
+    };
+    const overrides: Record<string, (...args: never[]) => unknown> = {
+      getSyncStatus: syncStatus,
+      syncStatusChangeRegistration: (listener: (status: SyncStatus) => void) => {
+        let published = syncStatus();
+        const publish = () => {
+          const status = syncStatus();
+          if (status === published) return;
+          published = status;
+          listener(status);
+        };
+        const stopAhead = next.onSyncStatusChange(publish);
+        const stopOwn = draining ? this.onSyncStatusChangeHere(publish) : () => {};
+        drainListeners.add(publish);
+        return () => {
+          stopAhead();
+          stopOwn();
+          drainListeners.delete(publish);
+        };
+      },
+      waitForSync: async (options: { timeoutMs?: number; signal?: AbortSignal } = {}) => {
+        await Promise.all([
+          next.waitForSync(options),
+          draining ? this.waitForOwnSync(options, drained) : undefined,
+        ]);
+      },
+      // The app's offline toggle covers both runtimes while the thin one
+      // still uploads.
+      disconnect: async () => {
+        await Promise.all([next.disconnect(), draining ? this.connection.disconnect() : undefined]);
+      },
+      reconnect: async () => {
+        await Promise.all([next.reconnect(), draining ? this.connection.reconnect() : undefined]);
+      },
+    };
+    for (const name of FORWARDED_TO_SUCCESSOR) {
+      Object.defineProperty(this, name, {
+        configurable: true,
+        value:
+          overrides[name] ??
+          ((...args: unknown[]) =>
+            (next as unknown as Record<string, (...a: unknown[]) => unknown>)[name]!(...args)),
+      });
+    }
+    Object.defineProperty(this, "syncStatusChangeRegistration", {
+      configurable: true,
+      value: overrides.syncStatusChangeRegistration,
+    });
+    // An app that took the thin Db offline keeps the local-first one offline.
+    // The last toggle the app asked for counts, even while it is in flight.
+    if (this.offlineRequested ?? this.connection.isExplicitlyOffline())
+      void next.disconnect().catch(() => {});
+    // Rejections this Db reported before anyone listened go to the listeners
+    // on the successor (already logged here as unhandled).
+    for (const event of this.pendingMutationErrorEvents.splice(0))
+      next.handleMutationError(event, true);
+    for (const entry of Array.from(this.movable)) entry.move(next);
+    this.movable.clear();
+  }
+
+  /**
+   * Wait for this Db's own runtime's writes, as {@link waitForSync} does
+   * (rejecting with the server's error for a rejected one), while it drains
+   * after the upgrade. The drain ending is the wait ending.
+   */
+  private async waitForOwnSync(
+    options: { timeoutMs?: number; signal?: AbortSignal },
+    drained: Promise<void>,
+  ): Promise<void> {
+    const { timeoutMs, signal } = options;
+    validateWriteWaitTimeout(timeoutMs);
+    signal?.throwIfAborted();
+    const control = new AbortController();
+    const forward = () => control.abort(signal!.reason);
+    signal?.addEventListener("abort", forward, { once: true });
+    const timer =
+      timeoutMs === undefined
+        ? undefined
+        : setTimeout(
+            () => control.abort(new WriteWaitTimeoutError("global", timeoutMs)),
+            timeoutMs,
+          );
+    try {
+      // The thin runtime's writes are answered (a rejection fails the wait),
+      // or its drain ends: then it has nothing left to wait for.
+      await Promise.race([this.connection.waitForSync(control.signal), drained]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      signal?.removeEventListener("abort", forward);
+    }
+  }
+
+  /** The app's last {@link disconnect} (true) or {@link reconnect} (false). */
+  private offlineRequested: boolean | undefined;
+
+  /** Set once this Db adopted a successor: its own runtime's last uploads. */
+  private drain: { done: Promise<void>; abort(): void } | null = null;
+
+  /**
+   * @internal Stop this Db's own runtime after the upgrade. With
+   * `waitForSync`, its writes upload first, the way a local-first client's
+   * do when it shuts down; without, they are dropped, as when a thin client
+   * closes.
+   */
+  async stopOwnRuntime(options: ShutdownOptions = {}): Promise<void> {
+    const drain = this.drain;
+    if (!drain) return this.shutdown(options);
+    if (!options.waitForSync) drain.abort();
+    await drain.done.catch(() => {});
+    // An aborted or failed drain leaves the runtime open: stop it now.
+    await Db.prototype.shutdown.call(this);
+  }
+
+  /** @internal The Db that does this one's work now: itself, or its successor. */
+  current(): Db {
+    return this.successor?.current() ?? this;
   }
 
   /**
@@ -4033,6 +4469,7 @@ export class Db {
   }
 
   protected assertOpen(): void {
+    if (this.replaced) throw this.replaced;
     if (this.shutdownPromise) {
       throw new Error("Cannot operate on a Db that is shutting down or closed.");
     }

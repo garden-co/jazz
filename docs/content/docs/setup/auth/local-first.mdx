@@ -88,7 +88,7 @@ accounts. See [Other / Custom](/docs/setup/auth/custom#guests-who-sign-up) and
 
 ## Permissions by auth mode
 
-Use `session.user.account` for stable account ownership. Use the exact issuer and subject when a policy deliberately distinguishes linked identities. A local-first identity is authenticated by its signing key; it is not an unauthenticated guest.
+Use `session.user`, the account, for stable ownership. Use `session.identity`, the exact issuer and subject, when a policy deliberately distinguishes linked identities. A local-first identity is authenticated by its signing key; it is not an unauthenticated guest.
 
 Claims from your backend can add application requirements, such as a verified role. They cannot replace the account assignment. Define those checks in [Declarative Permissions](/docs/schemas/policies), alongside ownership policies.
 

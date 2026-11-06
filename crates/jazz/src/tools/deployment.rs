@@ -13,7 +13,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::protocol::SchemaVersion;
 use crate::schema::JazzSchema;
-use crate::tools::public_schema::{Schema, SchemaHash, TableName, TablePolicies, Value};
+use crate::tools::public_schema::{
+    HistoryRetention, Schema, SchemaHash, TableName, TablePolicies, Value,
+};
 use crate::tools::schema_lens::{Lens, LensOp, runtime::compile_lens};
 use migration_validation::{validate_lineage_table_partition, validate_migration_lens_between};
 
@@ -25,6 +27,10 @@ type Edge = (Hash, Hash);
 pub struct DeploymentCatalogue {
     pub schemas: Vec<Schema>,
     pub migrations: Vec<Lens>,
+    /// The schemas the store admitted, oldest first. The newest that has
+    /// a table decides how much of its history the store keeps
+    /// (SPEC 4 §4.9).
+    pub admitted_schema_hashes: Vec<SchemaHash>,
 }
 
 /// Missing artifacts plus the requested target and its complete permission set.
@@ -35,6 +41,9 @@ pub struct DeploymentRequest {
     pub schemas: Vec<(SchemaHash, Schema)>,
     pub migrations: Vec<Lens>,
     pub permissions: HashMap<TableName, TablePolicies>,
+    /// Confirms switching tables of the active schema to latest-only history
+    /// (SPEC 4 §4.9), which drops their past versions for good.
+    pub allow_dropping_history: bool,
 }
 
 /// Validated combined history, ordered so parents precede children. This does not
@@ -83,13 +92,40 @@ pub enum DeploymentError {
     },
     #[error("migration graph contains a cycle; blocked schemas: {}", display_hashes(.schemas, ", "))]
     Cycle { schemas: Vec<SchemaHash> },
-    #[error("migration history has disconnected roots: {}. Add migrations connecting these histories to one common root before deploying", display_hashes(.roots, ", "))]
+    #[error(
+        "migration history has disconnected roots: {}. No migration connects these schema versions. \
+         Run `jazz-tools migrations create --name <name>` to write the missing migration and add it \
+         to migrations/index.ts, then deploy again. If one of them is \
+         a version your store already runs that migrations/snapshots has no snapshot of, check out \
+         that schema.ts and run `jazz-tools migrations create` to snapshot it first",
+        display_hashes(.roots, ", ")
+    )]
     DisconnectedGraph { roots: Vec<SchemaHash> },
     #[error("migration paths disagree: {} and {}", display_hashes(.first, " -> "), display_hashes(.second, " -> "))]
     ConflictingPaths {
         first: Vec<SchemaHash>,
         second: Vec<SchemaHash>,
     },
+    #[error(
+        "deploying schema {target} switches {} to latest-only history, which drops each row's past versions at its next write and cannot be undone. Deploy again with `allowDroppingHistory: true` to confirm.",
+        display_tables(.tables)
+    )]
+    DropsHistory {
+        target: SchemaHash,
+        tables: Vec<TableName>,
+    },
+}
+
+fn display_tables(tables: &[TableName]) -> String {
+    let names = tables
+        .iter()
+        .map(|table| format!("`{}`", table.as_str()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    match tables.len() {
+        1 => format!("table {names}"),
+        _ => format!("tables {names}"),
+    }
 }
 
 fn display_hashes(hashes: &[SchemaHash], separator: &str) -> String {
@@ -127,6 +163,20 @@ pub fn prepare_deployment(
         return Err(DeploymentError::MissingSchema {
             schema: request.target_schema_hash,
         });
+    }
+    if !request.allow_dropping_history {
+        let deployed: Vec<&Schema> = stored
+            .admitted_schema_hashes
+            .iter()
+            .filter_map(|hash| schemas.get(&hash.0))
+            .collect();
+        let tables = drops_history(&deployed, &schemas[&request.target_schema_hash.0]);
+        if !tables.is_empty() {
+            return Err(DeploymentError::DropsHistory {
+                target: request.target_schema_hash,
+                tables,
+            });
+        }
     }
     let compiled = schemas
         .iter()
@@ -233,6 +283,30 @@ pub fn prepare_deployment(
         migrations,
         active_schema,
     })
+}
+
+/// The tables `target` makes latest-only for the first time, by name: some
+/// of `deployed` keeps them in full and none latest-only yet, so writes
+/// under `target` start dropping past versions the store kept (SPEC 4
+/// §4.9). Once any deployed version made a table latest-only, publishing
+/// another such version, or rolling back to a full-history one, needs no
+/// confirmation. A table renamed in the same deploy is not caught.
+fn drops_history(deployed: &[&Schema], target: &Schema) -> Vec<TableName> {
+    target
+        .iter()
+        .filter(|(name, table)| {
+            let kept = |history| {
+                deployed
+                    .iter()
+                    .filter_map(|schema| schema.get(*name))
+                    .any(|before| before.history == history)
+            };
+            table.history == HistoryRetention::Latest
+                && kept(HistoryRetention::Full)
+                && !kept(HistoryRetention::Latest)
+        })
+        .map(|(name, _)| name.clone())
+        .collect()
 }
 
 fn topological_order(

@@ -210,6 +210,37 @@ export function useAllSuspense<T extends { id: string }>(
   options?: QueryOptions,
 ): UseAllSuspenseResult<T> {
   const db = useJazzClient().db as unknown as Db;
+  // `useAllBase` may suspend via `use()`. No hook may run after it: when the
+  // promise settles within the same render (e.g. a microtask), React replays
+  // this component and a trailing hook changes the hook order, which surfaces
+  // as a hook-order warning and a recoverable concurrent-render error.
   const data = useAllBase(query, options, { suspense: true }) as T[];
-  return useMemo(() => ({ data, db }), [data, db]);
+  return suspenseResult(data, db);
+}
+
+const suspenseResults = new WeakMap<object, { data: unknown; db: Db }>();
+const nullSuspenseResults = new WeakMap<Db, { data: null; db: Db }>();
+
+/**
+ * `{ data, db }` for a suspense hook, with stable identity while `data` and
+ * `db` are unchanged. A hook-free stand-in for `useMemo`, for use after a
+ * possible `use()`.
+ *
+ * @internal
+ */
+export function suspenseResult<D extends object | null>(data: D, db: Db): { data: D; db: Db } {
+  if (data === null) {
+    let cached = nullSuspenseResults.get(db);
+    if (!cached) {
+      cached = { data: null, db };
+      nullSuspenseResults.set(db, cached);
+    }
+    return cached as { data: D; db: Db };
+  }
+  let cached = suspenseResults.get(data);
+  if (!cached || cached.db !== db) {
+    cached = { data, db };
+    suspenseResults.set(data, cached);
+  }
+  return cached as { data: D; db: Db };
 }

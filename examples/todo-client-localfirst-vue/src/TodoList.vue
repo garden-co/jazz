@@ -8,7 +8,7 @@ import { app } from "./lib/schema.js";
 const { data: todos, db } = useAll(app.todos);
 // #endregion reading-reactive-vue
 const session = useSession();
-const sessionUserId = computed(() => session.value?.user.account ?? null);
+const sessionUserId = computed(() => session.value?.user ?? null);
 const title = ref("");
 
 function handleSubmit(e: Event) {

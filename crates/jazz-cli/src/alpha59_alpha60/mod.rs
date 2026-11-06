@@ -83,10 +83,20 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
 const USAGE_ARGS: &str = "(import | verify) --dump <dump> --data-dir <dir> --app-id <app id> \
     [--no-backend-identity-links] [--drop-transaction-metadata]";
 
+/// `--help` or `-h` anywhere, or `help` as the subcommand.
+fn wants_help(args: &[String]) -> bool {
+    args.first().is_some_and(|arg| arg == "help")
+        || args.iter().any(|arg| arg == "--help" || arg == "-h")
+}
+
 /// Run the importer as `program` (`jazz-alpha59-alpha60-import`, or `jazz-tools
 /// alpha59-alpha60` in a dev build) with `args`; the process exit code.
 pub async fn main(program: &str, args: Vec<String>) -> i32 {
     let usage = format!("usage: {program} {USAGE_ARGS}");
+    if wants_help(&args) {
+        println!("{usage}");
+        return 0;
+    }
     let mut args = args.into_iter();
     let verifying = match args.next().as_deref() {
         Some("import") => false,
@@ -221,14 +231,16 @@ fn remove_built(dir: &std::path::Path, keep_dir: bool) -> std::io::Result<()> {
 /// Read the whole dump once, so its digest and counts are checked before
 /// anything is built from it.
 fn check_dump(args: &Args) -> Result<(), String> {
-    let file = std::fs::File::open(&args.dump).map_err(err)?;
+    let file = std::fs::File::open(&args.dump)
+        .map_err(|error| format!("{}: {error}", args.dump.display()))?;
     let (mut reader, _) = dump::Reader::open(std::io::BufReader::new(file)).map_err(err)?;
     while reader.next_record().map_err(err)?.is_some() {}
     Ok(())
 }
 
 async fn run(args: &Args) -> Result<Json, String> {
-    let file = std::fs::File::open(&args.dump).map_err(err)?;
+    let file = std::fs::File::open(&args.dump)
+        .map_err(|error| format!("{}: {error}", args.dump.display()))?;
     // The reader refuses another dump format, naming the exporter to use.
     let (mut reader, _) = dump::Reader::open(std::io::BufReader::new(file)).map_err(err)?;
 
@@ -1006,6 +1018,23 @@ fn err(error: impl std::fmt::Display) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn help_is_recognised_in_any_position() {
+        let args = |list: &[&str]| list.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+        for asked in [
+            &["--help"][..],
+            &["-h"],
+            &["help"],
+            &["import", "--help"],
+            &["verify", "--dump", "x", "-h"],
+        ] {
+            assert!(wants_help(&args(asked)), "{asked:?}");
+        }
+        for not_asked in [&[][..], &["import"], &["import", "--dump", "help"]] {
+            assert!(!wants_help(&args(not_asked)), "{not_asked:?}");
+        }
+    }
 
     const HEAD: [u8; 16] = [7; 16];
     const ROW: [u8; 16] = [1; 16];

@@ -102,7 +102,7 @@ export const app = s.defineApp(schema);
 export const permissions = s.definePermissions(
   app,
   ({ policy, session }) => {
-    const mine = { owner_id: session.user.account };
+    const mine = { owner_id: session.user };
 
     policy.todos.allowRead.where(mine);
     policy.todos.allowInsert.where(mine);

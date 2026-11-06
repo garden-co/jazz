@@ -80,7 +80,7 @@ function update() {
       status(snapshot.error?.message ?? "Could not open MusicAgent.", true),
     );
   const client = snapshot.status === "ready" ? snapshot.client : undefined;
-  const account = client?.session?.user.account;
+  const account = client?.session?.user;
   if (!client || !account) return show("loading", () => status("Opening MusicAgent…"));
   const key = `chat:${user.id}:${account}`;
   if (shown?.key === key) return;

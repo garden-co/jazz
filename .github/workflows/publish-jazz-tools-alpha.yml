@@ -729,7 +729,7 @@ jobs:
             pnpm --filter jazz-tools publish --tag alpha --access public --no-git-checks
           fi
 
-      - name: Publish create-jazz (alpha tag, promote latest)
+      - name: Publish create-jazz (alpha tag)
         if: env.RELEASE_MODE == 'publish'
         run: |
           CREATE_JAZZ_VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("packages/create-jazz/package.json","utf8")).version')
@@ -739,7 +739,12 @@ jobs:
             pnpm --filter create-jazz publish --tag alpha --access public --no-git-checks
           fi
 
-          npm dist-tag add "create-jazz@${CREATE_JAZZ_VERSION}" latest
+      # From alpha.60, a plain `npm install jazz-tools` gets v2 (Classic stays
+      # `jazz-tools@0`). Every v2 package moves `latest` to this version, after
+      # all of them are published, and never back to an older alpha.
+      - name: Promote every v2 package to latest
+        if: env.RELEASE_MODE == 'publish'
+        run: node dev/artifacts/promote-latest.mjs
 
   # Jazz Cloud's images run the Linux server binary from the GitHub release:
   # npm's jazz-tools carries no native binary. Attach both builds with their

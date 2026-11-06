@@ -224,6 +224,21 @@ export function unblockJazzServerTransport(url: string): void {
   transportControl(url).unblock();
 }
 
+export function downJazzServerTransport(url: string): void {
+  transportControl(url).down();
+}
+
+/** Bring the transport back up in front of `serverUrl` (a restarted front). */
+export async function upJazzServerTransport(url: string, serverUrl?: string): Promise<void> {
+  if (serverUrl) {
+    for (const runningServer of jazzServerPromises.values()) {
+      const front = (await runningServer.catch(() => undefined))?.front;
+      if (front?.proxyOrigin(serverUrl, new URL(url).host)) break;
+    }
+  }
+  transportControl(url).up(serverUrl);
+}
+
 export async function stopJazzServerTransportControl(url: string): Promise<void> {
   const control = transportControl(url);
   transportControls.delete(url);

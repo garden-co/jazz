@@ -36,7 +36,7 @@ const createTodo = HttpRouter.add(
     const jazz = yield* Jazz;
     // A request without a signed-in user fails `forCurrentReqUser` before
     // this runs.
-    const account = jazz.db.getAuthState().session?.user.account;
+    const account = jazz.db.getAuthState().session?.user;
     if (!account) {
       return yield* HttpServerResponse.json({ error: "Account required" }, { status: 401 });
     }

@@ -1,4 +1,5 @@
-import { readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { assert, vi } from "vitest";
 import {
@@ -6,6 +7,7 @@ import {
   compileSchema as saveBaseline,
 } from "./dev/catalogue-project.js";
 import { describe, expect, it } from "vitest";
+import { validate } from "./cli.js";
 import { createCliFixtures } from "../tests/cli/fixtures.js";
 
 const {
@@ -15,6 +17,7 @@ const {
   fileExists,
   typecheckGeneratedMigration,
   captureConsoleLogs,
+  rootPermissionsSchema,
   rootSchemaWithoutInlinePermissions,
   rootSchemaWithTodoNotes,
   storedRootSchema,
@@ -25,7 +28,7 @@ const {
 } = createCliFixtures(import.meta.url);
 
 describe("cli migrations", () => {
-  it.each(["offline", "empty-server", "failed-server"])(
+  it.each(["empty-server", "failed-server"])(
     "does not save an initial snapshot without a usable baseline (%s)",
     async (kind) => {
       const { root } = await createWorkspace();
@@ -51,9 +54,60 @@ describe("cli migrations", () => {
       );
       expect(await fileExists(join(migrationsDir, "snapshots"))).toBe(false);
       expect((await readdir(migrationsDir)).filter((name) => name.endsWith(".ts"))).toEqual([]);
-      if (kind === "offline") expect(fetchMock).not.toHaveBeenCalled();
     },
   );
+
+  // An app on its own store (`sqlite()`) has no server to fetch a baseline
+  // from: the docs' first step snapshots schema.ts, and the next schema
+  // change migrates from it, with migrations/index.ts kept up to date
+  // (alpha.60 adopter pass V4).
+  it("snapshots schema.ts on the first offline run and migrates from it next", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const shipping = (source: string) =>
+      `import { migrations } from "./migrations/index.ts";\n` +
+      source.replace('{ migrations: "none" }', "{ migrations }");
+    await writeFile(join(root, "schema.ts"), shipping(rootSchemaWithoutInlinePermissions()));
+    await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
+    // The generated stub imports jazz-tools, as in an app.
+    await mkdir(join(root, "node_modules"), { recursive: true });
+    await symlink(
+      fileURLToPath(new URL("..", import.meta.url)),
+      join(root, "node_modules", "jazz-tools"),
+      "dir",
+    );
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { logs: firstValidate } = await captureConsoleLogs(() => validate({ schemaDir: root }));
+    expect(firstValidate.join("\n")).toContain("no schema snapshot yet");
+
+    const first = await createCatalogueMigration({ schemaDir: root, migrationsDir });
+    assert(first.status === "initial-snapshot");
+    expect(await fileExists(first.snapshotPath)).toBe(true);
+    const index = () => readFile(join(migrationsDir, "index.ts"), "utf8");
+    expect(await index()).toContain(first.hash);
+
+    await writeFile(join(root, "schema.ts"), shipping(rootSchemaWithTodoNotes()));
+    const { logs: changedValidate } = await captureConsoleLogs(() => validate({ schemaDir: root }));
+    expect(changedValidate.join("\n")).toContain("changed since the latest snapshot");
+    expect(changedValidate).not.toContain(
+      "Permission-only changes do not create schema hashes or require migrations.",
+    );
+
+    const second = await createCatalogueMigration({
+      schemaDir: root,
+      migrationsDir,
+      name: "add-notes",
+    });
+    assert(second.status === "generated");
+    expect(second.fromHash).toBe(first.hash);
+    // The stub is in migrations/index.ts without another `validate`.
+    const bundled = await index();
+    expect(bundled).toContain(`"fromHash": "${first.hash}"`);
+    expect(bundled).toContain(`"toHash": "${second.toHash}"`);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 
   it.each([false, true])(
     "uses the active server schema on first run (unchanged=%s)",

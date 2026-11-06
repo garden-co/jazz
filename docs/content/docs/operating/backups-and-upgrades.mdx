@@ -90,7 +90,7 @@ starts:
   flags while `schema.ts` still matches what you imported. Later schema changes follow
   [Migrations](/docs/schemas/migrations) as usual.
 - **Replace `isCreator`** with `{ $createdBy: session.user }`. It compares accounts, so it keeps
-  matching the rows users wrote on alpha.59.
+  matching the rows users wrote on alpha.59 whose author was imported with an account.
 
 ### Data on Jazz Cloud
 

@@ -103,10 +103,16 @@ test("payload resolution follows pnpm links, rejects version mismatch, and previ
     const payload = join(root, "store/android");
     const version = "2.0.0-alpha.55";
     const source = "a".repeat(40);
-    const metadata = { name: "jazz-rn", version, dependencies: { "jazz-rn-android": version } };
+    const metadata = {
+      name: "jazz-rn",
+      version,
+      dependencies: { "jazz-rn-android": version },
+    };
     json(join(wrapper, "package.json"), metadata);
     json(join(payload, "package.json"), { name: "jazz-rn-android", version });
-    json(join(payload, "android/jazz-native-relay.manifest.json"), { sourceRevision: source });
+    json(join(payload, "android/jazz-native-relay.manifest.json"), {
+      sourceRevision: source,
+    });
     mkdirSync(join(wrapper, "node_modules"), { recursive: true });
     symlinkSync(payload, join(wrapper, "node_modules/jazz-rn-android"));
     write(
@@ -115,9 +121,27 @@ test("payload resolution follows pnpm links, rejects version mismatch, and previ
     );
     const command = [join(wrapper, "scripts/resolve-payload.cjs"), "android"];
     assert.equal(execFileSync("node", command, { encoding: "utf8" }), payload);
-    json(join(payload, "package.json"), { name: "jazz-rn-android", version: "wrong" });
+    json(join(payload, "package.json"), {
+      name: "jazz-rn-android",
+      version: "wrong",
+    });
     assert.notEqual(spawnSync("node", command).status, 0);
     json(join(payload, "package.json"), { name: "jazz-rn-android", version });
+    // A release-candidate tarball names its sibling GitHub release asset
+    // (dev/artifacts/rc-tarballs.mjs link), never another version's asset.
+    const releaseDownload = "https://github.com/garden-co/jazz/releases/download";
+    metadata.dependencies["jazz-rn-android"] =
+      `${releaseDownload}/v${version}/jazz-rn-android-${version}.tgz`;
+    json(join(wrapper, "package.json"), metadata);
+    assert.equal(execFileSync("node", command, { encoding: "utf8" }), payload);
+    metadata.dependencies["jazz-rn-android"] =
+      `${releaseDownload}/v2.0.0-alpha.54/jazz-rn-android-2.0.0-alpha.54.tgz`;
+    json(join(wrapper, "package.json"), metadata);
+    assert.notEqual(spawnSync("node", command).status, 0);
+    metadata.dependencies["jazz-rn-android"] =
+      `https://example.invalid/releases/download/v${version}/jazz-rn-android-${version}.tgz`;
+    json(join(wrapper, "package.json"), metadata);
+    assert.notEqual(spawnSync("node", command).status, 0);
     metadata.dependencies["jazz-rn-android"] =
       `https://pkg.pr.new/garden-co/jazz/jazz-rn-android@${source}`;
     json(join(wrapper, "package.json"), metadata);
@@ -139,10 +163,16 @@ test("preview rewrites both ordinary dependencies to the exact source URLs", () 
     json(join(root, "package.json"), {
       name: "jazz-rn",
       version,
-      dependencies: { "jazz-rn-ios": "workspace:*", "jazz-rn-android": "workspace:*" },
+      dependencies: {
+        "jazz-rn-ios": "workspace:*",
+        "jazz-rn-android": "workspace:*",
+      },
     });
     for (const platform of ["android", "ios"])
-      json(join(root, "npm", platform, "package.json"), { name: `jazz-rn-${platform}`, version });
+      json(join(root, "npm", platform, "package.json"), {
+        name: `jazz-rn-${platform}`,
+        version,
+      });
     execFileSync("node", [
       join(repository, "dev/artifacts/rn-preview-dependencies.mjs"),
       commit,

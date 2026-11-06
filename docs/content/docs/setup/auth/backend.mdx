@@ -108,20 +108,21 @@ supabase.auth.onAuthStateChange(() => void jazz.reauthenticate());
 
 ## The session
 
-Once signed in, every context has a read-only session. `session.user` names the account and the
-exact identity acting for it:
+Once signed in, every context has a read-only session. `session.user` is the account and
+`session.identity` is the exact login acting for it:
 
 ```ts
-const author = {
-  account: "00000000-0000-4000-8000-000000000001",
-  identity: { issuer: "https://issuer.example", subject: "alice" },
-};
+const session = db.getAuthState().session;
+session?.user; // "00000000-0000-4000-8000-000000000001", the account
+session?.identity; // { issuer: "https://issuer.example", subject: "alice" }
 ```
 
-- **Ownership** compares `session.user.account`. Linked identities share one account id, so this is
-  what "rows this user owns" should use.
-- **Exact authorship** compares the whole structure, issuer and subject included. Jazz stamps
-  `$createdBy` and `$updatedBy` with it, along with edit timestamps.
+- **Ownership** compares `session.user`. Linked identities share one account, so this is
+  what "rows this user owns" should use: `{ $createdBy: session.user }` or
+  `{ owner_id: session.user }`, also inside `exists` and `hopTo` rules.
+- **Exact authorship** compares `session.identity`, issuer and subject included:
+  `{ "$createdBy.identity": session.identity }`. Jazz stamps `$createdBy` and `$updatedBy` with the
+  full author record, `{ account, identity }`, along with edit timestamps.
 - **`session.claims`** holds the claims `authenticate` returned. A claim named `user` stays under
   `session.claims.user` and can't shadow `session.user`. Claims never decide which account a request
   belongs to.
@@ -158,15 +159,15 @@ export const app = s.defineApp(
 );
 
 export const permissions = s.definePermissions(app, ({ policy, session }) => {
-  policy.todos.allowRead.where({ owner_id: session.user.account });
-  policy.todos.allowInsert.where({ owner_id: session.user.account });
+  policy.todos.allowRead.where({ owner_id: session.user });
+  policy.todos.allowInsert.where({ owner_id: session.user });
 });
 ```
 
 Then read and insert with the session's account:
 
 ```ts
-const accountId = db.getAuthState().session?.user.account;
+const accountId = db.getAuthState().session?.user;
 if (accountId) {
   const todos = await db.all(app.todos.where({ owner_id: accountId }));
   db.insert(app.todos, { title: "First task", owner_id: accountId });

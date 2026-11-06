@@ -320,6 +320,7 @@ function wasmTableToAst(name: string, table: TableSchema): Schema["tables"][numb
     indexedColumns: table.indexed_columns ? [...table.indexed_columns] : undefined,
     compositeIndexes: table.composite_indexes?.map((columns) => [...columns]),
     branchBy: table.branchBy ? [...table.branchBy] : undefined,
+    history: table.history,
     policies: table.policies as TablePolicies | undefined,
   };
 }

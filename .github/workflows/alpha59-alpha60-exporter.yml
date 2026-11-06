@@ -105,6 +105,7 @@ jobs:
           cat usage.txt
           test "$status" = 2
           grep -q "usage: jazz-alpha59-alpha60-export" usage.txt
+          .a59/target/release/jazz-alpha59-alpha60-export --help | grep -q "usage: jazz-alpha59-alpha60-export"
 
       - name: Build the importer
         run: cargo build --release -p jazz-cli --bin jazz-alpha59-alpha60-import
@@ -118,6 +119,7 @@ jobs:
           cat usage.txt
           test "$status" = 2
           grep -q "usage: jazz-alpha59-alpha60-import" usage.txt
+          target/release/jazz-alpha59-alpha60-import import --help | grep -q "usage: jazz-alpha59-alpha60-import"
 
       - name: Stage
         env:

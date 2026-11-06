@@ -61,7 +61,7 @@ export async function bootstrap(warehouseId?: string): Promise<void> {
 }
 
 export function Console({ children }: { children: ReactNode }) {
-  const accountId = useSession()?.user.account ?? undefined;
+  const accountId = useSession()?.user ?? undefined;
   const [prepared, setPrepared] = useState<"pending" | "ready" | Error>("pending");
   const [attempt, setAttempt] = useState(0);
   useEffect(() => {

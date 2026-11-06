@@ -18,7 +18,7 @@ export const app = s.defineApp(
 
 // Each user sees and edits only the todos they created
 export const permissions = s.definePermissions(app, ({ policy, session }) => {
-  const isCreator = { "$createdBy.account": session.user.account };
+  const isCreator = { $createdBy: session.user };
   policy.todos.allowRead.where(isCreator);
   policy.todos.allowInsert.where(isCreator);
   policy.todos.allowUpdate.where(isCreator);

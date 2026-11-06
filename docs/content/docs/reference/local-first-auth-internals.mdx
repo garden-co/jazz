@@ -31,6 +31,6 @@ The guest's sync token is never a link proof. A leaked, unexpired token can't li
 
 The core accepts the link only if the user's identity is unassigned. An identity already assigned to another account cannot be moved or merged, including after revocation.
 
-Existing rows retain their original structured authorship. Their account IDs stay unchanged, while new writes record the linked provider identity. Policies comparing `.account` keep ownership stable; comparisons of the entire author also distinguish the acting identity.
+Existing rows retain their original structured authorship. Their account IDs stay unchanged, while new writes record the linked provider identity. Policies comparing `$createdBy` with `session.user` (the account) keep ownership stable; comparing `$createdBy.identity` with `session.identity` also distinguishes the acting identity.
 
 If linking fails after the old context was closed, the app may reopen the account still selected by the manager. The manager performs no database shutdown or upload scheduling itself. See [Local-first auth](/docs/setup/auth/local-first) for the application flow.

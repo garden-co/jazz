@@ -1,9 +1,12 @@
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
-import { createServer, request as httpRequest, type Server } from "node:http";
+import { createServer, request as httpRequest, type IncomingMessage, type Server } from "node:http";
+import { createRequire } from "node:module";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { generateSecret, identityOf, signChallenge, signToken } from "../local-first-auth/index.js";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { JazzCore } from "jazz-napi";
@@ -16,11 +19,13 @@ import {
   createJazzClient,
   files,
   fromJWT,
+  isRequestAuthenticationError,
   memory,
   remote,
   sqlite,
   vercel,
   type Jazz,
+  type RequestAuthenticationError,
 } from "./index.js";
 import { localFirstAccountId } from "../accounts/local-first.js";
 import {
@@ -35,8 +40,8 @@ const app = s.defineApp(
   { migrations: "none" },
 );
 const permissions = s.definePermissions(app, ({ policy, session }) => {
-  policy.todos.allowRead.where({ owner: session.user.account });
-  policy.todos.allowInsert.where({ owner: session.user.account });
+  policy.todos.allowRead.where({ owner: session.user });
+  policy.todos.allowInsert.where({ owner: session.user });
   policy.todos.allowUpdate.never();
   policy.todos.allowDelete.never();
 });
@@ -164,7 +169,7 @@ describe("createJazz", () => {
 
     const alice = await userSession(appId, origin, "alice");
     // The client holds no Jazz credential: its identity comes from the backend.
-    expect(alice.session?.user?.identity).toEqual({
+    expect(alice.session?.identity).toEqual({
       issuer: "jazz:backend",
       subject: "alice",
     });
@@ -208,7 +213,7 @@ describe("createJazz", () => {
     fromWorker.close();
     expect(answered).toBe("message");
     const row = await alice.db
-      .insert(app.todos, { title: "from alice", owner: alice.session!.user!.account })
+      .insert(app.todos, { title: "from alice", owner: alice.session!.user! })
       .wait({ tier: "global" });
 
     // The backend's own db sees the row; a request scope sees only its user's rows.
@@ -221,7 +226,7 @@ describe("createJazz", () => {
     // API routes can name the request's account without a client credential.
     await expect(
       jazz.accountFor(new Request("http://app/x", { headers: { "x-test-user": "alice" } })),
-    ).resolves.toBe(alice.session!.user!.account);
+    ).resolves.toBe(alice.session!.user!);
     await expect(jazz.accountFor(new Request("http://app/x"))).resolves.toBeNull();
     // Server actions: backend authority, writes stamped as the request's user.
     const onBehalf = await jazz.withAttribution(
@@ -233,7 +238,7 @@ describe("createJazz", () => {
     const [withProvenance] = await jazz.db.all(
       app.todos.where({ id: stamped.id }).select("title", "$createdBy"),
     );
-    expect(withProvenance?.$createdBy).toMatchObject({ account: alice.session!.user!.account });
+    expect(withProvenance?.$createdBy).toMatchObject({ account: alice.session!.user! });
     // The user synced over a socket, not the stream fallback.
     expect(requestPaths.some((path) => path.includes("/stream"))).toBe(false);
     // This host upgrades sockets, so a failed socket isn't sent to the stream:
@@ -242,6 +247,173 @@ describe("createJazz", () => {
     expect(probe.status).toBe(426);
     expect(probe.headers.get("x-jazz-stream")).toBeNull();
   }, 60_000);
+
+  for (const sockets of [true, false]) {
+    it(`lets go of its clients' ${sockets ? "sockets" : "HTTP streams"} when it closes, so its server can`, async () => {
+      const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+      let closed = false;
+      cleanups.push(() => (closed ? Promise.resolve() : jazz.close()));
+      // The host's own server, closed the way a SIGTERM handler closes it:
+      // without dropping the connections it still serves.
+      const server: Server = createServer((req, res) => jazz.nodeHandler(req, res));
+      if (sockets) await jazz.attach(server);
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      cleanups.push(
+        () =>
+          new Promise((resolve) => {
+            server.closeAllConnections();
+            server.close(resolve);
+          }),
+      );
+      const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      if (!sockets) {
+        // A page on this origin, so the client falls back to the stream.
+        const previous = (globalThis as { location?: unknown }).location;
+        (globalThis as { location?: unknown }).location = {
+          host: new URL(origin).host,
+          href: `${origin}/`,
+        };
+        cleanups.push(async () => {
+          (globalThis as { location?: unknown }).location = previous;
+        });
+      }
+      const alice = await userSession(jazz.appId, origin, "alice");
+      await alice.db
+        .insert(app.todos, { title: "synced", owner: alice.session!.user! })
+        .wait({ tier: "global" });
+
+      await jazz.close();
+      closed = true;
+      const serverClosed = new Promise<void>((resolve) => server.close(() => resolve()));
+      await Promise.race([
+        serverClosed,
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("a client connection outlived close()")), 5_000),
+        ),
+      ]);
+    }, 30_000);
+  }
+
+  for (const host of ["close-server", "no-handler"] as const) {
+    it(`stops on SIGTERM with a client stream open (${host})`, async () => {
+      // tsx is a workspace dev dependency: resolve its CLI the way Node does
+      // instead of trusting a package's own node_modules/.bin.
+      const tsx = createRequire(import.meta.url).resolve("tsx/cli");
+      const child = spawn(
+        process.execPath,
+        [tsx, fileURLToPath(new URL("./fixtures/signal-host.ts", import.meta.url)), host],
+        { stdio: ["ignore", "pipe", "inherit"] },
+      );
+      const exited = new Promise<{ code: number | null; signal: string | null }>((resolve) =>
+        child.on("exit", (code, signal) => resolve({ code, signal })),
+      );
+      cleanups.push(async () => void child.kill("SIGKILL"));
+      const ready = await new Promise<string>((resolve, reject) => {
+        child.stdout!.on("data", (chunk: Buffer) => resolve(`${chunk}`.trim()));
+        child.on("error", reject);
+        child.on("exit", () => reject(new Error("the host exited before it served")));
+      });
+      const [port, appId] = ready.split(" ");
+      // A browser's sync stream, open until the server ends it.
+      const stream = await fetch(`http://127.0.0.1:${port}/jazz/apps/${appId}/stream`, {
+        method: "POST",
+      });
+      expect(stream.status).toBe(200);
+      const reader = stream.body!.getReader();
+      await reader.read();
+
+      child.kill("SIGTERM");
+      const outcome = await Promise.race([
+        exited,
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("the host outlived SIGTERM")), 15_000),
+        ),
+      ]);
+      // Stopped by the signal itself, as with no handler at all (tsx, which
+      // runs the host, reports its child's signal as 128 + 15).
+      if (host === "close-server") expect(outcome).toEqual({ code: 0, signal: null });
+      else expect(outcome.signal === "SIGTERM" || outcome.code === 128 + 15).toBe(true);
+      void reader.cancel().catch(() => undefined);
+    }, 60_000);
+  }
+
+  it("answers a signed-out request with an authentication error, not a plain one", async () => {
+    const failure = new Error("auth service down");
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate: (request) => {
+        if (request.headers.has("x-fail")) throw failure;
+        return request.headers.get("x-test-user") ? { userId: "alice" } : null;
+      },
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const signedOut = new Request("http://app/x");
+    for (const scope of [jazz.forReqUser, jazz.withAttribution]) {
+      const error = await scope(signedOut).catch((caught: unknown) => caught);
+      // What an app maps to 401.
+      expect(isRequestAuthenticationError(error)).toBe(true);
+      expect((error as RequestAuthenticationError).code).toBe("signed_out");
+      expect((error as Error).message).toMatch(/has no signed-in user/);
+    }
+    // authenticate failing is the server's problem, and stays its own error.
+    await expect(
+      jazz.forReqUser(new Request("http://app/x", { headers: { "x-fail": "1" } })),
+    ).rejects.toBe(failure);
+  });
+
+  it("leaves a body a parser read before nodeHandler to the app's routes", async () => {
+    const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    cleanups.push(() => jazz.close());
+    // What express.json() does before the app's handlers: read the stream
+    // whole and leave the result on `req.body`.
+    const parse = (req: IncomingMessage & { body?: unknown }, done: () => void) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk: Buffer) => chunks.push(chunk));
+      req.on("end", () => {
+        const raw = Buffer.concat(chunks);
+        req.body = req.headers["content-type"] === "application/json" ? JSON.parse(`${raw}`) : raw;
+        done();
+      });
+    };
+    const server: Server = createServer((req, res) =>
+      parse(req, () =>
+        jazz.nodeHandler(req, res, () => {
+          res.setHeader("content-type", "application/json");
+          res.end(JSON.stringify({ got: (req as { body?: unknown }).body }));
+        }),
+      ),
+    );
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    cleanups.push(() => new Promise((resolve) => server.close(resolve)));
+    const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+    const echoed = await fetch(`${origin}/api/echo`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: '{"a":1}',
+    });
+    expect(echoed.status).toBe(200);
+    expect(await echoed.json()).toEqual({ got: { a: 1 } });
+
+    // A Jazz route whose body a JSON parser took fails plainly, naming the
+    // fix, instead of with a locked-stream error.
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const taken = await fetch(`${origin}/jazz/auth/sign-in`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      expect(taken.status).toBe(500);
+      expect(errors.mock.calls.flat().join(" ")).toMatch(
+        /mount jazz.nodeHandler before body parsers/,
+      );
+    } finally {
+      errors.mockRestore();
+    }
+  });
 
   it("signs users in with fromJWT and keeps their account and claims", async () => {
     const { privateKey, publicKey } = await generateKeyPair("ES256", { extractable: true });
@@ -426,7 +598,7 @@ describe("createJazz", () => {
     const origin = await serve(jazz, { sockets: true, onUpgrade: () => upgrades++ });
     const alice = await userSession(appId, origin, "alice");
     await alice.db
-      .insert(app.todos, { title: "signed in", owner: alice.session!.user!.account })
+      .insert(app.todos, { title: "signed in", owner: alice.session!.user! })
       .wait({ tier: "global" });
 
     // Checks that still name her leave her session open.
@@ -451,7 +623,7 @@ describe("createJazz", () => {
   it("ends a user's open sync session once their claims change, so policies see the new ones", async () => {
     // Anyone reads their own todos; only an admin (a claim) may create one.
     const byRole = s.definePermissions(app, ({ policy, session }) => {
-      policy.todos.allowRead.where({ owner: session.user.account });
+      policy.todos.allowRead.where({ owner: session.user });
       policy.todos.allowInsert.where(session.where({ "claims.role": "admin" }));
       policy.todos.allowUpdate.never();
       policy.todos.allowDelete.never();
@@ -481,7 +653,7 @@ describe("createJazz", () => {
     cleanups.push(() => session.close());
     await session.loginWithBackend();
     const alice = session.getSnapshot().client!;
-    const owner = alice.session!.user!.account;
+    const owner = alice.session!.user!;
     const outcome = (write: { wait(options: { tier: "global" }): Promise<unknown> }) =>
       write.wait({ tier: "global" }).then(
         () => "accepted",
@@ -542,7 +714,7 @@ describe("createJazz", () => {
     const guest = guestSession.getSnapshot().client!;
     await guest.db.insert(app.todos, {
       title: "kept on the device",
-      owner: guest.session!.user!.account,
+      owner: guest.session!.user!,
     });
 
     // The socket is refused as an auth failure, so the client stops retrying.
@@ -574,7 +746,7 @@ describe("createJazz", () => {
     cleanups.push(() => guestSession.close());
     const guest = guestSession.getSnapshot().client!;
     await guest.db
-      .insert(app.todos, { title: "synced", owner: guest.session!.user!.account })
+      .insert(app.todos, { title: "synced", owner: guest.session!.user! })
       .wait({ tier: "global" });
 
     guestsWelcome = false;
@@ -603,7 +775,7 @@ describe("createJazz", () => {
     const origin = await serve(jazz, { sockets: true, onUpgrade: () => upgrades++ });
     const alice = await userSession(appId, origin, "alice");
     await alice.db
-      .insert(app.todos, { title: "before", owner: alice.session!.user!.account })
+      .insert(app.todos, { title: "before", owner: alice.session!.user! })
       .wait({ tier: "global" });
     const opened = upgrades;
     expiredBefore = Date.now() + 1;
@@ -611,7 +783,7 @@ describe("createJazz", () => {
     // cookies and keeps syncing.
     await expect.poll(() => upgrades, { timeout: 5_000, interval: 50 }).toBeGreaterThan(opened);
     await alice.db
-      .insert(app.todos, { title: "after", owner: alice.session!.user!.account })
+      .insert(app.todos, { title: "after", owner: alice.session!.user! })
       .wait({ tier: "global" });
     expect(alice.db.getSyncStatus().link).toEqual({ state: "connected" });
   }, 30_000);
@@ -623,7 +795,7 @@ describe("createJazz", () => {
     const origin = await serve(jazz, { sockets: true });
 
     const guest = await userSession(appId, origin, "guest-device-key");
-    const account = guest.session!.user!.account;
+    const account = guest.session!.user!;
     const row = await guest.db
       .insert(app.todos, { title: "made as a guest", owner: account })
       .wait({ tier: "global" });
@@ -634,7 +806,7 @@ describe("createJazz", () => {
     });
 
     const alice = await userSession(appId, origin, "alice");
-    expect(alice.session!.user!.account).toBe(account);
+    expect(alice.session!.user!).toBe(account);
     const seen = await alice.db.all(app.todos.where({ id: row.id }));
     expect(seen.map((todo) => todo.title)).toEqual(["made as a guest"]);
   }, 60_000);
@@ -678,11 +850,11 @@ describe("createJazz", () => {
       });
       cleanups.push(() => session.close());
       const guest = session.getSnapshot().client!;
-      const account = guest.session!.user!.account;
+      const account = guest.session!.user!;
       expect(account).toBe(
         localFirstAccountId(
           scoping === "names the app" ? appId : `${origin}/jazz`,
-          guest.session!.user!.identity.subject,
+          guest.session!.identity.subject,
         ),
       );
       const row = await guest.db
@@ -693,8 +865,8 @@ describe("createJazz", () => {
       signInAs(origin, "alice");
       await session.linkWithBackend();
       const alice = session.getSnapshot().client!;
-      expect(alice.session!.user!.account).toBe(account);
-      expect(alice.session!.user!.identity).toEqual({
+      expect(alice.session!.user!).toBe(account);
+      expect(alice.session!.identity).toEqual({
         issuer: "jazz:backend",
         subject: "alice",
       });
@@ -1184,7 +1356,7 @@ describe("createJazz", () => {
 
     const alice = await userSession(appId, origin, "alice");
     const row = await alice.db
-      .insert(app.todos, { title: "over the stream", owner: alice.session!.user!.account })
+      .insert(app.todos, { title: "over the stream", owner: alice.session!.user! })
       .wait({ tier: "global" });
     const seen = await jazz.db.all(app.todos.where({ id: row.id }));
     expect(seen.map((todo) => todo.title)).toEqual(["over the stream"]);
@@ -1214,7 +1386,7 @@ describe("createJazz", () => {
     expect(await unknown.text()).toContain("sticky routing");
     // Alice's session still works after both attempts.
     const later = await alice.db
-      .insert(app.todos, { title: "still over the stream", owner: alice.session!.user!.account })
+      .insert(app.todos, { title: "still over the stream", owner: alice.session!.user! })
       .wait({ tier: "global" });
     expect((await jazz.db.all(app.todos.where({ id: later.id }))).length).toBe(1);
   }, 60_000);
@@ -1440,7 +1612,7 @@ describe("createJazz", () => {
 
     const alice = await userSession(appId, origin, "alice");
     const row = await alice.db
-      .insert(app.todos, { title: "through the backend", owner: alice.session!.user!.account })
+      .insert(app.todos, { title: "through the backend", owner: alice.session!.user! })
       .wait({ tier: "global" });
 
     // A second backend on the same core (another instance, after a restart)
@@ -1475,11 +1647,110 @@ describe("createJazz", () => {
     cleanups.push(() => guestSession.close());
     const guest = guestSession.getSnapshot().client!;
     const made = await guest.db
-      .insert(app.todos, { title: "as a guest", owner: guest.session!.user!.account })
+      .insert(app.todos, { title: "as a guest", owner: guest.session!.user! })
       .wait({ tier: "global" });
     expect((await jazz.db.all(app.todos.where({ id: made.id }))).map((todo) => todo.title)).toEqual(
       ["as a guest"],
     );
+  }, 60_000);
+
+  it("reconnects to a remote core that restarts, and still closes", async () => {
+    const appId = randomUUID();
+    const dataDir = await mkdtemp(join(tmpdir(), "jazz-remote-restart-"));
+    cleanups.push(() => rm(dataDir, { recursive: true, force: true }));
+    const adminSecret = `restart-admin-${randomUUID().slice(0, 8)}`;
+    const backendSecret = `restart-backend-${randomUUID().slice(0, 8)}`;
+    const start = (port = 0) =>
+      startLocalJazzServer({ appId, port, dataDir, adminSecret, backendSecret });
+    let core = await start();
+    cleanups.push(() => core.stop());
+    const port = core.port;
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: remote({ url: core.url, appId, secret: adminSecret }),
+      authenticate,
+    }).ready();
+    let closed = false;
+    cleanups.push(() => (closed ? Promise.resolve() : jazz.close()));
+    const asAlice = () =>
+      jazz.forReqUser(new Request("http://app/x", { headers: { "x-test-user": "alice" } }));
+    const alice = await jazz.accountFor(
+      new Request("http://app/x", { headers: { "x-test-user": "alice" } }),
+    );
+    await (
+      await asAlice()
+    )
+      .insert(app.todos, { title: "before", owner: alice! })
+      .wait({ tier: "global" });
+
+    // The core goes away and comes back on the same address and data.
+    await core.stop();
+    core = await start(port);
+
+    const within = <T>(promise: Promise<T>, what: string) =>
+      Promise.race([
+        promise,
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error(`${what} hung after the core restarted`)), 20_000),
+        ),
+      ]);
+    const db = await within(asAlice(), "forReqUser");
+    await within(
+      db.insert(app.todos, { title: "after", owner: alice! }).wait({ tier: "global" }),
+      "a global write",
+    );
+    const titles = await within(db.all(app.todos, { tier: "remote" }), "a remote read");
+    expect(titles.map((todo) => todo.title).sort()).toEqual(["after", "before"]);
+
+    // The core sees the write: it reached the restarted core, not a cache.
+    const other = await createJazz({
+      app,
+      permissions,
+      store: remote({ url: core.url, appId, secret: adminSecret }),
+      authenticate,
+    }).ready();
+    cleanups.push(() => other.close());
+    expect((await other.db.all(app.todos)).map((todo) => todo.title).sort()).toEqual([
+      "after",
+      "before",
+    ]);
+
+    await within(jazz.close(), "close()");
+    closed = true;
+  }, 90_000);
+
+  it("closes while its remote core is down, with a write still pending", async () => {
+    const appId = randomUUID();
+    const core = await startLocalJazzServer({ appId, inMemory: true });
+    cleanups.push(() => core.stop());
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: remote({ url: core.url, appId, secret: core.adminSecret }),
+      authenticate,
+    }).ready();
+    let closed = false;
+    cleanups.push(() => (closed ? Promise.resolve() : jazz.close()));
+    const request = new Request("http://app/x", { headers: { "x-test-user": "alice" } });
+    const alice = await jazz.accountFor(request);
+    const db = await jazz.forReqUser(request);
+    await db.insert(app.todos, { title: "reached", owner: alice! }).wait({ tier: "global" });
+
+    await core.stop();
+    db.insert(app.todos, { title: "stranded", owner: alice! });
+
+    // A SIGTERM handler's close(): it gives pending writes their time, then
+    // ends instead of waiting for a core that is not coming back.
+    const started = Date.now();
+    await Promise.race([
+      jazz.close(),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("close() hung with the core down")), 25_000),
+      ),
+    ]);
+    closed = true;
+    expect(Date.now() - started).toBeLessThan(25_000);
   }, 60_000);
 
   it("serves each deployment's sessions by its own permissions, side by side", async () => {
@@ -1488,7 +1759,7 @@ describe("createJazz", () => {
     cleanups.push(() => core.stop());
     const store = remote({ url: core.url, appId, secret: core.adminSecret });
     const noInserts = s.definePermissions(app, ({ policy, session }) => {
-      policy.todos.allowRead.where({ owner: session.user.account });
+      policy.todos.allowRead.where({ owner: session.user });
       policy.todos.allowInsert.never();
       policy.todos.allowUpdate.never();
       policy.todos.allowDelete.never();
@@ -1520,7 +1791,7 @@ describe("createJazz", () => {
     const guestRow = await guestOnCurrent.db
       .insert(app.todos, {
         title: "a guest's, by the current deployment",
-        owner: guestOnCurrent.session!.user!.account,
+        owner: guestOnCurrent.session!.user!,
       })
       .wait({ tier: "global" });
     const guestOnNewer = await guestOf(onNewer);
@@ -1528,7 +1799,7 @@ describe("createJazz", () => {
       guestOnNewer.db
         .insert(app.todos, {
           title: "a guest's, by the newer deployment",
-          owner: guestOnNewer.session!.user!.account,
+          owner: guestOnNewer.session!.user!,
         })
         .wait({ tier: "global" }),
     ).rejects.toThrow();
@@ -1537,7 +1808,7 @@ describe("createJazz", () => {
     const row = await alice.db
       .insert(app.todos, {
         title: "by the current deployment",
-        owner: alice.session!.user!.account,
+        owner: alice.session!.user!,
       })
       .wait({ tier: "global" });
     // The browser's own permissions allow the insert; the core refuses it
@@ -1545,7 +1816,7 @@ describe("createJazz", () => {
     const bob = await userSession(appId, onNewer, "bob");
     await expect(
       bob.db
-        .insert(app.todos, { title: "by the newer deployment", owner: bob.session!.user!.account })
+        .insert(app.todos, { title: "by the newer deployment", owner: bob.session!.user! })
         .wait({ tier: "global" }),
     ).rejects.toThrow();
     // The backend's own scoped writes too.
@@ -1561,11 +1832,60 @@ describe("createJazz", () => {
       new Request("http://app/x", { headers: { "x-test-user": "alice" } }),
     );
     const again = await asAlice
-      .insert(app.todos, { title: "after the rollback", owner: alice.session!.user!.account })
+      .insert(app.todos, { title: "after the rollback", owner: alice.session!.user! })
       .wait({ tier: "global" });
     expect((await rolledBack.db.all(app.todos)).map((todo) => todo.id).sort()).toEqual(
       [guestRow.id, row.id, again.id].sort(),
     );
+  }, 60_000);
+
+  it("starts a deployment that switches a table to latest-only only when it says so", async () => {
+    const appId = randomUUID();
+    const core = await startLocalJazzServer({ appId, inMemory: true });
+    cleanups.push(() => core.stop());
+    const store = remote({ url: core.url, appId, secret: core.adminSecret });
+    const latest = s.defineApp(
+      {
+        todos: s.table({ title: s.string(), owner: s.uuid() }, {}).history("latest"),
+      },
+      { migrations: "none" },
+    );
+    const latestPermissions = s.definePermissions(latest, ({ policy, session }) => {
+      policy.todos.allowRead.where({ owner: session.user });
+      policy.todos.allowInsert.where({ owner: session.user });
+      policy.todos.allowUpdate.never();
+      policy.todos.allowDelete.never();
+    });
+    const full = await createJazz({ app, permissions, store, authenticate }).ready();
+    cleanups.push(() => full.close());
+
+    const refused = createJazz({
+      app: latest,
+      permissions: latestPermissions,
+      store,
+      authenticate,
+    });
+    cleanups.push(() => refused.close());
+    await expect(refused.ready()).rejects.toThrow(
+      /switches table `todos` to latest-only[\s\S]*allowDroppingHistory: true/,
+    );
+    const confirmed = await createJazz({
+      app: latest,
+      permissions: latestPermissions,
+      store,
+      authenticate,
+      allowDroppingHistory: true,
+    }).ready();
+    cleanups.push(() => confirmed.close());
+    // A latest-only version is admitted now: starting it again needs no
+    // confirmation.
+    const again = await createJazz({
+      app: latest,
+      permissions: latestPermissions,
+      store,
+      authenticate,
+    }).ready();
+    cleanups.push(() => again.close());
   }, 60_000);
 
   it.each([
@@ -1667,7 +1987,7 @@ describe("createJazz", () => {
 
     const alice = await userSession(appId, origin, "alice");
     await alice.db
-      .insert(app.todos, { title: "vouched", owner: alice.session!.user!.account })
+      .insert(app.todos, { title: "vouched", owner: alice.session!.user! })
       .wait({ tier: "global" });
     expect(asked).toBeGreaterThan(opened);
 
