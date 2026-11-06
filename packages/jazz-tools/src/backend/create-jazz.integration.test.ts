@@ -1,7 +1,13 @@
 import { spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
-import { createServer, request as httpRequest, type IncomingMessage, type Server } from "node:http";
+import {
+  Agent as HttpAgent,
+  createServer,
+  request as httpRequest,
+  type IncomingMessage,
+  type Server,
+} from "node:http";
 import {
   createServer as createHttp2Server,
   createSecureServer as createSecureHttp2Server,
@@ -1986,6 +1992,85 @@ describe("createJazz", () => {
     await within(jazz.close(), "close()");
     closed = true;
   }, 90_000);
+
+  it("closes the connections its routes are asked on once it has closed", async () => {
+    const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    const viaFetch = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    // One host mounts nodeHandler, the other a Fetch handler (Next's route
+    // handlers). That Next passes the header on, and so lets `next start`
+    // stop, was checked by hand against a real `next start` (#4900).
+    const servers = [
+      createServer((req, res) => jazz.nodeHandler(req, res)),
+      createServer(async (req, res) => {
+        const response = await viaFetch.handle(
+          new Request(`http://${req.headers.host}${req.url}`, { method: req.method }),
+        );
+        res.writeHead(response.status, Object.fromEntries(response.headers));
+        res.end(Buffer.from(await response.arrayBuffer()));
+      }),
+    ];
+    await jazz.attach(servers[0]!);
+    for (const server of servers) {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      cleanups.push(
+        () =>
+          new Promise((resolve) => {
+            server.closeAllConnections();
+            server.close(resolve);
+          }),
+      );
+    }
+    await jazz.close();
+    await viaFetch.close();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    cleanups.push(async () => errors.mockRestore());
+    const agent = new HttpAgent({ keepAlive: true });
+    cleanups.push(async () => agent.destroy());
+    for (const server of servers) {
+      const port = (server.address() as AddressInfo).port;
+      // A browser re-opening its sync stream over a kept-alive connection.
+      const answer = await new Promise<{ status?: number; connection?: string }>(
+        (resolve, reject) => {
+          const req = httpRequest(
+            { port, host: "127.0.0.1", path: "/jazz/apps/a1/stream", method: "POST", agent },
+            (res) => {
+              res.resume();
+              resolve({ status: res.statusCode, connection: res.headers.connection });
+            },
+          );
+          req.on("error", reject);
+          req.end();
+        },
+      );
+      expect(answer).toEqual({ status: 503, connection: "close" });
+    }
+    // A socket asked for after the close is refused the same way.
+    const socketAnswer = await new Promise<{ status?: number; connection?: string }>(
+      (resolve, reject) => {
+        const req = httpRequest({
+          host: "127.0.0.1",
+          port: (servers[0]!.address() as AddressInfo).port,
+          path: "/jazz/apps/a1/ws",
+          headers: {
+            connection: "Upgrade",
+            upgrade: "websocket",
+            "sec-websocket-version": "13",
+            "sec-websocket-key": randomBytesBase64(),
+          },
+        });
+        req.on("response", (res) => {
+          res.resume();
+          resolve({ status: res.statusCode, connection: res.headers.connection });
+        });
+        req.on("upgrade", () => resolve({ status: 101 }));
+        req.on("error", reject);
+        req.end();
+      },
+    );
+    expect(socketAnswer).toEqual({ status: 503, connection: "close" });
+    // A closed Jazz answering 503 is how shutdown goes, not an error to log.
+    expect(errors).not.toHaveBeenCalled();
+  });
 
   it("keeps its sync sockets from the server's other upgrade listeners", async () => {
     const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();

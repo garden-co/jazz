@@ -2973,10 +2973,22 @@ function retryAfterSeconds(entry: Entry): number {
 
 const UNAVAILABLE_BODY = "Jazz is unavailable; try again shortly";
 
-function storeUnavailable(retryAfter: number): Response {
+/**
+ * The 503 a Jazz route answers while its store can't open, or after it
+ * closed. After a close it also closes the connection: a host shutting down
+ * (`next start` on SIGTERM) waits for its keep-alive connections, and a
+ * client re-opening its sync stream over one would keep it, and the
+ * process, alive. (A Fetch response can't tell an HTTP/2 host, which drops
+ * the header with a warning; nodeHandler leaves it off there.)
+ */
+function storeUnavailable(retryAfter: number, closed: boolean): Response {
   return new Response(UNAVAILABLE_BODY, {
     status: 503,
-    headers: { "content-type": "text/plain", "retry-after": String(retryAfter) },
+    headers: {
+      "content-type": "text/plain",
+      "retry-after": String(retryAfter),
+      ...(closed ? { connection: "close" } : {}),
+    },
   });
 }
 
@@ -2989,13 +3001,17 @@ const BAD_UPGRADE = "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n";
 function facade(entry: Entry): Jazz {
   const use = () => settled(entry);
   const basePath = () => jazzSettings(entry.options).basePath;
+  // After close() its routes answer 503 as the host shuts down: no news.
+  const logUnavailable = (error: unknown) => {
+    if (!entry.closing) console.error("jazz: the store did not open", error);
+  };
   /** The open Jazz, or the 503 a Jazz route answers while its store can't open. */
   const useOr503 = async (): Promise<OpenedJazz | Response> => {
     try {
       return await use();
     } catch (error) {
-      console.error("jazz: the store did not open", error);
-      return storeUnavailable(retryAfterSeconds(entry));
+      logUnavailable(error);
+      return storeUnavailable(retryAfterSeconds(entry), entry.closing !== undefined);
     }
   };
   const handle = async (request: Request) => {
@@ -3050,7 +3066,7 @@ function facade(entry: Entry): Jazz {
         use().then(
           (opened) => take(opened, req, socket, head),
           (error: unknown) => {
-            console.error("jazz: the store did not open", error);
+            logUnavailable(error);
             socket.end(storeUnavailableUpgrade(retryAfterSeconds(entry)));
           },
         );
@@ -3090,9 +3106,11 @@ function facade(entry: Entry): Jazz {
       use().then(
         (opened) => opened.nodeHandler(req, res, next),
         (error: unknown) => {
-          console.error("jazz: the store did not open", error);
+          logUnavailable(error);
           res.statusCode = 503;
           res.setHeader("retry-after", String(retryAfterSeconds(entry)));
+          // HTTP/2 has no Connection header (Node warns and drops it).
+          if (entry.closing && req.httpVersionMajor < 2) res.setHeader("connection", "close");
           res.setHeader("content-type", "text/plain");
           res.end(UNAVAILABLE_BODY);
         },
@@ -3108,7 +3126,7 @@ function facade(entry: Entry): Jazz {
         .then(
           (opened) => opened.acceptSocket(request, socket),
           (error: unknown) => {
-            console.error("jazz: the store did not open", error);
+            logUnavailable(error);
             refuse("store unavailable");
           },
         )
