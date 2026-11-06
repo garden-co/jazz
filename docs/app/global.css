@@ -513,6 +513,7 @@ h6 {
    remaining third; below desktop width they sit full width under it. */
 .home-overview {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--spacing-10);
 }
 @media (min-width: 1024px) {
@@ -523,6 +524,7 @@ h6 {
 }
 .home-facts {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--spacing-8);
 }
 .home-feature {
@@ -846,43 +848,16 @@ h6 {
   height: 1.25rem;
   fill: currentColor;
 }
-.home-carousel-tabs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.4em;
+/* Scrolls sideways on narrow phones rather than widening the page. */
+.home-carousel-picker {
   margin-top: var(--spacing-4);
-  font-family: var(--font-family-code);
-  font-size: 0.8125rem;
-}
-.home-carousel-tab {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.5em;
-  min-width: 0;
-  padding: 0.35em 0.6em;
-  border-radius: 2px;
-  color: var(--color-text-secondary);
-  white-space: nowrap;
-  transition:
-    background-color 200ms,
-    color 200ms;
-}
-.home-carousel-tab:hover {
-  background-color: color-mix(in srgb, var(--color-text-primary) 6%, transparent);
-  color: var(--color-text-primary);
-}
-.home-carousel-tab[aria-selected="true"] {
-  background-color: #146aff;
-  color: #fff;
+  max-width: 100%;
+  overflow-x: auto;
 }
 .home-carousel-tab-icon {
   width: 1.1em;
   height: 1.1em;
   flex: none;
-}
-.home-carousel-soon {
-  font-size: 0.75em;
-  opacity: 0.8;
 }
 /* All slides share one grid cell, so the tallest sets the height and they
    cross-fade in place. */

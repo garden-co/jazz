@@ -11,10 +11,10 @@ import {
   useRef,
   useState,
 } from "react";
+import { SegmentedControl, SegmentedControlItem } from "@astryxdesign/core/SegmentedControl";
 import {
   DEPLOYMENT_LAYOUT,
   DeploymentDiagram,
-  deploymentScenarioNames,
   type DeploymentScenario,
 } from "@/components/home/diagrams";
 
@@ -22,7 +22,7 @@ const scenarios: DeploymentScenario[] = ["vercel", "cloudflare", "aws", "server"
 const INTERVAL_MS = 4500;
 const shortNames: Record<DeploymentScenario, string> = {
   vercel: "Vercel",
-  cloudflare: "Cloudflare",
+  cloudflare: "Cloudflare (soon)",
   aws: "AWS",
   server: "Single Server",
 };
@@ -115,8 +115,6 @@ export function DeploymentSlides() {
       {scenarios.map((scenario, index) => (
         <div
           key={scenario}
-          id={`deployment-${scenario}`}
-          role="tabpanel"
           aria-hidden={index !== active}
           className="home-carousel-slide"
           data-active={index === active}
@@ -132,28 +130,22 @@ export function DeploymentSlides() {
 export function DeploymentPicker() {
   const { active, pick, setPaused } = useCarousel();
   return (
-    <div
-      className="home-carousel-tabs"
-      role="tablist"
-      aria-label="Where Jazz runs"
-      {...pauseHandlers(setPaused)}
-    >
-      {scenarios.map((scenario, index) => (
-        <button
-          key={scenario}
-          type="button"
-          role="tab"
-          aria-selected={index === active}
-          aria-controls={`deployment-${scenario}`}
-          aria-label={deploymentScenarioNames[scenario]}
-          className="home-carousel-tab"
-          onClick={() => pick(index)}
-        >
-          <ScenarioIcon scenario={scenario} />
-          {shortNames[scenario]}
-          {scenario === "cloudflare" ? <span className="home-carousel-soon">soon</span> : null}
-        </button>
-      ))}
+    <div className="home-carousel-picker" {...pauseHandlers(setPaused)}>
+      <SegmentedControl
+        label="Where Jazz runs"
+        size="sm"
+        value={scenarios[active]}
+        onChange={(value) => pick(scenarios.indexOf(value as DeploymentScenario))}
+      >
+        {scenarios.map((scenario) => (
+          <SegmentedControlItem
+            key={scenario}
+            value={scenario}
+            label={shortNames[scenario]}
+            icon={<ScenarioIcon scenario={scenario} />}
+          />
+        ))}
+      </SegmentedControl>
     </div>
   );
 }
