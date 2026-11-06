@@ -3,6 +3,11 @@ title: Inspector
 description: "Learn how to look at your app's data, and let agents debug it, through your own backend."
 ---
 
+<Callout type="info">
+  Coming soon: the Inspector isn't in alpha.60 yet. This page describes how it will work once it
+  ships; `inspect`, `/jazz/inspect/` and the `jazz-tools inspect` commands don't exist until then.
+</Callout>
+
 The Inspector lets you browse and edit your app's data, follow relations, see a table's schema and
 permissions, and look at the app as a given user would. Your backend serves it at
 `<basePath>/inspect/`, by default `/jazz/inspect/`, and decides who may open it. The same access
@@ -28,12 +33,11 @@ export const jazz = createJazz({
 ```
 
 <Callout type="warn" title="This grants unlimited access">
-  Whoever `inspect` lets in reads every row of every table, with your
-  permissions not checked, and with `write: true` can change any of them. They
-  can also let agents in. Grant it only to people who may see all of your users'
-  data. Where you can, gate it with infrastructure that's separate from your
-  users' sign-in, such as Vercel deployment protection, Cloudflare Access, a VPN
-  or an SSO proxy, rather than a flag on a user account.
+  Whoever `inspect` lets in reads every row of every table, with your permissions not checked, and
+  with `write: true` can change any of them. They can also let agents in. Grant it only to people
+  who may see all of your users' data. Where you can, gate it with infrastructure that's separate
+  from your users' sign-in, such as Vercel deployment protection, Cloudflare Access, a VPN or an SSO
+  proxy, rather than a flag on a user account.
 </Callout>
 
 Without `inspect`, only local development gets in: a request from this machine while `NODE_ENV` is

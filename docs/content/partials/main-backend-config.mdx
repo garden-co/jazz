@@ -2,8 +2,9 @@
   Jazz enforces, so rolling back your backend rolls back its permissions too.
 - `authenticate(request)` reads your own session (a cookie, a header) and returns
   `{ userId, claims? }`, or `null` when signed out. It is the only place that decides who a user
-  is: sign-ins, sync connections and `forReqUser` all ask it. No JWKS, issuer or audience to
-  configure, and no Jazz token in the browser. See [How Auth Works in Jazz](/docs/setup/auth/backend).
+  is: sign-ins, sync connections and `forReqUser` all ask it. There's no Jazz token in the browser.
+  If your provider issues JWTs, [`fromJWT()`](/docs/setup/auth/custom#tokens-from-your-identity-provider)
+  is a ready-made `authenticate`. See [How Auth Works in Jazz](/docs/setup/auth/backend).
 - Admin and backend routes never leave the process: from outside, only sync and sign-in are
   reachable under `/jazz`.
 - `createJazz` opens nothing when your module loads: the store opens on first use, such as the first

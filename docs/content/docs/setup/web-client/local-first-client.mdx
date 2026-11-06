@@ -12,7 +12,7 @@ loads as its own chunk on top of the [thin client](/docs/setup/web-client/thin-c
 ## Connect
 
 Pass a loader for the local-first client. The app starts thin, then upgrades in the background
-after the first load, with live queries carried over:
+after the first load:
 
 <Tabs groupId="jazz-framework" items={["React", "TypeScript"]} persist updateAnchor>
   <Tab value="React">
@@ -50,7 +50,7 @@ A browser that has upgraded this account before opens it local-first straight aw
 works offline on later visits. If a background upgrade fails, the app stays on the thin client and
 logs a warning.
 
-The `import()` stays in your code, so the local-first client and its Wasm are a separate chunk. To
+The `import()` stays in your code, so the Wasm engine downloads only when the client upgrades. To
 upgrade only on demand, call `useDb().upgradeToLocalFirst(() => import("jazz-tools/local-first"))`
 instead; see [Upgrading to local-first](/docs/setup/web-client/thin-client#upgrading-to-local-first).
 

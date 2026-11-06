@@ -326,18 +326,6 @@ best effort for now.
 A brief drop shows as `connecting`, not `offline`, so a status badge doesn't flicker. `synced` is
 `true` when nothing waits for upload and the link is `connected` (or `local-only`).
 
-Three more fields help with debugging:
-
-- `oldestPendingAt`: when the oldest unsynced write was committed, in Unix milliseconds.
-- `rejected`: how many of this client's writes the server rejected since the `Db` opened, whether or
-  not a wait or listener handled them.
-- `lastError`: the latest rejection (`{ kind: "rejected", code, message, at }`) or link failure
-  (`kind` `"network"`, `"auth"` or `"stopped"`, with `message` and `at`). It stays after the link
-  recovers; an explicit disconnect is not an error.
-
-In a browser, `window.__jazz` gives the same view for the whole page: `status()`, `pending()`,
-`dbs()` and `waitForSync()`. Agents driving a browser can read it directly.
-
 In Node and React Native, `pendingUploads` includes transactions recovered from local storage after a
 restart. In the browser, each tab counts only the transactions it committed itself. Transactions
 recovered after a reload, or written by another tab, are uploaded by the shared worker and are not

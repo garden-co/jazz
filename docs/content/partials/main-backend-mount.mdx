@@ -8,8 +8,9 @@
     export const { GET, POST, DELETE } = jazz.next();
     ```
 
-    On Vercel, sync uses a WebSocket (through `upgradeWebSocket` from `@vercel/functions`; install
-    `@vercel/functions` and `ws`). Under plain `next dev`, which can't upgrade sockets, the browser
+    Install `ws` and `@vercel/functions`, and add `serverExternalPackages: ["jazz-napi"]` to
+    `next.config.ts` so Next doesn't bundle Jazz's native module; `next dev` needs all three. On
+    Vercel, sync uses a WebSocket (through `upgradeWebSocket` from `@vercel/functions`). Under plain `next dev`, which can't upgrade sockets, the browser
     switches to an HTTP stream on its own.
 
   </Tab>
@@ -54,19 +55,20 @@
         },
       },
       fetch: jazz.handle, // sync and sign-in under /jazz
-      websocket: jazz.websocket, // WebSocket upgrades on /jazz
     });
     ```
+
+    Under Bun, sync runs over an HTTP stream: the browser switches to it on its own. WebSocket
+    upgrades on Bun aren't supported yet.
 
   </Tab>
   <Tab value="Effect">
     ```ts title="server.ts"
-    import { createServer } from "node:http";
-    import { Effect, Layer } from "effect";
+    import { serve } from "@hono/node-server";
+    import { Effect, ManagedRuntime } from "effect";
     import { HttpRouter, HttpServerResponse } from "effect/http";
-    import { NodeHttpServer, NodeRuntime } from "@effect/platform-node";
     import { Jazz, JazzBackend } from "jazz-tools/effect/backend";
-    import { jazzConfig } from "./jazz.server"; // the object you'd pass to createJazz
+    import { jazz } from "./jazz.server";
     import { app } from "./schema";
 
     const listTodos = HttpRouter.add(
@@ -78,17 +80,23 @@
       }).pipe(JazzBackend.forCurrentReqUser()), // as the signed-in user
     );
 
-    HttpRouter.serve(Layer.mergeAll(listTodos, JazzBackend.routes)).pipe( // routes: /jazz/*
-      Layer.provide(JazzBackend.layer(jazzConfig)),
-      Layer.provide(NodeHttpServer.layer(createServer, { port: 3000 })),
-      Layer.launch,
-      NodeRuntime.runMain,
-    );
+    const runtime = ManagedRuntime.make(JazzBackend.layerJazz(jazz));
+    const services = await runtime.context();
+    const { handler } = HttpRouter.toWebHandler(listTodos);
+
+    const server = serve({
+      port: 3000,
+      fetch: (request) =>
+        new URL(request.url).pathname.startsWith("/jazz/")
+          ? jazz.handle(request) // sync and sign-in under /jazz
+          : handler(request, services),
+    });
+    await jazz.attach(server); // WebSocket upgrades on /jazz (needs `ws`)
     ```
 
-    `JazzBackend.layer` takes the same config as `createJazz` and opens Jazz for the server's
-    lifetime. `JazzBackend.routes` mounts sync and sign-in under `/jazz`, WebSockets included. See
-    [Effect](/docs/recipes/effect) for the `Jazz` service.
+    `JazzBackend.layerJazz` hands your `createJazz` instance to Effect handlers, and `/jazz` is
+    served by Jazz itself next to your routes. See [Effect](/docs/recipes/effect) for the `Jazz`
+    service.
 
   </Tab>
 </Tabs>

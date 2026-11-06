@@ -7,5 +7,5 @@ The difference is when a write shows up:
 - **Thin client.** A write shows after one round trip to your backend, and `wait()` resolves when
   the server has answered.
 - **Local-first client.** A write shows instantly in every local query, then syncs. `wait()`
-  takes a [durability tier](/docs/reference/durability-tiers) (`local`, `edge` or `global`) to
+  takes a [durability tier](/docs/reference/durability-tiers) (`local` or `global`) to
   wait for the point you need.

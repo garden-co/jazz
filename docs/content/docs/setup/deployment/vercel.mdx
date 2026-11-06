@@ -40,6 +40,24 @@ export const jazz = createJazz({
 
 <include>../../../partials/main-backend-config.mdx</include>
 
+In a Next.js app, install `ws` and `@vercel/functions` (both also needed under `next dev`) and keep
+Jazz's native module out of Next's server bundle:
+
+```bash title="Terminal"
+npm install ws @vercel/functions
+```
+
+```ts title="next.config.ts"
+import type { NextConfig } from "next";
+
+const nextConfig: NextConfig = {
+  // Your backend loads Jazz's native module; Next must not bundle it.
+  serverExternalPackages: ["jazz-napi"],
+};
+
+export default nextConfig;
+```
+
 Mount it with a catch-all route under `/jazz`, where clients connect by default:
 
 ```ts title="app/jazz/[...path]/route.ts"
@@ -52,8 +70,8 @@ Then deploy as usual with `git push` or `vercel deploy`. Your functions authenti
 their own OIDC token, and the core's secrets are generated inside the Sandbox, so there are no
 environment variables to set.
 
-On Vercel, sync uses a WebSocket (through `upgradeWebSocket` from `@vercel/functions`; install
-`@vercel/functions` and `ws`). Under plain `next dev`, which can't upgrade sockets, the browser
+On Vercel, sync uses a WebSocket (through `upgradeWebSocket` from `@vercel/functions`). Under plain
+`next dev`, which can't upgrade sockets, the browser
 switches to an HTTP stream on its own.
 
 <include>../../../partials/main-backend-use.mdx</include>

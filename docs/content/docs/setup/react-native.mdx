@@ -21,14 +21,51 @@ function App() {
 }
 ```
 
-Install `jazz-rn` directly in the application alongside `jazz-tools`
-(`npm install jazz-tools jazz-rn`, both 2.0 alphas), add its
-Expo config plugin, and build the native app. Expo Go cannot load the relay. A
-bare React Native host uses the same direct dependency and New Architecture,
-with an OS-protected account store. The [canonical Expo
-scaffold](https://github.com/garden-co/jazz/tree/main/examples/todo-client-localfirst-expo)
-shows the complete lifecycle and platform configuration. The alpha has not yet
-proven two physical JSI runtimes attached to one relay.
+### Install
+
+Use Expo SDK 54 or later (SDK 58 included). Install Jazz with the Expo modules it uses for crypto and
+the OS-protected account store, plus `babel-preset-expo`:
+
+```bash title="Terminal"
+npm install jazz-tools jazz-rn
+npx expo install expo-crypto expo-secure-store
+npm install --save-dev babel-preset-expo
+```
+
+Add the `jazz-rn` config plugin to `app.json`:
+
+```json title="app.json"
+{
+  "expo": {
+    "plugins": ["jazz-rn"]
+  }
+}
+```
+
+Let Babel transform `import.meta`, which Jazz uses:
+
+```js title="babel.config.js"
+module.exports = function (api) {
+  api.cache(true);
+  return {
+    presets: [["babel-preset-expo", { unstable_transformImportMeta: true }]],
+  };
+};
+```
+
+Jazz needs the New Architecture, which is the default from SDK 54. Then build the native app with
+`npx expo prebuild` and `npx expo run:android` or `npx expo run:ios`, or with EAS Build. Expo Go
+can't load Jazz's native module. After changing the Babel config, start Metro with
+`npx expo start --clear`.
+
+To reach a backend on your computer, the Android emulator uses `http://10.0.2.2:<port>` instead of
+`localhost`, and Android blocks plain `http://` unless you allow cleartext traffic for development.
+
+A bare React Native host uses the same direct dependency and New Architecture, with an OS-protected
+account store. The [Expo
+example](https://github.com/garden-co/jazz/tree/main/examples/todo-client-localfirst-expo) shows the
+complete lifecycle and platform configuration. The alpha has not yet proven two physical JSI
+runtimes attached to one relay.
 
 <Callout type="info">
   `serverUrl` is your backend's Jazz endpoint (where `createJazz` is mounted); the app names no app
@@ -54,4 +91,4 @@ Some bundlers and runtimes cannot automatically resolve Jazz's Wasm and worker a
 
 - Expo vs bare React Native setup, step by step
 - User auth integration
-- Today React Native clients are local-first only; a thin client follows the web thin client
+- Today React Native clients run the local-first engine on the device; a thin client follows the web thin client
