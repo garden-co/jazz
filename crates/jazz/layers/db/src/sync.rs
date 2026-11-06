@@ -672,8 +672,10 @@ pub type Order = (u64, [u8; 16], u64);
 /// The writer node a thin client's write commits under (SPEC 8 §8.14):
 /// derived from the author the write runs as and the node the client named,
 /// so every server derives the same one and no other author can name it, nor
-/// any store's own node. Marked as RFC 9562 version 8, which no runtime
-/// mints its nodes as (they are version 4, `NodeUuid::random_from`).
+/// any store's own node. Marked as RFC 9562 version 8 with the tag
+/// [`ORIGIN_NODE_TAG`] in its first bytes ([`is_origin_node`]): runtimes mint
+/// version-4 nodes (`NodeUuid::random_from`), and one minted as raw random
+/// bytes before that (alpha.59) carries the mark with odds of 2^-38.
 pub fn origin_node(author: &AuthorSubject, client_node: [u8; 16]) -> [u8; 16] {
     let (account, issuer, subject) = author_key(author);
     let mut hasher = jazz_types::sha256::Hasher::new();
@@ -686,14 +688,18 @@ pub fn origin_node(author: &AuthorSubject, client_node: [u8; 16]) -> [u8; 16] {
     hasher.update(&client_node);
     let digest = hasher.finalize();
     let mut node: [u8; 16] = digest.as_bytes()[..16].try_into().expect("16 bytes");
+    node[..4].copy_from_slice(&ORIGIN_NODE_TAG);
     node[6] = (node[6] & 0x0f) | 0x80;
     node[8] = (node[8] & 0x3f) | 0x80;
     node
 }
 
+/// The first bytes of every [`origin_node`].
+const ORIGIN_NODE_TAG: [u8; 4] = *b"jzTW";
+
 /// Whether `node` is a thin client's writer node ([`origin_node`]).
 pub(crate) fn is_origin_node(node: [u8; 16]) -> bool {
-    node[6] >> 4 == 8 && node[8] >> 6 == 0b10
+    node[..4] == ORIGIN_NODE_TAG && node[6] >> 4 == 8 && node[8] >> 6 == 0b10
 }
 
 pub(crate) fn writer_bytes(node: [u8; 16], tx: u64) -> Vec<u8> {
@@ -12256,9 +12262,13 @@ impl Db {
                 // may send any.
                 let identity = self.inner.borrow().sessions[index].identity;
                 // No session commits as a thin client's writer node: those
-                // are the server's, derived per author (`origin_node`).
+                // are the server's, derived per author (`origin_node`). A
+                // node the session already writes as stays its own, however
+                // its bytes read.
                 if policy.is_some()
-                    && (is_origin_node(node) || !self.inner.borrow().claim_node(node, &identity)?)
+                    && ((is_origin_node(node)
+                        && !self.inner.borrow().writes_as(node, &identity)?)
+                        || !self.inner.borrow().claim_node(node, &identity)?)
                 {
                     let mut inner = self.inner.borrow_mut();
                     let through = inner.served_through();
@@ -13651,6 +13661,30 @@ fn store_refusal(id: u64, event: &SubscriptionEvent) -> Option<SyncMessage> {
 
 #[cfg(test)]
 mod tests {
+    /// A thin client's writer node carries its mark; a node minted as raw
+    /// random bytes (alpha.59) that reads as version 8 does not.
+    #[test]
+    fn only_a_derived_writer_node_reads_as_a_thin_clients() {
+        use jazz_types::ids::AuthorSubject;
+        let author = AuthorSubject::for_test_bytes([1; 16]);
+        let derived = super::origin_node(&author, [7; 16]);
+        assert!(super::is_origin_node(derived));
+        assert_ne!(derived, super::origin_node(&author, [8; 16]));
+        assert_ne!(
+            derived,
+            super::origin_node(&AuthorSubject::for_test_bytes([2; 16]), [7; 16])
+        );
+        // Version 8, RFC 9562 variant, untagged.
+        let legacy = [
+            0x3a, 0x51, 0x0c, 0x9e, 0x44, 0x02, 0x8f, 0x13, 0xa7, 0x60, 0x11, 0xd2, 0x5e, 0x09,
+            0xbb, 0x4c,
+        ];
+        assert!(!super::is_origin_node(legacy));
+        assert!(!super::is_origin_node(
+            *jazz_types::ids::NodeUuid::random_from([0x88; 16]).as_bytes()
+        ));
+    }
+
     /// Only a chunk store's failure becomes a refusal, carrying the
     /// error's own message, not its text with the code in front.
     #[test]

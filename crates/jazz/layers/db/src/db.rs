@@ -41,6 +41,7 @@ pub use large_ops::{
 };
 #[path = "sync.rs"]
 pub(crate) mod sync;
+pub use sync::origin_node;
 
 #[path = "shard.rs"]
 pub mod shard;
@@ -1750,7 +1751,7 @@ impl Db {
         }
         self.inner.borrow_mut().next_origin = Some((node, tx));
         let written = write().await;
-        // Taken by the write's commit, if it reached one.
+        // Read by each attempt of the write's commit.
         self.inner.borrow_mut().next_origin = None;
         written.map(OriginWrite::Written)
     }
@@ -2916,20 +2917,18 @@ impl Db {
             let mut inner = self.inner();
             let (seq, standalone) = match &inner.tx {
                 Some((seq, _)) => (*seq, false),
-                None => (inner.next_seq(), true),
+                None => (inner.fresh_seq(), true),
             };
             begin_savepoint(&inner.conn, "w")?;
             let mark = inner.changed.borrow().len();
             // A standalone commit takes the writer id a thin client's write
-            // gave it (`Db::write_as_origin`). Its seq is not used up unless
-            // it commits, and the next commit takes it: what this one put in
-            // `own_order` for it goes back, so no other commit inherits its
-            // writer id, nor it another's.
-            let origin = if standalone {
-                inner.next_origin.take()
-            } else {
-                None
-            };
+            // gave it (`Db::write_as_origin`), on every attempt of the write
+            // (`Db::fetching_with` runs one again). Its seq is not used up
+            // unless it commits, and the next commit takes it: what this one
+            // put in `own_order` for it goes back, so no other commit
+            // inherits its writer id, nor it another's (and `fresh_seq`
+            // drops whatever an exit after this one leaves).
+            let origin = if standalone { inner.next_origin } else { None };
             let prior = standalone.then(|| inner.own_order.get(&seq).copied());
             inner.commit_origin = origin;
             let applied = apply(&mut inner, seq);
@@ -3017,7 +3016,7 @@ impl Db {
             }
             begin_savepoint(&inner.conn, "tx")?;
             inner.changed.borrow_mut().clear();
-            let seq = inner.next_seq();
+            let seq = inner.fresh_seq();
             inner.tx = Some((seq, BTreeSet::new()));
         }
         let mut tx = MergeableTx { db: self, identity };
@@ -8234,6 +8233,19 @@ impl Inner {
         self.hlc_last = self.hlc_last.max(self.bounded_hlc(seen));
     }
 
+    /// The seq a new local commit takes ([`Inner::next_seq`]). It is above
+    /// every seq this store committed, so on a replica an `own_order` entry
+    /// already there is stale, left by a commit at it that never happened
+    /// (a write that failed, or whose upload record did): the new commit
+    /// must not inherit its HLC or its writer id.
+    fn fresh_seq(&mut self) -> u64 {
+        let seq = self.next_seq();
+        if self.me != sync::ACCEPTED {
+            self.own_order.remove(&seq);
+        }
+        seq
+    }
+
     /// Give commit `seq` its HLC if it has none yet: its writes are at it,
     /// written by this store's node as tx `seq`.
     fn stamp_commit(&mut self, seq: u64) {
@@ -8717,7 +8729,7 @@ impl Db {
         let ops = &batch.ops;
         let (seq, prior, mark) = {
             let mut inner = self.inner();
-            let seq = inner.next_seq();
+            let seq = inner.fresh_seq();
             begin_savepoint(&inner.conn, "commit_batch")?;
             let mark = inner.changed.borrow().len();
             inner.defer_checks();

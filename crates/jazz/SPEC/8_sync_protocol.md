@@ -1003,9 +1003,10 @@ that does not read are not bounded yet (#4865).
   for it, a node the client picks and that node's counter, in the order the
   client makes its writes. The server makes the write as a commit whose
   writer is derived from the session's author and the client's node
-  (`origin_node`, an RFC 9562 version-8 node), at the client's counter
+  (`origin_node`, an RFC 9562 version-8 node with a fixed tag), at the client's counter
   (`Db::write_as_origin`): every server derives the same writer, and no
-  other author can name it. No session commits as such a node. The
+  other author can name it. No session commits as such a node, unless it
+  already writes as it. The
   authority records the commit's fate under it; a replica uploads it under
   it, which the authority dedups like any resent commit (§8.2), and never
   infers from pruned entries (a client's commits reach it through any
@@ -1013,7 +1014,8 @@ that does not read are not bounded yet (#4865).
   nothing, and the next commit does not inherit its id. A write whose key
   the store already knows for the same author is not made again: it answers
   `Written` with seq 0, or the first one's refusal as uploaded through a
-  replica. The authority does not record its own refusal: a resend of a
+  replica. In .60 the authority keeps these dedupe entries and never prunes them;
+  a bounded resend window is planned for .61 (#4961). The authority does not record its own refusal: a resend of a
   write it refused runs again, against current state. On a replica, seq 0
   can answer a write still pending upstream. An insert with a key names its
   `rowId`; a staged write names no key. So a client resends a keyed write

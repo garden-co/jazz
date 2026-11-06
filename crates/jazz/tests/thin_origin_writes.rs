@@ -328,3 +328,52 @@ fn two_users_writing_under_one_key_through_two_servers_both_land() {
     seen.sort();
     assert_eq!(seen, vec!["mine".to_owned(), "theirs".to_owned()]);
 }
+
+/// A session's own node that reads as version 8 (alpha.59 minted nodes as
+/// raw random bytes) still commits; a session naming a thin client's
+/// writer node does not.
+#[test]
+fn only_a_thin_clients_writer_node_is_refused_to_sessions() {
+    let legacy = [
+        0x3a, 0x51, 0x0c, 0x9e, 0x44, 0x02, 0x8f, 0x13, 0xa7, 0x60, 0x11, 0xd2, 0x5e, 0x09, 0xbb,
+        0x4c,
+    ];
+    let derived = jazz::db::origin_node(&user(1), [7; 16]);
+    let core = open(0);
+    let mut links = Vec::new();
+    let clients: Vec<Db> = [legacy, derived]
+        .into_iter()
+        .map(|node| {
+            let client = block_on(Db::open(DbConfig::new(
+                schema(),
+                DbIdentity {
+                    node: NodeUuid::from_bytes(node),
+                    author: user(1),
+                },
+            )))
+            .unwrap();
+            let (up, down) = duplex();
+            links.push(block_on(client.connect_upstream(up)));
+            core.accept_subscriber(down, user(1)).unwrap();
+            client.set_remote_link_hint(RemoteLinkHint::Live);
+            client
+        })
+        .collect();
+    for (n, client) in clients.iter().enumerate() {
+        block_on(client.insert(
+            "notes",
+            body(if n == 0 { "legacy" } else { "derived" }),
+            InsertOptions {
+                row_id: Some(RowUuid::from_bytes([n as u8 + 1; 16])),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    }
+    for _ in 0..8 {
+        for db in clients.iter().chain([&core]) {
+            block_on(db.tick()).unwrap();
+        }
+    }
+    assert_eq!(bodies(&core), vec!["legacy".to_owned()]);
+}
