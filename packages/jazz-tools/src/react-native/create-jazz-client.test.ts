@@ -210,7 +210,8 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
           expect(reader.string()).toBe("notes");
           expect(reader.u64()).toBe(0); // native allocates the row id
           expect(reader.bytes().length).toBeGreaterThan(0);
-          expect(JSON.parse(reader.string())).toEqual({ updatedAtMs: expect.any(Number) });
+          // An ordinary write names no time: the authority stamps it.
+          expect(JSON.parse(reader.string())).toEqual({});
           return Uint8Array.from([23, ...new Uint8Array(16).fill(4), ...rowId]);
         }
         case 21:

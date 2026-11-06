@@ -188,8 +188,8 @@ its maximum), the server applies the first and rejects the second with an explic
 
 Counters solve concurrent numbers; arrays have the same problem with concurrent membership. Under the
 default merge, if Alice adds `"urgent"` to a `tags` array while Bob concurrently adds
-`"blocked"`, the array is one field: the edit the server receives second loses whole, and a tag is
-silently dropped.
+`"blocked"`, the array is one field: the edit the server receives last replaces the whole
+array, and the other tag is silently dropped.
 
 Use `.merge("g-set")` to make an array column a grow-only set instead — concurrent writes converge
 to the union of every replica's elements:
