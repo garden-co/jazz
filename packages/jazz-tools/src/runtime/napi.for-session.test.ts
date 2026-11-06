@@ -618,10 +618,10 @@ describe("forSession concurrent session isolation", () => {
 
     // Cross-user update must be rejected.
     expect(() => aliceDb.update(todoApp.todos, bobRow.id, { title: "alice-as-bob" })).toThrow(
-      'Update failed: WriteError("read policy denied UPDATE on table todos: the operation requires read permission on the target row")',
+      'Update failed: WriteError("authorization_denied: read policy denied UPDATE on table todos: the row does not exist or the session may not read it")',
     );
     expect(() => bobDb.update(todoApp.todos, aliceRow.id, { title: "bob-as-alice" })).toThrow(
-      'Update failed: WriteError("read policy denied UPDATE on table todos: the operation requires read permission on the target row")',
+      'Update failed: WriteError("authorization_denied: read policy denied UPDATE on table todos: the row does not exist or the session may not read it")',
     );
 
     // Upsert of an existing foreign row follows the same read-before-write
@@ -635,7 +635,7 @@ describe("forSession concurrent session isolation", () => {
         owner_id: bob.user,
       }),
     ).toThrow(
-      'Upsert failed: WriteError("read policy denied UPSERT on table todos: the operation requires read permission on the target row")',
+      'Upsert failed: WriteError("authorization_denied: read policy denied UPSERT on table todos: the row does not exist or the session may not read it")',
     );
 
     // A synchronous admission denial has no returned write handle. It must be
