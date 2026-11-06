@@ -146,3 +146,45 @@ fn the_original_node_can_wait_through_a_schema_view_and_after_reopen() {
         Some(Value::String("retained".into()))
     );
 }
+
+/// A wait claims reporting a write's rejection exactly when it reports
+/// the rejection itself: at once for a write already refused here (any
+/// tier) and for a `global` wait, which hears the authority's verdict; a
+/// `local` wait on a write still in flight claims nothing as it starts, so
+/// a refusal that arrives after it resolved still reaches the listener,
+/// and claims it only if it fails with it.
+#[test]
+fn a_wait_claims_a_rejection_only_when_it_reports_it() {
+    use jazz::binding_host::{claiming, wait_claims_rejection};
+    use std::cell::Cell;
+    use std::rc::Rc;
+    let alice = open(1, None);
+    let live = insert(&alice, "live");
+    let refused = alice
+        .restore(
+            "notes",
+            &live.row_id.to_bytes(),
+            Some(&title("again")),
+            &serde_json::Value::Null,
+        )
+        .unwrap();
+    assert!(refused.rejected.is_some());
+    for tier in ["none", "local", "global"] {
+        assert!(wait_claims_rejection(&refused, tier), "{tier}");
+    }
+    assert!(!wait_claims_rejection(&live, "none"));
+    assert!(!wait_claims_rejection(&live, "local"));
+    assert!(wait_claims_rejection(&live, "global"));
+
+    // A wait that resolves claims nothing; one that fails claims.
+    let claimed = Rc::new(Cell::new(false));
+    let wait = alice.wait_for_write(&live, "local").unwrap();
+    block_on(claiming(wait, Rc::clone(&claimed))).unwrap();
+    assert!(!claimed.get(), "a local wait that resolved claims nothing");
+    let wait = alice.wait_for_write(&refused, "local").unwrap();
+    block_on(claiming(wait, Rc::clone(&claimed))).unwrap_err();
+    assert!(
+        claimed.get(),
+        "a wait that fails with the refusal claims it"
+    );
+}

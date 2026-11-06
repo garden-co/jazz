@@ -656,8 +656,9 @@ fn an_offline_write_a_tightened_bundle_refuses_is_reported_as_denied() {
     // The write built on the refused one says why that one was refused.
     let message = &rejections[1].error.message;
     assert!(
-        message.contains("built on a write the authority rejected")
-            && message.contains("permission denied"),
+        message.starts_with(
+            "the write was built on a write the authority rejected (permission denied: "
+        ) && !message.contains("authorization_denied"),
         "{message}"
     );
     assert_eq!(local(&db), [row], "the row is back to the accepted version");
@@ -741,5 +742,10 @@ fn an_offline_write_relayed_for_a_tab_is_reported_to_the_tab() {
         at_tab[0].error
     );
     let message = &at_tab[1].error.message;
-    assert!(message.contains("permission denied"), "{message}");
+    assert!(
+        message.starts_with(
+            "the write was built on a write the authority rejected (permission denied: "
+        ) && !message.contains("authorization_denied"),
+        "{message}"
+    );
 }

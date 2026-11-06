@@ -195,7 +195,9 @@ impl Inner {
             return Ok(cause);
         }
         let cause = if cause.is_authorization_denied() {
-            format!("permission denied: {}", cause.message)
+            // The wire message leads with its code; name it in words once.
+            let message = cause.message.trim_start_matches("authorization_denied: ");
+            format!("permission denied: {message}")
         } else {
             cause.message
         };
@@ -332,7 +334,9 @@ impl Inner {
                         Some(p) => BuiltOn::Commit { node: me, tx: p.tx },
                         None => match self.settled(node, tx)? {
                             Some(Some(at)) if at.accepted() => BuiltOn::Seq(at.seq),
-                            Some(None) => return Err(self.rejected_predecessor(node, tx)?),
+                            // Another session's refusal: why it was refused
+                            // is not this session's to learn.
+                            Some(None) => return Err(predecessor_rejected()),
                             _ => return Err(unknown_base("another node's commit")),
                         },
                     },
@@ -357,7 +361,9 @@ impl Inner {
                             }
                             (false, Some(Some(at))) if at.accepted() => BuiltOn::Seq(at.seq),
                             (false, Some(Some(_))) => BuiltOn::Commit { node: me, tx },
-                            (false, Some(None)) => return Err(self.rejected_predecessor(me, tx)?),
+                            // This relay's commit may carry another
+                            // session's write: name no cause.
+                            (false, Some(None)) => return Err(predecessor_rejected()),
                             (false, None) => BuiltOn::Seq(
                                 self.newest_accepted(table, row, &base.key)?.unwrap_or(0),
                             ),

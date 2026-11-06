@@ -710,16 +710,31 @@ impl Hooks {
     }
 }
 
-/// Whether a wait for a write at `tier` claims reporting the write's
-/// rejection. Only a wait for the authority's verdict can see it: one at
-/// `none` or `local` resolves when the write is committed here, so a
-/// refusal that arrives later (after an offline write reconnects) still
-/// goes to the mutation-error listener.
-pub fn wait_claims_rejection(tier: &str) -> bool {
-    matches!(
-        crate::binding_args::durability_tier(tier),
-        Ok(DurabilityTier::Global)
-    )
+/// Whether a wait for `write` at `tier` claims reporting the write's
+/// rejection as it starts: when the wait will report the rejection itself.
+/// It does for a write already refused here, and at `global`, which waits
+/// for the authority's verdict. One at `none` or `local` resolves once the
+/// write is committed here, so a refusal that arrives later (after an
+/// offline write reconnects) still goes to the mutation-error listener.
+pub fn wait_claims_rejection(write: &Write, tier: &str) -> bool {
+    write.rejected.is_some()
+        || matches!(
+            crate::binding_args::durability_tier(tier),
+            Ok(DurabilityTier::Global)
+        )
+}
+
+/// A wait's `fate` that claims the write's rejection when it reports one
+/// itself: a `local` wait still open when the refusal arrives (one a relay
+/// answers) fails with it, so the listener is not told a second time.
+pub fn claiming(fate: HostFuture<()>, claimed: Rc<Cell<bool>>) -> HostFuture<()> {
+    Box::pin(async move {
+        let result = fate.await;
+        if result.is_err() {
+            claimed.set(true);
+        }
+        result
+    })
 }
 
 /// The public `kind` of a transaction in a mutation-error event.

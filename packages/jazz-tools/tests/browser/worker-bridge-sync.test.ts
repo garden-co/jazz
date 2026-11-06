@@ -1107,52 +1107,63 @@ describe("SharedWorker bridge with IndexedDB", () => {
   it("reports an offline update a tightened deployment refuses to a tab open throughout", async () => {
     const syncServer = await publishSyncServerSchemaAndPermissions("offline-update-open-tab");
     const control = await createJazzServerTransportControl(syncServer.serverUrl);
-    const dbName = uniqueDbName("offline-update-open-tab");
-    const account = await acquireBrowserTestAccount({
-      appId: syncServer.appId,
-      serverUrl: control.url,
-      key: dbName,
-    });
-    const db = track(
-      await createDb({
+    try {
+      const dbName = uniqueDbName("offline-update-open-tab");
+      const account = await acquireBrowserTestAccount({
         appId: syncServer.appId,
-        driver: { type: "persistent" as const, dbName },
         serverUrl: control.url,
-        account,
-      }),
-    );
-    const errors = vi.fn();
-    db.onMutationError(errors);
-    const row = db.insert(todos, { title: "accepted", done: false });
-    await row.wait({ tier: "global" });
+        key: dbName,
+      });
+      const db = track(
+        await createDb({
+          appId: syncServer.appId,
+          driver: { type: "persistent" as const, dbName },
+          serverUrl: control.url,
+          account,
+        }),
+      );
+      const errors = vi.fn();
+      db.onMutationError(errors);
+      const row = db.insert(todos, { title: "accepted", done: false });
+      await row.wait({ tier: "global" });
 
-    await control.down();
-    await db.update(todos, row.value.id, { title: "offline edit" }).wait({ tier: "local" });
-    const later = db.update(todos, row.value.id, { title: "second offline edit" });
-    const laterOutcome = later.wait({ tier: "global" }).then(
-      () => "accepted",
-      (error: unknown) => error,
-    );
+      await control.down();
+      await db.update(todos, row.value.id, { title: "offline edit" }).wait({ tier: "local" });
+      const later = db.update(todos, row.value.id, { title: "second offline edit" });
+      const laterOutcome = later.wait({ tier: "global" }).then(
+        () => "accepted",
+        (error: unknown) => error,
+      );
 
-    const tightened = await publishPermissionsForServer(syncServer, readOnlyPermissions);
-    await control.up(tightened.serverUrl);
+      const tightened = await publishPermissionsForServer(syncServer, readOnlyPermissions);
+      await control.up(tightened.serverUrl);
 
-    await waitForCondition(
-      async () => errors.mock.calls.length > 0,
-      20_000,
-      "the refused offline edit reaches onMutationError",
-    );
-    expect(errors.mock.calls[0]![0]).toMatchObject({ code: "permission_denied" });
-    const outcome = await withTimeout(laterOutcome, 10_000, "the later edit's global wait settles");
-    expect(String(outcome)).toMatch(/permission|denied/i);
-    await waitForCondition(
-      async () =>
-        (await db.all(allTodos, { tier: "local-first" })).map((todo) => todo.title).join() ===
-        "accepted",
-      5000,
-      "the row returns to its accepted version",
-    );
-    await control.stop();
+      await waitForCondition(
+        async () => errors.mock.calls.length > 0,
+        20_000,
+        "the refused offline edit reaches onMutationError",
+      );
+      expect(errors.mock.calls[0]![0]).toMatchObject({ code: "permission_denied" });
+      const outcome = await withTimeout(
+        laterOutcome,
+        10_000,
+        "the later edit's global wait settles",
+      );
+      expect(String(outcome)).toMatch(/permission denied/i);
+      await waitForCondition(
+        async () =>
+          (await db.all(allTodos, { tier: "local-first" })).map((todo) => todo.title).join() ===
+          "accepted",
+        5000,
+        "the row returns to its accepted version",
+      );
+      // The refusal of the edit waited for only locally reaches the
+      // listener once; the later edit's refusal went to its global wait.
+      await sleep(500);
+      expect(errors).toHaveBeenCalledTimes(1);
+    } finally {
+      await control.stop();
+    }
   }, 60_000);
 
   it("delivers a rejection to a runtime attached while the worker rehydrates", async () => {
