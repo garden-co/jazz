@@ -92,6 +92,8 @@ async function setup() {
   // The replica a local-first client would keep in this browser's storage:
   // these clients run in memory, and record which user's storage was wiped.
   const wiped: string[] = [];
+  // Holds a wipe's delete until released (a slow storage teardown).
+  const hold = { wipe: undefined as Promise<void> | undefined };
   const store = memoryStore();
   const open = () =>
     createJazzClient({
@@ -102,13 +104,14 @@ async function setup() {
         createClient: async (config) => {
           const db = await createLocalFirstDb({ ...config, driver: { type: "memory" } });
           db.deleteClientStorage = async () => {
+            await hold.wipe;
             wiped.push(config.account.identity.subject);
           };
           return db;
         },
       }),
     });
-  return { jar, open, wiped };
+  return { jar, open, wiped, hold, storage };
 }
 
 function memoryStore(): AccountStore {
@@ -181,4 +184,46 @@ it("keeps the replica of the user who is still signed in, and wipes once, in the
   await new Promise((resolve) => setTimeout(resolve, 1_000));
   expect(wiped).toEqual(["alice"]);
   await third.close();
+}, 60_000);
+
+it("keeps the replica on one signed-out answer the next contradicts (a failed refresh)", async () => {
+  const { jar, open, wiped } = await setup();
+  const first = await signInLocalFirst(open);
+  await first.close();
+  // One answer says no one (the app's session refresh failed once); the next names alice again.
+  jar.user = null;
+  const second = await open();
+  cleanups.push(() => second.close());
+  jar.user = "alice";
+  await new Promise((resolve) => setTimeout(resolve, 3_000));
+  expect(wiped).toEqual([]);
+  await second.close();
+}, 60_000);
+
+it("lets a user who signs back in during the wipe open a fresh replica, still recorded", async () => {
+  const { jar, open, wiped, hold, storage } = await setup();
+  const first = await signInLocalFirst(open);
+  jar.user = null;
+  await first.close();
+
+  let finish!: () => void;
+  hold.wipe = new Promise<void>((resolve) => (finish = resolve));
+  const second = await open();
+  cleanups.push(() => second.close());
+  // The wipe has started (after its confirming answer); alice signs in meanwhile.
+  await new Promise((resolve) => setTimeout(resolve, 3_000));
+  jar.user = "alice";
+  const signingIn = second.loginWithBackend();
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  expect(wiped).toEqual([]);
+  finish();
+  await signingIn;
+  expect(wiped).toEqual(["alice"]);
+  await expect
+    .poll(() => second.getSnapshot().client?.session?.identity.subject, { timeout: 15_000 })
+    .toBe("alice");
+  // Her new replica is recorded, for a later missed sign-out.
+  const recorded = [...storage].find(([key]) => key.startsWith("jazz-clear-on-sign-out-v1:"));
+  expect(recorded?.[1]).toContain('"subject":"alice"');
+  await second.close();
 }, 60_000);

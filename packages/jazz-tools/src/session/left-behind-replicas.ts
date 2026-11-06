@@ -1,95 +1,174 @@
-import { rememberBackendUser, type RememberedBackendUser } from "../accounts/enrollment.js";
+import type { RememberedBackendUser } from "../accounts/enrollment.js";
 import type { AccountHandle } from "../accounts/state.js";
-import type { BackendUser } from "./backend-watch.js";
+
+/** What the record keeps of a user: enough to find their replica, no claims. */
+export type ReplicaOwner = Pick<RememberedBackendUser, "account" | "identity">;
 
 /**
  * With `clearOnSignOut`, the backend users whose local-first replica this
- * browser holds. A sign-out Jazz sees in the page wipes the replica, but one
- * the page doesn't see (a server-side logout followed by a reload, or
+ * browser may hold. A sign-out Jazz sees in the page wipes the replica, but
+ * one the page doesn't see (a server-side logout followed by a reload, or
  * another user signing in through the app before a reload) leaves it
  * behind: `clearOnSignOut` never reopens the previous user, so nothing would
- * wipe it. This record is what the next page load wipes. It holds what the
- * device remembers of a backend user (account, identity, claims), never a
+ * wipe it. This record is what a later page load wipes. An entry is written
+ * before its replica opens and dropped only once it is wiped. It keeps the
+ * account and identity a replica is stored under, never claims or a
  * credential.
  */
 export function leftBehindReplicas(registry: string) {
   const key = `jazz-clear-on-sign-out-v1:${encodeURIComponent(registry)}`;
-  const read = (): RememberedBackendUser[] => {
+  const read = (): ReplicaOwner[] => {
     try {
       const value = JSON.parse(globalThis.localStorage?.getItem(key) ?? "[]");
-      return Array.isArray(value) ? value.filter(isRemembered) : [];
+      return Array.isArray(value) ? value.filter(isOwner) : [];
     } catch {
       return [];
     }
   };
-  const write = (users: RememberedBackendUser[]) => {
+  const write = (owners: ReplicaOwner[]) => {
     try {
-      if (users.length === 0) globalThis.localStorage?.removeItem(key);
-      else globalThis.localStorage?.setItem(key, JSON.stringify(users));
+      if (owners.length === 0) globalThis.localStorage?.removeItem(key);
+      else globalThis.localStorage?.setItem(key, JSON.stringify(owners));
     } catch {
-      // Without storage there is no next load to wipe on either.
+      // Without storage there is no later load to wipe on either.
     }
   };
   return {
     read,
-    /** `account` now has a local-first replica on this device. */
+    /** `account` is about to keep a local-first replica on this device. */
     remember(account: AccountHandle) {
-      const user = rememberBackendUser(account);
-      if (!user) return;
-      write([...read().filter((u) => u.account !== user.account), user]);
+      if (read().some((owner) => owner.account === account.id)) return;
+      const { issuer, subject } = account.identity;
+      write([...read(), { account: account.id, identity: { issuer, subject } }]);
     },
     forget(account: string) {
-      write(read().filter((u) => u.account !== account));
+      write(read().filter((owner) => owner.account !== account));
     },
   };
 }
 
-function isRemembered(value: unknown): value is RememberedBackendUser {
-  const user = value as Partial<RememberedBackendUser> | null;
+function isOwner(value: unknown): value is ReplicaOwner {
+  const owner = value as Partial<ReplicaOwner> | null;
   return (
-    typeof user?.account === "string" &&
-    typeof user.identity?.issuer === "string" &&
-    typeof user.identity.subject === "string" &&
-    !!user.claims &&
-    typeof user.claims === "object" &&
-    !Array.isArray(user.claims)
+    typeof owner?.account === "string" &&
+    typeof owner.identity?.issuer === "string" &&
+    typeof owner.identity.subject === "string"
   );
 }
 
+type Locks = {
+  request(
+    name: string,
+    options: { mode: "shared" | "exclusive"; ifAvailable?: boolean },
+    callback: (lock: unknown) => Promise<unknown>,
+  ): Promise<unknown>;
+};
+const locks = (): Locks | undefined =>
+  (globalThis.navigator as { locks?: Locks } | undefined)?.locks;
+const lockName = (registry: string, account: string) => `jazz-replica-v1:${registry}:${account}`;
+
 /**
- * Wipe each replica `record` holds whose user the backend no longer names:
- * someone else signed in, or no one. The user it names keeps theirs (it is
- * their own device's copy, unsynced writes included). A backend that can't be
- * asked wipes nothing: the next load asks again.
+ * Hold `account`'s replica open in this tab until the returned release is
+ * called, so no other tab wipes it meanwhile (a Web Lock; without Web Locks,
+ * nothing to hold).
+ */
+export async function holdReplica(registry: string, account: string): Promise<() => void> {
+  const available = locks();
+  if (!available) return () => {};
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => (release = resolve));
+  await new Promise<void>((acquired) => {
+    void available.request(lockName(registry, account), { mode: "shared" }, async () => {
+      acquired();
+      await released;
+    });
+  });
+  return release;
+}
+
+/**
+ * Run `wipe` while no tab holds `account`'s replica open. Resolves false,
+ * without running it, when one does.
+ */
+export async function whileNoTabHolds(
+  registry: string,
+  account: string,
+  wipe: () => Promise<void>,
+): Promise<boolean> {
+  const available = locks();
+  if (!available) {
+    await wipe();
+    return true;
+  }
+  let ran = false;
+  await available.request(
+    lockName(registry, account),
+    { mode: "exclusive", ifAvailable: true },
+    async (lock) => {
+      if (!lock) return;
+      ran = true;
+      await wipe();
+    },
+  );
+  return ran;
+}
+
+/** A wipe that hangs (storage another tab is still closing) waits for a later load. */
+const WIPE_TIMEOUT_MS = 30_000;
+
+/**
+ * Wipe each replica `record` holds whose user the session doesn't hold now,
+ * once the session has followed the backend's first answer: someone else
+ * signed in, or no one. A "no one" answer is confirmed by a second one
+ * (`confirmSignedOut`), so one failed session refresh in the app's
+ * `authenticate` wipes nothing. Before each wipe `stillLeftBehind` is asked
+ * again, so a user who signs back in meanwhile keeps their replica. Anything
+ * not wiped stays recorded for a later load.
  */
 export async function wipeLeftBehindReplicas(options: {
   record: ReturnType<typeof leftBehindReplicas>;
-  signedIn(): Promise<BackendUser | null>;
-  wipe(user: RememberedBackendUser): Promise<void>;
+  /** The account the session holds now, once it settled. */
+  current(): string | undefined;
+  /** Whether that account is a user the backend signed in (not none, not a guest). */
+  signedIn(): boolean;
+  /** Whether the backend still says no one is signed in. */
+  confirmSignedOut(): Promise<boolean>;
+  stillLeftBehind(account: string): boolean;
+  /**
+   * Wipe `owner`'s replica and forget it in the record, in one step, so an
+   * open of that account waiting for the wipe records its new replica after.
+   * Resolves false when it left the replica (another tab holds it open).
+   */
+  wipe(owner: ReplicaOwner): Promise<boolean>;
 }): Promise<void> {
-  const users = options.record.read();
-  if (users.length === 0) return;
-  let current: BackendUser | null;
-  try {
-    current = await options.signedIn();
-  } catch {
-    return;
-  }
-  for (const user of users) {
-    if (
-      current &&
-      current.issuer === user.identity.issuer &&
-      current.subject === user.identity.subject
-    )
-      continue;
+  const owners = options.record.read().filter((owner) => owner.account !== options.current());
+  if (owners.length === 0) return;
+  if (!options.signedIn()) {
+    let confirmed = false;
     try {
-      await options.wipe(user);
-      options.record.forget(user.account);
+      confirmed = await options.confirmSignedOut();
+    } catch {
+      // A backend that can't be asked wipes nothing.
+    }
+    if (!confirmed) return;
+  }
+  for (const owner of owners) {
+    if (!options.stillLeftBehind(owner.account)) continue;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        options.wipe(owner),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("the wipe took too long")), WIPE_TIMEOUT_MS);
+        }),
+      ]);
     } catch (error) {
       console.warn(
-        "Jazz could not wipe the local data a signed-out user left on this device (clearOnSignOut); it tries again on the next load.",
+        "Jazz could not wipe the local data a signed-out user left on this device (clearOnSignOut); a later load tries again.",
         error,
       );
+    } finally {
+      clearTimeout(timer);
     }
   }
 }

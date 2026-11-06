@@ -65,6 +65,14 @@ export async function firstBackendAnswer(session: JazzSession<unknown>): Promise
   await firstAnswers.get(session);
 }
 
+/**
+ * @internal Settles once a `followUser` session's watch has followed the
+ * backend's first answer (or failed to ask), whatever the session opened as.
+ */
+export function backendAnswered(session: JazzSession<unknown>): Promise<void> {
+  return firstAnswers.get(session) ?? Promise.resolve();
+}
+
 function decorate<Client>(
   session: JazzSession<Client>,
   options: {
