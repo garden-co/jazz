@@ -2,9 +2,14 @@
 //! evaluates their queries under the session's identity and claims, sends
 //! finished results, and runs their writes as that session.
 
-use std::collections::BTreeMap;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, VecDeque};
+use std::future::Future;
+use std::pin::Pin;
+use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::task::{Context, Poll, Wake, Waker};
 
 use jazz::binding_codec;
 use jazz::binding_host::{
@@ -14,7 +19,7 @@ use jazz::binding_host::{
 use jazz::db::{
     Db, Error, ErrorCode, LargeValueUpdate, SerializedReadResult, StreamingMutationKind,
     StreamingValueUpload, SubscriptionEvent, SubscriptionStream, UpdateOptions, WriteHandle,
-    WriteIdentity, block_on,
+    WriteIdentity,
 };
 use jazz::ids::{AuthorSubject, RowUuid, SchemaVersionId};
 use jazz::model::transaction::OpenTransactionId;
@@ -24,7 +29,7 @@ use jazz::thin::{ThinBody, ThinOp, ThinRequest, ThinResponse};
 use jazz::wire::{WireErrorCode, WireFrame, WireRetry, encode_frame};
 use tokio::sync::mpsc as tokio_mpsc;
 
-use super::{Outbound, Owner, SESSION_QUEUE_BUDGET, ServerSession};
+use super::{Outbound, Owner, SESSION_QUEUE_BUDGET, ServerSession, ThinIngress};
 
 /// A transaction a thin session began and has not ended.
 struct ThinTransaction {
@@ -48,7 +53,8 @@ struct ThinStream {
     transaction: Option<OpenTransactionId>,
 }
 
-pub(super) struct ThinSession {
+struct ThinState {
+    db: Rc<Db>,
     identity: AuthorSubject,
     /// The identity's claims, bound to every read; `None` for SYSTEM.
     claims: Option<BTreeMap<String, Value>>,
@@ -64,7 +70,7 @@ pub(super) struct ThinSession {
     /// Large-value uploads, by the id of the request that began them.
     streams: BTreeMap<u64, ThinStream>,
     /// Answers produced while the session's egress budget is spent.
-    held: Vec<ThinResponse>,
+    held: Rc<RefCell<VecDeque<ThinResponse>>>,
     /// The live query the next pump drains first, so one busy query
     /// cannot keep the others' events waiting.
     next_subscription: u64,
@@ -72,8 +78,9 @@ pub(super) struct ThinSession {
     egress: Arc<AtomicUsize>,
 }
 
-impl ThinSession {
-    pub(super) fn new(
+impl ThinState {
+    fn new(
+        db: Rc<Db>,
         identity: AuthorSubject,
         claims: Option<BTreeMap<String, Value>>,
         bundle: Option<jazz::catalogue::BundleId>,
@@ -81,6 +88,7 @@ impl ThinSession {
         egress: Arc<AtomicUsize>,
     ) -> Self {
         Self {
+            db,
             identity,
             claims,
             bundle,
@@ -88,7 +96,7 @@ impl ThinSession {
             subscriptions: BTreeMap::new(),
             transactions: BTreeMap::new(),
             streams: BTreeMap::new(),
-            held: Vec::new(),
+            held: Rc::default(),
             next_subscription: 0,
             output,
             egress,
@@ -99,43 +107,96 @@ impl ThinSession {
         self.egress.load(Ordering::Acquire) < SESSION_QUEUE_BUDGET
     }
 
-    /// Send `responses` as one batch. False once the socket side is gone.
-    fn send(&self, responses: Vec<ThinResponse>) -> bool {
-        let mut frames = Vec::with_capacity(responses.len());
-        for response in responses {
-            match self.encode(response) {
-                Some(encoded) => frames.extend(encoded),
-                None => return false,
-            }
-        }
-        self.send_frames(frames)
-    }
-
-    /// `response` on the wire ([`encode_fitting`]); `None` once the session
-    /// was closed because it could not be encoded.
-    fn encode(&self, response: ThinResponse) -> Option<Vec<Vec<u8>>> {
-        encode_fitting(&self.output, response).map(|(frames, _)| frames)
-    }
-
-    /// Send encoded `frames` as one batch, counted against the egress
-    /// budget. False once the socket side is gone.
     fn send_frames(&self, frames: Vec<Vec<u8>>) -> bool {
-        if frames.is_empty() {
-            return true;
+        send_frames(&self.output, &self.egress, frames)
+    }
+}
+
+impl Drop for ThinState {
+    fn drop(&mut self) {
+        for id in self.transactions.keys() {
+            let _ = self.db.abandon_transaction_handle(*id);
         }
-        let bytes = frames.iter().map(Vec::len).sum::<usize>();
-        self.egress.fetch_add(bytes, Ordering::AcqRel);
-        self.output.send((Ok(frames), bytes)).is_ok()
+        // StreamingValueUpload's lease schedules cleanup on the owning Db.
+        // Dropping subscriptions also unregisters their pending reads.
+    }
+}
+
+struct RequestWake {
+    ready: AtomicBool,
+    host: Waker,
+}
+impl Wake for RequestWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+    fn wake_by_ref(self: &Arc<Self>) {
+        if !self.ready.swap(true, Ordering::AcqRel) {
+            self.host.wake_by_ref();
+        }
+    }
+}
+
+type RequestFuture = Pin<Box<dyn Future<Output = (ThinState, Option<ThinBody>)>>>;
+
+pub(super) struct ThinSession {
+    // A running request owns the state; cancellation drops it and its resources.
+    task: Option<(u64, RequestFuture)>,
+    state: Option<ThinState>,
+    queued: VecDeque<(ThinRequest, ThinIngress)>,
+    held: Rc<RefCell<VecDeque<ThinResponse>>>,
+    egress: Arc<AtomicUsize>,
+    wake: Arc<RequestWake>,
+    // Admission/close metadata must be readable even while a request owns
+    // the mutable state across await.
+    bundle: Option<jazz::catalogue::BundleId>,
+    output: tokio_mpsc::UnboundedSender<Outbound>,
+}
+
+impl ThinSession {
+    fn ready(&self) -> bool {
+        match self.task {
+            Some(_) => self.wake.ready.load(Ordering::Acquire),
+            None => !self.queued.is_empty(),
+        }
     }
 
-    /// End what the session left open: its transactions roll back, its
-    /// uploads are dropped.
-    fn release(self, db: &Db) {
-        for id in self.transactions.into_keys() {
-            let _ = db.abandon_transaction_handle(id);
-        }
-        for stream in self.streams.into_values() {
-            let _ = block_on(db.abort_streaming_value_upload(stream.upload));
+    fn poll_requests(&mut self) {
+        // Bound synchronous work too: a session's queue cannot monopolize a tick.
+        for _ in 0..super::INBOUND_MESSAGES_PER_TICK {
+            if self.task.is_none() {
+                let Some((request, ingress)) = self.queued.pop_front() else {
+                    return;
+                };
+                let mut state = self.state.take().expect("idle session has state");
+                let db = Rc::clone(&state.db);
+                let id = request.id;
+                self.task = Some((
+                    id,
+                    Box::pin(async move {
+                        let _ingress = ingress;
+                        let body = serve_thin(&db, &mut state, id, request.op).await;
+                        (state, body)
+                    }),
+                ));
+                self.wake.ready.store(true, Ordering::Release);
+            }
+            if !self.wake.ready.swap(false, Ordering::AcqRel) {
+                return;
+            }
+            let waker = Waker::from(Arc::clone(&self.wake));
+            let (id, future) = self.task.as_mut().expect("started above");
+            match future.as_mut().poll(&mut Context::from_waker(&waker)) {
+                Poll::Pending => return,
+                Poll::Ready((state, body)) => {
+                    let id = *id;
+                    self.task = None;
+                    if let Some(body) = body {
+                        state.held.borrow_mut().push_back(ThinResponse { id, body });
+                    }
+                    self.state = Some(state);
+                }
+            }
         }
     }
 }
@@ -274,9 +335,29 @@ impl Owner {
             self.db.set_identity_claims(identity, claims.clone());
             claims
         });
+        let state = ThinState::new(
+            Rc::clone(&self.db),
+            identity,
+            claims,
+            bundle,
+            output.clone(),
+            Arc::clone(&egress),
+        );
         self.thin.insert(
             session,
-            ThinSession::new(identity, claims, bundle, output, egress),
+            ThinSession {
+                held: Rc::clone(&state.held),
+                egress,
+                task: None,
+                state: Some(state),
+                queued: VecDeque::new(),
+                wake: Arc::new(RequestWake {
+                    ready: AtomicBool::new(false),
+                    host: self.wake.clone(),
+                }),
+                bundle,
+                output,
+            },
         );
         Ok(())
     }
@@ -303,84 +384,32 @@ impl Owner {
 
     pub(super) fn close_thin_session(&mut self, session: ServerSession) {
         // Dropping the streams ends the subscriptions.
-        if let Some(thin) = self.thin.remove(&session) {
-            thin.release(&self.db);
+        self.thin.remove(&session);
+    }
+
+    pub(super) fn thin_request(
+        &mut self,
+        session: ServerSession,
+        request: ThinRequest,
+        ingress: ThinIngress,
+    ) {
+        if let Some(thin) = self.thin.get_mut(&session) {
+            thin.queued.push_back((request, ingress));
+            thin.poll_requests();
         }
     }
 
-    pub(super) fn thin_request(&mut self, session: ServerSession, request: ThinRequest) {
-        if !self.thin.contains_key(&session) {
-            return;
-        }
-        let Some(body) = self.serve_thin(session, request.id, request.op) else {
-            return;
-        };
-        let response = ThinResponse {
-            id: request.id,
-            body,
-        };
-        let thin = self.thin.get_mut(&session).expect("checked above");
-        if thin.has_room() && thin.held.is_empty() {
-            if !thin.send(vec![response]) {
-                self.close_thin_session(session);
-            }
-        } else {
-            thin.held.push(response);
-        }
+    pub(super) fn thin_pending(&self) -> bool {
+        self.thin.values().any(ThinSession::ready)
     }
 
-    /// Serve one request; `None` when it has no immediate answer (a live
-    /// query answers from [`Owner::pump_thin`]).
-    fn serve_thin(&mut self, session: ServerSession, id: u64, op: ThinOp) -> Option<ThinBody> {
-        let thin = self.thin.get_mut(&session)?;
-        if let ThinOp::Schema { schema } = op {
-            // The version a replica built against this schema would declare.
-            let version = match decode_schema(&schema) {
-                Ok(schema) => schema.version_id(),
-                Err(error) => return Some(host_error(error)),
-            };
-            return Some(match self.db.pinned_view(version, thin.bundle.as_ref()) {
-                Err(error) => error_body(&error),
-                Ok(Some(_)) => {
-                    thin.version = Some(version);
-                    ThinBody::Ok
-                }
-                Ok(None) => ThinBody::Error {
-                    code: "SchemaNotDeployed".to_owned(),
-                    message: "the client's schema version is not deployed to this server"
-                        .to_owned(),
-                },
-            });
-        }
-        if let ThinOp::Unsubscribe { subscription } = op {
-            let removed = thin.subscriptions.remove(&subscription).is_some();
-            // The live query's own id hears that it ended.
-            if removed && subscription != id {
-                thin.held.push(ThinResponse {
-                    id: subscription,
-                    body: ThinBody::Closed,
-                });
-            }
-            return Some(ThinBody::Ok);
-        }
-        let Some(version) = thin.version else {
-            return Some(argument("a thin session declares its schema version first"));
-        };
-        // Resolved per request: an activation changes the policies that
-        // govern the declared version (a pinned bundle's never change).
-        let db = match self.db.pinned_view(version, thin.bundle.as_ref()) {
-            Ok(db) => db,
-            Err(error) => return Some(error_body(&error)),
-        };
-        let Some(db) = db else {
-            return Some(ThinBody::Error {
-                code: "SchemaNotDeployed".to_owned(),
-                message: "the client's schema version is no longer deployed".to_owned(),
-            });
-        };
-        match serve_thin_op(&db, thin, id, op) {
-            Ok(body) => body,
-            Err(body) => Some(body),
+    pub(super) fn poll_thin(&mut self) {
+        for thin in self.thin.values_mut() {
+            // Some engine read/settlement futures are advanced by ticks and
+            // intentionally do not register a waker. Poll once per host pass
+            // as well as when external I/O explicitly wakes the request.
+            thin.wake.ready.store(true, Ordering::Release);
+            thin.poll_requests();
         }
     }
 
@@ -392,7 +421,28 @@ impl Owner {
     /// it queues the next tick ([`super::ServerRuntimeFrameStream::recv`]).
     pub(super) fn pump_thin(&mut self) {
         let mut gone = Vec::new();
-        for (session, thin) in &mut self.thin {
+        for (session, session_state) in &mut self.thin {
+            if session_state.egress.load(Ordering::Acquire) >= SESSION_QUEUE_BUDGET {
+                continue;
+            }
+            if session_state.task.is_some() {
+                let sent = drain_held(
+                    &session_state.held,
+                    &session_state.output,
+                    &session_state.egress,
+                )
+                .is_some_and(|(frames, _)| {
+                    send_frames(&session_state.output, &session_state.egress, frames)
+                });
+                if !sent {
+                    gone.push(*session);
+                }
+                continue;
+            }
+            let thin = session_state
+                .state
+                .as_mut()
+                .expect("idle session has state");
             if !thin.has_room() {
                 continue;
             }
@@ -407,25 +457,99 @@ impl Owner {
     }
 }
 
-/// `thin`'s held answers, then its live queries' events in turn from
-/// [`ThinSession::next_subscription`], encoded until the batch fills the
-/// session's egress budget. Answers that do not fit stay held. `None` once
-/// the session was closed over a response it could not encode.
-fn drain_thin(thin: &mut ThinSession) -> Option<Vec<Vec<u8>>> {
-    let room = SESSION_QUEUE_BUDGET.saturating_sub(thin.egress.load(Ordering::Acquire));
+/// Serve one request; `None` when it has no immediate answer (a live
+/// query answers from [`Owner::pump_thin`]).
+async fn serve_thin(owner: &Db, thin: &mut ThinState, id: u64, op: ThinOp) -> Option<ThinBody> {
+    if let ThinOp::Schema { schema } = op {
+        // The version a replica built against this schema would declare.
+        let version = match decode_schema(&schema) {
+            Ok(schema) => schema.version_id(),
+            Err(error) => return Some(host_error(error)),
+        };
+        return Some(match owner.pinned_view(version, thin.bundle.as_ref()) {
+            Err(error) => error_body(&error),
+            Ok(Some(_)) => {
+                thin.version = Some(version);
+                ThinBody::Ok
+            }
+            Ok(None) => ThinBody::Error {
+                code: "SchemaNotDeployed".to_owned(),
+                message: "the client's schema version is not deployed to this server".to_owned(),
+            },
+        });
+    }
+    if let ThinOp::Unsubscribe { subscription } = op {
+        let removed = thin.subscriptions.remove(&subscription).is_some();
+        // The live query's own id hears that it ended.
+        if removed && subscription != id {
+            thin.held.borrow_mut().push_back(ThinResponse {
+                id: subscription,
+                body: ThinBody::Closed,
+            });
+        }
+        return Some(ThinBody::Ok);
+    }
+    let Some(version) = thin.version else {
+        return Some(argument("a thin session declares its schema version first"));
+    };
+    // Resolved per request: an activation changes the policies that
+    // govern the declared version (a pinned bundle's never change).
+    let db = match owner.pinned_view(version, thin.bundle.as_ref()) {
+        Ok(db) => db,
+        Err(error) => return Some(error_body(&error)),
+    };
+    let Some(db) = db else {
+        return Some(ThinBody::Error {
+            code: "SchemaNotDeployed".to_owned(),
+            message: "the client's schema version is no longer deployed".to_owned(),
+        });
+    };
+    match serve_thin_op(&db, thin, id, op).await {
+        Ok(body) => body,
+        Err(body) => Some(body),
+    }
+}
+
+fn drain_held(
+    held: &RefCell<VecDeque<ThinResponse>>,
+    output: &tokio_mpsc::UnboundedSender<Outbound>,
+    egress: &AtomicUsize,
+) -> Option<(Vec<Vec<u8>>, usize)> {
+    let room = SESSION_QUEUE_BUDGET.saturating_sub(egress.load(Ordering::Acquire));
     let mut frames = Vec::new();
     let mut bytes = 0;
-    let mut held = std::mem::take(&mut thin.held).into_iter();
-    for response in held.by_ref() {
-        let encoded = thin.encode(response)?;
+    while bytes < room {
+        let Some(response) = held.borrow_mut().pop_front() else {
+            break;
+        };
+        let (encoded, _) = encode_fitting(output, response)?;
         bytes += encoded.iter().map(Vec::len).sum::<usize>();
         frames.extend(encoded);
-        if bytes >= room {
-            break;
-        }
     }
-    thin.held = held.collect();
-    if !thin.held.is_empty() {
+    Some((frames, bytes))
+}
+
+fn send_frames(
+    output: &tokio_mpsc::UnboundedSender<Outbound>,
+    egress: &AtomicUsize,
+    frames: Vec<Vec<u8>>,
+) -> bool {
+    if frames.is_empty() {
+        return true;
+    }
+    let bytes = frames.iter().map(Vec::len).sum::<usize>();
+    egress.fetch_add(bytes, Ordering::AcqRel);
+    output.send((Ok(frames), bytes)).is_ok()
+}
+
+/// `thin`'s held answers, then its live queries' events in turn from
+/// [`ThinState::next_subscription`], encoded until the batch fills the
+/// session's egress budget. Answers that do not fit stay held. `None` once
+/// the session was closed over a response it could not encode.
+fn drain_thin(thin: &mut ThinState) -> Option<Vec<Vec<u8>>> {
+    let room = SESSION_QUEUE_BUDGET.saturating_sub(thin.egress.load(Ordering::Acquire));
+    let (mut frames, mut bytes) = drain_held(&thin.held, &thin.output, &thin.egress)?;
+    if !thin.held.borrow().is_empty() {
         return Some(frames);
     }
     let cursor = thin.next_subscription;
@@ -562,7 +686,7 @@ fn event_body(event: SubscriptionEvent) -> (ThinBody, bool) {
 
 /// The open transaction `transaction` names, if this session began it.
 fn session_transaction<'a>(
-    thin: &'a mut ThinSession,
+    thin: &'a mut ThinState,
     transaction: &str,
 ) -> Result<(OpenTransactionId, &'a mut ThinTransaction), ThinBody> {
     let id = open_transaction(transaction).map_err(host_error)?;
@@ -576,9 +700,9 @@ fn session_transaction<'a>(
 
 /// One request against the session's governed view; `Ok(None)` when a live
 /// query answers later.
-fn serve_thin_op(
+async fn serve_thin_op(
     db: &Db,
-    thin: &mut ThinSession,
+    thin: &mut ThinState,
     id: u64,
     op: ThinOp,
 ) -> Result<Option<ThinBody>, ThinBody> {
@@ -593,12 +717,15 @@ fn serve_thin_op(
             let opts = read_opts(&options_json(&options)?).map_err(host_error)?;
             let query: jazz::query::Query = postcard::from_bytes(&query)
                 .map_err(|error| argument(format!("undecodable query: {error}")))?;
-            let opened = db.prepare_query(&query).and_then(|mut prepared| {
-                if let Some((author, claims)) = scope {
-                    prepared = prepared.with_identity_claims(author, claims);
+            let opened = match db.prepare_query(&query) {
+                Ok(mut prepared) => {
+                    if let Some((author, claims)) = scope {
+                        prepared = prepared.with_identity_claims(author, claims);
+                    }
+                    db.subscribe_for_identity(&prepared, opts, identity).await
                 }
-                block_on(db.subscribe_for_identity(&prepared, opts, identity))
-            });
+                Err(error) => Err(error),
+            };
             match opened {
                 Ok(stream) => {
                     thin.subscriptions.insert(id, stream);
@@ -617,9 +744,11 @@ fn serve_thin_op(
                 Some(transaction) => Some(session_transaction(thin, &transaction)?.0),
                 None => None,
             };
-            // The authority holds everything a read can ask for: it never
-            // waits.
-            let read = block_on(db.all_serialized_query(&query, opts, open, scope, None));
+            // Even an authority may await offloaded chunks. Keep the owner
+            // available to tick and finish that I/O.
+            let read = db
+                .all_serialized_query(&query, opts, open, scope, None)
+                .await;
             let encoded = match read {
                 Ok(SerializedReadResult::Rows(rows)) => {
                     binding_codec::encode_rows(&rows).map(|rows| (rows, false))
@@ -650,10 +779,10 @@ fn serve_thin_op(
                     staged(
                         state,
                         row,
-                        block_on(db.tx_ref(open).insert(&table, cells, options)),
+                        db.tx_ref(open).insert(&table, cells, options).await,
                     )
                 }
-                None => written(block_on(db.insert(&table, cells, options))),
+                None => written(db.insert(&table, cells, options).await),
             }
         }
         ThinOp::Update {
@@ -673,10 +802,10 @@ fn serve_thin_op(
                     staged(
                         state,
                         row,
-                        block_on(db.tx_ref(open).update(&table, row, patch, options)),
+                        db.tx_ref(open).update(&table, row, patch, options).await,
                     )
                 }
-                None => written(block_on(db.update(&table, row, patch, options))),
+                None => written(db.update(&table, row, patch, options).await),
             }
         }
         ThinOp::Upsert {
@@ -696,10 +825,10 @@ fn serve_thin_op(
                     staged(
                         state,
                         row,
-                        block_on(db.tx_ref(open).upsert(&table, row, cells, options)),
+                        db.tx_ref(open).upsert(&table, row, cells, options).await,
                     )
                 }
-                None => written(block_on(db.upsert(&table, row, cells, options))),
+                None => written(db.upsert(&table, row, cells, options).await),
             }
         }
         ThinOp::Delete {
@@ -717,10 +846,10 @@ fn serve_thin_op(
                     staged(
                         state,
                         row,
-                        block_on(db.tx_ref(open).delete(&table, row, options)),
+                        db.tx_ref(open).delete(&table, row, options).await,
                     )
                 }
-                None => written(block_on(db.delete(&table, row, options))),
+                None => written(db.delete(&table, row, options).await),
             }
         }
         ThinOp::Restore {
@@ -743,10 +872,10 @@ fn serve_thin_op(
                     staged(
                         state,
                         row,
-                        block_on(db.tx_ref(open).restore(&table, row, cells, options)),
+                        db.tx_ref(open).restore(&table, row, cells, options).await,
                     )
                 }
-                None => written(block_on(db.restore(&table, row, cells, options))),
+                None => written(db.restore(&table, row, cells, options).await),
             }
         }
         ThinOp::UpdateLargeValues {
@@ -774,14 +903,17 @@ fn serve_thin_op(
                     staged(
                         state,
                         row,
-                        block_on(db.tx_ref(open).update_with_large_value_mutations(
-                            &table, row, patch, mutations, options,
-                        )),
+                        db.tx_ref(open)
+                            .update_with_large_value_mutations(
+                                &table, row, patch, mutations, options,
+                            )
+                            .await,
                     )
                 }
-                None => written(block_on(db.update_with_large_value_mutations(
-                    &table, row, patch, mutations, options,
-                ))),
+                None => written(
+                    db.update_with_large_value_mutations(&table, row, patch, mutations, options)
+                        .await,
+                ),
             }
         }
         ThinOp::Begin { transaction, kind } => {
@@ -789,9 +921,9 @@ fn serve_thin_op(
             let kind = TransactionKind::parse(&kind).map_err(host_error)?;
             let serializable = matches!(kind, TransactionKind::Serializable);
             let begun = if serializable {
-                block_on(db.begin_serializable(open))
+                db.begin_serializable(open).await
             } else {
-                block_on(db.begin_mergeable(open))
+                db.begin_mergeable(open).await
             };
             match begun {
                 Ok(()) => {
@@ -809,16 +941,18 @@ fn serve_thin_op(
         }
         ThinOp::Commit { transaction } => {
             let open = session_transaction(thin, &transaction)?.0;
-            let state = thin.transactions.remove(&open).expect("checked above");
-            if let Some(error) = state.refused {
+            let state = thin.transactions.get(&open).expect("checked above");
+            if let Some(error) = state.refused.clone() {
                 let _ = db.abandon_transaction_handle(open);
+                thin.transactions.remove(&open);
                 return Err(error_body(&error));
             }
             let receipt = if state.serializable {
-                block_on(db.commit_serializable_handle(open))
+                db.commit_serializable_handle(open).await
             } else {
-                block_on(db.commit_mergeable_handle(open))
+                db.commit_mergeable_handle(open).await
             };
+            thin.transactions.remove(&open);
             match receipt {
                 Ok(receipt) => ThinBody::Written {
                     row: [0; 16],
@@ -835,7 +969,7 @@ fn serve_thin_op(
                 Err(error) => error_body(&error),
             }
         }
-        ThinOp::CaptureSnapshot => match block_on(db.capture_snapshot()) {
+        ThinOp::CaptureSnapshot => match db.capture_snapshot().await {
             Ok(snapshot) => ThinBody::Snapshot {
                 snapshot: snapshot.to_persisted().into_bytes(),
             },
@@ -886,12 +1020,15 @@ fn serve_thin_op(
             let Some(open) = thin.streams.get_mut(&stream) else {
                 return Err(argument("no upload with this id is open"));
             };
-            match block_on(db.push_streaming_value_upload(&mut open.upload, &chunk)) {
+            match db
+                .push_streaming_value_upload(&mut open.upload, &chunk)
+                .await
+            {
                 Ok(()) => ThinBody::Ok,
                 Err(error) => {
                     // A failed push ends the upload.
                     let open = thin.streams.remove(&stream).expect("checked above");
-                    let _ = block_on(db.abort_streaming_value_upload(open.upload));
+                    let _ = db.abort_streaming_value_upload(open.upload).await;
                     error_body(&error)
                 }
             }
@@ -904,7 +1041,25 @@ fn serve_thin_op(
                 let Some(state) = thin.transactions.get_mut(&transaction) else {
                     return Err(argument("the upload's transaction is no longer open"));
                 };
-                let write = block_on(db.tx_ref(transaction).finish_streaming_value_upload(
+                let write = db
+                    .tx_ref(transaction)
+                    .finish_streaming_value_upload(
+                        open.upload,
+                        open.mutation,
+                        &open.table,
+                        open.row,
+                        open.cells,
+                        &open.column,
+                        WriteIdentity::Session(identity),
+                        open.updated_at_ms,
+                        open.head,
+                        open.base,
+                    )
+                    .await;
+                return Ok(Some(staged(state, open.row, write)));
+            }
+            written(
+                db.finish_streaming_value_upload(
                     open.upload,
                     open.mutation,
                     &open.table,
@@ -915,27 +1070,15 @@ fn serve_thin_op(
                     open.updated_at_ms,
                     open.head,
                     open.base,
-                ));
-                return Ok(Some(staged(state, open.row, write)));
-            }
-            written(block_on(db.finish_streaming_value_upload(
-                open.upload,
-                open.mutation,
-                &open.table,
-                open.row,
-                open.cells,
-                &open.column,
-                WriteIdentity::Session(identity),
-                open.updated_at_ms,
-                open.head,
-                open.base,
-            )))
+                )
+                .await,
+            )
         }
         ThinOp::AbortStream { stream } => {
             let Some(open) = thin.streams.remove(&stream) else {
                 return Err(argument("no upload with this id is open"));
             };
-            match block_on(db.abort_streaming_value_upload(open.upload)) {
+            match db.abort_streaming_value_upload(open.upload).await {
                 Ok(()) => ThinBody::Ok,
                 Err(error) => error_body(&error),
             }
@@ -943,3 +1086,6 @@ fn serve_thin_op(
     };
     Ok(Some(body))
 }
+
+#[cfg(test)]
+mod tests;

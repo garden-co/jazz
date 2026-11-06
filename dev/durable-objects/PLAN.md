@@ -198,7 +198,7 @@ No production deployment or full transaction compatibility is claimed; section 5
 remains deferred, section 7 owns durable chunk access, and section 11 owns wider
 lifecycle and deployment validation.
 
-## 7. Use one connection with bounded chunk storage
+## 7. Use one connection with bounded chunk storage — deferred
 
 Separate durability and cache budgeting from file paths. Read chunks and
 epochs through the owning DO connection, without cache locks held across SQL
@@ -207,14 +207,89 @@ preserve atomic updates of rows, epochs, chunks, and reference counts. Replace
 the server catalogue's separate `HostReader` connection too. Keep existing
 S3 and Vercel Blob behavior intact through the shared blob-store abstractions.
 
-## 8. Extract a host-neutral server core
+## 8. Adapt the server core to the DO runtime
 
-Share protocol hello/prelude handling, authenticated session admission,
-accounts, and catalogue operations between native and DO hosts. Move thread
-management, network clients, and transport scheduling into host adapters.
-Provide a single-threaded WASM host with per-object storage ownership and call
-`set_authority()` before serving sessions. Use existing authentication and
-permission checks; the experiment's caller-supplied author URL is only a harness.
+Start from the existing `JazzCore` contract, not a broad server rewrite. Map
+`appId`, `handle`, `openSocket`, `signLinkChallenge`, and `close` to a DO host;
+extract only the shared server logic those operations need. Unlike Vercel's
+Linux Sandbox, a DO hosts the engine inside the Workers runtime, so the native
+server's operating-system dependencies need adapters.
+
+### 8.1 Database scheduling and threads — in progress
+
+The native core owns its database on a dedicated OS thread and runs chunk I/O
+on additional threads; Workers cannot run those threads. Drive the engine from
+the DO event loop with explicit storage ownership and ordered ticks. Preserve
+serialization, error propagation, and persistence-before-publication behavior.
+Call `set_authority()` before admitting sessions.
+
+The first extraction separates native startup/execution (`NativeOwner`) from
+session state (`Owner`). The latter accepts an already-open `Db` and exposes an
+awaitable advance followed by output draining. Native execution preserves the
+existing tick → chunk-I/O scheduling → output order, thread, and panic recovery.
+Chunk runners now belong to the native adapter. This is not yet a Workers host:
+Tokio session output, clock access, and DO event scheduling still need
+adaptation before DO integration.
+Validated with `cargo test -p jazz-server --features test`: 294 tests passed,
+2 ignored, including direct owner driving without StoreLoop and native socket,
+restart, thin-client, and network chunk-store coverage.
+
+Session input now has a cloneable, bounded queue independent of the owner borrow.
+Handlers can enqueue ordered frames or disconnect during a suspended tick; a
+coalesced request flag retains the need for another pass. The tick exclusively
+borrows the owner, and disconnects discard queued output before publication.
+A real chunk-I/O suspension test covers arrivals, ordering, disconnects, and
+post-tick draining. The host still schedules the initial tick on input; wiring
+that scheduling to DO events remains.
+Validation after the input split: 296 server tests passed, 2 ignored.
+
+Thin requests now run as one owned async future per session, with FIFO requests
+and ingress permits retained until completion or cancellation. The owner polls
+pending work on engine passes and explicit I/O wakeups; other sessions and ticks
+can progress while a request waits. Completed replies drain independently of a
+later pending request. Disconnect drops the future, abandons open transactions,
+and schedules upload-lease cleanup through the existing drop path. No thin
+handler uses `block_on`; native startup/tick execution still does.
+Validated with 297 server tests passed, 2 ignored, including a delayed offloaded
+read alongside another session and sync input, ordered completion, and cancellation.
+This does not implement the deferred transaction overlay or a DO event adapter.
+
+### 8.2 Catalogue reads and the separate connection
+
+The core opens a separate `HostReader` for catalogue access. Route these reads
+through the owning storage connection without unsafe re-entry. This overlaps
+with deferred section 7: identify the minimum catalogue work needed for admission
+explicitly before implementation; do not silently pull chunk storage into scope.
+
+### 8.3 HTTP and WebSocket hosting
+
+Native standalone startup binds TCP listeners and serves Axum requests. A DO
+receives requests and WebSockets through Cloudflare handlers. Adapt requests,
+responses, and ordered frames at that boundary; share route/protocol behavior.
+Porting the standalone listener is unnecessary for the `JazzCore` contract.
+
+### 8.4 Outbound HTTP and background I/O
+
+Authentication fetches keys through an HTTP client; the S3 adapter also owns a
+multithreaded Tokio runtime. Use Worker-compatible HTTP execution and scheduling
+where needed. HTTP itself is supported. Preserve credential checks, timeouts,
+cancellation, and retry behavior; leave native S3 and Vercel Blob paths intact.
+
+### 8.5 Persistent state and native startup
+
+Native startup creates data directories, locks files, and uses OS-specific
+resource monitoring. Keep these in the native host. The DO host uses managed
+storage and explicit memory budgets, with no persistent filesystem dependency.
+Persist app identity and signing material so reconstruction does not create a
+new authority; lifecycle verification belongs to section 9.
+
+### 8.6 Production admission and shared server behavior
+
+The harness accepts a caller-supplied author; it is not production authentication.
+Share hello/prelude handling, authenticated session admission, bundle validation,
+accounts, and catalogue operations with the native core. Keep `createJazz()`'s
+application authentication and publication responsibilities intact. Verify valid
+sessions and rejection of invalid credentials/bundles through the normal paths.
 
 ## 9. Implement the DO lifecycle and routing
 
@@ -228,11 +303,14 @@ as a separate lifecycle step.
 
 ## 10. Connect the provider and assess Workers compatibility
 
-Implement `durableObject(...)` as a `JazzCoreProvider` returning the existing
+Implement `durableObjects(...)` as a `JazzCoreProvider` returning the existing
 `JazzCore` interface: request handling, sockets, stable link-challenge signing,
 and close. Preserve socket ordering, authentication, bundle pinning, and the
 meaning of close for a shared core. Add no provider-specific branch to
-`createJazz()` and keep the deferred interface rename out of scope.
+`createJazz()` and keep the deferred interface rename out of scope. The target
+API is `createJazz({ store: durableObjects(env.JAZZ) })`: the provider connects to
+the DO host from sections 8–9; it does not itself replace that host. Provider
+credentials remain private, and local routing markers are not DO credentials.
 
 A supported backend can initially reach the DO core through the remote provider.
 Running `createJazz()` itself in a Worker requires a separate dependency audit
@@ -256,12 +334,13 @@ sync. Use same-base CodSpeed comparisons for end-to-end performance claims.
 
 ## Delivery order
 
-The refreshed harness, SQL storage boundary, callback scopes, and unified
-transaction implementation are in place. The shared staged overlay is deferred.
-Exact SQL value handling is validated. Next adapt single-connection chunk access, followed
-by the shared core, lifecycle, and provider. Resolve overlay support
-before claiming full transaction compatibility. Workers-hosted `createJazz()`
-and hibernation have separate acceptance criteria.
+The refreshed harness, SQL storage boundary, callback scopes, unified transaction
+implementation, and exact SQL value handling are in place. Sections 5 and 7 are
+deferred. Next map the provider contract to the DO host (section 8), identify
+its catalogue dependency on section 7, and tackle the runtime adaptations one
+at a time. Then complete lifecycle/routing and provider integration. Do not claim
+full transaction or large-value support while sections 5 and 7 remain deferred.
+Workers-hosted `createJazz()` and hibernation have separate acceptance criteria.
 
 The first correctness milestone is a rejected multi-row write that leaves no
 partial rows, history, speculative cache state, or outgoing sync publication,

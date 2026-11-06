@@ -14,7 +14,10 @@
 
 pub mod alpha59_alpha60;
 pub mod auth_admission;
+mod native;
 mod thin;
+
+use native::NativeOwner;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -237,6 +240,11 @@ enum Work {
     /// Host work is queued.
     Host,
     Owner(Job),
+    ChunkDone {
+        finish: fn(&mut NativeOwner, jazz::chunk_store::ChunkIoDone),
+        // Keep large I/O outcomes out of every queued command's footprint.
+        done: Box<jazz::chunk_store::ChunkIoDone>,
+    },
     Start(Start),
     /// Stop the runtime; the store keeps serving its host tables.
     Stop(std_mpsc::Sender<()>),
@@ -485,7 +493,7 @@ impl Lane {
         name: &str,
         store: Arc<dyn jazz::chunk_store::ChunkStore>,
         work: std_mpsc::Sender<Work>,
-        finish: fn(&mut Owner, jazz::chunk_store::ChunkIoDone),
+        finish: fn(&mut NativeOwner, jazz::chunk_store::ChunkIoDone),
     ) -> Result<Self, String> {
         let (sender, receiver) = std_mpsc::channel::<jazz::chunk_store::ChunkIo>();
         let (cancel, mut cancelled) = futures::channel::oneshot::channel::<()>();
@@ -503,8 +511,13 @@ impl Lane {
                             futures::future::Either::Left((done, _)) => done,
                             futures::future::Either::Right(_) => return,
                         };
-                    let finish: Job = Box::new(move |owner: &mut Owner| finish(owner, done));
-                    if work.send(Work::Owner(finish)).is_err() {
+                    if work
+                        .send(Work::ChunkDone {
+                            finish,
+                            done: Box::new(done),
+                        })
+                        .is_err()
+                    {
                         return;
                     }
                 }
@@ -545,11 +558,16 @@ impl ChunkIoRunner {
                 "jazz-chunk-io",
                 Arc::clone(&store),
                 work.clone(),
-                Owner::finish_chunk_io,
+                NativeOwner::finish_chunk_io,
             )?,
             out: std::cell::Cell::new(false),
             backoff: Backoff::default(),
-            fetches: Lane::start("jazz-chunk-fetch", store, work, Owner::finish_chunk_fetches)?,
+            fetches: Lane::start(
+                "jazz-chunk-fetch",
+                store,
+                work,
+                NativeOwner::finish_chunk_fetches,
+            )?,
             fetching: std::cell::Cell::new(false),
             fetch_backoff: Backoff::default(),
         })
@@ -965,7 +983,7 @@ enum State {
     /// No runtime: the host tables on the file, or why it could not be
     /// opened (tried again on the next host work).
     Idle(Result<StoreFile, String>),
-    Running(Owner),
+    Running(NativeOwner),
 }
 
 impl StoreLoop {
@@ -1011,7 +1029,7 @@ impl StoreLoop {
             self.host_work(deadline);
             if tick && self.owner().is_some() {
                 self.tick_queued.store(false, Ordering::Release);
-                self.on_owner(Owner::tick);
+                self.on_owner(NativeOwner::tick);
                 #[cfg(test)]
                 self.ticks.fetch_add(1, Ordering::Relaxed);
             }
@@ -1021,7 +1039,7 @@ impl StoreLoop {
 
     fn owner(&self) -> Option<&Owner> {
         match &self.state {
-            State::Running(owner) => Some(owner),
+            State::Running(owner) => Some(&owner.core),
             State::Idle(_) => None,
         }
     }
@@ -1045,7 +1063,7 @@ impl StoreLoop {
             State::Idle(Err(error)) => {
                 catch_unwind(AssertUnwindSafe(|| job(&Unavailable(error.clone()))))
             }
-            State::Running(owner) => catch_unwind(AssertUnwindSafe(|| job(&owner.db))),
+            State::Running(owner) => catch_unwind(AssertUnwindSafe(|| job(&*owner.core.db))),
         };
         if let Err(panic) = ran {
             let panic = panic_message(&*panic);
@@ -1067,7 +1085,8 @@ impl StoreLoop {
             // Run before every item.
             Work::Host => {}
             // Without a runtime the job is dropped, and its caller told so.
-            Work::Owner(job) => self.on_owner(job),
+            Work::Owner(job) => self.on_owner(|owner| job(&mut owner.core)),
+            Work::ChunkDone { finish, done } => self.on_owner(|owner| finish(owner, *done)),
             Work::Start(start) => {
                 let started = match &self.state {
                     State::Running(_) => Err("the server runtime is already running".to_owned()),
@@ -1097,7 +1116,7 @@ impl StoreLoop {
         };
         let opened = file.and_then(|file| {
             catch_unwind(AssertUnwindSafe(|| {
-                Owner::open(
+                NativeOwner::open(
                     runtime.schema.clone(),
                     file,
                     self.source.chunk_store()?,
@@ -1131,7 +1150,7 @@ impl StoreLoop {
     }
 
     /// Run `f` on the runtime, if one is running.
-    fn on_owner(&mut self, f: impl FnOnce(&mut Owner)) {
+    fn on_owner(&mut self, f: impl FnOnce(&mut NativeOwner)) {
         let State::Running(owner) = &mut self.state else {
             return;
         };
@@ -1559,8 +1578,7 @@ impl ServerRuntimeHandle {
             return Err("unknown server session".to_owned());
         }
         self.send(Box::new(move |owner| {
-            owner.thin_request(session, request);
-            drop(ingress);
+            owner.thin_request(session, request, ingress);
         }))
     }
 
@@ -1887,10 +1905,12 @@ impl From<CatalogueApplyError> for String {
     }
 }
 
-// ---- owner thread -------------------------------------------------------------
+// ---- session owner ------------------------------------------------------------
 
 struct Owner {
-    db: Db,
+    db: Rc<Db>,
+    wake: std::task::Waker,
+    input_requested: Rc<std::cell::Cell<bool>>,
     sessions: HashMap<ServerSession, OwnerSession>,
     /// Thin client connections (SPEC 8.14), which are not sync sessions.
     thin: HashMap<ServerSession, thin::ThinSession>,
@@ -1899,14 +1919,13 @@ struct Owner {
     catalogue: Catalogue,
     /// The app this store serves, named in slow-query reports.
     app: Option<String>,
-    /// Runs a network chunk store's I/O beside this thread.
-    chunk_io: Option<ChunkIoRunner>,
     /// Tests: the next catalogue reload after a commit fails.
     #[cfg(test)]
     fail_next_reload: bool,
 }
 
 struct OwnerSession {
+    input: SessionInput,
     subscriber: SubscriberId,
     /// The published bundle its backend pinned it to, if any.
     bundle: Option<jazz::catalogue::BundleId>,
@@ -1915,6 +1934,58 @@ struct OwnerSession {
     queues: Rc<SessionQueues>,
     output: tokio_mpsc::UnboundedSender<Outbound>,
     egress: Arc<AtomicUsize>,
+}
+
+/// A host can retain this handle while `Owner::advance` borrows the owner.
+/// It only queues input; decoding and database access stay with the owner.
+#[derive(Clone)]
+struct SessionInput {
+    inbox: Rc<RefCell<SessionInbox>>,
+    requested: Rc<std::cell::Cell<bool>>,
+}
+
+#[derive(Default)]
+struct SessionInbox {
+    frames: VecDeque<AbiBytes>,
+    bytes: usize,
+    closed: bool,
+}
+
+impl SessionInput {
+    fn receive(&self, frames: Vec<AbiBytes>) -> Result<(), String> {
+        let mut inbox = self.inbox.borrow_mut();
+        if inbox.closed {
+            return Err("session is closed".to_owned());
+        }
+        let bytes = frames
+            .iter()
+            .try_fold(0usize, |sum, frame| sum.checked_add(frame.len()));
+        let Some(bytes) =
+            bytes.filter(|bytes| *bytes <= SESSION_QUEUE_BUDGET.saturating_sub(inbox.bytes))
+        else {
+            return Err("session ingress budget exceeded".to_owned());
+        };
+        // Empty frames count too: their allocation must not evade the byte cap.
+        if frames.len()
+            > jazz::protocol_limits::MAX_WIRE_BATCH_FRAMES.saturating_sub(inbox.frames.len())
+        {
+            return Err("session ingress frame budget exceeded".to_owned());
+        }
+        if !frames.is_empty() {
+            inbox.bytes += bytes;
+            inbox.frames.extend(frames);
+            self.requested.set(true);
+        }
+        Ok(())
+    }
+
+    fn close(&self) {
+        let mut inbox = self.inbox.borrow_mut();
+        inbox.closed = true;
+        inbox.frames.clear();
+        inbox.bytes = 0;
+        self.requested.set(true);
+    }
 }
 
 struct SessionQueues {
@@ -2219,71 +2290,23 @@ fn with_permissions(
 }
 
 impl Owner {
-    /// Open the runtime on `file`. A reopened store admits every version
-    /// it admitted before (the engine reads them from its catalogue) and
-    /// makes its current permissions revision current again. `schema` is
-    /// current instead when the store has no revision yet, or (unless
-    /// `any_stored_catalogue`) none whose catalogue admits `schema`.
-    fn open(
-        schema: JazzSchema,
-        file: StoreFile,
-        chunk_store: Option<ChunkStoreChoice>,
-        wake: std_mpsc::Sender<Work>,
-        any_stored_catalogue: bool,
-        app: Option<String>,
-    ) -> Result<Self, String> {
-        let rows = file
-            .catalogue()
-            .map_err(|error| format!("read catalogue: {error}"))?;
-        let stored = any_stored_catalogue
-            || rows
-                .schemas
-                .iter()
-                .any(|stored| stored.version == Some(schema.version_id()));
-        let head = rows.head().filter(|_| stored);
-        let compile = |hash: &jazz::tools::public_schema::SchemaHash| {
-            let structural = rows
-                .schema(hash)
-                .ok_or("the current permissions revision's schema is missing")?;
-            JazzSchema::new(&structural.schema)
-                .map_err(|error| format!("catalogue schema: {error}"))
-        };
-        // Every activation records a revision: without one, the store's
-        // genesis is current.
-        let current = match (head, rows.genesis().filter(|_| any_stored_catalogue)) {
-            (Some(head), _) => with_permissions(
-                &compile(&head.schema)?,
-                &head.permissions.clone().into_iter().collect(),
-            )?,
-            (None, Some(genesis)) => compile(&genesis.hash)?,
-            (None, None) => schema,
-        };
-        let config = match &chunk_store {
-            Some(choice) if choice.network => config(current)
-                .with_chunk_store(Arc::clone(&choice.store))
-                .with_host_chunk_io(),
-            Some(choice) => config(current).with_chunk_store(Arc::clone(&choice.store)),
-            None => config(current),
-        };
-        let chunk_io = match chunk_store {
-            Some(choice) if choice.network => Some(ChunkIoRunner::start(choice.store, wake)?),
-            _ => None,
-        };
-        let db = block_on(Db::open_file(config, file))
-            .map_err(|error| format!("open server store: {error}"))?;
+    /// Attach server session state to an already-open database. The host
+    /// owns storage construction and execution of the returned tick future.
+    fn from_db(db: Db, app: Option<String>) -> Result<Self, String> {
         db.set_authority();
         db.require_session_pins();
         db.track_closed_subscribers();
         db.set_slow_query_threshold(slow_query_threshold());
         let catalogue = Catalogue::load(&db.catalogue().map_err(|error| error.to_string())?)?;
         Ok(Self {
-            db,
+            db: Rc::new(db),
+            wake: std::task::Waker::noop().clone(),
+            input_requested: Rc::default(),
             sessions: HashMap::new(),
             thin: HashMap::new(),
             slice: Rc::default(),
             catalogue,
             app,
-            chunk_io,
             #[cfg(test)]
             fail_next_reload: false,
         })
@@ -2355,6 +2378,7 @@ impl Owner {
     /// Close every session (their streams end) and the store's runtime.
     fn close(mut self) {
         for (_, session) in self.sessions.drain() {
+            session.input.close();
             self.db.disconnect_subscriber(session.subscriber);
         }
         self.thin.clear();
@@ -2386,6 +2410,10 @@ impl Owner {
         self.sessions.insert(
             session,
             OwnerSession {
+                input: SessionInput {
+                    inbox: Rc::default(),
+                    requested: Rc::clone(&self.input_requested),
+                },
                 subscriber,
                 bundle,
                 // An untrusted peer's split message must fit the budget
@@ -2405,7 +2433,49 @@ impl Owner {
         Ok(())
     }
 
+    /// Retain before starting a tick; event handlers can then enqueue without
+    /// borrowing the owner. The host schedules a tick on input and checks
+    /// `inbound_pending` after flushing to service arrivals during an await.
+    fn input(&self, session: ServerSession) -> Option<SessionInput> {
+        self.sessions
+            .get(&session)
+            .map(|session| session.input.clone())
+    }
+
     fn receive(&mut self, session: ServerSession, frames: Vec<AbiBytes>) {
+        let Some(input) = self.input(session) else {
+            return;
+        };
+        if let Err(message) = input.receive(frames) {
+            if let Some(session) = self.sessions.get(&session) {
+                let _ = session.output.send((
+                    Err(jazz::wire::WireError::new(
+                        WireErrorCode::Backpressure,
+                        WireRetry::Later,
+                        message,
+                    )),
+                    0,
+                ));
+            }
+            self.close_session(session);
+            return;
+        }
+        self.drain_input(session);
+    }
+
+    fn drain_input(&mut self, session: ServerSession) {
+        let Some(input) = self.input(session) else {
+            return;
+        };
+        let (closed, frames) = {
+            let mut inbox = input.inbox.borrow_mut();
+            inbox.bytes = 0;
+            (inbox.closed, std::mem::take(&mut inbox.frames))
+        };
+        if closed {
+            self.close_session(session);
+            return;
+        }
         let Some(owner_session) = self.sessions.get_mut(&session) else {
             return;
         };
@@ -2456,65 +2526,51 @@ impl Owner {
 
     fn close_session(&mut self, session: ServerSession) {
         if let Some(session) = self.sessions.remove(&session) {
+            session.input.close();
             self.db.disconnect_subscriber(session.subscriber);
         }
         self.close_thin_session(session);
     }
 
     fn inbound_pending(&self) -> bool {
-        self.sessions
-            .values()
-            .any(|session| !session.queues.inbound.borrow().is_empty())
+        self.input_requested.get()
+            || self.thin_pending()
+            || self
+                .sessions
+                .values()
+                .any(|session| !session.queues.inbound.borrow().is_empty())
     }
 
-    /// One engine tick, then every session's output up to its budget. Each
-    /// session's inbound messages are taken a bounded number per tick, so a
-    /// large batch gets its first answers out early and other sessions are
-    /// served between its parts.
-    /// A network chunk store's batch came back: apply it (the tick that
-    /// follows this job hands the next one over).
-    /// Fetches run beside a batch came back: install them. A failure
-    /// refuses the reads waiting on them, and holds fetches back (batches
-    /// go on without them) for the backoff.
-    fn finish_chunk_fetches(&mut self, done: jazz::chunk_store::ChunkIoDone) {
-        let finished = self.db.finish_chunk_fetches(done);
-        let log = match &self.chunk_io {
-            Some(runner) => runner.fetched(finished.is_err()),
-            None => finished.is_err(),
-        };
-        if let Err(error) = finished
-            && log
-        {
-            tracing::warn!(%error, app = self.app.as_deref().unwrap_or("?"), "large-value store fetch failed; the reads waiting on it are refused, and fetches retry with backoff");
+    /// Advance the database without choosing an executor or starting I/O.
+    /// The exclusive borrow prevents overlapping ticks; input handles remain
+    /// usable during suspension. Complete this future before publishing output.
+    async fn advance(&mut self) {
+        self.poll_thin();
+        self.input_requested.set(false);
+        let sessions: Vec<_> = self.sessions.keys().copied().collect();
+        for session in sessions {
+            self.drain_input(session);
         }
-    }
-
-    fn finish_chunk_io(&mut self, done: jazz::chunk_store::ChunkIoDone) {
-        // Fetches that failed in a batch hold fetches back as the fetch
-        // lane's do, so the next batch does not ask again at once.
-        let fetches_failed = done.fetches_failed();
-        let finished = self.db.finish_chunk_io(done);
-        let log = match &self.chunk_io {
-            Some(runner) => runner.returned_with(finished.is_err(), fetches_failed),
-            None => finished.is_err(),
-        };
-        if let Err(error) = finished
-            && log
-        {
-            tracing::warn!(%error, app = self.app.as_deref().unwrap_or("?"), "large-value store I/O failed; retrying with backoff");
-        }
-    }
-
-    fn tick(&mut self) {
         start_tick(self.sessions.values().map(|session| &*session.queues));
         let started = std::time::Instant::now();
-        let ticked = block_on(self.db.tick());
+        let ticked = self.db.tick().await;
         self.slice.ticked(started.elapsed());
         if let Err(error) = ticked {
             tracing::error!(%error, "server runtime tick failed");
         }
-        if let Some(runner) = &self.chunk_io {
-            runner.pump(self);
+    }
+
+    /// Drain output only after the database tick's persistence boundary.
+    fn flush(&mut self) {
+        // A disconnect may arrive while the tick is suspended. Drop its output
+        // before publishing, but leave newly arrived frames for the next tick.
+        let closed: Vec<_> = self
+            .sessions
+            .iter()
+            .filter_map(|(id, session)| session.input.inbox.borrow().closed.then_some(*id))
+            .collect();
+        for session in closed {
+            self.close_session(session);
         }
         self.report_slow_queries();
         self.report_merge_fallbacks();
@@ -2556,6 +2612,7 @@ impl Owner {
         for id in gone {
             self.close_session(id);
         }
+        self.poll_thin();
         self.pump_thin();
     }
 }
@@ -2604,6 +2661,239 @@ mod tests {
                 .build(),
         )
         .unwrap()
+    }
+
+    /// Alice's host supplies an open database and drives a sync session without
+    /// StoreLoop or a store thread. Valid frames are consumed by an awaited tick;
+    /// malformed input closes the session with its protocol error.
+    /// This lower-level test exercises the host boundary directly: the public
+    /// native handle would start the very scheduler this test must run without.
+    #[test]
+    fn an_owner_can_be_driven_without_the_native_store_loop() {
+        block_on(async {
+            let db = Db::open(config(schema())).await.unwrap();
+            let mut owner = Owner::from_db(db, None).unwrap();
+            let alice = ServerSession(1);
+            let (output, mut received) = tokio_mpsc::unbounded_channel();
+            owner
+                .open_session(
+                    alice,
+                    AuthorSubject::SYSTEM,
+                    BTreeMap::new(),
+                    None,
+                    output,
+                    Arc::default(),
+                )
+                .unwrap();
+            owner.receive(
+                alice,
+                jazz::db::encode_frames(SyncMessage::Unsubscribe { id: 1 }).unwrap(),
+            );
+            assert!(owner.inbound_pending());
+            owner.advance().await;
+            assert!(!owner.inbound_pending());
+            owner.flush();
+            owner.receive(alice, vec![Vec::new()]);
+            assert!(!owner.sessions.contains_key(&alice));
+            let mut malformed = false;
+            while let Ok((message, _)) = received.try_recv() {
+                if let Err(error) = message {
+                    assert_eq!(error.code, WireErrorCode::MalformedFrame);
+                    malformed = true;
+                }
+            }
+            assert!(
+                malformed,
+                "the transport receives the malformed-frame error"
+            );
+            owner.close();
+        });
+    }
+
+    /// Alice keeps sending while the host's tick awaits chunk persistence;
+    /// Bob disconnects during that await. Input stays ordered, requests a later
+    /// pass, and Bob receives no queued output after disconnecting.
+    /// This lower-level test controls a real tick's I/O suspension to exercise
+    /// the host boundary without a native StoreLoop hiding the interleaving.
+    #[test]
+    fn session_input_remains_available_during_a_suspended_tick() {
+        use jazz::chunk_store::{ChunkStore, FileChunkStore, NodeKey, StoreFuture};
+        use std::future::Future;
+        use std::task::{Context, Poll};
+
+        struct PausedStore {
+            files: FileChunkStore,
+            released: AtomicBool,
+            wake: Mutex<Vec<std::task::Waker>>,
+        }
+        impl ChunkStore for PausedStore {
+            fn put<'a>(&'a self, node: &'a NodeKey, bytes: &'a [u8]) -> StoreFuture<'a, ()> {
+                Box::pin(async move {
+                    futures::future::poll_fn(|cx| {
+                        self.wake.lock().unwrap().push(cx.waker().clone());
+                        if self.released.load(Ordering::Acquire) {
+                            Poll::Ready(())
+                        } else {
+                            Poll::Pending
+                        }
+                    })
+                    .await;
+                    self.files.put(node, bytes).await
+                })
+            }
+            fn get<'a>(&'a self, node: &'a NodeKey) -> StoreFuture<'a, Option<bytes::Bytes>> {
+                self.files.get(node)
+            }
+            fn delete<'a>(&'a self, node: &'a NodeKey) -> StoreFuture<'a, ()> {
+                self.files.delete(node)
+            }
+        }
+        block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Arc::new(PausedStore {
+                files: FileChunkStore::new(dir.path().join("chunks")).unwrap(),
+                released: AtomicBool::new(false),
+                wake: Mutex::default(),
+            });
+            let db = Db::open_at(
+                config(docs()),
+                &dir.path().join("store.sqlite"),
+                FileOptions::default(),
+            )
+            .await
+            .unwrap();
+            let owner = Owner::from_db(db, None).unwrap();
+            owner
+                .db
+                .insert(
+                    "docs",
+                    BTreeMap::from([(
+                        "body".to_owned(),
+                        Value::Bytes(
+                            (0..400 * 1024u32)
+                                .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+                                .collect(),
+                        ),
+                    )]),
+                    Default::default(),
+                )
+                .await
+                .unwrap();
+            owner.close();
+            let db = Db::open_at(
+                config(docs()).with_chunk_store(store.clone()),
+                &dir.path().join("store.sqlite"),
+                FileOptions::default(),
+            )
+            .await
+            .unwrap();
+            let mut owner = Owner::from_db(db, None).unwrap();
+            let alice = ServerSession(1);
+            let bob = ServerSession(2);
+            let (output, mut received) = tokio_mpsc::unbounded_channel();
+            for id in [alice, bob] {
+                owner
+                    .open_session(
+                        id,
+                        AuthorSubject::SYSTEM,
+                        BTreeMap::new(),
+                        None,
+                        output.clone(),
+                        Arc::default(),
+                    )
+                    .unwrap();
+            }
+            let alice_input = owner.input(alice).unwrap();
+            let bob_input = owner.input(bob).unwrap();
+            // An already-queued result must not escape the suspended tick, or
+            // be delivered after Bob's disconnect.
+            owner.sessions[&bob]
+                .queues
+                .queue(SyncMessage::Unsubscribe { id: 99 })
+                .unwrap();
+            let mut tick = Box::pin(owner.advance());
+            let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+            assert!(tick.as_mut().poll(&mut cx).is_pending());
+            for id in [7, 8] {
+                alice_input
+                    .receive(jazz::db::encode_frames(SyncMessage::Unsubscribe { id }).unwrap())
+                    .unwrap();
+            }
+            bob_input.close();
+            assert!(
+                received.try_recv().is_err(),
+                "no output before the tick finishes"
+            );
+            assert!(tick.as_mut().poll(&mut cx).is_pending());
+            store.released.store(true, Ordering::Release);
+            for wake in store.wake.lock().unwrap().drain(..) {
+                wake.wake();
+            }
+            tick.await;
+            owner.flush();
+            assert!(!owner.sessions.contains_key(&bob));
+            assert!(
+                received.try_recv().is_err(),
+                "disconnected output is discarded"
+            );
+            assert!(bob_input.receive(vec![vec![1]]).is_err());
+            assert!(
+                owner.inbound_pending(),
+                "input during the tick requests another pass"
+            );
+            owner.drain_input(alice);
+            let ids: Vec<_> = owner.sessions[&alice]
+                .queues
+                .inbound
+                .borrow()
+                .iter()
+                .map(|message| match message {
+                    SyncMessage::Unsubscribe { id } => *id,
+                    _ => panic!("unexpected message"),
+                })
+                .collect();
+            assert_eq!(ids, [7, 8]);
+            owner.advance().await;
+            owner.flush();
+            assert!(
+                !owner.inbound_pending(),
+                "one later pass consumes both arrivals"
+            );
+            owner.close();
+            assert!(alice_input.receive(vec![vec![1]]).is_err());
+        });
+    }
+
+    /// Alice cannot grow a suspended owner's queue beyond its byte or frame
+    /// budget. Rejected batches leave accepted frames intact; closing frees it.
+    /// The internal handle is tested directly because native handles drain it
+    /// on their store thread rather than retaining it during an async tick.
+    #[test]
+    fn session_input_is_bounded_and_rejects_batches_atomically() {
+        let input = SessionInput {
+            inbox: Rc::default(),
+            requested: Rc::default(),
+        };
+        input.receive(vec![vec![1; SESSION_QUEUE_BUDGET]]).unwrap();
+        assert!(input.receive(vec![vec![2]]).is_err());
+        assert_eq!(input.inbox.borrow().bytes, SESSION_QUEUE_BUDGET);
+        assert_eq!(input.inbox.borrow().frames.len(), 1);
+        input.close();
+        assert_eq!(input.inbox.borrow().bytes, 0);
+        assert!(input.inbox.borrow().frames.is_empty());
+        assert!(input.receive(Vec::new()).is_err());
+
+        let input = SessionInput {
+            inbox: Rc::default(),
+            requested: Rc::default(),
+        };
+        input
+            .receive(vec![
+                Vec::new();
+                jazz::protocol_limits::MAX_WIRE_BATCH_FRAMES
+            ])
+            .unwrap();
+        assert!(input.receive(vec![Vec::new()]).is_err());
     }
 
     const PROBE: HostTable = HostTable::new("probe");
