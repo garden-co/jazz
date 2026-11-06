@@ -184,6 +184,8 @@ type OpenTransaction = {
   begin: OneShot;
   /** The connection it was begun on ended, and the server abandoned it. */
   lost: boolean;
+  /** The rows its staged writes touched. */
+  rows: WrittenRow[];
 };
 
 type Write = {
@@ -194,7 +196,14 @@ type Write = {
   committed: boolean;
   /** It settled: committed, rejected, or given up with its fate unknown. */
   answered: boolean;
+  /** The server answered that it committed (set before {@link Write.done} settles). */
+  confirmed: boolean;
+  /** The rows it wrote on the main branch, for {@link ThinRuntime.handOffWrittenRows}. */
+  rows: readonly WrittenRow[];
 };
+
+/** A row a thin write touched. */
+export type WrittenRow = { table: string; id: string };
 
 /**
  * How long the connection may keep failing before the link reports an
@@ -953,9 +962,11 @@ export class ThinRuntime implements Runtime {
       void this.request({ type: "abortStream", stream }).catch(() => undefined);
       throw error;
     }
+    const written: WrittenRow[] = context.branchView ? [] : [{ table, id: formatUuid(row) }];
     if (transaction) {
       // The value is staged in the transaction; its commit reports a
       // refusal of the row write.
+      transaction.rows.push(...written);
       const staged = this.request({ type: "finishStream", stream });
       transaction.requests.push(staged);
       transaction.staged = true;
@@ -969,7 +980,7 @@ export class ThinRuntime implements Runtime {
     return {
       id: formatUuid(row),
       kind: "committed",
-      txId: this.write({ type: "finishStream", stream }),
+      txId: this.write({ type: "finishStream", stream }, written),
     };
   }
 
@@ -998,6 +1009,7 @@ export class ThinRuntime implements Runtime {
       staged: false,
       begin: begin!,
       lost: false,
+      rows: [],
     });
     return id;
   }
@@ -1019,7 +1031,7 @@ export class ThinRuntime implements Runtime {
     // A staged write the server refused outright fails the commit; one its
     // row's state refused is the commit's own rejection, from the server.
     return Promise.all(transaction.requests).then(
-      () => this.write({ type: "commit", transaction: id }),
+      () => this.write({ type: "commit", transaction: id }, transaction.rows),
       (error: unknown) => {
         void this.request({ type: "rollback", transaction: id }).catch(() => undefined);
         throw error;
@@ -1066,8 +1078,10 @@ export class ThinRuntime implements Runtime {
     op: Extract<ThinOp, { transaction?: string }>,
   ): MutationResult {
     const id = context.transaction;
-    if (!id) return { kind: "committed", txId: this.write(op) };
+    const row = writtenRow(context, op);
+    if (!id) return { kind: "committed", txId: this.write(op, row ? [row] : []) };
     const transaction = this.openTransaction(id, context.operation);
+    if (row) transaction.rows.push(row);
     const staged = this.request({ ...op, transaction: id } as ThinOp);
     staged.catch(() => undefined);
     transaction.requests.push(staged);
@@ -1103,6 +1117,23 @@ export class ThinRuntime implements Runtime {
     ]);
   }
 
+  private writtenRowsReader: ((rows: readonly WrittenRow[]) => Promise<void>) | undefined;
+
+  /**
+   * @internal Hand the rows this runtime writes to `read`, which reads them
+   * into the local-first client taking over: from now on each write's rows
+   * once the server confirms it, before that write's waits resolve. `read`
+   * must give up on its own (offline, a timeout); a failure is ignored.
+   * Returns the rows of the writes the server already confirmed, for the
+   * caller to read.
+   */
+  handOffWrittenRows(read: (rows: readonly WrittenRow[]) => Promise<void>): readonly WrittenRow[] {
+    this.writtenRowsReader = read;
+    return [...this.writes.values()]
+      .filter((write) => write.confirmed)
+      .flatMap((write) => write.rows);
+  }
+
   /** The upstream link as the app sees it (see `linkStatusFromUpstream`). */
   upstreamLinkStatus(): LinkStatus {
     if (this.stopped) return offlineLink("stopped");
@@ -1127,6 +1158,11 @@ export class ThinRuntime implements Runtime {
     if (this.stopped) return;
     this.stopped = true;
     this.notifySyncStatus();
+  }
+
+  /** @internal Stop handing rows to `read` (its upgrade failed), unless another reader took over. */
+  stopHandingOffWrittenRows(read: (rows: readonly WrittenRow[]) => Promise<void>): void {
+    if (this.writtenRowsReader === read) this.writtenRowsReader = undefined;
   }
 
   /** How many writes still wait for the server's answer. */
@@ -1185,12 +1221,14 @@ export class ThinRuntime implements Runtime {
     ]);
   }
 
-  private write(op: ThinOp): TxId {
+  private write(op: ThinOp, rows: readonly WrittenRow[] = []): TxId {
     const txId = `thin:${this.nextRequestId}` as TxId;
     const write: Write = {
       observed: false,
       committed: false,
       answered: false,
+      confirmed: false,
+      rows,
       done: Promise.resolve(),
     };
     // A standalone write goes under this runtime's next write id, so it can
@@ -1209,8 +1247,13 @@ export class ThinRuntime implements Runtime {
       oneShot.resendable = resendable;
     }
     write.done = answer.then(
-      (body) => {
+      async (body) => {
         if (body.type !== "written") throw new Error(`unexpected answer to a write: ${body.type}`);
+        write.confirmed = true;
+        // Once handed off, a committed write's rows reach the local-first
+        // client before its waits resolve, so its local reads show them.
+        const read = this.writtenRowsReader;
+        if (read && rows.length > 0) await read(rows).catch(() => undefined);
       },
       (error: unknown) => {
         const failure = error instanceof Error ? error : new Error(String(error));
@@ -1290,6 +1333,19 @@ type WriteTarget = {
   branchView?: EncodedBranchView;
   updatedAtMs: number;
 };
+
+/** The main-branch row `op` writes, if any. */
+function writtenRow(
+  context: WriteTarget,
+  op: Extract<ThinOp, { transaction?: string }>,
+): WrittenRow | undefined {
+  if (context.branchView) return undefined;
+  if (op.type === "insert") {
+    const rowId = (op.options as { rowId?: Uint8Array }).rowId;
+    return rowId ? { table: op.table, id: formatUuid(rowId) } : undefined;
+  }
+  return "row" in op && op.row ? { table: op.table, id: formatUuid(op.row) } : undefined;
+}
 
 /** Write options for a write through a branch view. */
 function viewOptions(context: WriteTarget): object {
