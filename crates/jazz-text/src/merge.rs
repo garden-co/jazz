@@ -259,23 +259,30 @@ fn cuttable(word: &str) -> bool {
     })
 }
 
-/// Whether `new` is the word `old` with characters (whole graphemes) only
-/// inserted at one place, or only deleted from one.
+/// Whether `new` (one or more tokens, joined) is the word `old` with
+/// characters (whole graphemes) only inserted, or only deleted, at any
+/// number of places. Both people typing
+/// into one word leave it with insertions at several places once their
+/// keystrokes have merged (`abcXYZdef` from `XYZ`), and the next keystroke
+/// on either side must still merge by character.
 fn typed_into(old: &str, new: &str) -> bool {
-    if !anchors(old) || !anchors(new) || old == new || !cuttable(old) || !cuttable(new) {
+    // A word or a number: typing digits into a number, or letters around
+    // one (`AB0` from `0`), merges by character too. Markers and
+    // punctuation never do.
+    let typed = |token: &str| token.chars().any(word) && cuttable(token);
+    if old == new || !typed(old) || !typed(new) {
         return false;
     }
     let (old, new) = (graphemes(old), graphemes(new));
-    let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
-    let room = old.len().min(new.len()) - prefix;
-    let suffix = old
+    let (short, long) = if old.len() <= new.len() {
+        (&old, &new)
+    } else {
+        (&new, &old)
+    };
+    let mut rest = long.iter();
+    short
         .iter()
-        .rev()
-        .zip(new.iter().rev())
-        .take(room)
-        .take_while(|(a, b)| a == b)
-        .count();
-    prefix + suffix == old.len().min(new.len())
+        .all(|grapheme| rest.any(|other| other == grapheme))
 }
 
 /// The three token lists with each base word that both sides only typed
@@ -286,25 +293,27 @@ fn split_typed_words<'a>(
     (base, held, incoming): (&[&'a str], &[&'a str], &[&'a str]),
     (ours, theirs): (&[Hunk], &[Hunk]),
 ) -> Option<(Vec<&'a str>, Vec<&'a str>, Vec<&'a str>)> {
-    // Base index to the new index of each word a side only typed into.
+    // Base index to the new tokens of each word a side only typed into:
+    // one token, or several once the typing added a space or punctuation
+    // (`ABCD` to `ABCD E`).
     let typed = |hunks: &[Hunk], new: &[&str]| {
         hunks
             .iter()
             .filter(|hunk| {
                 hunk.old.1 == hunk.old.0 + 1
-                    && hunk.new.1 == hunk.new.0 + 1
-                    && typed_into(base[hunk.old.0], new[hunk.new.0])
+                    && hunk.new.1 > hunk.new.0
+                    && typed_into(base[hunk.old.0], &new[hunk.new.0..hunk.new.1].concat())
             })
-            .map(|hunk| (hunk.old.0, hunk.new.0))
+            .map(|hunk| (hunk.old.0, hunk.new.0..hunk.new.1))
             .collect::<HashMap<_, _>>()
     };
     let (in_held, in_incoming) = (typed(ours, held), typed(theirs, incoming));
     let mut cuts = (Vec::new(), Vec::new(), Vec::new());
-    for (&index, &at_held) in &in_held {
-        if let Some(&at_incoming) = in_incoming.get(&index) {
+    for (&index, at_held) in &in_held {
+        if let Some(at_incoming) = in_incoming.get(&index) {
             cuts.0.push(index);
-            cuts.1.push(at_held);
-            cuts.2.push(at_incoming);
+            cuts.1.extend(at_held.clone());
+            cuts.2.extend(at_incoming.clone());
         }
     }
     if cuts.0.is_empty() {
@@ -1247,6 +1256,23 @@ mod tests {
         assert_eq!(merge("cat", "cast", "cart"), "casrt");
         // An insert next to a delete in one word.
         assert_eq!(merge("hello", "heXllo", "helo"), "heXlo");
+        // Once both people's keystrokes have merged into one word, it holds
+        // insertions at several places; the next keystroke on either side
+        // still merges by letter, in both orders (at one spot, the held
+        // letters first).
+        assert_eq!(
+            merge("-- XYZ--", "-- abXYZcd--", "-- XYZW--"),
+            "-- abXYZcdW--"
+        );
+        assert_eq!(
+            merge("-- XYZ--", "-- XYZW--", "-- abXYZcd--"),
+            "-- abXYZWcd--"
+        );
+        // A number typed into, beside letters typed around it.
+        assert_eq!(merge("-- 0--", "-- AB0--", "-- 01--"), "-- AB01--");
+        assert_eq!(merge("v 2025", "v 20256", "v 20257"), "v 202567");
+        // Deletions at several places, beside an insert.
+        assert_eq!(merge("banana", "bnna", "banXana"), "bnXna");
         // A word only one side typed into merges whole, as before.
         assert_eq!(
             merge("the cat sat", "the cart sat", "the cat sat down"),
