@@ -370,10 +370,7 @@ export default function HomePage() {
 
       <section className="home-section">
         <div className="home-container">
-          <SectionHeader
-            id="how-it-works"
-            title="One database, from your backend to every client"
-          />
+          <SectionHeader id="how-it-works" title="Live data, from your cloud to every client" />
           <DeploymentCarousel>
             <div className="home-overview mt-6">
               <Figure className="home-figure-wide">
@@ -404,7 +401,7 @@ export default function HomePage() {
 
       <section className="home-section">
         <div className="home-container">
-          <SectionHeader id="code" title="Mount it in your backend, query it from anywhere">
+          <SectionHeader id="code" title="Install it in your backend, query it from anywhere">
             <Text as="p" display="block" type="large" color="secondary" weight="normal">
               Define tables and permissions in TypeScript and mount Jazz in your server. Then query
               from route handlers, or from any component as simple reactive state. Writes show up at
