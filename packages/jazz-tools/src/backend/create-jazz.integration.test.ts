@@ -1,10 +1,17 @@
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { createServer, request as httpRequest, type IncomingMessage, type Server } from "node:http";
+import {
+  createServer as createHttp2Server,
+  createSecureServer as createSecureHttp2Server,
+  type Http2SecureServer,
+  type Http2Server,
+} from "node:http2";
 import { createRequire } from "node:module";
 import type { AddressInfo, Socket } from "node:net";
 import { tmpdir } from "node:os";
+import type { Duplex } from "node:stream";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { generateSecret, identityOf, signChallenge, signToken } from "../local-first-auth/index.js";
@@ -77,8 +84,17 @@ async function serve(
       res.end("app route");
     });
   });
-  if (options.onUpgrade) server.on("upgrade", options.onUpgrade);
   if (options.sockets) await jazz.attach(server);
+  // attach() keeps Jazz's sockets from other upgrade listeners: count them
+  // as the server emits them.
+  const onUpgrade = options.onUpgrade;
+  if (onUpgrade) {
+    const emit = server.emit;
+    server.emit = function (this: Server, event: string | symbol, ...args: unknown[]) {
+      if (event === "upgrade") onUpgrade();
+      return emit.apply(this, [event, ...args] as Parameters<typeof emit>);
+    } as typeof server.emit;
+  }
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   cleanups.push(
     () =>
@@ -143,6 +159,17 @@ async function userSession(appId: string, origin: string, userId: string) {
   if (status !== "ready") throw error ?? new Error(status);
   return client!;
 }
+
+const randomBytesBase64 = () => randomBytes(16).toString("base64");
+
+// Hono's `serve()` returns any of these, and `attach()` takes each.
+export type AttachesHonoServers = [Server | Http2Server | Http2SecureServer] extends [
+  Parameters<Jazz["attach"]>[0],
+]
+  ? true
+  : never;
+const attachesHonoServers: AttachesHonoServers = true;
+void attachesHonoServers;
 
 describe("createJazz", () => {
   it("serves sync and sign-in from the app's backend with permissions from code", async () => {
@@ -1958,6 +1985,189 @@ describe("createJazz", () => {
 
     await within(jazz.close(), "close()");
     closed = true;
+  }, 90_000);
+
+  it("keeps its sync sockets from the server's other upgrade listeners", async () => {
+    const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    cleanups.push(() => jazz.close());
+    const server: Server = createServer((req, res) => jazz.nodeHandler(req, res));
+    await jazz.attach(server);
+    // What a custom Next.js server adds on its first request: a listener
+    // that ends every upgrade it doesn't route itself.
+    const others: string[] = [];
+    server.on("upgrade", (req: IncomingMessage, socket: Duplex) => {
+      others.push(req.url ?? "");
+      socket.destroy();
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    cleanups.push(
+      () =>
+        new Promise((resolve) => {
+          server.closeAllConnections();
+          server.close(resolve);
+        }),
+    );
+    const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const alice = await userSession(jazz.appId, origin, "alice");
+    await alice.db
+      .insert(app.todos, { title: "over the socket", owner: alice.session!.user! })
+      .wait({ tier: "global" });
+    expect(others).toEqual([]);
+    // Upgrades for the app's own paths still reach its listener.
+    await new Promise<void>((resolve) => {
+      const req = httpRequest(`${origin}/_next/webpack-hmr`, {
+        headers: { connection: "Upgrade", upgrade: "websocket" },
+      });
+      req.on("error", () => resolve());
+      req.on("close", () => resolve());
+      req.end();
+    });
+    expect(others).toEqual(["/_next/webpack-hmr"]);
+    // So does one only looking like Jazz's, and a malformed one doesn't
+    // take the process down.
+    const upgrade = (path: string) =>
+      new Promise<void>((resolve) => {
+        const req = httpRequest({
+          host: "127.0.0.1",
+          port: (server.address() as AddressInfo).port,
+          path,
+          headers: { connection: "Upgrade", upgrade: "websocket" },
+        });
+        req.on("error", () => resolve());
+        req.on("close", () => resolve());
+        req.end();
+      });
+    await upgrade("/jazz/apps/a/b/ws");
+    await upgrade("http://[/jazz/apps/a/ws");
+    // A Host header no URL can be made of gets a 400, not a crash.
+    const badHost = await new Promise<number | undefined>((resolve, reject) => {
+      const req = httpRequest({
+        host: "127.0.0.1",
+        port: (server.address() as AddressInfo).port,
+        path: "/jazz/apps/a/ws",
+        headers: { host: "[", connection: "Upgrade", upgrade: "websocket" },
+      });
+      req.on("response", (res) => resolve(res.statusCode));
+      req.on("error", reject);
+      req.end();
+    });
+    expect(badHost).toBe(400);
+    // And a plain request with a URL like that passes on (here: 404).
+    const badUrl = await new Promise<number | undefined>((resolve, reject) => {
+      const req = httpRequest(
+        { host: "127.0.0.1", port: (server.address() as AddressInfo).port, path: "http://[/x" },
+        (res) => {
+          res.resume();
+          resolve(res.statusCode);
+        },
+      );
+      req.on("error", reject);
+      req.end();
+    });
+    expect(badUrl).toBe(404);
+    expect(others).toEqual(["/_next/webpack-hmr", "/jazz/apps/a/b/ws", "http://[/jazz/apps/a/ws"]);
+    // Attaching again changes nothing.
+    await jazz.attach(server);
+    await upgrade("/_next/again");
+    expect(others.at(-1)).toBe("/_next/again");
+  }, 30_000);
+
+  it("refuses to attach to an HTTP/2 server, which has no WebSocket upgrades", async () => {
+    const jazz = createJazz({ app, permissions, store: memory(), authenticate });
+    cleanups.push(() => jazz.close());
+    const h2 = createHttp2Server();
+    await expect(jazz.attach(h2)).rejects.toThrow(/an HTTP\/2 server has no WebSocket upgrades/);
+    // Over TLS, only one that also serves HTTP/1 can upgrade.
+    await expect(jazz.attach(createSecureHttp2Server())).rejects.toThrow(
+      /an HTTP\/2 server has no WebSocket upgrades/,
+    );
+    await jazz.attach(createSecureHttp2Server({ allowHTTP1: true }));
+  });
+
+  it("attaches with its remote core down at start, names the core, and serves once it is up", async () => {
+    const appId = randomUUID();
+    const adminSecret = `down-admin-${randomUUID().slice(0, 8)}`;
+    // A port nothing listens on yet: the core starts there later.
+    const probe = createServer();
+    await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
+    const corePort = (probe.address() as AddressInfo).port;
+    await new Promise((resolve) => probe.close(resolve));
+    const coreUrl = `http://127.0.0.1:${corePort}`;
+    const jazz = createJazz({
+      app,
+      permissions,
+      store: remote({ url: coreUrl, appId, secret: adminSecret }),
+      authenticate,
+    });
+    cleanups.push(() => jazz.close());
+    const server: Server = createServer((req, res) => jazz.nodeHandler(req, res));
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    cleanups.push(
+      () =>
+        new Promise((resolve) => {
+          server.closeAllConnections();
+          server.close(resolve);
+        }),
+    );
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    cleanups.push(async () => errors.mockRestore());
+
+    // The host's startup goes on: attach() doesn't open the store.
+    await jazz.attach(server);
+    const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+    // Jazz routes answer 503 instead of a bare 500. The log names the core;
+    // the client isn't told internal addresses.
+    const signIn = await fetch(`${origin}/jazz/auth/sign-in`, { method: "POST" });
+    expect(signIn.status).toBe(503);
+    expect(Number(signIn.headers.get("retry-after"))).toBeGreaterThanOrEqual(1);
+    const body = await signIn.text();
+    expect(body).toBe("Jazz is unavailable; try again shortly");
+    expect(body).not.toContain(coreUrl);
+    expect(errors.mock.calls.flat().map(String).join(" ")).toContain(
+      `could not reach the Jazz core at ${coreUrl}`,
+    );
+    // So does a socket.
+    const upgraded = await new Promise<number | undefined>((resolve, reject) => {
+      const req = httpRequest(`${origin}/jazz/apps/${appId}/ws`, {
+        headers: {
+          connection: "Upgrade",
+          upgrade: "websocket",
+          "sec-websocket-version": "13",
+          "sec-websocket-key": randomBytesBase64(),
+        },
+      });
+      req.on("response", (res) => resolve(res.statusCode));
+      req.on("upgrade", () => resolve(101));
+      req.on("error", reject);
+      req.end();
+    });
+    expect(upgraded).toBe(503);
+    await expect(jazz.createAccountFor("alice")).rejects.toThrow(
+      new RegExp(`could not reach the Jazz core at ${coreUrl} \\(ECONNREFUSED\\)`),
+    );
+
+    // The core comes up: the next use past the backoff opens the store.
+    const core = await startLocalJazzServer({ appId, port: corePort, inMemory: true, adminSecret });
+    cleanups.push(() => core.stop());
+    const deadline = Date.now() + 30_000;
+    let alice: string | undefined;
+    while (!alice) {
+      alice = await jazz.createAccountFor("alice").catch(async (error: unknown) => {
+        if (Date.now() > deadline) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        return undefined;
+      });
+    }
+    const db = await jazz.forReqUser(
+      new Request("http://app/x", { headers: { "x-test-user": "alice" } }),
+    );
+    await db.insert(app.todos, { title: "after", owner: alice }).wait({ tier: "global" });
+    // Sockets upgrade now: attach() took effect once the store opened.
+    const user = await userSession(jazz.appId, origin, "bob");
+    await user.db
+      .insert(app.todos, { title: "synced", owner: user.session!.user! })
+      .wait({ tier: "global" });
   }, 90_000);
 
   it("closes while its remote core is down, with a write still pending", async () => {
