@@ -96,6 +96,38 @@ describe("browser session", () => {
     expect((await db(session).all(app.notes)).map((row) => row.text)).toEqual(["thin"]);
   }, 60_000);
 
+  it("refuses an option that holds a function or class, before any sign-in", async () => {
+    // rc.4 adopter finding R63: a `WebSocket` class reached the Db config, so
+    // loginWithBackend() threw "class WebSocket ... could not be cloned".
+    const server = await startServer();
+    class NodeWebSocket {}
+    await expect(
+      createJazzClient({
+        scope: server.appId,
+        serverUrl: server.url,
+        store: memoryStore(),
+        initial: "local-first",
+        driver: { type: "memory" },
+        WebSocket: NodeWebSocket,
+      } as never),
+    ).rejects.toThrow(
+      new TypeError(
+        `createJazzClient has no option "WebSocket" that takes a function or class: the client uses the platform's own WebSocket (Node has one from 22)`,
+      ),
+    );
+    await expect(
+      createJazzClient({
+        serverUrl: null,
+        store: memoryStore(),
+        client: loadLocalFirst,
+        driver: { type: "memory" },
+        onReady: () => {},
+      } as never),
+    ).rejects.toThrow(
+      new TypeError(`createJazzClient has no option "onReady" that takes a function or class`),
+    );
+  }, 60_000);
+
   it("takes a custom sign-in fetch without putting it into the client's config", async () => {
     // rc.3 adopter finding: the JSDoc'd `fetch` hook reached the Db config, so
     // opening the client threw DataCloneError in db.getConfig().
@@ -125,6 +157,7 @@ describe("browser session", () => {
     const client = session.getSnapshot().client;
     const kept = db(session);
     await kept.insert(app.notes, { text: "before" }).wait({ tier: "global" });
+    expect(kept.isLocalFirst()).toBe(false);
     const seen: string[][] = [];
     const errors: Error[] = [];
     const states: string[] = [];
@@ -143,6 +176,7 @@ describe("browser session", () => {
     expect(db(session)).toBe(kept);
     expect(isThinDb(kept)).toBe(false);
     expect(states).toEqual([]);
+    expect(kept.isLocalFirst()).toBe(true);
     // The rows were read into the local-first client first.
     expect((await kept.all(app.notes, { tier: "local-first" })).map((row) => row.text)).toEqual([
       "before",

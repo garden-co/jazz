@@ -36,6 +36,12 @@ export declare class JazzCore {
 export declare class JazzCoreSocket {
   /** Pass one binary message from the client. False once the session ended. */
   send(data: Uint8Array): boolean
+  /**
+   * `send`, resolving once the session has read enough of the messages
+   * before it. A host that awaits it before reading more from its client
+   * holds a fast client back instead of queueing all it sends.
+   */
+  sendWithRoom(data: Uint8Array): Promise<boolean>
   /** The client's socket closed. */
   close(): void
 }
