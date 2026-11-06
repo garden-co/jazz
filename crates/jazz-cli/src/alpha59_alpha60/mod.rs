@@ -414,7 +414,11 @@ fn check_app_id(entries: &[dump::AdminEntry], app_id: &str) -> Result<(), String
         .filter_map(|entry| entry.metadata.get("app_id").map(String::as_str))
         .collect();
     match (ids.pop_first(), ids.is_empty()) {
-        (None, _) => Ok(()),
+        (None, _) => Err(
+            "the dump's admin catalogue names no app id to check --app-id \
+                          against: not supported yet"
+                .to_owned(),
+        ),
         (Some(id), true) if id == app_id => Ok(()),
         (Some(id), true) => Err(format!(
             "--app-id {app_id} is not this dump's app: alpha.59 served it as {id}"
@@ -504,9 +508,9 @@ pub(crate) fn active_deployment(
 /// login; now `session.user` is the account and `session.identity` the
 /// login, and the old paths are refused. A whole `session.user` stays as it
 /// is: compared with `$createdBy` it now matches by account, which is what
-/// alpha.59 apps meant by owner. Session references appear as
-/// `{"type": "SessionRef", "path": [...]}` in policy comparisons and as
-/// `{"SessionRef": [...]}` in relations.
+/// alpha.59 apps meant by owner. A session path sits in `path` of a
+/// `SessionRef` value and of the `Session*` policies, in `session_path` of
+/// `In`, and is the whole of a relation's `{"SessionRef": [...]}`.
 pub(crate) fn rename_session_paths(permissions: &mut Json) -> usize {
     fn rename(path: &mut Json) -> usize {
         let Some(parts) = path.as_array() else {
@@ -525,16 +529,16 @@ pub(crate) fn rename_session_paths(permissions: &mut Json) -> usize {
     }
     match permissions {
         Json::Object(object) => {
-            let key = if object.get("type").and_then(Json::as_str) == Some("SessionRef") {
-                "path"
-            } else {
-                "SessionRef"
+            let key = match object.get("type").and_then(Json::as_str) {
+                Some(
+                    "SessionRef" | "SessionCmp" | "SessionIsNull" | "SessionIsNotNull"
+                    | "SessionContains" | "SessionInList",
+                ) => Some("path"),
+                Some("In") => Some("session_path"),
+                _ if object.len() == 1 => Some("SessionRef"),
+                _ => None,
             };
-            let alone = key == "path" || object.len() == 1;
-            let count = match object.get_mut(key) {
-                Some(path) if alone => rename(path),
-                _ => 0,
-            };
+            let count = key.and_then(|key| object.get_mut(key)).map_or(0, rename);
             count + object.values_mut().map(rename_session_paths).sum::<usize>()
         }
         Json::Array(items) => items.iter_mut().map(rename_session_paths).sum(),
@@ -1105,7 +1109,7 @@ mod tests {
             payload_json: "{}".to_owned(),
         };
         check_app_id(&[entry(id)], id).unwrap();
-        check_app_id(&[], id).unwrap();
+        assert!(check_app_id(&[], id).is_err());
         let refused = check_app_id(&[entry(id)], &id.to_uppercase()).unwrap_err();
         assert!(refused.contains("is not this dump's app"), "{refused}");
         let other = "0a590000-0000-4000-8000-000000000060";
@@ -1127,14 +1131,28 @@ mod tests {
                       "value": reference(&["user"]) },
                     { "type": "Cmp", "column": "team", "op": "Eq",
                       "value": reference(&["claims", "user", "account"]) },
+                    { "type": "SessionCmp", "path": ["user", "identity", "issuer"],
+                      "op": "Eq", "value": { "type": "Text", "value": "https://idp" } },
+                    { "type": "SessionIsNull", "path": ["user", "account"] },
+                    { "type": "SessionIsNotNull", "path": ["user", "account"] },
+                    { "type": "SessionContains", "path": ["user", "identity", "subject"],
+                      "value": { "type": "Text", "value": "a" } },
+                    { "type": "SessionInList", "path": ["user", "account"], "values": [] },
+                    { "type": "In", "column": "team", "session_path": ["user", "account"] },
                 ]}},
                 "insert": { "relation": { "Filter": { "predicate": { "Cmp": {
                     "right": { "SessionRef": ["user", "identity", "subject"] },
                 }}}}},
             },
         });
-        assert_eq!(rename_session_paths(&mut permissions), 3);
+        assert_eq!(rename_session_paths(&mut permissions), 9);
         let exprs = &permissions["todos"]["select"]["using"]["exprs"];
+        assert_eq!(exprs[4]["path"], json!(["identity", "issuer"]));
+        for at in [5, 6, 8] {
+            assert_eq!(exprs[at]["path"], json!(["user"]), "{at}");
+        }
+        assert_eq!(exprs[7]["path"], json!(["identity", "subject"]));
+        assert_eq!(exprs[9]["session_path"], json!(["user"]));
         assert_eq!(exprs[0]["value"], reference(&["user"]));
         assert_eq!(exprs[1]["value"], reference(&["identity"]));
         // A whole `session.user` and provider claims keep their paths.

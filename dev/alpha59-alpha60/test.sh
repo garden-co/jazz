@@ -74,7 +74,7 @@ grep -q '"versions_skipped_rejected":0' "$work/import.json"
 grep -q '"versions_keeping_a_removed_enum_variant":1' "$work/import.json"
 # The active bundle's alpha.59 session.user.account and
 # session.user.identity.subject come over under their new names.
-grep -q '"permission_session_paths_renamed":2' "$work/import.json"
+grep -q '"permission_session_paths_renamed":3' "$work/import.json"
 "${import[@]}" verify --dump "$work/dump" --data-dir "$work/a60" --app-id "$app"
 # A backend holding the dir's lock makes verify refuse.
 python3 -c 'import fcntl, sys, time; f = open(sys.argv[1], "a+"); fcntl.flock(f, fcntl.LOCK_EX); print("locked", flush=True); time.sleep(60)' \

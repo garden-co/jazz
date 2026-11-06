@@ -26,7 +26,7 @@ use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz_alpha59_alpha60_dump as dump;
 use jazz_server::server::alpha59_alpha60::{
-    migrate_import_first_permissions, migrate_import_login,
+    migrate_import_login, migrate_import_published_permissions,
 };
 use jazz_server::{BlobStore, ServerBuilder, ServerState, StorageBackend};
 use serde_json::{Value as Json, json};
@@ -450,23 +450,37 @@ fn verify_permissions(
     admin: &[dump::AdminEntry],
     report: &mut Report,
 ) -> Result<(), String> {
-    // The one deployment the import makes publishes this bundle, first:
-    // the app may have published its own since.
-    let expected = match active_deployment(admin)? {
-        None => Json::Null,
-        Some((deployment, _)) => json!({
-            "schema_hash": deployment["targetSchemaHash"],
-            "permissions": deployment["permissions"],
-        }),
+    let published = migrate_import_published_permissions(state)?;
+    // The one deployment the import makes publishes this bundle; the app may
+    // have published its own beside it since, so any published bundle that
+    // matches counts, whatever the clocks that ordered them.
+    let Some((deployment, _)) = active_deployment(admin)? else {
+        report.check("published bundle", published.is_empty(), || {
+            format!(
+                "{} bundles, though alpha.59 published none",
+                published.len()
+            )
+        });
+        return Ok(());
     };
-    let mut actual = migrate_import_first_permissions(state)?;
-    if let Some(actual) = actual.as_object_mut() {
-        actual.remove("bundle");
-    }
-    report.check("published bundle", actual == expected, || {
+    let expected = json!({
+        "schema_hash": deployment["targetSchemaHash"],
+        "permissions": deployment["permissions"],
+    });
+    let found = published.iter().any(|bundle| {
+        bundle["schema_hash"] == expected["schema_hash"]
+            && bundle["permissions"] == expected["permissions"]
+    });
+    report.check("published bundle", found, || {
+        let hashes: Vec<&str> = published
+            .iter()
+            .filter_map(|bundle| bundle["schema_hash"].as_str())
+            .collect();
         format!(
-            "alpha.59 schema {}, SQLite schema {}",
-            expected["schema_hash"], actual["schema_hash"]
+            "no published bundle has alpha.59's active permissions for schema {} \
+             (published schemas: {})",
+            expected["schema_hash"],
+            hashes.join(", ")
         )
     });
     Ok(())
