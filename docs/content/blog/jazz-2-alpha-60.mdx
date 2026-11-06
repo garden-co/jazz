@@ -9,7 +9,7 @@ This is an absolutely massive release that we hope makes the long wait worth it!
 
 ## Based on SQLite for orders of magnitude better performance
 
-Over the course of the v2 alpha, Jazz’s internal architecture has become simpler and simpler. Two weeks ago, we realized it had become simple enough that we could base Jazz on the venerable SQLite instead of rolling our own low-level database engine. We were able to ship this in just under a week, passing all tests with about 350k fewer lines of code.
+Over the course of the v2 alpha, Jazz’s internal architecture has become simpler and simpler. Two weeks ago, we realized it had become simple enough that we could base Jazz on the venerable SQLite instead of rolling our own low-level database engine. We were able to ship this in just under a week, passing all tests with about 350k fewer lines of code. Every real alpha.59 app we've tested it on migrates to alpha.60 and verifies cleanly.
 
 This involves a simpler version of IVM that strikes a much better tradeoff between one-shot reads and live subscriptions and benefits from the decades of optimization that have gone into SQLite.
 
@@ -23,30 +23,13 @@ Being based on SQLite also means that Jazz is much easier to run *embedded* in y
 
 With this release, we are targeting Vercel Functions and Sandboxes as our first serverless environment, where all you have to do is install a Jazz handler into your normal Next.js, Hono, etc. backend, that then automatically manages a persistent Sandbox with a Jazz core on SQLite. This includes not just active CPU pricing, but managed hibernation of the Sandbox for apps that see few requests, giving you true scale-to-zero.
 
-Support for Cloudflare as a target, with Jazz running on Durable Objects will come next release, together with support for sharding (licensed).
+Support for Cloudflare as a target, with Jazz running on Durable Objects will come next release, together with support for sharding (more on licensing below).
 
 **This marks the first step of a new strategy where (instead of being a Database-as-a-Service hosted provider) we will focus on making it as easy as possible to self-host Jazz embedded in your backend on your existing preferred cloud**
 
-We'll make this transition over the next couple releases and post more details on our thinking and monetization plans. The gist: free to self-host on a single machine, or a couple microVMs. Sharded Jazz at scale is still self-hosted but requires a license at fair volume-based pricing.
-
 We'll keep Jazz Cloud running for as long as anyone still needs it, but are excited for people to try the new self-hosted Jazz experience and are happy to help existing adopters move apps completely into their existing cloud.
 
-## Upgrading & breaking changes
-
-The biggest change in this new model is that Jazz now always sits *behind* a normal backend that you host. From there, we have adapters for local SQLite, Vercel Sandboxes (auto-managed) or a remote connector for Jazz Cloud.
-
-Your backend being the proxy for Jazz brings several benefits:
-
-- auth is much simpler now: defined and checked by your backend
-- sync happens via a same-origin /jazz endpoint
-- code is the source of truth for schema and permissions, changes to either are deployed together with your backend (while keeping the migration lens system for easy backcompat to old clients)
-- much less config on both backend and clients
-
-Please see the [full release notes](https://github.com/garden-co/jazz/releases/tag/v2.0.0-alpha.60), [new backend setup docs](/docs/setup/backend) and [new client setup docs](/docs/setup/web-client/thin-client) for details.
-
-**For apps that haven't had a backend at all yet** like some static client apps and React Native apps, this means you need to deploy a very slim backend to proxy Jazz. We're happy to help!
-
-Otherwise, the APIs for queries and writes are unchanged, but setup, auth and deployment change, and the sync protocol breaks, so you’ll have to update your server, backend and clients together. The storage format changes, too, but we’re providing migration binaries for self-hosted servers and a Jazz Cloud dashboard button to trial the migration and then run it for real, with opportunity to roll back, but no backwards migration.
+We'll make this transition over the next couple releases and post more details on our thinking and monetization plans. The gist: free to self-host on a single machine, or a couple microVMs. Sharded Jazz at scale is still self-hosted but requires a license at fair volume-based pricing.
 
 ## A new ~87KB "thin" client, now the default
 
@@ -65,3 +48,20 @@ Rich text is one of the most important ingredients for many collaborative apps a
 - agents being able to make edits and annotate document ranges without complex libraries on their end
 
 See the [rich text docs](/docs/recipes/data-patterns/rich-text-editor) for more details. We'll add more examples and recipes for this soon!
+
+## Upgrading & breaking changes
+
+The biggest change in this new model is that Jazz now always sits *behind* a normal backend that you host. From there, we have adapters for local SQLite, Vercel Sandboxes (auto-managed) or a remote connector for Jazz Cloud.
+
+Your backend being the proxy for Jazz brings several benefits:
+
+- auth is much simpler now: defined and checked by your backend
+- sync happens via a same-origin /jazz endpoint
+- code is the source of truth for schema and permissions, changes to either are deployed together with your backend (while keeping the migration lens system for easy backcompat to old clients)
+- much less config on both backend and clients
+
+Please see the [full release notes](https://github.com/garden-co/jazz/releases/tag/v2.0.0-alpha.60), [new backend setup docs](/docs/setup/backend) and [new client setup docs](/docs/setup/web-client/thin-client) for details.
+
+**For apps that haven't had a backend at all yet** like some static client apps and React Native apps, this means you need to deploy a very slim backend to proxy Jazz. We're happy to help!
+
+Otherwise, the APIs for queries and writes are unchanged, but setup, auth and deployment change, and the sync protocol breaks, so you’ll have to update your server, backend and clients together. The storage format changes, too, but we’re providing migration binaries for self-hosted servers and a Jazz Cloud dashboard button to trial the migration and then run it for real, with opportunity to roll back, but no backwards migration.
