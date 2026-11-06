@@ -78,6 +78,8 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
   private readonly disposeLocalSettlementObserver: () => void;
   private localSettlementsPending = false;
   private resumeProbePending = false;
+  /** The worker admitted this follower; until then, init RPCs carry the probes. */
+  private established = false;
   private readonly connectionId = crypto.randomUUID();
   private nextProbeNonce = 1;
   private probeNonce: number | null = null;
@@ -110,7 +112,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     globalThis.document?.addEventListener("resume", this.onResume);
     this.disposeLocalSettlementObserver = runtime.onLocalSettlementChange((pending) => {
       this.localSettlementsPending = pending;
-      if (this.hasPendingWork()) this.armWatchdog();
+      if (this.wantsWatchdog()) this.armWatchdog();
       else this.clearWatchdog();
     });
     this.disposeQueryCoverageTrace = traceRelay
@@ -168,7 +170,13 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       for (const frames of this.pendingFrames.splice(0)) this.pump.receive(frames);
     })();
     this.readyPromise = Promise.all([initialized, connected]).then(() => undefined);
-    void this.readyPromise.catch((error: unknown) => this.fail(toError(error)));
+    void this.readyPromise.then(
+      () => {
+        this.established = true;
+        this.armWatchdog();
+      },
+      (error: unknown) => this.fail(toError(error)),
+    );
   }
 
   async ready(): Promise<void> {
@@ -330,7 +338,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
   }
 
   private armWatchdog(): void {
-    if (this.closed || this.failed || !this.hasPendingWork() || this.watchdogTimer !== null) return;
+    if (this.closed || this.failed || !this.wantsWatchdog() || this.watchdogTimer !== null) return;
     this.scheduleWatchdog(probeTiming.intervalMs, false);
   }
 
@@ -340,7 +348,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     this.watchdogTimer = setTimeout(() => {
       if (epoch !== this.watchdogEpoch || this.closed || this.failed) return;
       this.watchdogTimer = null;
-      if (!this.hasPendingWork()) {
+      if (!this.wantsWatchdog()) {
         this.clearWatchdog();
         return;
       }
@@ -360,7 +368,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
 
   private sendProbe(): void {
     this.clearWatchdog();
-    if (this.closed || this.failed || !this.hasPendingWork()) return;
+    if (this.closed || this.failed || !this.wantsWatchdog()) return;
     const nonce = this.nextProbeNonce++;
     this.probeNonce = nonce;
     // Arm first so a synchronous adapter reply cannot leave an expiry behind.
@@ -385,6 +393,20 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
 
   private hasPendingWork(): boolean {
     return this.pending.size > 0 || this.localSettlementsPending || this.resumeProbePending;
+  }
+
+  /**
+   * Probe the worker while work waits on it, and while the page is visible:
+   * a visible tab that sits idle when the worker dies (another tab crashed
+   * it) has no other cue to notice and reopen it, and the writes the dead
+   * worker still held upload only once some tab does. A hidden page rests
+   * and probes when it becomes visible again.
+   */
+  private wantsWatchdog(): boolean {
+    return (
+      this.hasPendingWork() ||
+      (this.established && globalThis.document?.visibilityState === "visible")
+    );
   }
 
   private readonly onVisibilityChange = (): void => {
@@ -445,7 +467,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
         this.pending.delete(id);
         pending.resolve();
       }
-      if (!this.hasPendingWork()) this.clearWatchdog();
+      if (!this.wantsWatchdog()) this.clearWatchdog();
       this.port.postMessage({
         type: "storage-reset-observed",
         resetId: message.resetId,
@@ -470,7 +492,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     const pending = this.pending.get(message.id);
     if (!pending) return;
     this.pending.delete(message.id);
-    if (!this.hasPendingWork()) this.clearWatchdog();
+    if (!this.wantsWatchdog()) this.clearWatchdog();
     if (message.error) {
       pending.reject(deserializeBrowserRelayError(message.error));
     } else {
