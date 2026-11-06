@@ -10,8 +10,8 @@ Effects with typed errors, live queries are Streams, and transactions commit or 
 the Effect that runs inside them.
 
 <Callout type="info">
-  The bindings target Effect v4 (`effect@4.0.0-rc.118` or later). Install it next to Jazz: `pnpm add
-  effect@rc`.
+  The bindings target Effect v4 (`effect@4.0.0-rc.118` or later). Install a release next to Jazz:
+  `pnpm add effect@^4.1`. The `rc` tag can pull in prereleases whose packages need exact pins.
 </Callout>
 
 ## The `Jazz` service
@@ -115,10 +115,16 @@ listTodos.pipe(JazzBackend.forCurrentReqUser());
 listTodos.pipe(JazzBackend.asAuthority);
 ```
 
-For a user with no Jazz account yet, `JazzBackend.forReqUser`, `forCurrentReqUser` and
-`withAttribution` fail with a `JazzNoAccount` error (`{ userId, operation }`, exported from
-`jazz-tools/effect/backend`), which you can handle with `Effect.catchTag("JazzNoAccount", …)`.
-`JazzBackend.createAccountFor(userId)` creates the account, or returns the existing one's id; see
+For a user with no Jazz account yet, `JazzBackend.forReqUser` and `forCurrentReqUser` fail with a
+`JazzNoAccount` error (`{ userId, operation }`, exported from `jazz-tools/effect/backend`), which
+you can handle with `Effect.catchTag("JazzNoAccount", …)`. `createAccountFor(userId)` and
+`withAttribution(request)` are methods of the `JazzBackend` service, not statics:
+
+```ts
+const accountId = yield * JazzBackend.use((backend) => backend.createAccountFor(userId));
+```
+
+`createAccountFor` creates the account, or returns the existing one's id; see
 [Users without an account](/docs/setup/deployment/own-server#users-without-an-account).
 
 Provide `JazzBackend.layer(createJazzOptions)` once for the whole server (or

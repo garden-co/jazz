@@ -83,6 +83,21 @@ tie-breaker so page boundaries are stable.
   </Tab>
 </Tabs>
 
+A deep `offset` still reads every skipped row: page 100 of 50 rows scans 5,050. For long lists, page
+by a cursor instead, the last value of the sort column you showed:
+
+```ts
+const page = await db.all(
+  app.messages
+    .where({ sentAt: { lt: lastSentAt } })
+    .orderBy("sentAt", "desc")
+    .limit(50),
+);
+```
+
+Each page then reads only the rows it returns. For now, also prefer a cursor on the backend: a large
+`offset` with `orderBy` can fail on `jazz.db`.
+
 ## Values over 64 KB
 
 A `string`, `bytes` or `json` value over 64 KB is stored in chunks, and filters and sorting

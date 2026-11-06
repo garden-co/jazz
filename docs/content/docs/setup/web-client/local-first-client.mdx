@@ -50,11 +50,15 @@ after the first load:
   </Tab>
 </Tabs>
 
-A browser that has upgraded this account before opens it local-first straight away, so the app
-works offline on later visits. If a background upgrade fails, the app stays on the thin client and
+A browser that has upgraded this account before opens it local-first straight away, so Jazz works
+offline on later visits. Loading the page itself offline is up to your app: cache the app shell,
+including Jazz's Wasm and worker files, with a service worker of your own. If a background upgrade fails, the app stays on the thin client and
 logs a warning.
 
-The `import()` stays in your code, so the Wasm engine downloads only when the client upgrades. To
+The `import()` stays in your code, so the Wasm engine (about 3 MB gzipped, 8.7 MB uncompressed)
+downloads only when the client upgrades. After the first render, local storage keeps filling for a
+few seconds. Writes made on the thin client before the upgrade are kept offline only when a query
+the client subscribes to covers them. To
 upgrade only on demand, call `useDb().upgradeToLocalFirst(() => import("jazz-tools/local-first"))`
 instead; see [Upgrading to local-first](/docs/setup/web-client/thin-client#upgrading-to-local-first).
 

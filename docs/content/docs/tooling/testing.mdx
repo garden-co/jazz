@@ -146,7 +146,8 @@ const testJazz: TestJazz = await startTestJazz({ app, permissions });
 - **Guests** (anonymous or local-first clients) connect to `testJazz.url`.
 - **Signed-in users** call `await testJazz.as(userId, claims)`. Each user gets their own origin,
   which stands in for their browser's session cookie, and your permissions see `userId` and
-  `claims` as the signed-in user. Spread the result into the client's config.
+  `claims` as the signed-in user. Pass its `serverUrl` to `createJazzClient` and call
+  `loginWithBackend()`, as below.
 - **Native clients** that send `Authorization: Bearer` use `testJazz.bearer(userId, claims)` as
   their token against `testJazz.url`.
 - `testJazz.jazz` is the app's `Jazz` handle, for `forReqUser`, `db` and the rest of your backend
@@ -154,19 +155,29 @@ const testJazz: TestJazz = await startTestJazz({ app, permissions });
 - `await testJazz.stop()` stops everything it started.
 
 ```typescript
-import { createDb } from "jazz-tools";
+import { createJazzClient } from "jazz-tools/client";
 
-const alice = await createDb({
-  ...(await testJazz.as("alice")),
-  driver: { type: "memory" },
-});
-const bob = await createDb({
-  ...(await testJazz.as("bob")),
-  driver: { type: "memory" },
-});
+// A test client keeps its account in memory and signs in as `userId`.
+async function clientAs(userId: string) {
+  let saved: string | null = null;
+  const session = await createJazzClient({
+    serverUrl: (await testJazz.as(userId)).serverUrl,
+    store: { read: async () => saved, update: async (change) => void (saved = change(saved)) },
+  });
+  await session.loginWithBackend();
+  return session;
+}
 
-await alice.insert(app.todos, { title: "Buy milk", done: false }).wait({ tier: "global" });
+const alice = await clientAs("alice");
+const bob = await clientAs("bob");
+
+const aliceDb = alice.getSnapshot().client!.db;
+await aliceDb.insert(app.todos, { title: "Buy milk", done: false }).wait({ tier: "global" });
+
+await Promise.all([alice.close(), bob.close()]); // before testJazz.stop()
 ```
+
+Close every client before `testJazz.stop()`: a client left open keeps the test process alive.
 
 To share one core between suites, start it yourself with `startLocalJazzServer` and pass it as
 `startTestJazz({ core, app, permissions })`, or tune the core it starts with `coreOptions`.
@@ -224,6 +235,10 @@ user. Your framework's bindings then create their own clients against it.
 
 If you need to isolate data across tests, give each client its own `dbName`.
 
+jsdom can't run a syncing client: it has no Web Locks, and its WebSocket sends an origin your
+backend refuses. Run component tests that need sync in a real browser (Vitest browser mode or
+Playwright), and keep jsdom for components you render with test data.
+
 ### Testing sync
 
 Several clients on the same `startTestJazz` let you test anything that crosses clients, such as
@@ -236,6 +251,15 @@ disconnected, writes only happen locally and reads only see local data. After `r
 pending writes are sent and writes missed from other clients arrive. This is how you test that
 concurrent offline edits merge the way you expect.
 
+Browser-level offline switches, such as Playwright's `context.setOffline()` or the DevTools network
+throttle, don't reach a local-first client's sockets, which run in a worker. Use `db.disconnect()`,
+or put a proxy you can stop between the browser and your backend.
+
+#### Fake timers
+
+`vi.useFakeTimers()` fakes the timers Jazz waits on too, so `wait()` and queries never settle. Fake
+only the clock: `vi.useFakeTimers({ toFake: ["Date"] })`.
+
 #### Testing migrations
 
 `testJazz.redeploy({ app, permissions, migration })` deploys a new version of your app the way a
@@ -244,9 +268,20 @@ it. Every origin keeps its port, so clients reconnect where they were. A client 
 old schema keeps reading and writing through the migration's lens:
 
 ```typescript custom="noscroll"
-import { createDb, schema as s, migration as m } from "jazz-tools";
-import { appMigrations, startTestJazz } from "jazz-tools/testing";
+import { schema as s, migration as m } from "jazz-tools";
+import { createJazzClient } from "jazz-tools/client";
+import { appMigrations, startTestJazz, type TestJazz } from "jazz-tools/testing";
 import { expect, it, vi } from "vitest";
+
+async function clientAs(testJazz: TestJazz, userId: string) {
+  let saved: string | null = null;
+  const session = await createJazzClient({
+    serverUrl: (await testJazz.as(userId)).serverUrl,
+    store: { read: async () => saved, update: async (change) => void (saved = change(saved)) },
+  });
+  await session.loginWithBackend();
+  return session;
+}
 
 const oldSchema = {
   todos: s.table({ title: s.string(), done: s.boolean() }, {}),
@@ -286,20 +321,16 @@ it("lets old-schema clients write rows new-schema clients can read", async () =>
     app: oldApp,
     permissions: allowAll(oldApp),
   });
-  const oldDb = await createDb({
-    ...(await testJazz.as("alice")),
-    driver: { type: "memory" },
-  });
+  const alice = await clientAs(testJazz, "alice");
+  const oldDb = alice.getSnapshot().client!.db;
 
   await testJazz.redeploy({
     app: newApp,
     permissions: allowAll(newApp),
     migration,
   });
-  const newDb = await createDb({
-    ...(await testJazz.as("bob")),
-    driver: { type: "memory" },
-  });
+  const bob = await clientAs(testJazz, "bob");
+  const newDb = bob.getSnapshot().client!.db;
 
   const created = await oldDb
     .insert(oldApp.todos, { title: "written through old schema", done: false })
@@ -319,7 +350,7 @@ it("lets old-schema clients write rows new-schema clients can read", async () =>
     ]);
   });
 
-  await Promise.all([oldDb.shutdown(), newDb.shutdown()]);
+  await Promise.all([alice.close(), bob.close()]);
   await testJazz.stop();
 });
 ```

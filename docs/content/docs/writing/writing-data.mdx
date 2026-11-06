@@ -385,6 +385,8 @@ A mutation can fail when you call it or while you wait:
 
 Use `db.onMutationError(...)` as a fallback for rejected mutations without an active `wait(...)`.
 Its event is not an `Error`: read `event.code` and `event.reason`, not `.message`.
+An event with code `outcome_unknown` is not a rejection: the connection ended before the server
+answered, and the write may have been applied. Read the row again before you revert or retry it.
 This includes mutations you did not wait for and mutations whose wait finished before a later
 rejection arrived.
 

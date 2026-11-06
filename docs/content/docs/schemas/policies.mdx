@@ -275,9 +275,11 @@ You can use these edit metadata magic columns directly in `permissions.ts`. This
 Compare `$createdBy` with `session.user` to scope a rule to the row's creator. `session.user` is
 the account, so the rule matches rows written through any identity linked to it, including
 alpha.59 rows whose author was imported with an account. To match only the exact login that wrote the row, compare
-`$createdBy.identity` with `session.identity` (its `{ issuer, subject }`). Public `session.claims`
-also exposes the complete verified JWT payload, including the raw `iss` and `sub`, but those
-inspectable fields never replace the canonical author identity.
+`$createdBy.identity` with `session.identity` (its `{ issuer, subject }`). `session.claims`
+holds the claims your `authenticate` returned, not a raw JWT payload; with
+[`fromJWT()`](/docs/setup/auth/custom#tokens-from-your-identity-provider), `session.identity` is
+`{ issuer: "jazz:backend", subject }`, not your provider's `iss`. Claims never replace the
+canonical author identity.
 
 <include cwd lang="ts" meta='title="permissions.ts"'>
   ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-created-by-ts

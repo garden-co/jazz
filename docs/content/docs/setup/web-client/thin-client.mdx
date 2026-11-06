@@ -90,7 +90,8 @@ Each is an explicit "not supported" error:
 - no streaming inside a transaction
 - text edits with `editedFrom` on merge text columns are rejected (`NotObserved`) for now; use the
   local-first client for [collaborative text editing](/docs/recipes/data-patterns/collaborative-text-editing)
-- a write in flight when the socket drops is rejected (`ThinConnectionLostError`), not retried
+- a write in flight when the socket drops is rejected with `ThinConnectionLostError` (from
+  `jazz-tools/thin`) and not retried; it may or may not have committed, so read before you retry
 - `getSyncStatus()` and `useSyncStatus()` stay on `connecting` for now
 - no admin secret in the browser
 

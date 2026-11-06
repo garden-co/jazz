@@ -96,8 +96,10 @@ async function githubOidcToken() {
 
 `session.close()` on its own discards writes that haven't reached the backend yet, and so does
 exiting the process. Before a script ends, `await db.shutdown({ waitForSync: true })`. Each token
-needs at least 60 seconds of validity left when Jazz uses it; one closer to expiry is refused. While
-your main backend is unreachable, `createJazzClient` waits without logging anything, so give a job
+needs at least 60 seconds of validity left when Jazz uses it; one closer to expiry is refused. Each
+identity can hold at most 4 sync sockets at a time for now, so keep to four workers per trusted
+identity.
+While your main backend is unreachable, `createJazzClient` waits without logging anything, so give a job
 its own timeout.
 
 The session opens as whatever your main backend trusts the token as: with backend authority for a

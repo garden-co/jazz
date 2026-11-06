@@ -157,6 +157,9 @@ write is valid only if the data you just read has not changed in a conflicting t
 In TypeScript, `wait()` takes no durability tier for a serializable transaction. It resolves if the
 authority accepts the transaction and rejects if the authority rejects it.
 
+Keep transactions small. Their cost grows faster than their size for now, so split a bulk import
+into transactions of 10 to 50 rows.
+
 A conflict rejects with code `serialization_conflict` or `transaction_conflict`; treat both as "read
 again and retry". A rejection is different from a transport error, such as "websocket transport
 error" during an outage: there the transaction may still reach the authority, so check before you

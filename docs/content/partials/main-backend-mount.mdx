@@ -111,6 +111,7 @@
       }).pipe(JazzBackend.forCurrentReqUser()), // as the signed-in user
     );
 
+    await jazz.ready(); // open the store before Effect handlers use it
     const runtime = ManagedRuntime.make(JazzBackend.layerJazz(jazz));
     const services = await runtime.context();
     const { handler } = HttpRouter.toWebHandler(listTodos);
