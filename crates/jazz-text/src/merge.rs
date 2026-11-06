@@ -15,9 +15,10 @@
 //! HTML also tags and entities), so an edit never splits one. Two sides'
 //! changes then combine by these rules, in base order:
 //!
-//! - a word typed into or deleted from (characters inserted at one place,
-//!   or only deleted), by one side or both, is diffed by character, so
-//!   typing into one word at once keeps both sides' letters;
+//! - a word or number both sides typed into or deleted from (characters
+//!   only inserted, or only deleted, at any places, also where the typing
+//!   added a space or punctuation) is diffed by character, so typing into
+//!   one word at once keeps both sides' letters;
 //! - changes to disjoint parts of the base all apply;
 //! - an identical change made by both applies once;
 //! - inserts at one point apply in seq order, the held value's first;
@@ -259,23 +260,43 @@ fn cuttable(word: &str) -> bool {
     })
 }
 
-/// Whether `new` is the word `old` with characters (whole graphemes) only
-/// inserted at one place, or only deleted from one.
+/// A word or number token: word characters (and the marks completing
+/// them) alone, so not a list marker such as `1.`.
+fn word_token(token: &str) -> bool {
+    !token.is_empty() && token.chars().all(|c| word(c) || extends(c))
+}
+
+/// A token a word typed into may become: a word, a number, or one
+/// character (a typed space or punctuation mark), never a tag, entity,
+/// link destination or delimiter run.
+fn typable(token: &str) -> bool {
+    word_token(token) || graphemes(token).len() == 1
+}
+
+/// Whether `new` (one or more tokens, joined) is the word `old` with
+/// characters (whole graphemes) only inserted, or only deleted, at any
+/// number of places. Both people typing
+/// into one word leave it with insertions at several places once their
+/// keystrokes have merged (`abcXYZdef` from `XYZ`), and the next keystroke
+/// on either side must still merge by character.
 fn typed_into(old: &str, new: &str) -> bool {
-    if !anchors(old) || !anchors(new) || old == new || !cuttable(old) || !cuttable(new) {
+    // A word or a number: typing digits into a number, or letters around
+    // one (`AB0` from `0`), merges by character too. Markers and
+    // punctuation never do.
+    let typed = |token: &str| token.chars().any(word) && cuttable(token);
+    if old == new || !word_token(old) || !typed(old) || !typed(new) {
         return false;
     }
     let (old, new) = (graphemes(old), graphemes(new));
-    let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
-    let room = old.len().min(new.len()) - prefix;
-    let suffix = old
+    let (short, long) = if old.len() <= new.len() {
+        (&old, &new)
+    } else {
+        (&new, &old)
+    };
+    let mut rest = long.iter();
+    short
         .iter()
-        .rev()
-        .zip(new.iter().rev())
-        .take(room)
-        .take_while(|(a, b)| a == b)
-        .count();
-    prefix + suffix == old.len().min(new.len())
+        .all(|grapheme| rest.any(|other| other == grapheme))
 }
 
 /// The three token lists with each base word that both sides only typed
@@ -286,25 +307,30 @@ fn split_typed_words<'a>(
     (base, held, incoming): (&[&'a str], &[&'a str], &[&'a str]),
     (ours, theirs): (&[Hunk], &[Hunk]),
 ) -> Option<(Vec<&'a str>, Vec<&'a str>, Vec<&'a str>)> {
-    // Base index to the new index of each word a side only typed into.
+    // Base index to the new tokens of each word a side only typed into:
+    // one token, or several once the typing added a space or punctuation
+    // (`ABCD` to `ABCD E`).
     let typed = |hunks: &[Hunk], new: &[&str]| {
         hunks
             .iter()
             .filter(|hunk| {
                 hunk.old.1 == hunk.old.0 + 1
-                    && hunk.new.1 == hunk.new.0 + 1
-                    && typed_into(base[hunk.old.0], new[hunk.new.0])
+                    && hunk.new.1 > hunk.new.0
+                    // Only words, numbers and single characters: a tag, entity,
+                    // link destination or delimiter run is never split.
+                    && new[hunk.new.0..hunk.new.1].iter().all(|token| typable(token))
+                    && typed_into(base[hunk.old.0], &new[hunk.new.0..hunk.new.1].concat())
             })
-            .map(|hunk| (hunk.old.0, hunk.new.0))
+            .map(|hunk| (hunk.old.0, hunk.new.0..hunk.new.1))
             .collect::<HashMap<_, _>>()
     };
     let (in_held, in_incoming) = (typed(ours, held), typed(theirs, incoming));
     let mut cuts = (Vec::new(), Vec::new(), Vec::new());
-    for (&index, &at_held) in &in_held {
-        if let Some(&at_incoming) = in_incoming.get(&index) {
+    for (&index, at_held) in &in_held {
+        if let Some(at_incoming) = in_incoming.get(&index) {
             cuts.0.push(index);
-            cuts.1.push(at_held);
-            cuts.2.push(at_incoming);
+            cuts.1.extend(at_held.clone());
+            cuts.2.extend(at_incoming.clone());
         }
     }
     if cuts.0.is_empty() {
@@ -1247,6 +1273,39 @@ mod tests {
         assert_eq!(merge("cat", "cast", "cart"), "casrt");
         // An insert next to a delete in one word.
         assert_eq!(merge("hello", "heXllo", "helo"), "heXlo");
+        // Once both people's keystrokes have merged into one word, it holds
+        // insertions at several places; the next keystroke on either side
+        // still merges by letter, in both orders (at one spot, the held
+        // letters first).
+        assert_eq!(
+            merge("-- XYZ--", "-- abXYZcd--", "-- XYZW--"),
+            "-- abXYZcdW--"
+        );
+        assert_eq!(
+            merge("-- XYZ--", "-- XYZW--", "-- abXYZcd--"),
+            "-- abXYZWcd--"
+        );
+        // A word one side turned into markup is never cut: the tag or link
+        // destination stays whole, and the later write wins the word.
+        for (format, held) in [
+            (TextFormat::Html, "a <a href=\"kit\">kits</a> b"),
+            (TextFormat::Markdown, "a [kits](http://kit.io) b"),
+        ] {
+            for (first, second) in [(held, "a kiXt b"), ("a kiXt b", held)] {
+                // The later write wins the word, whole.
+                assert_eq!(merge3(format, "a kit b", first, second), second);
+            }
+        }
+        // A list marker is not a number to type into.
+        for (first, second) in [("1. 2 apples", "1X2 apples"), ("1X2 apples", "1. 2 apples")] {
+            let merged = merge3(TextFormat::Markdown, "12 apples", first, second);
+            assert!(!merged.contains("1X."), "{merged:?}");
+        }
+        // A number typed into, beside letters typed around it.
+        assert_eq!(merge("-- 0--", "-- AB0--", "-- 01--"), "-- AB01--");
+        assert_eq!(merge("v 2025", "v 20256", "v 20257"), "v 202567");
+        // Deletions at several places, beside an insert.
+        assert_eq!(merge("banana", "bnna", "banXana"), "bnXna");
         // A word only one side typed into merges whole, as before.
         assert_eq!(
             merge("the cat sat", "the cart sat", "the cat sat down"),
