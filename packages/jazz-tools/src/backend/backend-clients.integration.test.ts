@@ -238,6 +238,48 @@ describe("scoped backend clients", () => {
   });
 });
 
+describe("a user's own bearer token", () => {
+  // A CLI or desktop app whose user signed in to the app: the app's own
+  // `authenticate` reads their token, no workload trust involved.
+  it("syncs a Node client as the user the app's authenticate names", async () => {
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      // Stands in for the app verifying its own session token.
+      authenticate(request) {
+        const token = request.headers.get("authorization")?.replace(/^Bearer /, "");
+        const payload = token?.split(".")[1];
+        if (!payload) return null;
+        const { sub } = JSON.parse(Buffer.from(payload, "base64url").toString()) as JWTPayload;
+        return sub ? { userId: sub } : null;
+      },
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz);
+    const session = await createJazzClient({
+      appId: jazz.appId,
+      app,
+      permissions,
+      serverUrl: `${origin}/jazz`,
+      driver: { type: "memory" },
+      credential: () => sign({ sub: "alice" }),
+    });
+    cleanups.push(() => session.close());
+    const { client, status, error } = session.getSnapshot();
+    if (status !== "ready") throw error ?? new Error(status);
+    expect(client!.session!.identity).toEqual({ issuer: "jazz:backend", subject: "alice" });
+    const account = client!.session!.user!;
+
+    const row = await client!.db
+      .insert(app.todos, { title: "from the CLI", owner: account })
+      .wait({ tier: "global" });
+    expect((await jazz.db.all(app.todos.where({ id: row.id }))).map((t) => t.title)).toEqual([
+      "from the CLI",
+    ]);
+  });
+});
+
 describe("trusted backend clients", () => {
   it("sync with backend authority", async () => {
     const { appId, jazz, origin } = await appWith([

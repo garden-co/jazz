@@ -215,8 +215,9 @@ export async function createAccountDbWithRuntimeSource(
       // A refused credential renews whatever the server called it: a
       // rotated signing key reads as "invalid" until a new token is issued.
       // A new token cannot fix an auth mode the app has turned off or a
-      // revoked account identity.
-      if (state.error && isRenewableAuthFailure(state.error)) renew();
+      // revoked account identity. A user the backend signed in has no token
+      // to renew: the backend watch asks the backend again instead.
+      if (jwtToken && state.error && isRenewableAuthFailure(state.error)) renew();
     });
     opened.onShutdown(() => {
       stopped = true;

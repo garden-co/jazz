@@ -53,6 +53,8 @@ async function serve(jazz: Jazz): Promise<string> {
 
 /** Every request and socket to `origin` carries `userId`'s session, as a cookie would. */
 function signInAs(origin: string, userId: string) {
+  // A browser page: the host that sends the backend's cookie.
+  vi.stubGlobal("document", {});
   const realFetch = globalThis.fetch;
   const RealWebSocket = globalThis.WebSocket;
   globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
@@ -185,4 +187,26 @@ describe("browser session against the app's backend", () => {
       "thin",
     ]);
   }, 60_000);
+
+  // Node, Deno, a CLI: no cookie carries the backend's session on the sync
+  // connection, so a backend sign-in would report ready and never sync.
+  it("refuses a backend sign-in on a host that sends no cookies, before any request", async () => {
+    const requests: string[] = [];
+    const session = await createJazzClient({
+      serverUrl: "http://127.0.0.1:9/jazz",
+      store: memoryStore(),
+      driver: { type: "memory" },
+      fetch: async (input) => {
+        requests.push(String(input));
+        return new Response(null, { status: 500 });
+      },
+    });
+    cleanups.push(() => session.close());
+
+    await expect(session.loginWithBackend()).rejects.toThrow(
+      /need a browser.*React Native.*jazz-tools\/backend, with credential/,
+    );
+    expect(requests).toEqual([]);
+    expect(session.getSnapshot().status).not.toBe("ready");
+  });
 });

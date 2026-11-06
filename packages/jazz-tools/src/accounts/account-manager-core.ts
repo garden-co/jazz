@@ -23,7 +23,8 @@ export async function createAccountManagerWithMinter(
     registry,
     store,
     mintToken,
-    fetch: config.serverUrl === null ? deviceOnlyFetch : config.fetch,
+    fetch:
+      config.serverUrl === null ? deviceOnlyFetch : sendsCookies() ? config.fetch : cookielessFetch,
     rememberBackendUser: options.rememberBackendUser,
   });
 }
@@ -58,6 +59,31 @@ export const deviceOnlyFetch: typeof fetch = () =>
   Promise.reject(
     new Error(
       "Jazz runs on this device only (serverUrl: null), so it can't sign in through a backend. Set serverUrl to use loginWithBackend or linkWithBackend.",
+    ),
+  );
+
+/**
+ * Whether this host sends the app's cookies on Jazz's sync connection, as a
+ * browser page or worker does. A user the backend signs in holds no Jazz
+ * credential of their own: the backend's cookie is what names them on every
+ * connection, so on a host without one the session would report signed in
+ * and never sync.
+ */
+function sendsCookies(): boolean {
+  return (
+    typeof document !== "undefined" ||
+    typeof (globalThis as { WorkerGlobalScope?: unknown }).WorkerGlobalScope !== "undefined"
+  );
+}
+
+/**
+ * @internal What sign-in requests of a host without cookies get (Node, Deno,
+ * Bun, a CLI): a clear refusal, naming the hosts that sign in with a bearer.
+ */
+export const cookielessFetch: typeof fetch = () =>
+  Promise.reject(
+    new Error(
+      "loginWithBackend and linkWithBackend need a browser: the app's backend names the signed-in user by the cookie a browser sends on Jazz's sync connection, and this host sends none. With a bearer token instead: on React Native, pass bearer to createAccountManager; on Node, sync through the app's backend as a backend client (createJazzClient from jazz-tools/backend, with credential). Other hosts are not supported yet.",
     ),
   );
 
