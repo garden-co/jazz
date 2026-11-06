@@ -140,6 +140,37 @@ describe("Jazz session lifecycle", () => {
     });
     await session.close();
   });
+  it("signs out past writes the server refused for a sign-in it no longer accepts", async () => {
+    const { session, clients } = await setup();
+    const client = clients[0]! as (typeof clients)[0] & { db?: unknown };
+    client.db = {
+      getAuthState: () => ({ error: "invalid" }),
+      getSyncStatus: () => ({ pendingUploads: 2 }),
+      getConfig: () => ({ driver: { type: "persistent" } }),
+    };
+    const failure = new GracefulShutdownSyncError(new Error("session missing: not signed in"));
+    client.shutdown.mockRejectedValueOnce(failure);
+    const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await session.logout();
+    expect(session.getSnapshot().status).toBe("signed-out");
+    expect(client.shutdown.mock.calls).toEqual([[{ waitForSync: true }], []]);
+    expect(warned).toHaveBeenCalledWith(
+      expect.stringMatching(/2 write\(s\) the server refused.*stay on this device/),
+      failure.cause,
+    );
+    warned.mockRestore();
+    await session.close();
+  });
+  it("keeps a sign-out failing while its writes may still upload (an outage)", async () => {
+    const { session, clients, old } = await setup();
+    const client = clients[0]! as (typeof clients)[0] & { db?: unknown };
+    client.db = { getAuthState: () => ({}) };
+    const failure = new GracefulShutdownSyncError(new Error("websocket transport error"));
+    client.shutdown.mockRejectedValueOnce(failure);
+    await expect(session.logout()).rejects.toBe(failure);
+    expect(session.getSnapshot()).toMatchObject({ status: "ready", account: old, error: failure });
+    await session.close();
+  });
   it("failed link reopens old selection and preserves primary error", async () => {
     const { session, clients, enrollment, old } = await setup();
     const failure = new Error("link failed");
