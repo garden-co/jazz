@@ -49,8 +49,8 @@ describe("NAPI on_auth_failure", () => {
         },
       );
 
-      // Connect with an intentionally invalid JWT. The server requires
-      // backendSecret auth; supplying a bad JWT triggers Unauthorized.
+      // Connect with a JWT. A core admits only its app's backend, so a
+      // client's own token is refused as an invalid credential.
       runtime.connect(
         httpUrlToWs(server.url, appId),
         JSON.stringify({ jwt_token: "definitely.invalid.jwt" }),
@@ -63,7 +63,7 @@ describe("NAPI on_auth_failure", () => {
       }
 
       expect(reasons.length).toBeGreaterThan(0);
-      expect(reasons[0]).toBe("disabled");
+      expect(reasons[0]).toBe("invalid");
     } finally {
       runtime.disconnect();
       runtime.close?.();

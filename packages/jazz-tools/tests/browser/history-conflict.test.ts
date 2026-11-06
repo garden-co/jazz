@@ -12,9 +12,15 @@
 import { describe, it, expect, afterEach, beforeAll, afterAll } from "vitest";
 import type { Db, TableProxy } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
+import type { CompiledPermissionsMap } from "../../src/schema-permissions.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
 import { deploy } from "../../src/dev/catalogue.js";
-import { getJazzServerInfo, stopJazzServer, type JazzServerInfo } from "./testing-server.js";
+import {
+  getJazzServerInfo,
+  startJazzApp,
+  stopJazzServer,
+  type JazzServerInfo,
+} from "./testing-server.js";
 import {
   TestCleanup,
   createSyncedDb,
@@ -71,25 +77,20 @@ describe("History & Conflict Management", () => {
   });
   // Cases use fresh clients and distinct row IDs; the deployed schema is shared.
   beforeAll(async () => {
-    testingServer = await getJazzServerInfo(uniqueDbName("history-conflict-app"));
-    const { appId, serverUrl, adminSecret } = testingServer;
-    await deploy({
-      appId,
-      serverUrl,
-      adminSecret,
-      schema,
-      permissions: {
-        todos: {
-          select: { using: { type: "True" } },
-          insert: { with_check: { type: "True" } },
-          update: {
-            using: { type: "True" },
-            with_check: { type: "True" },
-          },
-          delete: { using: { type: "True" } },
+    const core = await getJazzServerInfo(uniqueDbName("history-conflict-app"));
+    const permissions: CompiledPermissionsMap = {
+      todos: {
+        select: { using: { type: "True" } },
+        insert: { with_check: { type: "True" } },
+        update: {
+          using: { type: "True" },
+          with_check: { type: "True" },
         },
+        delete: { using: { type: "True" } },
       },
-    });
+    };
+    await deploy({ ...core, schema, permissions });
+    testingServer = await startJazzApp(core, { schema, permissions });
   });
 
   /**
