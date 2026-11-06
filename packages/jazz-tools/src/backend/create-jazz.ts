@@ -393,6 +393,9 @@ export interface WsLikeSocket {
   on(event: "message", listener: (data: unknown, isBinary?: boolean) => void): unknown;
   on(event: "close", listener: () => void): unknown;
   on(event: "error", listener: (error: unknown) => void): unknown;
+  /** Stop reading from the client until `resume` (the `ws` package has both). */
+  pause?(): void;
+  resume?(): void;
 }
 
 export interface Jazz {
@@ -533,6 +536,12 @@ interface CoreReply {
 export interface CoreSocket {
   /** False once the session ended. */
   send(data: Uint8Array): boolean;
+  /**
+   * `send`, resolving once the session has read enough of the messages
+   * before it, so a host that awaits it holds a fast client back. A core
+   * without it takes `send`'s word.
+   */
+  sendWithRoom?(data: Uint8Array): Promise<boolean>;
   close(): void;
 }
 
@@ -738,19 +747,24 @@ async function applyBundle(
  */
 export function pinnedSocket(socket: CoreSocket, bundle: () => string | undefined): CoreSocket {
   let first = true;
+  /** `data`, with the pin stamped into the prelude; null if it can't be. */
+  const pin = (data: Uint8Array): Uint8Array | null => {
+    if (!first) return data;
+    first = false;
+    const pinned = withBundle(data, bundle());
+    // A prelude the pin cannot be stamped into would open unpinned.
+    if (pinned === null) socket.close();
+    return pinned;
+  };
   return {
     send(data) {
-      if (first) {
-        first = false;
-        const pinned = withBundle(data, bundle());
-        // A prelude the pin cannot be stamped into would open unpinned.
-        if (pinned === null) {
-          socket.close();
-          return false;
-        }
-        data = pinned;
-      }
-      return socket.send(data);
+      const pinned = pin(data);
+      return pinned !== null && socket.send(pinned);
+    },
+    async sendWithRoom(data) {
+      const pinned = pin(data);
+      if (pinned === null) return false;
+      return socket.sendWithRoom ? socket.sendWithRoom(pinned) : socket.send(pinned);
     },
     close: () => socket.close(),
   };
@@ -1579,6 +1593,12 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
    */
   interface ClientSession {
     send(data: Uint8Array): boolean;
+    /**
+     * `send`, resolving once the core has room for it (or with false once
+     * the session ended): a transport that awaits it before reading more
+     * from its client holds a fast client back.
+     */
+    deliver(data: Uint8Array): Promise<boolean>;
     close(): void;
     /** The user the session was admitted as, once it is. */
     readonly userId: string | undefined;
@@ -1665,31 +1685,40 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     };
     // Messages after the prelude wait for its admission, in order.
     let chain: Promise<boolean> | undefined;
+    const deliver = (data: Uint8Array): Promise<boolean> => {
+      if (ended) return Promise.resolve(false);
+      chain = chain
+        ? chain.then(async (ok) => {
+            if (!ok || ended || !socket) return false;
+            return socket.sendWithRoom ? socket.sendWithRoom(data) : socket.send(data);
+          })
+        : admit(data).catch((error: unknown) => {
+            if (!ended && isRefusal(error)) {
+              // The core refused this identity (revoked, local-first auth
+              // disabled, invalid): an auth failure the client must not
+              // retry, reported as a sign-in refusal is.
+              onEvent(null, {
+                kind: "message",
+                data: authFailedBatch(`session refused: ${refusalCode(error)}`),
+              });
+              onEvent(null, { kind: "close", code: 1008, reason: "sign-in refused" });
+            } else {
+              // The core is unreachable or failed (5xx), or the app's own
+              // `authenticate` threw: the client tries again later.
+              onEvent(null, { kind: "close", code: 1011, reason: "admission failed" });
+            }
+            end();
+            return false;
+          });
+      return chain;
+    };
     return {
       send(data) {
         if (ended) return false;
-        chain = chain
-          ? chain.then((ok) => ok && !ended && !!socket?.send(data))
-          : admit(data).catch((error: unknown) => {
-              if (!ended && isRefusal(error)) {
-                // The core refused this identity (revoked, local-first auth
-                // disabled, invalid): an auth failure the client must not
-                // retry, reported as a sign-in refusal is.
-                onEvent(null, {
-                  kind: "message",
-                  data: authFailedBatch(`session refused: ${refusalCode(error)}`),
-                });
-                onEvent(null, { kind: "close", code: 1008, reason: "sign-in refused" });
-              } else {
-                // The core is unreachable or failed (5xx), or the app's own
-                // `authenticate` threw: the client tries again later.
-                onEvent(null, { kind: "close", code: 1011, reason: "admission failed" });
-              }
-              end();
-              return false;
-            });
+        void deliver(data);
         return true;
       },
+      deliver,
       close: end,
       get userId() {
         return userId;
@@ -1921,22 +1950,43 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     return socket;
   }
 
+  /**
+   * Pass a send's records to the session as they arrive, each once the core
+   * has room for it: the body is not read ahead of the core, so a client
+   * sending faster than the core takes is held back by the request itself.
+   */
   async function streamSend(id: string, request: Request): Promise<Response> {
     const socket = await ownStream(id, request);
     if (socket instanceof Response) return socket;
-    const reader = new StreamRecordReader();
-    const records = reader.push(new Uint8Array(await request.arrayBuffer()));
-    if (reader.pending > 0) return new Response("truncated record", { status: 400 });
-    for (const record of records) {
-      if (
-        record.kind !== STREAM_RECORD_MESSAGE ||
-        record.payload.byteLength > MAX_STREAM_MESSAGE_BYTES
-      ) {
-        socket.close();
-        return new Response("invalid record", { status: 400 });
+    const refuse = (reason: string) => {
+      socket.close();
+      return new Response(reason, { status: 400 });
+    };
+    const records = new StreamRecordReader();
+    const body = request.body?.getReader();
+    for (;;) {
+      const chunk = body ? await body.read() : { done: true as const, value: undefined };
+      if (chunk.done) break;
+      for (const record of records.push(chunk.value)) {
+        if (
+          record.kind !== STREAM_RECORD_MESSAGE ||
+          record.payload.byteLength > MAX_STREAM_MESSAGE_BYTES
+        ) {
+          void body?.cancel().catch(() => undefined);
+          return refuse("invalid record");
+        }
+        if (!(await socket.deliver(record.payload))) {
+          void body?.cancel().catch(() => undefined);
+          return new Response("session ended", { status: 410 });
+        }
       }
-      if (!socket.send(record.payload)) return new Response("session ended", { status: 410 });
+      // A record no message may be: refused before it is buffered.
+      if (records.pending > 5 + MAX_STREAM_MESSAGE_BYTES) {
+        void body?.cancel().catch(() => undefined);
+        return refuse("invalid record");
+      }
     }
+    if (records.pending > 0) return refuse("truncated record");
     return new Response(null, { status: 204 });
   }
 
@@ -1952,22 +2002,36 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       ws.close(1008, "origin not allowed");
       return;
     }
+    // A paused socket reads no close handshake: resume it to close.
+    const close = (code: number, reason: string) => {
+      ws.resume?.();
+      ws.close(code, reason);
+    };
     let socket: ClientSession;
     try {
       socket = openClientSession(request, (error, event) => {
-        if (error) return ws.close(1011, error.message);
+        if (error) return close(1011, error.message);
         if (event.kind === "message" && event.data) ws.send(event.data);
         else if (event.kind === "close") {
-          ws.close(sendableCloseCode(event.code), event.reason ?? "");
+          close(sendableCloseCode(event.code), event.reason ?? "");
         }
       });
     } catch (error) {
-      ws.close(1013, error instanceof Error ? error.message : String(error));
+      close(1013, error instanceof Error ? error.message : String(error));
       return;
     }
     clientSockets.add(ws);
+    // Messages go to the core in order, each once it has room; the socket
+    // is not read while one waits, so a fast client is held back.
+    let waiting = 0;
     ws.on("message", (data) => {
-      if (!socket.send(toBytes(data))) ws.close(1000, "session ended");
+      waiting += 1;
+      ws.pause?.();
+      void socket.deliver(toBytes(data)).then((ok) => {
+        waiting -= 1;
+        if (!ok) close(1000, "session ended");
+        else if (waiting === 0) ws.resume?.();
+      });
     });
     ws.on("close", () => {
       clientSockets.delete(ws);
@@ -2403,7 +2467,10 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
           stream.end(1012, "server shutting down");
         }
         streams.clear();
-        for (const ws of [...clientSockets]) ws.close(1012, "server shutting down");
+        for (const ws of [...clientSockets]) {
+          ws.resume?.();
+          ws.close(1012, "server shutting down");
+        }
         clientSockets.clear();
         await Promise.all([...retiring].map((close) => close()));
         // Writes that resolved at the "local" tier may still be on their way
@@ -2779,6 +2846,8 @@ function heldSocket(ws: WsLikeSocket): { socket: WsLikeSocket; refuse(reason: st
   const socket: WsLikeSocket = {
     send: (data) => ws.send(data),
     close: (code, reason) => ws.close(code, reason),
+    pause: () => ws.pause?.(),
+    resume: () => ws.resume?.(),
     on(event: "message" | "close" | "error", listener: (...args: never[]) => void) {
       const first = listeners === null;
       listeners ??= {};

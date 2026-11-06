@@ -946,6 +946,10 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     );
     keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
+    // A sync batch read while its session's ingress budget was full: the
+    // socket is not read again until the owner has taken earlier frames.
+    let mut held: Option<(Vec<Vec<u8>>, WireAdmission)> = None;
+
     'connection: loop {
         let stall_at = thin_reader.stall_deadline();
         tokio::select! {
@@ -953,7 +957,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
             _ = keepalive.tick() => {
                 // A connection waiting for room reads nothing, its peer's
                 // pongs included: that is not the peer going quiet.
-                if thin_reader.waiting() {
+                if thin_reader.waiting() || held.is_some() {
                     last_inbound = tokio::time::Instant::now();
                 }
                 if last_inbound.elapsed() >= WS_IDLE_TIMEOUT {
@@ -1049,7 +1053,20 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                 ));
                 break 'connection;
             }
-            msg = socket_reader.next(), if !thin_reader.waiting() => {
+            room = async {
+                match &mut held {
+                    Some((_, admission)) => admission.await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                let (frames, _) = held.take().expect("a held batch is waiting");
+                let received = room.and_then(|room| core_server_shell.receive_wire_frames(session, frames, room));
+                if let Err(error) = received {
+                    queue_ws_error(&writer_tx, WireError::new(WireErrorCode::Backpressure, WireRetry::Later, error));
+                    break 'connection;
+                }
+            }
+            msg = socket_reader.next(), if !thin_reader.waiting() && held.is_none() => {
                 last_inbound = tokio::time::Instant::now();
                 match msg {
                 Some(Ok(Message::Binary(bytes))) => {
@@ -1074,7 +1091,19 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                         }
                         continue;
                     }
-                    if let Err(error) = core_server_shell.receive_wire_frames(session, frames) {
+                    let bytes = frames.iter().map(Vec::len).sum::<usize>();
+                    let received = match core_server_shell.try_admit_wire_frames(session, bytes) {
+                        Ok(Some(room)) => core_server_shell.receive_wire_frames(session, frames, room),
+                        Ok(None) => {
+                            let runtime = core_server_shell.clone();
+                            held = Some((frames, Box::pin(async move {
+                                runtime.admit_wire_frames(session, bytes).await
+                            })));
+                            Ok(())
+                        }
+                        Err(error) => Err(error),
+                    };
+                    if let Err(error) = received {
                         queue_ws_error(&writer_tx, WireError::new(WireErrorCode::Backpressure, WireRetry::Later, error));
                         break 'connection;
                     }
@@ -1112,6 +1141,11 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
 const THIN_PART_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 #[cfg(test)]
 const THIN_PART_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The wait for room for a sync batch in its session's ingress budget.
+type WireAdmission = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<crate::runtime::WireIngress, String>> + Send>,
+>;
 
 type ThinAdmission = std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<crate::runtime::ThinIngress, String>> + Send>,

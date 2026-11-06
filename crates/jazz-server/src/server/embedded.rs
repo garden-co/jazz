@@ -137,12 +137,17 @@ impl EmbeddedServer {
             })?;
         let (to_core, incoming) = mpsc::unbounded();
         let (outgoing, from_core) = mpsc::unbounded();
-        let socket = EmbeddedSocket { incoming, outgoing };
+        let room = Arc::new(tokio::sync::Semaphore::new(EMBEDDED_INBOUND_BUDGET));
+        let socket = EmbeddedSocket {
+            incoming,
+            outgoing,
+            room: Arc::clone(&room),
+        };
         self.runtime.spawn(super::routes::handle_ws_connection(
             socket, state, headers, guard,
         ));
         Ok(EmbeddedSocketPeer {
-            sender: EmbeddedSocketSender { to_core },
+            sender: EmbeddedSocketSender { to_core, room },
             from_core,
         })
     }
@@ -160,10 +165,20 @@ pub struct EmbeddedSocketPeer {
     from_core: mpsc::UnboundedReceiver<Message>,
 }
 
+/// Bytes of client messages [`EmbeddedSocketSender::send_with_room`] lets
+/// wait for the core before it waits too: two of the largest messages.
+const EMBEDDED_INBOUND_BUDGET: usize = 2 * MAX_WIRE_FRAME_BYTES;
+
+/// A client message on its way to the core, with the room it holds in the
+/// socket's inbound budget until the session reads it.
+type Inbound = (Message, Option<tokio::sync::OwnedSemaphorePermit>);
+
 /// Passes the client's messages to the core. Cheap to clone.
 #[derive(Clone)]
 pub struct EmbeddedSocketSender {
-    to_core: mpsc::UnboundedSender<Message>,
+    to_core: mpsc::UnboundedSender<Inbound>,
+    /// [`EMBEDDED_INBOUND_BUDGET`], as permits of one byte.
+    room: Arc<tokio::sync::Semaphore>,
 }
 
 /// What the core sends to the host's socket.
@@ -183,14 +198,34 @@ impl EmbeddedSocketSender {
             return false;
         }
         self.to_core
-            .unbounded_send(Message::Binary(bytes.into()))
+            .unbounded_send((Message::Binary(bytes.into()), None))
+            .is_ok()
+    }
+
+    /// [`Self::send`], once the session has read enough of the messages
+    /// before it: a host that waits for this before reading more from its
+    /// client holds a fast client back, as a socket's own flow control
+    /// would, instead of queueing everything it sends.
+    pub async fn send_with_room(&self, bytes: Vec<u8>) -> bool {
+        if bytes.len() > MAX_WIRE_FRAME_BYTES {
+            self.close();
+            return false;
+        }
+        let permits = u32::try_from(bytes.len().max(1)).expect("a frame's size fits u32");
+        let Ok(room) = Arc::clone(&self.room).acquire_many_owned(permits).await else {
+            return false;
+        };
+        self.to_core
+            .unbounded_send((Message::Binary(bytes.into()), Some(room)))
             .is_ok()
     }
 
     /// The client's socket closed.
     pub fn close(&self) {
-        let _ = self.to_core.unbounded_send(Message::Close(None));
+        let _ = self.to_core.unbounded_send((Message::Close(None), None));
         self.to_core.close_channel();
+        // Senders waiting for room give up.
+        self.room.close();
     }
 }
 
@@ -211,7 +246,10 @@ impl EmbeddedSocketPeer {
                     return Some(EmbeddedOutgoing::Binary(text.as_bytes().to_vec()));
                 }
                 Message::Ping(payload) => {
-                    let _ = self.sender.to_core.unbounded_send(Message::Pong(payload));
+                    let _ = self
+                        .sender
+                        .to_core
+                        .unbounded_send((Message::Pong(payload), None));
                 }
                 Message::Pong(_) => {}
                 Message::Close(frame) => {
@@ -227,17 +265,27 @@ impl EmbeddedSocketPeer {
 
 /// The core's end: the same message stream an axum WebSocket gives.
 struct EmbeddedSocket {
-    incoming: mpsc::UnboundedReceiver<Message>,
+    incoming: mpsc::UnboundedReceiver<Inbound>,
+    room: Arc<tokio::sync::Semaphore>,
     outgoing: mpsc::UnboundedSender<Message>,
+}
+
+impl Drop for EmbeddedSocket {
+    /// The session ended: the room its unread messages hold never frees, so
+    /// senders waiting for it give up.
+    fn drop(&mut self) {
+        self.room.close();
+    }
 }
 
 impl Stream for EmbeddedSocket {
     type Item = Result<Message, axum::Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        // The message's room frees as the session takes it.
         Pin::new(&mut self.incoming)
             .poll_next(cx)
-            .map(|item| item.map(Ok))
+            .map(|item| item.map(|(message, _room)| Ok(message)))
     }
 }
 
