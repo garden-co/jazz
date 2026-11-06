@@ -355,6 +355,36 @@ describe("migration stub generation", () => {
     }
   });
 
+  it("fills a required column it adds or drops from the column's declared default", () => {
+    const from = { records: s.table({ title: s.string(), rank: s.int().default(3) }, {}) };
+    const to = { records: s.table({ title: s.string(), points: s.int().default(1) }, {}) };
+    const source = renderMigrationStub({
+      fromHash: "aaaaaaaaaaaa",
+      toHash: "bbbbbbbbbbbb",
+      fromSchema: s.defineApp(from, { migrations: "none" }).wasmSchema,
+      toSchema: s.defineApp(to, { migrations: "none" }).wasmSchema,
+    });
+
+    expect(source).toContain('"points": m.add.int({ default: 1 }),');
+    expect(source).toContain('"rank": m.drop.int({ backwardsDefault: 3 }),');
+    expect(source).not.toContain("needs an explicit");
+    const migration = new Function(
+      "s",
+      "m",
+      source
+        .replace('import { schema as s, migration as m } from "jazz-tools";', "")
+        .replace("export default", "return"),
+    )(s, m);
+    expect(() =>
+      assertMigrationMatchesCanonicalBundle(migration, {
+        fromHash: "aaaaaaaaaaaa",
+        toHash: "bbbbbbbbbbbb",
+        fromSchema: s.defineApp(from, { migrations: "none" }).wasmSchema,
+        toSchema: s.defineApp(to, { migrations: "none" }).wasmSchema,
+      }),
+    ).not.toThrow();
+  });
+
   it("preserves default-only schema changes without transforming existing rows", () => {
     const definitions = [s.string(), s.string().default("before"), s.string().default("after")];
     for (const before of definitions)

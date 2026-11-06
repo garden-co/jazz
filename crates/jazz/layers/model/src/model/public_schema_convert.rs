@@ -163,7 +163,7 @@ fn validate_converted_schema(tables: &[CoreTableSchema]) -> Result<(), SchemaCon
             policy.validate_runtime(&schema).map_err(|error| {
                 err(
                     format!("$.{}.policies.select.using", table.name),
-                    format!("converted read policy is invalid: {error:?}"),
+                    format!("read policy is invalid: {error}"),
                 )
             })?;
         }
@@ -171,7 +171,7 @@ fn validate_converted_schema(tables: &[CoreTableSchema]) -> Result<(), SchemaCon
             policy.validate_runtime(&schema).map_err(|error| {
                 err(
                     format!("$.{}.policies.{label}", table.name),
-                    format!("converted write policy is invalid: {error:?}"),
+                    format!("write policy is invalid: {error}"),
                 )
             })?;
         }
