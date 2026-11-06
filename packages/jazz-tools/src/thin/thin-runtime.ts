@@ -135,6 +135,8 @@ type OneShot = {
   resolve(body: ThinBody): void;
   reject(error: Error): void;
   sent: boolean;
+  /** A write: its fate is unknown once its connection ends unanswered. */
+  write?: boolean;
 };
 
 type LiveQuery = {
@@ -367,6 +369,9 @@ export class ThinRuntime implements Runtime {
       if (!oneShot.sent) continue;
       this.oneShots.delete(id);
       if (error) oneShot.reject(error);
+      // An explicit disconnect leaves reads waiting, but a sent write is never
+      // sent again: it may have committed, so it ends with its fate unknown.
+      else if (oneShot.write) oneShot.reject(new ThinConnectionLostError());
     }
   }
 
@@ -964,7 +969,19 @@ export class ThinRuntime implements Runtime {
     _tier?: string,
     options: { throughOutage?: boolean; signal?: AbortSignal } = {},
   ): Promise<void> {
-    const answered = Promise.allSettled([...this.writes.values()].map((write) => write.done));
+    const dones = [...this.writes.values()].map((write) => write.done);
+    // Waiting for sync fails on the server's rejection. A write whose
+    // connection ended unanswered is not rejected, and the shutdown drain
+    // only waits for every write to be answered.
+    const answered = options.throughOutage
+      ? Promise.all(
+          dones.map((done) =>
+            done.catch((error: unknown) => {
+              if (error instanceof ThinRemoteError) throw error;
+            }),
+          ),
+        )
+      : Promise.allSettled(dones);
     const signal = options.signal;
     if (!signal) {
       await answered;
@@ -988,7 +1005,9 @@ export class ThinRuntime implements Runtime {
       committed: false,
       done: Promise.resolve(),
     };
-    write.done = this.request(op).then(
+    const { answer, oneShot } = this.requestWith(op);
+    if (oneShot) oneShot.write = true;
+    write.done = answer.then(
       (body) => {
         if (body.type !== "written") throw new Error(`unexpected answer to a write: ${body.type}`);
       },

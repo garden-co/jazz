@@ -3060,6 +3060,7 @@ export class Db {
       throw new Error("Cannot disconnect a Db that is shutting down.");
     }
 
+    this.offlineRequested = true;
     await this.connection.disconnect();
   }
 
@@ -3074,6 +3075,7 @@ export class Db {
       throw new Error("Cannot reconnect a Db that is shutting down.");
     }
 
+    this.offlineRequested = false;
     await this.connection.reconnect();
   }
 
@@ -4300,7 +4302,9 @@ export class Db {
       value: overrides.syncStatusChangeRegistration,
     });
     // An app that took the thin Db offline keeps the local-first one offline.
-    if (this.connection.isExplicitlyOffline()) void next.disconnect().catch(() => {});
+    // The last toggle the app asked for counts, even while it is in flight.
+    if (this.offlineRequested ?? this.connection.isExplicitlyOffline())
+      void next.disconnect().catch(() => {});
     // Rejections this Db reported before anyone listened go to the listeners
     // on the successor (already logged here as unhandled).
     for (const event of this.pendingMutationErrorEvents.splice(0))
@@ -4332,16 +4336,17 @@ export class Db {
             timeoutMs,
           );
     try {
+      // The thin runtime's writes are answered (a rejection fails the wait),
+      // or its drain ends: then it has nothing left to wait for.
       await Promise.race([this.connection.waitForSync(control.signal), drained]);
-    } catch (error) {
-      // The runtime stopping once its drain is done ends the wait, not fails it.
-      if (this.shutdownAbort.signal.aborted && !control.signal.aborted) return drained;
-      throw error;
     } finally {
       if (timer !== undefined) clearTimeout(timer);
       signal?.removeEventListener("abort", forward);
     }
   }
+
+  /** The app's last {@link disconnect} (true) or {@link reconnect} (false). */
+  private offlineRequested: boolean | undefined;
 
   /** Set once this Db adopted a successor: its own runtime's last uploads. */
   private drain: { done: Promise<void>; abort(): void } | null = null;

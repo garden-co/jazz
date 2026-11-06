@@ -6,6 +6,7 @@ import { isThinDb, type LocalFirstLoader } from "../runtime/local-first-upgrade.
 import { DbReplacedError } from "../runtime/db-replaced-error.js";
 import { Db } from "../runtime/db.js";
 import { WriteWaitTimeoutError } from "../runtime/client.js";
+import { ThinRemoteError, ThinRuntime } from "../thin/thin-runtime.js";
 import type { AccountStore } from "../accounts/persistence.js";
 import { startTestJazz, type TestJazz } from "../testing/index.js";
 import { createJazzClient, type BrowserJazzSession } from "./create-jazz-session.js";
@@ -178,6 +179,84 @@ describe("browser session", () => {
         timeout: 10_000,
       })
       .toEqual(["unsent"]);
+  }, 60_000);
+
+  it("keeps an app that went offline offline across the upgrade", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const kept = db(session);
+    await kept.disconnect();
+    await kept.upgradeToLocalFirst(loadLocalFirst);
+
+    // The local-first Db opened offline: its write stays local.
+    const write = kept.insert(app.notes, { text: "offline" });
+    await expect(write.wait({ tier: "global", timeoutMs: 300 })).rejects.toThrow(
+      WriteWaitTimeoutError,
+    );
+
+    await kept.reconnect();
+    await kept.waitForSync({ timeoutMs: 10_000 });
+    expect(kept.getSyncStatus().pendingUploads).toBe(0);
+  }, 60_000);
+
+  it("takes the thin runtime offline too while it still uploads", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const kept = db(session);
+    await kept.insert(app.notes, { text: "online" }).wait({ tier: "global" });
+    const thinRuntime = kept.currentRuntime() as ThinRuntime;
+    await kept.disconnect();
+    kept.insert(app.notes, { text: "unsent" });
+    await kept.upgradeToLocalFirst(loadLocalFirst);
+    const disconnects = vi.spyOn(thinRuntime, "disconnect");
+    const connects = vi.spyOn(thinRuntime, "connect");
+
+    await kept.reconnect();
+    expect(connects).toHaveBeenCalledTimes(1);
+    await kept.disconnect();
+    expect(disconnects).toHaveBeenCalledTimes(1);
+    // Sent or not, the thin write ends: the kept Db doesn't wait forever.
+    await kept.reconnect();
+    await kept.waitForSync({ timeoutMs: 10_000 });
+    expect(kept.getSyncStatus().pendingUploads).toBe(0);
+  }, 60_000);
+
+  it("tells a sync status listener the combined status when the upgrade moves it", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const kept = db(session);
+    await kept.disconnect();
+    kept.insert(app.notes, { text: "unsent" });
+    const statuses: ReturnType<Db["getSyncStatus"]>[] = [];
+    const stop = kept.onSyncStatusChange((status) => statuses.push(status));
+    await kept.upgradeToLocalFirst(loadLocalFirst);
+    const before = statuses.length;
+    // The local-first Db's own write adds to the thin runtime's unsent one.
+    kept.insert(app.notes, { text: "local" });
+    await expect
+      .poll(() => statuses.slice(before).at(-1)?.pendingUploads, { timeout: 10_000 })
+      .toBe(2);
+    expect(statuses.at(-1)).toEqual(kept.getSyncStatus());
+    stop();
+  }, 60_000);
+
+  it("fails waitForSync on the kept Db when the server rejects a thin write", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const kept = db(session);
+    const note = await kept.insert(app.notes, { text: "mine" }).wait({ tier: "global" });
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    await kept.disconnect();
+    // Nothing may update notes: the server rejects this once it is sent.
+    kept.update(app.notes, note.id, { text: "changed" });
+    await kept.upgradeToLocalFirst(loadLocalFirst);
+    await kept.reconnect();
+
+    try {
+      await expect(kept.waitForSync({ timeoutMs: 10_000 })).rejects.toThrow(ThinRemoteError);
+    } finally {
+      logged.mockRestore();
+    }
   }, 60_000);
 
   it("closes at once after the upgrade, even with thin writes it can't upload", async () => {

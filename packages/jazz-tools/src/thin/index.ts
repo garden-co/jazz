@@ -54,9 +54,11 @@ export async function createClient(config: ThinDbConfig): Promise<Db> {
 /**
  * Move an app from a thin `Db` to a local-first one, once it has loaded the
  * full client. `open` creates the local-first `Db` for the same account, for
- * example after `await import("jazz-tools")`. Every query the app is
- * subscribed to is read into the new `Db` from the server first, so its live
- * queries answer from local data straight away; then the thin `Db` waits for
+ * example after `await import("jazz-tools")`. The queries the app is
+ * subscribed to are read into the new `Db` from the server first, so its live
+ * queries answer from local data straight away. Queries subscribed during
+ * that read are read too, for up to 3 rounds; one subscribed later opens on
+ * the new `Db` with what it has locally. Then the thin `Db` waits for
  * its writes and shuts down. The app swaps the returned `Db` in where it held
  * the thin one.
  *
