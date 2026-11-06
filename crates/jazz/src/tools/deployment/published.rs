@@ -228,6 +228,50 @@ pub fn client_migrations(json: &[u8]) -> Result<(Vec<JazzSchema>, Vec<MigrationL
     Ok((schemas, lenses))
 }
 
+/// Check a [`ClientMigrations`] bundle (JSON) leading to `target` (a schema
+/// hash) as a deployment of it to a new authority would: every migration
+/// lowered, then the whole history prepared, lens checks included. So
+/// `jazz-tools validate` refuses what a deploy would refuse, naming it.
+/// Permissions are left out: validate compiles them on their own.
+pub fn check_client_migrations(json: &[u8], target: &str) -> Result<(), String> {
+    let bundle: ClientMigrations =
+        serde_json::from_slice(json).map_err(|error| format!("decode migrations: {error}"))?;
+    let target = parse_schema_hash(target)?;
+    let mut schemas = Vec::new();
+    let mut by_hash = std::collections::HashMap::new();
+    for entry in &bundle.schemas {
+        let hash = parse_schema_hash(&entry.hash)?;
+        schemas.push((hash, entry.schema.clone()));
+        by_hash.insert(hash, &entry.schema);
+    }
+    let mut migrations = Vec::new();
+    for migration in bundle.migrations {
+        let (from, to) = (
+            parse_schema_hash(&migration.from_hash)?,
+            parse_schema_hash(&migration.to_hash)?,
+        );
+        let (Some(source), Some(target)) = (by_hash.get(&from), by_hash.get(&to)) else {
+            return Err(format!(
+                "migrations: {} -> {} names a schema the bundle lacks",
+                migration.from_hash, migration.to_hash
+            ));
+        };
+        migrations.push(lower_migration(migration, source, target)?);
+    }
+    super::prepare_deployment(
+        &super::DeploymentCatalogue::default(),
+        super::DeploymentRequest {
+            target_schema_hash: target,
+            schemas,
+            migrations,
+            permissions: std::collections::HashMap::new(),
+            allow_dropping_history: true,
+        },
+    )
+    .map(drop)
+    .map_err(|error| error.to_string())
+}
+
 /// The bundle in `migrations` (JSON, see [`client_migrations`]) lowered for
 /// a store; none ships nothing.
 pub fn lowered_client_migrations(

@@ -11,14 +11,32 @@ use crate::schema::{
 pub enum Error {
     /// The catalogue update is not a valid migration.
     InvalidCatalogueUpdate(&'static str),
+    /// The lens does not turn a table's columns into its target columns.
+    ColumnsNotReproduced {
+        /// The target table.
+        table: String,
+        /// Each target or source column that comes out differently, with how.
+        columns: Vec<String>,
+    },
 }
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidCatalogueUpdate(reason) => write!(f, "invalid catalogue update: {reason}"),
+            Self::ColumnsNotReproduced { table, columns } => write!(
+                f,
+                "invalid catalogue update: the migration does not produce the columns of table \
+                 {table:?} ({}); a migration can add, drop or rename a column, but a column it \
+                 keeps or renames must keep its type and optionality",
+                columns.join("; ")
+            ),
         }
     }
+}
+
+fn optional(column: &ColumnSchema) -> bool {
+    matches!(column.column_type, crate::records::ValueType::Nullable(_))
 }
 
 pub fn validate_migration_lens_between(
@@ -203,9 +221,41 @@ pub fn validate_migration_lens_between(
             })
             .collect::<BTreeMap<_, _>>();
         if columns != target_columns {
-            return Err(Error::InvalidCatalogueUpdate(
-                "lens operations do not reproduce target columns",
-            ));
+            let names = columns
+                .keys()
+                .chain(target_columns.keys())
+                .collect::<BTreeSet<_>>();
+            let columns = names
+                .into_iter()
+                .filter_map(|name| match (columns.get(name), target_columns.get(name)) {
+                    (Some(_), None) => Some(format!("{name:?} is left over")),
+                    (None, Some(_)) => Some(format!("{name:?} is missing")),
+                    (Some(produced), Some(target)) if produced != target => {
+                        Some(if optional(produced) != optional(target) {
+                            format!(
+                                "{name:?} comes out {} but is {}",
+                                if optional(produced) {
+                                    "optional"
+                                } else {
+                                    "required"
+                                },
+                                if optional(target) {
+                                    "optional"
+                                } else {
+                                    "required"
+                                }
+                            )
+                        } else {
+                            format!("{name:?} comes out with another type")
+                        })
+                    }
+                    _ => None,
+                })
+                .collect();
+            return Err(Error::ColumnsNotReproduced {
+                table: target_table.name.to_string(),
+                columns,
+            });
         }
     }
     Ok(())
