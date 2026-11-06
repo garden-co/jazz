@@ -124,6 +124,7 @@ describe("browser session", () => {
     const client = session.getSnapshot().client;
     const kept = db(session);
     await kept.insert(app.notes, { text: "before" }).wait({ tier: "global" });
+    expect(kept.isLocalFirst()).toBe(false);
     const seen: string[][] = [];
     const errors: Error[] = [];
     const states: string[] = [];
@@ -142,6 +143,7 @@ describe("browser session", () => {
     expect(db(session)).toBe(kept);
     expect(isThinDb(kept)).toBe(false);
     expect(states).toEqual([]);
+    expect(kept.isLocalFirst()).toBe(true);
     // The rows were read into the local-first client first.
     expect((await kept.all(app.notes, { tier: "local-first" })).map((row) => row.text)).toEqual([
       "before",
