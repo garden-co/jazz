@@ -78,14 +78,18 @@ export async function upgradeToLocalFirst(thin: Db, open: () => Promise<Db>): Pr
   return next;
 }
 
+const PREFETCH_ROUNDS = 3;
+
 /** @internal Read every query `thin` is subscribed to into `next` from the server. */
 export async function prefetchThinQueries(thin: Db, next: Db): Promise<void> {
   const runtime = thinRuntimeOf(thin);
   if (!runtime) return;
   // Queries the app subscribes to while one round reads are read in the
   // next, so each live query opens on the local-first Db with its rows.
+  // A few rounds: a component that keeps subscribing with new queries
+  // must not hold the upgrade.
   const read = new Set<string>();
-  for (;;) {
+  for (let round = 0; round < PREFETCH_ROUNDS; round++) {
     const pending = runtime.liveQueryJsons().filter((query) => !read.has(query));
     if (pending.length === 0) return;
     await next.prefetchRuntimeQueries(runtime.schema, pending);

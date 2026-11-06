@@ -170,7 +170,7 @@ describe("browser session", () => {
     await expect(kept.waitForSync({ timeoutMs: 200 })).rejects.toThrow(WriteWaitTimeoutError);
 
     // Its own runtime reconnects and uploads it; then the kept Db is synced.
-    await Db.prototype.reconnect.call(kept);
+    await kept.reconnect();
     await kept.waitForSync({ timeoutMs: 10_000 });
     expect(kept.getSyncStatus().pendingUploads).toBe(0);
     await expect
@@ -194,55 +194,92 @@ describe("browser session", () => {
     sessions.splice(sessions.indexOf(session), 1);
   }, 60_000);
 
-  it("keeps the thin runtime's own credential renewal on the thin runtime", async () => {
+  it("renews the thin runtime's own expired credential after the upgrade, so its writes upload", async () => {
     const server = await startServer();
     const session = await open(server, memoryStore());
     const kept = db(session);
-    const own = vi.fn();
-    const stop = kept.onOwnAuthChanged(own);
-    const refreshed: Db[] = [];
-    const spy = vi
-      .spyOn(Db.prototype, "refreshOwnAccountAuth")
-      .mockImplementation(async function (this: Db) {
-        refreshed.push(this);
-        return "token";
-      });
+    await kept.disconnect();
+    kept.insert(app.notes, { text: "unsent" });
     await kept.upgradeToLocalFirst(loadLocalFirst);
-    const account = session.getSnapshot().account!;
-    // The app's renewal reaches the local-first Db; the thin runtime's own
-    // context renews the thin runtime, which still has writes to upload.
-    await kept.refreshAccountAuth(account);
-    await Db.prototype.refreshOwnAccountAuth.call(kept, account);
-    expect(refreshed[0]).not.toBe(kept);
-    expect(refreshed[1]).toBe(kept);
-    spy.mockRestore();
-    stop();
+    const renewals = vi.spyOn(Db.prototype, "refreshOwnAccountAuth");
+
+    // The thin runtime's credential runs out while its write waits.
+    (kept as unknown as { markUnauthenticated(reason: string): void }).markUnauthenticated(
+      "expired",
+    );
+    await kept.reconnect();
+
+    // Its own account context renews it, so the write uploads.
+    await expect.poll(() => renewals.mock.contexts.includes(kept), { timeout: 10_000 }).toBe(true);
+    await kept.waitForSync({ timeoutMs: 10_000 });
+    await expect
+      .poll(async () => (await kept.all(app.notes)).map((row) => row.text), {
+        timeout: 10_000,
+      })
+      .toEqual(["unsent"]);
+    renewals.mockRestore();
   }, 60_000);
 
-  it("opens a query subscribed during the upgrade with its rows", async () => {
+  it("prefetches a query subscribed while the upgrade reads the others", async () => {
     const server = await startServer();
     const session = await open(server, memoryStore());
     const kept = db(session);
     await kept.insert(app.notes, { text: "before" }).wait({ tier: "global" });
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => (release = resolve));
-    const upgrading = kept.upgradeToLocalFirst(async () => {
-      await gate;
-      return loadLocalFirst();
-    });
+    const first = kept.subscribe(app.notes, () => {});
     const seen: string[][] = [];
-    const stop = kept.subscribe(app.notes, (rows) => seen.push(rows.map((row) => row.text)));
+    let late: (() => void) | undefined;
+    const rounds: number[] = [];
+    await kept.upgradeToLocalFirst(async () => ({
+      createClient: async (config) => {
+        const next = await createLocalFirstDb(config);
+        const prefetch = next.prefetchRuntimeQueries.bind(next);
+        next.prefetchRuntimeQueries = async (schema, queries) => {
+          rounds.push(queries.length);
+          // A component mounts during the first round's read.
+          late ??= kept.subscribe(app.notes.where({ text: "before" }), (rows) =>
+            seen.push(rows.map((row) => row.text)),
+          );
+          return prefetch(schema, queries);
+        };
+        return next;
+      },
+    }));
+    // The second round read the late query in, so it never opened empty.
+    expect(rounds).toEqual([1, 1]);
     await expect.poll(() => seen.at(-1), { timeout: 10_000 }).toEqual(["before"]);
-    release();
-    await upgrading;
-    await kept.insert(app.notes, { text: "after" }).wait({ tier: "global" });
+    expect(seen.every((rows) => rows.length > 0)).toBe(true);
+    late?.();
+    first();
+  }, 60_000);
+
+  it("hands mutation errors nobody had heard yet to the local-first Db's listeners", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const kept = db(session);
+    const note = await kept.insert(app.notes, { text: "mine" }).wait({ tier: "global" });
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    // Nothing may update notes: the server rejects this, and nobody listens yet.
+    kept.update(app.notes, note.id, { text: "changed" });
     await expect
-      .poll(() => seen.at(-1)?.slice().sort(), { timeout: 10_000 })
-      .toEqual(["after", "before"]);
+      .poll(
+        () =>
+          logged.mock.calls.filter(([message]) => message === "Unhandled Jazz mutation error")
+            .length,
+        {
+          timeout: 10_000,
+        },
+      )
+      .toBe(1);
+
+    await kept.upgradeToLocalFirst(loadLocalFirst);
+    const listener = vi.fn();
+    const stop = kept.onMutationError(listener);
+    expect(listener).toHaveBeenCalledTimes(1);
     expect(
-      seen.slice(seen.findIndex((rows) => rows.length > 0)).every((rows) => rows.length > 0),
-    ).toBe(true);
+      logged.mock.calls.filter(([message]) => message === "Unhandled Jazz mutation error"),
+    ).toHaveLength(1);
     stop();
+    logged.mockRestore();
   }, 60_000);
 
   it("ends a kept Db's queries loudly once its user signs out", async () => {

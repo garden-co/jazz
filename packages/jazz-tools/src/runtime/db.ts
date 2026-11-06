@@ -386,27 +386,6 @@ const dbSubscriptionSources = new WeakMap<Db, DbSubscriptionSource>();
  * an app or framework calls. Its shutdown, and the internals its own runtime
  * needs to finish uploading, stay with it.
  */
-/** Wait for `done` as `waitForSync` waits: until `timeoutMs`, or until `signal` aborts. */
-function waitWithin(
-  done: Promise<void>,
-  { timeoutMs, signal }: { timeoutMs?: number; signal?: AbortSignal },
-): Promise<void> {
-  validateWriteWaitTimeout(timeoutMs);
-  signal?.throwIfAborted();
-  return new Promise<void>((resolve, reject) => {
-    const timer =
-      timeoutMs === undefined
-        ? undefined
-        : setTimeout(() => reject(new WriteWaitTimeoutError("global", timeoutMs)), timeoutMs);
-    const abort = () => reject(signal!.reason);
-    signal?.addEventListener("abort", abort, { once: true });
-    done.then(resolve, reject).finally(() => {
-      if (timer !== undefined) clearTimeout(timer);
-      signal?.removeEventListener("abort", abort);
-    });
-  });
-}
-
 const FORWARDED_TO_SUCCESSOR = [
   "allFromInspectorAttachment",
   "subscribeFromInspectorAttachment",
@@ -421,7 +400,6 @@ const FORWARDED_TO_SUCCESSOR = [
   "onMutationError",
   "textAnchors",
   "getSyncStatus",
-  "onSyncStatusChange",
   "waitForSync",
   "getConfig",
   "setDevMode",
@@ -2801,12 +2779,12 @@ export class Db {
     return null;
   }
 
-  private handleMutationError(event: MutationErrorEvent): void {
+  private handleMutationError(event: MutationErrorEvent, logged = false): void {
     // A write this Db took before the upgrade, rejected while it uploads:
     // the app's listeners are on the successor now.
-    if (this.successor) return this.successor.handleMutationError(event);
+    if (this.successor) return this.successor.handleMutationError(event, logged);
     if (this.mutationErrorListeners.size === 0) {
-      console.error("Unhandled Jazz mutation error", event);
+      if (!logged) console.error("Unhandled Jazz mutation error", event);
       this.pendingMutationErrorEvents.push(event);
       return;
     }
@@ -2974,7 +2952,18 @@ export class Db {
    * @returns an unsubscribe callback
    */
   onSyncStatusChange(listener: (status: SyncStatus) => void): () => void {
-    return this.registerMovable((db) => db.syncStatusChangeRegistration(listener), true);
+    let last = this.getSyncStatus();
+    const deliver = (status: SyncStatus) => {
+      if (status === last || sameSyncStatus(status, last)) return;
+      last = status;
+      listener(status);
+    };
+    return this.registerMovable((db) => {
+      const stop = db.syncStatusChangeRegistration(deliver);
+      // Moved at the upgrade: the status now covers both runtimes.
+      if (db.successor) deliver(db.getSyncStatus());
+      return stop;
+    }, true);
   }
 
   /** How this Db reports sync status changes: its own, or combined with its successor's. */
@@ -4265,8 +4254,6 @@ export class Db {
     };
     const overrides: Record<string, (...args: never[]) => unknown> = {
       getSyncStatus: syncStatus,
-      onSyncStatusChange: (listener: (status: SyncStatus) => void) =>
-        this.registerMovable((db) => db.syncStatusChangeRegistration(listener), true),
       syncStatusChangeRegistration: (listener: (status: SyncStatus) => void) => {
         let published = syncStatus();
         const publish = () => {
@@ -4287,8 +4274,16 @@ export class Db {
       waitForSync: async (options: { timeoutMs?: number; signal?: AbortSignal } = {}) => {
         await Promise.all([
           next.waitForSync(options),
-          draining ? waitWithin(drained, options) : undefined,
+          draining ? this.waitForOwnSync(options, drained) : undefined,
         ]);
+      },
+      // The app's offline toggle covers both runtimes while the thin one
+      // still uploads.
+      disconnect: async () => {
+        await Promise.all([next.disconnect(), draining ? this.connection.disconnect() : undefined]);
+      },
+      reconnect: async () => {
+        await Promise.all([next.reconnect(), draining ? this.connection.reconnect() : undefined]);
       },
     };
     for (const name of FORWARDED_TO_SUCCESSOR) {
@@ -4304,11 +4299,48 @@ export class Db {
       configurable: true,
       value: overrides.syncStatusChangeRegistration,
     });
+    // An app that took the thin Db offline keeps the local-first one offline.
+    if (this.connection.isExplicitlyOffline()) void next.disconnect().catch(() => {});
     // Rejections this Db reported before anyone listened go to the listeners
-    // on the successor.
-    for (const event of this.pendingMutationErrorEvents.splice(0)) next.handleMutationError(event);
+    // on the successor (already logged here as unhandled).
+    for (const event of this.pendingMutationErrorEvents.splice(0))
+      next.handleMutationError(event, true);
     for (const entry of Array.from(this.movable)) entry.move(next);
     this.movable.clear();
+  }
+
+  /**
+   * Wait for this Db's own runtime's writes, as {@link waitForSync} does
+   * (rejecting with the server's error for a rejected one), while it drains
+   * after the upgrade. The drain ending is the wait ending.
+   */
+  private async waitForOwnSync(
+    options: { timeoutMs?: number; signal?: AbortSignal },
+    drained: Promise<void>,
+  ): Promise<void> {
+    const { timeoutMs, signal } = options;
+    validateWriteWaitTimeout(timeoutMs);
+    signal?.throwIfAborted();
+    const control = new AbortController();
+    const forward = () => control.abort(signal!.reason);
+    signal?.addEventListener("abort", forward, { once: true });
+    const timer =
+      timeoutMs === undefined
+        ? undefined
+        : setTimeout(
+            () => control.abort(new WriteWaitTimeoutError("global", timeoutMs)),
+            timeoutMs,
+          );
+    try {
+      await Promise.race([this.connection.waitForSync(control.signal), drained]);
+    } catch (error) {
+      // The runtime stopping once its drain is done ends the wait, not fails it.
+      if (this.shutdownAbort.signal.aborted && !control.signal.aborted) return drained;
+      throw error;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      signal?.removeEventListener("abort", forward);
+    }
   }
 
   /** Set once this Db adopted a successor: its own runtime's last uploads. */
