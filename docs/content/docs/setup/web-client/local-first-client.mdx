@@ -153,6 +153,10 @@ module (`jazz-napi`) on the server. Tell your bundler to leave them alone:
     This is the same for React, Vue, Svelte, Solid and SvelteKit. With pnpm, also add `jazz-wasm` as a
     direct dependency of your app so its strict layout resolves it.
 
+    SvelteKit also needs `ssr: { external: ["jazz-napi"] }` in the same config, because its server
+    runs Jazz too: without it, `vite build` bundles Jazz's native module and fails with "Cannot find
+    module './index.cjs'".
+
   </Tab>
   <Tab value="Next.js">
     ```ts title="next.config.ts"
