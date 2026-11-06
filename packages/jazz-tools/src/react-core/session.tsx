@@ -189,7 +189,7 @@ export function useJazzSessionOwner<Config, Client extends CoreJazzClient>(
   useEffect(() => {
     owner.active = true;
     clearTimeout(owner.closeTimer);
-    void start().catch(() => {});
+    void start().catch(reportJazzStartupFailure);
     return () => {
       // StrictMode's immediate effect replay retains this same owner. A real
       // unmount closes only after the consumer's complete cleanup commit.
@@ -206,3 +206,11 @@ export type JazzSessionOwnerResult<Client> = {
   error?: Error;
   retry(): Promise<void>;
 };
+
+/**
+ * A provider's own start keeps its failure in state for the app's fallback,
+ * which may render nothing. Log it too, so a blank screen still says why.
+ */
+export function reportJazzStartupFailure(error: unknown) {
+  console.error("Jazz could not start:", error);
+}
