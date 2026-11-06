@@ -2,7 +2,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo, Socket } from "node:net";
 import { afterEach, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
-import { createJazz, memory } from "../backend/index.js";
+import { acceptLocalFirstAuth, createJazz, memory } from "../backend/index.js";
 import { createDb as createLocalFirstDb } from "../runtime/default-create-db.js";
 import { isThinDb } from "../runtime/local-first-upgrade.js";
 import type { AccountStore } from "../accounts/persistence.js";
@@ -27,14 +27,15 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-async function setup() {
+async function setup(options: { guests?: boolean } = {}) {
   const jazz = await createJazz({
     app,
     permissions,
     store: memory(),
     authenticate: (request: Request) => {
       const userId = request.headers.get("x-test-user");
-      return userId ? { userId } : null;
+      if (userId) return { userId };
+      return options.guests ? acceptLocalFirstAuth(request) : null;
     },
   }).ready();
   cleanups.push(() => jazz.close());
@@ -226,4 +227,97 @@ it("lets a user who signs back in during the wipe open a fresh replica, still re
   const recorded = [...storage].find(([key]) => key.startsWith("jazz-clear-on-sign-out-v1:"));
   expect(recorded?.[1]).toContain('"subject":"alice"');
   await second.close();
+}, 60_000);
+
+it("lets go of a wipe that hangs, so the user can sign back in, and keeps it for a later load", async () => {
+  const { jar, open, wiped, hold, storage } = await setup();
+  const first = await signInLocalFirst(open);
+  jar.user = null;
+  await first.close();
+
+  // The storage never finishes its teardown (another tab is still closing it).
+  hold.wipe = new Promise<void>(() => {});
+  const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+  cleanups.push(async () => warned.mockRestore());
+  const second = await open();
+  cleanups.push(() => second.close());
+  await expect
+    .poll(() => warned.mock.calls.some(([message]) => /later load/.test(String(message))), {
+      timeout: 40_000,
+      interval: 500,
+    })
+    .toBe(true);
+  // Given up on: alice signs back in without waiting on it.
+  jar.user = "alice";
+  await second.loginWithBackend();
+  expect(second.getSnapshot().client?.session?.identity.subject).toBe("alice");
+  expect(wiped).toEqual([]);
+  const recorded = [...storage].find(([key]) => key.startsWith("jazz-clear-on-sign-out-v1:"));
+  expect(recorded?.[1]).toContain('"subject":"alice"');
+}, 90_000);
+
+it("wipes nothing once the session is closed", async () => {
+  const { jar, open, wiped } = await setup();
+  const first = await signInLocalFirst(open);
+  jar.user = null;
+  await first.close();
+
+  // Closed while it confirms the signed-out answer.
+  const second = await open();
+  await second.close();
+  await new Promise((resolve) => setTimeout(resolve, 4_000));
+  expect(wiped).toEqual([]);
+}, 60_000);
+
+it("doesn't record a guest's replica", async () => {
+  const { jar, open, storage } = await setup({ guests: true });
+  jar.user = null;
+  const page = await open();
+  cleanups.push(() => page.close());
+  await page.createLocalFirst();
+  await expect.poll(() => isThinDb(page.getSnapshot().client!.db), { timeout: 15_000 }).toBe(false);
+  expect([...storage.keys()].filter((key) => key.startsWith("jazz-clear-on-sign-out-v1:"))).toEqual(
+    [],
+  );
+  await page.close();
+}, 60_000);
+
+it("keeps the entry while another tab still holds the replica a sign-out here wiped", async () => {
+  // Web Locks as a browser has them: both pages share them, and the storage.
+  const held = new Map<string, number>();
+  vi.stubGlobal("navigator", {
+    locks: {
+      async request(
+        name: string,
+        options: { mode: "shared" | "exclusive"; ifAvailable?: boolean },
+        callback: (lock: unknown) => Promise<unknown>,
+      ) {
+        if (options.mode === "exclusive") {
+          if (held.get(name)) return callback(null);
+          held.set(name, -1);
+        } else held.set(name, (held.get(name) ?? 0) + 1);
+        try {
+          return await callback({ name });
+        } finally {
+          if (options.mode === "exclusive") held.delete(name);
+          else held.set(name, held.get(name)! - 1);
+        }
+      },
+    },
+  });
+  const { open, storage } = await setup();
+  const recorded = () =>
+    [...storage].find(([key]) => key.startsWith("jazz-clear-on-sign-out-v1:"))?.[1] ?? "";
+  const here = await signInLocalFirst(open);
+  cleanups.push(() => here.close());
+  const there = await signInLocalFirst(open);
+  cleanups.push(() => there.close());
+
+  await here.logout();
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  expect(there.getSnapshot().status).toBe("ready");
+  expect(recorded()).toContain('"subject":"alice"');
+  // Once the other tab signs out too, nothing holds it: the entry goes.
+  await there.logout();
+  await expect.poll(recorded, { timeout: 5_000 }).toBe("");
 }, 60_000);

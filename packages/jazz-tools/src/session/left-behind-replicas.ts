@@ -69,8 +69,9 @@ const lockName = (registry: string, account: string) => `jazz-replica-v1:${regis
 
 /**
  * Hold `account`'s replica open in this tab until the returned release is
- * called, so no other tab wipes it meanwhile (a Web Lock; without Web Locks,
- * nothing to hold).
+ * called, so no other tab wipes it meanwhile (a Web Lock). Without Web
+ * Locks there is nothing to hold, and none is needed: persistent browser
+ * storage requires them, so such a browser keeps no replica to protect.
  */
 export async function holdReplica(registry: string, account: string): Promise<() => void> {
   const available = locks();
@@ -138,8 +139,10 @@ export async function wipeLeftBehindReplicas(options: {
    * Wipe `owner`'s replica and forget it in the record, in one step, so an
    * open of that account waiting for the wipe records its new replica after.
    * Resolves false when it left the replica (another tab holds it open).
+   * Once `signal` aborts (the wipe took too long) it lets go of the replica
+   * at once, without forgetting it.
    */
-  wipe(owner: ReplicaOwner): Promise<boolean>;
+  wipe(owner: ReplicaOwner, signal: AbortSignal): Promise<boolean>;
 }): Promise<void> {
   const owners = options.record.read().filter((owner) => owner.account !== options.current());
   if (owners.length === 0) return;
@@ -154,12 +157,17 @@ export async function wipeLeftBehindReplicas(options: {
   }
   for (const owner of owners) {
     if (!options.stillLeftBehind(owner.account)) continue;
+    const timeout = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([
-        options.wipe(owner),
+        options.wipe(owner, timeout.signal),
         new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new Error("the wipe took too long")), WIPE_TIMEOUT_MS);
+          timer = setTimeout(() => {
+            const error = new Error("the wipe took too long");
+            timeout.abort(error);
+            reject(error);
+          }, WIPE_TIMEOUT_MS);
         }),
       ]);
     } catch (error) {

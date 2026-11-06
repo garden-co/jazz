@@ -40,6 +40,7 @@ import {
   type ReplicaOwner,
 } from "./left-behind-replicas.js";
 import type { AccountStore } from "../accounts/persistence.js";
+import { rememberBackendUser } from "../accounts/enrollment.js";
 
 export type { LocalFirstLoader };
 
@@ -140,14 +141,28 @@ export async function createJazzClient(config: JazzClientConfig): Promise<Browse
   // being wiped: an account's open waits for its wipe to finish.
   const opening = new Set<string>();
   const wiping = new Map<string, Promise<void>>();
+  // Accounts signed out in this page, whose entry goes once no tab holds
+  // their replica (another tab may still have it open).
+  const signedOutHere = new Set<string>();
+  const forgetSignedOut = (id: string) => {
+    if (!leftBehind || !signedOutHere.has(id)) return;
+    void whileNoTabHolds(registry, id, async () => {
+      if (!signedOutHere.delete(id) || opening.has(id) || inSession.has(id)) return;
+      leftBehind.forget(id);
+    }).catch(() => {});
+  };
   /** Open `account`'s local-first client, recorded and held open against other tabs' wipes. */
   const openReplica = async (createDb: CreateAccountDb, account: AccountHandle) => {
-    if (!leftBehind) return openLocalFirst(createDb, account);
+    // Only a user the backend signed in: a guest's replica is the device's own.
+    if (!leftBehind || !rememberBackendUser(account)) return openLocalFirst(createDb, account);
     opening.add(account.id);
+    signedOutHere.delete(account.id);
     try {
       await wiping.get(account.id)?.catch(() => {});
       leftBehind.remember(account);
       const release = await holdReplica(registry, account.id);
+      // Again once held: another tab's forget may have run before it was.
+      leftBehind.remember(account);
       let client: JazzClient;
       try {
         client = await openLocalFirst(createDb, account);
@@ -157,8 +172,12 @@ export async function createJazzClient(config: JazzClientConfig): Promise<Browse
       }
       const shutdown = client.shutdown.bind(client);
       client.shutdown = async (options) => {
-        await shutdown(options);
-        release();
+        try {
+          await shutdown(options);
+        } finally {
+          release();
+          forgetSignedOut(account.id);
+        }
       };
       return client;
     } finally {
@@ -254,12 +273,15 @@ export async function createJazzClient(config: JazzClientConfig): Promise<Browse
       for (const id of inSession) {
         if (id === account?.id) continue;
         inSession.delete(id);
-        record.forget(id);
+        signedOutHere.add(id);
+        forgetSignedOut(id);
       }
     });
     const stillLeftBehind = (account: string) =>
-      !opening.has(account) && following.getSnapshot().account?.id !== account;
-    const wipe = async (owner: ReplicaOwner) => {
+      following.getSnapshot().status !== "closed" &&
+      !opening.has(account) &&
+      following.getSnapshot().account?.id !== account;
+    const wipe = async (owner: ReplicaOwner, signal: AbortSignal) => {
       const remembered = await createAccountManagerWithMinter(
         { ...config, serverUrl, store: rememberedUserStore(owner) },
         mintLocalFirstTokenInJs,
@@ -276,15 +298,23 @@ export async function createJazzClient(config: JazzClientConfig): Promise<Browse
           // backend refuses it: nothing of this replica uploads.
           const client = await openLocalFirst(createClient, account);
           try {
+            // Given up on while it opened: leave the replica for a later load.
+            if (signal.aborted) return;
             await client.db.deleteClientStorage();
           } finally {
             await client.shutdown();
           }
-          record.forget(owner.account);
+          if (!signal.aborted) record.forget(owner.account);
         })();
         wiping.set(owner.account, run);
+        // Given up on: let go of the lock and the account at once, so an open
+        // of it doesn't wait on a wipe that hangs.
+        const givenUp = new Promise<void>((resolve) => {
+          if (signal.aborted) resolve();
+          signal.addEventListener("abort", () => resolve(), { once: true });
+        });
         try {
-          await run;
+          await Promise.race([run, givenUp]);
         } finally {
           wiping.delete(owner.account);
         }

@@ -126,6 +126,33 @@ describe("wiping replicas a sign-out left behind", () => {
     expect(warned).toHaveBeenCalledWith(expect.stringMatching(/later load/), expect.any(Error));
     warned.mockRestore();
   });
+
+  it("gives up on a wipe that hangs, tells it to let go, and keeps it for a later load", async () => {
+    vi.useFakeTimers();
+    try {
+      const record = recordOf(owner("alice"), owner("bob"));
+      const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const signals: AbortSignal[] = [];
+      const { done } = wipeWith(record, {
+        // Alice's storage never finishes closing; bob's wipes.
+        wipe: async (o, signal) => {
+          signals.push(signal);
+          if (o.account === "account-alice") return new Promise<boolean>(() => {});
+          record.forget(o.account);
+          return true;
+        },
+      });
+      await vi.advanceTimersByTimeAsync(29_000);
+      expect(signals.map((signal) => signal.aborted)).toEqual([false]);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await done;
+      expect(signals.map((signal) => signal.aborted)).toEqual([true, false]);
+      expect(record.read().map((o) => o.account)).toEqual(["account-alice"]);
+      warned.mockRestore();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("holding a replica open across tabs", () => {
