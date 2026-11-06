@@ -180,8 +180,9 @@ pub enum ServerLinkAdmission {
 pub struct ServerSession(u64);
 
 /// Bytes a session may have queued in each direction. Inbound frames past
-/// it are refused (the peer ignored flow control); outbound messages past it
-/// wait in the engine until the socket catches up.
+/// it wait, unread, until the owner has taken earlier ones, so a fast peer
+/// is held back by its transport; outbound messages past it wait in the
+/// engine until the socket catches up.
 pub(crate) const SESSION_QUEUE_BUDGET: usize = 8 * 1024 * 1024;
 /// Bytes of split thin requests (each over a wire frame) the whole server
 /// may hold, being joined from parts or queued for the owner. A split past
@@ -1223,7 +1224,9 @@ struct Inner {
 struct Edge {
     /// Taken by [`ServerRuntimeHandle::open_wire_stream`].
     output: Option<tokio_mpsc::UnboundedReceiver<Outbound>>,
-    ingress: Arc<AtomicUsize>,
+    /// A sync session's room for frames read and not yet taken by the owner:
+    /// [`SESSION_QUEUE_BUDGET`], as permits of one byte.
+    ingress: Arc<tokio::sync::Semaphore>,
     /// A thin session's room for requests being joined or queued: the most
     /// one request takes, as permits of one byte.
     thin_ingress: Arc<tokio::sync::Semaphore>,
@@ -1236,6 +1239,12 @@ struct Edge {
 pub struct ThinIngress {
     _session: tokio::sync::OwnedSemaphorePermit,
     _server: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+
+/// Room for one batch of sync frames in its session's ingress budget, held
+/// from when it was read until the owner has taken it.
+pub struct WireIngress {
+    _room: tokio::sync::OwnedSemaphorePermit,
 }
 
 /// A session's next frame batch, or the error frame that ends it.
@@ -1402,7 +1411,7 @@ impl ServerRuntimeHandle {
             session,
             Edge {
                 output: Some(receiver),
-                ingress: Arc::new(AtomicUsize::new(0)),
+                ingress: Arc::new(tokio::sync::Semaphore::new(SESSION_QUEUE_BUDGET)),
                 thin_ingress: Arc::new(tokio::sync::Semaphore::new(
                     jazz::thin::MAX_THIN_MESSAGE_BYTES,
                 )),
@@ -1450,29 +1459,69 @@ impl ServerRuntimeHandle {
         })
     }
 
-    /// Queue inbound frames (each one `postcard(SyncMessage)`) for the
-    /// engine. Refused when the session already has its budget queued.
-    pub fn receive_wire_frames(
+    /// The room a batch of `bytes` takes: all of the budget for a batch
+    /// larger than it, so one never waits for room that cannot come.
+    fn wire_room(
         &self,
         session: ServerSession,
-        frames: Vec<AbiBytes>,
-    ) -> Result<(), String> {
-        if frames.is_empty() {
-            return Ok(());
-        }
-        let bytes = frames.iter().map(Vec::len).sum::<usize>();
-        let ingress = self
+        bytes: usize,
+    ) -> Result<(Arc<tokio::sync::Semaphore>, u32), String> {
+        let room = self
             .edges()?
             .get(&session)
             .map(|edge| Arc::clone(&edge.ingress))
             .ok_or_else(|| "unknown server session".to_owned())?;
-        if ingress.fetch_add(bytes, Ordering::AcqRel) + bytes > SESSION_QUEUE_BUDGET {
-            ingress.fetch_sub(bytes, Ordering::AcqRel);
-            return Err("session ingress budget exceeded".to_owned());
+        let permits =
+            u32::try_from(bytes.clamp(1, SESSION_QUEUE_BUDGET)).expect("the budget fits u32");
+        Ok((room, permits))
+    }
+
+    /// Room for a batch of `bytes` read off `session`'s socket, if its
+    /// ingress budget has it now.
+    pub fn try_admit_wire_frames(
+        &self,
+        session: ServerSession,
+        bytes: usize,
+    ) -> Result<Option<WireIngress>, String> {
+        let (room, permits) = self.wire_room(session, bytes)?;
+        match room.try_acquire_many_owned(permits) {
+            Ok(room) => Ok(Some(WireIngress { _room: room })),
+            Err(tokio::sync::TryAcquireError::NoPermits) => Ok(None),
+            Err(tokio::sync::TryAcquireError::Closed) => Err("server runtime stopped".to_owned()),
+        }
+    }
+
+    /// Wait for room for a batch of `bytes` in `session`'s ingress budget:
+    /// until the owner has taken enough of the frames before it.
+    pub async fn admit_wire_frames(
+        &self,
+        session: ServerSession,
+        bytes: usize,
+    ) -> Result<WireIngress, String> {
+        let (room, permits) = self.wire_room(session, bytes)?;
+        room.acquire_many_owned(permits)
+            .await
+            .map(|room| WireIngress { _room: room })
+            .map_err(|_| "server runtime stopped".to_owned())
+    }
+
+    /// Queue inbound frames (each one `postcard(SyncMessage)`) for the
+    /// engine, in the room [`Self::admit_wire_frames`] made for them, which
+    /// frees once the owner has taken them.
+    pub fn receive_wire_frames(
+        &self,
+        session: ServerSession,
+        frames: Vec<AbiBytes>,
+        ingress: WireIngress,
+    ) -> Result<(), String> {
+        if frames.is_empty() {
+            return Ok(());
+        }
+        if !self.edges()?.contains_key(&session) {
+            return Err("unknown server session".to_owned());
         }
         self.send(Box::new(move |owner| {
-            owner.receive(session, frames);
-            ingress.fetch_sub(bytes, Ordering::AcqRel);
+            owner.receive(session, frames, ingress)
         }))
     }
 
@@ -1918,6 +1967,12 @@ struct OwnerSession {
 
 struct SessionQueues {
     inbound: RefCell<VecDeque<SyncMessage>>,
+    /// The ingress room each received batch holds until the engine has
+    /// taken its last message: (messages pushed through that batch, room).
+    held_ingress: RefCell<VecDeque<(u64, WireIngress)>>,
+    /// Messages pushed onto `inbound`, and taken from it, ever.
+    pushed: std::cell::Cell<u64>,
+    taken: std::cell::Cell<u64>,
     /// Output the socket has not taken yet, encoded as it is queued so its
     /// size is known, with its bytes.
     outbound: RefCell<VecDeque<(Vec<AbiBytes>, usize)>>,
@@ -2001,9 +2056,21 @@ fn start_tick<'a>(sessions: impl Iterator<Item = &'a SessionQueues> + Clone) {
 struct SessionTransport(Rc<SessionQueues>);
 
 impl SessionQueues {
+    /// Free the room of every batch whose messages the engine has all taken.
+    fn release_taken_ingress(&self) {
+        let taken = self.taken.get();
+        let mut held = self.held_ingress.borrow_mut();
+        while held.front().is_some_and(|(through, _)| *through <= taken) {
+            held.pop_front();
+        }
+    }
+
     fn new(slice: Rc<TickSlice>, egress: Arc<AtomicUsize>) -> Self {
         Self {
             inbound: RefCell::default(),
+            held_ingress: RefCell::default(),
+            pushed: std::cell::Cell::new(0),
+            taken: std::cell::Cell::new(0),
             outbound: RefCell::default(),
             backlog: Backlog::new(egress),
             budget: std::cell::Cell::new(0),
@@ -2128,6 +2195,8 @@ impl Transport for SessionTransport {
         }
         let message = queues.inbound.borrow_mut().pop_front()?;
         queues.budget.set(budget - 1);
+        queues.taken.set(queues.taken.get() + 1);
+        queues.release_taken_ingress();
         Some(message)
     }
 }
@@ -2404,15 +2473,21 @@ impl Owner {
         Ok(())
     }
 
-    fn receive(&mut self, session: ServerSession, frames: Vec<AbiBytes>) {
+    /// Queue `frames`' messages for the engine. `ingress` stays held until
+    /// the engine has taken them, so the budget bounds what waits for it.
+    fn receive(&mut self, session: ServerSession, frames: Vec<AbiBytes>, ingress: WireIngress) {
         let Some(owner_session) = self.sessions.get_mut(&session) else {
             return;
         };
-        let mut inbound = owner_session.queues.inbound.borrow_mut();
+        let queues = Rc::clone(&owner_session.queues);
+        let mut inbound = queues.inbound.borrow_mut();
         for frame in frames {
             match owner_session.joiner.push(&frame) {
                 Ok(None) => {}
-                Ok(Some(message)) => inbound.push_back(message),
+                Ok(Some(message)) => {
+                    inbound.push_back(message);
+                    queues.pushed.set(queues.pushed.get() + 1);
+                }
                 Err(error) => {
                     drop(inbound);
                     let _ = owner_session.output.send((
@@ -2428,6 +2503,12 @@ impl Owner {
                 }
             }
         }
+        drop(inbound);
+        queues
+            .held_ingress
+            .borrow_mut()
+            .push_back((queues.pushed.get(), ingress));
+        queues.release_taken_ingress();
     }
 
     /// End every session (sync or thin) pinned to a bundle `ends` names,
@@ -2733,6 +2814,70 @@ mod tests {
         let during = ticks[JOBS - 1] - ticks[0];
         // 200ms of host work in 4ms slices: about 40 ticks.
         assert!(during >= 20, "{during} ticks during {JOBS} host jobs");
+        store.close().unwrap();
+    }
+
+    /// A session's ingress budget holds back frames until the engine has
+    /// taken their messages, not only until the owner queued them: what
+    /// waits for the engine stays within the budget.
+    #[test]
+    fn received_frames_hold_their_room_until_the_engine_takes_them() {
+        let store = AppStore::memory().unwrap();
+        let runtime = store
+            .start_runtime(schema(), NodeRole::Core, false)
+            .unwrap();
+        let handle_room = Arc::new(tokio::sync::Semaphore::new(SESSION_QUEUE_BUDGET));
+        let available = {
+            let room = Arc::clone(&handle_room);
+            move || room.available_permits()
+        };
+        let room = Arc::clone(&handle_room);
+        let held = block_on(runtime.run(move |owner| {
+            let (output, _) = tokio_mpsc::unbounded_channel();
+            owner
+                .open_session(
+                    ServerSession(1),
+                    AuthorSubject::SYSTEM,
+                    BTreeMap::new(),
+                    None,
+                    output,
+                    Arc::default(),
+                )
+                .map_err(|error| error.to_string())?;
+            let frames = |ids: std::ops::Range<u64>| {
+                ids.flat_map(|id| jazz::db::encode_frames(SyncMessage::Unsubscribe { id }).unwrap())
+                    .collect::<Vec<_>>()
+            };
+            let take = |bytes: u32| WireIngress {
+                _room: Arc::clone(&room).try_acquire_many_owned(bytes).unwrap(),
+            };
+            // Two batches: two messages in 1000 bytes, then one in 500.
+            owner.receive(ServerSession(1), frames(0..2), take(1000));
+            owner.receive(ServerSession(1), frames(2..3), take(500));
+            // Queued for the engine, not taken: the room stays held.
+            Ok(room.available_permits())
+        }))
+        .unwrap();
+        assert_eq!(held, SESSION_QUEUE_BUDGET - 1500, "queued, not yet taken");
+        // The engine takes them on its next ticks, and the room comes back.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while available() < SESSION_QUEUE_BUDGET {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the engine never took them"
+            );
+            block_on(runtime.run(|_| Ok(()))).unwrap();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let left = block_on(runtime.run(|owner| {
+            Ok(owner.sessions[&ServerSession(1)]
+                .queues
+                .inbound
+                .borrow()
+                .len())
+        }))
+        .unwrap();
+        assert_eq!(left, 0, "room comes back only once every message is taken");
         store.close().unwrap();
     }
 
