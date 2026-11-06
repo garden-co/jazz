@@ -94,6 +94,13 @@ export { useSession };
 export type { JazzClientContextValue };
 
 function ApplicationJazzProvider(props: JazzAppProviderProps) {
+  // Every other prop is client config, which reaches the browser worker:
+  // a React element there fails to clone, far from its cause.
+  if ("fallback" in props) {
+    throw new Error(
+      "<JazzProvider serverUrl=…> shows `loading` while it starts and `signedOut` while no one is signed in; it has no `fallback` prop (that is <JazzSessionProvider>'s and <JazzProvider config={…}>'s).",
+    );
+  }
   const { children, signedOut, loading, error, autoAttachDevTools, ...config } = props;
   const shouldAutoAttach = process.env.NODE_ENV !== "production" && autoAttachDevTools !== false;
   return (

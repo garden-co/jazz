@@ -35,6 +35,8 @@ mod column_defaults;
 mod commit_atomicity_frames;
 #[path = "../composite_indexes.rs"]
 mod composite_indexes;
+#[path = "../deferred_durability_acks.rs"]
+mod deferred_durability_acks;
 #[path = "../deleted_rows.rs"]
 mod deleted_rows;
 #[path = "../deployment_preparation.rs"]
@@ -93,6 +95,8 @@ mod order_by_unselected_column;
 mod parameterized_subscription_routing;
 #[path = "../pending_commit_reopen.rs"]
 mod pending_commit_reopen;
+#[path = "../pending_rebase_scope.rs"]
+mod pending_rebase_scope;
 #[path = "../permission_advice.rs"]
 mod permission_advice;
 #[path = "../policy_activation.rs"]
@@ -197,6 +201,8 @@ mod sync_wire_corpus;
 mod text_merge;
 #[path = "../text_splices.rs"]
 mod text_splices;
+#[path = "../thin_origin_writes.rs"]
+mod thin_origin_writes;
 #[path = "../transaction_commit_kind.rs"]
 mod transaction_commit_kind;
 #[path = "../transaction_handles.rs"]

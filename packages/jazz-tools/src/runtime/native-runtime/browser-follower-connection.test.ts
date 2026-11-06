@@ -124,10 +124,10 @@ describe("MessagePortBrowserFollowerConnection", () => {
   });
 
   it.each([false, true])(
-    "probes an idle follower once on resume (worker alive=%s)",
+    "probes a hidden idle follower once on resume (worker alive=%s)",
     async (alive) => {
       vi.useFakeTimers();
-      const page = Object.assign(new EventTarget(), { visibilityState: "visible" });
+      const page = Object.assign(new EventTarget(), { visibilityState: "hidden" });
       vi.stubGlobal("document", page);
       const fixture = await createWatchdogFollower();
       try {
@@ -145,6 +145,41 @@ describe("MessagePortBrowserFollowerConnection", () => {
           expect(fixture.onFailure).toHaveBeenCalledExactlyOnceWith(
             expect.any(BrowserWorkerUnresponsiveError),
           );
+      } finally {
+        fixture.connection.detachForReconnect();
+        vi.unstubAllGlobals();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  // rc.4 adopter finding R66: a visible tab sitting idle when another tab
+  // crashed the worker never noticed, so it stayed "connecting" and the dead
+  // tab's writes waited for some tab to write or reload.
+  it.each([false, true])(
+    "keeps probing a visible idle follower (worker alive=%s)",
+    async (alive) => {
+      vi.useFakeTimers();
+      const page = Object.assign(new EventTarget(), { visibilityState: "visible" });
+      vi.stubGlobal("document", page);
+      const fixture = await createWatchdogFollower();
+      try {
+        fixture.port.onPostMessage = (message) => {
+          if (alive && message.type === "runtime-probe")
+            fixture.port.emit({ ...message, type: "runtime-pong" });
+        };
+        await vi.advanceTimersByTimeAsync(120_000);
+        const probes = fixture.port.sent.filter((message) => message.type === "runtime-probe");
+        if (alive) {
+          expect(probes).toHaveLength(4);
+          expect(fixture.onFailure).not.toHaveBeenCalled();
+        } else {
+          // One probe, unanswered for its reply grace.
+          expect(probes).toHaveLength(1);
+          expect(fixture.onFailure).toHaveBeenCalledExactlyOnceWith(
+            expect.any(BrowserWorkerUnresponsiveError),
+          );
+        }
       } finally {
         fixture.connection.detachForReconnect();
         vi.unstubAllGlobals();
