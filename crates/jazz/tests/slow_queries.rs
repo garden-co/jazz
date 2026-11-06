@@ -43,7 +43,10 @@ fn db() -> Db {
             "tasks",
             BTreeMap::from([
                 ("title".to_owned(), Value::String(format!("task {n}"))),
-                ("owner".to_owned(), Value::String(format!("user {}", n % 110))),
+                (
+                    "owner".to_owned(),
+                    Value::String(format!("user {}", n % 110)),
+                ),
             ]),
             InsertOptions {
                 row_id: Some(RowUuid::from_bytes(row_id(n))),
