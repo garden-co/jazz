@@ -13,7 +13,7 @@ Over the course of the v2 alpha, Jazz’s internal architecture has become simpl
 
 This involves a simpler version of IVM that strikes a much better tradeoff between one-shot reads and live subscriptions and benefits from the decades of optimization that have gone into SQLite.
 
-As a result, the alpha.60 sync server uses **10x-35x less RAM** under load. Reads and opening subscriptions are **20x-600x faster** and everyday writes **4x-30x faster** across our example apps and benchmarks (a median of 27x across 88 benchmarks, none slower). We think you'll feel a big difference in your apps.
+As a result, alpha.60 needs **10x-35x less server memory under load**. **Reads are 20x-600x faster, everyday writes 4x-30x faster** across our example apps and benchmarks (a median of 27x across 88 benchmarks, none slower). We think you'll feel a big difference in your apps.
 
 In addition to speed, we directly benefit from the correctness and versatility of SQLite that our now much slimmer codebase can rely on.
 
@@ -31,9 +31,9 @@ We'll keep Jazz Cloud running for as long as anyone still needs it, but are exci
 
 We'll make this transition over the next couple releases and post more details on our thinking and monetization plans. The gist: free to self-host on a single machine, or a couple microVMs. Sharded Jazz at scale is still self-hosted but requires a license at fair volume-based pricing.
 
-## A new ~130KB "thin" client, now the default
+## A new ~160KB "thin" client, now the default
 
-We are introducing **a "thin" client for webapps** that isn't local-first, and it is now what `<JazzProvider>` opens by default. It is designed for pages that need very small bundle sizes. Since it doesn't ship any WASM or SQLite, it's only about 130KB gzipped (compared to the full local-first client, which is now about 3.4MB gzipped, half of alpha.59).
+We are introducing **a "thin" client for webapps** that isn't local-first, and it is now what `<JazzProvider>` opens by default. It is designed for pages that need very small bundle sizes. Since it doesn't ship any WASM or SQLite, it's only about 160KB gzipped (compared to the full local-first client, which is now about 3.4MB gzipped, half of alpha.59).
 
 The thin client supports most APIs in exactly the same way. To go local-first, pass `client={() => import("jazz-tools/local-first")}` to the provider. You can mix and match thin and local-first clients in different parts of your app (like landing pages and logged-in views) and can even lazily upgrade the thin client into the local-first client on a page without interruption of the user experience!
 
