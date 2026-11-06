@@ -40,6 +40,9 @@ struct ThinTransaction {
 struct Parked {
     request: ThinRequest,
     _ingress: ThinIngress,
+    /// [`Db::chunk_fetches_answered`] when it last ran: it runs again
+    /// only once a fetch was answered since.
+    ran_at: u64,
 }
 
 /// A large value a thin session is uploading in chunks.
@@ -355,6 +358,7 @@ impl Owner {
             thin.parked.push_back(Parked {
                 request,
                 _ingress: ingress,
+                ran_at: u64::MAX,
             });
             return;
         }
@@ -367,29 +371,29 @@ impl Owner {
     /// thread, which serves every session ([`Db::deferring_chunk_fetches`]).
     /// The fetch lane reads them; the next ticks try again. A fetch that
     /// fails answers with why, as reads of the node are refused until the
-    /// fetch lane's backoff ends.
-    /// Whether it was parked.
+    /// fetch lane's backoff ends. Whether it was parked.
     fn run_thin_request(
         &mut self,
         session: ServerSession,
         request: ThinRequest,
         ingress: ThinIngress,
     ) -> bool {
-        let ThinRequest { id, op } = request;
-        let retry = waits_for_chunks(&op).then(|| op.clone());
-        let (body, missing) = self.serve_thin(session, id, op);
-        if let Some(op) = retry
-            && missing
+        let ran_at = self.db.chunk_fetches_answered();
+        let (body, missing) = self.serve_thin(session, request.id, &request.op);
+        if missing
+            && waits_for_chunks(&request.op)
             && self.db.awaiting_chunks()
             && let Some(thin) = self.thin.get_mut(&session)
         {
             thin.parked.push_front(Parked {
-                request: ThinRequest { id, op },
+                request,
                 _ingress: ingress,
+                ran_at,
             });
             return true;
         }
         drop(ingress);
+        let id = request.id;
         let Some(body) = body else {
             return false;
         };
@@ -408,13 +412,19 @@ impl Owner {
     }
 
     /// Run each session's parked requests again, in order, until one still
-    /// waits for offloaded nodes. Each tick, before the chunk store's work
-    /// is handed out, so what they want next goes out in the same tick.
+    /// waits for offloaded nodes; only once a fetch was answered since the
+    /// first last ran. Each tick, before the chunk store's work is handed
+    /// out, so what they want next goes out in the same tick.
     pub(super) fn retry_parked_thin(&mut self) {
+        let answered = self.db.chunk_fetches_answered();
         let waiting: Vec<ServerSession> = self
             .thin
             .iter()
-            .filter(|(_, thin)| !thin.parked.is_empty())
+            .filter(|(_, thin)| {
+                thin.parked
+                    .front()
+                    .is_some_and(|parked| parked.ran_at != answered)
+            })
             .map(|(session, _)| *session)
             .collect();
         for session in waiting {
@@ -422,7 +432,10 @@ impl Owner {
                 let Some(thin) = self.thin.get_mut(&session) else {
                     break;
                 };
-                let Some(Parked { request, _ingress }) = thin.parked.pop_front() else {
+                let Some(Parked {
+                    request, _ingress, ..
+                }) = thin.parked.pop_front()
+                else {
                     break;
                 };
                 // Parked again: the ones behind it wait on.
@@ -440,7 +453,7 @@ impl Owner {
         &mut self,
         session: ServerSession,
         id: u64,
-        op: ThinOp,
+        op: &ThinOp,
     ) -> (Option<ThinBody>, bool) {
         let mut missing = false;
         let body = self.serve_thin_into(session, id, op, &mut missing);
@@ -451,13 +464,13 @@ impl Owner {
         &mut self,
         session: ServerSession,
         id: u64,
-        op: ThinOp,
+        op: &ThinOp,
         missing: &mut bool,
     ) -> Option<ThinBody> {
         let thin = self.thin.get_mut(&session)?;
         if let ThinOp::Schema { schema } = op {
             // The version a replica built against this schema would declare.
-            let version = match decode_schema(&schema) {
+            let version = match decode_schema(schema) {
                 Ok(schema) => schema.version_id(),
                 Err(error) => return Some(host_error(error)),
             };
@@ -474,7 +487,7 @@ impl Owner {
                 },
             });
         }
-        if let ThinOp::Unsubscribe { subscription } = op {
+        if let &ThinOp::Unsubscribe { subscription } = op {
             let removed = thin.subscriptions.remove(&subscription).is_some();
             // The live query's own id hears that it ended.
             if removed && subscription != id {
@@ -500,7 +513,7 @@ impl Owner {
                 message: "the client's schema version is no longer deployed".to_owned(),
             });
         };
-        let db = if waits_for_chunks(&op) {
+        let db = if waits_for_chunks(op) {
             db.deferring_chunk_fetches()
         } else {
             db
@@ -707,7 +720,7 @@ fn serve_thin_op(
     db: &Db,
     thin: &mut ThinSession,
     id: u64,
-    op: ThinOp,
+    op: &ThinOp,
     missing: &mut bool,
 ) -> Result<Option<ThinBody>, ThinBody> {
     // Notes a result that waits for offloaded nodes.
@@ -725,8 +738,8 @@ fn serve_thin_op(
             if thin.subscriptions.contains_key(&id) {
                 return Err(argument("a live query with this id is already open"));
             }
-            let opts = read_opts(&options_json(&options)?).map_err(host_error)?;
-            let query: jazz::query::Query = postcard::from_bytes(&query)
+            let opts = read_opts(&options_json(options)?).map_err(host_error)?;
+            let query: jazz::query::Query = postcard::from_bytes(query)
                 .map_err(|error| argument(format!("undecodable query: {error}")))?;
             let opened = db.prepare_query(&query).and_then(|mut prepared| {
                 if let Some((author, claims)) = scope {
@@ -747,14 +760,14 @@ fn serve_thin_op(
             options,
             transaction,
         } => {
-            let opts = read_opts(&options_json(&options)?).map_err(host_error)?;
+            let opts = read_opts(&options_json(options)?).map_err(host_error)?;
             let open = match transaction {
-                Some(transaction) => Some(session_transaction(thin, &transaction)?.0),
+                Some(transaction) => Some(session_transaction(thin, transaction)?.0),
                 None => None,
             };
             // The authority holds everything a read can ask for: it never
             // waits.
-            let read = block_on(db.all_serialized_query(&query, opts, open, scope, None));
+            let read = block_on(db.all_serialized_query(query, opts, open, scope, None));
             if let Err(error) = &read {
                 *missing |= waits_on_nodes(error);
             }
@@ -778,20 +791,20 @@ fn serve_thin_op(
             options,
             transaction,
         } => {
-            let cells = decode_cells(&cells).map_err(host_error)?;
-            let mut options = insert_options(&options_json(&options)?).map_err(host_error)?;
+            let cells = decode_cells(cells).map_err(host_error)?;
+            let mut options = insert_options(&options_json(options)?).map_err(host_error)?;
             as_session(&mut options.identity, identity)?;
             match transaction {
                 Some(transaction) => {
-                    let (open, state) = session_transaction(thin, &transaction)?;
+                    let (open, state) = session_transaction(thin, transaction)?;
                     let row = *options.row_id.get_or_insert_with(|| db.next_row_id());
                     staged(
                         state,
                         row,
-                        noted(block_on(db.tx_ref(open).insert(&table, cells, options))),
+                        noted(block_on(db.tx_ref(open).insert(table, cells, options))),
                     )
                 }
-                None => written(noted(block_on(db.insert(&table, cells, options)))),
+                None => written(noted(block_on(db.insert(table, cells, options)))),
             }
         }
         ThinOp::Update {
@@ -801,22 +814,20 @@ fn serve_thin_op(
             options,
             transaction,
         } => {
-            let row = RowUuid::from_bytes(row);
-            let patch = decode_cells(&patch).map_err(host_error)?;
-            let mut options = update_options(&options_json(&options)?).map_err(host_error)?;
+            let row = RowUuid::from_bytes(*row);
+            let patch = decode_cells(patch).map_err(host_error)?;
+            let mut options = update_options(&options_json(options)?).map_err(host_error)?;
             as_session(&mut options.identity, identity)?;
             match transaction {
                 Some(transaction) => {
-                    let (open, state) = session_transaction(thin, &transaction)?;
+                    let (open, state) = session_transaction(thin, transaction)?;
                     staged(
                         state,
                         row,
-                        noted(block_on(
-                            db.tx_ref(open).update(&table, row, patch, options),
-                        )),
+                        noted(block_on(db.tx_ref(open).update(table, row, patch, options))),
                     )
                 }
-                None => written(noted(block_on(db.update(&table, row, patch, options)))),
+                None => written(noted(block_on(db.update(table, row, patch, options)))),
             }
         }
         ThinOp::Upsert {
@@ -826,22 +837,20 @@ fn serve_thin_op(
             options,
             transaction,
         } => {
-            let row = RowUuid::from_bytes(row);
-            let mut options = upsert_options(&options_json(&options)?).map_err(host_error)?;
-            let cells = decode_cells(&cells).map_err(host_error)?;
+            let row = RowUuid::from_bytes(*row);
+            let mut options = upsert_options(&options_json(options)?).map_err(host_error)?;
+            let cells = decode_cells(cells).map_err(host_error)?;
             as_session(&mut options.identity, identity)?;
             match transaction {
                 Some(transaction) => {
-                    let (open, state) = session_transaction(thin, &transaction)?;
+                    let (open, state) = session_transaction(thin, transaction)?;
                     staged(
                         state,
                         row,
-                        noted(block_on(
-                            db.tx_ref(open).upsert(&table, row, cells, options),
-                        )),
+                        noted(block_on(db.tx_ref(open).upsert(table, row, cells, options))),
                     )
                 }
-                None => written(noted(block_on(db.upsert(&table, row, cells, options)))),
+                None => written(noted(block_on(db.upsert(table, row, cells, options)))),
             }
         }
         ThinOp::Delete {
@@ -850,19 +859,19 @@ fn serve_thin_op(
             options,
             transaction,
         } => {
-            let row = RowUuid::from_bytes(row);
-            let mut options = delete_options(&options_json(&options)?).map_err(host_error)?;
+            let row = RowUuid::from_bytes(*row);
+            let mut options = delete_options(&options_json(options)?).map_err(host_error)?;
             as_session(&mut options.identity, identity)?;
             match transaction {
                 Some(transaction) => {
-                    let (open, state) = session_transaction(thin, &transaction)?;
+                    let (open, state) = session_transaction(thin, transaction)?;
                     staged(
                         state,
                         row,
-                        noted(block_on(db.tx_ref(open).delete(&table, row, options))),
+                        noted(block_on(db.tx_ref(open).delete(table, row, options))),
                     )
                 }
-                None => written(noted(block_on(db.delete(&table, row, options)))),
+                None => written(noted(block_on(db.delete(table, row, options)))),
             }
         }
         ThinOp::Restore {
@@ -872,25 +881,26 @@ fn serve_thin_op(
             options,
             transaction,
         } => {
-            let row = RowUuid::from_bytes(row);
+            let row = RowUuid::from_bytes(*row);
             let cells = cells
-                .map(|cells| decode_cells(&cells))
+                .as_ref()
+                .map(|cells| decode_cells(cells))
                 .transpose()
                 .map_err(host_error)?;
-            let mut options = restore_options(&options_json(&options)?).map_err(host_error)?;
+            let mut options = restore_options(&options_json(options)?).map_err(host_error)?;
             as_session(&mut options.identity, identity)?;
             match transaction {
                 Some(transaction) => {
-                    let (open, state) = session_transaction(thin, &transaction)?;
+                    let (open, state) = session_transaction(thin, transaction)?;
                     staged(
                         state,
                         row,
                         noted(block_on(
-                            db.tx_ref(open).restore(&table, row, cells, options),
+                            db.tx_ref(open).restore(table, row, cells, options),
                         )),
                     )
                 }
-                None => written(noted(block_on(db.restore(&table, row, cells, options)))),
+                None => written(noted(block_on(db.restore(table, row, cells, options)))),
             }
         }
         ThinOp::UpdateLargeValues {
@@ -901,36 +911,36 @@ fn serve_thin_op(
             updated_at_ms,
             transaction,
         } => {
-            let row = RowUuid::from_bytes(row);
-            let patch = decode_cells(&patch).map_err(host_error)?;
+            let row = RowUuid::from_bytes(*row);
+            let patch = decode_cells(patch).map_err(host_error)?;
             let mutations: Vec<LargeValueUpdate> =
-                serde_json::from_slice(&mutations).map_err(|error| {
+                serde_json::from_slice(mutations).map_err(|error| {
                     argument(format!("invalid partial-value update descriptor: {error}"))
                 })?;
             let options = UpdateOptions {
                 identity: WriteIdentity::Session(identity),
-                updated_at_ms,
+                updated_at_ms: *updated_at_ms,
                 ..UpdateOptions::default()
             };
             match transaction {
                 Some(transaction) => {
-                    let (open, state) = session_transaction(thin, &transaction)?;
+                    let (open, state) = session_transaction(thin, transaction)?;
                     staged(
                         state,
                         row,
                         noted(block_on(db.tx_ref(open).update_with_large_value_mutations(
-                            &table, row, patch, mutations, options,
+                            table, row, patch, mutations, options,
                         ))),
                     )
                 }
                 None => written(noted(block_on(db.update_with_large_value_mutations(
-                    &table, row, patch, mutations, options,
+                    table, row, patch, mutations, options,
                 )))),
             }
         }
         ThinOp::Begin { transaction, kind } => {
-            let open = open_transaction(&transaction).map_err(host_error)?;
-            let kind = TransactionKind::parse(&kind).map_err(host_error)?;
+            let open = open_transaction(transaction).map_err(host_error)?;
+            let kind = TransactionKind::parse(kind).map_err(host_error)?;
             let serializable = matches!(kind, TransactionKind::Serializable);
             let begun = if serializable {
                 block_on(db.begin_serializable(open))
@@ -952,7 +962,7 @@ fn serve_thin_op(
             }
         }
         ThinOp::Commit { transaction } => {
-            let open = session_transaction(thin, &transaction)?.0;
+            let open = session_transaction(thin, transaction)?.0;
             let state = thin.transactions.remove(&open).expect("checked above");
             if let Some(error) = state.refused {
                 let _ = db.abandon_transaction_handle(open);
@@ -972,7 +982,7 @@ fn serve_thin_op(
             }
         }
         ThinOp::Rollback { transaction } => {
-            let open = session_transaction(thin, &transaction)?.0;
+            let open = session_transaction(thin, transaction)?.0;
             thin.transactions.remove(&open);
             match db.abandon_transaction_handle(open) {
                 Ok(()) => ThinBody::Ok,
@@ -998,23 +1008,23 @@ fn serve_thin_op(
                 return Err(argument("an upload with this id is already open"));
             }
             let transaction = match transaction {
-                Some(transaction) => Some(session_transaction(thin, &transaction)?.0),
+                Some(transaction) => Some(session_transaction(thin, transaction)?.0),
                 None => None,
             };
-            let mutation = streaming_mutation(&mutation)?;
-            let (updated_at_ms, head, base) = stream_options(&options_json(&options)?)?;
-            let cells = decode_cells(&cells).map_err(host_error)?;
-            match db.begin_streaming_value_upload(&table, &cells, &column) {
+            let mutation = streaming_mutation(mutation)?;
+            let (updated_at_ms, head, base) = stream_options(&options_json(options)?)?;
+            let cells = decode_cells(cells).map_err(host_error)?;
+            match db.begin_streaming_value_upload(table, &cells, column) {
                 Ok(upload) => {
                     thin.streams.insert(
                         id,
                         ThinStream {
                             upload,
                             mutation,
-                            table,
-                            row: RowUuid::from_bytes(row),
+                            table: table.clone(),
+                            row: RowUuid::from_bytes(*row),
                             cells,
-                            column,
+                            column: column.clone(),
                             updated_at_ms,
                             head,
                             base,
@@ -1027,21 +1037,21 @@ fn serve_thin_op(
             }
         }
         ThinOp::StreamChunk { stream, chunk } => {
-            let Some(open) = thin.streams.get_mut(&stream) else {
+            let Some(open) = thin.streams.get_mut(stream) else {
                 return Err(argument("no upload with this id is open"));
             };
-            match block_on(db.push_streaming_value_upload(&mut open.upload, &chunk)) {
+            match block_on(db.push_streaming_value_upload(&mut open.upload, chunk)) {
                 Ok(()) => ThinBody::Ok,
                 Err(error) => {
                     // A failed push ends the upload.
-                    let open = thin.streams.remove(&stream).expect("checked above");
+                    let open = thin.streams.remove(stream).expect("checked above");
                     let _ = block_on(db.abort_streaming_value_upload(open.upload));
                     error_body(&error)
                 }
             }
         }
         ThinOp::FinishStream { stream } => {
-            let Some(open) = thin.streams.remove(&stream) else {
+            let Some(open) = thin.streams.remove(stream) else {
                 return Err(argument("no upload with this id is open"));
             };
             if let Some(transaction) = open.transaction {
@@ -1076,7 +1086,7 @@ fn serve_thin_op(
             )))
         }
         ThinOp::AbortStream { stream } => {
-            let Some(open) = thin.streams.remove(&stream) else {
+            let Some(open) = thin.streams.remove(stream) else {
                 return Err(argument("no upload with this id is open"));
             };
             match block_on(db.abort_streaming_value_upload(open.upload)) {

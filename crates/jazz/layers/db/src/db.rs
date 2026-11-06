@@ -7739,6 +7739,14 @@ impl Db {
         })
     }
 
+    /// Grows each time the chunk store answered fetches (or reads of nodes
+    /// it failed to fetch may ask again): a read that failed waiting on
+    /// offloaded nodes ([`Self::deferring_chunk_fetches`]) is worth trying
+    /// again only once this changed.
+    pub fn chunk_fetches_answered(&self) -> u64 {
+        self.inner.staging().chunks.answered()
+    }
+
     /// This handle, but a read or write that waits on offloaded nodes of a
     /// host-run chunk store ([`crate::options::DbConfig::with_host_chunk_io`])
     /// fails at once with the missing-chunks error instead of fetching them
