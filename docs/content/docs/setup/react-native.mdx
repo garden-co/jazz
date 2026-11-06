@@ -87,8 +87,24 @@ Some bundlers and runtimes cannot automatically resolve Jazz's Wasm and worker a
 </Accordion>
 </Accordions>
 
+## Sign in through your backend
+
+An app has no cookie for your backend, so it hands Jazz its own token instead. Pass `bearer`, a
+function that returns the token your app holds for its backend (or `null` when signed out), next
+to `serverUrl`. Jazz sends it as `Authorization: Bearer …` when it signs in and on the device's sync
+connection, so your backend's `authenticate` reads that header instead of a cookie.
+
+After your own sign-in, call `loginWithBackend()` for the user's own account, or
+`linkWithBackend()` to keep a local-first guest's data under the new user, both from
+`useJazzAuth().sessionActions`; `useJazzAuth().logout()` signs out. Linking a user who already has an account
+fails with an `AccountAuthError` whose code is `link_refused`; sign them in with
+`loginWithBackend()` instead.
+
+To reach a development backend over plain `http://` on Android, allow cleartext traffic, for
+example with `expo-build-properties` (`android.usesCleartextTraffic: true`) in a development build
+only.
+
 ## Coming next
 
 - Expo vs bare React Native setup, step by step
-- User auth integration
 - Today React Native clients run the local-first engine on the device; a thin client follows the web thin client

@@ -16,7 +16,7 @@ import { createJazzClient } from "jazz-tools/client";
 const jazz = await createJazzClient({
   serverUrl: "/jazz",
   initial: "local-first",
-  // Local data, so a guest works offline from its first visit.
+  // Local data, so a guest keeps working offline once its first visit has reached the backend.
   client: () => import("jazz-tools/local-first"),
 });
 ```
@@ -26,7 +26,8 @@ for signed-out requests (an app with no sign-in passes `authenticate: acceptLoca
 Guests are refused otherwise. With `serverUrl: null`, Jazz stays on the device: no backend, one
 local-first account per browser profile.
 
-Session creation prepares crypto, restores usable saved selection, or creates a local-first account. Browser sessions retain signing roots in browser storage. Native hosts use an atomic, protected `AccountStore`. Creating a local-first account works offline once runtime assets are available.
+Session creation prepares crypto, restores usable saved selection, or creates a local-first account. Browser sessions retain signing roots in browser storage. Native hosts use an atomic, protected `AccountStore`. Creating a local-first account works offline once runtime assets are available. A first visit made while your backend is unreachable is not safe yet: the
+client stays thin, and a guest write made then can be lost on reload.
 
 Framework `JazzSessionProvider` and session hooks expose the same lifecycle. Account commands run outside contexts after ordinary graceful shutdown, which Jazz coordinates automatically. See [Lifecycle](/docs/setup/auth/backend#lifecycle). Lower-level account handles and client factories remain available when an app deliberately owns its own context lifecycle.
 
@@ -65,10 +66,7 @@ const backup = new BrowserPasskeyBackup({
   appName: "My App",
   appHostname: "app.example",
 });
-await backup.backup(
-  exportLocalFirstSecret(jazz.getSnapshot().account!),
-  "My account",
-);
+await backup.backup(exportLocalFirstSecret(jazz.getSnapshot().account!), "My account");
 ```
 
 `await backup.restore()` returns the root for `await jazz.restoreLocalFirst(secret)`. Pin the canonical production hostname when configuring a passkey backup; passkey availability and synchronization depend on the user's platform.

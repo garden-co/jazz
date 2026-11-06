@@ -62,9 +62,8 @@ Alpha.60 changes how Jazz runs, so an alpha.59 app needs more than a version bum
 - **Clients and backends upgrade together.** Alpha.59 clients can't sync with an alpha.60 backend.
   Ship the new client in the same release as the new backend. A client left on alpha.59 looks
   healthy: its session reports ready and local writes succeed, but nothing syncs and nothing is
-  logged. Against a `createJazz` backend, queries and waits that need the server never settle (or,
-  with `basePath: "/"`, reject with a bare WebSocket error event), and a reloaded alpha.59 tab never
-  signs in. Against Jazz Cloud, the first query that waits for the server rejects with "this Jazz
+  logged. Against a `createJazz` backend, queries and waits that need the server reject with a bare
+  `Error: [object Event]`, and a reloaded alpha.59 tab never signs in. Against Jazz Cloud, the first query that waits for the server rejects with "this Jazz
   client speaks wire protocol 3..=3, older than this server's 6".
 - **The storage engine is now SQLite.** Alpha.59's data directory doesn't open in alpha.60.
 
@@ -91,6 +90,17 @@ starts:
   [Migrations](/docs/schemas/migrations) as usual.
 - **Replace `isCreator`** with `{ $createdBy: session.user }`. It compares accounts, so it keeps
   matching the rows users wrote on alpha.59 whose author was imported with an account.
+- **Replace `session.user.account` with `session.user`**, which is now the account, and
+  `session.user.identity` with `session.identity`, in permissions and in client code. Permissions
+  that still use the old form fail with an error saying so; in client code it is silently
+  `undefined`.
+- **Rename removed read tiers.** `"global"` is now `"remote"` (`ReadTier.Remote`), and
+  `"local"` is `"local-first"`; `"edge"` is gone. See
+  [Removed read tiers](/docs/reference/durability-tiers#removed-read-tiers).
+- **Create accounts for users who never open a client.** `forReqUser` and `accountFor` no longer
+  create an account. If your API serves users before they sign in from a client, call
+  `jazz.createAccountFor(userId)` in your sign-in route; see
+  [Users without an account](/docs/setup/deployment/own-server#users-without-an-account).
 
 ### Data on Jazz Cloud
 
@@ -109,8 +119,12 @@ Before you start:
 - **Plan the downtime.** It runs from stopping the alpha.59 server until the new backend and the new
   client bundle are both live, since old clients can't sync with the new backend. The tools
   themselves take seconds for a small app.
-- **Let clients finish syncing.** Writes still queued in an alpha.59 browser, such as ones made
-  offline, are not carried over: alpha.60 opens a new local database and the old one is left unused.
+- **Let clients finish syncing, then close them.** Writes still queued in an alpha.59 browser, such as
+  ones made offline, are not carried over: alpha.60 opens a new local database and the old one is
+  left unused. Rolling back to alpha.59 is the only way to recover them, so drain open tabs before
+  step 1.
+- **Rehearse on a copy if you like.** `cp -a ./data ./data-rehearsal` with the alpha.59 server
+  stopped, then run steps 3 and 4 against the copy; nothing in them writes to it.
 - **Make the [code changes](#code-changes) first**, so the new backend can start as soon as the
   import is verified.
 - **Run `verify` before the new backend's first start.** That first start moves large values out of

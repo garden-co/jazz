@@ -4,8 +4,10 @@ description: "Learn how to change your schema while older clients keep working."
 reviewedAt: "b29b48d1a"
 ---
 
-<Callout type="info" title="You can skip this first">
-  If you are trying to get your first app running, you can skip this page and return later.
+<Callout type="info" title="Before your first schema change">
+  You don't need migrations to get a first app running. Read this page before you change a schema
+  that has been deployed: a schema change with no migration leaves the backend refusing to start,
+  and recovering means rebuilding the old schema from your Git history.
 </Callout>
 
 ## Why Jazz migrations are different
@@ -130,6 +132,51 @@ When a newer schema drops a column that older clients still expect, define a bac
   ../examples/docs/todo-server-ts/migrations/20260318-drop-legacy-priority-311995e9a178-73b65d082ab8.ts
 </include>
 
+### Operations
+
+A migration's `migrate` maps each changed table to its column operations; tables themselves are
+added, dropped and renamed next to it:
+
+```ts title="migrations/20260401-rename-and-split.ts"
+import { migration as m } from "jazz-tools";
+
+export default m.defineMigration({
+  migrate: {
+    todos: {
+      notes: m.renameFrom("description"), // same type, new name
+      priority: m.add.int({ default: 0 }), // a new column and its value for old rows
+      legacy_flag: m.drop.boolean({ backwardsDefault: false }), // what older clients read
+    },
+  },
+  renameTables: { projects: m.renameTableFrom("lists") },
+  createTables: { labels: true },
+  dropTables: { archived_todos: true },
+  from: {
+    /* the old schema's affected tables */
+  },
+  to: {
+    /* the new schema's affected tables */
+  },
+});
+```
+
+- `m.add.<type>({ default })` adds a column (`string`, `int`, `bigint`, `boolean`, `timestamp` and
+  the other column types). The default fills it for rows written under the older schema.
+- `m.drop.<type>({ backwardsDefault })` drops a column; older clients read `backwardsDefault`.
+- `m.renameFrom("oldName")` renames a column of the same type.
+- `renameTables`, `createTables` and `dropTables` cover tables that exist on only one side.
+
+After editing a stub, run `jazz-tools validate` (and your type checker): it rejects a migration that
+doesn't cover every change, while a stub with a `TODO` left in it can still pass type checks.
+
+### Changes that aren't supported yet
+
+- **Changing a column's type, or the variants of an enum.** The CLI refuses them. Adding a column
+  under a new name and dropping the old one works, but it does not carry values over: every row
+  gets the new column's default, with no warning. There is no value-mapping step yet.
+- **Changing indexes** (`indexOnly`, `compositeIndex`). `migrations create` writes no migration for
+  them, and the backend then refuses to start with "migration history has disconnected roots".
+
 ## Adding relations to existing UUID columns
 
 To add a relationship using an existing `ownerId` UUID column, declare `owner: s.rel("users", "ownerId")` in the table's relationships and follow the migration workflow above. Existing UUID values stay unchanged; Jazz emits an explicit identity table lens, which preserves row values while making the relation available under the new schema.
@@ -202,7 +249,10 @@ preserve or introduce.
 
 ## Visualizing the migration graph
 
-Run `jazz-tools migrations graph` to see the schemas and migrations:
+Run `jazz-tools migrations graph` to see the schemas and migrations. It reads the server's history,
+so it needs a Jazz Cloud app or a [`remote()`](/docs/setup/deployment/own-server#data-on-another-machine)
+store; against a backend's own `sqlite()` store it fails with a 404. The same holds for
+`--fromHash` and `--toHash` below when the hash isn't saved locally.
 
 ```sh
 pnpm dlx jazz-tools@alpha migrations graph <appId> --server-url <url> --admin-secret <secret>

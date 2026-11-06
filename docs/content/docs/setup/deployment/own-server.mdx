@@ -106,6 +106,29 @@ VOLUME /data
 CMD ["node", "dist/server.js"]
 ```
 
+On shutdown, close Jazz so writes still in flight reach the store and open sockets end cleanly:
+
+```ts title="server.ts"
+process.on("SIGTERM", () => {
+  void jazz.close().then(() => server.close());
+});
+```
+
+### Proxies, paths and origins
+
+These `createJazz` options cover a backend behind a proxy or on a non-default path:
+
+| Option            | Default            | What it does                                                                                                                                              |
+| :---------------- | :----------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `basePath`        | `"/jazz"`          | The path Jazz is served under. Mount your routes with `jazz.basePath`, and pass the same path as `serverUrl` in the browser                               |
+| `publicUrl`       | the request's host | The URL (or URLs) browsers reach Jazz at, when a proxy changes the host or path. Recommended in production; list your dev URL too if it uses this backend |
+| `allowedOrigins`  | the backend's own  | Other browser origins that may sync and sign in                                                                                                           |
+| `upgradesSockets` | `false`            | Set when your host upgrades sockets itself and passes them to `jazz.acceptSocket` (Bun, Deno, your own `ws`); `attach()` and Vercel set it on their own   |
+
+A proxy in front of your backend must pass WebSocket upgrades through to `/jazz`. Pages on another
+origin can't sign in with your app's cookie yet, even with `allowedOrigins`; serve the page and
+`/jazz` from the same origin for now.
+
 <include>../../../partials/main-backend-use.mdx</include>
 
 ## Data on another machine
@@ -158,5 +181,6 @@ Alpha.59 ran Jazz as its own process (`jazz-tools server`), and clients connecte
 ## Coming next
 
 - systemd recipe
-- TLS, reverse proxies, data dir on durable disks
+- TLS and data dir on durable disks (reverse proxies work today with `publicUrl`; see
+  [Proxies, paths and origins](#proxies-paths-and-origins))
 - Backups and upgrades (see [Operating Jazz](/docs/operating/backups-and-upgrades))

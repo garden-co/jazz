@@ -73,6 +73,10 @@ Each is an explicit "not supported" error:
 - no offline use: while the backend is unreachable, reads and subscriptions wait and are answered after the reconnect; writes are not optimistic: they show after one round trip, and `wait()` resolves when the server answered
 - no attributed writes
 - no streaming inside a transaction
+- text edits with `editedFrom` on merge text columns are rejected (`NotObserved`) for now; use the
+  local-first client for [collaborative text editing](/docs/recipes/data-patterns/collaborative-text-editing)
+- a write in flight when the socket drops is rejected (`ThinConnectionLostError`), not retried
+- `getSyncStatus()` and `useSyncStatus()` stay on `connecting` for now
 - no admin secret in the browser
 
 ## Upgrading to local-first
@@ -96,6 +100,6 @@ const { upgradeToLocalFirst } = useDb();
 await upgradeToLocalFirst(() => import("jazz-tools/local-first"));
 ```
 
-Without a framework, `upgradeToLocalFirst(db, () => import("jazz-tools/local-first"))` from
-`jazz-tools/thin` returns the local-first `Db` to use from then on. See
-[Local-First Client](/docs/setup/web-client/local-first-client).
+Without a framework, call the same method on the session's `Db`:
+`await db.upgradeToLocalFirst(() => import("jazz-tools/local-first"))`. The session upgrades in place,
+so you keep using the same `Db`. See [Local-First Client](/docs/setup/web-client/local-first-client).

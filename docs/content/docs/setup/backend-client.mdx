@@ -79,6 +79,7 @@ const session = await createJazzClient({
 
 const { client } = session.getSnapshot();
 await client!.db.insert(app.imports, { source: "nightly" }).wait({ tier: "global" });
+await client!.db.shutdown({ waitForSync: true }); // let queued writes reach the backend
 await session.close();
 
 // GitHub Actions hands out OIDC tokens to jobs with `permissions: id-token: write`.
@@ -92,6 +93,12 @@ async function githubOidcToken() {
   return (await response.json()).value as string;
 }
 ```
+
+`session.close()` on its own discards writes that haven't reached the backend yet, and so does
+exiting the process. Before a script ends, `await db.shutdown({ waitForSync: true })`. Each token
+needs at least 60 seconds of validity left when Jazz uses it; one closer to expiry is refused. While
+your main backend is unreachable, `createJazzClient` waits without logging anything, so give a job
+its own timeout.
 
 The session opens as whatever your main backend trusts the token as: with backend authority for a
 trusted machine (a request from it to act for a user is refused), or signed in as its user for a

@@ -10,22 +10,31 @@
 
     Install `ws` and `@vercel/functions`, and add `serverExternalPackages: ["jazz-napi"]` to
     `next.config.ts` so Next doesn't bundle Jazz's native module; `next dev` needs all three. On
-    Vercel, sync uses a WebSocket (through `upgradeWebSocket` from `@vercel/functions`). Under plain `next dev`, which can't upgrade sockets, the browser
-    switches to an HTTP stream on its own.
+    Vercel, sync uses a WebSocket (through `upgradeWebSocket` from `@vercel/functions`). Under plain
+    `next dev` and `next start`, which can't upgrade sockets, the browser switches to an HTTP stream
+    on its own. With `sqlite()` (not `vercel()`), also install `@vercel/sandbox` for now: Next
+    resolves it while building even though `sqlite()` never loads it.
+
+    A [custom Next server](https://nextjs.org/docs/app/guides/custom-server) can't use
+    `jazz.attach(server)` yet: Next's own upgrade handler closes the `/jazz` sockets. Leave sockets to
+    the HTTP stream there.
 
   </Tab>
   <Tab value="Hono">
     ```ts title="server.ts"
+    import type { Server } from "node:http";
     import { Hono } from "hono";
     import { serve } from "@hono/node-server";
     import { jazz } from "./jazz.server";
 
     const api = new Hono();
-    api.all("/jazz/*", (c) => jazz.handle(c.req.raw));
+    api.all(`${jazz.basePath}/*`, (c) => jazz.handle(c.req.raw));
 
     const server = serve({ fetch: api.fetch, port: 3000 });
-    await jazz.attach(server); // WebSocket upgrades on /jazz (needs `ws`)
+    await jazz.attach(server as Server); // WebSocket upgrades on /jazz (needs `ws`)
     ```
+
+    `serve()` is typed as a server that may be HTTP/2, so `attach` needs the `Server` cast.
 
   </Tab>
   <Tab value="Express / Node">
@@ -34,11 +43,27 @@
     import { jazz } from "./jazz.server";
 
     const api = express();
-    api.use((req, res, next) => jazz.nodeHandler(req, res, next));
+    api.use((req, res, next) => jazz.nodeHandler(req, res, next)); // before any body parser
+    api.use(express.json());
 
     const server = api.listen(3000);
     await jazz.attach(server); // WebSocket upgrades on /jazz (needs `ws`)
     ```
+
+    Mount Jazz before `express.json()` or any other body parser: Jazz reads sign-in bodies itself, and
+    a parser that has already read one makes sign-in fail with a 500. `forReqUser` takes a Fetch
+    `Request`; from Express, build one with the cookies your `authenticate` reads:
+
+    ```ts
+    const request = new Request(new URL(req.originalUrl, `http://${req.headers.host}`), {
+      headers: new Headers(req.headers as Record<string, string>),
+    });
+    const db = await jazz.forReqUser(request);
+    ```
+
+    On Fastify, mount Jazz in an `onRequest` hook, not a route: a route rejects sign-in's empty JSON
+    body with a 400 before your handler runs. For URLs under `jazz.basePath`, call `reply.hijack()`,
+    then `jazz.nodeHandler(request.raw, reply.raw)`.
 
   </Tab>
   <Tab value="Bun">
@@ -58,8 +83,14 @@
     });
     ```
 
-    Under Bun, sync runs over an HTTP stream: the browser switches to it on its own. WebSocket
-    upgrades on Bun aren't supported yet.
+    This syncs over an HTTP stream: the browser switches to it on its own. Bun closes idle
+    connections after 10 seconds by default; raise `idleTimeout` if streams drop.
+
+    For WebSockets, set `upgradesSockets: true` in `createJazz`, call `server.upgrade(request)` for
+    requests under `jazz.basePath` that ask for an upgrade, and hand each opened socket to
+    `jazz.acceptSocket(request, socket)`. It takes a socket of the `ws` package's shape (`send`,
+    `close`, and `on("message" | "close" | "error")`), so pass a small adapter around Bun's
+    `ServerWebSocket`.
 
   </Tab>
   <Tab value="Effect">

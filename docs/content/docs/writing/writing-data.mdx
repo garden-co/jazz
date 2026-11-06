@@ -69,6 +69,12 @@ Every framework provides a hook to access the database handle, and query hooks r
 
 Mutations are methods on the database handle. All three take a table as their first argument.
 
+<Callout type="warn" title="Read a row before you update it">
+  In alpha.60, `update` needs the row to have been read in the same process first. In a fresh
+  process, such as a REST handler right after a deploy, an update of a row the process hasn't read
+  throws `NotObserved`. Read it first, for example with `db.one(...)`.
+</Callout>
+
 <Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
@@ -378,6 +384,7 @@ A mutation can fail when you call it or while you wait:
 </Tabs>
 
 Use `db.onMutationError(...)` as a fallback for rejected mutations without an active `wait(...)`.
+Its event is not an `Error`: read `event.code` and `event.reason`, not `.message`.
 This includes mutations you did not wait for and mutations whose wait finished before a later
 rejection arrived.
 

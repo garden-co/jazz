@@ -44,6 +44,21 @@ export async function GET(request: Request) {
 }
 ```
 
+For a signed-out request, `forReqUser` throws a `RequestAuthenticationError` (`code: "signed_out"`).
+Map it to a 401 rather than a 500:
+
+```ts
+import { isRequestAuthenticationError } from "jazz-tools/backend";
+
+try {
+  const db = await jazz.forReqUser(request);
+  // …
+} catch (error) {
+  if (isRequestAuthenticationError(error)) return new Response(null, { status: 401 });
+  throw error;
+}
+```
+
 When a route acts with backend authority on a user's behalf (placing an order the user can't write
 directly, say), `await jazz.accountFor(request)` names that user's account, or `null` when signed
 out or when the user has no Jazz account yet, so the backend's `db` can write rows that point at it.

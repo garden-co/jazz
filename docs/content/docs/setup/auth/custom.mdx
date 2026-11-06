@@ -219,7 +219,9 @@ See [Declarative Permissions](/docs/schemas/policies) for the full claims API.
 
 ## Ownership and provenance
 
-Public sessions and author columns expose the same structured value:
+`session.user` is the account, and `session.identity` is the exact login:
+`{ issuer: "jazz:backend", subject: "alice" }`, where `subject` is the `userId` your `authenticate`
+returned. Author columns (`$createdBy`, `$updatedBy`) hold both:
 
 ```ts
 {
@@ -228,8 +230,9 @@ Public sessions and author columns expose the same structured value:
 }
 ```
 
-Compare `.account` for account-owned data. Two linked identities (a guest and the user it became)
-share account ownership while keeping distinct authorship.
+Compare `session.user` for account-owned data, such as `{ $createdBy: session.user }`. Two linked
+identities (a guest and the user it became) share account ownership while keeping distinct
+authorship.
 
 ## Users from alpha.59
 

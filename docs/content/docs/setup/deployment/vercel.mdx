@@ -110,8 +110,10 @@ as for [your own server](/docs/setup/deployment/own-server#large-values).
 
 Each Blob store or bucket serves one Vercel environment. A store you connect spans every
 environment unless you limit it, so create one store per environment, connect each to its own
-environment only, and enable OIDC for each environment in the project's settings. A core given another environment's store refuses to
-start and says so. Both `vercelBlob()` and `s3()` also take a `prefix`, by default
+environment only, and enable OIDC for each environment in the project's settings. A store created
+through the API or CLI is connected to production, preview and development alike; limit it in the
+store's settings in the dashboard. Jazz doesn't yet notice two environments sharing one store: a
+preview core given the production store writes into it, under the same prefix. Both `vercelBlob()` and `s3()` also take a `prefix`, by default
 `jazz/<store id>/`.
 
 Where large values go is a one-way choice. A core that started on SQLite can move to Vercel Blob
@@ -161,9 +163,9 @@ they aren't, `vercel()` throws and asks you to pass `name`. It also throws for a
 Git branch, such as a deploy through the Vercel API or from the CLI outside a Git checkout: pass
 `name` to give such previews a core of their own.
 
-`coreTarballUrl` is needed for any `jazz-tools` version that isn't on npm, such as a release
-candidate. If the Sandbox can't download the core, the function's error says so and the Sandbox is
-stopped. A Sandbox that already holds another
+The default `coreTarballUrl` covers every published `jazz-tools` version, release candidates
+included; set it only for a build you made yourself. If the Sandbox can't download the core, the
+function's error says so and the Sandbox is stopped. A Sandbox that already holds another
 app's core is refused.
 
 ## Limits
@@ -180,3 +182,8 @@ app's core is refused.
   benchmarks and 4.2 s on a real project; requests after the wake took about 0.45 s.
 - Deploying a newer `jazz-tools` restarts the core on that version, which briefly drops open
   sockets; clients reconnect. An older deployment that is still running never moves the core back.
+- Any redeploy can stall open tabs' sync for a while until their sockets drop and reconnect. A thin
+  client's write that is in flight at that moment fails with `ThinConnectionLostError` and is not
+  retried.
+- `vercel()` needs Next.js 16 for now: under Next 15's webpack build, every request fails with
+  "Cannot find module 'jazz-tools/package.json'".
