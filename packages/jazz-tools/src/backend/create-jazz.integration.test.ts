@@ -1,9 +1,11 @@
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { createServer, request as httpRequest, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { generateSecret, identityOf, signChallenge, signToken } from "../local-first-auth/index.js";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { JazzCore } from "jazz-napi";
@@ -244,6 +246,91 @@ describe("createJazz", () => {
     expect(probe.status).toBe(426);
     expect(probe.headers.get("x-jazz-stream")).toBeNull();
   }, 60_000);
+
+  for (const sockets of [true, false]) {
+    it(`lets go of its clients' ${sockets ? "sockets" : "HTTP streams"} when it closes, so its server can`, async () => {
+      const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+      let closed = false;
+      cleanups.push(() => (closed ? Promise.resolve() : jazz.close()));
+      // The host's own server, closed the way a SIGTERM handler closes it:
+      // without dropping the connections it still serves.
+      const server: Server = createServer((req, res) => jazz.nodeHandler(req, res));
+      if (sockets) await jazz.attach(server);
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      cleanups.push(
+        () =>
+          new Promise((resolve) => {
+            server.closeAllConnections();
+            server.close(resolve);
+          }),
+      );
+      const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      if (!sockets) {
+        // A page on this origin, so the client falls back to the stream.
+        const previous = (globalThis as { location?: unknown }).location;
+        (globalThis as { location?: unknown }).location = {
+          host: new URL(origin).host,
+          href: `${origin}/`,
+        };
+        cleanups.push(async () => {
+          (globalThis as { location?: unknown }).location = previous;
+        });
+      }
+      const alice = await userSession(jazz.appId, origin, "alice");
+      await alice.db
+        .insert(app.todos, { title: "synced", owner: alice.session!.user!.account })
+        .wait({ tier: "global" });
+
+      await jazz.close();
+      closed = true;
+      const serverClosed = new Promise<void>((resolve) => server.close(() => resolve()));
+      await Promise.race([
+        serverClosed,
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("a client connection outlived close()")), 5_000),
+        ),
+      ]);
+    }, 30_000);
+  }
+
+  for (const host of ["close-server", "no-handler"] as const) {
+    it(`stops on SIGTERM with a client stream open (${host})`, async () => {
+      const child = spawn(
+        join(process.cwd(), "node_modules/.bin/tsx"),
+        [fileURLToPath(new URL("./fixtures/signal-host.ts", import.meta.url)), host],
+        { stdio: ["ignore", "pipe", "inherit"] },
+      );
+      const exited = new Promise<{ code: number | null; signal: string | null }>((resolve) =>
+        child.on("exit", (code, signal) => resolve({ code, signal })),
+      );
+      cleanups.push(async () => void child.kill("SIGKILL"));
+      const ready = await new Promise<string>((resolve, reject) => {
+        child.stdout!.on("data", (chunk: Buffer) => resolve(`${chunk}`.trim()));
+        child.on("exit", () => reject(new Error("the host exited before it served")));
+      });
+      const [port, appId] = ready.split(" ");
+      // A browser's sync stream, open until the server ends it.
+      const stream = await fetch(`http://127.0.0.1:${port}/jazz/apps/${appId}/stream`, {
+        method: "POST",
+      });
+      expect(stream.status).toBe(200);
+      const reader = stream.body!.getReader();
+      await reader.read();
+
+      child.kill("SIGTERM");
+      const outcome = await Promise.race([
+        exited,
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("the host outlived SIGTERM")), 15_000),
+        ),
+      ]);
+      // Stopped by the signal itself, as with no handler at all (tsx, which
+      // runs the host, reports its child's signal as 128 + 15).
+      if (host === "close-server") expect(outcome).toEqual({ code: 0, signal: null });
+      else expect(outcome.signal === "SIGTERM" || outcome.code === 128 + 15).toBe(true);
+      void reader.cancel().catch(() => undefined);
+    }, 60_000);
+  }
 
   it("answers a signed-out request with an authentication error, not a plain one", async () => {
     const failure = new Error("auth service down");
