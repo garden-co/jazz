@@ -44,12 +44,17 @@ function bytes(pos, b) {
 function args(input) {
   const v = new DataView(input.buffer, input.byteOffset, input.byteLength);
   const list = [];
+  const types = [];
   let i = 0;
   while (i < input.length) {
     const tag = input[i++];
+    types.push(tag);
     if (tag === 0) {
       list.push(null);
     } else if (tag === 1) {
+      list.push(Number(v.getBigInt64(i, true)));
+      i += 8;
+    } else if (tag === 2) {
       list.push(v.getFloat64(i, true));
       i += 8;
     } else {
@@ -60,7 +65,7 @@ function args(input) {
       list.push(tag === 3 ? decoder.decode(part) : part.slice().buffer);
     }
   }
-  return list;
+  return { list, types };
 }
 // The marker belongs to this invocation, so nested scopes cannot swallow
 // one another's rollback or a real storage exception.
@@ -75,8 +80,45 @@ export function jazz_do_scope(storage, body) {
   }
 }
 
+// Rewrite parameter tokens only, never strings, identifiers, or comments.
+// Jazz uses positional parameters. Refuse other parameter syntaxes explicitly.
+function numericBindings(query, types) {
+  let out = "", i = 0, highest = 0;
+  while (i < query.length) {
+    const start = i, c = query[i++];
+    if (c === "'" || c === '"' || c === '`' || c === '[') {
+      const end = c === '[' ? ']' : c;
+      while (i < query.length) {
+        if (query[i++] === end) {
+          if (c !== '[' && query[i] === end) { i++; continue; }
+          break;
+        }
+      }
+    } else if (c === '-' && query[i] === '-') {
+      while (i < query.length && query[i] !== '\n') i++;
+    } else if (c === '/' && query[i] === '*') {
+      i++;
+      while (i < query.length && !(query[i-1] === '*' && query[i] === '/')) i++;
+      if (i < query.length) i++;
+    } else if (c === '?') {
+      while (i < query.length && /[0-9]/.test(query[i])) i++;
+      const index = i === start + 1 ? highest + 1 : Number(query.slice(start + 1, i));
+      if (!Number.isSafeInteger(index) || index < 1 || index > types.length) throw new Error("invalid SQL parameter index");
+      highest = Math.max(highest, index);
+      out += types[index - 1] === 1 ? `+CAST(?${index} AS INTEGER)` : `?${index}`;
+      continue;
+    } else if (c === ':' || c === '@' || c === '$') {
+      throw new Error("named SQL parameters are not supported by Durable Object storage");
+    }
+    out += query.slice(start, i);
+  }
+  if (highest !== types.length) throw new Error("incorrect SQL parameter count");
+  return out;
+}
 export function jazz_do_query(storage, query, bindings) {
-  const cursor = storage.sql.exec(query, ...args(bindings));
+  const { list, types } = args(bindings);
+  query = numericBindings(query, types);
+  const cursor = storage.sql.exec(query, ...list);
   return { cursor, rows: cursor.raw(), columns: cursor.columnNames };
 }
 export function jazz_do_columns(result) { return result.columns; }
@@ -311,10 +353,10 @@ fn encode(bindings: &[Value]) -> storage::Result<Vec<u8>> {
                     ));
                 }
                 out.push(1);
-                out.extend_from_slice(&(*n as f64).to_le_bytes());
+                out.extend_from_slice(&n.to_le_bytes());
             }
             Value::Real(n) => {
-                out.push(1);
+                out.push(2);
                 out.extend_from_slice(&n.to_le_bytes());
             }
             Value::Text(bytes) | Value::Blob(bytes) => {
