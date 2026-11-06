@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { createServer, request as httpRequest, type IncomingMessage, type Server } from "node:http";
+import { createRequire } from "node:module";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -295,9 +296,12 @@ describe("createJazz", () => {
 
   for (const host of ["close-server", "no-handler"] as const) {
     it(`stops on SIGTERM with a client stream open (${host})`, async () => {
+      // tsx is a workspace dev dependency: resolve its CLI the way Node does
+      // instead of trusting a package's own node_modules/.bin.
+      const tsx = createRequire(import.meta.url).resolve("tsx/cli");
       const child = spawn(
-        join(process.cwd(), "node_modules/.bin/tsx"),
-        [fileURLToPath(new URL("./fixtures/signal-host.ts", import.meta.url)), host],
+        process.execPath,
+        [tsx, fileURLToPath(new URL("./fixtures/signal-host.ts", import.meta.url)), host],
         { stdio: ["ignore", "pipe", "inherit"] },
       );
       const exited = new Promise<{ code: number | null; signal: string | null }>((resolve) =>
@@ -306,6 +310,7 @@ describe("createJazz", () => {
       cleanups.push(async () => void child.kill("SIGKILL"));
       const ready = await new Promise<string>((resolve, reject) => {
         child.stdout!.on("data", (chunk: Buffer) => resolve(`${chunk}`.trim()));
+        child.on("error", reject);
         child.on("exit", () => reject(new Error("the host exited before it served")));
       });
       const [port, appId] = ready.split(" ");
