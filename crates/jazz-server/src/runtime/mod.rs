@@ -3105,6 +3105,80 @@ mod tests {
         store.close().unwrap();
     }
 
+    /// A thin client's read (`all_serialized_query`, run on the store
+    /// thread) of a value whose leaves live only in the bucket, after a
+    /// restart: it fetches them in place and answers, instead of waiting
+    /// for a tick the blocked store thread can never run.
+    #[test]
+    fn a_serialized_read_of_offloaded_leaves_fetches_them_after_a_restart() {
+        let bucket = crate::s3::mock::MockS3::start();
+        let dir = tempfile::tempdir().unwrap();
+        let storage =
+            || StorageConfig::data_dir(dir.path()).with_blobs(bucket_blobs(&bucket, "app/", "me"));
+        let value: Vec<u8> = (0..400 * 1024u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+            .collect();
+        {
+            let store = AppStore::open(&storage()).unwrap();
+            let runtime = store.start_runtime(docs(), NodeRole::Core, false).unwrap();
+            let written = value.clone();
+            block_on(runtime.run(move |owner| {
+                block_on(owner.db.insert(
+                    "docs",
+                    BTreeMap::from([("body".to_owned(), jazz::records::Value::Bytes(written))]),
+                    Default::default(),
+                ))
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+            }))
+            .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while bucket.names("app/").len() < 2 {
+                assert!(Instant::now() < deadline, "leaves never reached the bucket");
+                block_on(runtime.run(|_| Ok(()))).unwrap();
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            store.close().unwrap();
+        }
+        let store = AppStore::open(&storage()).unwrap();
+        let runtime = store.start_runtime(docs(), NodeRole::Core, false).unwrap();
+        let query = postcard::to_allocvec(&jazz::query::Query::from("docs")).unwrap();
+        let read = |runtime: &ServerRuntimeHandle| {
+            let (done, answer) = std_mpsc::channel();
+            let (runtime, query) = (runtime.clone(), query.clone());
+            std::thread::spawn(move || {
+                let read = block_on(runtime.run(move |owner| {
+                    match block_on(owner.db.all_serialized_query(
+                        &query,
+                        jazz::db::ReadOpts::default(),
+                        None,
+                        None,
+                        None,
+                    )) {
+                        Ok(jazz::db::SerializedReadResult::Rows(rows)) => Ok(rows
+                            .first()
+                            .and_then(|row| row.cell("body"))
+                            .and_then(|value| match value {
+                                jazz::records::Value::Bytes(bytes) => Some(bytes),
+                                _ => None,
+                            })),
+                        Ok(_) => Err("expected rows".to_owned()),
+                        Err(error) => Err(error.to_string()),
+                    }
+                }));
+                let _ = done.send(read);
+            });
+            answer
+                .recv_timeout(Duration::from_secs(20))
+                .expect("the read answers instead of blocking the store thread")
+                .unwrap()
+        };
+        assert_eq!(read(&runtime).as_deref(), Some(value.as_slice()));
+        // The store thread is free: the next read answers too.
+        assert_eq!(read(&runtime).as_deref(), Some(value.as_slice()));
+        store.close().unwrap();
+    }
+
     /// A bucket that refuses everything is asked again with backoff, not
     /// on every tick; once it answers, the leaves move.
     #[test]
