@@ -1,5 +1,5 @@
 import type { TurboModule } from "react-native";
-import { TurboModuleRegistry } from "react-native";
+import { Platform, TurboModuleRegistry } from "react-native";
 
 /**
  * The future native-relay TurboModule boundary.
@@ -17,4 +17,8 @@ export interface Spec extends TurboModule {
 // legacy artifact does not yet contain this module. Expo Go and old native
 // development builds therefore fail explicitly without pretending JS can add
 // the embedded Rust relay through an OTA update.
-export default TurboModuleRegistry.get<Spec>("JazzRelay");
+//
+// react-native-web has no TurboModuleRegistry, and no native build can exist
+// there, so the web target never looks the module up.
+export const isWeb = Platform.OS === "web";
+export default isWeb ? null : TurboModuleRegistry.get<Spec>("JazzRelay");
