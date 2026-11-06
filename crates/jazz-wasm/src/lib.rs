@@ -788,11 +788,13 @@ impl WasmWrite {
         };
         let fate = db
             .binding
-            .wait_for_write(&self.write, &tier)
+            .wait_for_write(
+                &self.write,
+                &tier,
+                (!observe_only.unwrap_or(false)).then(|| Rc::clone(&self.claimed)),
+            )
             .map_err(host_error)?;
-        if !observe_only.unwrap_or(false) {
-            self.claimed.set(true);
-        }
+
         Ok(host_promise(fate, |()| JsValue::UNDEFINED))
     }
 
