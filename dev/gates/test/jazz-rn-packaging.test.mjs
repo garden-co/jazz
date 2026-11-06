@@ -772,7 +772,28 @@ function evaluatePodspecNewArchGate({ helper, podfileProperties, env = {} }) {
   }
 }
 
-test("JazzRn.podspec accepts every New Architecture host autolinking evaluates it in", () => {
+// CocoaPods evaluates the podspec with Ruby. The Linux CI container has no
+// Ruby; the macOS package job (which also runs a real pod install) sets
+// JAZZ_RN_REQUIRE_RUBY=1 so the evaluation cannot be skipped there.
+const rubyAvailable = (() => {
+  try {
+    execFileSync("ruby", ["--version"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
+test("JazzRn.podspec accepts every New Architecture host autolinking evaluates it in", (t) => {
+  if (!rubyAvailable) {
+    assert.notEqual(
+      process.env.JAZZ_RN_REQUIRE_RUBY,
+      "1",
+      "JAZZ_RN_REQUIRE_RUBY=1 but ruby is not installed",
+    );
+    t.skip("ruby is not installed; the macOS package job runs this evaluation");
+    return;
+  }
   // Expo SDK 58 (React Native 0.88) prebuild: no newArchEnabled in
   // Podfile.properties.json, and use_react_native! sets RCT_NEW_ARCH_ENABLED
   // only after autolinking has evaluated the podspec (rc.3 adopter finding V13).
@@ -1749,7 +1770,10 @@ test("a freshly installed Expo app prebuilds the packed jazz-rn relay host", asy
     assert.match(androidProperties, /^newArchEnabled=true$/m);
     assertRelayAndroidArchitectures(androidProperties, "a packed jazz-rn install");
     assert.match(androidSettings, /autolinkLibrariesFromCommand/);
-    assert.match(iosProperties, /"newArchEnabled": "true"/);
+    // The plugin leaves newArchEnabled to Expo: an app config without it
+    // writes nothing to Podfile.properties.json, and React Native 0.81 then
+    // defaults to the New Architecture (JazzRn.podspec asks RN itself).
+    assert.doesNotMatch(iosProperties, /"newArchEnabled": "false"/);
     assert.match(iosPodfile, /use_native_modules!/);
 
     const expoAutolink = (platform) =>
