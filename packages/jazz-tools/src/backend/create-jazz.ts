@@ -968,6 +968,17 @@ function openRemoteCore(
           onEvent(null, { kind: "message", data });
         });
         ws.addEventListener("close", (event) => finish(event.code, event.reason));
+        // A socket that never connects (the core is down or restarting) can
+        // report only the error, and stay CONNECTING: without this, the link
+        // waits on it forever instead of retrying.
+        ws.addEventListener("error", () => {
+          finish(1006, "connection to the core failed");
+          try {
+            ws?.close();
+          } catch {
+            // Already closing.
+          }
+        });
       })
       // A failing credential hook, or a socket that can't even be created.
       .catch((error: unknown) =>

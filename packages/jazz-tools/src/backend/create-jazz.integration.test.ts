@@ -1482,6 +1482,105 @@ describe("createJazz", () => {
     );
   }, 60_000);
 
+  it("reconnects to a remote core that restarts, and still closes", async () => {
+    const appId = randomUUID();
+    const dataDir = await mkdtemp(join(tmpdir(), "jazz-remote-restart-"));
+    cleanups.push(() => rm(dataDir, { recursive: true, force: true }));
+    const adminSecret = `restart-admin-${randomUUID().slice(0, 8)}`;
+    const backendSecret = `restart-backend-${randomUUID().slice(0, 8)}`;
+    const start = (port = 0) =>
+      startLocalJazzServer({ appId, port, dataDir, adminSecret, backendSecret });
+    let core = await start();
+    cleanups.push(() => core.stop());
+    const port = core.port;
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: remote({ url: core.url, appId, secret: adminSecret }),
+      authenticate,
+    }).ready();
+    let closed = false;
+    cleanups.push(() => (closed ? Promise.resolve() : jazz.close()));
+    const asAlice = () =>
+      jazz.forReqUser(new Request("http://app/x", { headers: { "x-test-user": "alice" } }));
+    const alice = await jazz.accountFor(
+      new Request("http://app/x", { headers: { "x-test-user": "alice" } }),
+    );
+    await (
+      await asAlice()
+    )
+      .insert(app.todos, { title: "before", owner: alice! })
+      .wait({ tier: "global" });
+
+    // The core goes away and comes back on the same address and data.
+    await core.stop();
+    core = await start(port);
+
+    const within = <T>(promise: Promise<T>, what: string) =>
+      Promise.race([
+        promise,
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error(`${what} hung after the core restarted`)), 20_000),
+        ),
+      ]);
+    const db = await within(asAlice(), "forReqUser");
+    await within(
+      db.insert(app.todos, { title: "after", owner: alice! }).wait({ tier: "global" }),
+      "a global write",
+    );
+    const titles = await within(db.all(app.todos, { tier: "remote" }), "a remote read");
+    expect(titles.map((todo) => todo.title).sort()).toEqual(["after", "before"]);
+
+    // The core sees the write: it reached the restarted core, not a cache.
+    const other = await createJazz({
+      app,
+      permissions,
+      store: remote({ url: core.url, appId, secret: adminSecret }),
+      authenticate,
+    }).ready();
+    cleanups.push(() => other.close());
+    expect((await other.db.all(app.todos)).map((todo) => todo.title).sort()).toEqual([
+      "after",
+      "before",
+    ]);
+
+    await within(jazz.close(), "close()");
+    closed = true;
+  }, 90_000);
+
+  it("closes while its remote core is down, with a write still pending", async () => {
+    const appId = randomUUID();
+    const core = await startLocalJazzServer({ appId, inMemory: true });
+    cleanups.push(() => core.stop());
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: remote({ url: core.url, appId, secret: core.adminSecret }),
+      authenticate,
+    }).ready();
+    let closed = false;
+    cleanups.push(() => (closed ? Promise.resolve() : jazz.close()));
+    const request = new Request("http://app/x", { headers: { "x-test-user": "alice" } });
+    const alice = await jazz.accountFor(request);
+    const db = await jazz.forReqUser(request);
+    await db.insert(app.todos, { title: "reached", owner: alice! }).wait({ tier: "global" });
+
+    await core.stop();
+    db.insert(app.todos, { title: "stranded", owner: alice! });
+
+    // A SIGTERM handler's close(): it gives pending writes their time, then
+    // ends instead of waiting for a core that is not coming back.
+    const started = Date.now();
+    await Promise.race([
+      jazz.close(),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("close() hung with the core down")), 25_000),
+      ),
+    ]);
+    closed = true;
+    expect(Date.now() - started).toBeLessThan(25_000);
+  }, 60_000);
+
   it("serves each deployment's sessions by its own permissions, side by side", async () => {
     const appId = randomUUID();
     const core = await startLocalJazzServer({ appId, inMemory: true });
