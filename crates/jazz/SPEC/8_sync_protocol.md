@@ -185,6 +185,19 @@ which every shipped artifact (native, NAPI, WASM) validates
 (`jazz::sync_wire_corpus`). The corpus may be re-pinned until alpha.60 ships;
 after that, a layout change needs a compatibility write-up.
 
+A server pings every link every 20 s and drops one that sent nothing for
+60 s. The WebSocket API shows neither pings nor partial messages, so a
+client that advertises `FEATURE_HEARTBEAT` also gets a `WireFrame::Heartbeat`
+(tag 7, no body, no answer) with each ping. Such a client gives a link up,
+and reconnects, once nothing at all, heartbeat included, arrived for 120 s:
+a half-open TCP link or a stalled proxy then ends instead of showing
+`connected` while nothing moves. A heartbeat queues behind the message being
+sent, so 120 s also bounds the slowest link a whole 2 MiB message survives
+(about 18 KB/s). The TypeScript carrier (browsers, Node, workers) asks for
+it on every link and drops the frame before the runtime sees it. The native
+Rust transport (NAPI `remote()`, React Native) does not ask yet and has no
+silence timeout of its own.
+
 In-process links (a worker and its tab, tests) carry `SyncMessage` values
 directly (`sync::duplex`); a byte link frames them with postcard
 (`WireTransportAdapter`).
@@ -972,6 +985,16 @@ arrive within `THIN_PART_TIMEOUT` (90 s) ends its connection with a
 retryable `Backpressure` error, releasing its room. These budgets bound
 what the server holds of incoming requests; answers waiting for a client
 that does not read are not bounded yet (#4865).
+
+A read or row write that needs large-value bytes held only in a network
+chunk store (`s3()`, Vercel Blob; after a restart, say) never fetches them
+on the store thread, which serves every session. The request is parked: the
+store's fetch lane reads the bytes beside the store thread, with its
+backoff, and the parked request runs again on the tick after they land.
+Until then it keeps its admitted room, so that session's later requests wait
+behind it, in order, while other sessions are served as usual. A fetch that
+fails answers the request with its `Storage` error, and later reads of
+those bytes are refused with it at once until the fetch backoff ends.
 
 - A thin session is served as its admitted identity and claims, exactly as a
   sync session with that admission is (§8.6): reads see what its policies let

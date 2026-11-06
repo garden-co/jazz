@@ -7,8 +7,10 @@ export class AccountAuthError extends Error {
     readonly code: string,
     /** The registry's HTTP status when it answered with an error. */
     readonly status?: number,
+    /** What the app can do about it, when the code alone doesn't say. */
+    message: string = code,
   ) {
-    super(code);
+    super(message);
     this.name = "AccountAuthError";
   }
 }
@@ -113,8 +115,11 @@ async function backendRequest(
       method: "POST",
       credentials: "same-origin",
       redirect: "error",
-      headers: { "Content-Type": "application/json" },
-      body: body === undefined ? undefined : JSON.stringify(body),
+      // No body, no content type: a host's JSON parser (Fastify's, Express's)
+      // refuses or swallows an empty "JSON" body.
+      ...(body === undefined
+        ? {}
+        : { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }),
     });
     if (!response.ok) {
       const code = await response.text();

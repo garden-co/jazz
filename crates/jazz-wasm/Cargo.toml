@@ -33,9 +33,7 @@ getrandom = { version = "0.3", features = ["wasm_js"] }
 getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
 talc = "5.0.4"
 sqlite-wasm-rs = { version = "0.5", default-features = false }
-# Only for its OPFS pool; the IndexedDB VFS is `src/idb_vfs.rs`.
-sqlite-wasm-vfs = "0.2"
-# The IndexedDB VFS's own dependencies (all already under sqlite-wasm-vfs).
+# The IndexedDB VFS's (`src/idb_vfs.rs`) own dependencies.
 indexed_db_futures = "0.6.4"
 rsqlite-vfs = "0.1"
 thiserror = "2"
@@ -44,20 +42,10 @@ tokio = { version = "1", default-features = false, features = ["sync"] }
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
 
-[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
-web-sys = { version = "0.3", features = [
-  "FileSystemDirectoryHandle",
-  "MessageChannel",
-  "StorageManager",
-  "Navigator",
-  "WorkerGlobalScope",
-  "WorkerNavigator",
-] }
-
 [features]
 default = ["console_error_panic_hook", "transport-compression-ruzstd"]
 bench-probes = []
-# Browser store comparison probes (IndexedDB vs OPFS); never in release builds.
+# Browser store probes (IndexedDB vs in memory); never in release builds.
 browser-bench = []
 transport-compression-lz4 = ["jazz/transport-compression-lz4"]
 transport-compression-zstd = ["jazz/transport-compression-zstd"]

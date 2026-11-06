@@ -1,7 +1,7 @@
 //! WebAssembly bindings for the Jazz database (`jazz-db`).
 //!
 //! One bundle serves both browser roles: a worker that owns a durable SQLite
-//! file (on IndexedDB or OPFS, see [`browser`]) and main-thread in-memory
+//! file (on IndexedDB, see [`browser`]) and main-thread in-memory
 //! databases that sync through it. Calls for features Jazz does not support
 //! yet fail with an explicit "not supported yet" error.
 //!
@@ -1303,9 +1303,9 @@ impl WasmDb {
     }
 
     /// Open the durable store a browser worker owns. `storage` selects the
-    /// SQLite VFS: `{ backend: "indexeddb" | "opfs", path?: string }`
-    /// (IndexedDB when omitted; see [`browser`]). The default file is named
-    /// after `database`, the physical database name the worker admitted.
+    /// file: `{ backend?: "indexeddb", path?: string }` (see [`browser`]).
+    /// The default file is named after `database`, the physical database
+    /// name the worker admitted.
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen(js_name = openBrowser)]
     pub async fn open_browser(
@@ -1358,9 +1358,8 @@ impl WasmDb {
         )
         .map_err(|error| host_error(binding_host::HostError::Argument(error)))?;
         let (db, store) = browser::open(&spec, db_config).await?;
-        if store.defers_writes() {
-            db.defer_durability_acks();
-        }
+        // Commits reach IndexedDB only after they return.
+        db.defer_durability_acks();
         let owner = Self::runtime_owner(Binding::new(db, identity, trusted));
         let inner = owner.open_inner()?;
         // A commit's write failing starts the retries, whether or not an
@@ -1393,8 +1392,7 @@ impl WasmDb {
     }
 
     /// Wait until every commit so far is in the browser store's backing
-    /// storage. A no-op for in-memory and OPFS databases, whose commits are
-    /// written through.
+    /// storage. A no-op for in-memory databases.
     #[wasm_bindgen(js_name = flush)]
     pub fn flush(&self) -> js_sys::Promise {
         let inner = match self.open_inner() {

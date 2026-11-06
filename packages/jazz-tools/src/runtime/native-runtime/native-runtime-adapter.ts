@@ -105,6 +105,7 @@ import {
   WebSocketCarrier,
   WIRE_PROTOCOL_VERSION,
   isReconnectLaterWireError,
+  isSocketDropWireError,
   normalizeBackendWebSocketAuth,
   peerIdentityForWebSocketAuth,
   policyClaimsForAdmittedWebSocket,
@@ -621,10 +622,7 @@ function upstreamLinkFailure(error: WireError, negotiated: boolean): UpstreamLin
   }
   // The network or the server dropped the socket. A local-first client must
   // survive an outage of any length, including one it was opened in.
-  if (
-    error.retry === "later" &&
-    (error.code === "websocket_closed" || error.code === "websocket_error")
-  ) {
+  if (isSocketDropWireError(error)) {
     return { kind: "network", message };
   }
   // Anything else (a protocol error, an incompatible server) cannot succeed
@@ -2900,7 +2898,8 @@ export class NativeRuntimeAdapter implements Runtime {
         if (
           isReconnectLaterWireError(error) ||
           error.code === "websocket_closed" ||
-          error.code === "websocket_error"
+          error.code === "websocket_error" ||
+          error.code === "websocket_silent"
         ) {
           return;
         }
