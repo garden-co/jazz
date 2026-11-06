@@ -221,37 +221,7 @@ pub fn prepare_deployment(
     )?;
     let order = topological_order(&schemas, &migrations)?;
     compatible::validate_compatible_graph(&schemas, &migrations, &representatives)?;
-    for ((from, to), lens) in &migrations {
-        let check = || -> Result<(), String> {
-            if lens.is_draft() {
-                return Err("migration contains unreviewed draft operations".into());
-            }
-            // Public deployment supports auto-invertible lenses only. Historical
-            // custom inverses must not silently lose their semantics during preparation.
-            if lens.backward.ops != lens.forward.invert().ops {
-                return Err("custom backward transforms are not supported by deployment".into());
-            }
-            let runtime_lens = compile_lens(lens, &schemas[from], &schemas[to])?;
-            let (new_tables, dropped_tables) = lens.table_changes();
-            validate_migration_lens_between(&runtime_lens, &compiled[from], &compiled[to])
-                .map_err(|error| error.to_string())?;
-            validate_lineage_table_partition(
-                &compiled[from].schema,
-                &compiled[to].schema,
-                &runtime_lens,
-                &new_tables,
-                &dropped_tables,
-            )
-            .map_err(|error| error.to_string())?;
-            validate_public_operations(lens, &schemas[from], &schemas[to])?;
-            Ok(())
-        };
-        check().map_err(|reason| DeploymentError::InvalidMigration {
-            from: SchemaHash(*from),
-            to: SchemaHash(*to),
-            reason,
-        })?;
-    }
+    check_lenses(&schemas, &compiled, &migrations)?;
     validate_parallel_paths(&order, &schemas, &migrations)?;
     let mut target = schemas[&request.target_schema_hash.0].clone();
     for (name, policies) in request.permissions {
@@ -283,6 +253,48 @@ pub fn prepare_deployment(
         migrations,
         active_schema,
     })
+}
+
+/// Each migration's own checks, apart from where it sits in the history:
+/// its lens is reviewed, auto-invertible, reproduces its target schema
+/// from its source, and uses only public operations.
+fn check_lenses(
+    schemas: &BTreeMap<Hash, Schema>,
+    compiled: &BTreeMap<Hash, SchemaVersion>,
+    migrations: &BTreeMap<Edge, Lens>,
+) -> Result<(), DeploymentError> {
+    for ((from, to), lens) in migrations {
+        let check = || -> Result<(), String> {
+            if lens.is_draft() {
+                return Err("migration contains unreviewed draft operations".into());
+            }
+            // Public deployment supports auto-invertible lenses only. Historical
+            // custom inverses must not silently lose their semantics during preparation.
+            if lens.backward.ops != lens.forward.invert().ops {
+                return Err("custom backward transforms are not supported by deployment".into());
+            }
+            let runtime_lens = compile_lens(lens, &schemas[from], &schemas[to])?;
+            let (new_tables, dropped_tables) = lens.table_changes();
+            validate_migration_lens_between(&runtime_lens, &compiled[from], &compiled[to])
+                .map_err(|error| error.to_string())?;
+            validate_lineage_table_partition(
+                &compiled[from].schema,
+                &compiled[to].schema,
+                &runtime_lens,
+                &new_tables,
+                &dropped_tables,
+            )
+            .map_err(|error| error.to_string())?;
+            validate_public_operations(lens, &schemas[from], &schemas[to])?;
+            Ok(())
+        };
+        check().map_err(|reason| DeploymentError::InvalidMigration {
+            from: SchemaHash(*from),
+            to: SchemaHash(*to),
+            reason,
+        })?;
+    }
+    Ok(())
 }
 
 /// The tables `target` makes latest-only for the first time, by name: some

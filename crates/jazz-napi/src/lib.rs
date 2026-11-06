@@ -91,6 +91,15 @@ pub fn validate_schema(schema: Uint8Array) -> js::Result<()> {
     Ok(())
 }
 
+/// Check an app's shipped migrations (the `ClientMigrations` JSON) leading
+/// to the schema hash `target` as a deployment to a new authority would,
+/// without opening a database. `jazz-tools validate` runs it.
+#[napi(js_name = "checkClientMigrations")]
+pub fn check_client_migrations(migrations: String, target: String) -> napi::Result<()> {
+    jazz::tools::deployment::published::check_client_migrations(migrations.as_bytes(), &target)
+        .map_err(napi::Error::from_reason)
+}
+
 /// Exact build/ABI fingerprint for the generated native artifact.
 #[napi]
 pub fn native_artifact_fingerprint() -> String {
