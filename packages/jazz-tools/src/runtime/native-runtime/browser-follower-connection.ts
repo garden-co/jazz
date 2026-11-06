@@ -451,6 +451,10 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       this.runtime.reportRemoteMutationError(message.event);
       return;
     }
+    if (message.type === "storage-failure") {
+      this.runtime.reportLocalStorageFailure(message.message);
+      return;
+    }
     if (message.type === "transport-error") {
       // Keep this distinct from a fate rejection. The runtime records the
       // error before any later port teardown so active Global waits and

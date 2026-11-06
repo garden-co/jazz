@@ -1,10 +1,14 @@
 //! Durable browser stores: the worker's SQLite file on one of two VFSes.
 //!
-//! - **IndexedDB** (`relaxed-idb`, the default): the whole file lives in
-//!   memory and every commit is queued as one IndexedDB transaction, applied
-//!   in order. A commit is never torn, but a crash can lose the newest ones
-//!   until [`Store::flush`] resolves. Works in any worker, so one shared
-//!   worker can own the file for every tab.
+//! - **IndexedDB** ([`crate::idb_vfs`], the default): the whole file lives
+//!   in memory and every commit is queued as one IndexedDB transaction,
+//!   applied in order. IndexedDB always holds one whole committed state, but
+//!   the newest commits are only in memory until [`Store::flush`] resolves,
+//!   and a failed write (storage full) keeps them there until a flush
+//!   succeeds. So the database holds back the acks that tell a tab its
+//!   commit is `Local` until a flush covers it
+//!   ([`jazz::db::Db::defer_durability_acks`]). Works in any worker, so one
+//!   shared worker can own the file for every tab.
 //! - **OPFS** (`opfs-sahpool`): sync access handles, written through on
 //!   every commit. Dedicated workers only, and no WAL.
 //!
@@ -16,16 +20,14 @@ use std::rc::Rc;
 
 use jazz::db::{Db, DbConfig, FileOptions, Journal};
 use sha2::{Digest, Sha256};
-use sqlite_wasm_vfs::relaxed_idb::{self, Preload, RelaxedIdbCfgBuilder, RelaxedIdbUtil};
 use sqlite_wasm_vfs::sahpool::{self, OpfsSAHPoolCfgBuilder};
+
+use crate::idb_vfs::{self, IdbVfsUtil};
 use wasm_bindgen::prelude::*;
 
 const IDB_VFS: &str = "jazz-idb";
 const OPFS_VFS: &str = "jazz-opfs";
 const OPFS_DIRECTORY: &str = "jazz";
-/// Deleting this never-opened file is queued behind every pending commit,
-/// so its completion is a flush barrier.
-const IDB_BARRIER: &str = "/.jazz-flush-barrier";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Backend {
@@ -89,22 +91,47 @@ impl StoreSpec {
 /// The open file's backing storage, kept by the database's host.
 #[derive(Clone)]
 pub(crate) enum Store {
-    IndexedDb(Rc<RelaxedIdbUtil>),
+    /// The VFS and the file's path.
+    IndexedDb(Rc<IdbVfsUtil>, Rc<str>),
     Opfs,
 }
 
 impl Store {
-    /// Resolves once every commit so far is in the backing storage.
-    pub(crate) async fn flush(&self) -> Result<(), JsValue> {
+    /// Resolves once every commit so far is in the backing storage, or
+    /// fails with why it could not be written (it stays in memory, and the
+    /// next flush tries again).
+    pub(crate) async fn flush(&self) -> Result<(), String> {
         match self {
-            Store::IndexedDb(util) => util
-                .delete_db(IDB_BARRIER)
-                .map_err(vfs_error)?
+            Store::IndexedDb(util, path) => util
+                .flush(path)
+                .map_err(|error| error.to_string())?
                 .await
-                .map_err(vfs_error),
+                .map_err(|error| error.to_string()),
             // Sync access handles write through on every commit.
             Store::Opfs => Ok(()),
         }
+    }
+
+    /// Call `hook` when a commit's own write to the backing storage fails
+    /// (`None` removes it).
+    pub(crate) fn on_write_failed(&self, hook: Option<Rc<dyn Fn()>>) {
+        if let Store::IndexedDb(util, path) = self {
+            util.on_write_failed(path, hook);
+        }
+    }
+
+    /// Whether the last write to the backing storage failed, so commits
+    /// since wait in memory for a flush to retry them.
+    pub(crate) fn write_failed(&self) -> bool {
+        match self {
+            Store::IndexedDb(util, path) => util.write_failed(path),
+            Store::Opfs => false,
+        }
+    }
+
+    /// Whether commits reach the backing storage only after they return.
+    pub(crate) fn defers_writes(&self) -> bool {
+        matches!(self, Store::IndexedDb(..))
     }
 }
 
@@ -112,12 +139,8 @@ fn vfs_error(error: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&format!("browser storage: {error}"))
 }
 
-async fn install_idb() -> Result<RelaxedIdbUtil, JsValue> {
-    let cfg = RelaxedIdbCfgBuilder::new()
-        .vfs_name(IDB_VFS)
-        .preload(Preload::None)
-        .build();
-    relaxed_idb::install::<sqlite_wasm_rs::WasmOsCallback>(&cfg, false)
+async fn install_idb() -> Result<IdbVfsUtil, JsValue> {
+    idb_vfs::install::<sqlite_wasm_rs::WasmOsCallback>(IDB_VFS)
         .await
         .map_err(vfs_error)
 }
@@ -155,7 +178,7 @@ pub(crate) async fn open(spec: &StoreSpec, config: DbConfig) -> Result<(Db, Stor
                 .await
                 .map_err(vfs_error)?;
             (
-                Store::IndexedDb(Rc::new(util)),
+                Store::IndexedDb(Rc::new(util), Rc::from(spec.path.as_str())),
                 FileOptions {
                     vfs: Some(IDB_VFS),
                     journal: Journal::Memory,

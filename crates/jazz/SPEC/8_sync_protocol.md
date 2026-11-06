@@ -70,6 +70,7 @@ source of truth and names each invariant's tests):
 - `INV-SYNC-52`: A replica MUST upload each commit's ops by stored names, as the schema view that wrote them stores them, keeping it pending while offline; a server MUST refuse a commit naming a stored table or column of a version it has not deployed, at once, with reason `schema_version_not_deployed`.
 - `INV-SYNC-53`: The authority MUST NOT name a writer's own row as written (instead of shipping it) unless the commit applied unmerged over the very version the writer built on and that version is still current (§8.3); every other row ships, and a writer whose image differs from the digest asks for the row whole.
 - `INV-SYNC-54`: An authority MUST mint its namespace when it is opened as the authority and keep it in its store. A replica that keeps another namespace than its upstream's MUST refuse that link with `AuthorityChanged`, upload nothing to it, fail its remote reads and its `Global` waits on writes still pending with that error, and keep its local rows and pending writes; only a new link tries again (§8.10).
+- `INV-SYNC-55`: A store whose file writes complete after its commits return MUST NOT tell a session a commit is in the store (`Stored`, or its own acceptance) until a persist covering that commit succeeded.
 - `INV-TX-2`, `INV-TX-11`, `INV-TX-23`: commit, seq and relay rules (ch. 3).
 - `INV-WIRE-1`, `INV-WIRE-2`: exact postcard frames and Hello version negotiation (§8.1.1).
 

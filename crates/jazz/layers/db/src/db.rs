@@ -677,6 +677,10 @@ struct Inner {
     upstream_rejections: Option<Vec<UpstreamRejection>>,
     /// Clients this store serves.
     sessions: Vec<sync::Session>,
+    /// Durability acks to sessions held until the host has persisted the
+    /// store, for a host whose file writes complete after the commit
+    /// returns (see [`Db::defer_durability_acks`]).
+    held_acks: Option<sync::HeldAcks>,
     /// Each stored table's column positions, the codes authored-column
     /// bitmasks use (SPEC 4 §4.6), read on first use.
     column_codes: RefCell<HashMap<String, HashMap<String, u32>>>,
@@ -1564,6 +1568,7 @@ impl Db {
                 pins_required: false,
                 upstream_rejections: None,
                 sessions: Vec::new(),
+                held_acks: None,
                 column_codes: RefCell::default(),
                 closed: None,
                 slow: RefCell::default(),
