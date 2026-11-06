@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { schema as s, migration as m } from "../index.js";
 import { wasmSchemasEqual, structuralSchemaHash } from "./schema-utils.js";
-import { renderMigrationStub } from "./migrations.js";
+import { renderMigrationStub, UNFILLED_STUB_TODO } from "./migrations.js";
 
 describe("migration stub generation", () => {
   it("generates additive table witnesses with bare, nullable, and referenced UUIDs", () => {
@@ -356,7 +356,7 @@ describe("migration stub generation", () => {
   });
 
   it("fills a required column it adds or drops from the column's declared default", () => {
-    const from = { records: s.table({ title: s.string(), rank: s.int().default(3) }, {}) };
+    const from = { records: s.table({ title: s.string(), rank: s.string().default("low") }, {}) };
     const to = { records: s.table({ title: s.string(), points: s.int().default(1) }, {}) };
     const source = renderMigrationStub({
       fromHash: "aaaaaaaaaaaa",
@@ -366,7 +366,7 @@ describe("migration stub generation", () => {
     });
 
     expect(source).toContain('"points": m.add.int({ default: 1 }),');
-    expect(source).toContain('"rank": m.drop.int({ backwardsDefault: 3 }),');
+    expect(source).toContain('"rank": m.drop.string({ backwardsDefault: "low" }),');
     expect(source).not.toContain("needs an explicit");
     const migration = new Function(
       "s",
@@ -383,6 +383,34 @@ describe("migration stub generation", () => {
         toSchema: s.defineApp(to, { migrations: "none" }).wasmSchema,
       }),
     ).not.toThrow();
+  });
+
+  it("leaves a possible rename to the author instead of adding and dropping", () => {
+    const from = { records: s.table({ title: s.string().optional(), done: s.boolean() }, {}) };
+    const to = {
+      records: s.table(
+        { heading: s.string().optional(), done: s.boolean(), notes: s.string().optional() },
+        {},
+      ),
+    };
+    const source = renderMigrationStub({
+      fromHash: "aaaaaaaaaaaa",
+      toHash: "bbbbbbbbbbbb",
+      fromSchema: s.defineApp(from, { migrations: "none" }).wasmSchema,
+      toSchema: s.defineApp(to, { migrations: "none" }).wasmSchema,
+    });
+    // Either added column could be "title" renamed; adding them and
+    // dropping "title" would start every row empty.
+    for (const added of ["heading", "notes"])
+      expect(source).toContain(
+        `// TODO: Added column "${added}" may be a rename of "title": to keep its values, give it the step m.renameFrom("title")`,
+      );
+    // No step is written for any of the three: the hints name m.add and
+    // m.drop only in prose.
+    expect(source).not.toMatch(/m\.add\.\w/);
+    expect(source).not.toMatch(/m\.drop\.\w/);
+    const migrate = source.slice(source.indexOf("migrate:"), source.indexOf("fromHash:"));
+    expect(migrate.split("\n").filter((line) => UNFILLED_STUB_TODO.test(line))).toHaveLength(2);
   });
 
   it("preserves default-only schema changes without transforming existing rows", () => {
