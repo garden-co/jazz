@@ -454,6 +454,24 @@ it("signs a remembered user in again, once, when the core lost their account", a
   await t.session.close();
 });
 
+it("tries the sign-in for a lost account again when it failed", async () => {
+  const t = await setup(user("alice"));
+  t.signIn(user("alice"));
+  t.probe.mockResolvedValue({ ...user("alice").identity, hasAccount: false });
+  // The first sign-in can't reach the backend.
+  t.loginWithBackend.mockRejectedValueOnce(new AccountAuthError("account_request_failed", 503));
+  t.watch.authRefused();
+  await settle();
+  // A later check signs in again, and that one works.
+  t.watch.authRefused();
+  await settle();
+  expect(t.loginWithBackend).toHaveBeenCalledTimes(2);
+  await expect(t.loginWithBackend.mock.results[0]!.value).rejects.toThrow();
+  expect(t.session.getSnapshot().status).toBe("ready");
+  t.watch.stop();
+  await t.session.close();
+});
+
 it("stops only once the backend keeps answering 404, asking again with backoff", async () => {
   const t = await setup(undefined, { noBackend: true });
   await settle();

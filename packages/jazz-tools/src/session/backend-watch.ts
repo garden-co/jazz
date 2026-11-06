@@ -288,7 +288,14 @@ export function watchBackendUser<Client>(
           if (lostAccount === who) return;
           lostAccount = who;
           remembered = undefined;
-          return attempt(session.loginWithBackend());
+          // A sign-in that fails (a network error, a 5xx) is tried again on
+          // the next refusal.
+          return attempt(
+            session.loginWithBackend().catch((cause: unknown) => {
+              if (lostAccount === who) lostAccount = undefined;
+              throw cause;
+            }),
+          );
         }
         if (signedIn.hasAccount !== false && lostAccount === who) lostAccount = undefined;
         const account = session.getSnapshot().account;

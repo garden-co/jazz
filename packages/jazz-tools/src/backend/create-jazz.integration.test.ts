@@ -1134,6 +1134,11 @@ describe("createJazz", () => {
     await expect(jazz.accountFor(asAlice())).resolves.toBeNull();
     await expect(jazz.forReqUser(asAlice())).rejects.toMatchObject({ code: "no_account" });
     await expect(jazz.withAttribution(asAlice())).rejects.toMatchObject({ code: "no_account" });
+    // createAccountFor needs the user's id, and rejects without one.
+    await expect(jazz.createAccountFor("")).rejects.toThrow(/pass the user's id/);
+    await expect(jazz.createAccountFor(undefined as unknown as string)).rejects.toThrow(
+      /pass the user's id/,
+    );
     // So the guest's link to alice still goes through, and the answer names
     // the guest's account from then on.
     const secret = generateSecret();
