@@ -175,14 +175,26 @@ export function encodeWireClientHello(features = CLIENT_WIRE_FEATURES): Uint8Arr
 }
 
 /**
+ * A server's frames are told apart by their first byte, as the Rust client
+ * does (`CorpusReader::Client` in `crates/jazz/layers/db/src/sync.rs`): 0 is
+ * a `Hello`, 1 an `Error`, anything else a sync message or a part of one
+ * split across frames. A part starts with a marker byte (0xFF, or 0xFE for
+ * the last) and then arbitrary message bytes, so it must not be read as a
+ * postcard tag: `0xFE 0x00` reads as a non-minimal varint.
+ */
+const WIRE_HELLO_TAG = 0;
+const WIRE_ERROR_TAG = 1;
+
+/**
  * Classify a `Hello`. Only the tag and version range are shared across wire
  * versions; the rest of the body is read exactly when the range is this
  * version's, and a foreign-version Hello is left to `decodeServerHello` to
  * report as a version mismatch (SPEC 8 §8.1.1).
  */
 export function isWireHello(frame: Uint8Array): boolean {
+  if (frame[0] !== WIRE_HELLO_TAG) return false;
   const reader = new PostcardReader(frame);
-  if (reader.u64() !== 0) return false;
+  reader.u64();
   const { min, max } = readWireHelloVersionRange(reader);
   if (min === WIRE_PROTOCOL_VERSION && max === WIRE_PROTOCOL_VERSION) {
     readWireHelloBodyAfterRangeExact(reader);
@@ -191,8 +203,9 @@ export function isWireHello(frame: Uint8Array): boolean {
 }
 
 export function isWireError(frame: Uint8Array): boolean {
+  if (frame[0] !== WIRE_ERROR_TAG) return false;
   const reader = new PostcardReader(frame);
-  if (reader.u64() !== 1) return false;
+  reader.u64();
   readWireErrorBodyExact(reader);
   return true;
 }
