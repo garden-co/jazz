@@ -3,7 +3,7 @@ import type { TxId } from "../../src/runtime/client.js";
 import { afterEach, beforeEach, describe, expect, expectTypeOf, it } from "vitest";
 import { schema as s, migration as m } from "../../src/index.js";
 import { computeSchemaHash } from "../../src/dev/catalogue.js";
-import { deploy, startLocalJazzServer } from "../../src/testing/index.js";
+import { deploy, startLocalJazzServer, startTestJazz } from "../../src/testing/index.js";
 import { createDb } from "../../src/runtime/default-create-db.js";
 import { localAccountConfig } from "../../src/runtime/testing/account-fixtures.js";
 import { appMigrations } from "../../src/testing/client-migrations.js";
@@ -24,17 +24,14 @@ const permissions = s.definePermissions(app, ({ policy }) => {
 describe("TS Query API history", () => {
   let db: Db;
   let subscriptions: (() => void)[];
-  let server: Awaited<ReturnType<typeof startLocalJazzServer>>;
+  let server: Awaited<ReturnType<typeof startTestJazz>>;
 
   beforeEach(async () => {
     subscriptions = [];
-    server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
-    await deploy({
-      serverUrl: server.url,
-      appId: server.appId,
-      adminSecret: server.adminSecret,
-      schema: app,
-      permissions,
+    server = await startTestJazz({
+      app: app,
+      permissions: permissions,
+      coreOptions: { allowLocalFirstAuth: true, inMemory: true },
     });
     db = await createDb({
       ...(await localAccountConfig(server.appId, server.url)),
@@ -739,17 +736,13 @@ describe("TS Query API history schema migrations", () => {
   });
   let db: Db;
   let writer: Db;
-  let server: Awaited<ReturnType<typeof startLocalJazzServer>>;
+  let server: Awaited<ReturnType<typeof startTestJazz>>;
   let id: string;
   let stop: (() => void) | undefined;
 
   beforeEach(async () => {
-    server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
-    const deployment = {
-      serverUrl: server.url,
-      appId: server.appId,
-      adminSecret: server.adminSecret,
-    };
+    const core = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+    const deployment = { serverUrl: core.url, appId: core.appId, adminSecret: core.adminSecret };
     const deployed = await deploy({ ...deployment, schema: v1, permissions: permissionsV1 });
     const migration = m.defineMigration({
       fromHash: deployed.schema.hash,
@@ -765,6 +758,8 @@ describe("TS Query API history schema migrations", () => {
       },
     });
     await deploy({ ...deployment, schema: v2, permissions: permissionsV2, migration });
+    // Clients reach the core through the app's backend, which runs the latest deploy.
+    server = await startTestJazz({ app: v2, permissions: permissionsV2, core });
     // v2 ships the migration, as its generated module would hold it.
     shipMigrations(v2.wasmSchema, await appMigrations(v1, { to: v2, migration }));
     writer = await createDb({
@@ -811,6 +806,7 @@ describe("TS Query API history schema migrations", () => {
       await writer?.shutdown();
     } finally {
       await server?.stop();
+      await server?.core.stop();
     }
   });
 
@@ -874,18 +870,15 @@ describe("TS Query API history schema migrations", () => {
 describe("TS Query API upstream history", () => {
   let writer: Db;
   let reader: Db;
-  let server: Awaited<ReturnType<typeof startLocalJazzServer>>;
+  let server: Awaited<ReturnType<typeof startTestJazz>>;
   let id: string;
   let stop: (() => void) | undefined;
 
   beforeEach(async () => {
-    server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
-    await deploy({
-      serverUrl: server.url,
-      appId: server.appId,
-      adminSecret: server.adminSecret,
-      schema: app,
-      permissions,
+    server = await startTestJazz({
+      app: app,
+      permissions: permissions,
+      coreOptions: { allowLocalFirstAuth: true, inMemory: true },
     });
     writer = await createDb({
       ...(await localAccountConfig(server.appId, server.url)),
@@ -1047,20 +1040,17 @@ describe("TS Query API branch history", () => {
     policy.notes.allowUpdate.always();
     policy.notes.allowDelete.always();
   });
-  let server: Awaited<ReturnType<typeof startLocalJazzServer>>;
+  let server: Awaited<ReturnType<typeof startTestJazz>>;
   let writer: Db;
   let reader: Db;
   let id: string;
   let stop: (() => void) | undefined;
 
   beforeEach(async () => {
-    server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
-    await deploy({
-      serverUrl: server.url,
-      appId: server.appId,
-      adminSecret: server.adminSecret,
-      schema: branches,
+    server = await startTestJazz({
+      app: branches,
       permissions: branchPermissions,
+      coreOptions: { allowLocalFirstAuth: true, inMemory: true },
     });
     writer = await createDb({
       ...(await localAccountConfig(server.appId, server.url)),
@@ -1210,19 +1200,16 @@ describe("TS Query API private draft branch history", () => {
     policy.notes.allowInsert.always();
     policy.notes.allowUpdate.always();
   });
-  let server: Awaited<ReturnType<typeof startLocalJazzServer>>;
+  let server: Awaited<ReturnType<typeof startTestJazz>>;
   let owner: Db;
   let bob: Db;
   let id: string;
 
   beforeEach(async () => {
-    server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
-    await deploy({
-      serverUrl: server.url,
-      appId: server.appId,
-      adminSecret: server.adminSecret,
-      schema: drafts,
+    server = await startTestJazz({
+      app: drafts,
       permissions: draftPermissions,
+      coreOptions: { allowLocalFirstAuth: true, inMemory: true },
     });
     owner = await createDb({
       ...(await localAccountConfig(server.appId, server.url)),
@@ -1312,23 +1299,20 @@ describe("TS Query API branch history with relational read policies", () => {
       policy.notes.allowUpdate.always();
     },
   );
-  let server: Awaited<ReturnType<typeof startLocalJazzServer>>;
+  let server: Awaited<ReturnType<typeof startTestJazz>>;
   let writer: Db;
   let bob: Db;
   let eve: Db;
   let id: string;
 
   beforeEach(async () => {
-    server = await startLocalJazzServer({
-      allowLocalFirstAuth: true,
-      inMemory: true,
-    });
-    await deploy({
-      serverUrl: server.url,
-      appId: server.appId,
-      adminSecret: server.adminSecret,
-      schema: projectsApp,
+    server = await startTestJazz({
+      app: projectsApp,
       permissions: projectPermissions,
+      coreOptions: {
+        allowLocalFirstAuth: true,
+        inMemory: true,
+      },
     });
     writer = await createDb({
       ...(await localAccountConfig(server.appId, server.url)),

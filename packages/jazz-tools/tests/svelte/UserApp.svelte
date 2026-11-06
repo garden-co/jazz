@@ -1,10 +1,12 @@
 <script lang="ts">
-  import type { Readable } from "svelte/store";
+  import type { Snippet } from "svelte";
   import JazzProvider from "../../src/svelte/JazzProvider.svelte";
-  let { user }: { user: Readable<string | null | undefined> } = $props();
+  import AuthStatus from "./AuthStatus.svelte";
+  import type { JazzAuthState } from "../../src/svelte/auth-state.js";
+  let { onAuth, children: privateChildren }: { onAuth: (auth: JazzAuthState) => void; children: Snippet } = $props();
 </script>
-<JazzProvider user={$user} autoAttachDevTools={false}>
-  {#snippet signedOut()}<p>SIGN IN</p>{/snippet}
+<JazzProvider appId="test" initial="signed-out" autoAttachDevTools={false}>
+  {#snippet signedOut()}<p>SIGN IN</p><div hidden><AuthStatus {onAuth} /></div>{/snippet}
   {#snippet loading()}<p>WAIT</p>{/snippet}
-  {#snippet children()}<p>PRIVATE</p>{/snippet}
+  {#snippet children()}{@render privateChildren()}{/snippet}
 </JazzProvider>

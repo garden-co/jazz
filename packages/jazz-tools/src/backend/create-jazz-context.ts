@@ -1,7 +1,14 @@
+import { textAnchorsFrom, type TextAnchors } from "../runtime/text-anchors.js";
 import type { WebSocketConstructor } from "../runtime/native-runtime/websocket.js";
 import { clientScope } from "../runtime/client-scope.js";
 import { accountRegistryUrl } from "../accounts/context.js";
-import { NapiDb } from "jazz-napi";
+import {
+  NapiDb,
+  captureTextAnchor,
+  captureTextRange,
+  resolveTextAnchor,
+  resolveTextRange,
+} from "jazz-napi";
 import type { JWK } from "jose";
 import type { WasmSchema } from "../drivers/types.js";
 import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
@@ -93,6 +100,13 @@ export type BackendContextConfig = Omit<AppContext, "schema" | "driver"> & {
   allowLocalFirstAuth?: boolean;
   /** @internal How the runtime opens its server socket (a backend client's credentialed one). */
   webSocket?: WebSocketConstructor;
+  /**
+   * The id of the published permissions bundle this backend's link is
+   * pinned to (what `deploy()` returned), as createJazz pins its own. The
+   * users it acts for are checked by that bundle's permissions; an unpinned
+   * link can only act as itself.
+   */
+  bundle?: string;
 } & BackendContextSchemaConfig;
 
 type ResolvedBackendContextConfig = BackendContextConfig & {
@@ -122,6 +136,15 @@ interface BackendMutationErrorSink {
 }
 
 class BackendRuntimeSource extends RuntimeSource<DbConfig> {
+  override textAnchors(): TextAnchors {
+    return textAnchorsFrom({
+      captureTextAnchor,
+      captureTextRange,
+      resolveTextAnchor,
+      resolveTextRange,
+    });
+  }
+
   private initializedSchemaJson?: string;
   private runtime?: FlushableRuntime;
   private client?: JazzClient;
@@ -389,6 +412,7 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
       jwt_token: undefined,
       backend_secret: this.config.backendSecret,
       backend_session: this.config.cookieSession,
+      ...(this.config.bundle === undefined ? {} : { bundle: this.config.bundle }),
     });
   }
 
@@ -766,6 +790,7 @@ export class JazzContext {
       {
         appId: this.config.appId,
         accountRegistry: accountRegistryUrl(this.config.serverUrl, this.config.appId),
+        backendSecret: this.config.backendSecret,
         jwksUrl: this.config.jwksUrl,
         jwtPublicKey: this.config.jwtPublicKey,
         jwtIssuer: this.config.jwtIssuer,

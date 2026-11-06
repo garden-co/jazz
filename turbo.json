@@ -49,6 +49,7 @@
         "$TURBO_ROOT$/crates/jazz-napi/scripts/**",
         "$TURBO_ROOT$/crates/jazz-napi/src/**/*.rs",
         "$TURBO_ROOT$/crates/jazz/**",
+        "$TURBO_ROOT$/crates/jazz-text/**",
         "$TURBO_ROOT$/crates/jazz-compression/**",
         "$TURBO_ROOT$/vendor/ruzstd/**",
         "$TURBO_ROOT$/crates/jazz-native-transport/**",
@@ -65,6 +66,9 @@
         "$TURBO_ROOT$/turbo.json"
       ],
       "passThroughEnv": [
+        "CARGO_TARGET_DIR",
+        "CARGO_BUILD_JOBS",
+        "CARGO_NET_OFFLINE",
         "JAZZ_RN_TEST_BRIDGE",
         "JAZZ_TEST_ARTIFACT_LOCK_PATH",
         "JAZZ_ARTIFACT_BUILD_LEASE",
@@ -84,6 +88,7 @@
         "src/**/*.rs",
         "$TURBO_ROOT$/dev/artifacts/**",
         "$TURBO_ROOT$/crates/jazz/**",
+        "$TURBO_ROOT$/crates/jazz-text/**",
         "$TURBO_ROOT$/crates/jazz-compression/**",
         "$TURBO_ROOT$/vendor/ruzstd/**",
         "$TURBO_ROOT$/crates/wasm-tracing/**",
@@ -97,6 +102,9 @@
         "$TURBO_ROOT$/turbo.json"
       ],
       "passThroughEnv": [
+        "CARGO_TARGET_DIR",
+        "CARGO_BUILD_JOBS",
+        "CARGO_NET_OFFLINE",
         "AR_wasm32-unknown-unknown",
         "AR_wasm32_unknown_unknown",
         "JAZZ_TEST_ARTIFACT_LOCK_PATH",
@@ -114,6 +122,7 @@
         "src/**/*.rs",
         "$TURBO_ROOT$/dev/artifacts/**",
         "$TURBO_ROOT$/crates/jazz/**",
+        "$TURBO_ROOT$/crates/jazz-text/**",
         "$TURBO_ROOT$/crates/jazz-compression/**",
         "$TURBO_ROOT$/vendor/ruzstd/**",
         "$TURBO_ROOT$/crates/wasm-tracing/**",
@@ -127,6 +136,9 @@
         "$TURBO_ROOT$/turbo.json"
       ],
       "passThroughEnv": [
+        "CARGO_TARGET_DIR",
+        "CARGO_BUILD_JOBS",
+        "CARGO_NET_OFFLINE",
         "AR_wasm32-unknown-unknown",
         "AR_wasm32_unknown_unknown",
         "JAZZ_TEST_ARTIFACT_LOCK_PATH",
@@ -167,6 +179,7 @@
       "inputs": [
         "package.json",
         "$TURBO_ROOT$/crates/jazz/**",
+        "$TURBO_ROOT$/crates/jazz-text/**",
         "$TURBO_ROOT$/crates/jazz-cli/**",
         "$TURBO_ROOT$/crates/jazz-compression/**",
         "$TURBO_ROOT$/vendor/ruzstd/**",

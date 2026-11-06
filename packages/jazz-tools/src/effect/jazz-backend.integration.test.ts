@@ -5,7 +5,12 @@ import { describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
 import { resolveSchemaSource } from "../schema-source.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
-import { deploy, startLocalJazzServer, startTestJwtIssuer } from "../testing/index.js";
+import {
+  deploy,
+  startLocalJazzServer,
+  startTestJazz,
+  startTestJwtIssuer,
+} from "../testing/index.js";
 import { Jazz, JazzBackend, JazzWriteRejected } from "./backend/index.js";
 
 const app = s.defineApp(
@@ -49,18 +54,25 @@ describe("JazzBackend Effect layer", () => {
       jwtIssuer: issuer.issuer,
       jwtAudience: issuer.audience,
     };
-    const server = await startLocalJazzServer({ appId, allowLocalFirstAuth: true, ...auth });
+    // The core verifies no user tokens: the backend does, and Effect clients
+    // sync as guests through the app's backend.
+    const server = await startTestJazz({
+      app,
+      permissions,
+      coreOptions: { appId, allowLocalFirstAuth: true },
+    });
     try {
-      await deploy({
-        serverUrl: server.url,
+      const { bundle } = await deploy({
+        serverUrl: server.core.url,
         appId,
         adminSecret: server.adminSecret,
         schema: resolveSchemaSource(app),
         permissions,
       });
       const backendLayer = JazzBackend.layer({
+        bundle,
         appId,
-        serverUrl: server.url,
+        serverUrl: server.core.url,
         app,
         permissions,
         ...auth,
@@ -126,9 +138,9 @@ describe("JazzBackend Effect layer", () => {
       jwtIssuer: issuer.issuer,
       jwtAudience: issuer.audience,
     };
-    const server = await startLocalJazzServer({ appId, ...auth });
+    const server = await startLocalJazzServer({ appId });
     try {
-      await deploy({
+      const { bundle } = await deploy({
         serverUrl: server.url,
         appId,
         adminSecret: server.adminSecret,
@@ -136,6 +148,7 @@ describe("JazzBackend Effect layer", () => {
         permissions,
       });
       const backendLayer = JazzBackend.layer({
+        bundle,
         appId,
         serverUrl: server.url,
         app,

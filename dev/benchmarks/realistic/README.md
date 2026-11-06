@@ -70,7 +70,7 @@ This launches:
 
 - a Vite dev server rooted at `packages/jazz-tools`
 - a headless Chromium with CDP enabled
-- a real `JazzServer` plus `TestJwtIssuer` from `jazz-napi`
+- a real `JazzServer` from `jazz-napi` (the server-backed scenarios are not supported yet: a core admits only its app's backend, and `main()` refuses to start)
 
 It captures both main-thread and dedicated-worker CPU profiles to `/tmp/jazz-browser-profiles`
 by default, then prints the hottest self-time frames for each scenario.

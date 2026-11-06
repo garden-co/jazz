@@ -2,7 +2,7 @@
  * Browser tests for the world-tour Jazz + Vue integration.
  *
  * Mounts small Vue components inside a JazzClientProvider against a Jazz client
- * connected to the per-suite local Jazz server (see global-setup.ts), then
+ * connected to the app's backend (Jazz in the test server, see jazz.server.ts), then
  * exercises the schema through the public composables (useDb, useAll,
  * useSession).
  *
@@ -15,7 +15,7 @@
  * Inserts use `scope.tag(...)` to stamp every row, so even though all tests
  * share one server, every assertion only sees its own test's data.
  */
-import { afterEach, describe, expect, inject, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { type App, createApp, defineComponent, h } from "vue";
 import {
   type JazzClient,
@@ -27,9 +27,7 @@ import {
   useSession,
 } from "jazz-tools/vue";
 import { app } from "../../schema.js";
-import { APP_ID } from "./test-constants.js";
-
-const SERVER_URL = inject("worldTourJazzServerUrl");
+import { APP_ID, SERVER_URL } from "./test-constants.js";
 
 interface Scope {
   marker: string;

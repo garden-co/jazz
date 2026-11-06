@@ -4,7 +4,7 @@ import { definePermissions } from "../permissions/index.js";
 import { createDb } from "./default-create-db.js";
 import type { Db } from "./db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
-import { deploy, startLocalJazzServer } from "../testing/index.js";
+import { startTestJazz } from "../testing/index.js";
 
 it.each(["standalone", "transaction"])(
   "can delete a restored plaintext row (%s)",
@@ -16,16 +16,13 @@ it.each(["standalone", "transaction"])(
       policy.notes.allowUpdate.always();
       policy.notes.allowDelete.always();
     });
-    const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+    const server = await startTestJazz({
+      app: app,
+      permissions: permissions,
+      coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+    });
     let db: Db | undefined;
     try {
-      await deploy({
-        serverUrl: server.url,
-        appId: server.appId,
-        adminSecret: server.adminSecret,
-        schema: app,
-        permissions,
-      });
       db = await createDb(await localAccountConfig(server.appId, server.url));
       const note = await db.insert(app.notes, { title: "Original" }).wait({ tier: "global" });
       await db.delete(app.notes, note.id).wait({ tier: "global" });

@@ -1,16 +1,17 @@
-import { JazzProvider, backendAuth, useJazzAuth, useDb } from "./index.js";
+import { JazzProvider, useJazzAuth, useDb } from "./index.js";
 function Data() {
   useDb();
-  const { logout, retry, status } = useJazzAuth();
+  const { logout, retry, reauthenticate, user, status } = useJazzAuth();
   void logout;
   void retry;
+  void reauthenticate;
+  void user?.claims;
   return status;
 }
 export const expoApplication = (
   <JazzProvider
     appId="expo-app"
     serverUrl="https://sync.example.test"
-    auth={backendAuth({ key: null, logout: async () => {} })}
     signedOut={null}
     error={({ retry }) => {
       void retry;
@@ -20,9 +21,8 @@ export const expoApplication = (
     <Data />
   </JazzProvider>
 );
-declare const signedInUser: string | null | undefined;
-export const nativeApplicationFollowingUser = (
-  <JazzProvider serverUrl="https://app.example.test/jazz" user={signedInUser} signedOut={null}>
+export const expoApplicationWithoutGuests = (
+  <JazzProvider serverUrl="https://app.example.test/jazz" initial="signed-out" signedOut={null}>
     <Data />
   </JazzProvider>
 );
