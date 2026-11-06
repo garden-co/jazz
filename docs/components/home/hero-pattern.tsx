@@ -4,9 +4,9 @@ import { useEffect, useMemo, useState } from "react";
 import { useTheme } from "next-themes";
 import { StippleCanvas, heroPattern } from "@garden-co/design/stipple";
 
-/** The logo blue, and the mint the palette uses per theme (--color-jazz-mint). */
+/** The logo blue, and a mint per theme (dark matches --color-jazz-mint). */
 const BLUE = "#146aff";
-const MINT = { light: "#0e7550", dark: "#62f5c0" };
+const MINT = { light: "#00c17b", dark: "#62f5c0" };
 
 /**
  * The hero stipple in the logo blue and the theme's mint. The canvas paints
