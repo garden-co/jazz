@@ -1281,6 +1281,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         new Error(`Jazz account ${operation} failed (${response.status}): ${text}`),
         {
           status: response.status,
+          code: text.trim(),
         },
       );
     }
@@ -1320,7 +1321,11 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       const { account } = await adminAccounts("resolve", { identity: identity(userId) });
       return remember(userId, account);
     } catch (error) {
-      if ((error as { status?: number }).status === 404) return null;
+      // Only the core's own "no account for this identity" answer: any other
+      // 404 (an unknown app, a missing route) is a server error, not a user
+      // without an account.
+      const { status, code } = error as { status?: number; code?: string };
+      if (status === 404 && code === "identity_not_assigned") return null;
       throw error;
     }
   }

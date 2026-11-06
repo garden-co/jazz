@@ -425,6 +425,35 @@ it("a refused check leaves a remembered user's claims refresh to the next check"
   await t.session.close();
 });
 
+it("signs a remembered user in again, once, when the core lost their account", async () => {
+  // Reopened from this device's memory, but the core no longer holds the
+  // account (a reset dev store, a new core): sync admission refuses it.
+  const t = await setup(user("alice"));
+  t.signIn(user("alice"));
+  t.probe.mockResolvedValue({ ...user("alice").identity, hasAccount: false });
+  t.watch.authRefused();
+  await settle();
+  // Signing in again gives her a new account; reconnecting would only be refused.
+  expect(t.loginWithBackend).toHaveBeenCalledOnce();
+  expect(t.reconnect).not.toHaveBeenCalled();
+  // A backend that keeps saying no account doesn't make it sign in again and again.
+  t.watch.authRefused();
+  await settle();
+  expect(t.loginWithBackend).toHaveBeenCalledOnce();
+  // Once the backend says she has one, a later loss signs her in again.
+  t.watch.connected();
+  t.probe.mockResolvedValue({ ...user("alice").identity, hasAccount: true });
+  t.focus();
+  await settle();
+  t.probe.mockResolvedValue({ ...user("alice").identity, hasAccount: false });
+  t.watch.authRefused();
+  await settle();
+  expect(t.loginWithBackend).toHaveBeenCalledTimes(2);
+  expect(t.session.getSnapshot().status).toBe("ready");
+  t.watch.stop();
+  await t.session.close();
+});
+
 it("stops only once the backend keeps answering 404, asking again with backoff", async () => {
   const t = await setup(undefined, { noBackend: true });
   await settle();
