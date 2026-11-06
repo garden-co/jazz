@@ -191,7 +191,10 @@ pub async fn browser_bench_close() -> Result<JsValue, JsValue> {
     };
     let start = Instant::now();
     if let Some(store) = &store {
-        store.flush().await?;
+        store
+            .flush()
+            .await
+            .map_err(|error| JsValue::from_str(&error))?;
     }
     let flush_ms = ms(start);
     db.close().await.map_err(err)?;

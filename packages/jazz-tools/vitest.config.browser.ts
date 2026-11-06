@@ -48,6 +48,35 @@ import {
   shouldExcludeRealisticBrowserBench,
 } from "./src/browser-benchmark-mode.js";
 
+type QuotaPage = {
+  context(): { newCDPSession(page: unknown): Promise<QuotaCdpSession> };
+};
+type QuotaCdpSession = {
+  send(method: string, params: object): Promise<unknown>;
+  detach(): Promise<void>;
+};
+// The override lasts as long as the CDP session that set it.
+const quotaSessions = new Map<string, QuotaCdpSession>();
+async function overrideStorageQuota(
+  page: unknown,
+  origin: string,
+  quotaSize: number | null,
+): Promise<void> {
+  let session = quotaSessions.get(origin);
+  if (!session) {
+    session = await (page as QuotaPage).context().newCDPSession(page);
+    quotaSessions.set(origin, session);
+  }
+  await session.send(
+    "Storage.overrideQuotaForOrigin",
+    quotaSize === null ? { origin } : { origin, quotaSize },
+  );
+  if (quotaSize === null) {
+    quotaSessions.delete(origin);
+    await session.detach();
+  }
+}
+
 const realisticBrowserScenarios = process.env.JAZZ_REALISTIC_BROWSER_SCENARIOS ?? "";
 const realisticBrowserRunId = process.env.JAZZ_REALISTIC_BROWSER_RUN_ID ?? "";
 const realisticBrowserLimitOverrides =
@@ -160,6 +189,10 @@ export default defineConfig({
           return JSON.parse(readFileSync(resolve(directory, file), "utf8"));
         },
         workerFaultBundleUrl: async () => workerFaultBundle.url(),
+        // Chromium only: caps (or, with `null`, restores) the storage quota of
+        // `origin` through CDP, so a test can run IndexedDB out of space.
+        overrideStorageQuota: async ({ page }, origin: string, quotaSize: number | null) =>
+          overrideStorageQuota(page, origin, quotaSize),
         recoverPendingIndexedDbWrites: async ({ context, page }, config) =>
           recoverPendingIndexedDbWrites(context, page, config),
         writeBrowserStorageCorpus: async (_context, records: Record<string, string>) => {

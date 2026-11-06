@@ -33,6 +33,8 @@ use wasm_bindgen_futures::future_to_promise;
 mod browser;
 #[cfg(all(target_arch = "wasm32", feature = "browser-bench"))]
 pub mod browser_bench;
+#[cfg(target_arch = "wasm32")]
+mod idb_vfs;
 mod identity;
 mod text;
 
@@ -411,21 +413,44 @@ struct Host {
     mutation_errors: RefCell<Option<js_sys::Function>>,
     #[cfg(target_arch = "wasm32")]
     store: RefCell<Option<browser::Store>>,
+    /// Persisting the store, as asked for after ticks.
+    #[cfg(target_arch = "wasm32")]
+    persist: Persist,
 }
 
-impl Host {
-    /// Resolve once every commit so far is in the browser store's backing
-    /// storage (a no-op without one).
-    async fn flush(&self) -> Result<(), JsValue> {
-        #[cfg(target_arch = "wasm32")]
-        {
-            let store = self.store.borrow().clone();
-            if let Some(store) = store {
-                store.flush().await?;
-            }
-        }
-        Ok(())
-    }
+/// The store's persists: whether one runs, and how the last one failed.
+#[cfg(target_arch = "wasm32")]
+#[derive(Default)]
+struct Persist {
+    /// A background persist is running.
+    running: std::cell::Cell<bool>,
+    /// Another was asked for while it ran.
+    again: std::cell::Cell<bool>,
+    /// Why the last persist failed, until one succeeds.
+    failure: RefCell<Option<String>>,
+    /// While failed: no background persist before this time (ms), and the
+    /// delay before the next one after that fails too.
+    retry_at: std::cell::Cell<f64>,
+    retry_delay: std::cell::Cell<f64>,
+    /// A retry timer is set.
+    retry_timer: std::cell::Cell<bool>,
+    /// Told `(message)` when persisting starts failing and `(null)` when it
+    /// recovers.
+    listener: RefCell<Option<js_sys::Function>>,
+}
+
+/// The first and the longest wait before persisting again after a failed
+/// persist (ms).
+#[cfg(target_arch = "wasm32")]
+const PERSIST_RETRY_MS: (f64, f64) = (1_000.0, 10_000.0);
+
+/// The error a persist failure is reported as, with code `storage`.
+#[cfg(target_arch = "wasm32")]
+fn storage_error(message: &str) -> JsValue {
+    core_error_to_js(&Error::new(
+        jazz::db::ErrorCode::Storage,
+        format!("browser storage: {message}"),
+    ))
 }
 
 /// A bound database (or one of its schema views) and the browser hooks.
@@ -436,6 +461,120 @@ struct WasmDbInner {
 }
 
 impl WasmDbInner {
+    /// Resolve once every commit so far is in the browser store's backing
+    /// storage (at once without one), then send the acks the database held
+    /// for them; fail, with code `storage`, if they could not be written.
+    async fn flush(&self) -> Result<(), JsValue> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let store = self.host.store.borrow().clone();
+            if let Some(store) = store {
+                let db = &self.binding.db;
+                let point = db.persist_point();
+                let flushed = store.flush().await;
+                let persist = &self.host.persist;
+                match flushed {
+                    Ok(()) => {
+                        persist.retry_delay.set(0.0);
+                        if persist.failure.borrow_mut().take().is_some() {
+                            self.tell_storage_failure(None);
+                        }
+                        if point.is_some_and(|point| db.persisted(point)) {
+                            self.schedule_tick();
+                        }
+                    }
+                    Err(message) => {
+                        let delay = (persist.retry_delay.get() * 2.0)
+                            .clamp(PERSIST_RETRY_MS.0, PERSIST_RETRY_MS.1);
+                        persist.retry_delay.set(delay);
+                        persist.retry_at.set(js_sys::Date::now() + delay);
+                        let changed = persist.failure.borrow().as_deref() != Some(&message);
+                        if changed {
+                            *persist.failure.borrow_mut() = Some(message.clone());
+                            self.tell_storage_failure(Some(&message));
+                        }
+                        self.retry_persist_later(delay);
+                        return Err(storage_error(&message));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Persist in the background while the database holds acks for
+    /// commits the store may not have written yet: after each tick, so a
+    /// tab hears its commit is `Local` once IndexedDB holds it. After a
+    /// failed persist, the next waits for its backoff.
+    #[cfg(target_arch = "wasm32")]
+    fn request_persist(&self) {
+        let persist = &self.host.persist;
+        if self.host.store.borrow().is_none() || self.binding.db.persist_point().is_none() {
+            return;
+        }
+        if persist.running.get() {
+            persist.again.set(true);
+            return;
+        }
+        let wait = persist.retry_at.get() - js_sys::Date::now();
+        if persist.failure.borrow().is_some() && wait > 0.0 {
+            self.retry_persist_later(wait);
+            return;
+        }
+        persist.running.set(true);
+        let inner = self.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            loop {
+                inner.host.persist.again.set(false);
+                let persisted = inner.flush().await;
+                if persisted.is_err() || !inner.host.persist.again.get() {
+                    break;
+                }
+            }
+            inner.host.persist.running.set(false);
+            // Asked for meanwhile, after a failure: wait for the backoff.
+            if inner.host.persist.again.get() {
+                inner.request_persist();
+            }
+        });
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn retry_persist_later(&self, delay: f64) {
+        let persist = &self.host.persist;
+        if persist.retry_timer.replace(true) {
+            return;
+        }
+        let inner = self.clone();
+        let retry = Closure::once_into_js(move || {
+            inner.host.persist.retry_timer.set(false);
+            inner.request_persist();
+        });
+        let set_timeout = js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("setTimeout"))
+            .ok()
+            .and_then(|f| f.dyn_into::<js_sys::Function>().ok());
+        if let Some(set_timeout) = set_timeout {
+            let _ = set_timeout.call2(&JsValue::NULL, &retry, &JsValue::from_f64(delay));
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn tell_storage_failure(&self, message: Option<&str>) {
+        let listener = self.host.persist.listener.borrow().clone();
+        if let Some(listener) = listener {
+            let argument = message.map_or(JsValue::NULL, JsValue::from_str);
+            let _ = listener.call1(&JsValue::NULL, &argument);
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn schedule_tick(&self) {
+        let scheduler = self.host.tick_scheduler.borrow().clone();
+        if let Some(scheduler) = scheduler {
+            let _ = scheduler.call1(&JsValue::NULL, &JsValue::from_str("immediate"));
+        }
+    }
+
     fn new(binding: Binding) -> Self {
         let host = Rc::new(Host::default());
         let scheduler = Rc::clone(&host);
@@ -1208,6 +1347,9 @@ impl WasmDb {
         )
         .map_err(|error| host_error(binding_host::HostError::Argument(error)))?;
         let (db, store) = browser::open(&spec, db_config).await?;
+        if store.defers_writes() {
+            db.defer_durability_acks();
+        }
         let owner = Self::runtime_owner(Binding::new(db, identity, trusted));
         *owner.open_inner()?.host.store.borrow_mut() = Some(store);
         Ok(owner)
@@ -1235,7 +1377,7 @@ impl WasmDb {
             Err(error) => return js_sys::Promise::reject(&error),
         };
         future_to_promise(async move {
-            inner.host.flush().await?;
+            inner.flush().await?;
             Ok(JsValue::UNDEFINED)
         })
     }
@@ -1378,6 +1520,25 @@ impl WasmDb {
         }
     }
 
+    /// Register `callback(message)`, called when writing the browser store
+    /// to its backing storage starts failing (storage full, most often)
+    /// and `callback(null)` once a write succeeds again. Meanwhile commits
+    /// stay in memory, tabs do not hear their writes are `Local`, and
+    /// `flush` fails with code `storage`. Called at once if failing now.
+    #[wasm_bindgen(js_name = onStorageFailure)]
+    pub fn on_storage_failure(&self, callback: js_sys::Function) {
+        #[cfg(target_arch = "wasm32")]
+        if let Ok(inner) = self.open_inner() {
+            let failure = inner.host.persist.failure.borrow().clone();
+            *inner.host.persist.listener.borrow_mut() = Some(callback);
+            if let Some(message) = failure {
+                inner.tell_storage_failure(Some(&message));
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = callback;
+    }
+
     /// Register a callback for rejected writes that no active wait consumed.
     #[wasm_bindgen(js_name = onMutationError)]
     pub fn on_mutation_error(&self, callback: js_sys::Function) {
@@ -1460,7 +1621,7 @@ impl WasmDb {
             let wait = async move {
                 match durability_tier_from_str(&tier)? {
                     DurabilityTier::None => {}
-                    DurabilityTier::Local => inner.host.flush().await?,
+                    DurabilityTier::Local => inner.flush().await?,
                     DurabilityTier::Global => inner
                         .binding
                         .wait_for_pending_writes_global()
@@ -1488,8 +1649,15 @@ impl WasmDb {
             Ok(binding) => binding,
             Err(error) => return js_sys::Promise::reject(&error),
         };
+        #[cfg(target_arch = "wasm32")]
+        let inner = self.open_inner().ok();
         future_to_promise(async move {
             binding.tick().await.map_err(host_error)?;
+            // The tick may have held acks for commits it applied.
+            #[cfg(target_arch = "wasm32")]
+            if let Some(inner) = inner {
+                inner.request_persist();
+            }
             Ok(JsValue::UNDEFINED)
         })
     }
@@ -1731,7 +1899,7 @@ impl WasmDb {
         future_to_promise(async move {
             if owns_runtime {
                 inner.binding.close().await.map_err(host_error)?;
-                inner.host.flush().await?;
+                inner.flush().await?;
                 #[cfg(target_arch = "wasm32")]
                 inner.host.store.borrow_mut().take();
             }
