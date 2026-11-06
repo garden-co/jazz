@@ -320,6 +320,10 @@ thin client rejects with a `ThinRemoteError` whose `code` is `WriteRejected` and
 starts with the reason, such as `authorization_denied: …`. Use
 `db.onMutationError(...)` as a fallback for rejections without an active wait;
 see [Handling mutation errors](/docs/writing/writing-data#handling-mutation-errors).
+A backend connected to Jazz Cloud doesn't refuse a session's write up front either: the cloud
+decides it, and a denial arrives through `wait(...)` with the same `permission_denied` code. Only a
+store with no authority above it, such as a client with `serverUrl: null` or a backend on its own
+storage, refuses a denied write at once.
 An empty query result can also mean that read permissions filtered out rows.
 
 As the app developer, check your own configuration:

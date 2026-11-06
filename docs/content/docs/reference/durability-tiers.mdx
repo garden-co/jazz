@@ -52,11 +52,11 @@ have a server, and `"local-first"` when they don't.
 <Callout type="warn">
   In your backend, return only `"remote"` reads (the default) to users. The core decides whether a
   user's write is allowed, so a session's write sits pending until the core answers. A
-  `"local-first"` read in that session already shows the pending version, and judges the row by the
-  user's read permissions as they apply to the edited version. A user who changes a column their
-  read permission checks, on a row they can't read, could see that row's other columns through such
-  a read until the core refuses the write. A `"remote"` read shows only accepted rows, under their
-  own permissions.
+  `"local-first"` read in that session, or a read inside a transaction, already shows the pending
+  version, and judges the row by the user's read permissions as they apply to the edited version. A
+  user who changes a column their read permission checks, on a row they can't read, could see that
+  row's other columns through such a read until the core refuses the write. A `"remote"` read shows
+  only accepted rows, under their own permissions.
 </Callout>
 
 Remote reads and your own writes:
