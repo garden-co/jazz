@@ -4,6 +4,7 @@ import {
   attachJazzSessionConsumer,
   createJazzSessionOwner,
   replaceJazzSessionClient,
+  switchJazzSessionUser,
 } from "./state.js";
 import type { JWTAuth } from "../accounts/enrollment.js";
 import { GracefulShutdownSyncError } from "../runtime/graceful-shutdown-error.js";
@@ -158,6 +159,30 @@ describe("Jazz session lifecycle", () => {
       expect.stringMatching(/2 write\(s\) the server refused.*stay on this device/),
       failure.cause,
     );
+    warned.mockRestore();
+    await session.close();
+  });
+  // Another user signed in through the app (no sign-out first): the server
+  // refuses the first user's socket, which carries the next user's cookie,
+  // so their client can't finish syncing. The switch signs them out anyway.
+  it("switches to the next user past a client the server refuses", async () => {
+    const { session, clients, enrollment, old, next } = await setup();
+    const client = clients[0]! as (typeof clients)[0] & { db?: unknown };
+    client.db = {
+      getAuthState: () => ({ error: "missing" }),
+      getSyncStatus: () => ({ pendingUploads: 0 }),
+      getConfig: () => ({ driver: { type: "persistent" } }),
+    };
+    client.shutdown.mockRejectedValueOnce(
+      new GracefulShutdownSyncError(new Error("session missing: not signed in")),
+    );
+    const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await expect(switchJazzSessionUser(session, old)).resolves.toBe(true);
+    expect(enrollment.logout).toHaveBeenCalled();
+    expect(session.getSnapshot()).toMatchObject({ status: "ready", account: next });
+    expect(session.getSnapshot().error).toBeUndefined();
+    expect(clients.at(-1)!.account).toBe(next);
+    expect(warned).not.toHaveBeenCalled();
     warned.mockRestore();
     await session.close();
   });
