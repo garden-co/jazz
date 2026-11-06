@@ -131,6 +131,42 @@ test("payload resolution follows pnpm links, rejects version mismatch, and previ
   }
 });
 
+test("payload resolution accepts the release candidate's own asset URL and nothing else", () => {
+  const root = mkdtempSync(join(tmpdir(), "rn-resolve-rc-test-"));
+  try {
+    const wrapper = join(root, "store/jazz-rn");
+    const payload = join(root, "store/ios");
+    const version = "2.0.0-alpha.60-rc.3";
+    const release = `https://github.com/garden-co/jazz/releases/download/v${version}`;
+    const metadata = { name: "jazz-rn", version, dependencies: {} };
+    json(join(payload, "package.json"), { name: "jazz-rn-ios", version });
+    json(join(payload, "ios/jazz-native-relay.manifest.json"), { sourceRevision: "a".repeat(40) });
+    mkdirSync(join(wrapper, "node_modules"), { recursive: true });
+    symlinkSync(payload, join(wrapper, "node_modules/jazz-rn-ios"));
+    write(
+      join(wrapper, "scripts/resolve-payload.cjs"),
+      readFileSync(join(repository, "crates/jazz-rn/scripts/resolve-payload.cjs")),
+    );
+    const command = [join(wrapper, "scripts/resolve-payload.cjs"), "ios"];
+    const declare = (spec) => {
+      metadata.dependencies["jazz-rn-ios"] = spec;
+      json(join(wrapper, "package.json"), metadata);
+    };
+    declare(`${release}/jazz-rn-ios-${version}.tgz`);
+    assert.equal(execFileSync("node", command, { encoding: "utf8" }), payload);
+    for (const wrong of [
+      `${release}/jazz-rn-android-${version}.tgz`,
+      `https://github.com/garden-co/jazz/releases/download/v2.0.0-alpha.60-rc.2/jazz-rn-ios-${version}.tgz`,
+      `https://example.com/releases/download/v${version}/jazz-rn-ios-${version}.tgz`,
+    ]) {
+      declare(wrong);
+      assert.notEqual(spawnSync("node", command).status, 0, wrong);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("preview rewrites both ordinary dependencies to the exact source URLs", () => {
   const root = mkdtempSync(join(tmpdir(), "rn-preview-test-"));
   try {
