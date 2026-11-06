@@ -61,10 +61,11 @@ Alpha.60 changes how Jazz runs, so an alpha.59 app needs more than a version bum
   [Custom auth](/docs/setup/auth/custom)).
 - **Clients and backends upgrade together.** Alpha.59 clients can't sync with an alpha.60 backend.
   Ship the new client in the same release as the new backend. A client left on alpha.59 looks
-  healthy: its session reports ready and local writes succeed, but nothing syncs, nothing is
-  logged and it doesn't retry. The only sign is a rejected query promise, starting with the first
-  query that waits for the server, with the error "this Jazz client speaks wire protocol 3..=3,
-  older than this server's 6".
+  healthy: its session reports ready and local writes succeed, but nothing syncs and nothing is
+  logged. Against a `createJazz` backend, queries and waits that need the server never settle (or,
+  with `basePath: "/"`, reject with a bare WebSocket error event), and a reloaded alpha.59 tab never
+  signs in. Against Jazz Cloud, the first query that waits for the server rejects with "this Jazz
+  client speaks wire protocol 3..=3, older than this server's 6".
 - **The storage engine is now SQLite.** Alpha.59's data directory doesn't open in alpha.60.
 
 ### Data on Jazz Cloud
@@ -79,12 +80,38 @@ account.
 Move a self-hosted data directory with the same import tool Jazz Cloud uses. You need only the two
 downloads below, no Node or Rust toolchain, and nothing writes to your alpha.59 directory.
 
-1. **Stop the alpha.59 server.**
-2. **Download the tools.** Get `jazz-alpha59-alpha60-export-<platform>` and `jazz-alpha59-alpha60-import-<platform>`
-   (`linux-x64`, `linux-arm64` or `darwin-arm64`) from the
-   [v2.0.0-alpha.60 release](https://github.com/garden-co/jazz/releases/tag/v2.0.0-alpha.60), and
-   check them against `jazz-alpha59-alpha60-export.sha256` and `jazz-alpha59-alpha60-import.sha256`
-   from the same release, and make them executable.
+Before you start:
+
+- **Plan the downtime.** It runs from stopping the alpha.59 server until the new backend and the new
+  client bundle are both live, since old clients can't sync with the new backend. The tools
+  themselves take seconds for a small app.
+- **Let clients finish syncing.** Writes still queued in an alpha.59 browser, such as ones made
+  offline, are not carried over: alpha.60 opens a new local database and the old one is left unused.
+- **Make the code changes first** (the list above), so the new backend can start as soon as the
+  import is verified.
+- **Run `verify` before the new backend's first start.** That first start moves large values out of
+  `jazz.sqlite` into `blobs/`, and `verify` can't read the directory after that.
+
+Then:
+
+1. **Stop the alpha.59 server.** It drains open connections first, for up to 30 seconds by default
+   (`--shutdown-timeout-secs`).
+2. **Download the tools.** Get `jazz-alpha59-alpha60-export-<platform>` and
+   `jazz-alpha59-alpha60-import-<platform>` (`linux-x64`, `linux-arm64` or `darwin-arm64`) and the
+   two checksum files from the
+   [v2.0.0-alpha.60 release](https://github.com/garden-co/jazz/releases/tag/v2.0.0-alpha.60). Each
+   checksum file lists every platform, so check with `--ignore-missing`, then rename the tools to
+   drop the platform suffix and make them executable:
+
+   ```bash title="Terminal"
+   sha256sum -c --ignore-missing jazz-alpha59-alpha60-export.sha256 jazz-alpha59-alpha60-import.sha256
+   mv jazz-alpha59-alpha60-export-linux-x64 jazz-alpha59-alpha60-export
+   mv jazz-alpha59-alpha60-import-linux-x64 jazz-alpha59-alpha60-import
+   chmod +x jazz-alpha59-alpha60-export jazz-alpha59-alpha60-import
+   ```
+
+   On macOS, use `shasum -a 256 -c --ignore-missing` and the `darwin-arm64` names.
+
 3. **Export** the data with alpha.59's own code. `--work` is an empty scratch directory: the
    exporter reads a private copy of your data there.
 
@@ -100,8 +127,8 @@ downloads below, no Node or Rust toolchain, and nothing writes to your alpha.59 
    ./jazz-alpha59-alpha60-import verify --dump app.dump --data-dir ./data-new --app-id <appId>
    ```
 
-5. **Start your new backend** with `sqlite({ path: "./data-new" })`. Keep `./data` until you're
-   happy with the result.
+5. **Start your new backend** with `sqlite({ path: "./data-new" })`, then deploy the new client.
+   Keep `./data` and the dump until you're happy with the result.
 
 `--app-id` is your app's ID exactly as before, case included: the import uses it to link each
 returning user's old sign-in to their account, as `jazz:backend` with their old `sub` (as [`fromJWT()`](/docs/setup/auth/custom) returns it), and to keep

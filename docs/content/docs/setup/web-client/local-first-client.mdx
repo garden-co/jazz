@@ -36,9 +36,11 @@ after the first load, with live queries carried over:
 
     const jazz = await createJazzClient({ client: () => import("jazz-tools/local-first") });
     authClient.onSessionChange(() => void jazz.reauthenticate());
-    const db = jazz.getSnapshot().client!.db;
+    // The client swaps to local-first in the background and closes the old db,
+    // so read db from the snapshot each time instead of keeping it.
+    const db = () => jazz.getSnapshot().client!.db;
 
-    const todos = await db.all(app.todos);
+    const todos = await db().all(app.todos);
     ```
 
   </Tab>

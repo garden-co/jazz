@@ -138,6 +138,23 @@ holder of the app's admin secret. Keep it server-side, like a database password.
 Jazz always runs inside a backend like this one. There is no separate Jazz server to install or
 run.
 
+## Coming from the alpha.59 server
+
+Alpha.59 ran Jazz as its own process (`jazz-tools server`), and clients connected to its port
+(`:1625/` by default). In alpha.60 that process is gone:
+
+- **Clients sync with your backend under `/jazz`**, on your app's own origin, instead of with a
+  separate Jazz server.
+- **`--jwks-url` and the other JWT flags move into `authenticate`.** Pass the same values to
+  [`fromJWT()`](/docs/setup/auth/custom#tokens-from-your-identity-provider).
+- **`jazz-tools deploy` is gone.** Your backend applies its schema, migrations and permissions
+  each time it starts.
+- **Move the data directory with the import tool** (see
+  [Upgrading from alpha.59](/docs/operating/backups-and-upgrades#self-hosted-alpha59-servers)).
+  The import keeps large values inside `jazz.sqlite`. On its first start your backend moves them
+  to `blobs/`, or wherever `blobs` points, without logging anything. Run the import's `verify`
+  before that first start.
+
 ## Coming next
 
 - systemd recipe
