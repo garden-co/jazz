@@ -6786,11 +6786,15 @@ impl Inner {
     /// and its waits report the authority's refusal: the replica may lack
     /// the rows that grant access (a fresh process has loaded none).
     /// Until the authority answers, the staged version is judged by the
-    /// read policy like any other: a session's local read of a hidden row
-    /// it patched a policy column of can show the row's other cells. A
-    /// `Remote` read leaves pending versions out (it is settled-only on a
-    /// replica), so it shows only accepted rows under their own policy;
-    /// that is a backend's default read.
+    /// read policy like any other: a patch of a column the policy reads,
+    /// on a hidden row, can show the row's other cells to a read that
+    /// includes pending versions, the writer's or another session's that
+    /// the patch names (`owner = carol`). Those are `LocalFirst` and
+    /// `LocalOnly` reads, and every read inside an open transaction, which
+    /// sees its own staged writes whatever its tier. A `Remote` read
+    /// outside a transaction leaves pending versions out (it is
+    /// settled-only on a replica), so it shows only accepted rows under
+    /// their own policy; that is a backend's default read.
     fn authorize_patch(
         &self,
         table: &Table,
