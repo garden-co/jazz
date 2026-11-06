@@ -386,6 +386,27 @@ const dbSubscriptionSources = new WeakMap<Db, DbSubscriptionSource>();
  * an app or framework calls. Its shutdown, and the internals its own runtime
  * needs to finish uploading, stay with it.
  */
+/** Wait for `done` as `waitForSync` waits: until `timeoutMs`, or until `signal` aborts. */
+function waitWithin(
+  done: Promise<void>,
+  { timeoutMs, signal }: { timeoutMs?: number; signal?: AbortSignal },
+): Promise<void> {
+  validateWriteWaitTimeout(timeoutMs);
+  signal?.throwIfAborted();
+  return new Promise<void>((resolve, reject) => {
+    const timer =
+      timeoutMs === undefined
+        ? undefined
+        : setTimeout(() => reject(new WriteWaitTimeoutError("global", timeoutMs)), timeoutMs);
+    const abort = () => reject(signal!.reason);
+    signal?.addEventListener("abort", abort, { once: true });
+    done.then(resolve, reject).finally(() => {
+      if (timer !== undefined) clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
+    });
+  });
+}
+
 const FORWARDED_TO_SUCCESSOR = [
   "allFromInspectorAttachment",
   "subscribeFromInspectorAttachment",
@@ -2796,6 +2817,16 @@ export class Db {
 
   /** @internal Refresh only through the immutable handle that owns this context. */
   async refreshAccountAuth(account: AccountHandle): Promise<string> {
+    return this.refreshOwnAccountAuth(account);
+  }
+
+  /**
+   * @internal Renew this Db's own runtime's credential. Its account context
+   * calls this rather than {@link refreshAccountAuth}, which after the
+   * local-first upgrade renews the successor: the thin runtime still needs
+   * its own credential to finish uploading.
+   */
+  async refreshOwnAccountAuth(account: AccountHandle): Promise<string> {
     assertAccountConfig(this.config);
     const current = getDbInternalSession(this);
     if (
@@ -2851,6 +2882,11 @@ export class Db {
     return this.mintLocalFirstToken(this._localFirstSecret, audience, ttl);
   }
 
+  /** @internal This Db's own runtime's auth state changes, which never move to a successor. */
+  onOwnAuthChanged(listener: (state: AuthState) => void): () => void {
+    return this.authStateStore.onChange((state) => listener(state));
+  }
+
   onAuthChanged(listener: (state: AuthState) => void): () => void {
     return this.registerMovable((db) =>
       db.authStateStore.onChange((state) => {
@@ -2864,14 +2900,20 @@ export class Db {
    * session upgrades it to the local-first client, so code holding the
    * returned handle keeps hearing from whichever Db does the work.
    */
-  private registerMovable(register: (db: Db) => () => void): () => void {
+  private registerMovable(
+    register: (db: Db) => () => void,
+    // Register again on this Db rather than on its successor: for what this
+    // Db answers itself after the upgrade (its sync status covers the writes
+    // its own runtime is still uploading).
+    reregisterHere = false,
+  ): () => void {
     let detach = register(this);
     let closed = false;
     const entry = {
       move: (next: Db) => {
         if (closed) return;
         detach();
-        detach = next.registerMovable(register);
+        detach = reregisterHere ? register(this) : next.registerMovable(register);
       },
     };
     this.movable.add(entry);
@@ -2932,7 +2974,12 @@ export class Db {
    * @returns an unsubscribe callback
    */
   onSyncStatusChange(listener: (status: SyncStatus) => void): () => void {
-    return this.registerMovable((db) => db.onSyncStatusChangeHere(listener));
+    return this.registerMovable((db) => db.syncStatusChangeRegistration(listener), true);
+  }
+
+  /** How this Db reports sync status changes: its own, or combined with its successor's. */
+  private syncStatusChangeRegistration(listener: (status: SyncStatus) => void): () => void {
+    return this.onSyncStatusChangeHere(listener);
   }
 
   private onSyncStatusChangeHere(listener: (status: SyncStatus) => void): () => void {
@@ -2976,7 +3023,9 @@ export class Db {
     signal?.addEventListener("abort", forward, { once: true });
     // Shutdown ends the wait instead of leaving it parked on a closed runtime.
     const shutdown = () => control.abort(new Error("Db was shut down"));
-    this.shutdownAbort.signal.addEventListener("abort", shutdown, { once: true });
+    this.shutdownAbort.signal.addEventListener("abort", shutdown, {
+      once: true,
+    });
     const timer =
       timeoutMs === undefined
         ? undefined
@@ -3830,7 +3879,11 @@ export class Db {
           onDelta: (delta) => {
             if (opening) {
               opening = false;
-              onDelta({ delta: delta.delta, all: delta.all ?? [], reset: true });
+              onDelta({
+                delta: delta.delta,
+                all: delta.all ?? [],
+                reset: true,
+              });
               return;
             }
             onDelta(delta);
@@ -4182,15 +4235,98 @@ export class Db {
   adoptSuccessor(next: Db): void {
     if (this.successor) throw new Error("This Db already has a successor");
     this.successor = next;
+    // Upload what this runtime still holds, then stop it. Until then its
+    // writes count in the sync status and in waitForSync.
+    let draining = true;
+    const drainListeners = new Set<() => void>();
+    const drained = this.shutdown({ waitForSync: true }).finally(() => {
+      draining = false;
+      for (const listener of Array.from(drainListeners)) listener();
+    });
+    void drained.catch(() => {});
+    this.drain = {
+      done: drained,
+      abort: () => {
+        if (draining) this.abortGracefulShutdown();
+      },
+    };
+    let combined: SyncStatus | null = null;
+    const syncStatus = (): SyncStatus => {
+      const ahead = next.getSyncStatus();
+      if (!draining) return ahead;
+      const own = Db.prototype.getSyncStatus.call(this);
+      const status: SyncStatus = {
+        link: ahead.link,
+        pendingUploads: ahead.pendingUploads + own.pendingUploads,
+        synced: ahead.synced && own.pendingUploads === 0,
+      };
+      if (combined && sameSyncStatus(status, combined)) return combined;
+      return (combined = status);
+    };
+    const overrides: Record<string, (...args: never[]) => unknown> = {
+      getSyncStatus: syncStatus,
+      onSyncStatusChange: (listener: (status: SyncStatus) => void) =>
+        this.registerMovable((db) => db.syncStatusChangeRegistration(listener), true),
+      syncStatusChangeRegistration: (listener: (status: SyncStatus) => void) => {
+        let published = syncStatus();
+        const publish = () => {
+          const status = syncStatus();
+          if (status === published) return;
+          published = status;
+          listener(status);
+        };
+        const stopAhead = next.onSyncStatusChange(publish);
+        const stopOwn = draining ? this.onSyncStatusChangeHere(publish) : () => {};
+        drainListeners.add(publish);
+        return () => {
+          stopAhead();
+          stopOwn();
+          drainListeners.delete(publish);
+        };
+      },
+      waitForSync: async (options: { timeoutMs?: number; signal?: AbortSignal } = {}) => {
+        await Promise.all([
+          next.waitForSync(options),
+          draining ? waitWithin(drained, options) : undefined,
+        ]);
+      },
+    };
     for (const name of FORWARDED_TO_SUCCESSOR) {
       Object.defineProperty(this, name, {
         configurable: true,
-        value: (...args: unknown[]) =>
-          (next as unknown as Record<string, (...a: unknown[]) => unknown>)[name]!(...args),
+        value:
+          overrides[name] ??
+          ((...args: unknown[]) =>
+            (next as unknown as Record<string, (...a: unknown[]) => unknown>)[name]!(...args)),
       });
     }
+    Object.defineProperty(this, "syncStatusChangeRegistration", {
+      configurable: true,
+      value: overrides.syncStatusChangeRegistration,
+    });
+    // Rejections this Db reported before anyone listened go to the listeners
+    // on the successor.
+    for (const event of this.pendingMutationErrorEvents.splice(0)) next.handleMutationError(event);
     for (const entry of Array.from(this.movable)) entry.move(next);
     this.movable.clear();
+  }
+
+  /** Set once this Db adopted a successor: its own runtime's last uploads. */
+  private drain: { done: Promise<void>; abort(): void } | null = null;
+
+  /**
+   * @internal Stop this Db's own runtime after the upgrade. With
+   * `waitForSync`, its writes upload first, the way a local-first client's
+   * do when it shuts down; without, they are dropped, as when a thin client
+   * closes.
+   */
+  async stopOwnRuntime(options: ShutdownOptions = {}): Promise<void> {
+    const drain = this.drain;
+    if (!drain) return this.shutdown(options);
+    if (!options.waitForSync) drain.abort();
+    await drain.done.catch(() => {});
+    // An aborted or failed drain leaves the runtime open: stop it now.
+    await Db.prototype.shutdown.call(this);
   }
 
   /** @internal The Db that does this one's work now: itself, or its successor. */

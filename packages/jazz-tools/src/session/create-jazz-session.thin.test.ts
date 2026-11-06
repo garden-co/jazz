@@ -4,6 +4,8 @@ import { definePermissions } from "../permissions/index.js";
 import { createDb as createLocalFirstDb } from "../runtime/default-create-db.js";
 import { isThinDb, type LocalFirstLoader } from "../runtime/local-first-upgrade.js";
 import { DbReplacedError } from "../runtime/db-replaced-error.js";
+import { Db } from "../runtime/db.js";
+import { WriteWaitTimeoutError } from "../runtime/client.js";
 import type { AccountStore } from "../accounts/persistence.js";
 import { startTestJazz, type TestJazz } from "../testing/index.js";
 import { createJazzClient, type BrowserJazzSession } from "./create-jazz-session.js";
@@ -54,7 +56,9 @@ function memoryLocalStorage() {
   };
 }
 
-const loadLocalFirst: LocalFirstLoader = async () => ({ createClient: createLocalFirstDb });
+const loadLocalFirst: LocalFirstLoader = async () => ({
+  createClient: createLocalFirstDb,
+});
 
 async function open(
   server: TestJazz,
@@ -129,13 +133,105 @@ describe("browser session", () => {
     stopStates();
   }, 60_000);
 
+  it("counts and uploads the thin Db's unsent writes after the upgrade", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const kept = db(session);
+    await kept.disconnect();
+    kept.insert(app.notes, { text: "unsent" });
+    await kept.upgradeToLocalFirst(loadLocalFirst);
+
+    // The thin runtime still holds the write: the kept Db says so.
+    expect(kept.getSyncStatus().synced).toBe(false);
+    expect(kept.getSyncStatus().pendingUploads).toBeGreaterThan(0);
+    await expect(kept.waitForSync({ timeoutMs: 200 })).rejects.toThrow(WriteWaitTimeoutError);
+
+    // Its own runtime reconnects and uploads it; then the kept Db is synced.
+    await Db.prototype.reconnect.call(kept);
+    await kept.waitForSync({ timeoutMs: 10_000 });
+    expect(kept.getSyncStatus().pendingUploads).toBe(0);
+    await expect
+      .poll(async () => (await kept.all(app.notes)).map((row) => row.text), {
+        timeout: 10_000,
+      })
+      .toEqual(["unsent"]);
+  }, 60_000);
+
+  it("closes at once after the upgrade, even with thin writes it can't upload", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const kept = db(session);
+    await kept.disconnect();
+    kept.insert(app.notes, { text: "unsent" });
+    await kept.upgradeToLocalFirst(loadLocalFirst);
+
+    let closed = false;
+    void session.close().then(() => (closed = true));
+    await expect.poll(() => closed, { timeout: 5_000 }).toBe(true);
+    sessions.splice(sessions.indexOf(session), 1);
+  }, 60_000);
+
+  it("keeps the thin runtime's own credential renewal on the thin runtime", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const kept = db(session);
+    const own = vi.fn();
+    const stop = kept.onOwnAuthChanged(own);
+    const refreshed: Db[] = [];
+    const spy = vi
+      .spyOn(Db.prototype, "refreshOwnAccountAuth")
+      .mockImplementation(async function (this: Db) {
+        refreshed.push(this);
+        return "token";
+      });
+    await kept.upgradeToLocalFirst(loadLocalFirst);
+    const account = session.getSnapshot().account!;
+    // The app's renewal reaches the local-first Db; the thin runtime's own
+    // context renews the thin runtime, which still has writes to upload.
+    await kept.refreshAccountAuth(account);
+    await Db.prototype.refreshOwnAccountAuth.call(kept, account);
+    expect(refreshed[0]).not.toBe(kept);
+    expect(refreshed[1]).toBe(kept);
+    spy.mockRestore();
+    stop();
+  }, 60_000);
+
+  it("opens a query subscribed during the upgrade with its rows", async () => {
+    const server = await startServer();
+    const session = await open(server, memoryStore());
+    const kept = db(session);
+    await kept.insert(app.notes, { text: "before" }).wait({ tier: "global" });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const upgrading = kept.upgradeToLocalFirst(async () => {
+      await gate;
+      return loadLocalFirst();
+    });
+    const seen: string[][] = [];
+    const stop = kept.subscribe(app.notes, (rows) => seen.push(rows.map((row) => row.text)));
+    await expect.poll(() => seen.at(-1), { timeout: 10_000 }).toEqual(["before"]);
+    release();
+    await upgrading;
+    await kept.insert(app.notes, { text: "after" }).wait({ tier: "global" });
+    await expect
+      .poll(() => seen.at(-1)?.slice().sort(), { timeout: 10_000 })
+      .toEqual(["after", "before"]);
+    expect(
+      seen.slice(seen.findIndex((rows) => rows.length > 0)).every((rows) => rows.length > 0),
+    ).toBe(true);
+    stop();
+  }, 60_000);
+
   it("ends a kept Db's queries loudly once its user signs out", async () => {
     const server = await startServer();
     const session = await open(server, memoryStore());
     const kept = db(session);
     await kept.insert(app.notes, { text: "before" }).wait({ tier: "global" });
     const errors: Error[] = [];
-    kept.subscribe(app.notes, { onUpdate: () => {}, onError: (error) => errors.push(error) });
+    kept.subscribe(app.notes, {
+      onUpdate: () => {},
+      onError: (error) => errors.push(error),
+    });
 
     await session.logout();
 

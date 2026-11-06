@@ -198,7 +198,6 @@ const upgradesInPlace = new WeakMap<JazzClient, (next: JazzClient) => void>();
  */
 function upgradableClient(thin: JazzClient): JazzClient {
   let inner = thin;
-  let thinDrained: Promise<void> | undefined;
   const client: JazzClient = attachSubscriptionStore(
     {
       db: thin.db,
@@ -207,20 +206,20 @@ function upgradableClient(thin: JazzClient): JazzClient {
       },
       async shutdown(options?: ShutdownOptions) {
         if (inner === thin) return thin.shutdown(options);
-        await inner.shutdown(options);
-        // Its query cache served the app until now; its runtime is stopping.
-        await thinDrained?.catch(() => {});
+        // Both runtimes stop the same way: with `waitForSync`, after their
+        // writes upload; without, straight away (a close, or a sign-out
+        // that wipes this device).
+        await Promise.all([inner.shutdown(options), thin.db.stopOwnRuntime(options)]);
+        // Its query cache served the app until now.
         await thin.shutdown();
       },
     },
     getSubscriptionStore(thin),
   );
   upgradesInPlace.set(client, (next) => {
+    // The thin Db starts uploading what it still holds and stops once done.
     thin.db.adoptSuccessor(next.db);
     inner = next;
-    thinDrained = thin.db.shutdown({ waitForSync: true }).catch((error: unknown) => {
-      console.warn("Jazz could not upload the thin client's writes before stopping it.", error);
-    });
   });
   return client;
 }

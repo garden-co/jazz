@@ -2,7 +2,6 @@ import { applySubscriptionDelta, type SubscriptionDelta } from "./runtime/subscr
 import { type DbSubscriptionSource, type QueryBuilder, type QueryOptions } from "./runtime/db.js";
 import { isInspectorLocalQueryOptions } from "./internal/inspector-query.js";
 import type { Session } from "./runtime/context.js";
-import { DbReplacedError } from "./runtime/db-replaced-error.js";
 
 type UseAllStatePending<T> = {
   status: "pending";
@@ -405,9 +404,6 @@ export class SubscriptionsOrchestrator {
     const reject = (error: unknown) => {
       this.trace("reject", entry, String(error));
       if (entry.generation !== generation || entry.state.status === "rejected") return;
-      // The session replaced this Db, and the provider is moving its
-      // components onto the new one: not an error to show them.
-      if (error instanceof DbReplacedError) return;
       entry.state = { status: "rejected", data: undefined, error };
       entry.rejectfulfilled(error);
       for (const listener of Array.from(entry.listeners)) {

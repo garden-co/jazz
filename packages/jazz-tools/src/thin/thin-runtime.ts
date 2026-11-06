@@ -195,6 +195,9 @@ export class ThinRuntime implements Runtime {
   private readonly liveQueries = new Map<number, LiveQuery>();
   private readonly liveByRequest = new Map<number, number>();
   private readonly writes = new Map<string, Write>();
+  /** Writes the server has not answered yet. */
+  private unanswered = 0;
+  private readonly syncStatusListeners = new Set<() => void>();
   private readonly transactions = new Map<OpenTransactionId, OpenTransaction>();
   private mutationErrorCallback?: (event: MutationErrorEvent) => void;
   private authFailureCallback?: (reason: string) => void;
@@ -384,7 +387,10 @@ export class ThinRuntime implements Runtime {
     op: ThinOp,
     id = this.nextRequestId++,
   ): { answer: Promise<ThinBody>; oneShot?: OneShot } {
-    if (this.closed) return { answer: Promise.reject(new Error("the thin runtime is closed")) };
+    if (this.closed)
+      return {
+        answer: Promise.reject(new Error("the thin runtime is closed")),
+      };
     let oneShot: OneShot | undefined;
     const answer = new Promise<ThinBody>((resolve, reject) => {
       oneShot = { op, resolve, reject, sent: false };
@@ -427,7 +433,11 @@ export class ThinRuntime implements Runtime {
    */
   private refuseOtherSession(sessionJson: string | null | undefined, operation: string): void {
     if (sessionJson == null) return;
-    type SessionJson = { issuer?: string; user_id?: string; account_id?: string };
+    type SessionJson = {
+      issuer?: string;
+      user_id?: string;
+      account_id?: string;
+    };
     // A session, or a write context naming one.
     const parsed = JSON.parse(sessionJson) as SessionJson & {
       session?: SessionJson;
@@ -531,7 +541,10 @@ export class ThinRuntime implements Runtime {
     if (live.requestId === undefined) return;
     this.liveByRequest.delete(live.requestId);
     if (this.bound) {
-      void this.request({ type: "unsubscribe", subscription: live.requestId }).catch(() => {
+      void this.request({
+        type: "unsubscribe",
+        subscription: live.requestId,
+      }).catch(() => {
         // The connection ended: the server closed the live query with it.
       });
     }
@@ -664,7 +677,10 @@ export class ThinRuntime implements Runtime {
       table,
       row: parseUuid(objectId),
       cells: encodeCellsForRow(definition, values, table),
-      options: { branch: context.branchView?.head, updatedAtMs: context.updatedAtMs },
+      options: {
+        branch: context.branchView?.head,
+        updatedAtMs: context.updatedAtMs,
+      },
     });
     const row = writeRow(table, objectId, definition.columns, values);
     return { id: row.id, values: row.values, ...receipt };
@@ -782,7 +798,11 @@ export class ThinRuntime implements Runtime {
       transaction.requests.push(staged);
       transaction.staged = true;
       await staged;
-      return { id: formatUuid(row), kind: "staged", openTransactionId: context.transaction! };
+      return {
+        id: formatUuid(row),
+        kind: "staged",
+        openTransactionId: context.transaction!,
+      };
     }
     return {
       id: formatUuid(row),
@@ -914,9 +934,29 @@ export class ThinRuntime implements Runtime {
     return Promise.race([
       write.done,
       new Promise<never>((_, reject) =>
-        signal.addEventListener("abort", () => reject(signal.reason), { once: true }),
+        signal.addEventListener("abort", () => reject(signal.reason), {
+          once: true,
+        }),
       ),
     ]);
+  }
+
+  /** How many writes still wait for the server's answer. */
+  pendingUploadCount(): number {
+    return this.unanswered;
+  }
+
+  /** Observe changes of {@link pendingUploadCount}. */
+  onSyncStatusChange(listener: () => void, signal: AbortSignal): void {
+    if (signal.aborted) return;
+    this.syncStatusListeners.add(listener);
+    signal.addEventListener("abort", () => this.syncStatusListeners.delete(listener), {
+      once: true,
+    });
+  }
+
+  private notifySyncStatus(): void {
+    for (const listener of [...this.syncStatusListeners]) listener();
   }
 
   /** Every write made so far has been answered. Every write is global once answered. */
@@ -934,14 +974,20 @@ export class ThinRuntime implements Runtime {
     await Promise.race([
       answered,
       new Promise<never>((_, reject) =>
-        signal.addEventListener("abort", () => reject(signal.reason), { once: true }),
+        signal.addEventListener("abort", () => reject(signal.reason), {
+          once: true,
+        }),
       ),
     ]);
   }
 
   private write(op: ThinOp): TxId {
     const txId = `thin:${this.nextRequestId}` as TxId;
-    const write: Write = { observed: false, committed: false, done: Promise.resolve() };
+    const write: Write = {
+      observed: false,
+      committed: false,
+      done: Promise.resolve(),
+    };
     write.done = this.request(op).then(
       (body) => {
         if (body.type !== "written") throw new Error(`unexpected answer to a write: ${body.type}`);
@@ -965,7 +1011,12 @@ export class ThinRuntime implements Runtime {
               kind: "mergeable",
               sealed: true,
               latestSettlement: rejected
-                ? { kind: "rejected", transactionId: txId, code, reason: failure.message }
+                ? {
+                    kind: "rejected",
+                    transactionId: txId,
+                    code,
+                    reason: failure.message,
+                  }
                 : { kind: "missing", transactionId: txId },
             },
           });
@@ -975,6 +1026,14 @@ export class ThinRuntime implements Runtime {
     );
     // An unobserved failure is reported above, not as an unhandled rejection.
     write.done.catch(() => undefined);
+    this.unanswered++;
+    this.notifySyncStatus();
+    void write.done
+      .catch(() => undefined)
+      .then(() => {
+        this.unanswered--;
+        this.notifySyncStatus();
+      });
     write.done.then(
       () => (write.committed = true),
       () => undefined,

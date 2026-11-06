@@ -63,7 +63,7 @@ export async function createClient(config: ThinDbConfig): Promise<Db> {
  * This is for a thin `Db` the app opened itself with {@link createClient}.
  * Under a Jazz provider or `createJazzClient`, call the `Db` method
  * `db.upgradeToLocalFirst(loader)` instead: it takes the loader, and the
- * session swaps the new `Db` in for every component.
+ * session upgrades in place, so the app keeps the same `Db`.
  */
 export async function upgradeToLocalFirst(thin: Db, open: () => Promise<Db>): Promise<Db> {
   thinRuntimeOf(thin);
@@ -81,7 +81,16 @@ export async function upgradeToLocalFirst(thin: Db, open: () => Promise<Db>): Pr
 /** @internal Read every query `thin` is subscribed to into `next` from the server. */
 export async function prefetchThinQueries(thin: Db, next: Db): Promise<void> {
   const runtime = thinRuntimeOf(thin);
-  if (runtime) await next.prefetchRuntimeQueries(runtime.schema, runtime.liveQueryJsons());
+  if (!runtime) return;
+  // Queries the app subscribes to while one round reads are read in the
+  // next, so each live query opens on the local-first Db with its rows.
+  const read = new Set<string>();
+  for (;;) {
+    const pending = runtime.liveQueryJsons().filter((query) => !read.has(query));
+    if (pending.length === 0) return;
+    await next.prefetchRuntimeQueries(runtime.schema, pending);
+    for (const query of pending) read.add(query);
+  }
 }
 
 function thinRuntimeOf(thin: Db): ThinRuntime | null {
