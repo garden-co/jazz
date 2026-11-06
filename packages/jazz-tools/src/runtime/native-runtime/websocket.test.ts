@@ -20,6 +20,7 @@ import {
   encodeWebSocketFrameBatch,
   isWireHello,
   isWireError,
+  isSocketDropWireError,
   peerIdentityForWebSocketAuth,
   policyClaimsForAdmittedWebSocket,
 } from "./websocket.js";
@@ -1001,10 +1002,11 @@ describe("websocket frame carrier", () => {
         );
         await vi.advanceTimersByTimeAsync(20_000);
         socket.emitMessage(heartbeat);
-        // Then nothing at all, as from a half-open TCP link.
-        await vi.advanceTimersByTimeAsync(HEARTBEAT_SILENCE_MS - 1);
+        // Then nothing at all, as from a half-open TCP link. Past the limit
+        // the silence is confirmed a moment later.
+        await vi.advanceTimersByTimeAsync(HEARTBEAT_SILENCE_MS);
         expect(terminals).toEqual([]);
-        await vi.advanceTimersByTimeAsync(1);
+        await vi.advanceTimersByTimeAsync(1_000);
         expect(terminals).toEqual([
           expect.objectContaining({ code: "websocket_silent", retry: "later" }),
         ]);
@@ -1012,6 +1014,43 @@ describe("websocket frame carrier", () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+
+    it("keeps a link whose held-back messages arrive once the silence is noticed", async () => {
+      vi.useFakeTimers();
+      try {
+        const { carrier, socket, terminals } = heartbeatCarrier();
+        await vi.advanceTimersByTimeAsync(0);
+        socket.emitMessage(
+          encodeWebSocketFrameBatch([
+            encodeServerHello(1n, WIRE_PROTOCOL_VERSION, {
+              features: CLIENT_WIRE_FEATURES | FEATURE_HEARTBEAT,
+            }),
+          ]),
+        );
+        // A frozen page: its timer fires first, then the heartbeats queued
+        // meanwhile are delivered.
+        await vi.advanceTimersByTimeAsync(HEARTBEAT_SILENCE_MS);
+        socket.emitMessage(heartbeat);
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(terminals).toEqual([]);
+        expect(socket.closed).toBe(false);
+        carrier.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("classes a silent link as a network drop, which clients retry", () => {
+      expect(isSocketDropWireError({ code: "websocket_silent", retry: "later", message: "" })).toBe(
+        true,
+      );
+      expect(isSocketDropWireError({ code: "websocket_closed", retry: "later", message: "" })).toBe(
+        true,
+      );
+      expect(isSocketDropWireError({ code: "protocol_error", retry: "never", message: "" })).toBe(
+        false,
+      );
     });
 
     it("never times out a server that sends no heartbeat", async () => {

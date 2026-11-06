@@ -941,10 +941,6 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     // arrived for the idle timeout; every WebSocket client answers pings.
     let mut last_inbound = tokio::time::Instant::now();
     let heartbeat = negotiated.features & jazz::wire::FEATURE_HEARTBEAT != 0;
-    let heartbeat_batch = encode_frame(&WireFrame::Heartbeat)
-        .ok()
-        .and_then(|frame| encode_ws_frame_batches(&[frame]).ok())
-        .unwrap_or_default();
     let mut keepalive = tokio::time::interval_at(
         last_inbound + WS_KEEPALIVE_PING_INTERVAL,
         WS_KEEPALIVE_PING_INTERVAL,
@@ -971,11 +967,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
                 // A full writer queue already proves the link is busy; the
                 // next tick pings again. A client that cannot see pings (a
                 // browser) asked for a heartbeat frame it can see instead.
-                let mut beat = vec![Message::Ping(Default::default())];
-                if heartbeat {
-                    beat.extend(heartbeat_batch.iter().cloned().map(|bytes| Message::Binary(bytes.into())));
-                }
-                let _ = writer_tx.try_send(beat);
+                let _ = writer_tx.try_send(keepalive_beat(heartbeat));
             }
             _ = async {
                 if let Some(changes) = &mut account_changes { let _ = changes.changed().await; }
@@ -1269,6 +1261,19 @@ impl Drop for SocketWriterGuard {
     fn drop(&mut self) {
         self.0.abort();
     }
+}
+
+/// One keepalive tick's messages: a ping, and for a client that negotiated
+/// [`jazz::wire::FEATURE_HEARTBEAT`] a heartbeat frame it can see.
+fn keepalive_beat(heartbeat: bool) -> Vec<Message> {
+    let mut beat = vec![Message::Ping(Default::default())];
+    if heartbeat {
+        let frame = encode_frame(&WireFrame::Heartbeat).expect("a unit frame encodes");
+        let batch = jazz::wire::encode_websocket_frame_batch(&[frame])
+            .expect("a one-byte frame fits a batch");
+        beat.push(Message::Binary(batch.into()));
+    }
+    beat
 }
 
 fn queue_ws_error(writer: &mpsc::Sender<Vec<Message>>, error: WireError) {
@@ -2675,6 +2680,19 @@ mod tests {
     /// A browser cannot see WebSocket pings, so a client that asks for it
     /// gets a heartbeat it can see; its frame is the one byte the TypeScript
     /// carrier drops before the runtime (`WIRE_FRAME_HEARTBEAT`).
+    #[test]
+    fn keepalive_sends_a_heartbeat_only_to_a_client_that_asked() {
+        let [Message::Ping(_)] = keepalive_beat(false).as_slice() else {
+            panic!("a client without the feature gets only the ping");
+        };
+        let beat = keepalive_beat(true);
+        let [Message::Ping(_), Message::Binary(batch)] = beat.as_slice() else {
+            panic!("a heartbeat client gets the ping and one batch");
+        };
+        let frames = decode_ws_frame_batch(batch).expect("a frame batch");
+        assert_eq!(frames, vec![WireFrame::Heartbeat]);
+    }
+
     #[tokio::test]
     async fn websocket_negotiates_the_heartbeat_a_browser_asks_for() {
         assert_eq!(encode_frame(&WireFrame::Heartbeat).unwrap(), vec![7]);

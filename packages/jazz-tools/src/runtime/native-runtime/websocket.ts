@@ -44,6 +44,20 @@ export function isReconnectLaterWireError(error: WireError): boolean {
   return error.retry === "later" && (error.code === "not_ready" || error.code === "backpressure");
 }
 
+/**
+ * Whether the carrier itself ended the link because the socket went away:
+ * closed, failed, or silent past {@link HEARTBEAT_SILENCE_MS}. These are
+ * network outages, which a client retries however long they last.
+ */
+export function isSocketDropWireError(error: WireError): boolean {
+  return (
+    error.retry === "later" &&
+    (error.code === "websocket_closed" ||
+      error.code === "websocket_error" ||
+      error.code === "websocket_silent")
+  );
+}
+
 export function isRetryablePreHelloWireError(error: unknown): error is PreHelloWireError {
   return error instanceof PreHelloWireError && isReconnectLaterWireError(error.wireError);
 }
@@ -96,14 +110,23 @@ export const FEATURE_AUTHORIZATION_SCOPE_VIEWS = 1 << 7;
 export const FEATURE_AUXILIARY_CHUNKS = 1 << 8;
 /**
  * `FEATURE_HEARTBEAT` in `crates/jazz/layers/protocol/src/wire.rs`: the server
- * sends a `Heartbeat` frame on its keepalive cadence (20 s). A browser cannot
- * see WebSocket pings, so this is how a carrier tells a link that went
- * silently dead (a half-open TCP connection, a stalled proxy) from a quiet
- * one. Every carrier asks for it; it never reaches the runtime above.
+ * sends a `Heartbeat` frame on its keepalive cadence (20 s). The WebSocket API
+ * shows neither pings nor partial messages, so this is how a carrier tells a
+ * link that went silently dead (a half-open TCP connection, a stalled proxy)
+ * from a quiet one. Every carrier asks for it; it never reaches the runtime
+ * above.
  */
 export const FEATURE_HEARTBEAT = 1 << 11;
-/** How long a heartbeat link may stay silent before the carrier gives it up. */
-export const HEARTBEAT_SILENCE_MS = 45_000;
+/**
+ * How long a heartbeat link may stay silent before the carrier gives it up.
+ * A message arrives whole, and a heartbeat queues behind the message being
+ * sent, so this also bounds the slowest link a full 2 MiB message survives:
+ * about 18 KB/s. A link slower than that is treated as gone.
+ */
+export const HEARTBEAT_SILENCE_MS = 120_000;
+/** A silence past the limit is confirmed after this long, so that messages
+ * a frozen page or a long task held back are delivered before it counts. */
+const HEARTBEAT_CONFIRM_MS = 1_000;
 const WIRE_FRAME_HEARTBEAT = 7;
 export const CLIENT_WIRE_FEATURES =
   FEATURE_PAYLOAD_ZSTD | FEATURE_AUTHORIZATION_SCOPE_VIEWS | FEATURE_AUXILIARY_CHUNKS;
@@ -243,7 +266,7 @@ export class WebSocketCarrier {
   private negotiated = false;
   private closing = false;
   private terminated = false;
-  private lastInbound = Date.now();
+  private lastInbound = performance.now();
   private silenceTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(options: WebSocketCarrierOptions) {
@@ -283,7 +306,7 @@ export class WebSocketCarrier {
       },
     );
     this.socket.addEventListener("message", (event) => {
-      this.lastInbound = Date.now();
+      this.lastInbound = performance.now();
       void this.handleMessage(event.data).catch((error) => {
         this.reportTerminal(
           {
@@ -387,12 +410,17 @@ export class WebSocketCarrier {
 
   /** Give the link up once the server has sent nothing, not even a
    * heartbeat, for {@link HEARTBEAT_SILENCE_MS}. Checked against the time
-   * of the last message, so a timer the browser throttled or a page that
-   * was frozen judges the silence it actually saw. */
-  private watchSilence(): void {
+   * of the last message, so a timer the browser throttled judges the
+   * silence it actually saw; a silence past the limit is confirmed a moment
+   * later, after any messages a frozen page held back were delivered. */
+  private watchSilence(confirming = false): void {
     clearTimeout(this.silenceTimer);
     if (this.closing || this.terminated) return;
-    const silentFor = Date.now() - this.lastInbound;
+    const silentFor = performance.now() - this.lastInbound;
+    if (silentFor >= HEARTBEAT_SILENCE_MS && !confirming) {
+      this.silenceTimer = setTimeout(() => this.watchSilence(true), HEARTBEAT_CONFIRM_MS);
+      return;
+    }
     if (silentFor >= HEARTBEAT_SILENCE_MS) {
       this.reportTerminal({
         code: "websocket_silent",

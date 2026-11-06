@@ -185,13 +185,17 @@ which every shipped artifact (native, NAPI, WASM) validates
 after that, a layout change needs a compatibility write-up.
 
 A server pings every link every 20 s and drops one that sent nothing for
-60 s. A browser cannot see pings, so a client that advertises
-`FEATURE_HEARTBEAT` also gets a `WireFrame::Heartbeat` (tag 7, no body, no
-answer) with each ping. Such a client gives a link up, and reconnects, once
-nothing at all, heartbeat included, arrived for 45 s: a half-open TCP link
-or a stalled proxy then ends instead of showing `connected` while nothing
-moves. The browser carrier asks for it on every link and drops the frame
-before the runtime sees it; a native client sees pings and does not ask.
+60 s. The WebSocket API shows neither pings nor partial messages, so a
+client that advertises `FEATURE_HEARTBEAT` also gets a `WireFrame::Heartbeat`
+(tag 7, no body, no answer) with each ping. Such a client gives a link up,
+and reconnects, once nothing at all, heartbeat included, arrived for 120 s:
+a half-open TCP link or a stalled proxy then ends instead of showing
+`connected` while nothing moves. A heartbeat queues behind the message being
+sent, so 120 s also bounds the slowest link a whole 2 MiB message survives
+(about 18 KB/s). The TypeScript carrier (browsers, Node, workers) asks for
+it on every link and drops the frame before the runtime sees it. The native
+Rust transport (NAPI `remote()`, React Native) does not ask yet and has no
+silence timeout of its own.
 
 In-process links (a worker and its tab, tests) carry `SyncMessage` values
 directly (`sync::duplex`); a byte link frames them with postcard
