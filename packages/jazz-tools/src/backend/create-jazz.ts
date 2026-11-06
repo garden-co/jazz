@@ -525,6 +525,12 @@ const STAND_IN_SECRET = "stated-by-backend-credential";
 // never its cookies or its app session.
 const REMOTE_FORWARDED_HEADERS = ["accept", "content-type", "if-none-match"];
 const MAX_STREAM_MESSAGE_BYTES = 2 * 1024 * 1024;
+/**
+ * Bytes a session's client may have sent that the core has not taken yet.
+ * A transport that waits for the core stays well under it; past it, the
+ * client ignored flow control and its session ends.
+ */
+const MAX_WAITING_SESSION_BYTES = 32 * 1024 * 1024;
 
 interface CoreReply {
   status: number;
@@ -654,7 +660,32 @@ function inProcessWebSocket(
 
     send(data: Uint8Array | string): void {
       if (this.readyState !== 1 || !this.session) throw new Error("socket is not open");
-      this.session.send(toBytes(data));
+      // Like a socket's own buffer: messages wait here, in order, until the
+      // core has room, so this client's pace is the core's.
+      this.outbox.push(toBytes(data));
+      void this.drain();
+    }
+
+    private readonly outbox: Uint8Array[] = [];
+    private draining = false;
+
+    private async drain(): Promise<void> {
+      if (this.draining) return;
+      this.draining = true;
+      try {
+        while (this.outbox.length > 0 && this.readyState === 1 && this.session) {
+          const data = this.outbox.shift()!;
+          const sent = this.session.sendWithRoom
+            ? await this.session.sendWithRoom(data)
+            : this.session.send(data);
+          if (!sent) break;
+        }
+      } catch (error) {
+        this.emit("error", error);
+        this.close();
+      } finally {
+        this.draining = false;
+      }
     }
 
     close(): void {
@@ -1685,31 +1716,59 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     };
     // Messages after the prelude wait for its admission, in order.
     let chain: Promise<boolean> | undefined;
+    // Bytes handed to `deliver` the core has not taken yet: a host that
+    // doesn't wait for it (a socket that can't pause) is cut off past the
+    // limit, as the core cuts off a peer that ignores flow control.
+    let waitingBytes = 0;
     const deliver = (data: Uint8Array): Promise<boolean> => {
       if (ended) return Promise.resolve(false);
+      if (waitingBytes + data.byteLength > MAX_WAITING_SESSION_BYTES) {
+        onEvent(null, {
+          kind: "close",
+          code: 1008,
+          reason: "client sent faster than the server takes",
+        });
+        end();
+        return Promise.resolve(false);
+      }
+      waitingBytes += data.byteLength;
+      const taken = (ok: boolean) => {
+        waitingBytes -= data.byteLength;
+        return ok;
+      };
       chain = chain
-        ? chain.then(async (ok) => {
-            if (!ok || ended || !socket) return false;
-            return socket.sendWithRoom ? socket.sendWithRoom(data) : socket.send(data);
-          })
-        : admit(data).catch((error: unknown) => {
-            if (!ended && isRefusal(error)) {
-              // The core refused this identity (revoked, local-first auth
-              // disabled, invalid): an auth failure the client must not
-              // retry, reported as a sign-in refusal is.
-              onEvent(null, {
-                kind: "message",
-                data: authFailedBatch(`session refused: ${refusalCode(error)}`),
-              });
-              onEvent(null, { kind: "close", code: 1008, reason: "sign-in refused" });
-            } else {
-              // The core is unreachable or failed (5xx), or the app's own
-              // `authenticate` threw: the client tries again later.
-              onEvent(null, { kind: "close", code: 1011, reason: "admission failed" });
-            }
-            end();
-            return false;
-          });
+        ? chain
+            .then(async (ok) => {
+              if (!ok || ended || !socket) return false;
+              return socket.sendWithRoom ? socket.sendWithRoom(data) : socket.send(data);
+            })
+            .catch(() => {
+              // A core that failed to take a message ends the session.
+              onEvent(null, { kind: "close", code: 1011, reason: "session failed" });
+              end();
+              return false;
+            })
+            .then(taken)
+        : admit(data)
+            .catch((error: unknown) => {
+              if (!ended && isRefusal(error)) {
+                // The core refused this identity (revoked, local-first auth
+                // disabled, invalid): an auth failure the client must not
+                // retry, reported as a sign-in refusal is.
+                onEvent(null, {
+                  kind: "message",
+                  data: authFailedBatch(`session refused: ${refusalCode(error)}`),
+                });
+                onEvent(null, { kind: "close", code: 1008, reason: "sign-in refused" });
+              } else {
+                // The core is unreachable or failed (5xx), or the app's own
+                // `authenticate` threw: the client tries again later.
+                onEvent(null, { kind: "close", code: 1011, reason: "admission failed" });
+              }
+              end();
+              return false;
+            })
+            .then(taken);
       return chain;
     };
     return {
@@ -1958,6 +2017,22 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
   async function streamSend(id: string, request: Request): Promise<Response> {
     const socket = await ownStream(id, request);
     if (socket instanceof Response) return socket;
+    // A send's records go in whole and in order: one send at a time.
+    if (sendingStreams.has(id)) {
+      return new Response("a send to this stream is in progress", { status: 409 });
+    }
+    sendingStreams.add(id);
+    try {
+      return await passStreamRecords(socket, request);
+    } finally {
+      sendingStreams.delete(id);
+    }
+  }
+
+  /** Stream sessions with a send in progress. */
+  const sendingStreams = new Set<string>();
+
+  async function passStreamRecords(socket: ClientSession, request: Request): Promise<Response> {
     const refuse = (reason: string) => {
       socket.close();
       return new Response(reason, { status: 400 });
@@ -2027,6 +2102,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     ws.on("message", (data) => {
       waiting += 1;
       ws.pause?.();
+      // `deliver` resolves false, never rejects, when the session fails.
       void socket.deliver(toBytes(data)).then((ok) => {
         waiting -= 1;
         if (!ok) close(1000, "session ended");

@@ -1521,8 +1521,7 @@ impl ServerRuntimeHandle {
             return Err("unknown server session".to_owned());
         }
         self.send(Box::new(move |owner| {
-            owner.receive(session, frames);
-            drop(ingress);
+            owner.receive(session, frames, ingress)
         }))
     }
 
@@ -1969,6 +1968,12 @@ struct OwnerSession {
 
 struct SessionQueues {
     inbound: RefCell<VecDeque<SyncMessage>>,
+    /// The ingress room each received batch holds until the engine has
+    /// taken its last message: (messages pushed through that batch, room).
+    held_ingress: RefCell<VecDeque<(u64, WireIngress)>>,
+    /// Messages pushed onto `inbound`, and taken from it, ever.
+    pushed: std::cell::Cell<u64>,
+    taken: std::cell::Cell<u64>,
     /// Output the socket has not taken yet, encoded as it is queued so its
     /// size is known, with its bytes.
     outbound: RefCell<VecDeque<(Vec<AbiBytes>, usize)>>,
@@ -2052,9 +2057,21 @@ fn start_tick<'a>(sessions: impl Iterator<Item = &'a SessionQueues> + Clone) {
 struct SessionTransport(Rc<SessionQueues>);
 
 impl SessionQueues {
+    /// Free the room of every batch whose messages the engine has all taken.
+    fn release_taken_ingress(&self) {
+        let taken = self.taken.get();
+        let mut held = self.held_ingress.borrow_mut();
+        while held.front().is_some_and(|(through, _)| *through <= taken) {
+            held.pop_front();
+        }
+    }
+
     fn new(slice: Rc<TickSlice>, egress: Arc<AtomicUsize>) -> Self {
         Self {
             inbound: RefCell::default(),
+            held_ingress: RefCell::default(),
+            pushed: std::cell::Cell::new(0),
+            taken: std::cell::Cell::new(0),
             outbound: RefCell::default(),
             backlog: Backlog::new(egress),
             budget: std::cell::Cell::new(0),
@@ -2179,6 +2196,8 @@ impl Transport for SessionTransport {
         }
         let message = queues.inbound.borrow_mut().pop_front()?;
         queues.budget.set(budget - 1);
+        queues.taken.set(queues.taken.get() + 1);
+        queues.release_taken_ingress();
         Some(message)
     }
 }
@@ -2455,15 +2474,21 @@ impl Owner {
         Ok(())
     }
 
-    fn receive(&mut self, session: ServerSession, frames: Vec<AbiBytes>) {
+    /// Queue `frames`' messages for the engine. `ingress` stays held until
+    /// the engine has taken them, so the budget bounds what waits for it.
+    fn receive(&mut self, session: ServerSession, frames: Vec<AbiBytes>, ingress: WireIngress) {
         let Some(owner_session) = self.sessions.get_mut(&session) else {
             return;
         };
-        let mut inbound = owner_session.queues.inbound.borrow_mut();
+        let queues = Rc::clone(&owner_session.queues);
+        let mut inbound = queues.inbound.borrow_mut();
         for frame in frames {
             match owner_session.joiner.push(&frame) {
                 Ok(None) => {}
-                Ok(Some(message)) => inbound.push_back(message),
+                Ok(Some(message)) => {
+                    inbound.push_back(message);
+                    queues.pushed.set(queues.pushed.get() + 1);
+                }
                 Err(error) => {
                     drop(inbound);
                     let _ = owner_session.output.send((
@@ -2479,6 +2504,12 @@ impl Owner {
                 }
             }
         }
+        drop(inbound);
+        queues
+            .held_ingress
+            .borrow_mut()
+            .push_back((queues.pushed.get(), ingress));
+        queues.release_taken_ingress();
     }
 
     /// End every session (sync or thin) pinned to a bundle `ends` names,
@@ -2783,6 +2814,70 @@ mod tests {
         let during = ticks[JOBS - 1] - ticks[0];
         // 200ms of host work in 4ms slices: about 40 ticks.
         assert!(during >= 20, "{during} ticks during {JOBS} host jobs");
+        store.close().unwrap();
+    }
+
+    /// A session's ingress budget holds back frames until the engine has
+    /// taken their messages, not only until the owner queued them: what
+    /// waits for the engine stays within the budget.
+    #[test]
+    fn received_frames_hold_their_room_until_the_engine_takes_them() {
+        let store = AppStore::memory().unwrap();
+        let runtime = store
+            .start_runtime(schema(), NodeRole::Core, false)
+            .unwrap();
+        let handle_room = Arc::new(tokio::sync::Semaphore::new(SESSION_QUEUE_BUDGET));
+        let available = {
+            let room = Arc::clone(&handle_room);
+            move || room.available_permits()
+        };
+        let room = Arc::clone(&handle_room);
+        let held = block_on(runtime.run(move |owner| {
+            let (output, _) = tokio_mpsc::unbounded_channel();
+            owner
+                .open_session(
+                    ServerSession(1),
+                    AuthorSubject::SYSTEM,
+                    BTreeMap::new(),
+                    None,
+                    output,
+                    Arc::default(),
+                )
+                .map_err(|error| error.to_string())?;
+            let frames = |ids: std::ops::Range<u64>| {
+                ids.flat_map(|id| jazz::db::encode_frames(SyncMessage::Unsubscribe { id }).unwrap())
+                    .collect::<Vec<_>>()
+            };
+            let take = |bytes: u32| WireIngress {
+                _room: Arc::clone(&room).try_acquire_many_owned(bytes).unwrap(),
+            };
+            // Two batches: two messages in 1000 bytes, then one in 500.
+            owner.receive(ServerSession(1), frames(0..2), take(1000));
+            owner.receive(ServerSession(1), frames(2..3), take(500));
+            // Queued for the engine, not taken: the room stays held.
+            Ok(room.available_permits())
+        }))
+        .unwrap();
+        assert_eq!(held, SESSION_QUEUE_BUDGET - 1500, "queued, not yet taken");
+        // The engine takes them on its next ticks, and the room comes back.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while available() < SESSION_QUEUE_BUDGET {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the engine never took them"
+            );
+            block_on(runtime.run(|_| Ok(()))).unwrap();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let left = block_on(runtime.run(|owner| {
+            Ok(owner.sessions[&ServerSession(1)]
+                .queues
+                .inbound
+                .borrow()
+                .len())
+        }))
+        .unwrap();
+        assert_eq!(left, 0, "room comes back only once every message is taken");
         store.close().unwrap();
     }
 

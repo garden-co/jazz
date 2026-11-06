@@ -135,27 +135,38 @@ impl EmbeddedServer {
                 WebSocketEntryRefused::ShuttingDown => OpenSocketRefused::ShuttingDown,
                 WebSocketEntryRefused::AtCapacity => OpenSocketRefused::AtCapacity,
             })?;
-        let (to_core, incoming) = mpsc::unbounded();
-        let (outgoing, from_core) = mpsc::unbounded();
-        let room = Arc::new(tokio::sync::Semaphore::new(EMBEDDED_INBOUND_BUDGET));
-        let socket = EmbeddedSocket {
-            incoming,
-            outgoing,
-            room: Arc::clone(&room),
-        };
+        let (peer, socket) = socket_pair();
         self.runtime.spawn(super::routes::handle_ws_connection(
             socket, state, headers, guard,
         ));
-        Ok(EmbeddedSocketPeer {
-            sender: EmbeddedSocketSender { to_core, room },
-            from_core,
-        })
+        Ok(peer)
     }
 
     /// Stop serving and close storage. Open sessions are closed first.
     pub async fn shutdown(&self) -> ShutdownPhase {
         self.built.shutdown().await
     }
+}
+
+/// The host's and the core's ends of one embedded socket.
+fn socket_pair() -> (EmbeddedSocketPeer, EmbeddedSocket) {
+    let (to_core, incoming) = mpsc::unbounded();
+    let (outgoing, from_core) = mpsc::unbounded();
+    let room = Arc::new(tokio::sync::Semaphore::new(EMBEDDED_INBOUND_BUDGET));
+    let socket = EmbeddedSocket {
+        incoming,
+        outgoing,
+        room: Arc::clone(&room),
+    };
+    let peer = EmbeddedSocketPeer {
+        sender: EmbeddedSocketSender {
+            to_core,
+            room,
+            unpaced: Arc::default(),
+        },
+        from_core,
+    };
+    (peer, socket)
 }
 
 /// The host's end of an embedded socket: messages for the client come out of
@@ -169,9 +180,30 @@ pub struct EmbeddedSocketPeer {
 /// wait for the core before it waits too: two of the largest messages.
 const EMBEDDED_INBOUND_BUDGET: usize = 2 * MAX_WIRE_FRAME_BYTES;
 
-/// A client message on its way to the core, with the room it holds in the
-/// socket's inbound budget until the session reads it.
-type Inbound = (Message, Option<tokio::sync::OwnedSemaphorePermit>);
+/// Bytes [`EmbeddedSocketSender::send`] may queue past the inbound budget
+/// for a host that does not wait for room: past it the session ends, as a
+/// listener ends one whose peer ignores flow control.
+const EMBEDDED_UNPACED_LIMIT: usize = 8 * EMBEDDED_INBOUND_BUDGET;
+
+/// The room a client message holds until the session reads it.
+enum Room {
+    None,
+    Budget {
+        _permit: tokio::sync::OwnedSemaphorePermit,
+    },
+    Unpaced(usize, Arc<std::sync::atomic::AtomicUsize>),
+}
+
+impl Drop for Room {
+    fn drop(&mut self) {
+        if let Self::Unpaced(bytes, queued) = self {
+            queued.fetch_sub(*bytes, std::sync::atomic::Ordering::AcqRel);
+        }
+    }
+}
+
+/// A client message on its way to the core, with its room.
+type Inbound = (Message, Room);
 
 /// Passes the client's messages to the core. Cheap to clone.
 #[derive(Clone)]
@@ -179,6 +211,8 @@ pub struct EmbeddedSocketSender {
     to_core: mpsc::UnboundedSender<Inbound>,
     /// [`EMBEDDED_INBOUND_BUDGET`], as permits of one byte.
     room: Arc<tokio::sync::Semaphore>,
+    /// Bytes [`Self::send`] queued past the budget, not read yet.
+    unpaced: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// What the core sends to the host's socket.
@@ -189,16 +223,33 @@ pub enum EmbeddedOutgoing {
 }
 
 impl EmbeddedSocketSender {
-    /// Pass one binary message from the client. Returns `false` once the
-    /// session has ended, or for a message larger than a listener accepts
-    /// (which ends the session, as a listener would).
+    /// Pass one binary message from the client without waiting. Returns
+    /// `false` once the session has ended, or for a message larger than a
+    /// listener accepts. A host that sends faster than the session reads,
+    /// past [`EMBEDDED_UNPACED_LIMIT`], ends it: either ends the session, as
+    /// a listener would.
     pub fn send(&self, bytes: Vec<u8>) -> bool {
+        use std::sync::atomic::Ordering;
         if bytes.len() > MAX_WIRE_FRAME_BYTES {
             self.close();
             return false;
         }
+        let permits = u32::try_from(bytes.len().max(1)).expect("a frame's size fits u32");
+        let room = match Arc::clone(&self.room).try_acquire_many_owned(permits) {
+            Ok(permit) => Room::Budget { _permit: permit },
+            Err(tokio::sync::TryAcquireError::Closed) => return false,
+            Err(tokio::sync::TryAcquireError::NoPermits) => {
+                let len = bytes.len();
+                if self.unpaced.fetch_add(len, Ordering::AcqRel) + len > EMBEDDED_UNPACED_LIMIT {
+                    self.unpaced.fetch_sub(len, Ordering::AcqRel);
+                    self.close();
+                    return false;
+                }
+                Room::Unpaced(len, Arc::clone(&self.unpaced))
+            }
+        };
         self.to_core
-            .unbounded_send((Message::Binary(bytes.into()), None))
+            .unbounded_send((Message::Binary(bytes.into()), room))
             .is_ok()
     }
 
@@ -216,13 +267,18 @@ impl EmbeddedSocketSender {
             return false;
         };
         self.to_core
-            .unbounded_send((Message::Binary(bytes.into()), Some(room)))
+            .unbounded_send((
+                Message::Binary(bytes.into()),
+                Room::Budget { _permit: room },
+            ))
             .is_ok()
     }
 
     /// The client's socket closed.
     pub fn close(&self) {
-        let _ = self.to_core.unbounded_send((Message::Close(None), None));
+        let _ = self
+            .to_core
+            .unbounded_send((Message::Close(None), Room::None));
         self.to_core.close_channel();
         // Senders waiting for room give up.
         self.room.close();
@@ -249,7 +305,7 @@ impl EmbeddedSocketPeer {
                     let _ = self
                         .sender
                         .to_core
-                        .unbounded_send((Message::Pong(payload), None));
+                        .unbounded_send((Message::Pong(payload), Room::None));
                 }
                 Message::Pong(_) => {}
                 Message::Close(frame) => {
@@ -314,5 +370,80 @@ impl Sink<Message> for EmbeddedSocket {
         Pin::new(&mut self.outgoing)
             .poll_close(cx)
             .map_err(axum::Error::new)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::StreamExt as _;
+
+    fn frame(bytes: usize) -> Vec<u8> {
+        vec![7; bytes]
+    }
+
+    #[tokio::test]
+    async fn a_paced_send_waits_until_the_session_reads_earlier_messages() {
+        let (peer, mut socket) = socket_pair();
+        let sender = peer.sender();
+        assert!(sender.send_with_room(frame(MAX_WIRE_FRAME_BYTES)).await);
+        assert!(sender.send_with_room(frame(MAX_WIRE_FRAME_BYTES)).await);
+        // The budget is full: the next send waits for the session.
+        let waiting = tokio::spawn({
+            let sender = sender.clone();
+            async move { sender.send_with_room(frame(1024)).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!waiting.is_finished(), "a send past the budget waits");
+        assert!(socket.next().await.is_some());
+        assert!(waiting.await.unwrap(), "it goes once the session read one");
+    }
+
+    #[tokio::test]
+    async fn a_paced_send_waiting_when_the_session_ends_gives_up() {
+        let (peer, socket) = socket_pair();
+        let sender = peer.sender();
+        assert!(sender.send_with_room(frame(MAX_WIRE_FRAME_BYTES)).await);
+        assert!(sender.send_with_room(frame(MAX_WIRE_FRAME_BYTES)).await);
+        let waiting = tokio::spawn({
+            let sender = sender.clone();
+            async move { sender.send_with_room(frame(1024)).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        drop(socket);
+        assert!(!waiting.await.unwrap(), "the ended session takes nothing");
+    }
+
+    #[tokio::test]
+    async fn an_unpaced_host_that_floods_the_session_ends_it() {
+        let (peer, mut socket) = socket_pair();
+        let sender = peer.sender();
+        let mut sent = 0;
+        while sender.send(frame(MAX_WIRE_FRAME_BYTES)) {
+            sent += MAX_WIRE_FRAME_BYTES;
+            assert!(sent <= EMBEDDED_INBOUND_BUDGET + EMBEDDED_UNPACED_LIMIT);
+        }
+        assert_eq!(sent, EMBEDDED_INBOUND_BUDGET + EMBEDDED_UNPACED_LIMIT);
+        // What it queued still reads, then the close.
+        let mut read = 0;
+        while let Some(Ok(message)) = socket.next().await {
+            match message {
+                Message::Binary(bytes) => read += bytes.len(),
+                Message::Close(_) => break,
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert_eq!(read, sent);
+        assert!(!sender.send(frame(1)), "the session ended");
+    }
+
+    #[tokio::test]
+    async fn an_unpaced_host_the_session_keeps_up_with_is_never_cut_off() {
+        let (peer, mut socket) = socket_pair();
+        let sender = peer.sender();
+        for _ in 0..4 * (EMBEDDED_UNPACED_LIMIT / MAX_WIRE_FRAME_BYTES) {
+            assert!(sender.send(frame(MAX_WIRE_FRAME_BYTES)));
+            assert!(socket.next().await.is_some());
+        }
     }
 }

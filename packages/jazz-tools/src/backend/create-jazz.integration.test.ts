@@ -26,6 +26,7 @@ import {
   vercel,
   type Jazz,
   type RequestAuthenticationError,
+  type WsLikeSocket,
 } from "./index.js";
 import { localFirstAccountId } from "../accounts/local-first.js";
 import {
@@ -1557,6 +1558,39 @@ describe("createJazz", () => {
         ).toHaveLength(1);
     }, 120_000);
   }
+
+  it("ends the session of a socket that can't pause once its client sends far ahead of the core", async () => {
+    // Sign-in never finishes, so nothing the client sends is taken.
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate: () => new Promise<never>(() => {}),
+      upgradesSockets: true,
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const listeners: Record<string, (...args: unknown[]) => void> = {};
+    const closes: Array<[number | undefined, string | undefined]> = [];
+    jazz.acceptSocket(new Request(`http://app.test/jazz/apps/${jazz.appId}/ws`), {
+      send() {},
+      close: (code, reason) => closes.push([code, reason]),
+      on(event: string, listener: (...args: never[]) => void) {
+        listeners[event] = listener as (...args: unknown[]) => void;
+      },
+    } as WsLikeSocket);
+    // A prelude stating a user's session: admission waits on authenticate.
+    listeners.message!(
+      new TextEncoder().encode(JSON.stringify({ auth: { backend_session: { user_id: "alice" } } })),
+      true,
+    );
+    const megabyte = new Uint8Array(1024 * 1024);
+    for (let sent = 0; sent < 40 && closes.length === 0; sent += 1) {
+      listeners.message!(megabyte, true);
+      await Promise.resolve();
+    }
+    expect(closes[0]?.[0]).toBe(1008);
+    expect(closes[0]?.[1]).toContain("faster than the server takes");
+  });
 
   it("sends a failed socket to the HTTP stream only through handlers that can't upgrade", async () => {
     const appId = randomUUID();
