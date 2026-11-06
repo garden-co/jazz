@@ -305,8 +305,9 @@ fn encode(bindings: &[Value]) -> storage::Result<Vec<u8>> {
             Value::Null => out.push(0),
             Value::Integer(n) => {
                 if !(-MAX_SAFE..=MAX_SAFE).contains(n) {
+                    STATS.with(|stats| stats.borrow_mut().wide_int_binds += 1.0);
                     return Err(bridge_error(
-                        "wide SQL integer bindings require exact numeric casts".into(),
+                        "SQL INTEGER outside Durable Object safe integer range".into(),
                     ));
                 }
                 out.push(1);
