@@ -1238,8 +1238,11 @@ export class NativeRuntimeAdapter implements Runtime {
       // Never restore cached JavaScript claims during observation, including
       // first admission after a native claim withdrawal. Core inherits its
       // CURRENT owner claims; the observation checks exact expected claims.
+      // A schema-view read can install the native owner's claims without
+      // populating this wrapper's JS cache. The native subscriber still binds
+      // and verifies CURRENT claims; an absent JS cache is not a denial proof.
       if (
-        !this.clientSessionClaimsKey ||
+        this.clientSessionClaimsKey &&
         canonicalJson(session.claims) !== this.clientSessionClaimsKey
       )
         throw new Error("Local observation requires the current installed owner claims");
