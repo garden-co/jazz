@@ -258,7 +258,7 @@ type Platform = {
   /** Your backend's runtime, under "Your Backend". */
   runtime: string[];
   /** Each shard: the platform's box title lines, and the Jazz box inside. */
-  shard: { title: string[]; inner: string[]; count: number };
+  shard: { title: string[]; small?: boolean; inner: string[]; count: number };
   store: string;
 };
 
@@ -268,15 +268,15 @@ const deploymentScenarios: Record<DeploymentScenario, Platform> = {
   vercel: {
     label:
       "On Vercel, everything stays in your Vercel account: jazz SQLite shards in Vercel Sandboxes, auto-scaling and hibernating, jazz large value chunks in Vercel Blobs, and the jazz core in your backend's Vercel functions, next to your normal API routes and behind your auth. Web pages, web apps, native apps, backend workers and agent VMs get efficient realtime sync through the mounted /jazz sync endpoint; traditional clients make manual HTTP requests and streaming.",
-    runtime: ["(Vercel functions)"],
-    shard: { title: ["Vercel", "Sandbox"], inner: ["jazz SQLite", "shard"], count: 4 },
+    runtime: ["(Functions)"],
+    shard: { title: ["Sandbox"], inner: ["jazz SQLite", "shard"], count: 4 },
     store: "Vercel Blobs",
   },
   cloudflare: {
     label:
       "On Cloudflare, coming soon: everything stays in your Cloudflare account: jazz shards in Durable Objects with their own SQLite, auto-scaling and hibernating, jazz large value chunks in R2, and the jazz core in your backend's Workers, next to your normal API routes and behind your auth. Clients get efficient realtime sync through the mounted /jazz sync endpoint; traditional clients make manual HTTP requests and streaming.",
     runtime: ["(CF Workers)"],
-    shard: { title: ["CF DO", "SQLite"], inner: ["jazz", "shard"], count: 7 },
+    shard: { title: ["durable", "object"], small: true, inner: ["jazz", "shard"], count: 7 },
     store: "R2",
   },
   aws: {
@@ -337,6 +337,7 @@ function Nested({
   h,
   title,
   inner,
+  small,
 }: {
   x: number;
   y: number;
@@ -344,15 +345,25 @@ function Nested({
   h: number;
   title: string[];
   inner: string[];
+  /** Title in the detail size, for narrow boxes with a long name. */
+  small?: boolean;
 }) {
   const pad = w < 70 ? 5 : w < 90 ? 8 : 12;
+  const step = small ? 13 : 18;
+  const titleY = small ? y + 20 : y + 23;
   return (
     <g>
       <Frame x={x} y={y} w={w} h={h} tone="ink" />
-      <Lines x={x + pad} y={y + 23} lines={title} className="dg-title dg-fill-ink" />
       <Lines
         x={x + pad}
-        y={y + 23 + title.length * 18 + 8}
+        y={titleY}
+        lines={title}
+        step={step}
+        className={small ? "dg-detail dg-fill-ink" : "dg-title dg-fill-ink"}
+      />
+      <Lines
+        x={x + pad}
+        y={titleY + title.length * step + 8}
         lines={inner}
         step={16}
         className="dg-detail dg-fill-blue"
@@ -439,7 +450,7 @@ function cycleDelay(count: number, turn: number, col: number): string {
  */
 export const DEPLOYMENT_LAYOUT = {
   width: 560,
-  height: 606,
+  height: 582,
   switcher: { x: 16, y: 32, w: 256, h: 76 },
 };
 
@@ -457,17 +468,17 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
   const { label, runtime, shard, store } = deploymentScenarios[scenario];
   const { width: W, height: H, switcher } = DEPLOYMENT_LAYOUT;
   const storeBox = { x: 284, y: 32, w: 260, h: 76 };
-  const shardRow = { x: 16, y: 120, w: 484, h: 104 };
-  const backend = { x: 16, y: 264, w: 484 };
-  const backendBottom = 392;
+  const shardRow = { x: 16, y: 120, w: 484, h: 80 };
+  const backend = { x: 16, y: 240, w: 484 };
+  const backendBottom = 368;
   const authH = 24;
   // The jazz core above, its mounted sync endpoint below the divider.
-  const jazz = { x: 224, y: 276, w: 264, h: 104, divider: 328 };
-  const api = { x: 32, y: 336, w: 180, h: 44 };
+  const jazz = { x: 224, y: 252, w: 264, h: 104, divider: 304 };
+  const api = { x: 32, y: 312, w: 180, h: 44 };
   const cw = 168;
   const colX = [16, 196, 376];
   const center = (col: number) => colX[col] + cw / 2;
-  const rowY = 480;
+  const rowY = 456;
   const clientH = H - rowY - 6;
   // The traditional client stays; the thin and local-first slots take
   // turns between their kinds of client.
@@ -481,10 +492,10 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
   // stays where it is in the other variants.
   const single = scenario === "server";
   const backendTop = single ? shardRow.y : backend.y;
-  const local = { y: 212, h: 44, sqlite: { x: 224, w: 124 }, files: { x: 364, w: 124 } };
+  const local = { y: 188, h: 44, sqlite: { x: 224, w: 124 }, files: { x: 364, w: 124 } };
   return (
     <Diagram viewBox={`0 0 ${W} ${H}`} label={label}>
-      <rect x={4} y={4} width={552} height={418} rx={4} className="dg-cloud" />
+      <rect x={4} y={4} width={552} height={394} rx={4} className="dg-cloud" />
       <Label x={switcher.x} y={22} tone="ink">
         Your own cloud:
       </Label>
@@ -534,6 +545,7 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
               w={sw}
               h={shardRow.h}
               title={shard.title}
+              small={shard.small}
               inner={shard.inner}
             />
           ))}
@@ -543,8 +555,8 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
               points={[
                 // A lone shard spans the row; drop straight into the core.
                 [shard.count === 1 ? 360 : x + sw / 2, shardRow.y + shardRow.h],
-                [shard.count === 1 ? 360 : x + sw / 2, 244],
-                [360, 244],
+                [shard.count === 1 ? 360 : x + sw / 2, 220],
+                [360, 220],
                 [360, jazz.y],
               ]}
               start
@@ -578,8 +590,8 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
       )}
       <Wire
         points={[
-          [530, 466],
-          [colX[1] + cw - 16, 466],
+          [530, 442],
+          [colX[1] + cw - 16, 442],
           [colX[1] + cw - 16, rowY],
         ]}
         tone="blue"
@@ -635,7 +647,7 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
       />
       <Lines
         x={center(0) + 6}
-        y={432}
+        y={408}
         lines={["manual http", "requests &", "streaming"]}
         step={14}
         className="dg-label dg-fill-ink"
@@ -653,7 +665,7 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
       ))}
       <Lines
         x={(center(1) + center(2)) / 2}
-        y={438}
+        y={414}
         lines={["efficient realtime sync", "+ direct blob streaming"]}
         step={14}
         anchor="middle"
