@@ -2201,7 +2201,9 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       // after a socket failed before it opened. Where this host upgrades
       // sockets (attach(), or Vercel), that failure was transient (a
       // restart, a draining instance) and the client should retry the
-      // socket. Only where it can't does the marker send it to the stream.
+      // socket. Only where it can't does the marker send it to the stream
+      // at once; the client also switches after several failed sockets in
+      // a row, when something in between doesn't pass upgrades on.
       if (upgrades) {
         return new Response("Upgrade to a WebSocket", { status: 426 });
       }
