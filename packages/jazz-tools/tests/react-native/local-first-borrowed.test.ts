@@ -43,7 +43,8 @@ it("opens a borrowed local-first account foreground and subscribes without brows
     client = await openJazzClient({ ...config, nativeRelay: { capability: lease.capability } });
     expect(client.session).toMatchObject({
       authMode: "local-first",
-      user: { account: account.id, identity: account.identity },
+      user: account.id,
+      identity: account.identity,
     });
     const snapshots: unknown[][] = [];
     stop = client.db.subscribe(app.todos, (rows) => snapshots.push(rows));
