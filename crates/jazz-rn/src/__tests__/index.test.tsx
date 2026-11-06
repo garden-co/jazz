@@ -74,12 +74,11 @@ function foregroundFixture() {
   };
 }
 
-function loadRelay(nativeRelay: FixtureNativeRelay | null, { isWeb = false } = {}) {
+function loadRelay(nativeRelay: FixtureNativeRelay | null) {
   jest.resetModules();
   jest.doMock("../NativeJazzRelay", () => ({
     __esModule: true,
     default: nativeRelay,
-    isWeb,
   }));
   // Each case supplies the native boundary before importing the wrapper. That
   // is the same one-time lookup Metro performs for an installed native build.
@@ -113,29 +112,6 @@ it("tells Expo Go and old development builds that a native artifact is required"
   await expect(relay.executeNativeRelayCommand("AA==")).rejects.toThrow(
     "install a matching native development or release build containing the Jazz relay artifact. Expo Go never includes it.",
   );
-});
-
-it("tells an Expo web target to use the browser client instead", async () => {
-  const relay = loadRelay(null, { isWeb: true });
-
-  await expect(relay.executeNativeRelayCommand("AA==")).rejects.toThrow(
-    "runs only in iOS and Android builds, not on the web target. For web, use the browser client from jazz-tools/react",
-  );
-  expect(() => relay.installNativeForegroundRuntime()).toThrow("not on the web target");
-});
-
-it("does not look up the TurboModule on react-native-web", () => {
-  jest.resetModules();
-  jest.dontMock("../NativeJazzRelay");
-  jest.doMock("react-native", () => ({ Platform: { OS: "web" }, TurboModuleRegistry: undefined }));
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const module = require("../NativeJazzRelay") as { default: unknown; isWeb: boolean };
-    expect(module.default).toBeNull();
-    expect(module.isWeb).toBe(true);
-  } finally {
-    jest.dontMock("react-native");
-  }
 });
 
 it("rejects an installed native build with an incompatible ABI before executing a command", async () => {

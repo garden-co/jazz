@@ -1,4 +1,4 @@
-import nativeRelay, { isWeb } from "./NativeJazzRelay";
+import nativeRelay from "./NativeJazzRelay";
 import { NATIVE_RELAY_ABI, NATIVE_RELAY_ABI_V1 } from "./native-relay-abi";
 
 /**
@@ -19,11 +19,6 @@ export interface NativeRelayAbiRange {
 export { NATIVE_RELAY_ABI, NATIVE_RELAY_ABI_V1 };
 
 function requireNativeRelay() {
-  if (isWeb) {
-    throw new Error(
-      "Jazz's React Native client (jazz-tools/react-native, jazz-tools/expo) runs only in iOS and Android builds, not on the web target. For web, use the browser client from jazz-tools/react, for example in a .web.tsx platform file.",
-    );
-  }
   if (nativeRelay == null) {
     throw new Error(
       "Jazz native relay is unavailable: install a matching native development or release build containing the Jazz relay artifact. Expo Go never includes it.",
