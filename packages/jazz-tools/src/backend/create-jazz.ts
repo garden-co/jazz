@@ -73,6 +73,7 @@ export {
   type VercelBlobStore,
 } from "./blobs.js";
 import { isSameAdmission, recheckEvery } from "./session-recheck.js";
+import { RequestAuthenticationError } from "./request-auth.js";
 
 /** Where the core keeps its data. */
 export type JazzStore =
@@ -1013,6 +1014,16 @@ function openRemoteCore(
     }),
   });
   return core;
+}
+
+/**
+ * A request `authenticate` names no user for: what an app answers with 401.
+ * (A throwing `authenticate` passes its own error through instead.)
+ */
+function signedOut(operation: string): RequestAuthenticationError {
+  return new RequestAuthenticationError(`${operation}: the request has no signed-in user`, {
+    code: "signed_out",
+  });
 }
 
 /** How long `close()` waits for pending writes to reach the core. */
@@ -2264,12 +2275,12 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     linkIdentity,
     async forReqUser(request) {
       const user = await authenticate(request);
-      if (!user) throw new Error("forReqUser: the request has no signed-in user");
+      if (!user) throw signedOut("forReqUser");
       return backendDbForSession(backend, await sessionFor(user));
     },
     async withAttribution(request) {
       const user = await authenticate(request);
-      if (!user) throw new Error("withAttribution: the request has no signed-in user");
+      if (!user) throw signedOut("withAttribution");
       return backendDbAttributedTo(backend, await sessionFor(user));
     },
     async accountFor(request) {

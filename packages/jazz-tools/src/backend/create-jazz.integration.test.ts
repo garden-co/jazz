@@ -16,11 +16,13 @@ import {
   createJazzClient,
   files,
   fromJWT,
+  isRequestAuthenticationError,
   memory,
   remote,
   sqlite,
   vercel,
   type Jazz,
+  type RequestAuthenticationError,
 } from "./index.js";
 import { localFirstAccountId } from "../accounts/local-first.js";
 import {
@@ -242,6 +244,32 @@ describe("createJazz", () => {
     expect(probe.status).toBe(426);
     expect(probe.headers.get("x-jazz-stream")).toBeNull();
   }, 60_000);
+
+  it("answers a signed-out request with an authentication error, not a plain one", async () => {
+    const failure = new Error("auth service down");
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate: (request) => {
+        if (request.headers.has("x-fail")) throw failure;
+        return request.headers.get("x-test-user") ? { userId: "alice" } : null;
+      },
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const signedOut = new Request("http://app/x");
+    for (const scope of [jazz.forReqUser, jazz.withAttribution]) {
+      const error = await scope(signedOut).catch((caught: unknown) => caught);
+      // What an app maps to 401.
+      expect(isRequestAuthenticationError(error)).toBe(true);
+      expect((error as RequestAuthenticationError).code).toBe("signed_out");
+      expect((error as Error).message).toMatch(/has no signed-in user/);
+    }
+    // authenticate failing is the server's problem, and stays its own error.
+    await expect(
+      jazz.forReqUser(new Request("http://app/x", { headers: { "x-fail": "1" } })),
+    ).rejects.toBe(failure);
+  });
 
   it("signs users in with fromJWT and keeps their account and claims", async () => {
     const { privateKey, publicKey } = await generateKeyPair("ES256", { extractable: true });
