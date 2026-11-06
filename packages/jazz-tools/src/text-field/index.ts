@@ -10,7 +10,7 @@ export type TextField = Pick<
   | "setSelectionRange"
   | "addEventListener"
   | "removeEventListener"
-  | "ownerDocument"
+  | "getRootNode"
 >;
 
 export interface TextFieldSyncOptions {
@@ -42,26 +42,34 @@ export interface TextFieldSync {
  * wrote; values read from the column are applied as a change, not a reset,
  * so the cursor stays where its text went.
  *
- * Leave the field uncontrolled (in React, `defaultValue`, not `value`), so
- * that only this sync sets its text.
+ * Leave the field uncontrolled and give it its first value once (in React,
+ * a `defaultValue` that never changes), so that only this sync sets its
+ * text. Setting the text drops the browser's own undo history for the
+ * field.
  */
 export function textFieldSync(field: TextField, options: TextFieldSyncOptions): TextFieldSync {
-  // The column's value as this field last wrote or applied it. A value read
-  // from the column that equals it is that write's echo.
+  // The value the field last wrote or applied: each write edits it.
   let base = field.value;
+  // This field's writes not yet seen back from the column, oldest first. A
+  // subscription can deliver them a little after later keystrokes were
+  // written, so an earlier write coming back is its echo, not a deletion.
+  let pending: string[] = [];
   // A value that arrived while an input method was composing text.
   let held: string | null = null;
   let composing = false;
+  let destroyed = false;
 
   const onInput = () => {
     const text = field.value;
     if (text === base) return;
+    options.onChange(text, { editedFrom: base });
+    // Only a write that was made moves the base: after a write that threw,
+    // the next one still edits what the column holds.
+    base = text;
+    pending.push(text);
     // A value held back is older than this write; the write's merge with
     // it comes next.
     held = null;
-    const editedFrom = base;
-    base = text;
-    options.onChange(text, { editedFrom });
   };
   const onCompositionStart = () => {
     composing = true;
@@ -78,21 +86,27 @@ export function textFieldSync(field: TextField, options: TextFieldSyncOptions): 
   };
 
   function apply(value: string): void {
+    if (destroyed) return;
     if (composing) {
       // Changing the text under an input method breaks the composition.
       held = value;
       return;
     }
     const shown = field.value;
-    if (value === base || value === shown) {
-      base = value;
-      return;
-    }
     // Text typed but not written yet (its input event still to come) is
     // written now and merged over `value`; the merged value comes next.
     if (shown !== base) return onInput();
+    const echoed = pending.indexOf(value);
+    if (echoed >= 0) {
+      // One of this field's own writes coming back.
+      pending = pending.slice(echoed + 1);
+      return;
+    }
+    pending = [];
     base = value;
-    const focused = field.ownerDocument?.activeElement === (field as unknown);
+    if (value === shown) return;
+    const root = field.getRootNode() as Document | ShadowRoot;
+    const focused = root.activeElement === (field as unknown);
     const start = field.selectionStart;
     const end = field.selectionEnd;
     const direction = field.selectionDirection ?? undefined;
@@ -102,8 +116,14 @@ export function textFieldSync(field: TextField, options: TextFieldSyncOptions): 
       // keystroke continues the word it typed; a selection keeps to the
       // text it selected.
       const collapsed = start === end;
-      const from = mapOffset(shown, value, start, collapsed ? "before" : "after");
-      const to = collapsed ? from : mapOffset(shown, value, end, "before");
+      const from = wholeCharacter(
+        value,
+        mapOffset(shown, value, start, collapsed ? "before" : "after"),
+        collapsed ? "before" : "after",
+      );
+      const to = collapsed
+        ? from
+        : wholeCharacter(value, mapOffset(shown, value, end, "before"), "before");
       field.setSelectionRange(from, Math.max(from, to), direction);
     }
   }
@@ -114,9 +134,21 @@ export function textFieldSync(field: TextField, options: TextFieldSyncOptions): 
   return {
     apply,
     destroy() {
+      destroyed = true;
       field.removeEventListener("input", onInput);
       field.removeEventListener("compositionstart", onCompositionStart);
       field.removeEventListener("compositionend", onCompositionEnd);
     },
   };
+}
+
+/** `offset`, moved out of the middle of a surrogate pair (an emoji, say)
+ * to the side it leans to. */
+function wholeCharacter(text: string, offset: number, side: "before" | "after"): number {
+  if (offset <= 0 || offset >= text.length) return offset;
+  const previous = text.charCodeAt(offset - 1);
+  const next = text.charCodeAt(offset);
+  const splitsPair = previous >= 0xd800 && previous <= 0xdbff && next >= 0xdc00 && next <= 0xdfff;
+  if (!splitsPair) return offset;
+  return side === "before" ? offset - 1 : offset + 1;
 }

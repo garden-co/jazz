@@ -72,13 +72,90 @@ describe("textFieldSync", () => {
     expect(field.selectionDirection).toBe("backward");
   });
 
-  it("applies a value equal to an earlier write: someone deleted what it typed", () => {
-    const { field, sync, type } = setup("a");
+  it("takes a late echo of an earlier write as nothing new", () => {
+    const { field, sync, writes, type } = setup("a");
     field.setSelectionRange(1, 1);
     type("b");
     type("c");
+    // The subscription delivers each write, a little behind the keystrokes.
     sync.apply("ab");
-    expect(field.value).toBe("ab");
+    expect(field.value).toBe("abc");
+    sync.apply("abc");
+    type("d");
+    expect(writes.at(-1)).toEqual(["abcd", "abc"]);
+    // Once a merged value is shown, an earlier write is a value like any
+    // other: someone deleted what was typed.
+    sync.apply("Xabcd");
+    sync.apply("abc");
+    expect(field.value).toBe("abc");
+  });
+
+  it("keeps the cursor out of the middle of an emoji", () => {
+    const { field, sync } = setup("a\u{1F600}");
+    field.setSelectionRange(3, 3);
+    sync.apply("a\u{1F603}");
+    expect(field.selectionStart === 1 || field.selectionStart === 3).toBe(true);
+    field.setSelectionRange(1, 3);
+    sync.apply("a\u{1F604}b");
+    const { selectionStart, selectionEnd } = field;
+    for (const at of [selectionStart!, selectionEnd!]) {
+      const code = field.value.charCodeAt(at);
+      expect(code >= 0xdc00 && code <= 0xdfff).toBe(false);
+    }
+  });
+
+  it("writes typed text first even when a remote value equals it", () => {
+    const { field, sync, writes } = setup("abc");
+    field.value = "abcd"; // input event still to come
+    sync.apply("abcd"); // someone else typed the same letter
+    expect(writes).toEqual([["abcd", "abc"]]);
+  });
+
+  it("keeps editing from the column's value when a write throws", () => {
+    const field = document.createElement("textarea");
+    field.value = "a";
+    document.body.append(field);
+    fields.push(field);
+    const writes: Array<[string, string]> = [];
+    let fail = true;
+    textFieldSync(field, {
+      onChange: (text, { editedFrom }) => {
+        if (fail) throw new Error("refused");
+        writes.push([text, editedFrom]);
+      },
+    });
+    // The DOM reports a listener's error instead of throwing it.
+    const reported: unknown[] = [];
+    const onError = (event: ErrorEvent) => {
+      reported.push(event.error);
+      event.preventDefault();
+    };
+    window.addEventListener("error", onError);
+    field.value = "ab";
+    field.dispatchEvent(new Event("input"));
+    window.removeEventListener("error", onError);
+    expect(String(reported[0])).toContain("refused");
+    fail = false;
+    field.value = "abc";
+    field.dispatchEvent(new Event("input"));
+    expect(writes).toEqual([["abc", "a"]]);
+  });
+
+  it("syncs a single-line input too", () => {
+    const field = document.createElement("input");
+    field.value = "title";
+    document.body.append(field);
+    field.focus();
+    const writes: string[] = [];
+    const sync = textFieldSync(field, { onChange: (text) => writes.push(text) });
+    field.setSelectionRange(5, 5);
+    field.setRangeText("!", 5, 5, "end");
+    field.dispatchEvent(new Event("input"));
+    sync.apply("A title!");
+    expect(field.value).toBe("A title!");
+    expect(field.selectionStart).toBe(8);
+    expect(writes).toEqual(["title!"]);
+    field.remove();
   });
 
   it("writes text typed before its input event instead of applying over it", () => {
@@ -105,6 +182,22 @@ describe("textFieldSync", () => {
     expect(field.selectionStart).toBe(4);
   });
 
+  it("applies a held value after composition when its input event comes last", () => {
+    const { field, sync, writes } = setup("ka");
+    field.setSelectionRange(2, 2);
+    field.dispatchEvent(new Event("compositionstart"));
+    sync.apply("Oka");
+    // Some browsers change the text and send its input event only after
+    // compositionend.
+    field.setRangeText("n", 2, 2, "end");
+    field.dispatchEvent(new Event("compositionend"));
+    field.dispatchEvent(new Event("input"));
+    expect(writes).toEqual([["kan", "ka"]]);
+    expect(field.value).toBe("kan");
+    sync.apply("Okan");
+    expect(field.value).toBe("Okan");
+  });
+
   it("drops a held value once the field writes past it", () => {
     const { field, sync, writes, type } = setup("ka");
     field.setSelectionRange(2, 2);
@@ -121,12 +214,16 @@ describe("textFieldSync", () => {
     expect(field.value).toBe("Okanji");
   });
 
-  it("stops listening once destroyed", () => {
+  it("stops listening and applying once destroyed", () => {
     const { field, sync, writes, type } = setup("x");
     sync.destroy();
     field.setSelectionRange(1, 1);
+    field.dispatchEvent(new Event("compositionstart"));
     type("y");
+    field.dispatchEvent(new Event("compositionend"));
     expect(writes).toEqual([]);
+    sync.apply("z");
+    expect(field.value).toBe("xy");
   });
 
   it("sets an unfocused field's text without moving focus to it", () => {

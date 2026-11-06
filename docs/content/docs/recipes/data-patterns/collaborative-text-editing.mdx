@@ -71,11 +71,12 @@ must be exactly that: not the value a subscription delivers, which can lag a key
 behind your own writes, and would then apply those keystrokes again.
 
 For a plain `<textarea>` or `<input>`, `textFieldSync` from `jazz-tools/text-field` does this
-bookkeeping. It writes each change as an edit of the value the field last showed or wrote, and
-applies merged values as a change, so the cursor stays with the text it was in:
+bookkeeping. It writes each change as an edit of the value the field last showed or wrote, takes
+a late echo of its own writes as nothing new, and applies merged values as a change, so the
+cursor stays with the text it was in:
 
 ```tsx
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useDb } from "jazz-tools/react";
 import { textFieldSync, type TextFieldSync } from "jazz-tools/text-field";
 
@@ -83,6 +84,9 @@ function NoteBody({ note }: { note: { id: string; body: string } }) {
   const db = useDb();
   const field = useRef<HTMLTextAreaElement>(null);
   const sync = useRef<TextFieldSync | null>(null);
+  // The field's first text, given once: React writes a changed
+  // `defaultValue` into a field nobody typed in yet, bypassing the sync.
+  const [initial] = useState(note.body);
   useEffect(() => {
     const synced = textFieldSync(field.current!, {
       onChange: (body, { editedFrom }) =>
@@ -93,14 +97,16 @@ function NoteBody({ note }: { note: { id: string; body: string } }) {
   }, [db, note.id]);
   useEffect(() => sync.current?.apply(note.body), [note.body]);
   // Uncontrolled: only the sync sets the field's text.
-  return <textarea ref={field} defaultValue={note.body} />;
+  return <textarea ref={field} defaultValue={initial} />;
 }
 ```
 
 Render it with `key={note.id}`, so that it starts over for each note. Keep the field
-uncontrolled (`defaultValue`, not `value`): a controlled field resets its whole text on each merged
-value, which moves the cursor and can drop a keystroke typed in between. An editor that mounted
-before the row loaded must not name `""`: it would add the whole text again.
+uncontrolled, with a `defaultValue` that never changes: a controlled field resets its whole text
+on each merged value, which moves the cursor and can drop a keystroke typed in between. Because
+the sync sets the field's text, the browser's own undo (Ctrl+Z) does not reach past a merged
+value. An editor that mounted before the row loaded must not name `""`: it would add the whole
+text again.
 
 `editedFrom` is not supported yet in branch views, on a column with its own transform, or (on a
 backend) for a write as a user outside a transaction; those writes throw. `upsert` does not take
