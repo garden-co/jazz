@@ -739,6 +739,48 @@ describe("createJazz", () => {
     expect(await jazz.db.all(app.todos)).toEqual([]);
   }, 30_000);
 
+  // A guest whose browser just signed up (the app set the user's cookie)
+  // reconnects before it links: its writes still upload as the guest's.
+  it("lets a guest sync while a user's cookie rides on its socket", async () => {
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      // The documented setup: the session cookie's user, else a guest.
+      authenticate: (request) => {
+        const user = /(?:^|; )sid=([^;]+)/.exec(request.headers.get("cookie") ?? "")?.[1];
+        return user ? { userId: user } : acceptLocalFirstAuth(request);
+      },
+    });
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz, { sockets: true });
+    const RealWebSocket = globalThis.WebSocket;
+    globalThis.WebSocket = class extends RealWebSocket {
+      constructor(url: string | URL, options?: { headers?: Record<string, string> }) {
+        const cookie = new URL(url).host === new URL(origin).host ? { cookie: "sid=alice" } : {};
+        super(url, { ...options, headers: { ...options?.headers, ...cookie } } as never);
+      }
+    } as typeof WebSocket;
+    cleanups.push(async () => {
+      globalThis.WebSocket = RealWebSocket;
+    });
+    const guestSession = await createJazzClient({
+      app,
+      permissions,
+      serverUrl: `${origin}/jazz`,
+      driver: { type: "memory" },
+      initial: "local-first",
+    });
+    cleanups.push(() => guestSession.close());
+    const guest = guestSession.getSnapshot().client!;
+    const row = await guest.db
+      .insert(app.todos, { title: "the guest's", owner: guest.session!.user! })
+      .wait({ tier: "global" });
+    expect((await jazz.db.all(app.todos.where({ id: row.id }))).map((t) => t.title)).toEqual([
+      "the guest's",
+    ]);
+  }, 30_000);
+
   it("ends a guest's open sync session once authenticate stops accepting guests", async () => {
     let guestsWelcome = true;
     const jazz = await createJazz({
