@@ -13,8 +13,8 @@ A backend client is one of two kinds:
 
 - **Trusted.** It acts as the system, with your main backend's own authority: your permissions are
   not checked, and its writes carry the [system identity](/docs/setup/auth/backend#system-authored-rows).
-  The server would also let it act for any user, but `createJazzClient` has no way to ask for that
-  yet. Use it for system work such as imports, migrations and scheduled jobs.
+  It can also [act for any user](#act-for-a-user). Use it for system work such as imports,
+  migrations and scheduled jobs.
 - **Scoped.** It acts as one user, with that user's permissions, exactly as if `authenticate` had
   named the user. Use it for an agent or service that should only touch one account's data.
 
@@ -106,9 +106,7 @@ While your main backend is unreachable, `createJazzClient` waits without logging
 its own timeout.
 
 The session opens as whatever your main backend trusts the token as: with backend authority for a
-trusted machine, or signed in as its user for a scoped one. A trusted machine is also allowed to
-act for any user, with that user's identity and permissions, but `createJazzClient` doesn't offer
-a way to do that yet. Your main backend's API routes see the
+trusted machine, or signed in as its user for a scoped one. Your main backend's API routes see the
 same identity, so `jazz.forReqUser(request)` and `jazz.accountFor(request)` work for requests that
 carry the token as `Authorization: Bearer …`.
 
@@ -116,6 +114,36 @@ A scoped client's user gets an account when the client first signs in, like any 
 Before that, `accountFor` and `forReqUser` in your API routes find no account for that user; call
 `jazz.createAccountFor(userId)` in your main backend if a route needs it earlier. A trusted client
 uses the system identity and needs no user account.
+
+## Act for a user
+
+A trusted client can work as one of your users with `client.forUser(userId)`. It returns the
+database as that user, just like `jazz.forReqUser(request)` in your main backend: writes carry the
+user's identity and are checked against that user's permissions. `userId` is the id your main
+backend's `authenticate` names the user by.
+
+```ts title="digest-job.ts"
+import { isNoJazzAccountError } from "jazz-tools/backend";
+
+const { client } = session.getSnapshot();
+try {
+  const db = await client!.forUser("user_123", { claims: { org: "acme" } });
+  await db.insert(app.notifications, { text: "Your weekly digest" }).wait({ tier: "global" });
+} catch (error) {
+  if (!isNoJazzAccountError(error)) throw error;
+  // This user hasn't signed in yet, so they have no account to act as.
+}
+```
+
+- `forUser` never creates an account. A user with no account yet rejects with a
+  `NoJazzAccountError` (`code: "no_account"`). They get one when they first sign in, or when your
+  main backend calls `jazz.createAccountFor(userId)`.
+- Your `authenticate` isn't called, because there is no request from the user. Your declarative
+  permissions see exactly the `claims` you pass as the user's claims, and `{}` when you pass none.
+- If your main backend refuses the identity, for example because it was revoked, `forUser`
+  rejects with an error whose `status` is 403.
+- Only a trusted client has `forUser`. On a scoped client it throws, because that client already
+  acts as its user. In your main backend itself, use `jazz.forReqUser`.
 
 ## Machines without an OIDC token
 
