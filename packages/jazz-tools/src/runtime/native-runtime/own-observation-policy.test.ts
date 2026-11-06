@@ -5,11 +5,10 @@ import { createDb } from "../default-create-db.js";
 import { localAccountConfig } from "../testing/account-fixtures.js";
 import { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
 import {
-  resolveClientInternalSessionSync,
   trustedReservedSessionToken,
   TRUSTED_RESERVED_SESSION_TOKEN_FIELD,
 } from "../client-session.js";
-import { getTrustedReservedSession } from "../db-internal-session.js";
+import { getDbInternalSession } from "../db-internal-session.js";
 import { startTestJazz } from "../../testing/index.js";
 import { translateQuery } from "../query-adapter.js";
 import { transformRow } from "../row-transformer.js";
@@ -32,10 +31,7 @@ it("keeps real account policy, pending rows and caller claims outside another ow
   });
   const owners: Awaited<ReturnType<typeof createDb>>[] = [];
   const actualSession = (db: (typeof owners)[number]) => {
-    const session = resolveClientInternalSessionSync({
-      ...db.config,
-      trustedReservedSession: getTrustedReservedSession(db.config),
-    });
+    const session = getDbInternalSession(db);
     if (!session) throw new Error("Missing real fixture account session");
     return {
       account_id: session.account_id,

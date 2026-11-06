@@ -6,11 +6,10 @@ import { definePermissions } from "../../permissions/index.js";
 import { startTestJazz } from "../../testing/index.js";
 import { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
 import {
-  resolveClientInternalSessionSync,
   trustedReservedSessionToken,
   TRUSTED_RESERVED_SESSION_TOKEN_FIELD,
 } from "../client-session.js";
-import { getTrustedReservedSession } from "../db-internal-session.js";
+import { getDbInternalSession } from "../db-internal-session.js";
 import { translateQuery } from "../query-adapter.js";
 import { transformRow } from "../row-transformer.js";
 
@@ -57,10 +56,7 @@ it("observes a genuine native account's accepted rows and refuses its retired ow
     });
     await write.wait({ tier: "global" });
     const query = app.observation_rows.where({ id: write.value.id });
-    const actual = resolveClientInternalSessionSync({
-      ...db.config,
-      trustedReservedSession: getTrustedReservedSession(db.config),
-    });
+    const actual = getDbInternalSession(db);
     if (!actual) throw new Error("Missing real native account session");
     const session = JSON.stringify({
       account_id: actual.account_id,
