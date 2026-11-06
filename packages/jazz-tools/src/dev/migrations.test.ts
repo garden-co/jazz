@@ -405,8 +405,10 @@ describe("migration stub generation", () => {
       expect(source).toContain(
         `// TODO: Added column "${added}" may be a rename of "title": to keep its values, give it the step m.renameFrom("title")`,
       );
-    expect(source).not.toContain("m.add.");
-    expect(source).not.toContain("m.drop.");
+    // No step is written for any of the three: the hints name m.add and
+    // m.drop only in prose.
+    expect(source).not.toMatch(/m\.add\.\w/);
+    expect(source).not.toMatch(/m\.drop\.\w/);
     const migrate = source.slice(source.indexOf("migrate:"), source.indexOf("fromHash:"));
     expect(migrate.split("\n").filter((line) => UNFILLED_STUB_TODO.test(line))).toHaveLength(2);
   });
