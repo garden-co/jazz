@@ -4,7 +4,10 @@ import { storageQuotaBrowserCommands } from "./browser-commands.js";
 import { createBrowserTestDb as createDb, uniqueDbName, waitForCondition } from "./support.js";
 import { todos, allTodos, useSharedWorkerBridgeHarness } from "./worker-bridge-harness.js";
 
-// The quota override is a Chromium DevTools command.
+// The quota override is a Chromium DevTools command. It reaches IndexedDB only
+// if nothing in the browser has opened this origin's IndexedDB before, so this
+// file runs alone in its own browser (pnpm test:browser:storage-quota) and the
+// shared browser run excludes it.
 const chromium = /Chrome\//.test(navigator.userAgent);
 
 /** A title of about `bytes` that no codec shrinks. */
