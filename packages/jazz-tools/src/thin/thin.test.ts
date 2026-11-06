@@ -200,6 +200,26 @@ describe("thin client", () => {
     unsubscribe();
   }, 60_000);
 
+  it("upgrades with the server down, and a guest's write goes to the local store", async () => {
+    const server = await startServer();
+    const secret = formatAuthSecret(new Uint8Array(32).fill(7));
+    const thin = await thinDb(server, secret);
+    const unsubscribe = thin.subscribe(app.notes, () => undefined);
+    await thin.all(app.notes);
+    const config = await localAccountConfig(server.appId, server.url, secret);
+    await server.stop();
+
+    const local = await upgradeToLocalFirst(thin, () => createLocalFirstDb(config));
+    opened.push(local);
+    unsubscribe();
+    // Written while the server is still down: stored locally, and read back
+    // without it.
+    const { value: written } = local.insert(app.notes, { text: "offline guest", done: false });
+    expect((await local.all(app.notes, { tier: "local-first" })).map((row) => row.id)).toContain(
+      written.id,
+    );
+  }, 60_000);
+
   it("upgrades to local-first with the app's live queries already loaded", async () => {
     const server = await startServer();
     const secret = formatAuthSecret(new Uint8Array(32).fill(5));
