@@ -1,0 +1,87 @@
+---
+title: Backend Clients
+description: "Machines outside your main backend that sync through it with their platform's OIDC token."
+---
+
+Your **main backend** is the one that runs `createJazz`: it serves `/jazz`, and its `authenticate` decides who your users are. A **backend client** is a machine outside it, such as a CI job, a worker on another cloud, or a partner's service. It syncs through the main backend's `/jazz` like a browser does, but it proves who it is with its platform's OIDC token (GitHub Actions, Vercel, Google Cloud, AWS EKS and Kubernetes service accounts, and others). It needs no shared secret.
+
+## Trusting a backend client
+
+List the workloads you trust in `backendClients`, each with `trustWorkload`:
+
+```ts title="app/jazz/[...path]/route.ts"
+import { createJazz, trustWorkload } from "jazz-tools/backend";
+
+const jazz = await createJazz({
+  app,
+  permissions,
+  store,
+  authenticate,
+  backendClients: [
+    // A trusted machine: it syncs with the main backend's authority.
+    trustWorkload({
+      issuer: "https://token.actions.githubusercontent.com",
+      audience: "https://app.example.com",
+      claims: {
+        sub: "repo:acme/app:environment:production",
+        job_workflow_ref: "acme/app/.github/workflows/sync.yml@refs/heads/main",
+      },
+      as: "backend",
+    }),
+    // A scoped machine: it acts as the user its claims map to.
+    trustWorkload({
+      issuer: "https://oidc.vercel.com/acme",
+      audience: "https://vercel.com/acme",
+      claims: { sub: "owner:acme:project:importer:environment:production" },
+      as: (claims) => ({ userId: `importer:${claims.sub}` }),
+    }),
+  ],
+});
+```
+
+The main backend verifies each token it receives. The checks are:
+
+- The token must be signed with one of the issuer's published keys, which the main backend finds through the issuer's OpenID discovery document.
+- It must be meant for `audience` and must not have expired.
+- It must carry every claim in `claims` with exactly that value.
+
+An issuer signs tokens for all of its workloads with the same keys, so `claims` must name yours, down to the environment:
+
+- **GitHub Actions:** pin `sub`, which names the repository and the deployment environment (`repo:acme/app:environment:production`). Add `job_workflow_ref` to pin the workflow file and branch as well. Request the token with an audience of your own, such as your app's URL, so that tokens minted for other services don't work here.
+- **Vercel:** every token in a team has the same audience (`https://vercel.com/<team>`), so the audience alone names nothing. Pin the full `sub`, which names the project and the environment.
+- **Kubernetes and EKS:** the cluster's service account issuer must be public and served over https, so that the main backend can fetch its keys. Pin `sub` (`system:serviceaccount:<namespace>:<name>`).
+
+A token from a listed issuer that fails any check is refused, as is a token with less than a minute left. It is never handed to `authenticate`. So if your users also sign in with tokens from the same issuer (for example, Google ID tokens alongside Google Cloud workloads), those users are refused too. Use separate issuers, or keep such machines on your own auth (below). A token from an issuer you haven't listed goes to `authenticate` as usual. If the main backend can't fetch an issuer's keys, it answers 503 and the backend client retries.
+
+`as` decides what the backend client may do:
+
+- **`"backend"`: a trusted machine.** It syncs with the main backend's own authority. Its own writes are the system's, and your permissions are not checked for them. Like the main backend, it may also act on behalf of any user: writes it makes as a user carry that user's identity and are checked against that user's permissions. Use this only for machines you would trust with your main backend's code.
+- **A function from the token's claims to a user: a scoped machine.** It acts as that user, with that user's permissions, exactly as if `authenticate` had named the user. The user gets an account on first use, like any other user. Return `null` to refuse the token. API routes see the same user through `jazz.forRequest(request)` and `jazz.accountFor(request)`.
+
+## Connecting from the backend client
+
+In Node, pass the token as `credential` to `createJazzClient`. Pass a function: it is called for every request and socket, so the token stays fresh. A plain token string only works for jobs that finish before it expires. After that the session is refused, and the client reports an auth failure instead of reconnecting.
+
+```ts title="worker.ts"
+import { createJazzClient } from "jazz-tools/backend";
+
+const session = await createJazzClient({
+  appId,
+  app,
+  permissions,
+  serverUrl: "https://app.example.com/jazz",
+  driver: { type: "memory" },
+  // Your platform's way to get a token, e.g. `getVercelOidcToken()` from
+  // `@vercel/functions/oidc`, or the token GitHub Actions hands a job.
+  credential: () => getOidcToken({ audience: "https://app.example.com" }),
+});
+const { client } = session.getSnapshot();
+```
+
+A backend client syncs over a WebSocket. It has no HTTP-stream fallback, so the main backend must accept sockets (with `attach()`, on Vercel, or on a host that upgrades them).
+
+The session opens as whatever the main backend trusts the token as: with backend authority for a trusted machine, or signed in as its user for a scoped one. If the main backend trusts the token as neither, `createJazzClient` fails. A backend client's session ends when its token expires, and the client reconnects with a fresh token.
+
+## When there is no OIDC token
+
+Some machines have no OIDC token, such as a developer's laptop or a plain Cloudflare Worker. Others have a different kind of credential: AWS outside EKS signs requests with SigV4. For these, sign in through your app's own auth: have `authenticate` accept a credential your app issues, such as an API key or a token your backend mints for that machine.

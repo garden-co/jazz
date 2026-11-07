@@ -87,17 +87,16 @@ export interface Session {
 /**
  * A session that Jazz has admitted for use by a client binding.
  *
- * `user` retains both stable account ownership and the exact JWT identity used
- * to act. Compare `user.account` for ownership across linked identities; compare
- * all fields for exact authorship. Provider claims never supply account IDs.
- * Intern handles are process-local Rust details and are never exposed here.
+ * `user` is the account, shared by every identity linked to it, as policies
+ * see `session.user`. `identity` is the exact login (JWT issuer and subject)
+ * used to act. Provider claims never supply account IDs. Intern handles are
+ * process-local Rust details and are never exposed here.
  */
 export interface PublicSession {
-  /** Anonymous/internal readers may have no admitted account; row authors always do. */
-  readonly user: Readonly<{
-    account: string | null;
-    identity: import("../magic-columns.js").RowAuthor["identity"];
-  }>;
+  /** The account; anonymous/internal readers may have none, row authors always do. */
+  readonly user: string | null;
+  /** The exact login, as `session.identity` in policies. */
+  readonly identity: import("../magic-columns.js").RowAuthor["identity"];
   readonly claims: Readonly<Record<string, unknown>>;
   readonly authMode: AuthMode;
 }
@@ -111,17 +110,11 @@ export interface AppContext {
   /** Application identifier (used for isolation) */
   appId: string;
 
-  /** Optional client ID (generated if not provided) */
-  clientId?: string;
-
   /** Schema definition */
   schema: WasmSchema;
 
   /** Optional server URL for sync */
   serverUrl?: string;
-
-  /** Optional runtime source overrides for WASM loading. */
-  runtimeSources?: RuntimeSourcesConfig;
 
   /** Storage driver mode (defaults to persistent). */
   driver?: StorageDriver;
@@ -156,14 +149,10 @@ export interface AppContext {
   adminSecret?: string;
 
   /**
-   * Durability tier identity for this node (or identities for multi-role nodes).
-   * Set for server nodes to enable durability notifications.
-   * Clients typically leave this undefined.
+   * Slow-query log: queries whose runs take at least this many milliseconds
+   * are reported with `console.warn`, one line per query shape with its plan
+   * and the index that would likely make it fast (default 50; 0 turns the
+   * log off).
    */
-  tier?: "local" | "global" | Array<"local" | "global">;
-
-  /**
-   * Default durability tier for reads and writes when no explicit tier is provided.
-   */
-  defaultDurabilityTier?: "local" | "global";
+  slowQueryThresholdMs?: number;
 }

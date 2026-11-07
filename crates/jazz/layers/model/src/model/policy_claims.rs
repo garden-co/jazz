@@ -2,9 +2,9 @@
 
 use std::collections::BTreeMap;
 
-use crate::groove::records::Value;
 use crate::ids::AuthorSubject;
 use crate::query::provider_claim_key;
+use jazz_types::records::Value;
 
 /// Construct the one canonical policy-binding vocabulary for an admitted
 /// identity and its provider claims.
@@ -37,7 +37,7 @@ pub fn canonical_policy_binding_claims(
 /// Flat keys address explicit public paths; provider keys have another namespace.
 pub fn author_policy_claims(author: AuthorSubject) -> BTreeMap<String, Value> {
     // Admitted account authors use the exact non-null row descriptor, so
-    // whole-author policy equality has the same type as row provenance.
+    // `session.identity` has the same type as a row's author identity.
     // Accountless reader sessions remain a separate nullable representation.
     let row_author = crate::ids::RowAuthor::from_persisted_subject(author).ok();
     let value = row_author
@@ -58,17 +58,17 @@ pub fn author_policy_claims(author: AuthorSubject) -> BTreeMap<String, Value> {
     };
     let issuer = principal.get("issuer").expect("author issuer field");
     let subject = principal.get("subject").expect("author subject field");
+    // `session.user` is the account; `session.identity` the exact login.
     let mut claims = BTreeMap::from([
-        ("user.identity".into(), identity),
-        ("user.identity.issuer".into(), issuer),
-        ("user.identity.subject".into(), subject),
+        ("identity".into(), identity),
+        ("identity.issuer".into(), issuer),
+        ("identity.subject".into(), subject),
     ]);
-    // Accountless readers are not row authors. Missing ownership claims lower
-    // to deny; binding a nullable record/value to a non-null author would
+    // Accountless readers are not row authors. A missing account lowers to
+    // deny; binding a nullable value to a non-null account column would
     // instead reject the query with a parameter-type error.
     if row_author.is_some() {
-        claims.insert("user".into(), value);
-        claims.insert("user.account".into(), account);
+        claims.insert("user".into(), account);
     }
     claims
 }
@@ -237,11 +237,12 @@ mod tests {
 
         assert_eq!(
             claims.get("user"),
-            Some(
-                &crate::ids::RowAuthor::from_persisted_subject(author)
+            Some(&Value::Uuid(
+                crate::ids::RowAuthor::from_persisted_subject(author)
                     .unwrap()
-                    .to_value()
-            ),
+                    .account_id()
+                    .0
+            )),
         );
         assert_eq!(
             claims.get("authMode"),

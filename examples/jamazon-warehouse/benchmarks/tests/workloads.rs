@@ -23,7 +23,7 @@ fn pending_order_access_path_is_bounded() {
 }
 
 #[test]
-fn exclusive_purchase_commits_every_operational_row_together() {
+fn serializable_purchase_commits_every_operational_row_together() {
     let fixture = Fixture::new(2);
 
     assert_eq!(

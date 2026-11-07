@@ -15,7 +15,9 @@ import {
 } from "../../../../packages/jazz-tools/tests/browser/topology-harness.js";
 import {
   getJazzServerInfo,
-  getJazzServerJwtForUser,
+  jazzAppUserUrl,
+  loginAtJazzAppUser,
+  startJazzApp,
 } from "../../../../packages/jazz-tools/tests/browser/testing-server.js";
 import permissions from "../../permissions.js";
 import { app } from "../../schema.js";
@@ -38,7 +40,7 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
     let nextOperator: Db;
     let ownerAccount: string;
     let nextOperatorAccount: string;
-    let ownerToken: string;
+    let ownerUrl: string;
     let ownerDbName: string;
     let warehouse: { id: string };
     let district: { id: string };
@@ -64,7 +66,7 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
             restart: async () => {
               await owner.shutdown();
               ctx.untrack(owner);
-              owner = await openClient(server, "owner-reopened", ownerToken, ownerDbName);
+              owner = await openClient(server, "owner-reopened", ownerUrl, ownerDbName);
             },
           },
           authorization: {
@@ -72,7 +74,7 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
               const outsider = await openClient(
                 server,
                 "outsider",
-                await getJazzServerJwtForUser("jamazon-outsider", undefined, server.appId),
+                await jazzAppUserUrl(server, "jamazon-outsider"),
               );
               await expect(
                 outsider
@@ -100,26 +102,27 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
           {
             name: "bootstrap the warehouse and its operational rows",
             run: async () => {
-              server = await getJazzServerInfo(uniqueDbName("jamazon-warehouse-topology"));
+              const core = await getJazzServerInfo(uniqueDbName("jamazon-warehouse-topology"));
               await deploy({
-                appId: server.appId,
-                serverUrl: server.serverUrl,
-                adminSecret: server.adminSecret,
+                appId: core.appId,
+                serverUrl: core.serverUrl,
+                adminSecret: core.adminSecret,
                 schema: app,
                 permissions,
               });
-              ownerToken = await getJazzServerJwtForUser("jamazon-owner", undefined, server.appId);
+              server = await startJazzApp(core, { schema: app, permissions });
+              ownerUrl = await jazzAppUserUrl(server, "jamazon-owner");
               ownerDbName = uniqueDbName("jamazon-owner-persistent");
-              owner = await openClient(server, "owner", ownerToken, ownerDbName);
+              owner = await openClient(server, "owner", ownerUrl, ownerDbName);
               observer = await openClient(
                 server,
                 "observer",
-                await getJazzServerJwtForUser("jamazon-observer", undefined, server.appId),
+                await jazzAppUserUrl(server, "jamazon-observer"),
               );
               nextOperator = await openClient(
                 server,
                 "next-operator",
-                await getJazzServerJwtForUser("jamazon-next-operator", undefined, server.appId),
+                await jazzAppUserUrl(server, "jamazon-next-operator"),
               );
               ownerAccount = accountFromDb(owner);
               nextOperatorAccount = accountFromDb(nextOperator);
@@ -178,7 +181,7 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
                   (rows) => rows.length === 1 && rows[0]?.id === district.id,
                   "observer warehouse districts",
                   15_000,
-                  "global",
+                  "remote",
                 ),
                 waitForQuery(
                   observer,
@@ -186,10 +189,10 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
                   (rows) => rows.length === 1 && rows[0]?.id === customer.id,
                   "observer district customers",
                   15_000,
-                  "global",
+                  "remote",
                 ),
               ]);
-              expect(await observer.all(queries.pendingOrders, { tier: "global" })).toEqual([]);
+              expect(await observer.all(queries.pendingOrders, { tier: "remote" })).toEqual([]);
             },
           },
           {
@@ -203,7 +206,7 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
                 () => {
                   // Do not await here: the scheduler deterministically starts
                   // both duplicated deliveries before either preflight or
-                  // exclusive transaction can settle. This is the real
+                  // serializable transaction can settle. This is the real
                   // same-key overlap that a double submit or retry can cause.
                   duplicateCheckouts.push(
                     purchase(publicDb(owner), {
@@ -236,7 +239,7 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
                 (rows) => rows.length === 1 && rows[0]?.id === receipts[0]?.orderId,
                 "observer sees exactly one concurrently duplicated checkout",
                 20_000,
-                "global",
+                "remote",
               );
               const afterConcurrentDuplicate = await checkoutSnapshot(observer, {
                 warehouseId: warehouse.id,
@@ -277,7 +280,7 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
 
               // This is an app-owned checkout relay boundary, not an attempt to
               // instrument Jazz's transport.  The first handoff is dropped and
-              // the retry reaches the same exclusive checkout with the same
+              // the retry reaches the same serializable checkout with the same
               // request key.  It models the important adopter-visible client ↔
               // core failure mode without coupling this example to runtime
               // protocol details.
@@ -326,7 +329,7 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
                     [receipts[0]?.orderId, recoveredReceipt?.orderId].join(","),
                 "observer sees both completed checkout retries in order",
                 20_000,
-                "global",
+                "remote",
               );
               expect(orders.map((order) => [order.order_number, order.total_cents])).toEqual([
                 [17, 7_500],
@@ -417,7 +420,7 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
                     [17, 18, ...Array.from({ length: 18 }, (_, offset) => 100 + offset)].join(","),
                 "observer sees the first bounded pending-order page in order",
                 20_000,
-                "global",
+                "remote",
               );
               expect(boundedOrders.at(-1)?.order_number).toBe(117);
               expect(boundedOrders.some((order) => order.order_number === 118)).toBe(false);
@@ -430,7 +433,7 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
                     [17, 18, ...Array.from({ length: 18 }, (_, offset) => 100 + offset)].join(","),
                 "observer sees the ordered, bounded console order page",
                 20_000,
-                "global",
+                "remote",
               );
               expect(boundedConsoleOrders.at(-1)?.order_number).toBe(117);
               expect(boundedConsoleOrders.some((order) => order.order_number === 118)).toBe(false);
@@ -440,31 +443,31 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
                 (rows) => rows.length === 21 && rows.at(-1)?.order_number === 118,
                 "observer converges the complete concurrently seeded operational set",
                 20_000,
-                "global",
+                "remote",
               );
               expect(
                 await observer.all(app.order_lines.where({ order_id: receipts[0]!.orderId }), {
-                  tier: "global",
+                  tier: "remote",
                 }),
               ).toMatchObject([{ item_id: item.id, quantity: 3, amount_cents: 7_500 }]);
               expect(
                 await observer.all(app.payments.where({ order_id: receipts[0]!.orderId }), {
-                  tier: "global",
+                  tier: "remote",
                 }),
               ).toMatchObject([
                 { customer_id: customer.id, amount_cents: 7_500, idempotency_key: "checkout-17" },
               ]);
               expect(
-                await observer.all(app.stock.where({ id: stock.id }).limit(1), { tier: "global" }),
+                await observer.all(app.stock.where({ id: stock.id }).limit(1), { tier: "remote" }),
               ).toMatchObject([{ on_hand: 6 }]);
               expect(
                 await observer.all(app.districts.where({ id: district.id }).limit(1), {
-                  tier: "global",
+                  tier: "remote",
                 }),
               ).toMatchObject([{ next_order_number: 19 }]);
               expect(
                 await observer.all(app.customers.where({ id: customer.id }).limit(1), {
-                  tier: "global",
+                  tier: "remote",
                 }),
               ).toMatchObject([{ balance_cents: -10_000 }]);
 
@@ -507,7 +510,7 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
               );
               expect(
                 await owner.all(app.warehouses.where({ id: warehouse.id }).limit(1), {
-                  tier: "local",
+                  tier: "local-first",
                 }),
               ).toMatchObject([{ region: "offline-east" }]);
             },
@@ -525,7 +528,7 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
                 (rows) => rows[0]?.region === "offline-east",
                 "persistent owner reopen retains local edit",
                 20_000,
-                "global",
+                "local-first",
               );
               const observed = await waitForQuery(
                 observer,
@@ -533,13 +536,13 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
                 (rows) => rows[0]?.region === "offline-east",
                 "observer receives reconnected local edit",
                 20_000,
-                "global",
+                "remote",
               );
               expect(observed[0]?.operator_id).toBe(ownerAccount);
               const allOrders = await owner.all(
                 completeOrdersForTopology({ warehouseId: warehouse.id, districtId: district.id }),
                 {
-                  tier: "global",
+                  tier: "remote",
                 },
               );
               expect(allOrders).toHaveLength(21);
@@ -589,15 +592,15 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
               // transfer also revokes the former manager's stock writes.
               // A partial update needs the row's current cells locally, so
               // each client loads the rows it edits first, as the console does.
-              await owner.all(app.stock.where({ id: stock.id }).limit(1), { tier: "global" });
+              await owner.all(app.stock.where({ id: stock.id }).limit(1), { tier: "remote" });
               await expect(
                 owner.update(app.stock, stock.id, { on_hand: 99 }).wait({ tier: "global" }),
               ).rejects.toThrow(/AuthorizationDenied|Write rejected/);
               await nextOperator.all(app.warehouses.where({ id: warehouse.id }).limit(1), {
-                tier: "global",
+                tier: "remote",
               });
               await nextOperator.all(app.stock.where({ id: stock.id }).limit(1), {
-                tier: "global",
+                tier: "remote",
               });
               await nextOperator
                 .update(app.warehouses, warehouse.id, { region: "next-operator-write" })
@@ -611,7 +614,7 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
                 (rows) => rows[0]?.region === "next-operator-write",
                 "new operator update reaches observer",
                 20_000,
-                "global",
+                "remote",
               );
             },
           },
@@ -637,24 +640,23 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
 async function openClient(
   server: { appId: string; serverUrl: string },
   label: string,
-  jwtToken: string,
+  userUrl: string,
   dbName = uniqueDbName(`jamazon-${label}`),
 ): Promise<Db> {
-  // Public clients sign in through a real account handle: the JWT is
-  // registered with the account registry once, and reopening logs it in again.
+  // Users sign in through the app's backend on their own origin; reopening
+  // signs in again there, to the same account.
   return ctx.track(
     await createBrowserTestDb({
       appId: server.appId,
-      serverUrl: server.serverUrl,
-      jwtToken,
-      registerJwt: true,
+      serverUrl: userUrl,
+      account: await loginAtJazzAppUser(server.appId, userUrl),
       driver: { type: "persistent", dbName },
     }),
   );
 }
 
 function accountFromDb(db: Db): string {
-  const account = db.getAuthState().session?.user.account;
+  const account = db.getAuthState().session?.user;
   if (!account) throw new Error("test client is missing an admitted account");
   return account;
 }
@@ -698,12 +700,12 @@ async function checkoutSnapshot(
   },
 ) {
   const [orders, orderLines, payments, stockRows, districtRows, customerRows] = await Promise.all([
-    db.all(app.orders.where({ warehouse_id: warehouseId }), { tier: "global" }),
-    db.all(app.order_lines.where({ warehouse_id: warehouseId }), { tier: "global" }),
-    db.all(app.payments.where({ warehouse_id: warehouseId }), { tier: "global" }),
-    db.all(app.stock.where({ id: stockId }).limit(1), { tier: "global" }),
-    db.all(app.districts.where({ id: districtId }).limit(1), { tier: "global" }),
-    db.all(app.customers.where({ id: customerId }).limit(1), { tier: "global" }),
+    db.all(app.orders.where({ warehouse_id: warehouseId }), { tier: "remote" }),
+    db.all(app.order_lines.where({ warehouse_id: warehouseId }), { tier: "remote" }),
+    db.all(app.payments.where({ warehouse_id: warehouseId }), { tier: "remote" }),
+    db.all(app.stock.where({ id: stockId }).limit(1), { tier: "remote" }),
+    db.all(app.districts.where({ id: districtId }).limit(1), { tier: "remote" }),
+    db.all(app.customers.where({ id: customerId }).limit(1), { tier: "remote" }),
   ]);
   const [stock] = stockRows;
   const [district] = districtRows;

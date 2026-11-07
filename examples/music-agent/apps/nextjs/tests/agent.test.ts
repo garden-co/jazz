@@ -10,8 +10,10 @@ import permissions from "../permissions";
 let server: LocalJazzServerHandle;
 beforeAll(async () => {
   server = await startLocalJazzServer({ inMemory: true, schema: app, permissions });
-  process.env.NEXT_PUBLIC_JAZZ_SERVER_URL = server.url;
-  process.env.NEXT_PUBLIC_JAZZ_APP_ID = server.appId;
+  // The app's Jazz fronts this test server with remote().
+  process.env.JAZZ_SERVER_URL = server.url;
+  process.env.JAZZ_ADMIN_SECRET = server.adminSecret;
+  process.env.JAZZ_APP_ID = server.appId;
   process.env.BACKEND_SECRET = server.backendSecret;
   process.env.BETTER_AUTH_SECRET = "music-agent-test-better-auth-secret-0123456789";
   process.env.MUSIC_AGENT_PROVIDER = "scripted";
@@ -28,22 +30,14 @@ let second: Db | undefined;
 let secondSession: { close(): Promise<void> } | undefined;
 async function secondBackend(): Promise<Db> {
   if (second) return second;
-  const { createJazzSession } = await import("jazz-tools/backend");
-  const { jazzEnv } = await import("../src/lib/jazz-env");
-  const session = await createJazzSession({
+  const { createJazz, remote } = await import("jazz-tools/backend");
+  const jazz = createJazz({
     app,
     permissions,
-    appId: server.appId,
-    driver: { type: "memory" },
-    serverUrl: server.url,
-    initial: { backendSecret: server.backendSecret },
-    env: jazzEnv,
-    tier: "global",
+    store: remote({ url: server.url, appId: server.appId, secret: server.adminSecret }),
   });
-  secondSession = session;
-  const client = session.getSnapshot().client;
-  if (!client) throw new Error("second backend session is not ready");
-  second = client.db;
+  secondSession = jazz;
+  second = jazz.db;
   return second;
 }
 
@@ -65,7 +59,7 @@ describe("MusicAgent server execution", () => {
 
     await runTurn(firstReply);
 
-    const turn = await db.one(app.turns.where({ id: firstReply }), { tier: "global" });
+    const turn = await db.one(app.turns.where({ id: firstReply }), { tier: "remote" });
     expect(turn).toMatchObject({ status: "complete", provider: "Scripted agent" });
     expect(turn!.body).toContain("night-shift-single-rough-mix.wav");
     expect(turn!.body).toContain("The Green Room");
@@ -83,7 +77,7 @@ describe("MusicAgent server execution", () => {
 
   test("a reply whose server died is marked interrupted and resumes to the same answer", async () => {
     const { queueAssistantTurn, sweepStaleTurns, runTurn, db, STALE_AFTER_MS } = await load();
-    const original = (await db.one(app.turns.where({ id: firstReply }), { tier: "global" }))!;
+    const original = (await db.one(app.turns.where({ id: firstReply }), { tier: "remote" }))!;
 
     // A regenerated sibling whose server stopped partway: streaming, a stale
     // heartbeat and half a reply.
@@ -103,12 +97,12 @@ describe("MusicAgent server execution", () => {
       .wait({ tier: "global" });
 
     expect(await sweepStaleTurns()).toBe(1);
-    expect((await db.one(app.turns.where({ id: sibling }), { tier: "global" }))!.status).toBe(
+    expect((await db.one(app.turns.where({ id: sibling }), { tier: "remote" }))!.status).toBe(
       "interrupted",
     );
 
     await runTurn(sibling);
-    const resumed = (await db.one(app.turns.where({ id: sibling }), { tier: "global" }))!;
+    const resumed = (await db.one(app.turns.where({ id: sibling }), { tier: "remote" }))!;
     expect(resumed.status).toBe("complete");
     expect(resumed.body).toBe(original.body);
 
@@ -118,15 +112,15 @@ describe("MusicAgent server execution", () => {
 
   test("a turn that is already running is not claimed twice", async () => {
     const { runTurn, db } = await load();
-    const before = (await db.one(app.turns.where({ id: firstReply }), { tier: "global" }))!;
+    const before = (await db.one(app.turns.where({ id: firstReply }), { tier: "remote" }))!;
     await runTurn(firstReply); // complete, so nothing to claim
-    const after = (await db.one(app.turns.where({ id: firstReply }), { tier: "global" }))!;
+    const after = (await db.one(app.turns.where({ id: firstReply }), { tier: "remote" }))!;
     expect(after.body).toBe(before.body);
   });
 
   test("two runners racing to claim one reply write it once", async () => {
     const { queueAssistantTurn, runTurn, db } = await load();
-    const original = (await db.one(app.turns.where({ id: firstReply }), { tier: "global" }))!;
+    const original = (await db.one(app.turns.where({ id: firstReply }), { tier: "remote" }))!;
 
     // Two runners in one process: they collide on the local runtime.
     const { turnId: local } = await queueAssistantTurn(
@@ -144,24 +138,24 @@ describe("MusicAgent server execution", () => {
       original.conversationId,
       original.parentId!,
     );
-    await other.one(app.turns.where({ id: remote }), { tier: "global" });
+    await other.one(app.turns.where({ id: remote }), { tier: "remote" });
     await Promise.all([runTurn(remote), runTurn(remote, other)]);
 
     for (const turnId of [local, remote]) {
-      const reply = (await db.one(app.turns.where({ id: turnId }), { tier: "global" }))!;
+      const reply = (await db.one(app.turns.where({ id: turnId }), { tier: "remote" }))!;
       expect(reply.status).toBe("complete");
       expect(reply.body).toBe(original.body);
-      const calls = await db.all(app.toolCalls.where({ turnId }), { tier: "global" });
+      const calls = await db.all(app.toolCalls.where({ turnId }), { tier: "remote" });
       expect(calls.map((call) => call.name).sort()).toEqual(["check_calendar", "find_venues"]);
     }
   });
 
-  test("an exclusive write that loses at the authority is a retryable conflict", async () => {
+  test("an serializable write that loses at the authority is a retryable conflict", async () => {
     const { db } = await load();
-    const { isExclusiveConflict } = await import("../src/lib/write-errors");
+    const { isSerializationConflict } = await import("../src/lib/write-errors");
     const other = await secondBackend();
-    const turn = (await db.one(app.turns.where({ id: firstReply }), { tier: "global" }))!;
-    await other.one(app.turns.where({ id: turn.id }), { tier: "global" });
+    const turn = (await db.one(app.turns.where({ id: firstReply }), { tier: "remote" }))!;
+    await other.one(app.turns.where({ id: turn.id }), { tier: "remote" });
 
     // Both read the turn, then both write it: only one of them can commit.
     let read = 0;
@@ -169,7 +163,7 @@ describe("MusicAgent server execution", () => {
     const barrier = new Promise<void>((resolve) => (bothRead = resolve));
     const results = await Promise.allSettled(
       [db, other].map(async (client) => {
-        const write = await client.exclusiveTransaction(async (tx) => {
+        const write = await client.serializableTransaction(async (tx) => {
           await tx.one(app.turns.where({ id: turn.id }));
           if (++read === 2) bothRead();
           await barrier;
@@ -182,14 +176,14 @@ describe("MusicAgent server execution", () => {
       result.status === "rejected" ? [result.reason] : [],
     );
     expect(failures).toHaveLength(1);
-    expect(isExclusiveConflict(failures[0])).toBe(true);
+    expect(isSerializationConflict(failures[0])).toBe(true);
   });
 
   test("a runner that loses its lease stops writing and never finishes the turn", async () => {
     const { queueAssistantTurn, runTurn, db, HEARTBEAT_MS } = await load();
-    const original = (await db.one(app.turns.where({ id: firstReply }), { tier: "global" }))!;
+    const original = (await db.one(app.turns.where({ id: firstReply }), { tier: "remote" }))!;
     const { turnId } = await queueAssistantTurn(db, original.conversationId, original.parentId!);
-    const read = async () => (await db.one(app.turns.where({ id: turnId }), { tier: "global" }))!;
+    const read = async () => (await db.one(app.turns.where({ id: turnId }), { tier: "remote" }))!;
 
     // Slow enough that the reply is still streaming well after the takeover.
     process.env.SCRIPTED_AGENT_TOKEN_DELAY_MS = "60";
@@ -203,7 +197,7 @@ describe("MusicAgent server execution", () => {
       // elsewhere), and notes the body as it stood at that moment.
       const { retryOnConflict } = await import("../src/lib/retry");
       const takeover = await retryOnConflict(async () => {
-        const write = await db.exclusiveTransaction(async (tx) => {
+        const write = await db.serializableTransaction(async (tx) => {
           const current = (await tx.one(app.turns.where({ id: turnId })))!;
           tx.update(app.turns, turnId, { runnerId: "another-runner" });
           return current.body;

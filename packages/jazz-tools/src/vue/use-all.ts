@@ -1,5 +1,6 @@
 import { ref, toValue, watchEffect, type MaybeRefOrGetter, type Ref } from "vue";
-import { applyDelta } from "../shared/index.js";
+import { applyDeltaToRows } from "../reconcile-array.js";
+import type { Db } from "../runtime/db.js";
 import type {
   CacheEntryHandle,
   QueryBuilder,
@@ -9,16 +10,20 @@ import type {
 } from "../shared/index.js";
 import { getSubscriptionStore } from "../subscription-store-internal.js";
 import { useJazzClient } from "./provider.js";
+import { toError } from "../runtime/util.js";
 
 /**
  * Reactive result of {@link useAll}. `data` is the matching rows (or `undefined`
  * while loading or on error), `error` is the last subscription error (or
- * `null`), and `isLoading` is `true` until the first result or error.
+ * `null`), and `isLoading` is `true` until the first result or error. `db` is
+ * the (non-reactive) {@link Db} handle for writes, so components don't need a
+ * separate `useDb()`.
  */
 export interface UseAllResult<T extends { id: string }> {
   data: Ref<T[] | undefined>;
   error: Ref<Error | null>;
   isLoading: Ref<boolean>;
+  db: Db;
 }
 
 /**
@@ -30,10 +35,7 @@ export interface UseAllResult<T extends { id: string }> {
 export interface UseAllSuspenseResult<T extends { id: string }> {
   data: Ref<T[] | undefined>;
   error: Ref<Error | null>;
-}
-
-function toError(value: unknown): Error {
-  return value instanceof Error ? value : new Error(String(value));
+  db: Db;
 }
 
 function applyEntryState<T extends { id: string }>(
@@ -72,14 +74,7 @@ function subscribeToEntry<T extends { id: string }>(
       isLoading.value = false;
     },
     onDelta: (delta: SubscriptionDelta<T>) => {
-      if (data.value) {
-        applyDelta(data.value, delta);
-      } else if (delta.reset) {
-        data.value = [...delta.all];
-      } else {
-        data.value = [];
-        applyDelta(data.value, delta);
-      }
+      data.value = applyDeltaToRows(data.value, delta);
       isLoading.value = false;
     },
     onError: (err) => {
@@ -101,14 +96,16 @@ function subscribeToEntry<T extends { id: string }>(
  * @param query - the database query (e.g. `app.todos.where({ done: false })`)
  * @param options - optional query execution options
  *
- * @returns reactive `{ data, isLoading, error }`. `data` is `undefined` until the
- *   query resolves; `error` is set if the subscription fails.
+ * @returns `{ data, isLoading, error, db }`. `data`, `isLoading` and `error` are
+ *   refs: `data` is `undefined` until the query resolves; `error` is set if the
+ *   subscription fails. `db` is the {@link Db} handle for writes.
  */
 export function useAll<T extends { id: string }>(
   query: MaybeRefOrGetter<QueryBuilder<T> | undefined>,
   options?: MaybeRefOrGetter<QueryOptions | undefined>,
 ): UseAllResult<T> {
-  const store = getSubscriptionStore(useJazzClient());
+  const client = useJazzClient();
+  const store = getSubscriptionStore(client);
   const data = ref<T[] | undefined>(undefined) as Ref<T[] | undefined>;
   const error = ref<Error | null>(null);
   const isLoading = ref(true);
@@ -135,7 +132,7 @@ export function useAll<T extends { id: string }>(
     });
   });
 
-  return { data, isLoading, error };
+  return { data, isLoading, error, db: client.db };
 }
 
 /**
@@ -146,7 +143,8 @@ export function useAll<T extends { id: string }>(
  * @param query - the database query (e.g. `app.todos.where({ done: false })`)
  * @param options - optional query execution options
  *
- * @returns reactive `{ data, error }`. Unlike {@link useAll}, there is no
+ * @returns `{ data, error, db }` (`data` and `error` are refs). Unlike
+ *   {@link useAll}, there is no
  *   `isLoading` flag: the promise only resolves once the first result is
  *   available, so the query is never loading at the point of use.
  */
@@ -155,11 +153,11 @@ export async function useAllSuspense<T extends { id: string }>(
   options?: QueryOptions,
 ): Promise<UseAllSuspenseResult<T>> {
   const store = getSubscriptionStore(useJazzClient());
-  const { data, error } = useAll<T>(query, options);
+  const { data, error, db } = useAll<T>(query, options);
 
   const key = store.makeQueryKey(query, options);
   const entry = store.getCacheEntry<T>(key);
   await entry.promise;
 
-  return { data, error };
+  return { data, error, db };
 }

@@ -33,7 +33,7 @@ count-only query substitutes for fetching fields.
 
 The history representation is sufficient for this fixture and the successor
 sensitivity checks. It is not an implementation of arbitrary branch conflict
-resolution, exclusive transactions, distributed acceptance, or schema migration.
+resolution, serializable transactions, distributed acceptance, or schema migration.
 In particular, a PostgreSQL transaction is not a substitute for Jazz's distributed
 transaction protocol.
 

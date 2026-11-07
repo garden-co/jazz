@@ -6,13 +6,16 @@ import { loadWasmModuleForTest } from "../testing/wasm-runtime-test-utils.js";
 import { openConfig, queryFromTable, queryWithPredicates } from "./native-codec.js";
 import { encodeSchema } from "./schema-codec.js";
 
-const app = s.defineApp({
-  folders: s.table({ title: s.string() }, { notesViaFolder: s.reverse("notes", "folder") }),
-  notes: s.table(
-    { text: s.string(), folderId: s.uuid() },
-    { folder: s.rel("folders", "folderId") },
-  ),
-});
+const app = s.defineApp(
+  {
+    folders: s.table({ title: s.string() }, { notesViaFolder: s.reverse("notes", "folder") }),
+    notes: s.table(
+      { text: s.string(), folderId: s.uuid() },
+      { folder: s.rel("folders", "folderId") },
+    ),
+  },
+  { migrations: "none" },
+);
 
 describe("WASM backend read capability parity", () => {
   for (const backend of [false, true]) {
@@ -29,15 +32,19 @@ describe("WASM backend read capability parity", () => {
         ),
       );
       const query = queryFromTable("notes");
+      // The relation shape the query adapter sends: a full row projection.
       const relation = queryWithPredicates("notes", [], {
         relation: {
           Project: {
             input: { TableScan: { table: "notes" } },
-            columns: [{ alias: "text", expr: { Column: { scope: "notes", column: "text" } } }],
+            columns: ["id", "text", "folderId"].map((column) => ({
+              alias: column,
+              expr: { Column: { scope: "notes", column } },
+            })),
           },
         },
       });
-      const opts = { tier: "local" };
+      const opts = { tier: "local-first" };
       const txId = createOpenTransactionId();
       db.beginTransaction(txId, "mergeable");
       const reads = [

@@ -1,28 +1,33 @@
 import { copyAccountConfigAdmission } from "../../accounts/config-capability.js";
 import type { WasmSchema } from "../../drivers/types.js";
-import type { DurabilityTier, JazzClient, AuthUpdate } from "../client.js";
+import { reportCredentialRefusal } from "../client.js";
+import type { JazzClient, AuthUpdate } from "../client.js";
 import { resolveClientInternalSessionSync } from "../client-session.js";
 import { getTrustedReservedSession, setTrustedReservedSession } from "../db-internal-session.js";
 import type { BrowserForegroundNodeLease, BrowserWorkerConnection } from "../runtime-source.js";
 import type { RemoteLinkState } from "../remote-link-state.js";
+import { CONNECTED, CONNECTING, offlineLink, type LinkStatus } from "../sync-status.js";
 import { reloadAfterStorageInvalidation } from "../browser-storage-invalidation.js";
 import { runCleanupSteps } from "../run-cleanup-steps.js";
-import { NativeRuntimeAdapter } from "../native-runtime/native-runtime-adapter.js";
 import { BrowserWorkerUnresponsiveError } from "../native-runtime/browser-worker-protocol.js";
+import { StoreHeldByAnotherTabError } from "../store-held-by-another-tab-error.js";
 import {
   ConnectionManager,
   type ConnectionManagerClientInput,
+  type ConnectionRequirement,
   type DbForConnection,
 } from "./types.js";
 import { registerBrowserInspectorControl } from "../../dev/inspector-overlay/browser-control-registry.js";
 import { assertBrowserStorageOwnerUnchanged } from "../browser-worker-config.js";
 import { waitForInspectorOpening } from "../native-runtime/inspector-control-lifecycle.js";
+import { toError } from "../util.js";
 
 interface BrowserConnectionScope {
   readonly connection: BrowserWorkerConnection;
   readonly lease: BrowserForegroundNodeLease | undefined;
   readonly inspectorAttachment: boolean;
   resetReason: Error | null;
+  leaseWorkerReplaced: boolean;
 }
 
 /**
@@ -39,6 +44,8 @@ export class BrowserConnectionManager extends ConnectionManager {
   private disconnected = false;
   /** Reported by the worker that owns the upstream socket. */
   private workerRemoteLink: RemoteLinkState = "connecting";
+  /** The worker's link status; absent from an older worker. */
+  private workerLinkStatus: LinkStatus | null = null;
   private readonly workerRemoteLinkListeners = new Set<() => void>();
   private readonly reconnectWaiters = new Set<(error?: Error) => void>();
   private transportTransition: Promise<void> = Promise.resolve();
@@ -49,9 +56,17 @@ export class BrowserConnectionManager extends ConnectionManager {
   private browserConnectionInput: ConnectionManagerClientInput | null = null;
   /** A failed follower owns no recoverable port; reconnect must mint a new one. */
   private recoverableConnectionFailure = false;
+  private workerRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
+  private workerRecoveryDelayMs = 250;
   private observedConfigurationAdmissionFailure: BrowserWorkerConnection | null = null;
   private configurationAdmissionRetry: Promise<BrowserWorkerConnection | null> | null = null;
   private readonly readinessByConnection = new WeakMap<BrowserWorkerConnection, Promise<void>>();
+  /** Waiting for a refused connection's replacement (see `admissionRefused`). */
+  private readonly replacementWaiters = new Set<() => void>();
+  /** Runs out how long a refused tab waits quietly (see `admissionRefused`). */
+  private heldPatienceTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The other tab has held the store past that patience: report it. */
+  private heldTooLong = false;
   declare protected foregroundNodeLease: BrowserForegroundNodeLease | undefined;
   private shutdownStarted = false;
   private shutdownFailure: {
@@ -61,7 +76,11 @@ export class BrowserConnectionManager extends ConnectionManager {
     abandon: (error: Error) => void;
   } | null = null;
 
-  constructor(host: DbForConnection) {
+  constructor(
+    host: DbForConnection,
+    /** A lease whose acquisition already started the worker, in parallel with runtime loading. */
+    private readonly earlyLease?: Promise<BrowserForegroundNodeLease>,
+  ) {
     super(host);
   }
 
@@ -69,9 +88,8 @@ export class BrowserConnectionManager extends ConnectionManager {
     // This resolves before public Db construction returns, preserving the
     // synchronous application mutation API while leasing the TxId node before
     // the foreground runtime can exist or mint a transaction.
-    this.foregroundNodeLease = await this.host.runtimeSource.acquireBrowserForegroundNodeLease(
-      this.host.config,
-    );
+    this.foregroundNodeLease = await (this.earlyLease ??
+      this.host.runtimeSource.acquireBrowserForegroundNodeLease(this.host.config));
   }
 
   override getClient(schema: WasmSchema): JazzClient {
@@ -102,11 +120,15 @@ export class BrowserConnectionManager extends ConnectionManager {
       config: workerConfig,
       schema: input.schema,
       client: input.client,
-      onAuthFailure: (reason) => this.host.markUnauthenticated(reason),
+      onAuthFailure: (reason) => {
+        // A tab hears of a refusal from its worker, not from its own runtime.
+        reportCredentialRefusal(input.client, reason);
+        this.host.markUnauthenticated(reason);
+      },
       onAuthRestored: () => this.host.clearAuthError(),
       onExplicitOfflineChange: (offline) => this.setExplicitOffline(connection, offline),
-      onRemoteLinkChange: (state) => this.setWorkerRemoteLink(connection, state),
-      onFailure: (error) => this.observeConnectionFailure(connection, asError(error)),
+      onRemoteLinkChange: (state, link) => this.setWorkerRemoteLink(connection, state, link),
+      onFailure: (error) => this.observeConnectionFailure(connection, toError(error)),
       onStorageReset: (resetId) => this.beginStorageReset(scope, resetId),
       onStorageInvalidated: () => this.reloadAfterStorageInvalidation(connection),
     });
@@ -115,9 +137,11 @@ export class BrowserConnectionManager extends ConnectionManager {
       lease: this.foregroundNodeLease,
       inspectorAttachment: workerConfig.runtimeSources?.inspectorBinding !== undefined,
       resetReason: null,
+      leaseWorkerReplaced: false,
     };
     this.connectionScope = scope;
     this.connection = connection;
+    this.wakeReplacementWaiters();
     this.setWorkerRemoteLink(connection, "connecting");
     this.observedConfigurationAdmissionFailure = null;
     this.unregisterInspectorControl?.();
@@ -130,6 +154,13 @@ export class BrowserConnectionManager extends ConnectionManager {
     this.readinessByConnection.set(connection, readiness);
     this.connectionReady = readiness.then(
       () => {
+        // Shutdown may already own this scope while follower init finishes.
+        // Keep its lease-owner evidence even after the manager detaches it.
+        const realm = connection.getWorkerRealmId?.();
+        scope.leaseWorkerReplaced =
+          realm !== undefined &&
+          scope.lease?.workerRealmId !== undefined &&
+          realm !== scope.lease.workerRealmId;
         if (this.connection !== connection) return;
         const inspectorPhysicalDbName =
           connection.getAuthenticatedInspectorAttachmentPhysicalDbName?.();
@@ -142,9 +173,12 @@ export class BrowserConnectionManager extends ConnectionManager {
         this.initialExplicitOfflineStateKnown = true;
         this.connectionError = null;
         this.recoverableConnectionFailure = false;
+        this.clearWorkerRecoveryTimer();
+        this.workerRecoveryDelayMs = 250;
+        this.clearHeldPatience();
       },
       (error: unknown) => {
-        this.observeConnectionFailure(connection, asError(error));
+        this.observeConnectionFailure(connection, toError(error));
         if (this.connection !== connection) return;
         // `connectionReady` is also observed by passive readiness consumers
         // (for example the initial offline-state probe). Keep it a settled
@@ -172,9 +206,131 @@ export class BrowserConnectionManager extends ConnectionManager {
     this.recoverableConnectionFailure = true;
     this.rejectReconnectWaiters(error);
     this.notifyWorkerRemoteLink();
+    const refused = this.admissionRefused(connection);
+    if (refused) this.startHeldPatience();
+    if (error instanceof BrowserWorkerUnresponsiveError || refused)
+      this.scheduleWorkerRecovery(connection);
   }
 
-  async ensureReady(tier?: DurabilityTier, signal?: AbortSignal): Promise<void> {
+  /**
+   * Wait quietly for the other tab to let go for this long: following a
+   * sign-up takes it moments, and an abruptly closed tab is noticed by the
+   * worker as soon as the browser drops the page.
+   */
+  static readonly HELD_BY_ANOTHER_TAB_PATIENCE_MS = 30_000;
+
+  private startHeldPatience(): void {
+    if (this.heldPatienceTimer !== null || this.heldTooLong) return;
+    this.heldPatienceTimer = setTimeout(() => {
+      this.heldPatienceTimer = null;
+      if (this.shutdownStarted || this.host.isShuttingDown) return;
+      // Still waiting: the other tab is frozen in the background, or never
+      // follows (another build). Say so, and fail what waits, so the app can
+      // ask the user to close it; the retries go on.
+      this.heldTooLong = true;
+      this.wakeReplacementWaiters();
+      this.notifyWorkerRemoteLink();
+    }, BrowserConnectionManager.HELD_BY_ANOTHER_TAB_PATIENCE_MS);
+  }
+
+  private clearHeldPatience(): void {
+    if (this.heldPatienceTimer !== null) clearTimeout(this.heldPatienceTimer);
+    this.heldPatienceTimer = null;
+    if (!this.heldTooLong) return;
+    this.heldTooLong = false;
+    this.notifyWorkerRemoteLink();
+  }
+
+  /**
+   * The worker refused this tab because another tab holds this account's
+   * store under another sign-in: a guest who just signed up here, while
+   * another tab is still the guest. That tab follows the sign-up, or closes
+   * (the worker watches each tab's page lock), so this tab tries again on
+   * its own, meanwhile connecting rather than stopped: its writes wait for
+   * the worker in this tab, and its queries and waits go on once it joins.
+   * Past `HELD_BY_ANOTHER_TAB_PATIENCE_MS` it reports `held-by-another-tab`
+   * and fails those waits with a `StoreHeldByAnotherTabError`, still trying
+   * in the background. Any other refused configuration (an older deploy's
+   * schema) still fails visibly.
+   */
+  private admissionRefused(connection: BrowserWorkerConnection | null): boolean {
+    return !!connection?.waitsForAnotherSignIn?.();
+  }
+
+  /** Resolves once `failed` is no longer this tab's connection, it shuts down, or `signal` aborts. */
+  private replacementOf(failed: BrowserWorkerConnection, signal?: AbortSignal): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const check = () => {
+        if (
+          this.connection === failed &&
+          !this.heldTooLong &&
+          !this.shutdownStarted &&
+          !this.host.isShuttingDown &&
+          !signal?.aborted
+        )
+          return;
+        this.replacementWaiters.delete(check);
+        signal?.removeEventListener("abort", check);
+        resolve();
+      };
+      this.replacementWaiters.add(check);
+      signal?.addEventListener("abort", check, { once: true });
+      check();
+    });
+  }
+
+  private wakeReplacementWaiters(): void {
+    for (const check of [...this.replacementWaiters]) check();
+  }
+
+  private scheduleWorkerRecovery(failed: BrowserWorkerConnection): void {
+    if (
+      this.workerRecoveryTimer !== null ||
+      this.shutdownStarted ||
+      this.host.isShuttingDown ||
+      this.storageReset ||
+      // A tab the inspector attached recovers only on an explicit call, but
+      // waiting for another tab's sign-in is no failure of its own.
+      (this.connectionScope?.inspectorAttachment && !this.admissionRefused(failed))
+    )
+      return;
+    const delay = this.workerRecoveryDelayMs;
+    this.workerRecoveryDelayMs = Math.min(delay * 2, 30_000);
+    this.workerRecoveryTimer = setTimeout(() => {
+      this.workerRecoveryTimer = null;
+      void this.enqueueTransportTransition(async () => {
+        if (
+          this.connection !== failed ||
+          this.shutdownStarted ||
+          this.host.isShuttingDown ||
+          this.storageReset
+        )
+          return;
+        if (this.admissionRefused(failed)) {
+          await this.retryConfigurationAdmission(failed);
+          await this.connectionReady;
+          return;
+        }
+        if (!(this.connectionError instanceof BrowserWorkerUnresponsiveError)) return;
+        // Preserve the in-memory runtime, its transaction identities, and its
+        // pending durability waiters. Native transport replacement replays the
+        // retained outbox through the normal sync and permission path.
+        // Worker readiness is sufficient here: recovery also works offline.
+        this.reopenFailedFollower();
+        await this.connectionReady;
+      }).catch((error: unknown) => {
+        this.connectionError ??= toError(error);
+        this.notifyWorkerRemoteLink();
+      });
+    }, delay);
+  }
+
+  private clearWorkerRecoveryTimer(): void {
+    if (this.workerRecoveryTimer !== null) clearTimeout(this.workerRecoveryTimer);
+    this.workerRecoveryTimer = null;
+  }
+
+  async ensureReady(requirement: ConnectionRequirement, signal?: AbortSignal): Promise<void> {
     if (this.host.isShuttingDown || signal?.aborted) return;
     const reset = this.storageReset;
     // Capture before yielding: callers already waiting on a rejected attempt
@@ -184,21 +340,38 @@ export class BrowserConnectionManager extends ConnectionManager {
     await reset;
     if (this.storageResetError) throw this.storageResetError;
     if (this.host.isShuttingDown || signal?.aborted) return;
-    connection ??= this.connection;
+    // Between a retry's shutdown of the refused connection and its
+    // replacement there is none: wait for the replacement.
+    connection ??= this.connection ?? (await this.configurationAdmissionRetry);
     if (retry && connection) connection = await this.retryConfigurationAdmission(connection);
     if (this.host.isShuttingDown || signal?.aborted) return;
-    try {
-      await (connection ? this.readinessByConnection.get(connection) : this.connectionReady);
-    } catch (error) {
-      if (connection === this.connection && connection?.canRetryInitialConfigurationAdmission?.()) {
-        this.observedConfigurationAdmissionFailure = connection;
+    for (;;) {
+      try {
+        await (connection ? this.readinessByConnection.get(connection) : this.connectionReady);
+        break;
+      } catch (error) {
+        // A refused tab tries again by itself (see `admissionRefused`): wait
+        // for the attempt that joins, as for a reconnect.
+        if (connection && this.admissionRefused(connection) && !signal?.aborted) {
+          if (this.heldTooLong) throw new StoreHeldByAnotherTabError(undefined, { cause: error });
+          await this.replacementOf(connection, signal);
+          if (this.host.isShuttingDown || this.shutdownStarted || signal?.aborted) return;
+          connection = this.connection ?? (await this.configurationAdmissionRetry);
+          continue;
+        }
+        if (
+          connection === this.connection &&
+          connection?.canRetryInitialConfigurationAdmission?.()
+        ) {
+          this.observedConfigurationAdmissionFailure = connection;
+        }
+        throw error;
       }
-      throw error;
     }
     await this.connectionReady;
     if (this.host.isShuttingDown) return;
     if (this.connectionError) throw this.connectionError;
-    if (tier !== "local") {
+    if (requirement !== "runtime") {
       for (;;) {
         while (this.disconnected) {
           await this.waitForReconnect(signal);
@@ -208,7 +381,7 @@ export class BrowserConnectionManager extends ConnectionManager {
         if (!this.disconnected || this.host.isShuttingDown || signal?.aborted) break;
       }
     }
-    if (this.host.config.serverUrl && tier !== "local") {
+    if (this.host.config.serverUrl && requirement === "server") {
       await this.connection?.waitForServerConnection();
     }
   }
@@ -236,8 +409,8 @@ export class BrowserConnectionManager extends ConnectionManager {
     return retry;
   }
 
-  shouldDeferSubscriptionStart(tier?: DurabilityTier): boolean {
-    return tier === "global";
+  shouldDeferSubscriptionStart(requirement: ConnectionRequirement): boolean {
+    return requirement === "server";
   }
   isExplicitlyOffline(): boolean {
     return this.disconnected;
@@ -325,12 +498,22 @@ export class BrowserConnectionManager extends ConnectionManager {
     void connection
       .updateAuth(JSON.stringify(runtimeAuth(nextConfig)), runtimeSessionClaims(nextConfig))
       .catch((error: unknown) => {
-        this.observeConnectionFailure(connection, asError(error));
+        this.observeConnectionFailure(connection, toError(error));
       });
   }
 
   async deleteClientStorage(): Promise<void> {
+    // A reset already in progress (e.g. another tab deleted the shared
+    // storage) has detached this Db's client and connection; it is the
+    // delete, so wait for it rather than reopening mid-reset.
+    if (this.storageReset) return this.storageReset;
+    // A Db that hasn't read or written yet has no worker connection, and
+    // without one there would be nothing to delete through: open it, as the
+    // direct manager opens its client, so the delete reaches the storage.
+    if (!this.connection && !this.getCurrentClient()) this.getClient({});
     await this.connectionReady;
+    if (!this.connection)
+      throw new Error("deleteClientStorage(): the browser worker is not connected");
     await this.connection?.deleteStorage();
     await this.storageReset;
   }
@@ -350,6 +533,7 @@ export class BrowserConnectionManager extends ConnectionManager {
     scope.resetReason = new Error(
       `Browser foreground lease released after storage reset ${resetId}`,
     );
+    this.clearWorkerRecoveryTimer();
     this.host.clearAuthenticatedInspectorLocalReads();
     this.connection = null;
     this.connectionReady = null;
@@ -386,7 +570,7 @@ export class BrowserConnectionManager extends ConnectionManager {
     // A reset received by another tab has no direct promise consumer yet.
     // Retain its failure for subsequent synchronous client access/readiness.
     void reset.catch((error: unknown) => {
-      this.storageResetError ??= asError(error);
+      this.storageResetError ??= toError(error);
     });
   }
 
@@ -397,6 +581,7 @@ export class BrowserConnectionManager extends ConnectionManager {
    */
   private reopenFailedFollower(): void {
     if (!this.recoverableConnectionFailure) return;
+    this.clearWorkerRecoveryTimer();
     this.host.clearAuthenticatedInspectorLocalReads();
     this.connection = null;
     this.connectionReady = null;
@@ -419,6 +604,10 @@ export class BrowserConnectionManager extends ConnectionManager {
   override async shutdown(): Promise<void> {
     if (this.shutdownStarted) return;
     this.shutdownStarted = true;
+    this.clearWorkerRecoveryTimer();
+    if (this.heldPatienceTimer !== null) clearTimeout(this.heldPatienceTimer);
+    this.heldPatienceTimer = null;
+    this.wakeReplacementWaiters();
     const connection = this.connection;
     const scope = this.connectionScope;
     const admissionError = this.connectionError;
@@ -495,7 +684,7 @@ export class BrowserConnectionManager extends ConnectionManager {
               if (!runtime) {
                 if (flushFailed) await lease.retire();
                 else await lease.returnWithHighWater(lease.confirmedTxTime);
-              } else if (!(runtime instanceof NativeRuntimeAdapter)) {
+              } else if (!runtime.quiesceForegroundTxTimeHighWater) {
                 await lease.retire();
               } else {
                 // Even after an ordinary flush failure, close mutation admission
@@ -503,7 +692,11 @@ export class BrowserConnectionManager extends ConnectionManager {
                 // failed flush cannot establish a clean durable handoff.
                 const highWater = await runtime.quiesceForegroundTxTimeHighWater();
                 if (scope?.resetReason) return;
-                if (flushFailed) await lease.retire();
+                if (scope?.leaseWorkerReplaced && lease.releaseAfterWorkerReplacement) {
+                  lease.releaseAfterWorkerReplacement(
+                    new Error("Foreground lease owner was replaced"),
+                  );
+                } else if (flushFailed) await lease.retire();
                 else await lease.returnWithHighWater(highWater);
               }
             } catch (error) {
@@ -569,6 +762,8 @@ export class BrowserConnectionManager extends ConnectionManager {
 
   protected override transportLinkState(): RemoteLinkState {
     // A failed follower cannot receive the worker's answer.
+    if (this.heldTooLong) return "unavailable";
+    if (this.connectionError && this.admissionRefused(this.connection)) return "connecting";
     return this.connectionError ? "unavailable" : this.workerRemoteLink;
   }
 
@@ -580,14 +775,40 @@ export class BrowserConnectionManager extends ConnectionManager {
     });
   }
 
-  private setWorkerRemoteLink(connection: BrowserWorkerConnection, state: RemoteLinkState): void {
+  protected override transportLinkStatus(): LinkStatus {
+    // A failed follower cannot receive the worker's answer.
+    if (this.heldTooLong) return offlineLink("held-by-another-tab", true);
+    if (this.connectionError && this.admissionRefused(this.connection)) return CONNECTING;
+    if (this.connectionError) return offlineLink("stopped");
+    // This Db has a server configured, so a worker that has not dialled yet
+    // (it may still wait for a credential) is about to connect, not local-only.
+    if (this.workerLinkStatus) {
+      return this.workerLinkStatus.state === "local-only" ? CONNECTING : this.workerLinkStatus;
+    }
+    switch (this.workerRemoteLink) {
+      case "connected":
+        return CONNECTED;
+      case "unavailable":
+        return offlineLink("network");
+      default:
+        return CONNECTING;
+    }
+  }
+
+  private setWorkerRemoteLink(
+    connection: BrowserWorkerConnection,
+    state: RemoteLinkState,
+    link: LinkStatus | null = null,
+  ): void {
     if (this.connection !== connection) return;
     this.workerRemoteLink = state;
+    this.workerLinkStatus = link;
     this.notifyWorkerRemoteLink();
   }
 
   private notifyWorkerRemoteLink(): void {
     for (const listener of [...this.workerRemoteLinkListeners]) listener();
+    this.notifySyncStatus();
   }
 
   private enqueueTransportTransition(run: () => void | Promise<void>): Promise<void> {
@@ -612,8 +833,4 @@ function runtimeSessionClaims(config: DbForConnection["config"]): Record<string,
       trustedReservedSession: getTrustedReservedSession(config),
     })?.claims ?? {}
   );
-}
-
-function asError(error: unknown): Error {
-  return error instanceof Error ? error : new Error(String(error));
 }

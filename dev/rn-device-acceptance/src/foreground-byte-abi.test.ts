@@ -844,7 +844,7 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
                                             {
                                               rowId: subscriptionRowId,
                                               raw: Uint8Array.from([
-                                                2,
+                                                0,
                                                 ...new TextEncoder().encode(
                                                   "subscription from foreground A",
                                                 ),
@@ -1439,7 +1439,7 @@ test("two aliases in one installed JSI runtime require B to observe A's committe
                       {
                         rowId: new Uint8Array(16).fill(0xee),
                         raw: Uint8Array.from([
-                          2,
+                          0,
                           ...new TextEncoder().encode(
                             wrongMatchesWrittenContent
                               ? "subscription from foreground A"
@@ -1598,7 +1598,7 @@ function encodeSubscriptionDelta({
   writer.vec(() => undefined, 0);
   for (const rows of [added, updated]) {
     writer.vec((key, index) => {
-      key.bytes(Uint8Array.from([1, ...rows[index]!.rowId, 0, 0, 0, 0, 0, 0, 0, 0]));
+      key.bytes(Uint8Array.from([2, ...rows[index]!.rowId, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
     }, rows.length);
   }
   writer.vec(() => undefined, 0);
@@ -1606,6 +1606,8 @@ function encodeSubscriptionDelta({
   writer.vec((indexWriter, index) => indexWriter.u64(index), updated.length);
   writer.vec((indexWriter, index) => indexWriter.u64(index), updated.length);
   writer.vec(() => undefined, 0);
+  // No opted-in splices on any updated row.
+  writer.vec((row) => row.vec(() => undefined, 0), updated.length);
   return writer.finish();
 }
 

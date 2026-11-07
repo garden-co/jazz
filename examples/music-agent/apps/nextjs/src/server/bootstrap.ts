@@ -47,14 +47,14 @@ export const FIRST_PROMPT =
  * Prepare a workspace the first time an account opens the app: its booking
  * data and a first conversation whose reply streams in live. Runs server-side
  * with backend authority and is idempotent: the profile row is the marker,
- * and the exclusive transaction makes concurrent first opens seed only once.
+ * and the serializable transaction makes concurrent first opens seed only once.
  */
 export async function ensureWorkspace(accountId: string, authUserId: string, displayName: string) {
   const db = (await backendJazzClient()).db;
   // A concurrent first open that wins the race makes this attempt conflict; the
   // retry then finds its profile and returns null.
   return retryOnConflict(async () => {
-    const write = await db.exclusiveTransaction(async (tx) => {
+    const write = await db.serializableTransaction(async (tx) => {
       const existing = await tx.all(app.profiles.where({ accountId }));
       if (existing[0]) return null;
       const ownerAccount = accountId;

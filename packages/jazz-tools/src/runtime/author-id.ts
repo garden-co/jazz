@@ -3,7 +3,7 @@ import type { Value } from "../drivers/types.js";
 import type { PublicSession, Session } from "./context.js";
 
 const canonicalAuthorDecoder = new Utf8Decoder({ fatal: true });
-const STORED_SCALAR_INLINE_TAG = 2;
+const STORED_SCALAR_INLINE_TAG = 0;
 const CANONICAL_AUTHOR_OPEN_BRACKET = 0x5b;
 const publicSessions = new WeakMap<Session, PublicSession>();
 // Verified-handler presentation metadata only. Internal sessions carry only
@@ -114,15 +114,14 @@ export function withCanonicalUser(session: Session): PublicSession {
   const existing = publicSessions.get(session);
   if (existing) return existing;
   canonicalAuthorSubject(session.issuer, session.user_id, session.account_id);
-  const user = Object.freeze({
-    account: session.account_id ?? null,
-    identity: Object.freeze({ issuer: session.issuer, subject: session.user_id }),
-  });
+  const user = session.account_id ?? null;
+  const identity = Object.freeze({ issuer: session.issuer, subject: session.user_id });
   const claims = cloneAndFreezeClaim(
     publicSessionClaims.get(session) ?? session.claims,
   ) as Readonly<Record<string, unknown>>;
   const published: PublicSession = Object.freeze({
     user,
+    identity,
     claims,
     authMode: session.authMode,
   });

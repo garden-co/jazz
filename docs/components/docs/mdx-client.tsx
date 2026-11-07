@@ -42,6 +42,8 @@ export function Code({
       language={lang}
       title={title}
       tokenizer={customTokenizer(lang)}
+      // Firefox loses syntax colors in the automatic range mode after client navigation.
+      highlightMode="spans"
       hasLanguageLabel={false}
       width="100%"
       maxHeight={isScrollable ? 600 : undefined}
@@ -114,7 +116,7 @@ function accordionIds(children: ReactNode): string[] {
 }
 
 /** MDX `<Accordions>` as an Astryx `CollapsibleGroup`. An item whose `id` is
-    the URL hash opens, so `/docs/faq#reset-browser-storage` lands on it open. */
+    the URL hash opens, so `/docs/how-jazz-works#reset-browser-storage` lands on it open. */
 export function Accordions({
   type = "single",
   children,

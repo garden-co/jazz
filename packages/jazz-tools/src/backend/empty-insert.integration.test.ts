@@ -1,28 +1,24 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
-import { deploy, startLocalJazzServer } from "../testing/index.js";
-import { createJazzSession } from "./index.js";
+import { deploy, startLocalJazzServer, startTestJazz, type TestJazz } from "../testing/index.js";
 
 describe("inserting with every optional column omitted through the native backend", () => {
   it("creates the row and syncs it to another session", async () => {
-    const app = s.defineApp({
-      notes: s.table({ label: s.string().optional(), rank: s.int().optional() }, {}),
-      posters: s.table({ title: s.string().optional(), metadata: s.json().optional() }, {}),
-    });
+    const app = s.defineApp(
+      {
+        notes: s.table({ label: s.string().optional(), rank: s.int().optional() }, {}),
+        posters: s.table({ title: s.string().optional(), metadata: s.json().optional() }, {}),
+      },
+      { migrations: "none" },
+    );
     const server = await startLocalJazzServer({ appId: randomUUID(), inMemory: true });
-    const sessions: Awaited<ReturnType<typeof createJazzSession>>[] = [];
+    // Each session is an app's own Jazz (createJazz) in front of the core.
+    const sessions: TestJazz[] = [];
     const openSession = async () => {
-      const session = await createJazzSession({
-        appId: server.appId,
-        serverUrl: server.url,
-        app,
-        permissions: {},
-        driver: { type: "memory" },
-        initial: { backendSecret: server.backendSecret },
-      });
+      const session = await startTestJazz({ app, permissions: {}, core: server });
       sessions.push(session);
-      return session.getSnapshot().client!.db;
+      return session.jazz.db;
     };
     try {
       await deploy({
@@ -40,20 +36,20 @@ describe("inserting with every optional column omitted through the native backen
       await inTransaction.wait({ tier: "global" });
 
       const reader = await openSession();
-      const notes = await reader.all(app.notes, { tier: "global" });
+      const notes = await reader.all(app.notes, { tier: "remote" });
       expect(notes).toHaveLength(2);
       expect(notes).toContainEqual({ id: note.id, label: null, rank: null });
-      expect(await reader.all(app.posters, { tier: "global" })).toEqual([
+      expect(await reader.all(app.posters, { tier: "remote" })).toEqual([
         { id: poster.id, title: null, metadata: null },
       ]);
 
       // The created row behaves like any other: a later update applies.
       await writer.update(app.notes, note.id, { label: "set" }).wait({ tier: "global" });
-      expect(await reader.all(app.notes.where({ label: "set" }), { tier: "global" })).toEqual([
+      expect(await reader.all(app.notes.where({ label: "set" }), { tier: "remote" })).toEqual([
         { id: note.id, label: "set", rank: null },
       ]);
     } finally {
-      for (const session of sessions) await session.close();
+      for (const session of sessions) await session.stop();
       await server.stop();
     }
   }, 30_000);

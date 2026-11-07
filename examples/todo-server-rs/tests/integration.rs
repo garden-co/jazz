@@ -17,22 +17,13 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::response::sse::{Event, Sse};
-use base64::Engine;
 use futures_util::StreamExt as _;
 use futures_util::stream::Stream;
 use http_body_util::BodyExt;
 use jazz::tools::{
-    AppContext, AppId, ClientStorage, ColumnType, DurabilityTier, JazzClient, SchemaBuilder,
-    TableSchema,
+    AppContext, AppId, ClientStorage, ColumnType, ReadTier, SchemaBuilder, Session, TableSchema,
 };
 
-async fn connect_native(context: AppContext) -> jazz::tools::Result<JazzClient> {
-    JazzClient::connect_with_native_transport(
-        context,
-        std::sync::Arc::new(jazz_native_transport::NativeWebSocketConnector),
-    )
-    .await
-}
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
 use tokio::sync::broadcast;
@@ -41,7 +32,7 @@ use tower::ServiceExt;
 use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
-use client_worker::TodoClient;
+use client_worker::{TodoClient, connect_native};
 
 /// Todo item.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,6 +78,25 @@ fn test_schema() -> jazz::tools::Schema {
         .build()
 }
 
+fn with_offline_account(mut context: AppContext) -> AppContext {
+    let audience = context.app_id.to_string();
+    let token = jazz::identity::mint_jazz_self_signed_token(
+        &[1; 32],
+        jazz::identity::LOCAL_FIRST_ISSUER,
+        &audience,
+        3600,
+    )
+    .expect("mint Alice's offline proof");
+    let proof = jazz::identity::verify_jazz_self_signed_proof(&token, &audience)
+        .expect("verify Alice's offline proof");
+    context.account_id = Some(jazz::account_registry::local_first_account_id(
+        *context.app_id.uuid(),
+        &proof.user_id,
+    ));
+    context.jwt_token = Some(token);
+    context
+}
+
 async fn setup_test_app(temp_dir: &TempDir) -> Router {
     setup_test_app_with_path(temp_dir.path().to_path_buf()).await
 }
@@ -99,15 +109,18 @@ async fn setup_test_app_with_path(data_dir: PathBuf) -> Router {
         server_url: String::new(),
         data_dir,
         storage: ClientStorage::Persistent,
-        storage_factory: Some(std::sync::Arc::new(
-            jazz_storage_rocksdb::RocksDbStorageFactory,
-        )),
+        account_id: None,
         jwt_token: None,
         backend_secret: None,
+        backend_session: None,
+        bundle: None,
         admin_secret: None,
+        migrations: Default::default(),
     };
 
-    let client = TodoClient::connect(context).await.unwrap();
+    let client = TodoClient::connect(with_offline_account(context))
+        .await
+        .unwrap();
     let (sse_tx, _) = broadcast::channel::<Vec<Todo>>(16);
     let state = Arc::new(AppState { client, sse_tx });
 
@@ -158,7 +171,10 @@ fn todo_values(
     title: impl Into<String>,
     description: impl Into<String>,
 ) -> std::collections::HashMap<String, Value> {
-    jazz::row_input!("title" => title.into(), "done" => false, "description" => description.into())
+    jazz::row_input!(
+        "title" => title.into(), "done" => false, "description" => description.into(),
+        "parent" => Value::Null, "project" => Value::Null,
+    )
 }
 
 /// Broadcast current todos to all SSE connections.
@@ -457,6 +473,12 @@ async fn test_crud_operations() {
 
 #[tokio::test]
 async fn test_local_persistence() {
+    tokio::task::LocalSet::new()
+        .run_until(local_persistence())
+        .await;
+}
+
+async fn local_persistence() {
     let temp_dir = TempDir::new().unwrap();
     let data_path = temp_dir.path().to_path_buf();
 
@@ -469,14 +491,15 @@ async fn test_local_persistence() {
             server_url: String::new(),
             data_dir: data_path.clone(),
             storage: ClientStorage::Persistent,
-            storage_factory: Some(std::sync::Arc::new(
-                jazz_storage_rocksdb::RocksDbStorageFactory,
-            )),
+            account_id: None,
             jwt_token: None,
             backend_secret: None,
+            backend_session: None,
+            bundle: None,
             admin_secret: None,
+            migrations: Default::default(),
         };
-        let client = connect_native(context).await.unwrap();
+        let client = connect_native(with_offline_account(context)).await.unwrap();
 
         // Create a todo
         let values = todo_values("Persist me", "");
@@ -484,11 +507,14 @@ async fn test_local_persistence() {
 
         // Verify it exists
         let query = Query::from("todos");
-        let results = client.query(query, None).await.unwrap();
+        let results = client.query(query, ReadTier::LocalFirst).await.unwrap();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].1[0], Value::Text("Persist me".to_string()));
+        assert_eq!(
+            results[0].get("title"),
+            Some(&Value::Text("Persist me".to_string()))
+        );
 
-        // Shutdown client to release Fjall file handles
+        // Shutdown client to release SQLite file handles
         client.shutdown().await.unwrap();
         row_id
     };
@@ -502,26 +528,34 @@ async fn test_local_persistence() {
             server_url: String::new(),
             data_dir: data_path,
             storage: ClientStorage::Persistent,
-            storage_factory: Some(std::sync::Arc::new(
-                jazz_storage_rocksdb::RocksDbStorageFactory,
-            )),
+            account_id: None,
             jwt_token: None,
             backend_secret: None,
+            backend_session: None,
+            bundle: None,
             admin_secret: None,
+            migrations: Default::default(),
         };
-        let client = connect_native(context).await.unwrap();
+        let client = connect_native(with_offline_account(context)).await.unwrap();
 
         // Query todos - should have the one we created
         let query = Query::from("todos");
-        let results = client.query(query, None).await.unwrap();
+        let results = client.query(query, ReadTier::LocalFirst).await.unwrap();
 
         assert_eq!(
             results.len(),
             1,
             "Todo should persist across client restarts"
         );
-        assert_eq!(results[0].0, created_id, "Should be the same row");
-        assert_eq!(results[0].1[0], Value::Text("Persist me".to_string()));
+        assert_eq!(
+            results[0].key.row_id(),
+            Some(created_id),
+            "Should be the same row"
+        );
+        assert_eq!(
+            results[0].get("title"),
+            Some(&Value::Text("Persist me".to_string()))
+        );
 
         client.shutdown().await.unwrap();
     }
@@ -535,110 +569,42 @@ struct TestServer {
     port: u16,
     #[allow(dead_code)]
     data_dir: TempDir,
-    #[allow(dead_code)]
-    jwks_server: JwksServer,
 }
 
 /// Test admin secret for catalogue sync.
 const TEST_ADMIN_SECRET: &str = "test-admin-secret-12345";
 
-/// Test HMAC secret for JWT validation via JWKS.
-const TEST_JWT_SECRET: &str = "test-jwt-secret-for-integration";
-const TEST_JWT_KID: &str = "test-jwks-kid";
+/// The backend secret this test service holds, as the app's backend does.
+const TEST_BACKEND_SECRET: &str = "test-backend-secret-12345";
 
-#[derive(Clone)]
-struct JwksState {
-    kid: String,
-    secret_b64: String,
-}
-
-struct JwksServer {
-    task: tokio::task::JoinHandle<()>,
-    url: String,
-}
-
-impl JwksServer {
-    async fn start(kid: &str, secret: &str) -> Self {
-        let state = JwksState {
-            kid: kid.to_string(),
-            secret_b64: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(secret.as_bytes()),
-        };
-
-        let app = Router::new()
-            .route("/jwks", axum::routing::get(jwks_handler))
-            .with_state(state);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind JWKS server");
-        let addr = listener.local_addr().expect("JWKS local addr");
-        let task = tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("serve JWKS");
-        });
-
-        Self {
-            task,
-            url: format!("http://{addr}/jwks"),
-        }
+/// A context acting as `user_id`, as the app's backend opens one.
+fn backend_user_context(
+    app_id: AppId,
+    server_url: String,
+    data_dir: PathBuf,
+    user_id: &str,
+) -> AppContext {
+    AppContext {
+        app_id,
+        client_id: None,
+        schema: test_schema(),
+        server_url,
+        data_dir,
+        storage: ClientStorage::Persistent,
+        account_id: None,
+        jwt_token: None,
+        backend_secret: Some(TEST_BACKEND_SECRET.to_owned()),
+        backend_session: Some(Session::new("jazz:backend", user_id)),
+        bundle: None,
+        admin_secret: None,
+        migrations: Default::default(),
     }
-}
-
-impl Drop for JwksServer {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
-}
-
-/// Generate a test JWT for the given user ID.
-fn make_test_jwt(user_id: &str) -> String {
-    use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    #[derive(serde::Serialize)]
-    struct Claims {
-        sub: String,
-        claims: serde_json::Value,
-        exp: u64,
-    }
-    let exp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-        + 3600;
-    let claims = Claims {
-        sub: user_id.to_string(),
-        claims: serde_json::json!({}),
-        exp,
-    };
-    let key = EncodingKey::from_secret(TEST_JWT_SECRET.as_bytes());
-    let mut header = Header::new(Algorithm::HS256);
-    header.kid = Some(TEST_JWT_KID.to_string());
-    encode(&header, &claims, &key).unwrap()
-}
-
-async fn publish_test_schema(base_url: &str, app_id: AppId) {
-    let response = reqwest::Client::new()
-        .post(format!("{base_url}/apps/{app_id}/admin/schemas"))
-        .header("X-Jazz-Admin-Secret", TEST_ADMIN_SECRET)
-        .json(&serde_json::json!({
-            "schema": test_schema(),
-            "permissions": null,
-        }))
-        .send()
-        .await
-        .expect("publish test schema request");
-
-    assert_eq!(
-        response.status(),
-        reqwest::StatusCode::CREATED,
-        "publish test schema"
-    );
 }
 
 impl TestServer {
     /// Start a test server on the given port.
     async fn start(port: u16) -> Self {
         let data_dir = TempDir::new().expect("create temp dir");
-        let jwks_server = JwksServer::start(TEST_JWT_KID, TEST_JWT_SECRET).await;
 
         // Use a deterministic UUID app ID for testing
         let app_id = "00000000-0000-0000-0000-000000000001";
@@ -656,8 +622,9 @@ impl TestServer {
                 data_dir.path().to_str().unwrap(),
                 "--admin-secret",
                 TEST_ADMIN_SECRET,
+                "--backend-secret",
+                TEST_BACKEND_SECRET,
             ])
-            .env("JAZZ_JWKS_URL", &jwks_server.url)
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .spawn()
@@ -667,7 +634,6 @@ impl TestServer {
             process,
             port,
             data_dir,
-            jwks_server,
         };
 
         // Wait for server to be ready
@@ -678,6 +644,9 @@ impl TestServer {
 
     /// Find the jazz-tools binary in cargo's target directory.
     fn find_jazz_binary() -> PathBuf {
+        if let Some(path) = std::env::var_os("JAZZ_TOOLS_BIN") {
+            return PathBuf::from(path);
+        }
         // Get the path to the test binary, which gives us the target directory
         let exe = std::env::current_exe().expect("get current exe");
         let target_dir = exe
@@ -733,25 +702,10 @@ fn get_free_port() -> u16 {
     listener.local_addr().unwrap().port()
 }
 
-async fn jwks_handler(
-    axum::extract::State(state): axum::extract::State<JwksState>,
-) -> axum::Json<serde_json::Value> {
-    axum::Json(serde_json::json!({
-        "keys": [
-            {
-                "kty": "oct",
-                "kid": state.kid,
-                "alg": "HS256",
-                "k": state.secret_b64,
-            }
-        ]
-    }))
-}
-
 /// Test that data syncs through server between clients via subscribe.
 ///
 /// This test verifies the subscribe-driven sync model:
-/// 1. Client syncs schema to server via catalogue
+/// 1. Fixture setup publishes the schema and permissions on the server
 /// 2. Client syncs row data to server
 /// 3. Server stores data
 /// 4. New client subscribes and receives data from server via sync
@@ -766,6 +720,12 @@ async fn jwks_handler(
 /// end-to-end client-server sync with persistent client IDs.
 #[tokio::test]
 async fn test_server_resync() {
+    tokio::task::LocalSet::new()
+        .run_until(server_resync())
+        .await;
+}
+
+async fn server_resync() {
     // 1. Start jazz-tools server
     let port = get_free_port();
     let server = TestServer::start(port).await;
@@ -775,35 +735,29 @@ async fn test_server_resync() {
 
     // IMPORTANT: Client app_id must match server's app_id for schema sync to work
     let test_app_id = AppId::from_string("00000000-0000-0000-0000-000000000001").unwrap();
+    let mut bundle: Option<String> = None;
 
-    // 2. Create a normal JWT client with todos schema, then add data.
-    // User-scoped WS sync is what publishes the initial schema and rows here.
-    // Adding admin_secret would now force backend mode and reject catalogue writes.
+    // 2. Act as one user (as the app's backend does), then add data.
+    // Publish schema and policies before that user's transport is admitted.
     {
-        let context = AppContext {
-            app_id: test_app_id,
-            client_id: None,
-            schema: test_schema(),
-            server_url: server.base_url(),
-            data_dir: data_path.clone(),
-            storage: ClientStorage::Persistent,
-            storage_factory: Some(std::sync::Arc::new(
-                jazz_storage_rocksdb::RocksDbStorageFactory,
-            )),
-            jwt_token: Some(make_test_jwt("client1-user")),
-            backend_secret: None,
-            admin_secret: None,
-        };
-        let client = connect_native(context).await.unwrap();
+        let mut context = backend_user_context(
+            test_app_id,
+            server.base_url(),
+            data_path.clone(),
+            "client1-user",
+        );
         let permissions_schema = test_schema();
-        publish_test_schema(&server.base_url(), test_app_id).await;
-        permissions_support::publish_allow_all_permissions(
+        let published = permissions_support::publish_allow_all_permissions(
             &server.base_url(),
             test_app_id,
             TEST_ADMIN_SECRET,
             &permissions_schema,
         )
         .await;
+        // The backend pins the user's session to the bundle it published.
+        bundle = Some(published.bundle);
+        context.bundle = bundle.clone();
+        let client = connect_native(context).await.unwrap();
 
         // Create a todo
         let values = todo_values("Synced todo", "");
@@ -811,7 +765,10 @@ async fn test_server_resync() {
 
         // Verify it exists locally
         let query = Query::from("todos");
-        let results = client.query(query.clone(), None).await.unwrap();
+        let results = client
+            .query(query.clone(), ReadTier::LocalFirst)
+            .await
+            .unwrap();
         assert_eq!(results.len(), 1, "Todo should exist locally");
 
         // Use a GlobalServer query as the causal barrier before shutdown.
@@ -819,7 +776,7 @@ async fn test_server_resync() {
         // guessing with a fixed sleep that can flake under CI load.
         let server_results = tokio::time::timeout(
             Duration::from_secs(10),
-            client.query(query, Some(DurabilityTier::GlobalServer)),
+            client.query(query, ReadTier::Remote),
         )
         .await
         .expect("Writer query with GlobalServer tier should resolve within 10s")
@@ -837,26 +794,13 @@ async fn test_server_resync() {
     std::fs::remove_dir_all(&data_path).unwrap();
     std::fs::create_dir_all(&data_path).unwrap();
 
-    // 4. New client should resync from server via one-shot query with GlobalServer tier.
-    // No admin_secret — this client's local catalogue sync will be rejected by the
-    // server (CatalogueWriteDenied / SessionRequired), which is fine: the server
-    // already has the schema from Client 1. The JWT provides a session so the
-    // client can read data via QuerySubscription.
+    // 4. A new client, acting as another user, should resync from the server
+    // via a one-shot query with GlobalServer tier. The server already has the
+    // schema from step 2; the backend session lets it read via QuerySubscription.
     {
-        let context = AppContext {
-            app_id: test_app_id,
-            client_id: None,
-            schema: test_schema(),
-            server_url: server.base_url(),
-            data_dir: data_path,
-            storage: ClientStorage::Persistent,
-            storage_factory: Some(std::sync::Arc::new(
-                jazz_storage_rocksdb::RocksDbStorageFactory,
-            )),
-            jwt_token: Some(make_test_jwt("client2-user")),
-            backend_secret: None,
-            admin_secret: None, // Intentionally no admin - server already has schema
-        };
+        let mut context =
+            backend_user_context(test_app_id, server.base_url(), data_path, "client2-user");
+        context.bundle = bundle.clone();
         let client = connect_native(context).await.unwrap();
 
         // One-shot query with GlobalServer settled tier — waits for the server's
@@ -864,7 +808,7 @@ async fn test_server_resync() {
         let query = Query::from("todos");
         let results = tokio::time::timeout(
             Duration::from_secs(10),
-            client.query(query, Some(DurabilityTier::GlobalServer)),
+            client.query(query, ReadTier::Remote),
         )
         .await
         .expect("Query with GlobalServer tier should resolve within 10s")

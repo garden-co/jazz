@@ -1,3 +1,5 @@
+import { inProcessWebSocketFor } from "../in-process-transport.js";
+import { sameOriginWebSocketConstructor } from "./http-stream-socket.js";
 import { Utf8Decoder } from "../utf8.js";
 import { httpUrlToWs } from "../url.js";
 import { mapAuthReason } from "../auth-state.js";
@@ -40,6 +42,20 @@ export class PreHelloWireError extends Error {
  */
 export function isReconnectLaterWireError(error: WireError): boolean {
   return error.retry === "later" && (error.code === "not_ready" || error.code === "backpressure");
+}
+
+/**
+ * Whether the carrier itself ended the link because the socket went away:
+ * closed, failed, or silent past {@link HEARTBEAT_SILENCE_MS}. These are
+ * network outages, which a client retries however long they last.
+ */
+export function isSocketDropWireError(error: WireError): boolean {
+  return (
+    error.retry === "later" &&
+    (error.code === "websocket_closed" ||
+      error.code === "websocket_error" ||
+      error.code === "websocket_silent")
+  );
 }
 
 export function isRetryablePreHelloWireError(error: unknown): error is PreHelloWireError {
@@ -86,24 +102,34 @@ export type BrowserWebSocket = {
  * The sole Jazz wire-protocol version. This is distinct from independently
  * versioned v1 storage, catalogue, and binding formats.
  */
-export const WIRE_PROTOCOL_VERSION = 3;
+export const WIRE_PROTOCOL_VERSION = 6;
 export const MIN_WIRE_PROTOCOL_VERSION = WIRE_PROTOCOL_VERSION;
 export const MAX_WIRE_PROTOCOL_VERSION = WIRE_PROTOCOL_VERSION;
-export const FEATURE_SYNC_MESSAGE_PAYLOAD = 1 << 0;
-export const FEATURE_STRUCTURED_ERRORS = 1 << 2;
 export const FEATURE_PAYLOAD_ZSTD = 1 << 4;
-export const FEATURE_MESSAGE_FRAGMENTATION = 1 << 5;
-export const FEATURE_AUTHORIZATION_SCOPE_RECEIPTS = 1 << 6;
 export const FEATURE_AUTHORIZATION_SCOPE_VIEWS = 1 << 7;
 export const FEATURE_AUXILIARY_CHUNKS = 1 << 8;
+/**
+ * `FEATURE_HEARTBEAT` in `crates/jazz/layers/protocol/src/wire.rs`: the server
+ * sends a `Heartbeat` frame on its keepalive cadence (20 s). The WebSocket API
+ * shows neither pings nor partial messages, so this is how a carrier tells a
+ * link that went silently dead (a half-open TCP connection, a stalled proxy)
+ * from a quiet one. Every carrier asks for it; it never reaches the runtime
+ * above.
+ */
+export const FEATURE_HEARTBEAT = 1 << 11;
+/**
+ * How long a heartbeat link may stay silent before the carrier gives it up.
+ * A message arrives whole, and a heartbeat queues behind the message being
+ * sent, so this also bounds the slowest link a full 2 MiB message survives:
+ * about 18 KB/s. A link slower than that is treated as gone.
+ */
+export const HEARTBEAT_SILENCE_MS = 120_000;
+/** A silence past the limit is confirmed after this long, so that messages
+ * a frozen page or a long task held back are delivered before it counts. */
+const HEARTBEAT_CONFIRM_MS = 1_000;
+const WIRE_FRAME_HEARTBEAT = 7;
 export const CLIENT_WIRE_FEATURES =
-  FEATURE_SYNC_MESSAGE_PAYLOAD |
-  FEATURE_STRUCTURED_ERRORS |
-  FEATURE_PAYLOAD_ZSTD |
-  FEATURE_MESSAGE_FRAGMENTATION |
-  FEATURE_AUTHORIZATION_SCOPE_RECEIPTS |
-  FEATURE_AUTHORIZATION_SCOPE_VIEWS |
-  FEATURE_AUXILIARY_CHUNKS;
+  FEATURE_PAYLOAD_ZSTD | FEATURE_AUTHORIZATION_SCOPE_VIEWS | FEATURE_AUXILIARY_CHUNKS;
 
 // The server route accepts WebSocket messages up to one MiB. Reserve enough
 // postcard framing bytes that a burst of otherwise-valid wire frames remains
@@ -182,27 +208,38 @@ export function encodeWireClientHello(features = CLIENT_WIRE_FEATURES): Uint8Arr
   return writer.finish();
 }
 
-export function isWireHello(frame: Uint8Array): boolean {
-  const reader = new PostcardReader(frame);
-  if (reader.u64() !== 0) return false;
-  readWireHelloBodyExact(reader);
-  return true;
-}
+/**
+ * A server's frames are told apart by their first byte, as the Rust client
+ * does (`CorpusReader::Client` in `crates/jazz/layers/db/src/sync.rs`): 0 is
+ * a `Hello`, 1 an `Error`, anything else a sync message or a part of one
+ * split across frames. A part starts with a marker byte (0xFF, or 0xFE for
+ * the last) and then arbitrary message bytes, so it must not be read as a
+ * postcard tag: `0xFE 0x00` reads as a non-minimal varint.
+ */
+const WIRE_HELLO_TAG = 0;
+const WIRE_ERROR_TAG = 1;
 
-export function isWireMessage(frame: Uint8Array): boolean {
+/**
+ * Classify a `Hello`. Only the tag and version range are shared across wire
+ * versions; the rest of the body is read exactly when the range is this
+ * version's, and a foreign-version Hello is left to `decodeServerHello` to
+ * report as a version mismatch (SPEC 8 §8.1.1).
+ */
+export function isWireHello(frame: Uint8Array): boolean {
+  if (frame[0] !== WIRE_HELLO_TAG) return false;
   const reader = new PostcardReader(frame);
-  if (reader.u64() !== 1) return false;
-  reader.u64(); // protocol_version
-  reader.u64(); // features
-  reader.option(readWireSession);
-  reader.bytes(); // semantic payload
-  assertReaderDone(reader, "WireFrame::Message");
+  reader.u64();
+  const { min, max } = readWireHelloVersionRange(reader);
+  if (min === WIRE_PROTOCOL_VERSION && max === WIRE_PROTOCOL_VERSION) {
+    readWireHelloBodyAfterRangeExact(reader);
+  }
   return true;
 }
 
 export function isWireError(frame: Uint8Array): boolean {
+  if (frame[0] !== WIRE_ERROR_TAG) return false;
   const reader = new PostcardReader(frame);
-  if (reader.u64() !== 2) return false;
+  reader.u64();
   readWireErrorBodyExact(reader);
   return true;
 }
@@ -210,7 +247,7 @@ export function isWireError(frame: Uint8Array): boolean {
 export function decodeWireError(frame: Uint8Array): WireError {
   const reader = new PostcardReader(frame);
   const tag = reader.u64();
-  if (tag !== 2) throw new Error(`expected WireFrame::Error, got tag ${tag}`);
+  if (tag !== 1) throw new Error(`expected WireFrame::Error, got tag ${tag}`);
   return readWireErrorBodyExact(reader);
 }
 
@@ -242,14 +279,17 @@ export class WebSocketCarrier {
   private negotiated = false;
   private closing = false;
   private terminated = false;
+  private lastInbound = performance.now();
+  private silenceTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(options: WebSocketCarrierOptions) {
-    const WebSocketCtor = options.WebSocket ?? browserWebSocketConstructor();
     this.url = options.endpointUrl;
+    const WebSocketCtor =
+      options.WebSocket ?? inProcessWebSocketFor(this.url) ?? defaultWebSocketConstructor(this.url);
     this.onFrame = options.onFrame;
     this.onError = options.onError;
     this.onTerminal = options.onTerminal;
-    this.localFeatures = options.features ?? CLIENT_WIRE_FEATURES;
+    this.localFeatures = (options.features ?? CLIENT_WIRE_FEATURES) | FEATURE_HEARTBEAT;
     assertWireFeatures(this.localFeatures, "client wire features");
     this.socket = new WebSocketCtor(this.url);
     this.socket.binaryType = "arraybuffer";
@@ -279,6 +319,7 @@ export class WebSocketCarrier {
       },
     );
     this.socket.addEventListener("message", (event) => {
+      this.lastInbound = performance.now();
       void this.handleMessage(event.data).catch((error) => {
         this.reportTerminal(
           {
@@ -347,6 +388,7 @@ export class WebSocketCarrier {
   close(): void {
     if (this.closing) return;
     this.closing = true;
+    clearTimeout(this.silenceTimer);
     this.reportTerminal(
       {
         code: "websocket_closed",
@@ -373,9 +415,35 @@ export class WebSocketCarrier {
   ): void {
     if (this.terminated) return;
     this.terminated = true;
+    clearTimeout(this.silenceTimer);
     this.rejectNegotiation(negotiationError);
     if (notifyError) this.onError?.(error);
     if (notifyTerminal) this.onTerminal?.(error);
+  }
+
+  /** Give the link up once the server has sent nothing, not even a
+   * heartbeat, for {@link HEARTBEAT_SILENCE_MS}. Checked against the time
+   * of the last message, so a timer the browser throttled judges the
+   * silence it actually saw; a silence past the limit is confirmed a moment
+   * later, after any messages a frozen page held back were delivered. */
+  private watchSilence(confirming = false): void {
+    clearTimeout(this.silenceTimer);
+    if (this.closing || this.terminated) return;
+    const silentFor = performance.now() - this.lastInbound;
+    if (silentFor >= HEARTBEAT_SILENCE_MS && !confirming) {
+      this.silenceTimer = setTimeout(() => this.watchSilence(true), HEARTBEAT_CONFIRM_MS);
+      return;
+    }
+    if (silentFor >= HEARTBEAT_SILENCE_MS) {
+      this.reportTerminal({
+        code: "websocket_silent",
+        retry: "later",
+        message: `the server sent nothing for ${Math.round(silentFor / 1000)} s, not even a heartbeat`,
+      });
+      this.close();
+      return;
+    }
+    this.silenceTimer = setTimeout(() => this.watchSilence(), HEARTBEAT_SILENCE_MS - silentFor);
   }
 
   private async handleMessage(data: unknown): Promise<void> {
@@ -384,7 +452,15 @@ export class WebSocketCarrier {
       if (isWireHello(frame)) {
         if (this.negotiated) continue;
         this.negotiated = true;
-        this.resolveNegotiation(decodeServerHello(frame, this.localFeatures));
+        const negotiation = decodeServerHello(frame, this.localFeatures);
+        if ((negotiation.features & FEATURE_HEARTBEAT) !== 0) this.watchSilence();
+        this.resolveNegotiation({
+          ...negotiation,
+          features: negotiation.features & ~FEATURE_HEARTBEAT,
+        });
+        continue;
+      }
+      if (this.negotiated && frame.byteLength === 1 && frame[0] === WIRE_FRAME_HEARTBEAT) {
         continue;
       }
       if (!this.negotiated) {
@@ -435,13 +511,15 @@ function decodeServerHello(
 ): WebSocketNegotiation {
   const reader = new PostcardReader(frame);
   if (reader.u64() !== 0) throw new Error("expected WireFrame::Hello");
-  const hello = readWireHelloBodyExact(reader);
-  const { min, max, features, role, authority } = hello;
+  // The version range comes first in every wire version; the rest of the
+  // body is version-scoped, so check the range before reading it.
+  const { min, max } = readWireHelloVersionRange(reader);
   if (min !== WIRE_PROTOCOL_VERSION || max !== WIRE_PROTOCOL_VERSION) {
     throw new Error(
       `server must advertise exactly wire protocol ${WIRE_PROTOCOL_VERSION}, got ${min}..=${max}`,
     );
   }
+  const { features, role, authority } = readWireHelloBodyAfterRangeExact(reader);
   const unsupportedFeatures = features & ~BigInt(localFeatures);
   if (unsupportedFeatures !== 0n) {
     throw new Error(
@@ -458,15 +536,15 @@ function assertWireFeatures(features: number, label: string): void {
   }
 }
 
-function readWireHelloBodyExact(reader: PostcardReader): {
-  min: number;
-  max: number;
+function readWireHelloVersionRange(reader: PostcardReader): { min: number; max: number } {
+  return { min: reader.u64(), max: reader.u64() };
+}
+
+function readWireHelloBodyAfterRangeExact(reader: PostcardReader): {
   features: bigint;
   role: number;
   authority?: { node: Uint8Array; epoch: bigint };
 } {
-  const min = reader.u64();
-  const max = reader.u64();
   const features = reader.u64BigInt();
   const role = reader.u64();
   const authority = reader.option((value) => {
@@ -477,13 +555,7 @@ function readWireHelloBodyExact(reader: PostcardReader): {
     return { node, epoch: value.u64BigInt() };
   });
   assertReaderDone(reader, "WireFrame::Hello");
-  return { min, max, features, role, authority };
-}
-
-function readWireSession(reader: PostcardReader): void {
-  reader.string(); // session_id
-  reader.u64BigInt(); // epoch
-  reader.option((identity) => identity.string()); // canonical AuthorSubject
+  return { features, role, authority };
 }
 
 function assertReaderDone(reader: PostcardReader, payload: string): void {
@@ -665,14 +737,6 @@ function canonicalAuthorSubjectPart(author: string): string | null {
   return parseCanonicalAuthorSubject(author)?.user_id ?? null;
 }
 
-export async function connectWebSocketCarrier(
-  options: WebSocketCarrierOptions,
-): Promise<WebSocketCarrier> {
-  const carrier = new WebSocketCarrier(options);
-  await carrier.ready();
-  return carrier;
-}
-
 export async function bytesFromWebSocketMessage(data: unknown): Promise<Uint8Array> {
   if (data instanceof ArrayBuffer) return new Uint8Array(data);
   if (ArrayBuffer.isView(data)) {
@@ -682,6 +746,23 @@ export async function bytesFromWebSocketMessage(data: unknown): Promise<Uint8Arr
     return new Uint8Array(await data.arrayBuffer());
   }
   throw new Error(`expected binary websocket message, got ${typeof data}`);
+}
+
+/** Same-origin endpoints fall back to the HTTP stream transport when the host
+ * can't upgrade WebSockets (see `http-stream-socket.ts`). */
+function defaultWebSocketConstructor(url: string): WebSocketConstructor {
+  const native = browserWebSocketConstructor();
+  return isSameOriginEndpoint(url) ? sameOriginWebSocketConstructor(native) : native;
+}
+
+function isSameOriginEndpoint(url: string): boolean {
+  const location = (globalThis as { location?: { host?: string } }).location;
+  if (!location?.host) return false;
+  try {
+    return new URL(url).host === location.host;
+  } catch {
+    return false;
+  }
 }
 
 function browserWebSocketConstructor(): WebSocketConstructor {

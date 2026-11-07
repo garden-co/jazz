@@ -2,20 +2,23 @@ import { describe, expect, it } from "vitest";
 import { schema } from "../../src/index.js";
 import { withNativeRelayFixture } from "./fixture.js";
 
-const app = schema.defineApp({
-  groups: schema.table(
-    { name: schema.string() },
-    { tasksViaGroup: schema.reverse("tasks", "group") },
-  ),
-  tasks: schema.table(
-    { title: schema.string(), group_id: schema.uuid() },
-    { group: schema.rel("groups", "group_id"), notesViaTask: schema.reverse("notes", "task") },
-  ),
-  notes: schema.table(
-    { body: schema.string(), task_id: schema.uuid() },
-    { task: schema.rel("tasks", "task_id") },
-  ),
-});
+const app = schema.defineApp(
+  {
+    groups: schema.table(
+      { name: schema.string() },
+      { tasksViaGroup: schema.reverse("tasks", "group") },
+    ),
+    tasks: schema.table(
+      { title: schema.string(), group_id: schema.uuid() },
+      { group: schema.rel("groups", "group_id"), notesViaTask: schema.reverse("notes", "task") },
+    ),
+    notes: schema.table(
+      { body: schema.string(), task_id: schema.uuid() },
+      { task: schema.rel("tasks", "task_id") },
+    ),
+  },
+  { migrations: "none" },
+);
 const query = app.groups
   .include({
     tasksViaGroup: app.tasks.select("title").include({ notesViaTask: true }),
@@ -29,12 +32,12 @@ describe("React Native structured reads", () => {
     await withNativeRelayFixture(app, {}, async (fixture) => {
       const db = await fixture.createDb();
       const related = app.tasks.where({ title: "included" }).hopTo("group").orderBy("name");
-      expect(await db.all(related, { tier: "local" })).toEqual([]);
+      expect(await db.all(related, { tier: "local-first" })).toEqual([]);
       const group = db.insert(app.groups, { name: "group" }).value;
       const task = db.insert(app.tasks, { title: "included", group_id: group.id }).value;
-      expect(await db.all(related, { tier: "local" })).toEqual([group]);
+      expect(await db.all(related, { tier: "local-first" })).toEqual([group]);
       db.delete(app.tasks, task.id);
-      expect(await db.all(related, { tier: "local" })).toEqual([]);
+      expect(await db.all(related, { tier: "local-first" })).toEqual([]);
     });
   });
 
@@ -93,7 +96,7 @@ describe("React Native structured reads", () => {
           ],
         },
       ]);
-      const tx = db.beginExclusiveTransaction();
+      const tx = db.beginSerializableTransaction();
       tx.update(app.notes, note.id, { body: "draft note" });
       expect(await tx.all(query)).toMatchObject([
         { tasksViaGroup: [{ notesViaTask: [{ body: "draft note" }] }] },

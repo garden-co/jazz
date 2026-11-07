@@ -4,15 +4,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::{SinkExt as _, StreamExt as _};
-use jazz::db::ConnectionSessionContext;
-#[cfg(test)]
-use jazz::db::WireTransportAdapter;
 use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::protocol_limits::{MAX_WIRE_BATCH_FRAMES, MAX_WIRE_FRAME_BYTES, validate_wire_frame_len};
 use jazz::wire::{
-    FEATURE_SYNC_MESSAGE_PAYLOAD, TransportError, WireAuthorityEndpoint, WireError, WireFrame,
-    WireHello, WirePeerRole, WireTransport, current_wire_features, decode_frame, encode_frame,
-    negotiate_wire,
+    TransportError, WireAuthorityEndpoint, WireError, WireFrame, WireHello, WirePeerRole,
+    WireTransport, current_wire_features, decode_frame, encode_frame, negotiate_wire,
 };
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::sync::{Semaphore, mpsc, oneshot};
@@ -28,7 +24,6 @@ use jazz::tools::native_transport_connector::{
 };
 use jazz::tools::websocket_prelude_auth::AuthConfig;
 
-const WS_CLIENT_REQUIRED_FEATURES: u64 = FEATURE_SYNC_MESSAGE_PAYLOAD;
 const WS_CLIENT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 // The serving route caps client-to-server WebSocket messages at one MiB. Keep
 // a small postcard framing reserve so a burst of individually-valid wire
@@ -50,6 +45,11 @@ pub enum WebSocketClientError {
     Send(tokio_tungstenite::tungstenite::Error),
     Receive(tokio_tungstenite::tungstenite::Error),
     ClosedDuringHandshake,
+    /// The peer sent a Close frame before its hello, with this close code.
+    ClosedBeforeHello {
+        code: u16,
+        reason: String,
+    },
     HandshakeTimeout,
     UnexpectedHandshakeMessage,
     EncodePrelude(serde_json::Error),
@@ -69,6 +69,12 @@ impl fmt::Display for WebSocketClientError {
             Self::Receive(error) => write!(f, "failed to receive websocket frame: {error}"),
             Self::ClosedDuringHandshake => {
                 write!(f, "websocket closed during handshake")
+            }
+            Self::ClosedBeforeHello { code, reason } => {
+                write!(
+                    f,
+                    "websocket closed before hello (code={code}, reason={reason})"
+                )
             }
             Self::HandshakeTimeout => write!(f, "websocket handshake timed out"),
             Self::UnexpectedHandshakeMessage => {
@@ -167,6 +173,14 @@ fn native_transport_error(error: WebSocketClientError) -> NativeTransportError {
             )
         }
         WebSocketClientError::HandshakeTimeout => true,
+        // A relay (the app's backend) accepts the upgrade and then closes
+        // when it cannot reach its core. Like the HTTP statuses below, only
+        // close codes that describe transient availability retry: going
+        // away, server error, restart, try again later and bad gateway. A
+        // refused sign-in arrives as an auth-failed wire error first.
+        WebSocketClientError::ClosedBeforeHello { code, .. } => {
+            matches!(code, 1001 | 1011 | 1012 | 1013 | 1014)
+        }
         // Only HTTP statuses that describe transient availability are
         // retryable. This includes request timeout, too early, throttling,
         // and common temporary server failures. Authorization, unsupported
@@ -183,8 +197,21 @@ fn native_transport_error(error: WebSocketClientError) -> NativeTransportError {
         }
         _ => false,
     };
+    // A refused credential stays refused until the caller brings a new one,
+    // whether the upgrade itself was refused or Core said so before hello.
+    let auth_rejected = match &error {
+        WebSocketClientError::Connect(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+            response.status().as_u16() == 401
+        }
+        WebSocketClientError::ServerWireError(error) => {
+            error.code == jazz::wire::WireErrorCode::AuthFailed
+        }
+        _ => false,
+    };
     if retryable {
         NativeTransportError::Retryable(error.to_string())
+    } else if auth_rejected {
+        NativeTransportError::AuthRejected(error.to_string())
     } else {
         NativeTransportError::Terminal(error.to_string())
     }
@@ -198,7 +225,6 @@ pub struct WebSocketTransport {
     terminal_publisher: Arc<Mutex<Option<oneshot::Sender<NativeTransportTerminal>>>>,
     protocol_version: u16,
     features: u64,
-    session_context: Option<ConnectionSessionContext>,
 }
 
 /// Tokio/TLS WebSocket implementation selected by native process and binding
@@ -210,27 +236,26 @@ pub struct NativeWebSocketConnector;
 impl NativeTransportConnector for NativeWebSocketConnector {
     fn connect(&self, request: NativeTransportRequest) -> NativeTransportFuture {
         Box::pin(async move {
-            let permits_delegated_sessions = request.peer_identity == AuthorSubject::SYSTEM
-                && (request.auth.backend_secret.is_some() || request.auth.admin_secret.is_some());
             let mut transport = WebSocketTransport::connect_with_link(
                 request.server_url,
                 request.app_id,
                 request.peer_identity,
                 request.auth,
+                Upgrade {
+                    authorization: request.authorization,
+                    bundle: request.bundle,
+                },
                 request.wake,
                 request.requested_link,
             )
             .await
             .map_err(native_connect_error)?;
-            let (protocol_version, features, session_context) =
-                transport.negotiated_transport_metadata();
+            let (protocol_version, features) = transport.negotiated_transport_metadata();
             let terminal = transport.take_terminal_future();
             Ok(ConnectedNativeTransport {
                 transport: Box::new(transport),
                 protocol_version,
                 features,
-                session_context,
-                permits_delegated_sessions,
                 terminal,
             })
         })
@@ -401,6 +426,7 @@ impl WebSocketTransport {
             app_id,
             peer_identity,
             auth,
+            Upgrade::default(),
             wake,
             NativeTransportLink::OrdinarySession,
         )
@@ -413,18 +439,24 @@ impl WebSocketTransport {
         app_id: AppId,
         peer_identity: AuthorSubject,
         auth: AuthConfig,
+        upgrade: Upgrade,
         wake: Arc<dyn Fn() + Send + Sync>,
         requested_link: NativeTransportLink,
     ) -> Result<Self, NativeConnectFailure> {
+        let Upgrade {
+            authorization,
+            bundle,
+        } = upgrade;
         let deadline = tokio::time::Instant::now() + WS_CLIENT_HANDSHAKE_TIMEOUT;
         let url = ws_url(base_url.as_ref(), app_id);
-        let (mut ws, _) = tokio::time::timeout_at(deadline, open_client_websocket(url))
-            .await
-            .map_err(|_| {
-                NativeConnectFailure::WebSocket(WebSocketClientError::HandshakeTimeout)
-            })??;
+        let (mut ws, _) = tokio::time::timeout_at(
+            deadline,
+            open_client_websocket(url, authorization.as_deref()),
+        )
+        .await
+        .map_err(|_| NativeConnectFailure::WebSocket(WebSocketClientError::HandshakeTimeout))??;
 
-        let prelude = encode_prelude(peer_identity, auth, requested_link)?;
+        let prelude = encode_prelude(peer_identity, auth, bundle, requested_link)?;
         tokio::time::timeout_at(deadline, ws.send(Message::Binary(prelude.into())))
             .await
             .map_err(|_| WebSocketClientError::HandshakeTimeout)?
@@ -452,7 +484,7 @@ impl WebSocketTransport {
             .map_err(WebSocketClientError::Send)?;
 
         let server_hello = receive_server_hello(&mut ws, deadline).await?;
-        let mut negotiated = negotiate_wire(&server_hello, current_wire_features())
+        let negotiated = negotiate_wire(&server_hello, current_wire_features())
             .map_err(WebSocketClientError::Negotiation)?;
         if requested_link == NativeTransportLink::ScopeIsolatedClientRelay
             && negotiated.features & jazz::wire::FEATURE_SCOPE_ISOLATED_CLIENT_RELAY == 0
@@ -462,34 +494,6 @@ impl WebSocketTransport {
             )
             .into());
         }
-        // Receipt semantics require an admitted authority endpoint, not merely
-        // a feature bit from a legacy hello.
-        if server_hello.authority.is_none() {
-            negotiated.features &= !(jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
-                | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS);
-        }
-        if negotiated.features & WS_CLIENT_REQUIRED_FEATURES != WS_CLIENT_REQUIRED_FEATURES {
-            return Err(WebSocketClientError::ServerRejected(
-                "server did not negotiate sync message payload frames".to_owned(),
-            )
-            .into());
-        }
-        let session_context = if negotiated.features
-            & (jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
-                | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS)
-            != 0
-        {
-            server_hello
-                .authority
-                .map(|remote| ConnectionSessionContext {
-                    local: client_endpoint,
-                    remote: Some(remote),
-                    link_identity: peer_identity,
-                    negotiated_features: negotiated.features,
-                })
-        } else {
-            None
-        };
 
         let (inbound_tx, inbound_rx) = mpsc::channel(WS_CLIENT_INBOUND_FRAME_SLOTS);
         let inbound = Arc::new(Mutex::new(inbound_rx));
@@ -525,13 +529,12 @@ impl WebSocketTransport {
             terminal_publisher,
             protocol_version: negotiated.protocol_version,
             features: negotiated.features,
-            session_context,
         })
     }
 
     /// Negotiated metadata authenticated during the websocket handshake.
-    pub fn negotiated_transport_metadata(&self) -> (u16, u64, Option<ConnectionSessionContext>) {
-        (self.protocol_version, self.features, self.session_context)
+    pub fn negotiated_transport_metadata(&self) -> (u16, u64) {
+        (self.protocol_version, self.features)
     }
 
     fn take_terminal_future(&mut self) -> NativeTransportTerminalFuture {
@@ -582,9 +585,21 @@ impl WireTransport for WebSocketTransport {
 struct WebSocketClientPrelude {
     peer_identity: String,
     auth: AuthConfig,
+    /// The published bundle a stated session is pinned to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bundle: Option<String>,
 
     #[serde(skip_serializing_if = "is_ordinary_link")]
     requested_link: NativeTransportLink,
+}
+
+/// What a socket carries beside its auth: the upgrade's `Authorization`
+/// header (for the app's own backend) and the bundle a stated session is
+/// pinned to.
+#[derive(Default)]
+struct Upgrade {
+    authorization: Option<String>,
+    bundle: Option<String>,
 }
 
 fn is_ordinary_link(value: &NativeTransportLink) -> bool {
@@ -594,12 +609,14 @@ fn is_ordinary_link(value: &NativeTransportLink) -> bool {
 fn encode_prelude(
     peer_identity: AuthorSubject,
     auth: AuthConfig,
+    bundle: Option<String>,
 
     requested_link: NativeTransportLink,
 ) -> Result<Vec<u8>, WebSocketClientError> {
     serde_json::to_vec(&WebSocketClientPrelude {
         peer_identity: peer_identity.canonical().to_owned(),
         auth,
+        bundle,
 
         requested_link,
     })
@@ -623,6 +640,7 @@ fn ws_url(base_url: &str, app_id: AppId) -> String {
 /// `set_nodelay` is applied here rather than via `connect_async`'s flag.
 async fn open_client_websocket(
     url: String,
+    authorization: Option<&str>,
 ) -> Result<
     (
         tokio_tungstenite::WebSocketStream<
@@ -632,9 +650,23 @@ async fn open_client_websocket(
     ),
     NativeConnectFailure,
 > {
-    let request = url
+    let mut request = url
         .into_client_request()
         .map_err(WebSocketClientError::Connect)?;
+    if let Some(authorization) = authorization {
+        let value = authorization.parse().map_err(|_| {
+            WebSocketClientError::Connect(tokio_tungstenite::tungstenite::Error::HttpFormat(
+                tokio_tungstenite::tungstenite::http::Error::from(
+                    tokio_tungstenite::tungstenite::http::header::HeaderValue::from_bytes(b"\n")
+                        .unwrap_err(),
+                ),
+            ))
+        })?;
+        request.headers_mut().insert(
+            tokio_tungstenite::tungstenite::http::header::AUTHORIZATION,
+            value,
+        );
+    }
     let host = request.uri().host().ok_or_else(|| {
         WebSocketClientError::Connect(tokio_tungstenite::tungstenite::Error::Url(
             tokio_tungstenite::tungstenite::error::UrlError::NoHostName,
@@ -715,21 +747,33 @@ async fn receive_server_hello(
         .map_err(|_| WebSocketClientError::HandshakeTimeout)?
         .ok_or(WebSocketClientError::ClosedDuringHandshake)?
         .map_err(WebSocketClientError::Receive)?;
-    let Message::Binary(bytes) = message else {
-        return Err(WebSocketClientError::UnexpectedHandshakeMessage);
+    let bytes = match message {
+        Message::Binary(bytes) => bytes,
+        Message::Close(frame) => {
+            let (code, reason) = frame
+                .map(|frame| (u16::from(frame.code), frame.reason.to_string()))
+                // A Close frame without a status is "no status received".
+                .unwrap_or((1005, String::new()));
+            return Err(WebSocketClientError::ClosedBeforeHello { code, reason });
+        }
+        _ => return Err(WebSocketClientError::UnexpectedHandshakeMessage),
     };
     let encoded = jazz::wire::decode_websocket_frame_batch(&bytes)
         .map_err(WebSocketClientError::DecodeBatch)?;
     if encoded.len() != 1 {
         return Err(WebSocketClientError::UnexpectedHandshakeMessage);
     }
-    let frame = decode_frame(&encoded[0]).map_err(WebSocketClientError::DecodeFrame)?;
-    let WireFrame::Hello(hello) = frame else {
+    if jazz::wire::wire_hello_version_range(&encoded[0]).is_none() {
+        let frame = decode_frame(&encoded[0]).map_err(WebSocketClientError::DecodeFrame)?;
         if let WireFrame::Error(error) = frame {
             return Err(WebSocketClientError::ServerWireError(error));
         }
         return Err(WebSocketClientError::UnexpectedHandshakeMessage);
-    };
+    }
+    // Read the version range before the version-scoped body, so a server on
+    // another wire version is reported as a version mismatch.
+    let hello =
+        jazz::wire::decode_hello_frame(&encoded[0]).map_err(WebSocketClientError::Negotiation)?;
     if hello.role != WirePeerRole::Core {
         return Err(WebSocketClientError::UnexpectedHandshakeMessage);
     }
@@ -895,6 +939,43 @@ fn decode_inbound_batch(bytes: &[u8]) -> Result<Vec<Vec<u8>>, String> {
 
 #[cfg(test)]
 mod tests {
+    /// #4248: Core refusing the bearer (an `AuthFailed` error before hello,
+    /// or a 401 on upgrade) is an auth rejection a fresh credential can
+    /// clear, distinct from other terminal failures and from a retryable
+    /// `NotReady`.
+    #[test]
+    fn a_refused_credential_is_an_auth_rejection() {
+        use jazz::wire::{WireError, WireErrorCode, WireRetry};
+        let wire = |code, retry| {
+            native_transport_error(WebSocketClientError::ServerWireError(WireError::new(
+                code,
+                retry,
+                "token expired",
+            )))
+        };
+        assert!(matches!(
+            wire(WireErrorCode::AuthFailed, WireRetry::Never),
+            NativeTransportError::AuthRejected(_)
+        ));
+        assert!(wire(WireErrorCode::NotReady, WireRetry::Later).is_retryable());
+        assert!(matches!(
+            wire(WireErrorCode::MalformedFrame, WireRetry::Never),
+            NativeTransportError::Terminal(_)
+        ));
+        let http = |status: u16| {
+            let response = tokio_tungstenite::tungstenite::http::Response::builder()
+                .status(status)
+                .body(None)
+                .unwrap();
+            native_transport_error(WebSocketClientError::Connect(
+                tokio_tungstenite::tungstenite::Error::Http(Box::new(response)),
+            ))
+        };
+        assert!(matches!(http(401), NativeTransportError::AuthRejected(_)));
+        assert!(matches!(http(403), NativeTransportError::Terminal(_)));
+        assert!(http(503).is_retryable());
+    }
+
     // A proxy can accept TCP while its upstream is down, then close before
     // completing HTTP upgrade. Observe the real socket error, not its text.
     #[tokio::test]
@@ -934,6 +1015,43 @@ mod tests {
             classified.is_retryable(),
             "incomplete upgrade must reconnect: {classified:?}"
         );
+        server.await.unwrap();
+    }
+
+    // A relay that accepts the upgrade and closes when its core is
+    // unreachable sends a real Close frame before any hello.
+    #[tokio::test]
+    async fn relay_close_before_hello_is_retryable() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            ws.send(Message::Close(Some(
+                tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                    code: 1011.into(),
+                    reason: "admission failed".into(),
+                },
+            )))
+            .await
+            .unwrap();
+        });
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{address}"))
+            .await
+            .unwrap();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let error = receive_server_hello(&mut ws, deadline)
+            .await
+            .expect_err("closed before hello");
+        assert!(
+            matches!(
+                &error,
+                WebSocketClientError::ClosedBeforeHello { code: 1011, reason }
+                    if reason == "admission failed"
+            ),
+            "unexpected close: {error:?}"
+        );
+        assert!(native_transport_error(error).is_retryable());
         server.await.unwrap();
     }
 
@@ -987,7 +1105,7 @@ mod tests {
         });
         let ws = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            open_client_websocket(format!("ws://{address}")),
+            open_client_websocket(format!("ws://{address}"), None),
         )
         .await
         .expect("bounded client connect")
@@ -1104,6 +1222,22 @@ mod tests {
     }
 
     #[test]
+    fn close_before_hello_retries_only_transient_close_codes() {
+        let closed = |code: u16| {
+            native_transport_error(WebSocketClientError::ClosedBeforeHello {
+                code,
+                reason: "core unavailable".to_owned(),
+            })
+        };
+        for transient in [1001, 1011, 1012, 1013, 1014] {
+            assert!(closed(transient).is_retryable(), "close {transient}");
+        }
+        for terminal in [1000, 1002, 1003, 1005, 1007, 1008, 1009, 1010, 4000] {
+            assert!(!closed(terminal).is_retryable(), "close {terminal}");
+        }
+    }
+
+    #[test]
     fn broken_pipe_on_established_socket_is_retryable() {
         use tokio_tungstenite::tungstenite::Error;
 
@@ -1206,93 +1340,16 @@ mod tests {
     }
 
     use super::*;
-    use jazz::db::Transport;
     use jazz::wire::WIRE_PROTOCOL_VERSION;
-    use std::collections::{BTreeMap, VecDeque};
 
-    #[derive(Clone)]
-    struct FrameSink {
-        outbound: Arc<Mutex<VecDeque<Vec<u8>>>>,
-        inbound: Arc<Mutex<VecDeque<Vec<u8>>>>,
-    }
-
-    impl WireTransport for FrameSink {
-        fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
-            self.outbound
-                .lock()
-                .expect("frame sink lock")
-                .push_back(frame);
-            Ok(())
-        }
-
-        fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
-            self.inbound.lock().expect("frame source lock").pop_front()
-        }
-    }
-
-    fn valid_fragmented_wire_message_larger_than_ingress_budget() -> Vec<Vec<u8>> {
-        let frames = Arc::new(Mutex::new(VecDeque::new()));
-        let credits = Arc::new(Mutex::new(VecDeque::new()));
-        let received_frames = Arc::new(Mutex::new(VecDeque::new()));
-        let features = FEATURE_SYNC_MESSAGE_PAYLOAD | jazz::wire::FEATURE_MESSAGE_FRAGMENTATION;
-        let mut sender = WireTransportAdapter::new(
-            FrameSink {
-                outbound: Arc::clone(&frames),
-                inbound: Arc::clone(&credits),
-            },
-            WIRE_PROTOCOL_VERSION,
-            features,
-            None,
-        );
-        let mut receiver = WireTransportAdapter::new(
-            FrameSink {
-                outbound: credits,
-                inbound: Arc::clone(&received_frames),
-            },
-            WIRE_PROTOCOL_VERSION,
-            features,
-            None,
-        );
-        let body = (0..(WS_CLIENT_MAX_QUEUED_BYTES + 1))
-            .map(|index| char::from((index % 251) as u8))
-            .collect::<String>();
-        let message = jazz::protocol::SyncMessage::SessionClaims {
-            identity: AuthorSubject::SYSTEM,
-            claims: BTreeMap::from([(
-                "catalogue_fixture".to_owned(),
-                jazz::groove::records::Value::String(body),
-            )]),
-        };
-        sender
-            .send(message.clone())
-            .expect("encode valid fragmented logical message");
-        let mut captured = Vec::new();
-        for _ in 0..1024 {
-            let turn = frames
-                .lock()
-                .expect("frame sink lock")
-                .drain(..)
-                .collect::<Vec<_>>();
-            received_frames.lock().unwrap().extend(turn.iter().cloned());
-            captured.extend(turn);
-            if let Some(received) = receiver
-                .try_recv_strict()
-                .expect("receive fragmented message")
-            {
-                assert_eq!(
-                    received, message,
-                    "credit-driven fragmentation preserves the full bootstrap"
-                );
-                assert!(captured.len() > 1, "message must be wire fragmented");
-                assert!(captured.iter().map(Vec::len).sum::<usize>() > WS_CLIENT_MAX_QUEUED_BYTES);
-                return captured;
-            }
-            assert_eq!(
-                sender.try_recv_strict().expect("apply receiver credits"),
-                None
-            );
-        }
-        panic!("credit-driven fragmented bootstrap must finish within bounded pump turns");
+    /// Frames, each within the physical cap, that together exceed the
+    /// ingress budget: an initial sync can arrive like this.
+    fn frames_larger_than_ingress_budget() -> Vec<Vec<u8>> {
+        let frame = MAX_WIRE_FRAME_BYTES / 2;
+        let count = WS_CLIENT_MAX_QUEUED_BYTES / frame + 2;
+        (0..count)
+            .map(|index| vec![(index % 251) as u8; frame])
+            .collect()
     }
 
     #[test]
@@ -1344,7 +1401,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fragmented_bootstrap_larger_than_ingress_budget_streams_with_backpressure() {
+    async fn a_burst_larger_than_the_ingress_budget_streams_with_backpressure() {
         let (sender, mut receiver) = mpsc::channel::<InboundFrame>(1);
         let budget = Arc::new(Semaphore::new(WS_CLIENT_MAX_QUEUED_BYTES));
         let consumer = tokio::spawn(async move {
@@ -1354,7 +1411,7 @@ mod tests {
             }
             received
         });
-        let frames = valid_fragmented_wire_message_larger_than_ingress_budget();
+        let frames = frames_larger_than_ingress_budget();
         let expected = frames.iter().map(Vec::len).sum::<usize>();
         for frame in frames {
             let budget_permit = Arc::clone(&budget)
@@ -1438,6 +1495,7 @@ mod tests {
                 encode_prelude(
                     identity,
                     auth,
+                    None,
                     if entry["requested_link"] == "scope_isolated_client_relay" {
                         NativeTransportLink::ScopeIsolatedClientRelay
                     } else {
@@ -1493,12 +1551,13 @@ mod tests {
                     app_id: AppId::random(),
                     peer_identity: AuthorSubject::SYSTEM,
                     auth: AuthConfig::default(),
+                    authorization: None,
+                    bundle: None,
                     wake: Arc::new(|| {}),
                 })
                 .await;
             if supported {
-                let connected = connected.expect("supported scoped handshake");
-                assert!(!connected.permits_delegated_sessions);
+                connected.expect("supported scoped handshake");
             } else {
                 let error = match connected {
                     Ok(_) => panic!("missing scoped feature must fail closed"),
@@ -1509,6 +1568,38 @@ mod tests {
             }
             server.await.unwrap();
         }
+    }
+
+    /// Alice can connect to Bob with no optional features: semantic traffic,
+    /// structured errors, and channel splitting are baseline wire behavior.
+    #[tokio::test]
+    async fn ordinary_connection_accepts_no_optional_features() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let _prelude = socket.next().await.unwrap().unwrap();
+            let _hello = socket.next().await.unwrap().unwrap();
+            let hello =
+                encode_frame(&WireFrame::Hello(WireHello::current(WirePeerRole::Core, 0))).unwrap();
+            socket
+                .send(Message::Binary(
+                    postcard::to_allocvec(&vec![hello]).unwrap().into(),
+                ))
+                .await
+                .unwrap();
+        });
+        let connected = WebSocketTransport::connect(
+            format!("http://{address}"),
+            AppId::random(),
+            AuthorSubject::for_test_bytes([0x42; 16]),
+            AuthConfig::default(),
+        )
+        .await
+        .expect("baseline protocol requires no feature bits");
+        assert_eq!(connected.features, 0);
+        server.await.unwrap();
     }
 
     #[tokio::test]
@@ -1523,8 +1614,7 @@ mod tests {
             terminal: None,
             terminal_publisher: Arc::new(Mutex::new(None)),
             protocol_version: WIRE_PROTOCOL_VERSION,
-            features: FEATURE_SYNC_MESSAGE_PAYLOAD,
-            session_context: None,
+            features: 0,
         };
         let frame = vec![0; MAX_WIRE_FRAME_BYTES];
         for _ in 0..(WS_CLIENT_MAX_OUTBOUND_QUEUED_BYTES / MAX_WIRE_FRAME_BYTES) {

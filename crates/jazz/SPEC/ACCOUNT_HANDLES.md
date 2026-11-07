@@ -22,8 +22,8 @@ to the shared state; they do not implement independent authentication flows.
   existing active assignment. The explicit login-or-register operation resolves
   an active assignment or creates the first assignment in one serialized owner
   request. It never reactivates or reassigns a revoked principal. Concurrent
-  requests and retries converge on the same assignment; a storage failure
-  requires authoritative recovery rather than speculative success.
+  requests and retries converge on the same assignment; after a storage
+  failure the next lookup reads committed state rather than assuming success.
 - Local-first founding is deterministic from the application namespace and
   verified founding key identity. It is usable offline; arbitrary external
   assignment cannot be accepted offline.
@@ -51,18 +51,16 @@ An application-scoped account manager provides:
 - `createLocalFirst(): AccountHandle`: synchronous offline founding and selection.
 - `getLoggedIn(): AccountHandle | undefined`: local selected state, not a fresh
   remote admission guarantee.
-- `registerJWT(auth): Promise<AccountHandle>`: explicit registration and selection.
-- `loginJWT(auth): Promise<AccountHandle>`: existing active assignment and selection.
-- `loginOrRegisterJWT(auth): Promise<AccountHandle>`: atomically resolve or create
-  an external identity's account and select it. Shared JazzSession exposes the
-  same action through its graceful shutdown and replacement lifecycle.
-- `linkJWT(auth): Promise<AccountHandle>`: link to the selected account and select
-  a new handle acting as the linked principal.
+- `loginWithBackend(): Promise<AccountHandle>`: the app's backend names the
+  signed-in user (its `authenticate`), and the core resolves or creates that
+  identity's account and selects it. The client receives no credential.
+- `linkWithBackend(guest): Promise<AccountHandle>`: link the selected
+  local-first guest to the user the backend names, and select a handle acting
+  as that user.
 - `logout()`: clear selection and stop credential use without remote revocation
   or silently deleting recoverable local-first credentials.
 
 Async failures reject with typed errors and preserve the previous selection.
-Credential inputs support refresh; plain JWT strings are a convenience.
 Concurrent operations cannot restore a login after logout or overwrite a newer
 selection. Successful remote side effects remain discoverable through login
 when the initiating UI operation was canceled.
@@ -70,7 +68,7 @@ when the initiating UI operation was canceled.
 Default provider integrations use login-or-register for signup, signin and
 restoration. Linking is an explicit alternative before enrollment: a hybrid
 application must not automatically register the incoming identity before calling
-`linkJWT`. The core primitive does not infer linking or merge accounts. Existing
+`linkWithBackend`. The core primitive does not infer linking or merge accounts. Existing
 strict login and registration operations retain their original semantics.
 
 The ordered owner performs login-or-register by looking up current admission and,
@@ -119,8 +117,8 @@ versioned native encodings.
 Derived aggregate results have no originating write and omit author metadata;
 they do not manufacture a system author or expose a nullable author record.
 
-Accountless anonymous readers have no admitted account (`session.user.account`
-is null). Policy bindings for `user` and `user.account` are absent until an
+Accountless anonymous readers have no admitted account (`session.user`
+is null). The policy binding for `user` is absent until an
 account is admitted, so ownership checks fail closed; explicit anonymous-access policies remain
 available. An accountless ordinary principal cannot author new persisted rows.
 Rust interns the entire author structure, including account and both principal
@@ -185,7 +183,7 @@ sessions. Two registries assigning identical account UUIDs must never alias
 local storage. Applications cannot supply or override this internal authority
 field separately from the opaque handle.
 
-Enrollment has no dependency on an open database or a framework. `linkJWT`
+Enrollment has no dependency on an open database or a framework. `linkWithBackend`
 operates on the selected handle's credential and the core registry only; it
 never enumerates contexts, drains uploads, or rewrites transaction authors.
 
@@ -194,7 +192,7 @@ The application or local-first auth helper uses the general lifecycle sequence:
 1. Stop admitting application work and call `oldContext.shutdown({ waitForSync: true })`.
 2. If synchronization fails, retain the existing selection and usable context;
    do not proceed to linking.
-3. Call `accounts.linkJWT(externalCredential)` outside any Jazz context.
+3. Call `accounts.linkWithBackend(guest)` outside any Jazz context.
 4. Open a new context with the returned handle. If linking fails, a new context
    may be opened with the manager's unchanged previous handle.
 
@@ -211,7 +209,7 @@ release uses sync-before-switch; it does not add cross-author replay authority.
 ## Native account roots and advisory admission
 
 The RN platform supplies its absolute application storage directory; JavaScript
-supplies no filename or path. The native account filename is lowercase BLAKE3
+supplies no filename or path. The native account filename is lowercase SHA-256
 hex plus `.sqlite`, over these exact bytes in order:
 
 - ASCII `jazz-native-account-root-v1` followed by one NUL byte;
@@ -238,13 +236,16 @@ bindings update together; upstream renewal reconnects with the new bearer.
 ## Durable policy-binding directory
 
 The directory retains the existing typed provider-claim node encoding. It
-stores the exact author identity plus a native record with `derived_v1: U8` presence mask and
+stores the exact author identity plus a native record with `derived_v2: U8` presence mask and
 `claims_v1: Array<Record>` typed provider-claim nodes, omitting the canonical
 identity-derived entries (`user` and its structured paths, `authMode`, and the
 namespaced `iss`/`sub`). Writing omits an entry only when it equals the value derived from the
-stored identity; other portable scalar bindings remain stored verbatim. The mask bits 0–7 correspond to `\0claims:iss`,
-`\0claims:sub`, `authMode`, `user`, `user.account`, `user.identity`,
-`user.identity.issuer`, and `user.identity.subject`. Reading rejects entries stored both explicitly and in the mask and reconstructs only the mask-selected entries from that
+stored identity; other portable scalar bindings remain stored verbatim. Mask bits follow the canonical UTF-8 order of the
+derived entries present for the identity: `\0claims:iss`, `\0claims:sub`,
+`authMode`, `identity`, `identity.issuer`, `identity.subject`, and (only for an
+accounted identity) `user`, as bits 0–6. `derived_v2` replaced `derived_v1`
+when `session.user` became the account; a `derived_v1` record fails the
+descriptor check rather than decoding under the old names. Reading rejects entries stored both explicitly and in the mask and reconstructs only the mask-selected entries from that
 identity before producing the policy-binding key. Partial internal bindings
 therefore remain exact; missing claims are never implicitly added. Provider
 claims named `user` remain separately namespaced and are retained.
@@ -256,9 +257,12 @@ This introduces no generic record-valued durable key or migration-lens default.
 
 ## Backend account selection and request scopes
 
-The Node `jazz-tools/backend` factory composes the shared session owner with
-`initial: { backendSecret }` and `session.becomeBackend({ backendSecret })`.
-Application/schema, driver and server URL are configured once. Admission sends
+`createJazz` (`jazz-tools/backend`) opens its own session as the backend: an
+internal session owner selects the backend account once, at start, with the
+core's backend secret. No public session can select or switch to a backend
+account; the public Node `createJazzClient` refuses a backend secret and
+serves only backend clients (`credential`). Application/schema, driver and
+server URL are configured once. Admission sends
 `POST /apps/{app}/backend/admit` with `X-Jazz-Backend-Secret`; the configured server's existing
 backend-secret validation must succeed before the host issues an opaque handle.
 A reachable server is required, including for memory-driver initialization.
@@ -268,33 +272,34 @@ Browser and React Native hosts reject backend selection through their absent
 backend admission adapter.
 
 Backend handles use the nil SYSTEM account UUID and exact identity
-`{ issuer: "urn:jazz:system", subject: originatingNodeUUID }`. Native runtime
-construction uses that same node UUID. Backend credential material lives in a
+`{ issuer: "urn:jazz:system", subject: backendNodeUUID }`, and SYSTEM
+provenance on rows the backend writes names that same UUID. A persistent
+backend's runtime also writes transactions as that node. A memory backend's
+counter starts over on every open, so the handle pools one random version-4
+node of its own: its transaction ids name that node while its provenance keeps
+the backend's. Backend credential material lives in a
 private WeakMap; it never enters snapshots or persisted account preferences.
 Graceful backend shutdown fences all request scopes and waits for every
 transaction originating on its node, regardless of the credited user. Trusted
 backend reopen recovers those same pending uploads. Ordinary user barriers
 remain author-scoped. Reopening an in-memory backend handle after a failed
-transition seeds the retained node-clock high-water before accepting new writes;
-an incomplete clock handoff prevents reuse. This receipt is process-local and
-adds no durable encoding.
+transition reuses its pooled node and seeds that node's retained clock
+high-water before accepting new writes; an incomplete clock handoff prevents
+reuse. This receipt is process-local and adds no durable encoding.
 
 Copied handles and SYSTEM identity objects confer no authority. Ordinary JWT
 registration, login, linking, and token extraction cannot mint or use backend
 handles. Logout fences late admissions and invalidates all issued handles.
 
-The ready backend client's `db` already carries backend authority. Public
-`forRequest` verifies the original bearer and resolves its active account
-through the core registry before creating an immutable policy scope. External
-JWT claims cannot choose an account. Request resolution defaults to strict login;
-`forRequest(request, { account: "login-or-register" })` explicitly opts that
-request into atomic external enrollment after bearer verification. It creates
-no separate runtime and does not change the backend's selected account.
-Local-first founding remains the key-bound exception, unaffected by this option.
-`forAccount` requires an opaque admitted user handle and re-verifies its proof.
-These operations do not switch the shared owner to serve concurrent requests.
-`withAttribution(account)` and `withAttributionForRequest(request)` retain
-backend permissions with verified user authorship. Raw session objects and
+The backend's `db` already carries backend authority. `jazz.forReqUser(request)`
+asks the app's `authenticate` who the request's user is, resolves (or creates)
+that user's account through the core registry, and creates an immutable policy
+scope; the backend does not verify external JWTs itself (an app can use
+`fromJWT` as its `authenticate`). External JWT claims cannot choose an account.
+It creates no separate runtime and does not change the backend's selected
+account. These operations do not switch the shared owner to serve concurrent
+requests. `jazz.withAttribution(request)` retains backend permissions with that
+user's authorship. Raw session objects and
 arbitrary issuer/subject arguments are not public impersonation capabilities.
 
 Backend selection follows the same detach, sync, shutdown, retry and logout
@@ -316,7 +321,7 @@ this is neither row storage nor a server wire format. The key is
 Defaults are `dev` and `default`; the registry already includes the canonical
 application UUID, so app-name/UUID aliases share the same selection.
 
-Each read/transform/write runs synchronously under a native exclusive `flock`
+Each read/transform/write runs synchronously under a native serializable `flock`
 on `account-selection-v1.lock` in the platform-owned application storage root.
 JavaScript cannot supply this path. The lock spans separate runtimes/processes,
 rejects same-thread recursion, and releases on normal return, exception, or
@@ -326,54 +331,59 @@ biometric-prompt options. Older native builds without the lock fail preparation.
 Persistence errors remain observable and prevent a new handle from supplying
 credentials until retention succeeds; roots are never truncated to fit storage.
 
-## Account registry record journal (v1)
+## Account registry state
 
-The registry has its own application root, separate from ordinary row storage.
-Its `default` column family is accessed through Groove `RecordStore`. Keys are
-ASCII `account-command:v1:` followed by the big-endian eight-byte revision,
-starting at zero without gaps. Recovery scans the entire `account-command:`
-prefix and rejects other versions, malformed keys, and invalid commands.
+A server keeps each application's registry as its current state, in two host
+tables of the application's store file: `_jazz_host_account_identities` (one
+row per assigned principal: exact issuer and subject, account, admission flag,
+management flag, admission generation) and `_jazz_host_account_links` (one
+row per pending or accepted link approval, keyed by its nonce). The columns
+and encodings are in `dev/proofs/server-host-tables.md`. There is no command
+journal and no replay: opening the registry reads nothing.
 
-The `jazz.account-journal.v1` profile versions the root-local journal
-key and closed descriptor contract, not a new value codec. It uses canonical Groove
-records exclusively. Its one field, `command`, is an Enum named
-`jazz.account-command.v1` with fixed registry identity 1 in this isolated root.
-Declaration-order cases and ordered payload fields are:
-
-- Register: principal Record, account Uuid.
-- RequestLink: approver Record, candidate Record, nonce Uuid, now U64, expires_at U64.
-- AcceptLink: candidate Record, nonce Uuid, now U64.
-- Revoke: approver Record, target Record.
-- FoundLocalFirst: principal Record, app Uuid.
-
-Every principal Record has issuer String then subject String, preserving exact
-UTF-8, with each nonempty component limited to 16 KiB. Groove supplies enum
-framing, record offsets, strings, UUIDs, and integers; no account-specific byte
-tags or serializer defaults define their encoding. The command and descriptor
-bytes are pinned in `layers/types/src/account_registry/command-v1.corpus` (five command lines,
-then the canonical descriptor). Roots must match the journal profile exactly;
-unknown profiles are rejected before replay. As in ordinary Groove records,
-a terminal String consumes its record remainder:
-appending valid UTF-8 can change that principal component rather than represent
-trailing garbage. Invalid UTF-8, invalid offsets, unknown enum cases, and
-invalid principal components are rejected. No private length framing is added.
-
-Conditional append remains atomic through the backend primitive, followed by a
-durability barrier before publishing state. Recovery also flushes before serving.
-A competing append or ambiguous read/write/flush error poisons the owner until
-recovery; login checks absence of the next revision before admitting cached state.
-Assignments, nonce consumption, and revocation retain the existing state-machine
-semantics. For example, a loser at revision zero cannot overwrite registration;
-a stale reader after revocation fails unavailable instead of admitting its old
-assignment. Reopening replays only the ordered committed commands.
+The decisions are `account_registry::apply` over an `AccountState`. A server
+runs each command's reads, decision and writes in one savepoint on the store's
+only writer connection, durable (`synchronous = FULL`) before the result is
+acknowledged; a refused command writes nothing. A login reads committed state
+by primary key and caches nothing, so a stale owner cannot admit from old
+state: after a revocation commits, every later lookup refuses. A write whose
+durable flush reports a failure has an unknown outcome until the next read;
+the owner announces it so live sockets re-check. Assignments, nonce
+consumption and revocation keep the state-machine semantics above: an
+assignment is permanent, revocation is never undone, and a link request
+deletes approvals that expired unaccepted (accepting one afterwards finds no
+intent).
 
 ## Shared client session lifecycle
 
-The high-level TypeScript `createJazzSession` composes the account manager and
+The high-level TypeScript `createJazzClient` composes the account manager and
 one immutable-handle-bound client. Host adapters prepare credentials/storage and
 open clients; framework adapters observe the shared snapshot and acknowledge
 consumer detachment. Rust remains the registry/authorization authority. The
-session API introduces no storage or wire format.
+session API introduces no wire format; its one stored record is the account
+selection below.
+
+The client-side account selection store (`jazz-account-selection-v1`, local
+helper preferences rather than a database codec) keeps every local-first root
+and at most one selection: a root index (`selected`) or, for a user the app's
+backend signed in, `backendUser` (`jazz-backend-user-v1`: account UUID,
+identity and the claims `authenticate` returned at sign-in, never a credential
+or bearer). A reload reopens that selection before any network request, so a
+device with a remembered account never founds a fresh guest and opens offline;
+the backend still states the identity on every connection. The following
+session's first answer confirms it: another user switches, a confirmed
+signed-out answer signs out (and clears the record), and different claims sign
+the same user in again. Readers without `backendUser` ignore it and drop it on
+their next write; stores without one keep their exact earlier bytes.
+
+Following the backend never publishes a contradicting transient: a switch from
+one backend user to another is one transition (`transitioning` from the first
+user to `ready` as the next, the first torn down as on logout, `clearOnSignOut`
+included; a failed sign-in ends signed out, never back on the first). A
+sign-out confirmation signs out only the account its check started with. A
+404 from the backend-user route is retried with backoff and stops the watch
+only after three in a row over three backoff intervals; a stopped watch
+rejects every later `reauthenticate`.
 
 A transition publishes no usable client, waits for registered framework consumers
 to detach, and gracefully shuts down the old client with `waitForSync: true`.

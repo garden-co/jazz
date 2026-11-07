@@ -4,7 +4,7 @@ import { createAccountDbWithRuntimeSource } from "../accounts/context.js";
 import { createAccountManager } from "../accounts/create-account-manager.js";
 import { DefaultRuntimeSource } from "./default-runtime-source.js";
 import type { RuntimeClientContext } from "./runtime-source.js";
-import type { JazzClient, TransactionalRuntime } from "./client.js";
+import type { JazzClient } from "./client.js";
 import type { Db } from "./db.js";
 import { beginDbTransactionAfter } from "./db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
@@ -19,9 +19,12 @@ class PreparationSource extends DefaultRuntimeSource {
   }
 }
 
-const app = s.defineApp({
-  documents: s.table({ payload: s.bytes(), label: s.string().default("untitled") }, {}),
-});
+const app = s.defineApp(
+  {
+    documents: s.table({ payload: s.bytes(), label: s.string().default("untitled") }, {}),
+  },
+  { migrations: "none" },
+);
 let db: Db;
 let source: PreparationSource;
 beforeEach(async () => {
@@ -30,7 +33,7 @@ beforeEach(async () => {
     await localAccountConfig(`transaction-preparation-${crypto.randomUUID()}`),
     source,
   );
-  await db.all(app.documents, { tier: "local" });
+  await db.all(app.documents, { tier: "local-first" });
 });
 afterEach(async () => {
   vi.restoreAllMocks();
@@ -40,10 +43,7 @@ afterEach(async () => {
 it.each(["ready", "rejected", "cancelled"])(
   "owns deferred snapshot admission through wait (%s)",
   async (outcome) => {
-    const opening = vi.spyOn(
-      source.client.getRuntime() as TransactionalRuntime,
-      "beginTransaction",
-    );
+    const opening = vi.spyOn(source.client.getRuntime(), "beginTransaction");
     let release!: () => void;
     let entered!: () => void;
     const started = new Promise<void>((resolve) => {
@@ -59,13 +59,13 @@ it.each(["ready", "rejected", "cancelled"])(
     });
     const inserted = tx.insert(app.documents, { payload: new Uint8Array([6]) });
     expect(inserted).not.toBeInstanceOf(Promise);
-    const reading = tx.all(app.documents, { tier: "local" });
+    const reading = tx.all(app.documents, { tier: "local-first" });
     reading.catch(() => {});
     const earlyWait = outcome === "cancelled" ? undefined : tx.commit().wait();
     earlyWait?.catch(() => {});
     await started;
     expect(opening).not.toHaveBeenCalled();
-    expect(await db.all(app.documents, { tier: "local" })).toEqual([]);
+    expect(await db.all(app.documents, { tier: "local-first" })).toEqual([]);
     if (outcome === "cancelled") await tx.rollback();
     const wait = earlyWait ?? tx.commit().wait();
     wait.catch(() => {});
@@ -73,7 +73,7 @@ it.each(["ready", "rejected", "cancelled"])(
     if (outcome === "ready") {
       await wait;
       expect(await reading).toEqual([inserted]);
-      expect(await db.all(app.documents, { tier: "local" })).toEqual([inserted]);
+      expect(await db.all(app.documents, { tier: "local-first" })).toEqual([inserted]);
       expect(opening).toHaveBeenCalledTimes(1);
     } else {
       const message =
@@ -81,14 +81,14 @@ it.each(["ready", "rejected", "cancelled"])(
       await expect(wait).rejects.toThrow(message);
       await expect(reading).rejects.toThrow(message);
       if (outcome === "rejected") await tx.rollback();
-      expect(await db.all(app.documents, { tier: "local" })).toEqual([]);
+      expect(await db.all(app.documents, { tier: "local-first" })).toEqual([]);
       expect(opening).not.toHaveBeenCalled();
     }
   },
 );
 
 it("does not enter the runtime after shutdown during admission", async () => {
-  const opening = vi.spyOn(source.client.getRuntime() as TransactionalRuntime, "beginTransaction");
+  const opening = vi.spyOn(source.client.getRuntime(), "beginTransaction");
   let release!: () => void;
   let entered!: () => void;
   const started = new Promise<void>((resolve) => {
@@ -112,7 +112,7 @@ it("does not enter the runtime after shutdown during admission", async () => {
 });
 
 it("does not enter a discarded runtime after suspended admission", async () => {
-  const opening = vi.spyOn(source.client.getRuntime() as TransactionalRuntime, "beginTransaction");
+  const opening = vi.spyOn(source.client.getRuntime(), "beginTransaction");
   let release!: () => void;
   let entered!: () => void;
   const started = new Promise<void>((resolve) => {
@@ -126,7 +126,7 @@ it("does not enter a discarded runtime after suspended admission", async () => {
     await ready;
   });
   tx.insert(app.documents, { payload: new Uint8Array([5]) });
-  const reading = tx.all(app.documents, { tier: "local" });
+  const reading = tx.all(app.documents, { tier: "local-first" });
   reading.catch(() => {});
   const wait = tx.commit().wait();
   wait.catch(() => {});
@@ -161,11 +161,8 @@ it.each(["selection", "logout"])(
       { appId, account: first, driver: { type: "memory" } },
       source,
     );
-    await db.all(app.documents, { tier: "local" });
-    const opening = vi.spyOn(
-      source.client.getRuntime() as TransactionalRuntime,
-      "beginTransaction",
-    );
+    await db.all(app.documents, { tier: "local-first" });
+    const opening = vi.spyOn(source.client.getRuntime(), "beginTransaction");
     let release!: () => void;
     let entered!: () => void;
     const started = new Promise<void>((resolve) => {
@@ -205,9 +202,9 @@ it.each(["selection", "logout"])(
         await wait;
         expect(opening).toHaveBeenCalledTimes(1);
         expect(JSON.parse(opening.mock.calls[0]![2]!).account_id).toBe(first.id);
-        expect(await db.all(app.documents, { tier: "local" })).toEqual([oldRow]);
+        expect(await db.all(app.documents, { tier: "local-first" })).toEqual([oldRow]);
       }
-      expect(await replacement.all(app.documents, { tier: "local" })).toEqual([newRow]);
+      expect(await replacement.all(app.documents, { tier: "local-first" })).toEqual([newRow]);
     } finally {
       release();
       await replacement.shutdown();
@@ -226,19 +223,19 @@ it("does not delay an ordinary transaction beside suspended admission", async ()
   const pending = deferred.commit().wait();
   pending.catch(() => {});
   try {
-    const ordinary = db.beginExclusiveTransaction();
+    const ordinary = db.beginSerializableTransaction();
     const row = ordinary.insert(app.documents, { payload: new Uint8Array([2]) });
     await ordinary.commit().wait();
-    expect(await db.all(app.documents, { tier: "local" })).toEqual([row]);
+    expect(await db.all(app.documents, { tier: "local-first" })).toEqual([row]);
   } finally {
     release();
   }
   await pending;
-  expect(await db.all(app.documents, { tier: "local" })).toHaveLength(2);
+  expect(await db.all(app.documents, { tier: "local-first" })).toHaveLength(2);
 });
 
 it("returns an inserted row immediately without overtaking earlier preparation", async () => {
-  const tx = db.beginExclusiveTransaction();
+  const tx = db.beginSerializableTransaction();
   const id = tx.openTransactionId();
   let documentId: string;
   source.client.prepareTransaction(id, async () => {
@@ -248,7 +245,7 @@ it("returns an inserted row immediately without overtaking earlier preparation",
       .query(
         translateQuery(query._build(), query._schema),
         undefined,
-        "local",
+        "local-first",
         JSON.stringify({ transaction_id: id }),
       );
     expect(earlier).toEqual([]);
@@ -257,7 +254,7 @@ it("returns an inserted row immediately without overtaking earlier preparation",
   documentId = inserted.id;
   expect(inserted).not.toBeInstanceOf(Promise);
   expect(inserted.payload).toEqual(new Uint8Array([3]));
-  const reading = tx.all(app.documents, { tier: "local" });
+  const reading = tx.all(app.documents, { tier: "local-first" });
   // Keep a failed preparation visible through both read and commit handles.
   const result = await Promise.allSettled([reading, tx.commit().wait()]);
   expect(result).toEqual([
@@ -268,16 +265,16 @@ it("returns an inserted row immediately without overtaking earlier preparation",
 
 it.each(
   ["update", "upsert", "delete"].flatMap((operation) =>
-    ["mergeable", "exclusive"].map((kind) => ({ operation, kind })),
+    ["mergeable", "serializable"].map((kind) => ({ operation, kind })),
   ),
 )(
   "preserves an ordinary $operation after deferred preparation in a $kind transaction",
   async ({ operation, kind }) => {
     const inserted = db.insert(app.documents, { payload: new Uint8Array([0]) });
     await inserted.wait({ tier: "local" });
-    const tx = kind === "exclusive" ? db.beginExclusiveTransaction() : db.beginTransaction();
+    const tx = kind === "serializable" ? db.beginSerializableTransaction() : db.beginTransaction();
     // Bind to the table before registering work at the logical-operation seam.
-    await tx.all(app.documents, { tier: "local" });
+    await tx.all(app.documents, { tier: "local-first" });
     const id = tx.openTransactionId();
     let release!: () => void;
     const ready = new Promise<void>((resolve) => {
@@ -299,13 +296,13 @@ it.each(
     else if (operation === "upsert") tx.upsert(app.documents, inserted.value.id, { payload });
     else tx.update(app.documents, inserted.value.id, { payload });
     payload[0] = 9;
-    const reading = tx.all(app.documents, { tier: "local" });
+    const reading = tx.all(app.documents, { tier: "local-first" });
     const committed = tx.commit();
     release();
     await committed.wait({ tier: "local" });
     const expected = operation === "delete" ? [] : [{ payload: new Uint8Array([2]) }];
     await expect(reading).resolves.toMatchObject(expected);
-    await expect(db.all(app.documents, { tier: "local" })).resolves.toMatchObject(expected);
+    await expect(db.all(app.documents, { tier: "local-first" })).resolves.toMatchObject(expected);
   },
 );
 
@@ -314,7 +311,7 @@ it("queues restoration with defaults and isolates returned and input bytes", asy
     .insert(app.documents, { payload: new Uint8Array([0]) })
     .wait({ tier: "local" });
   await db.delete(app.documents, original.id).wait({ tier: "local" });
-  const tx = db.beginExclusiveTransaction();
+  const tx = db.beginSerializableTransaction();
   source.client.prepareTransaction(tx.openTransactionId(), async () => {});
   const payload = new Uint8Array([5]);
   const restored = tx.restore(app.documents, original.id, { payload });
@@ -323,7 +320,7 @@ it("queues restoration with defaults and isolates returned and input bytes", asy
   restored.payload[0] = 7;
   await tx.commit().wait();
   await expect(
-    db.one(app.documents.where({ id: original.id }), { tier: "local" }),
+    db.one(app.documents.where({ id: original.id }), { tier: "local-first" }),
   ).resolves.toMatchObject({
     payload: new Uint8Array([5]),
     label: "untitled",

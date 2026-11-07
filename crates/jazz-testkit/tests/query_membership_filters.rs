@@ -29,6 +29,37 @@ fn membership_schema() -> Schema {
         .build()
 }
 
+/// Alice can query nullable UUID values without an optional UUID lookup failing.
+#[tokio::test(flavor = "current_thread")]
+async fn id_membership_with_nullable_uuid_keeps_matching_rows() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let client = JazzClient::test_client(membership_schema()).await;
+            let (alice, _, _) = client
+                .insert("users", row_input!("name" => "alice"))
+                .unwrap();
+            client.insert("users", row_input!("name" => "bob")).unwrap();
+            let query = jazz::query::Query::from("users")
+                .filter(in_list(
+                    col("id"),
+                    [
+                        lit(*alice.uuid()),
+                        lit(jazz::records::Value::Nullable(Some(Box::new(
+                            jazz::records::Value::Uuid(*alice.uuid()),
+                        )))),
+                    ],
+                ))
+                .select(["name"]);
+            let rows = client
+                .query(query, jazz::tools::ReadTier::LocalFirst)
+                .await
+                .map(jazz::tools::test_support::ordinary_rows)
+                .unwrap();
+            assert_eq!(rows, vec![(alice, vec![Value::Text("alice".into())])]);
+        })
+        .await;
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn in_filters_match_integer_float_boolean_and_reference_columns() {
     tokio::task::LocalSet::new()

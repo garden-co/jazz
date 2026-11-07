@@ -14,10 +14,8 @@ mod relay_topology {
     use std::collections::BTreeMap;
 
     use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, SubscriptionEvent, block_on};
-    use jazz::groove::records::Value;
-    use jazz::groove::storage::MemoryStorage;
     use jazz::ids::{AuthorSubject, NodeUuid};
-    use jazz::node::CommitUnitTrust;
+    use jazz::records::Value;
     use jazz::schema::JazzSchema;
     use jazz::tools::{ColumnType, SchemaBuilder, TableSchema};
     use jazz::tx::DurabilityTier;
@@ -34,14 +32,8 @@ mod relay_topology {
 
     fn open_db(node: u8, author: AuthorSubject) -> Db {
         let schema = schema();
-        let column_families = schema.column_families();
-        let refs = column_families
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
         block_on(Db::open(DbConfig::new(
             schema,
-            MemoryStorage::new(&refs).expect("valid memory storage families"),
             DbIdentity {
                 node: NodeUuid::from_bytes([node; 16]),
                 author,
@@ -52,14 +44,8 @@ mod relay_topology {
 
     fn open_authority(node: u8) -> Db {
         let schema = schema();
-        let column_families = schema.column_families();
-        let refs = column_families
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
         block_on(Db::open_history_complete(DbConfig::new(
             schema,
-            MemoryStorage::new(&refs).expect("valid memory storage families"),
             DbIdentity {
                 node: NodeUuid::from_bytes([node; 16]),
                 author: AuthorSubject::SYSTEM,
@@ -111,7 +97,9 @@ mod relay_topology {
         let seeder = open_db(0x41, bob);
         let (seeder_transport, authority_seed_transport) = duplex();
         let _seeder_connection = block_on(seeder.connect_upstream(seeder_transport));
-        let _authority_seed_subscriber = authority.accept_subscriber(authority_seed_transport, bob);
+        let _authority_seed_subscriber = authority
+            .accept_subscriber(authority_seed_transport, bob)
+            .unwrap();
         let seeded = block_on(seeder.insert(
             "documents",
             document_cells("settled at the authority"),
@@ -124,19 +112,18 @@ mod relay_topology {
 
         let (client_transport, relay_subscriber_transport) = duplex();
         let _client_connection = block_on(client.connect_upstream(client_transport));
-        let _relay_subscriber = relay.accept_subscriber(relay_subscriber_transport, alice);
+        let _relay_subscriber = relay
+            .accept_subscriber(relay_subscriber_transport, alice)
+            .unwrap();
         let (relay_upstream_transport, authority_transport) = duplex();
         let _relay_upstream = block_on(relay.connect_upstream(relay_upstream_transport));
         // The relay-to-authority hop is a trusted backend link. It delegates
         // Alice's immutable session binding inside its propagated
         // subscription; Core must not model the physical transport as Alice's
         // direct session link.
-        let _authority_subscriber = authority.accept_subscriber_with_claims_and_trust(
-            authority_transport,
-            AuthorSubject::SYSTEM,
-            BTreeMap::new(),
-            CommitUnitTrust::TrustedBackend,
-        );
+        let _authority_subscriber = authority
+            .accept_subscriber(authority_transport, AuthorSubject::SYSTEM)
+            .unwrap();
 
         let documents = client
             .prepare_query(&client.table("documents"))
@@ -144,7 +131,7 @@ mod relay_topology {
         let mut subscription = block_on(client.subscribe(
             &documents,
             ReadOpts {
-                tier: DurabilityTier::Global,
+                tier: jazz::db::ReadTier::Remote,
                 ..ReadOpts::default()
             },
         ))
@@ -217,7 +204,9 @@ mod relay_topology {
 
         let (client_transport, relay_subscriber_transport) = duplex();
         let _client_connection = block_on(client.connect_upstream(client_transport));
-        let _relay_subscriber = relay.accept_subscriber(relay_subscriber_transport, alice);
+        let _relay_subscriber = relay
+            .accept_subscriber(relay_subscriber_transport, alice)
+            .unwrap();
 
         // Install the relay's upstream transport but leave the far end
         // unattached so the handshake never completes during the hold phase.
@@ -230,7 +219,7 @@ mod relay_topology {
         let mut subscription = block_on(client.subscribe(
             &documents,
             ReadOpts {
-                tier: DurabilityTier::Global,
+                tier: jazz::db::ReadTier::Remote,
                 ..ReadOpts::default()
             },
         ))
@@ -252,12 +241,9 @@ mod relay_topology {
         // session. Keeping the same admission model in the delayed-handshake
         // case proves that non-settlement is caused by the missing upstream
         // frontier, rather than rejected delegated policy context.
-        let _authority_subscriber = authority.accept_subscriber_with_claims_and_trust(
-            held_authority_transport,
-            AuthorSubject::SYSTEM,
-            BTreeMap::new(),
-            CommitUnitTrust::TrustedBackend,
-        );
+        let _authority_subscriber = authority
+            .accept_subscriber(held_authority_transport, AuthorSubject::SYSTEM)
+            .unwrap();
         let mut events = premature;
         for _ in 0..4 {
             tick(&authority, "process the queued handshake");
@@ -305,7 +291,7 @@ mod relay_topology {
         client.set_non_durable_client();
         let (client_transport, relay_transport) = duplex();
         let _client_connection = block_on(client.connect_upstream(client_transport));
-        let _relay_subscriber = relay.accept_subscriber(relay_transport, alice);
+        let _relay_subscriber = relay.accept_subscriber(relay_transport, alice).unwrap();
 
         let documents = client
             .prepare_query(&client.table("documents"))
@@ -357,7 +343,7 @@ mod relay_topology {
         let mut subscription = block_on(node.subscribe(
             &documents,
             ReadOpts {
-                tier: DurabilityTier::Global,
+                tier: jazz::db::ReadTier::Remote,
                 ..ReadOpts::default()
             },
         ))
@@ -372,9 +358,9 @@ mod relay_topology {
         let rows = node.read(&documents).expect("one-shot local read");
         assert_eq!(rows.len(), 1, "the local read must resolve immediately");
         assert_eq!(rows[0].row_uuid(), written.row_uuid());
-        let one = node.one(&documents).expect("one-shot local single read");
+        let one = node.read(&documents).expect("one-shot local single read");
         assert_eq!(
-            one.map(|row| row.row_uuid()),
+            one.first().map(|row| row.row_uuid()),
             Some(written.row_uuid()),
             "single-row local reads must also resolve immediately"
         );
@@ -400,7 +386,7 @@ mod relay_topology {
         let mut subscription = block_on(node.subscribe(
             &documents,
             ReadOpts {
-                tier: DurabilityTier::Global,
+                tier: jazz::db::ReadTier::Remote,
                 ..ReadOpts::default()
             },
         ))
@@ -416,7 +402,9 @@ mod relay_topology {
              pending: {premature:?}"
         );
 
-        let _authority_subscriber = authority.accept_subscriber(held_authority_transport, alice);
+        let _authority_subscriber = authority
+            .accept_subscriber(held_authority_transport, alice)
+            .unwrap();
         let mut events = Vec::new();
         for _ in 0..4 {
             tick(&authority, "process the queued handshake");
@@ -485,7 +473,9 @@ mod relay_topology {
 
         let (client_transport, authority_transport) = duplex();
         let _client_connection = block_on(client.connect_upstream(client_transport));
-        let _authority_subscriber = authority.accept_subscriber(authority_transport, alice);
+        let _authority_subscriber = authority
+            .accept_subscriber(authority_transport, alice)
+            .unwrap();
 
         let documents = client
             .prepare_query(&client.table("documents"))
@@ -493,7 +483,7 @@ mod relay_topology {
         let mut subscription = block_on(client.subscribe(
             &documents,
             ReadOpts {
-                tier: DurabilityTier::Global,
+                tier: jazz::db::ReadTier::Remote,
                 ..ReadOpts::default()
             },
         ))
@@ -565,7 +555,7 @@ mod relay_topology {
         let mut subscription = block_on(node.subscribe(
             &documents,
             ReadOpts {
-                tier: DurabilityTier::Global,
+                tier: jazz::db::ReadTier::Remote,
                 ..ReadOpts::default()
             },
         ))
@@ -593,7 +583,9 @@ mod relay_topology {
         let authority = open_authority(0x38);
         let (replacement_transport, authority_transport) = duplex();
         let _replacement = block_on(node.connect_upstream(replacement_transport));
-        let _subscriber = authority.accept_subscriber(authority_transport, alice);
+        let _subscriber = authority
+            .accept_subscriber(authority_transport, alice)
+            .unwrap();
         for _ in 0..3 {
             tick(
                 &node,
@@ -872,7 +864,7 @@ mod client_transport {
                     .with_app_id(app_id)
                     .with_schema(schema.clone())
                     .with_data_dir(data_dir.path())
-                    .with_storage_factory(jazz_testkit::persistent_storage_factory())
+                    .with_persistent_storage()
                     .start()
                     .await
                     .expect("start test server");
@@ -933,7 +925,7 @@ mod client_transport {
                     .with_app_id(app_id)
                     .with_schema(schema.clone())
                     .with_data_dir(data_dir.path())
-                    .with_storage_factory(jazz_testkit::persistent_storage_factory())
+                    .with_persistent_storage()
                     .start()
                     .await
                     .expect("start test server");
@@ -990,12 +982,27 @@ mod client_transport {
                     .start()
                     .await
                     .expect("start test server");
-                let alice = TestingClient::builder()
-                    .with_server(&server)
-                    .with_schema(schema)
-                    .with_user_id("alice-auth-failure")
-                    .ready_on("documents", Duration::from_secs(30))
-                    .connect()
+                // A local-first guest, relayed by the app's backend: its own
+                // proof expires an hour after the server's test clock reads now.
+                let seed = [0xa7; 32];
+                let subject = jazz::tools::identity::derive_user_id(&seed).to_string();
+                let mut context = server.make_client_context_for_user(schema, &subject);
+                context.jwt_token = Some(
+                    jazz::tools::identity::mint_jazz_self_signed_token_at(
+                        &seed,
+                        jazz::tools::identity::LOCAL_FIRST_ISSUER,
+                        &server.app_id().to_string(),
+                        3600,
+                        auth_clock.now_seconds(),
+                    )
+                    .expect("mint guest proof"),
+                );
+                context.account_id = Some(jazz::account_registry::local_first_account_id(
+                    *server.app_id().uuid(),
+                    &subject,
+                ));
+                let alice = jazz_testkit::connect(context).await.expect("connect alice");
+                support::wait_for_remote_query_ready(&alice, "documents", Duration::from_secs(30))
                     .await;
 
                 let (document_id, _, transaction_id) = alice
@@ -1014,8 +1021,6 @@ mod client_transport {
                 drop(online);
 
                 disconnect_client(&alice);
-                // The context token is minted with a one-hour expiry against
-                // the server's test auth clock.
                 auth_clock.advance(Duration::from_secs(4000));
 
                 let rejected = reconnect_client(&alice).await;

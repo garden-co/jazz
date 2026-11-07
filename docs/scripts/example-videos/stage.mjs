@@ -304,7 +304,7 @@ export class Stage {
    * A device: its own browser context (own storage and identity) behind its
    * own network, in dark mode unless `colorScheme` says otherwise. Returns
    * the page. `name` is shown in a laptop's menu bar; `kind: "phone"` draws a
-   * phone with a status bar and no browser toolbar.
+   * phone with a status bar and no browser toolbar, on a touch context.
    */
   async device(
     id,
@@ -316,7 +316,10 @@ export class Stage {
       viewport,
       colorScheme = "dark",
       keepPorts = [],
-      contextOptions = {},
+      // A phone is a touch device at 1x, so frames match its drawn size.
+      contextOptions = kind === "phone"
+        ? { isMobile: true, hasTouch: true, deviceScaleFactor: 1 }
+        : {},
     } = {},
   ) {
     const network = await startDeviceNetwork({ keepPorts });

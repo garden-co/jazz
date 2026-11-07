@@ -1,19 +1,28 @@
 //! Native HTTP/WebSocket server adapter for Jazz's semantic runtime.
 
-pub mod loopback;
+mod kv;
 pub mod middleware;
 pub mod profiling;
+pub mod resources;
+pub mod runtime;
+pub mod s3;
 pub mod server;
+pub mod storage_cache;
 mod tcp;
+pub mod vercel_blob;
 
 pub use middleware::AuthConfig;
 pub use server::{
-    BuiltServer, ServerBuilder, ServerState, ShutdownController, ShutdownPhase, StorageBackend,
+    BlobStore, BuiltServer, ServerBuilder, ServerState, ShutdownController, ShutdownPhase,
+    StorageBackend,
 };
 #[cfg(feature = "embedded-server")]
 pub use server::{
-    JazzServer, JazzServerBuilder, ServerDataDir, TEST_JWT_AUDIENCE, TEST_JWT_ISSUER,
-    TestJwtIssuer, TestJwtOptions, push_catalogue_in_memory,
+    EmbeddedOutgoing, EmbeddedServer, EmbeddedSocketPeer, EmbeddedSocketSender, OpenSocketRefused,
+};
+#[cfg(feature = "embedded-server")]
+pub use server::{
+    JazzServer, JazzServerBuilder, ServerDataDir, TEST_JWT_ISSUER, push_catalogue_in_memory,
 };
 
 use std::net::SocketAddr;
@@ -27,6 +36,135 @@ use tracing::info;
 
 const STANDALONE_INSPECTOR_URL: &str = "https://jazz2-inspector.vercel.app/";
 
+/// Why [`lock_data_dir`] could not lock a data dir.
+#[derive(Debug)]
+pub enum DataDirLockError {
+    /// Another open core holds it; the text names the holder, if it said.
+    Held(String),
+    Io(String),
+}
+
+impl std::fmt::Display for DataDirLockError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Held(holder) if holder.is_empty() => write!(f, "already open"),
+            Self::Held(holder) => write!(f, "already open ({holder})"),
+            Self::Io(error) => f.write_str(error),
+        }
+    }
+}
+
+impl std::error::Error for DataDirLockError {}
+
+/// Lock `<dir>/jazz.lock` for as long as the returned file is open, so two
+/// cores (a restart racing the old process, two replicas on one volume, two
+/// cores in one process) never open one data dir. The lock is the OS's on
+/// the open file, so it goes away with the process however it exits.
+pub fn lock_data_dir(dir: &std::path::Path) -> Result<std::fs::File, DataDirLockError> {
+    use std::io::Write;
+    std::fs::create_dir_all(dir)
+        .map_err(|e| DataDirLockError::Io(format!("{}: {e}", dir.display())))?;
+    let path = dir.join("jazz.lock");
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .map_err(|e| DataDirLockError::Io(format!("{}: {e}", path.display())))?;
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => {
+            let holder = std::fs::read_to_string(&path).unwrap_or_default();
+            return Err(DataDirLockError::Held(holder.trim().to_owned()));
+        }
+        Err(std::fs::TryLockError::Error(e)) => {
+            return Err(DataDirLockError::Io(format!(
+                "could not lock {}: {e}",
+                path.display()
+            )));
+        }
+    }
+    // Who holds it, for the message above; the lock itself is what counts.
+    let _ = file.set_len(0);
+    let _ = write!(file, "process {}", std::process::id());
+    Ok(file)
+}
+
+/// Where a served core keeps large values' bytes, as its launcher names it:
+/// `kind` is `files`, `s3`, `vercel-blob` or `sqlite`; each other field
+/// belongs to one kind and otherwise defaults from the environment.
+#[derive(Debug, Default)]
+pub struct BlobOptions {
+    pub kind: String,
+    pub dir: Option<String>,
+    pub s3_bucket: Option<String>,
+    pub s3_region: Option<String>,
+    pub s3_endpoint: Option<String>,
+    pub s3_prefix: Option<String>,
+    /// Assume AWS_ROLE_ARN with the trusted workload's own OIDC token.
+    pub s3_role_from_workload: bool,
+    pub vercel_blob_store_id: Option<String>,
+    pub vercel_blob_prefix: Option<String>,
+    /// Authenticate to Vercel Blob with the trusted workload's OIDC token.
+    pub vercel_blob_token_from_workload: bool,
+    /// The environment an S3 bucket or Blob store is claimed for: one
+    /// environment's credential reaches the whole store, so two never share one.
+    pub environment: Option<String>,
+}
+
+impl BlobOptions {
+    /// The store these options name.
+    pub fn resolve(self) -> Result<BlobStore, String> {
+        match self.kind.as_str() {
+            "sqlite" => Ok(BlobStore::Sqlite),
+            "files" => Ok(BlobStore::Files {
+                dir: self.dir.map(Into::into),
+            }),
+            "s3" => {
+                let mut options = s3::S3Options::from_env(
+                    self.s3_bucket,
+                    self.s3_region,
+                    self.s3_endpoint,
+                    self.s3_prefix,
+                )?;
+                if self.s3_role_from_workload {
+                    let s3::S3Credentials::WebIdentity { token, .. } = &mut options.credentials
+                    else {
+                        return Err("s3 role from workload needs AWS_ROLE_ARN".to_owned());
+                    };
+                    *token = s3::WebIdentityToken::Workload;
+                }
+                options.environment = self.environment;
+                Ok(BlobStore::S3(options))
+            }
+            "vercel-blob" => vercel_blob::VercelBlobOptions::from_env(
+                self.vercel_blob_store_id,
+                self.vercel_blob_prefix,
+                self.vercel_blob_token_from_workload.then_some(
+                    vercel_blob::VercelBlobCredentials::Oidc(s3::WebIdentityToken::Workload),
+                ),
+            )
+            .map(|mut options| {
+                options.environment = self.environment;
+                BlobStore::VercelBlob(options)
+            }),
+            other => Err(format!(
+                "blobs must be files, s3, vercel-blob or sqlite, not {other:?}"
+            )),
+        }
+    }
+}
+
+/// What starts a served core's controlled shutdown.
+pub enum ShutdownSignal {
+    /// The process's SIGTERM or SIGINT: for an executable that owns them.
+    Process,
+    /// The receiver turning `true`: for a host, such as Node, that owns the
+    /// process's signals and asks the core to stop.
+    External(tokio::sync::watch::Receiver<bool>),
+}
+
 /// Run the native Jazz server process shell.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
@@ -34,10 +172,43 @@ pub async fn run(
     port: u16,
     data_dir: &str,
     in_memory: bool,
+    blobs: BlobStore,
     auth_config: AuthConfig,
     bound_port_file: Option<String>,
     shutdown_timeout: Duration,
     diagnostics: DiagnosticsConfig,
+    limits: resources::ServerResourceLimits,
+) -> Result<(), Box<dyn std::error::Error>> {
+    run_until(
+        app_id_str,
+        port,
+        data_dir,
+        in_memory,
+        blobs,
+        auth_config,
+        bound_port_file,
+        shutdown_timeout,
+        diagnostics,
+        limits,
+        ShutdownSignal::Process,
+    )
+    .await
+}
+
+/// [`run`], stopping on `signal`.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_until(
+    app_id_str: &str,
+    port: u16,
+    data_dir: &str,
+    in_memory: bool,
+    blobs: BlobStore,
+    auth_config: AuthConfig,
+    bound_port_file: Option<String>,
+    shutdown_timeout: Duration,
+    diagnostics: DiagnosticsConfig,
+    limits: resources::ServerResourceLimits,
+    signal: ShutdownSignal,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let app_id = AppId::from_string(app_id_str)?;
     diagnostics.validate()?;
@@ -48,10 +219,64 @@ pub async fn run(
         info!("Storage mode: in-memory");
     } else {
         info!("Data directory: {}", data_dir);
+        match &blobs {
+            BlobStore::Sqlite => info!("Large values: in jazz.sqlite"),
+            BlobStore::Files { dir } => info!(
+                "Large values: files in {}",
+                dir.as_ref()
+                    .map(|dir| dir.display().to_string())
+                    .unwrap_or_else(|| format!("{data_dir}/blobs"))
+            ),
+            BlobStore::S3(options) => info!("Large values: {}", options.describe()),
+            BlobStore::VercelBlob(options) => info!("Large values: {}", options.describe()),
+        }
     }
+    match limits.memory_limit_bytes {
+        Some(limit) => info!("Memory limit: {} MiB", limit / (1024 * 1024)),
+        None => info!("Memory limit: none detected"),
+    }
+    info!(
+        "WebSocket connection cap: {}",
+        limits.max_websocket_connections
+    );
+    if !limits.stored_arrangements {
+        tracing::warn!("--no-stored-arrangements has no effect: SQLite reads stored tables by key");
+    }
+    let ceiling = limits.query_cache_ceiling_bytes();
+    storage_cache::set_budget(ceiling);
+    if let Some(ceiling) = ceiling {
+        info!(
+            "Storage cache budget: {} MiB{}",
+            ceiling / (1024 * 1024),
+            if limits.memory_limit_bytes.is_some() {
+                ", lowered under memory pressure"
+            } else {
+                ""
+            }
+        );
+    }
+    // Serves until this function returns, and leaves the process unbounded
+    // again for a server started after it.
+    let _cache_budget = CacheBudgetGuard(
+        limits
+            .cache_budget_governor()
+            .map(|governor| AbortOnDrop(tokio::spawn(govern_cache_budget(governor)))),
+    );
+    // One process per data dir: held until this function returns, and
+    // dropped by the kernel however the process exits.
+    let _data_dir_lock = if in_memory {
+        None
+    } else {
+        Some(
+            lock_data_dir(std::path::Path::new(data_dir)).map_err(|error| {
+                format!("data dir '{data_dir}' {error}; give each server its own data dir")
+            })?,
+        )
+    };
     let mut builder = ServerBuilder::new(app_id)
         .with_auth_config(auth_config)
-        .with_shutdown_timeout(shutdown_timeout);
+        .with_shutdown_timeout(shutdown_timeout)
+        .with_max_websocket_connections(limits.max_websocket_connections);
     if let Some(dump) = diagnostics.heap_profiler {
         builder = builder.with_heap_profiler(dump);
     }
@@ -59,12 +284,10 @@ pub async fn run(
         builder.with_storage(StorageBackend::InMemory).build().await
     } else {
         builder
-            .with_storage_factory(std::sync::Arc::new(
-                jazz_storage_rocksdb::RocksDbStorageFactory,
-            ))
             .with_storage(StorageBackend::Persistent {
                 path: data_dir.into(),
             })
+            .with_blob_store(blobs)
             .build()
             .await
     }
@@ -88,7 +311,20 @@ pub async fn run(
     };
     let shutdown = built.state.shutdown.clone();
     let mut sigterm_task = install_signal_before_readiness(
-        || spawn_sigterm_shutdown_task(shutdown.clone()),
+        || match signal {
+            ShutdownSignal::Process => spawn_sigterm_shutdown_task(shutdown.clone()),
+            ShutdownSignal::External(mut stop) => {
+                let shutdown = shutdown.clone();
+                Ok(tokio::spawn(async move {
+                    // A dropped sender stops it too: whoever held it can no
+                    // longer ask, so the core must not outlive it unstoppable.
+                    let _ = stop.wait_for(|stop| *stop).await;
+                    if shutdown.request_shutdown() {
+                        info!("Asked to stop; starting controlled shutdown");
+                    }
+                }))
+            }
+        },
         || {
             bound_port_file.map_or(Ok(()), |path| {
                 // The bound-port file is a readiness record consumed by process
@@ -122,18 +358,16 @@ pub async fn run(
             })
         });
     #[cfg(feature = "otel")]
-    let _rocksdb_memory_gauge = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+    let _query_cache_gauges = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
         .is_ok()
         .then(|| {
             let meter = opentelemetry::global::meter("jazz-server");
-            jazz_otel::register_rocksdb_memory_gauge(&meter, || {
-                let usage = jazz_storage_rocksdb::process_memory_usage()?;
-                Some(vec![
-                    ("block_cache", usage.block_cache_bytes),
-                    ("block_cache_pinned", usage.block_cache_pinned_bytes),
-                    ("memtables", usage.memtable_bytes),
-                    ("table_readers", usage.table_reader_bytes),
-                ])
+            jazz_otel::register_query_cache_metrics(&meter, || jazz_otel::QueryCacheUsage {
+                budget_bytes: storage_cache::budget().map(|bytes| bytes as u64),
+                resident_bytes: storage_cache::resident_bytes() as u64,
+                // SQLite recycles pages rather than evicting buckets.
+                evicted_buckets: 0,
+                process_rss_bytes: resources::process_rss_bytes(),
             })
         });
     let shutdown_budget = shutdown_timeout
@@ -242,6 +476,61 @@ impl Drop for AbortOnDrop {
     }
 }
 
+/// Resets the process-wide storage cache budget when its server stops.
+struct CacheBudgetGuard(#[allow(dead_code)] Option<AbortOnDrop>);
+
+impl Drop for CacheBudgetGuard {
+    fn drop(&mut self) {
+        storage_cache::set_budget(None);
+    }
+}
+
+/// How often the storage cache budget follows the resident set.
+const CACHE_BUDGET_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Keep the process-wide storage cache budget in step with memory pressure.
+async fn govern_cache_budget(mut governor: resources::CacheBudgetGovernor) {
+    let ceiling = governor.ceiling_bytes();
+    let floor = governor.floor_bytes();
+    let mib = |bytes: usize| bytes / (1024 * 1024);
+    let mut interval = tokio::time::interval(CACHE_BUDGET_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        interval.tick().await;
+        let Some(rss) = resources::process_rss_bytes() else {
+            return;
+        };
+        let current = governor.budget_bytes();
+        let next = governor.step(rss, storage_cache::resident_bytes());
+        if next == current {
+            continue;
+        }
+        storage_cache::set_budget(Some(next));
+        let rss_mib = rss / (1024 * 1024);
+        if current == ceiling {
+            tracing::info!(
+                rss_mib,
+                budget_mib = mib(next),
+                "memory pressure: storage cache budget lowered, queries read more from disk"
+            );
+        } else if next == floor {
+            tracing::warn!(
+                rss_mib,
+                budget_mib = mib(next),
+                "memory pressure: storage cache budget at its floor"
+            );
+        } else if next == ceiling {
+            tracing::info!(
+                rss_mib,
+                budget_mib = mib(next),
+                "storage cache budget back at its ceiling"
+            );
+        } else {
+            tracing::debug!(rss_mib, budget_mib = mib(next), "storage cache budget");
+        }
+    }
+}
+
 async fn abort_task<T>(task: &mut JoinHandle<T>) {
     task.abort();
     let _ = tokio::time::timeout(Duration::from_millis(50), task).await;
@@ -269,7 +558,22 @@ fn percent_encode_fragment_value(input: &str) -> String {
 mod tests {
     use std::cell::RefCell;
 
-    use super::{build_inspector_link, install_signal_before_readiness};
+    use super::{BlobOptions, build_inspector_link, install_signal_before_readiness};
+
+    #[test]
+    fn refuses_a_blob_store_it_does_not_know() {
+        let error = BlobOptions {
+            kind: "ftp".to_owned(),
+            ..Default::default()
+        }
+        .resolve()
+        .err()
+        .expect("an unknown kind is refused");
+        assert_eq!(
+            error,
+            "blobs must be files, s3, vercel-blob or sqlite, not \"ftp\""
+        );
+    }
 
     #[test]
     fn signal_registration_precedes_readiness_publication() {
@@ -330,9 +634,22 @@ mod tests {
 
     #[test]
     fn semantic_runtime_facade_is_consumable_without_core_state_access() {
-        let _boundary = |runtime: &jazz::serving::ServerRuntimeHandle| {
+        let _boundary = |runtime: &crate::runtime::ServerRuntimeHandle| {
             let _activity = runtime.subscribe_activity();
             runtime.notify_activity();
         };
+    }
+}
+
+#[cfg(test)]
+mod data_dir_lock_tests {
+    #[test]
+    fn a_second_server_on_one_data_dir_is_refused_until_the_first_lets_go() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let first = super::lock_data_dir(dir.path()).expect("first");
+        let error = super::lock_data_dir(dir.path()).expect_err("second refused");
+        assert!(matches!(error, super::DataDirLockError::Held(_)), "{error}");
+        drop(first);
+        super::lock_data_dir(dir.path()).expect("free again");
     }
 }

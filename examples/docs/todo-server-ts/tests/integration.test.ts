@@ -1,25 +1,17 @@
 /**
  * Integration tests for the todo server.
  *
- * These tests start the server programmatically with Fjall-backed storage,
+ * These tests start the server programmatically with SQLite-backed storage,
  * exercise the full HTTP API, and clean up afterwards.
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { randomUUID } from "node:crypto";
-import { createAccountManager } from "jazz-tools";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { WebSocket as UndiciWebSocket } from "undici";
-import {
-  deploy,
-  startLocalJazzServer,
-  startTestJwtIssuer,
-  type TestJwtIssuerHandle,
-  type LocalJazzServerHandle,
-} from "jazz-tools/testing";
-import permissions from "../permissions.js";
+import { startTestJwtIssuer, type TestJwtIssuerHandle } from "jazz-tools/testing";
 import { app } from "../schema.js";
 import {
   createServer,
@@ -34,35 +26,17 @@ globalThis.WebSocket ??= UndiciWebSocket as unknown as typeof globalThis.WebSock
 describe("Todo Server Integration", () => {
   let server: RunningServer;
   let baseUrl: string;
-  let upstream: LocalJazzServerHandle | undefined;
   let issuer: TestJwtIssuerHandle;
 
-  // This awaits two native durable-server readiness boundaries (upstream and
-  // backend). Keep individual request tests on the suite default, while
-  // allowing this explicit lifecycle setup to contend safely with CI workers.
+  // Keep individual request tests on the suite default, while allowing this
+  // explicit lifecycle setup to contend safely with CI workers.
   beforeAll(async () => {
     issuer = await startTestJwtIssuer();
-    upstream = await startLocalJazzServer({
+
+    // Create server with temp persistent storage.
+    const todoServer = await createServer({
       jwksUrl: issuer.jwksUrl,
       jwtIssuer: "https://todo-docs.example.test",
-      jwtAudience: issuer.audience,
-    });
-
-    await deploy({
-      serverUrl: upstream.url,
-      appId: upstream.appId,
-      adminSecret: upstream.adminSecret,
-      schema: app,
-      permissions,
-    });
-
-    // Create server with temp persistent storage plus an ephemeral upstream server.
-    const todoServer = await createServer({
-      appId: upstream.appId,
-      serverUrl: upstream.url,
-      backendSecret: upstream.backendSecret,
-      jwksUrl: issuer.jwksUrl,
-      adminSecret: upstream.adminSecret,
     });
 
     // Start on random available port
@@ -73,10 +47,6 @@ describe("Todo Server Integration", () => {
   afterAll(async () => {
     if (server) {
       await stopServer(server);
-    }
-
-    if (upstream) {
-      await upstream.stop();
     }
     await issuer?.stop();
   });
@@ -180,27 +150,19 @@ describe("Todo Server Integration", () => {
       const aliceTitle = `Alice private ${Date.now()}`;
       const bobTitle = `Bob private ${Date.now()}`;
       const admit = async () => {
-        const token = issuer.jwtForUser(
+        const token = await issuer.jwtForUser(
           randomUUID(),
           {},
           { issuer: "https://todo-docs.example.test" },
         );
-        let stored: string | null = null;
-        const accounts = await createAccountManager({
-          appId: upstream!.appId,
-          serverUrl: upstream!.url,
-          env: `todo-docs-${randomUUID()}`,
-          store: {
-            async read() {
-              return stored;
-            },
-            async update(transform) {
-              stored = transform(stored);
-            },
-          },
+        // Signing in returns the account Jazz made for the identity.
+        const signIn = await fetch(`${baseUrl}/sign-in`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
         });
-        const account = await accounts.registerJWT(token);
-        return { id: account.id, token };
+        expect(signIn.status).toBe(200);
+        const { account } = (await signIn.json()) as { account: string };
+        return { id: account, token };
       };
       const alice = await admit();
       const bob = await admit();
@@ -260,31 +222,11 @@ describe("Todo Server Integration", () => {
 
   describe("Persistence / Cold Start", () => {
     it("survives a server restart", async () => {
-      // Use an isolated upstream so CRUD test data doesn't leak into the count assertion.
-      const coldStartUpstream = await startLocalJazzServer();
-      await deploy({
-        serverUrl: coldStartUpstream.url,
-        appId: coldStartUpstream.appId,
-        adminSecret: coldStartUpstream.adminSecret,
-        schema: app,
-        permissions,
-      });
-
-      // Use a shared data path so both server instances see the same Fjall file
-      const dataDir = mkdtempSync(join(tmpdir(), "jazz-cold-start-"));
-      const dbPath = join(dataDir, "jazz.db");
+      // Use a shared data path so both server instances see the same database
+      const dbPath = mkdtempSync(join(tmpdir(), "jazz-cold-start-"));
 
       // --- First boot: create some todos ---
-      const server1 = await startServer(
-        await createServer({
-          dataPath: dbPath,
-          appId: coldStartUpstream.appId,
-          serverUrl: coldStartUpstream.url,
-          backendSecret: coldStartUpstream.backendSecret,
-          adminSecret: coldStartUpstream.adminSecret,
-        }),
-        0,
-      );
+      const server1 = await startServer(await createServer({ dataPath: dbPath }), 0);
 
       const createRes1 = await fetch(`${server1.baseUrl}/todos`, {
         method: "POST",
@@ -302,28 +244,12 @@ describe("Todo Server Integration", () => {
       expect(createRes2.status).toBe(201);
       const todo2: Todo = await createRes2.json();
 
-      // Flush to disk and shut down
-      server1.flush();
       await stopServer(server1);
 
       // --- Second boot: same data path, fresh server ---
-      const server2 = await startServer(
-        await createServer({
-          dataPath: dbPath,
-          appId: coldStartUpstream.appId,
-          serverUrl: coldStartUpstream.url,
-          backendSecret: coldStartUpstream.backendSecret,
-          adminSecret: coldStartUpstream.adminSecret,
-        }),
-        0,
-      );
+      const server2 = await startServer(await createServer({ dataPath: dbPath }), 0);
 
-      // This receipt is specifically about the local Fjall store surviving a
-      // cold restart. Read it explicitly at Local: an Edge read asks the
-      // upstream for canonical membership, and its read-your-writes behavior
-      // immediately after reopening is intentionally tracked separately in
-      // https://github.com/garden-co/jazz/issues/1995.
-      const todos = await server2.db.all(app.todos, { tier: "local" });
+      const todos = await server2.db.all(app.todos);
 
       // Both todos should be present
       expect(todos.length).toBe(2);
@@ -338,30 +264,13 @@ describe("Todo Server Integration", () => {
       expect(found2!.title).toBe("Also persist");
 
       await stopServer(server2);
-      await coldStartUpstream.stop();
     });
   });
 
   describe("SSE Live Endpoint", () => {
     it("streams all todos and updates on changes", async () => {
-      // Use an isolated upstream and local server so this test starts from a clean global state.
-      const sseUpstream = await startLocalJazzServer();
-      await deploy({
-        serverUrl: sseUpstream.url,
-        appId: sseUpstream.appId,
-        adminSecret: sseUpstream.adminSecret,
-        schema: app,
-        permissions,
-      });
-      const sseServer = await startServer(
-        await createServer({
-          appId: sseUpstream.appId,
-          serverUrl: sseUpstream.url,
-          backendSecret: sseUpstream.backendSecret,
-          adminSecret: sseUpstream.adminSecret,
-        }),
-        0,
-      );
+      // Use an isolated server so this test starts from a clean state.
+      const sseServer = await startServer(await createServer(), 0);
       const sseBaseUrl = sseServer.baseUrl;
       let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
       try {
@@ -436,7 +345,6 @@ describe("Todo Server Integration", () => {
           await reader.cancel().catch(() => undefined);
         }
         await stopServer(sseServer);
-        await sseUpstream.stop();
       }
     });
   });

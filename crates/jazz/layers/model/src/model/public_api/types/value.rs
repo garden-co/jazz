@@ -73,10 +73,11 @@ impl fmt::Debug for Value {
     }
 }
 
-/// Use internally-tagged enum for JSON serialization.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", content = "value")]
-enum ValueHuman {
+/// JSON shape of [`Value`]: adjacently tagged, with BigInt as a decimal
+/// string; nested values recurse through `Value`'s own impls.
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "Value", tag = "type", content = "value")]
+enum ValueJson {
     Integer(i32),
     BigInt(
         #[serde(
@@ -92,29 +93,54 @@ enum ValueHuman {
     Uuid(ObjectId),
     TransactionId([u8; 16]),
     Bytea(Vec<u8>),
-    Array(Vec<ValueHuman>),
-    Row(RowHuman),
-    Enum(EnumHuman),
+    Array(Vec<Value>),
+    #[serde(deserialize_with = "deserialize_row")]
+    Row {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<ObjectId>,
+        values: Vec<Value>,
+    },
+    #[serde(deserialize_with = "deserialize_enum")]
+    Enum {
+        case: String,
+        values: Vec<Value>,
+    },
     Null,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+// Row and enum payloads also decode from a positional sequence.
+#[derive(Deserialize)]
 struct RowHuman {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     id: Option<ObjectId>,
-    values: Vec<ValueHuman>,
+    values: Vec<Value>,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+
+#[derive(Deserialize)]
 struct EnumHuman {
     case: String,
-    values: Vec<ValueHuman>,
+    values: Vec<Value>,
+}
+
+fn deserialize_row<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<(Option<ObjectId>, Vec<Value>), D::Error> {
+    let RowHuman { id, values } = RowHuman::deserialize(deserializer)?;
+    Ok((id, values))
+}
+
+fn deserialize_enum<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<(String, Vec<Value>), D::Error> {
+    let EnumHuman { case, values } = EnumHuman::deserialize(deserializer)?;
+    Ok((case, values))
 }
 
 /// Public `Value` is a host-facing shape, not a generic postcard payload.
 ///
 /// JSON preserves all row metadata. Production binary row boundaries instead
-/// use the descriptor/raw-record codecs in `admin_catalogue_row_format` and the
-/// native runtime, which carry an optional nested-row id explicitly.
+/// use the native runtime's descriptor/raw-record codecs, which carry an
+/// optional nested-row id explicitly.
 const NON_HUMAN_VALUE_CODEC_ERROR: &str =
     "public Value does not support non-human serde codecs; use the descriptor/raw row codec";
 
@@ -218,65 +244,13 @@ where
     deserializer.deserialize_any(BigIntValueVisitor)
 }
 
-impl From<&Value> for ValueHuman {
-    fn from(value: &Value) -> Self {
-        match value {
-            Value::Integer(v) => ValueHuman::Integer(*v),
-            Value::BigInt(v) => ValueHuman::BigInt(*v),
-            Value::Double(v) => ValueHuman::Double(*v),
-            Value::Boolean(v) => ValueHuman::Boolean(*v),
-            Value::Text(v) => ValueHuman::Text(v.clone()),
-            Value::Timestamp(v) => ValueHuman::Timestamp(*v),
-            Value::Uuid(v) => ValueHuman::Uuid(*v),
-            Value::TransactionId(v) => ValueHuman::TransactionId(*v),
-            Value::Bytea(v) => ValueHuman::Bytea(v.clone()),
-            Value::Array(v) => ValueHuman::Array(v.iter().map(ValueHuman::from).collect()),
-            Value::Row { id, values } => ValueHuman::Row(RowHuman {
-                id: *id,
-                values: values.iter().map(ValueHuman::from).collect(),
-            }),
-            Value::Enum { case, values } => ValueHuman::Enum(EnumHuman {
-                case: case.clone(),
-                values: values.iter().map(ValueHuman::from).collect(),
-            }),
-            Value::Null => ValueHuman::Null,
-        }
-    }
-}
-
-impl From<ValueHuman> for Value {
-    fn from(value: ValueHuman) -> Self {
-        match value {
-            ValueHuman::Integer(v) => Value::Integer(v),
-            ValueHuman::BigInt(v) => Value::BigInt(v),
-            ValueHuman::Double(v) => Value::Double(v),
-            ValueHuman::Boolean(v) => Value::Boolean(v),
-            ValueHuman::Text(v) => Value::Text(v),
-            ValueHuman::Timestamp(v) => Value::Timestamp(v),
-            ValueHuman::Uuid(v) => Value::Uuid(v),
-            ValueHuman::TransactionId(v) => Value::TransactionId(v),
-            ValueHuman::Bytea(v) => Value::Bytea(v),
-            ValueHuman::Array(v) => Value::Array(v.into_iter().map(Value::from).collect()),
-            ValueHuman::Row(r) => Value::Row {
-                id: r.id,
-                values: r.values.into_iter().map(Value::from).collect(),
-            },
-            ValueHuman::Enum(e) => Value::Enum {
-                case: e.case,
-                values: e.values.into_iter().map(Value::from).collect(),
-            },
-            ValueHuman::Null => Value::Null,
-        }
-    }
-}
-
 impl Serialize for Value {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
         if serializer.is_human_readable() {
-            ValueHuman::from(self).serialize(serializer)
+            ValueJson::serialize(self, serializer)
         } else {
             Err(serde::ser::Error::custom(NON_HUMAN_VALUE_CODEC_ERROR))
         }
@@ -289,7 +263,7 @@ impl<'de> Deserialize<'de> for Value {
         D: Deserializer<'de>,
     {
         if deserializer.is_human_readable() {
-            ValueHuman::deserialize(deserializer).map(Value::from)
+            ValueJson::deserialize(deserializer)
         } else {
             Err(serde::de::Error::custom(NON_HUMAN_VALUE_CODEC_ERROR))
         }

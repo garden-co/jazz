@@ -1,15 +1,10 @@
-use axum::{Json, Router, routing::get};
-use base64::Engine;
-use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
-use serde_json::{Value as JsonValue, json};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use uuid::Uuid;
 
 use crate::middleware::AuthConfig;
-use jazz::tools::AppContext;
 use jazz::tools::AppId;
 use jazz::tools::public_schema::Schema;
 
@@ -18,12 +13,9 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 const DEFAULT_APP_ID_STR: &str = "00000000-0000-0000-0000-000000000001";
-const JWT_KID: &str = "test-jwks-kid";
-const JWT_SECRET: &str = "test-jwt-secret-for-integration";
-/// The issuer configured by the embedded external-JWT test server.
+/// An issuer for the sessions tests state as the app's backend, which
+/// authenticated them (the core verifies no user tokens).
 pub const TEST_JWT_ISSUER: &str = "urn:jazz:test";
-/// The audience configured by the embedded external-JWT test server.
-pub const TEST_JWT_AUDIENCE: &str = "urn:jazz:test-audience";
 
 /// Builder for configuring and starting a [`JazzServer`].
 #[derive(Default)]
@@ -33,11 +25,11 @@ pub struct JazzServerBuilder {
     data_dir: Option<PathBuf>,
     schema: Option<Schema>,
     persistent_storage: bool,
-    storage_factory: Option<Arc<dyn jazz::groove::storage::StorageFactory>>,
     admin_secret: Option<String>,
     backend_secret: Option<String>,
-    jwks_url: Option<String>,
     auth_clock: Option<crate::middleware::auth::AuthClock>,
+    trusted_workload: Option<crate::middleware::workload::TrustedWorkload>,
+    local_first_auth_disabled: bool,
 }
 
 impl std::fmt::Debug for JazzServerBuilder {
@@ -81,16 +73,6 @@ impl JazzServerBuilder {
         self
     }
 
-    /// Supply the target-owned adapter used by persistent test storage.
-    pub fn with_storage_factory(
-        mut self,
-        factory: Arc<dyn jazz::groove::storage::StorageFactory>,
-    ) -> Self {
-        self.storage_factory = Some(factory);
-        self.persistent_storage = true;
-        self
-    }
-
     pub fn with_admin_secret(mut self, secret: impl Into<String>) -> Self {
         self.admin_secret = Some(secret.into());
         self
@@ -101,8 +83,9 @@ impl JazzServerBuilder {
         self
     }
 
-    pub fn with_jwks_url(mut self, jwks_url: impl Into<String>) -> Self {
-        self.jwks_url = Some(jwks_url.into());
+    /// Admit no local-first accounts (`--allow-local-first-auth false`).
+    pub fn without_local_first_auth(mut self) -> Self {
+        self.local_first_auth_disabled = true;
         self
     }
 
@@ -112,102 +95,17 @@ impl JazzServerBuilder {
         self
     }
 
+    /// Trust only this workload; the server then has no shared secrets.
+    pub fn with_trusted_workload(
+        mut self,
+        workload: crate::middleware::workload::TrustedWorkload,
+    ) -> Self {
+        self.trusted_workload = Some(workload);
+        self
+    }
+
     pub async fn start(self) -> Result<JazzServer, String> {
         JazzServer::from_builder(self).await
-    }
-}
-
-pub struct TestJwtOptions {
-    pub expires_in: Duration,
-    pub issuer: Option<String>,
-}
-
-impl Default for TestJwtOptions {
-    fn default() -> Self {
-        Self {
-            expires_in: Duration::from_secs(3600),
-            // Test helpers mint ordinary external sessions unless a test
-            // explicitly exercises a missing or reserved issuer.
-            issuer: Some(TEST_JWT_ISSUER.to_owned()),
-        }
-    }
-}
-
-pub struct TestJwtIssuer {
-    addr: std::net::SocketAddr,
-    task: tokio::task::JoinHandle<()>,
-}
-
-impl TestJwtIssuer {
-    pub async fn start() -> Self {
-        let app = Router::new().route("/jwks", get(jwks_handler));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind jwks server");
-        let addr = listener.local_addr().expect("jwks local addr");
-        let task = tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("serve jwks");
-        });
-        Self { addr, task }
-    }
-
-    pub fn endpoint(&self) -> String {
-        format!("http://{}/jwks", self.addr)
-    }
-
-    pub fn jwt_for_user(sub: &str) -> String {
-        Self::jwt_for_user_with_claims(sub, json!({"role": "user"}))
-    }
-
-    pub fn jwt_for_user_with_claims(sub: &str, claims: JsonValue) -> String {
-        Self::jwt_for_user_with_options(sub, claims, TestJwtOptions::default())
-    }
-
-    pub fn jwt_for_user_with_options(
-        sub: &str,
-        claims: JsonValue,
-        options: TestJwtOptions,
-    ) -> String {
-        Self::jwt_for_user_with_options_at(sub, claims, options, SystemTime::now())
-    }
-
-    fn jwt_for_user_with_options_at(
-        sub: &str,
-        claims: JsonValue,
-        options: TestJwtOptions,
-        now: SystemTime,
-    ) -> String {
-        let mut payload = claims.as_object().cloned().unwrap_or_default();
-        payload.insert("sub".to_owned(), json!(sub));
-        if let Some(issuer) = options.issuer {
-            payload.insert("iss".to_owned(), json!(issuer));
-        }
-        payload.insert("aud".to_owned(), json!(TEST_JWT_AUDIENCE));
-        payload.insert(
-            "exp".to_owned(),
-            json!(
-                now.duration_since(UNIX_EPOCH)
-                    .expect("clock drift")
-                    .as_secs()
-                    + options.expires_in.as_secs()
-            ),
-        );
-
-        let mut header = Header::new(Algorithm::HS256);
-        header.kid = Some(JWT_KID.to_string());
-
-        encode(
-            &header,
-            &JsonValue::Object(payload),
-            &EncodingKey::from_secret(JWT_SECRET.as_bytes()),
-        )
-        .expect("encode jwt")
-    }
-}
-
-impl Drop for TestJwtIssuer {
-    fn drop(&mut self) {
-        self.task.abort();
     }
 }
 
@@ -222,7 +120,6 @@ pub struct JazzServer {
     backend_secret: String,
     host: IpAddr,
     client_data_dirs: Mutex<Vec<OwnedTempDir>>,
-    embedded_jwks_server: Option<TestJwtIssuer>,
     auth_clock: crate::middleware::auth::AuthClock,
 }
 
@@ -250,11 +147,11 @@ impl JazzServer {
             data_dir,
             schema,
             persistent_storage,
-            storage_factory,
             admin_secret,
             backend_secret,
-            jwks_url,
             auth_clock,
+            trusted_workload,
+            local_first_auth_disabled,
         } = builder;
 
         let app_id = app_id.unwrap_or_else(AppId::random);
@@ -264,39 +161,24 @@ impl JazzServer {
             ServerDataDir::in_memory()
         };
         let storage_data_dir = data_dir.path().to_path_buf();
-        let (jwks_url, embedded_jwks_server) = match jwks_url {
-            Some(jwks_url) => (jwks_url, None),
-            None => {
-                let jwks_server = TestJwtIssuer::start().await;
-                let jwks_url = jwks_server.endpoint();
-                (jwks_url, Some(jwks_server))
-            }
-        };
-
         let admin_secret = admin_secret.unwrap_or_else(|| Self::ADMIN_SECRET.to_string());
         let backend_secret = backend_secret.unwrap_or_else(|| Self::BACKEND_SECRET.to_string());
         let auth_clock = auth_clock.unwrap_or_default();
 
         let auth_config = AuthConfig {
-            jwks_url: Some(jwks_url),
-            jwt_issuer: Some(TEST_JWT_ISSUER.to_owned()),
-            jwt_audience: Some(TEST_JWT_AUDIENCE.to_owned()),
-            allow_local_first_auth: true,
-            backend_secret: Some(backend_secret.clone()),
-            admin_secret: Some(admin_secret.clone()),
+            allow_local_first_auth: !local_first_auth_disabled,
+            backend_secret: trusted_workload.is_none().then(|| backend_secret.clone()),
+            admin_secret: trusted_workload.is_none().then(|| admin_secret.clone()),
+            trusted_workload,
             clock: auth_clock.clone(),
-            ..Default::default()
         };
 
-        let mut server_builder = ServerBuilder::new(app_id).with_auth_config(auth_config);
-        if let Some(factory) = storage_factory {
-            server_builder = server_builder.with_storage_factory(factory);
-        }
+        let server_builder = ServerBuilder::new(app_id).with_auth_config(auth_config);
         let mut server_builder =
             apply_storage_mode(server_builder, storage_data_dir, persistent_storage);
 
-        if let Some(schema) = schema {
-            server_builder = server_builder.with_schema(schema);
+        if let Some(schema) = &schema {
+            server_builder = server_builder.with_schema(schema.clone());
         }
         let built = server_builder
             .build()
@@ -313,8 +195,12 @@ impl JazzServer {
             backend_secret,
         )
         .await?;
-        server.embedded_jwks_server = embedded_jwks_server;
         server.auth_clock = auth_clock;
+        // As createJazz does on boot: the schema's permissions go out as a
+        // bundle, which the clients this server makes pin their sessions to.
+        if let Some(schema) = &schema {
+            crate::server::deployment::publish_source_bundle(server.state.clone(), schema).await?;
+        }
         Ok(server)
     }
 
@@ -375,7 +261,6 @@ impl JazzServer {
             host,
             backend_secret,
             client_data_dirs: Mutex::new(Vec::new()),
-            embedded_jwks_server: None,
             auth_clock: crate::middleware::auth::AuthClock::default(),
         };
         server.wait_ready().await;
@@ -412,57 +297,115 @@ impl JazzServer {
 
     /// Returns a clone of the shared `Arc<ServerState>` for in-process tests
     /// that need to inspect or drive internal server state.
+    /// Re-read the catalogue a test changed on the runtime directly, so the
+    /// clients this server makes see what it published (its latest bundle).
+    pub fn refresh_catalogue(&self) {
+        self.state
+            .catalogue_store
+            .refresh()
+            .expect("refresh test server catalogue");
+    }
+
     pub fn server_state(&self) -> std::sync::Arc<super::ServerState> {
         self.state.clone()
     }
 
-    fn require_built_in_jwt_helpers(&self) {
-        if self.embedded_jwks_server.is_none() {
-            panic!(
-                "JazzServer uses an external JWKS URL; built-in JWT helpers are unavailable. Mint JWTs from your external JWKS test fixture instead."
-            );
-        }
-    }
-
+    /// A client context of the app's backend, with in-memory storage and a
+    /// fresh data directory kept until the server drops. A core admits only
+    /// its backend; the client acts for a user with `for_session`, and
+    /// `_user_id` only names what the test means it for.
     pub fn make_client_context_for_user(
         &self,
         schema: Schema,
-        user_id: impl AsRef<str>,
-    ) -> AppContext {
-        self.require_built_in_jwt_helpers();
-        let user_id = user_id.as_ref();
-        // Subjects are opaque strings. Keep the test caller's subject intact
-        // so this helper exercises the same issuer-scoped identity boundary as
-        // production external sessions.
-        let user_id = user_id.to_owned();
-
+        _user_id: impl AsRef<str>,
+    ) -> jazz::tools::AppContext {
         let client_data_dir = OwnedTempDir::new("jazz-tools-testing-client");
         let data_dir = client_data_dir.path().to_path_buf();
         self.client_data_dirs
             .lock()
             .expect("lock test client data dirs")
             .push(client_data_dir);
-
-        let now = UNIX_EPOCH + Duration::from_secs(self.auth_clock.now_seconds());
-        let jwt_token = TestJwtIssuer::jwt_for_user_with_options_at(
-            &user_id,
-            json!({"role": "user"}),
-            TestJwtOptions::default(),
-            now,
-        );
-        AppContext {
+        jazz::tools::AppContext {
             app_id: self.app_id,
             client_id: None,
             schema,
             server_url: self.base_url(),
             data_dir,
             storage: jazz::tools::ClientStorage::Memory,
-            storage_factory: None,
             account_id: None,
-            jwt_token: Some(jwt_token),
+            jwt_token: None,
             backend_secret: Some(self.backend_secret().to_string()),
+            backend_session: None,
+            bundle: self.latest_bundle(),
             admin_secret: None,
+            migrations: self.published_migrations(),
         }
+    }
+
+    /// A client the app's backend opens for `user_id` (as `createJazz`
+    /// relays a signed-in user's client): the backend secret, and the user's
+    /// session with a `role: user` claim. Enroll it before connecting.
+    pub fn make_user_context(
+        &self,
+        schema: Schema,
+        user_id: impl AsRef<str>,
+    ) -> jazz::tools::AppContext {
+        let user_id = user_id.as_ref();
+        let mut context = self.make_client_context_for_user(schema, user_id);
+        context.backend_session = Some(
+            jazz::tools::Session::new(TEST_JWT_ISSUER, user_id)
+                .with_claims(serde_json::json!({ "role": "user" })),
+        );
+        context
+    }
+
+    /// The versions and lenses published to this server so far, as an app
+    /// that deployed them ships them (SPEC 10.7).
+    /// The permissions bundle published last on this server (hex), which
+    /// the clients it makes pin their stated sessions to.
+    pub fn latest_bundle(&self) -> Option<String> {
+        self.state
+            .catalogue_store
+            .latest_bundle()
+            .map(|bundle| bundle.to_hex())
+    }
+
+    pub fn published_migrations(&self) -> jazz::db::Migrations {
+        let state = &self.state;
+        let store = &state.catalogue_store;
+        let mut schemas = std::collections::HashMap::new();
+        for hash in state
+            .catalogue
+            .known_schema_hashes(store)
+            .expect("read published schema hashes")
+        {
+            if let Some(schema) = state
+                .catalogue
+                .known_schema(store, &hash)
+                .expect("read published schema")
+            {
+                schemas.insert(hash, schema);
+            }
+        }
+        let lenses = state
+            .catalogue
+            .known_lenses(store)
+            .expect("read published lenses")
+            .iter()
+            .filter_map(|lens| {
+                let source = schemas.get(&lens.source_hash)?;
+                let target = schemas.get(&lens.target_hash)?;
+                Some(
+                    jazz::tools::schema_lens::runtime::compile_lens(lens, source, target)
+                        .expect("lower a published lens"),
+                )
+            })
+            .collect();
+        let schemas = schemas
+            .values()
+            .map(|schema| jazz::schema::JazzSchema::new(schema).expect("lower a published schema"))
+            .collect();
+        jazz::db::Migrations { schemas, lenses }
     }
 
     pub fn data_dir(&self) -> &Path {
@@ -626,24 +569,8 @@ fn apply_storage_mode(
     }
 }
 
-async fn jwks_handler() -> Json<JsonValue> {
-    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(JWT_SECRET.as_bytes());
-    Json(json!({
-        "keys": [
-            {
-                "kty": "oct",
-                "kid": JWT_KID,
-                "alg": "HS256",
-                "k": encoded,
-            }
-        ]
-    }))
-}
-
 #[cfg(test)]
 mod tests {
-    use std::panic::{AssertUnwindSafe, catch_unwind};
-
     use reqwest::StatusCode;
 
     use crate::server::ShutdownPhase;
@@ -707,52 +634,6 @@ mod tests {
             error.contains("bind") || error.contains("server listener"),
             "startup error should identify the server listener: {error}"
         );
-    }
-
-    #[tokio::test]
-    async fn default_jazz_server_keeps_built_in_jwt_helpers_enabled() {
-        let server = JazzServer::start().await.expect("start test server");
-        let context = server.make_client_context_for_user(Schema::new(), "default-helper-user");
-
-        assert!(context.jwt_token.is_some());
-        assert!(context.admin_secret.is_none());
-
-        assert_eq!(server.shutdown().await, ShutdownPhase::StorageClosed);
-    }
-
-    #[tokio::test]
-    async fn external_jwks_url_disables_built_in_jwt_helpers() {
-        let external_jwks = TestJwtIssuer::start().await;
-        let server = JazzServer::builder()
-            .with_jwks_url(external_jwks.endpoint())
-            .start()
-            .await
-            .expect("start test server");
-
-        let health = reqwest::Client::new()
-            .get(format!("{}/health", server.base_url()))
-            .send()
-            .await
-            .expect("health request");
-        assert_eq!(health.status(), StatusCode::OK);
-
-        let panic = catch_unwind(AssertUnwindSafe(|| {
-            server.make_client_context_for_user(Schema::new(), "external-helper-user")
-        }))
-        .expect_err("external JWKS mode should reject built-in JWT helpers");
-        let message = if let Some(message) = panic.downcast_ref::<String>() {
-            message.as_str()
-        } else if let Some(message) = panic.downcast_ref::<&str>() {
-            message
-        } else {
-            panic!("unexpected panic payload");
-        };
-        assert_eq!(
-            message,
-            "JazzServer uses an external JWKS URL; built-in JWT helpers are unavailable. Mint JWTs from your external JWKS test fixture instead."
-        );
-
-        assert_eq!(server.shutdown().await, ShutdownPhase::StorageClosed);
     }
 
     #[tokio::test]

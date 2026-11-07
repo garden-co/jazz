@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { once } from "node:events";
 import {
   existsSync,
   chmodSync,
@@ -211,6 +212,41 @@ test("a sealed publication collision accepts the winner without leaking its priv
   }
 });
 
+test("a publication collision cannot redirect admission to a different valid snapshot", () => {
+  const root = fixture("collision-redirect", "f".repeat(64), "0".repeat(64));
+  try {
+    assert.throws(
+      () =>
+        snapshotCorrectnessArtifacts(root, {
+          beforePublish({ destination }) {
+            for (const [path, fingerprint] of [
+              [join(root, "crates/jazz-wasm/pkg/.jazz-artifact-manifest.json"), "a".repeat(64)],
+              [
+                join(
+                  root,
+                  "crates/jazz-napi/.native-artifacts/generation-test/.jazz-artifact-manifest.json",
+                ),
+                "b".repeat(64),
+              ],
+            ]) {
+              const manifest = JSON.parse(readFileSync(path, "utf8"));
+              writeFileSync(
+                path,
+                JSON.stringify({ ...manifest, nativeArtifactFingerprint: fingerprint }),
+              );
+            }
+            const other = snapshotCorrectnessArtifacts(root);
+            mkdirSync(destination);
+            writeFileSync(join(destination, "receipt.json"), JSON.stringify(other));
+          },
+        }),
+      /snapshot fingerprint mismatch/,
+    );
+  } finally {
+    removeFixture(root);
+  }
+});
+
 test("producer manifest binds sealed artifacts to every relevant source input", () => {
   const root = fixture("producer", "a".repeat(64), "b".repeat(64));
   try {
@@ -332,28 +368,34 @@ test("a consumer pins its manifest-selected pair across pointer swaps and partia
         [
           "const fs=require('node:fs')",
           "const [pointer,first,second]=process.argv.slice(1)",
-          "for(let i=0;i<2000;i++) fs.writeFileSync(pointer, i%2 ? first : second)",
+          "process.on('message', () => process.exit(0))",
+          "function swap(){fs.writeFileSync(pointer,first);fs.writeFileSync(pointer,second);setImmediate(swap)}",
+          "swap();process.send('ready')",
         ].join(";"),
         pointer,
         JSON.stringify(first),
         JSON.stringify(second),
       ],
-      { stdio: "ignore" },
+      { stdio: ["ignore", "ignore", "ignore", "ipc"] },
     );
-    let exited = false;
-    let observations = 0;
-    swapper.once("exit", (code) => {
-      assert.equal(code, 0);
-      exited = true;
-    });
-    do {
-      const selected = correctnessArtifactConsumerEnvironment(root);
-      assert.equal(selected.JAZZ_CORRECTNESS_WASM_PACKAGE, first.wasmPackage);
-      assert.equal(selected.JAZZ_CORRECTNESS_NAPI_BINDING, join(first.napiGeneration, "index.js"));
-      observations++;
-      await new Promise((resolvePromise) => setImmediate(resolvePromise));
-    } while (!exited);
-    assert.ok(observations > 1, "pointer swap did not overlap consumer preflight");
+    const closed = once(swapper, "close");
+    try {
+      await once(swapper, "message", { signal: AbortSignal.timeout(10000) });
+      for (let observation = 0; observation < 3; observation++) {
+        const selected = correctnessArtifactConsumerEnvironment(root);
+        assert.equal(selected.JAZZ_CORRECTNESS_WASM_PACKAGE, first.wasmPackage);
+        assert.equal(
+          selected.JAZZ_CORRECTNESS_NAPI_BINDING,
+          join(first.napiGeneration, "index.js"),
+        );
+        await new Promise((resolvePromise) => setImmediate(resolvePromise));
+      }
+      swapper.send("stop");
+      assert.equal((await closed)[0], 0);
+    } finally {
+      swapper.kill("SIGKILL");
+      await closed;
+    }
 
     // A killed producer leaves only a private temporary manifest.  Existing
     // readers remain on the prior atomic receipt, never a half-written one.
@@ -457,9 +499,9 @@ test("one source admission covers nested consumers while snapshot checks continu
       ],
       { cwd: root, rootDir: root },
     );
-    // Only Linux supplies the process-start identity needed for inherited admission.
+    // Linux and macOS supply process-start identities for inherited admission.
     // Other platforms must freshly admit the changed source and reject it.
-    if (process.platform === "linux") await nested;
+    if (process.platform === "linux" || process.platform === "darwin") await nested;
     else await assert.rejects(nested, /correctness consumer failed/);
     assert.throws(() => verifyCorrectnessArtifactProducer(root), /different source inputs/);
     assert.throws(
@@ -486,45 +528,55 @@ test("one source admission covers nested consumers while snapshot checks continu
   }
 });
 
-test("a capability without a process-start identity cannot bypass fresh source admission", async () => {
-  const root = fixture("missing-owner-start", "5".repeat(64), "6".repeat(64));
-  try {
-    execFileSync("git", ["add", "."], { cwd: root });
-    execFileSync(
-      "git",
-      ["-c", "user.email=test@example.invalid", "-c", "user.name=Test", "commit", "-qm", "fixture"],
-      { cwd: root },
-    );
-    const snapshot = snapshotCorrectnessArtifacts(root);
-    writeCorrectnessArtifactProducerManifest(root, snapshot);
-    const runner = new URL("../gates/run-correctness-consumer.mjs", import.meta.url).href;
-    await assert.rejects(
-      runCorrectnessConsumer(
-        process.execPath,
+for (const identity of [undefined, "different-process-start"]) {
+  test(`a capability with ${identity === undefined ? "missing" : "mismatched"} process-start identity cannot bypass fresh source admission`, async () => {
+    const root = fixture("missing-owner-start", "5".repeat(64), "6".repeat(64));
+    try {
+      execFileSync("git", ["add", "."], { cwd: root });
+      execFileSync(
+        "git",
         [
-          "--input-type=module",
-          "-e",
-          [
-            "import fs from 'node:fs'",
-            `import { runCorrectnessConsumer } from ${JSON.stringify(runner)}`,
-            "fs.writeFileSync(process.argv[1], 'source drift')",
-            "const path=process.env.JAZZ_CORRECTNESS_CONSUMER_CAPABILITY",
-            "const capability=JSON.parse(fs.readFileSync(path,'utf8'))",
-            "delete capability.ownerStart",
-            "fs.writeFileSync(path,JSON.stringify(capability))",
-            "await runCorrectnessConsumer(process.execPath, ['-e', ''], { rootDir: process.argv[2] })",
-          ].join(";"),
-          join(root, "test-output"),
-          root,
+          "-c",
+          "user.email=test@example.invalid",
+          "-c",
+          "user.name=Test",
+          "commit",
+          "-qm",
+          "fixture",
         ],
-        { cwd: root, rootDir: root },
-      ),
-      /correctness consumer failed/,
-    );
-  } finally {
-    removeFixture(root);
-  }
-});
+        { cwd: root },
+      );
+      const snapshot = snapshotCorrectnessArtifacts(root);
+      writeCorrectnessArtifactProducerManifest(root, snapshot);
+      const runner = new URL("../gates/run-correctness-consumer.mjs", import.meta.url).href;
+      await assert.rejects(
+        runCorrectnessConsumer(
+          process.execPath,
+          [
+            "--input-type=module",
+            "-e",
+            [
+              "import fs from 'node:fs'",
+              `import { runCorrectnessConsumer } from ${JSON.stringify(runner)}`,
+              "fs.writeFileSync(process.argv[1], 'source drift')",
+              "const path=process.env.JAZZ_CORRECTNESS_CONSUMER_CAPABILITY",
+              "const capability=JSON.parse(fs.readFileSync(path,'utf8'))",
+              `capability.ownerStart=${JSON.stringify(identity)}`,
+              "fs.writeFileSync(path,JSON.stringify(capability))",
+              "await runCorrectnessConsumer(process.execPath, ['-e', ''], { rootDir: process.argv[2] })",
+            ].join(";"),
+            join(root, "test-output"),
+            root,
+          ],
+          { cwd: root, rootDir: root },
+        ),
+        /correctness consumer failed/,
+      );
+    } finally {
+      removeFixture(root);
+    }
+  });
+}
 
 test("snapshot pointers reject malformed fingerprints and path traversal", () => {
   const root = fixture("traversal", "e".repeat(64), "f".repeat(64));

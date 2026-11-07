@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useAll, useDb, useOne } from "jazz-tools/react";
+import { useAll, useOne } from "jazz-tools/react";
 import { Badge } from "@astryxdesign/core/Badge";
 import { Button } from "@astryxdesign/core/Button";
 import { EmptyState } from "@astryxdesign/core/EmptyState";
@@ -21,13 +21,17 @@ import { TaskDialog } from "./TaskDialog.js";
 type ShowPageProps = { showId: string; tab: ShowTab; taskId?: string };
 
 export function ShowPage({ showId, tab, taskId }: ShowPageProps) {
-  const db = useDb();
   const me = useMe();
   const [isEditing, setEditing] = useState(false);
   // An empty local result waits for the server, so a fresh device doesn't
   // flash "not on this crew" before the show arrives.
-  const { data: show, isLoading } = useOne(app.shows.where({ id: showId }), {
-    tier: "local-first-unless-empty",
+  const {
+    data: show,
+    isLoading,
+    db,
+  } = useOne(app.shows.where({ id: showId }), {
+    tier: "local-first",
+    firstLoadRemoteWaitMs: 5_000,
   });
   const { data: crew = [] } = useAll(
     app.showCrew.where({ showId }).include({ crew: true }).orderBy("role", "asc"),

@@ -9,14 +9,16 @@
  * rather than specific LWW winners, making them timing-tolerant.
  */
 
-import { describe, it, expect, afterEach, beforeEach } from "vitest";
+import { describe, it, expect, afterEach, beforeAll, afterAll } from "vitest";
 import type { Db, TableProxy } from "../../src/runtime/db.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
+import type { CompiledPermissionsMap } from "../../src/schema-permissions.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
 import { deploy } from "../../src/dev/catalogue.js";
 import {
   getJazzServerInfo,
-  unblockJazzServerNetwork,
+  startJazzApp,
+  stopJazzServer,
   type JazzServerInfo,
 } from "./testing-server.js";
 import {
@@ -70,27 +72,25 @@ describe("History & Conflict Management", () => {
   const ctx = new TestCleanup();
   let testingServer: JazzServerInfo;
   afterEach(() => ctx.cleanup());
-  beforeEach(async () => {
-    testingServer = await getJazzServerInfo(uniqueDbName("history-conflict-app"));
-    const { appId, serverUrl, adminSecret } = testingServer;
-    await unblockJazzServerNetwork(serverUrl);
-    await deploy({
-      appId,
-      serverUrl,
-      adminSecret,
-      schema,
-      permissions: {
-        todos: {
-          select: { using: { type: "True" } },
-          insert: { with_check: { type: "True" } },
-          update: {
-            using: { type: "True" },
-            with_check: { type: "True" },
-          },
-          delete: { using: { type: "True" } },
+  afterAll(async () => {
+    if (testingServer) await stopJazzServer(testingServer.serverUrl);
+  });
+  // Cases use fresh clients and distinct row IDs; the deployed schema is shared.
+  beforeAll(async () => {
+    const core = await getJazzServerInfo(uniqueDbName("history-conflict-app"));
+    const permissions: CompiledPermissionsMap = {
+      todos: {
+        select: { using: { type: "True" } },
+        insert: { with_check: { type: "True" } },
+        update: {
+          using: { type: "True" },
+          with_check: { type: "True" },
         },
+        delete: { using: { type: "True" } },
       },
-    });
+    };
+    await deploy({ ...core, schema, permissions });
+    testingServer = await startJazzApp(core, { schema, permissions });
   });
 
   /**
@@ -374,8 +374,8 @@ describe("History & Conflict Management", () => {
     let convergedTitle = "";
     await waitForCondition(
       async () => {
-        const aliceRows = await dbAlice.all(allTodos, { tier: "global" });
-        const bobRows = await dbBob.all(allTodos, { tier: "global" });
+        const aliceRows = await dbAlice.all(allTodos, { tier: "remote" });
+        const bobRows = await dbBob.all(allTodos, { tier: "remote" });
         const aliceTodo = aliceRows.find((r) => r.id === id);
         const bobTodo = bobRows.find((r) => r.id === id);
         if (!aliceTodo || !bobTodo) return false;
@@ -402,7 +402,7 @@ describe("History & Conflict Management", () => {
       (rows) => rows.some((row) => row.id === id && row.title === convergedTitle),
       "Charlie sees converged title",
       20000,
-      "global",
+      "remote",
     );
     const charlieTodo = charlieRows.find((r) => r.id === id);
     expect(charlieTodo?.title).toBe(convergedTitle);
@@ -506,7 +506,7 @@ async function waitForPeerSync(dbAlice: Db, dbBob: Db, label: string): Promise<v
     (rows) => rows.some((row) => row.id === aliceToBobId),
     `${label} Alice->Bob peer sync should reach Bob`,
     20_000,
-    "global",
+    "remote",
   );
 
   const { id: bobToAliceId } = await withTimeout(
@@ -523,6 +523,6 @@ async function waitForPeerSync(dbAlice: Db, dbBob: Db, label: string): Promise<v
     (rows) => rows.some((row) => row.id === bobToAliceId),
     `${label} Bob->Alice peer sync should reach Alice`,
     20_000,
-    "global",
+    "remote",
   );
 }

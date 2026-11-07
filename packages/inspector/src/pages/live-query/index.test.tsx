@@ -76,8 +76,7 @@ describe("LiveQuery", () => {
       {
         id: "sub-1",
         table: "todos",
-        tier: "global",
-        propagation: "full",
+        tier: "remote",
         branches: ["main"],
         createdAt: "2026-03-10T10:00:00.000Z",
         query: '{"table":"todos"}',
@@ -91,7 +90,7 @@ describe("LiveQuery", () => {
     );
 
     expect(await screen.findByRole("cell", { name: "todos" })).not.toBeNull();
-    expect(await screen.findByRole("cell", { name: "full" })).not.toBeNull();
+    expect(screen.queryByRole("columnheader", { name: "Propagation" })).toBeNull();
     expect(await screen.findByText('{"table":"todos"}')).not.toBeNull();
     // No stack column anymore.
     expect(screen.queryByRole("columnheader", { name: "Stack" })).toBeNull();
@@ -102,8 +101,7 @@ describe("LiveQuery", () => {
       {
         id: "sub-1",
         table: "todos",
-        tier: "local",
-        propagation: "full",
+        tier: "local-first",
         branches: ["main"],
         createdAt: "2026-03-10T10:00:00.000Z",
         query: '{"table":"todos"}',
@@ -111,8 +109,7 @@ describe("LiveQuery", () => {
       {
         id: "sub-2",
         table: "projects",
-        tier: "global",
-        propagation: "local-only",
+        tier: "remote",
         branches: ["main"],
         createdAt: "2026-03-10T11:00:00.000Z",
         query: '{"table":"projects"}',
@@ -129,7 +126,7 @@ describe("LiveQuery", () => {
     expect(screen.queryByRole("cell", { name: "todos" })).toBeNull();
     expect(screen.getByRole("cell", { name: "projects" })).not.toBeNull();
 
-    fireEvent.change(screen.getByLabelText("Filter by tier"), { target: { value: "local" } });
+    fireEvent.change(screen.getByLabelText("Filter by tier"), { target: { value: "local-first" } });
     expect(screen.getByText("No active subscriptions")).not.toBeNull();
   });
 
@@ -139,8 +136,7 @@ describe("LiveQuery", () => {
       {
         id: "sub-1",
         table: "todos",
-        tier: "global",
-        propagation: "full",
+        tier: "remote",
         branches: ["main"],
         createdAt: "2026-03-10T10:00:00.000Z",
         query: '{"table":"todos"}',
@@ -148,8 +144,7 @@ describe("LiveQuery", () => {
       {
         id: "sub-2",
         table: "projects",
-        tier: "global",
-        propagation: "local-only",
+        tier: "remote",
         branches: ["main"],
         createdAt: "2026-03-10T11:00:00.000Z",
         query: '{"table":"projects"}',
@@ -157,8 +152,7 @@ describe("LiveQuery", () => {
       {
         id: "sub-3",
         table: "users",
-        tier: "local",
-        propagation: "full",
+        tier: "local-first",
         branches: ["main"],
         createdAt: "2026-03-10T11:00:00.000Z",
         query: '{"table":"users"}',
@@ -192,7 +186,6 @@ describe("LiveQuery", () => {
           groupKey: "group-1",
           count: 2,
           table: "todos",
-          propagation: "full",
           branches: ["main"],
           query: '{"table":"todos"}',
         },

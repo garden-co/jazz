@@ -33,7 +33,7 @@ function describeCause(cause: unknown): string {
 
 /**
  * A write was applied locally but rejected when it reached the requested
- * durability tier (for example by permissions or exclusive-transaction
+ * durability tier (for example by permissions or serializable-transaction
  * validation at the authority). The local write has already been undone.
  */
 export class JazzWriteRejected extends Data.TaggedError("JazzWriteRejected")<{
@@ -43,6 +43,23 @@ export class JazzWriteRejected extends Data.TaggedError("JazzWriteRejected")<{
 }> {
   override get message(): string {
     return `Jazz write ${this.transactionId} was rejected (${this.code}): ${this.reason}`;
+  }
+}
+
+/**
+ * The request's user has no Jazz account yet, so there is no one to act as
+ * (`NoJazzAccountError` on the plain backend). They get one when they sign in
+ * from a client, when a local-first guest links to them, or when the backend
+ * calls `createAccountFor`.
+ */
+export class JazzNoAccount extends Data.TaggedError("JazzNoAccount")<{
+  /** The user, as the app's `authenticate` names them. */
+  readonly userId: string;
+  /** The operation that needed the account, such as `"forReqUser"`. */
+  readonly operation: string;
+}> {
+  override get message(): string {
+    return `Jazz ${this.operation} failed: user ${JSON.stringify(this.userId)} has no Jazz account yet`;
   }
 }
 

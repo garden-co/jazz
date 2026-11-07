@@ -259,13 +259,13 @@ export function seedRows() {
 
 /**
  * Insert the seed profile once. Runs with backend authority in the trusted
- * bootstrap route; the exclusive transaction makes concurrent first requests
+ * bootstrap route; the serializable transaction makes concurrent first requests
  * converge on a single seed.
  */
 export async function ensureSeed(db: Db): Promise<"seeded" | "present"> {
   const rows = seedRows();
   return await retryOnConflict(async () => {
-    const write = await db.exclusiveTransaction(async (tx) => {
+    const write = await db.serializableTransaction(async (tx) => {
       const existing = await tx.one(app.warehouses.where({ id: rows.warehouses[0]!.id }).limit(1));
       if (existing) return "present" as const;
       const insertAll = <T extends { id: string }>(
@@ -298,7 +298,7 @@ export async function ensureOperator(
   { accountId, name, warehouseId }: { accountId: string; name: string; warehouseId: string },
 ): Promise<{ warehouseId: string }> {
   return await retryOnConflict(async () => {
-    const write = await db.exclusiveTransaction(async (tx) => {
+    const write = await db.serializableTransaction(async (tx) => {
       const existing = await tx.one(
         app.warehouse_operators.where({ account_id: accountId }).limit(1),
       );

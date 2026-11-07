@@ -417,7 +417,7 @@ async fn transaction_insert_is_visible_only_after_commit_settles() {
 // The latest accepted row should reflect the update.
 // Todo row visible on main.
 // A transaction-scoped upsert of that row id overwrites it; explicit-id
-// inserts in exclusive transactions are create-only, so upsert must not be
+// inserts in serializable transactions are create-only, so upsert must not be
 // staged as one.
 local_tokio_test! {
 async fn transaction_upsert_overwrites_existing_row() {

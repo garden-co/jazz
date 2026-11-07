@@ -3,7 +3,6 @@ packages:
   - packages/*
   - crates/jazz-rn
   - crates/jazz-rn/npm/*
-  - starters/*
   - examples/*
   - examples/*/apps/*
   - examples/docs/*
@@ -11,6 +10,7 @@ packages:
   - dev/stress-tests/*
   - "!dev/stress-tests/stress-test-expo"
   - dev/local-telemetry/web
+  - dev/benchmarks/example-load-times
   # The label-gated Android/iOS acceptance workflow invokes this package via
   # `pnpm --filter`; it must be a workspace member so CI installs Expo and its
   # declared native dependencies before prebuild.
@@ -38,9 +38,6 @@ catalogs:
     vitest: 4.1.0
     vue-tsc: "^2.1.10"
 
-ignoredBuiltDependencies:
-  - blake3
-
 allowBuilds:
   "@swc/core": true
   esbuild: true
@@ -50,6 +47,7 @@ allowBuilds:
   workerd: true
 
 overrides:
+  "libsodium-wrappers@0.8.3>libsodium": 0.8.3
   react: 19.2.4
   react-dom: 19.2.4
 

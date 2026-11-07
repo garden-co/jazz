@@ -139,7 +139,7 @@ function rustPathParts(name, count) {
   const crate = parts[0];
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(crate)) return null;
   if (
-    ["core", "alloc", "std", "hashbrown", "talc", "sha1_smol", "groove", "jazz"].includes(crate)
+    ["core", "alloc", "std", "hashbrown", "talc", "sha1_smol", "jazz", "jazz_db"].includes(crate)
   ) {
     return parts.slice(0, count).join("::");
   }

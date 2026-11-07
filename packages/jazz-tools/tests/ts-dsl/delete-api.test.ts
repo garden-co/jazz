@@ -59,7 +59,7 @@ describe("TS Delete API", () => {
     const pending = db.delete(app.todos, todo.id);
     await pending.wait({ tier: "local" });
 
-    const rows = await db.all(app.todos.where({ id: { eq: todo.id } }), { tier: "local" });
+    const rows = await db.all(app.todos.where({ id: { eq: todo.id } }), { tier: "local-first" });
     expect(rows).toEqual([]);
   });
 

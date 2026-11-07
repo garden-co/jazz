@@ -1,12 +1,11 @@
 import { PersistedWriteRejectedError } from "jazz-tools";
 
 /**
- * Rejection codes that mean "another exclusive transaction raced us; read
+ * Rejection codes that mean "another serializable transaction raced us; read
  * again and retry". These are the codes the Better Auth adapter retries.
  */
 export const RETRYABLE_CONFLICT_CODES: ReadonlySet<string> = new Set([
-  "cascade_rejected",
-  "exclusive_conflict",
+  "serialization_conflict",
   "transaction_conflict",
 ]);
 

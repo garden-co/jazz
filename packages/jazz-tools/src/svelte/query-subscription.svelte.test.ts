@@ -12,12 +12,16 @@ const mocks = vi.hoisted(() => {
     subscribe,
   }));
 
+  const ctx: { db: unknown } = { db: null };
+
   return {
+    ctx,
     makeQueryKey,
     getCacheEntry,
     subscribe,
     unsubscribe,
     reset() {
+      ctx.db = null;
       unsubscribe.mockReset();
       subscribe.mockReset().mockReturnValue(unsubscribe);
       makeQueryKey.mockReset().mockImplementation((q: any) => `key:${q?._marker ?? "?"}`);
@@ -31,7 +35,9 @@ const mocks = vi.hoisted(() => {
 
 vi.mock("./context.svelte.js", () => ({
   getJazzContext: () => ({
-    db: null,
+    get db() {
+      return mocks.ctx.db;
+    },
     session: null,
     subscriptionStore: {
       makeQueryKey: mocks.makeQueryKey,
@@ -213,11 +219,29 @@ describe("svelte/QuerySubscription", () => {
     const query = makeQuery("inbox");
 
     const cleanup = $effect.root(() => {
-      new QuerySubscription(query, () => ({ tier: "global" as const }));
+      new QuerySubscription(query, () => ({ tier: "remote" as const }));
     });
     await settle();
 
-    expect(mocks.makeQueryKey).toHaveBeenCalledWith(query, { tier: "global" });
+    expect(mocks.makeQueryKey).toHaveBeenCalledWith(query, { tier: "remote" });
+
+    cleanup();
+  });
+
+  it("exposes the context's db handle via .db, and throws before it is open", () => {
+    let all!: InstanceType<typeof QuerySubscription<{ id: string }>>;
+    let one!: InstanceType<typeof QuerySubscriptionOne<{ id: string }>>;
+    const cleanup = $effect.root(() => {
+      all = new QuerySubscription(makeQuery());
+      one = new QuerySubscriptionOne(makeQuery());
+    });
+
+    expect(() => all.db).toThrow("Jazz database is not yet initialised");
+
+    const db = { marker: "db" };
+    mocks.ctx.db = db;
+    expect(all.db).toBe(db);
+    expect(one.db).toBe(db);
 
     cleanup();
   });
@@ -227,7 +251,7 @@ describe("svelte/QuerySubscription", () => {
     let withTier!: InstanceType<typeof QuerySubscription<{ id: string }>>;
     const cleanup = $effect.root(() => {
       withoutTier = new QuerySubscription(makeQuery());
-      withTier = new QuerySubscription(makeQuery(), { tier: "global" as const });
+      withTier = new QuerySubscription(makeQuery(), { tier: "remote" as const });
     });
 
     expect(withoutTier.current).toBeUndefined();
@@ -248,7 +272,7 @@ describe("svelte/QuerySubscription", () => {
     } as any);
 
     const query = makeQuery("one") as QueryBuilder<Todo>;
-    const createSubscription = () => new QuerySubscriptionOne(query, { tier: "global" });
+    const createSubscription = () => new QuerySubscriptionOne(query, { tier: "remote" });
     let subscription!: ReturnType<typeof createSubscription>;
     const cleanup = $effect.root(() => {
       subscription = createSubscription();
@@ -259,7 +283,7 @@ describe("svelte/QuerySubscription", () => {
     expect(subscription.current).toBeNull();
     const [limitedQuery, queryOptions] = mocks.makeQueryKey.mock.calls.at(-1)!;
     expect(JSON.parse(limitedQuery._build()).limit).toBe(1);
-    expect(queryOptions).toEqual({ tier: "global" });
+    expect(queryOptions).toEqual({ tier: "remote" });
 
     onDelta({ all: [{ id: "1", title: "first" }], delta: [] });
     expect(subscription.current).toEqual({ id: "1", title: "first" });
@@ -272,11 +296,11 @@ describe("svelte/QuerySubscription", () => {
   it("QuerySubscriptionOne accepts reactive query options", async () => {
     const query = makeQuery("one") as QueryBuilder<{ id: string }>;
     const cleanup = $effect.root(() => {
-      new QuerySubscriptionOne(query, () => ({ tier: "global" as const }));
+      new QuerySubscriptionOne(query, () => ({ tier: "remote" as const }));
     });
     await settle();
 
-    expect(mocks.makeQueryKey).toHaveBeenCalledWith(expect.anything(), { tier: "global" });
+    expect(mocks.makeQueryKey).toHaveBeenCalledWith(expect.anything(), { tier: "remote" });
     cleanup();
   });
 

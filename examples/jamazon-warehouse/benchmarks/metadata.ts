@@ -10,7 +10,7 @@ export const jamazonBenchmarks: BenchmarkMetadata[] = [
     name: "jamazon_checkout_100",
     title: "Jamazon checkout · 100 orders",
     description:
-      "Place 100 orders one after another. Each checkout is one exclusive transaction that checks the request key, reads stock, the district's order counter and the customer's balance, then updates all three and inserts the order, its line and its payment. Each checkout also prepares its request-key lookup query, as the app does. Today checkout cost grows with order history (#3476).",
+      "Place 100 orders one after another. Each checkout is one serializable transaction that checks the request key, reads stock, the district's order counter and the customer's balance, then updates all three and inserts the order, its line and its payment. Each checkout also prepares its request-key lookup query, as the app does. Today checkout cost grows with order history (#3476).",
     fixture: `${store("1,000")} A fresh store per measured run.`,
     storage,
     includes: [
@@ -34,7 +34,7 @@ export const jamazonBenchmarks: BenchmarkMetadata[] = [
     fixture: `${store("1,000")} The retried checkout committed once before measurement.`,
     storage,
     includes: [
-      "Opening the exclusive transaction",
+      "Opening the serializable transaction",
       "Preparing and running the request-key lookup",
       "Returning the receipt",
     ],

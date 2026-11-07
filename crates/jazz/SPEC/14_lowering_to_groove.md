@@ -33,7 +33,7 @@ Invariant digest:
 - `INV-LOWER-13`: Aggregation, ordinary read ordering, general pagination, and projection MUST be applied by the node after row materialization, not required from groove lowering, except maintained unordered `limit(1)` with offset `0` which MAY lower through groove `ArgMinBy` over `row_uuid`, and maintained ordered windows or ordered suffixes which MUST lower through groove `TopBy`.
 - `INV-LOWER-14`: Sync query updates SHOULD consume maintained terminal facts for result membership, path/correlation coverage, payload/replacement/version witnesses, policy witnesses, and read-frontier settlement; query-row recompute paths are migration/oracle debt, not an alternate production engine.
 - `INV-LOWER-15`: Whole-table current-row sync views MUST be represented as the normal table-rooted row-set shape, not a separate current-row serving engine; their result set must match the node's lowered `current_rows` result while migration code still exists.
-- `INV-LOWER-16`: Exclusive predicate validation for non-degenerate shape predicates MUST compare predicate-output-set terminal facts for the shape+binding at `base_snapshot.global_base` to the corresponding current predicate-output-set facts.
+- `INV-LOWER-16`: Serializable predicate validation for non-degenerate shape predicates MUST compare predicate-output-set terminal facts for the shape+binding at `base_snapshot.global_base` to the corresponding current predicate-output-set facts.
 - `INV-LOWER-18`: Counter merge strategy MUST NOT be accepted for nullable or non-integer columns.
 - `INV-LOWER-19`: Lowered record wrapper field indexes MUST match the groove schema record descriptors used at node open.
 - `INV-LOWER-20`: RLS policy declarations MUST be valid Jazz query shapes; read policy MUST lower through the query engine as part of the policy-composed read graph, while write-time acceptance MAY continue to evaluate policy predicates directly in `node/policy.rs` until write-policy prepared-shape lowering lands.
@@ -48,7 +48,7 @@ Invariant digest:
 - `INV-LOWER-26`: A structured query MUST expose one authoritative terminal output relation. Groove MUST assemble nested paths into that terminal; a child change semantically replaces or patches its owning root output, and public carriers MUST NOT require a second relation-edge delta stream.
 - `INV-LOWER-27`: An enum case's authored discriminant is scoped to its row `SchemaVersionId`; lowering MUST translate it through the persistent case identity of its physical occurrence before using a local storage tag, predicate, grouping key, or ordering key.
 - `INV-LOWER-28`: An additive enum case MUST be a row-level incompatibility for an older read schema, never a query or subscription error. For a current read, Global/Ahead candidates first choose their single canonical winner; the compatibility boundary then removes that unrepresentable winner before any semantic consumer (filter, ordering, grouping, aggregation, policy, relation requirement, pagination, or maintained delta) observes it. It MUST NOT fall back to an older compatible candidate. Unused enum occurrences remain undecoded and do not affect row visibility.
-- `INV-LOWER-30`: A table's declared composite indexes MUST be part of its `SchemaVersionId` (a distinct id domain used only when some table declares one, so plain schema ids never change) and its `v2` CATS schema envelope, and MUST lower to `by_physical_composite_v1_<column ids>` on both ahead-current and global-current tables keyed by `branch_key` then each indexed column in declared order; declaration order of distinct indexes is not identity.
+- `INV-LOWER-30`: A table's declared composite indexes MUST be part of its `SchemaVersionId` (a distinct id domain used only when some table declares one, so plain schema ids never change) and its stored catalogue schema, and MUST lower to `by_physical_composite_v1_<column ids>` on both ahead-current and global-current tables keyed by `branch_key` then each indexed column in declared order; declaration order of distinct indexes is not identity.
 
 ## Details
 
@@ -67,6 +67,49 @@ their indirect scalar format and every logical operation over it, while Jazz
 supplies only the authorized opaque-locator chunk capability specified by
 chapter 19. Jazz MUST NOT materialize descriptors after Groove has already
 evaluated filters, policies, ordering, grouping, joins, indices, or aggregates.
+
+Lowered subscription installation selects Groove's prepared-shape lifetime.
+Retained installations, client-local and trusted serving alike, use shared
+prepared shapes: subscribers with identical terminals bind one shape, and its
+last binding releases the registration. A trusted-serving binding source is
+shared across sessions: claim values bound as binding slots (including a
+policy's equality against a carried claim) are part of a session's binding key,
+and a claim the graph still inlines as a literal makes its terminals, and so
+its shape, distinct. Client-local sources stay scoped to the session's claims. First-result reads keep explicit ownership of their
+private preparation and retire it on completion or cancellation. While binding is suspended, the Jazz installation
+guard still owns a caller-owned preparation. This changes resource ownership,
+not query results, authorisation routing, or storage and wire encodings.
+
+A shared prepared program is only sound when every operator keeps bindings
+apart. Before a trusted-serving program is installed, the node checks its
+lowered graphs structurally against the binding routes the parameter domain
+declares (`route_discipline.rs`). A node depends on a route when a binding
+source for it lies below. Then:
+
+- every terminal delivers by every route its graph depends on;
+- a binding-dependent join input carries the routes it depends on, an inner
+  join keys on every route both inputs carry, and a semi or anti join keys on
+  every route its right input depends on;
+- aggregates, arg-max/min, windows and collect-by group on every route their
+  input depends on;
+- a lookup keyed by binding values depends on no route: its rows serve every
+  binding at once, and pairing them with a route is sound only on the
+  lookup's own key, which the check cannot yet identify;
+- recursive operators and streaming checksums depend on no route.
+
+A typed query template is checked as the declarative operators it was compiled
+from; one that cannot be expanded must depend on no route. Every program whose
+graphs read a binding source is checked, including one compiled without a
+source name (recursive and frontier policies seeded from claim slots).
+
+A program that breaks a rule is not shared: its binding source is renamed to a
+per-session, per-binding name, so it behaves exactly as a private preparation.
+A program that passes reads a binding source named after its own lowered
+graphs. Equal programs share it, and a program whose graph inlines a session's
+claims reads only its own bindings, never every session's of its signature.
+The check is the safety net; lowering paths that keep routes (closure joins
+key on routes both sides carry, include-deleted policy sources declare their
+routes) are what let a program share.
 
 ### 14.2 Schema → groove
 
@@ -384,7 +427,7 @@ requires source-aware reachable lowering. These staged source gaps must not
 create a second query algebra. `INV-LOWER-11` — prepared lowering rejects `!=`
 parameter predicates until supported.
 
-### 14.5 Sync views & exclusive validation → groove
+### 14.5 Sync views & serializable validation → groove
 
 #### Structured app-output terminal
 
@@ -434,7 +477,7 @@ view update from current query rows is migration/oracle debt governed by ch. 16,
 not an alternate production engine (`INV-LOWER-14`). Whole-table current-row
 views are the normal table-rooted row-set shape, not a separate current-row
 serving engine (`INV-LOWER-15`). Result-set ids stay separate from version
-payloads via per-peer dedup (ch. 8). Exclusive predicate validation compares
+payloads via per-peer dedup (ch. 8). Serializable predicate validation compares
 predicate-output-set terminal facts for the shape+binding at
 `base_snapshot.global_base` against now (degenerate whole-table predicates use
 the global-currency-changed probe) (`INV-LOWER-16`, ch. 3).

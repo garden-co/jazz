@@ -64,7 +64,8 @@ async function readAssetBlob(db: Db, asset: AssetMeta): Promise<Blob> {
   for (let from = 0; from < asset.byteLength; from += ASSET_PAGE_BYTES) {
     const to = Math.min(asset.byteLength, from + ASSET_PAGE_BYTES);
     const page = await db.one(app.assets.where({ id: asset.id }).select({ bytes: { from, to } }), {
-      tier: "local-first-unless-empty",
+      tier: "local-first",
+      firstLoadRemoteWaitMs: 5_000,
     });
     if (!page) throw new Error(`Asset ${asset.id} is not available yet`);
     pages.push(new Uint8Array(page.bytes));

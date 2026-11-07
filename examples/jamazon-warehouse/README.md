@@ -9,11 +9,11 @@ What an operator does in the console:
 - **Dashboard**: orders entered today, pending deliveries and low-stock items for the warehouse,
   plus the next orders to deliver in the selected district. Every number updates live.
 - **New order** (TPC-C "new order"): pick a customer and up to 15 item lines. Checkout is two
-  exclusive transactions (see [Two-phase checkout](#two-phase-checkout)). Each attempt carries a
+  serializable transactions (see [Two-phase checkout](#two-phase-checkout)). Each attempt carries a
   request key, so a retry (or "submit the same request again") returns the first receipt instead
   of taking stock twice.
 - **Pending orders**: the district's delivery queue, oldest first, one bounded page.
-- **Delivery** (TPC-C "delivery"): one exclusive batch delivers the oldest pending order in every
+- **Delivery** (TPC-C "delivery"): one serializable batch delivers the oldest pending order in every
   district.
 - **Payment** (TPC-C "payment"): credit a customer's balance, once per request key.
 - **Order status** (TPC-C "order status"): a customer's recent orders, or one order by number,
@@ -28,8 +28,9 @@ pnpm install
 pnpm --dir examples/jamazon-warehouse dev
 ```
 
-`pnpm dev` starts a local Jazz server through `withJazz` and pushes `schema.ts` and
-`permissions.ts` to it. Open <http://localhost:3000>, create an operator account and choose a
+Jazz runs inside the Next app (`createJazz` in `src/lib/jazz.server.ts`, mounted at `/jazz`) and
+keeps its data in `.jazz/`; its `authenticate` reads the Better Auth session cookie, so the browser
+signs in through the backend with no token of its own. Open <http://localhost:3000>, create an operator account and choose a
 warehouse. Open a second browser (or a private window) and sign up a second operator to watch the
 queue and stock change live in both.
 
@@ -50,13 +51,14 @@ moment. The authority accepts one order; the other checkout re-reads stock and f
 
 Configuration fails closed (`src/lib/config.ts`). A development run on a loopback origin uses
 local defaults, so `pnpm dev` works without setup. A production process (`pnpm build`,
-`pnpm start`) is always a deployment: it refuses to start without `NEXT_PUBLIC_APP_ORIGIN`,
-`BACKEND_SECRET` and `BETTER_AUTH_SECRET`, and never falls back to localhost or the development
-secrets. A deployment also sets `NEXT_PUBLIC_JAZZ_APP_ID` and `NEXT_PUBLIC_JAZZ_SERVER_URL`.
+`pnpm start`) is always a deployment: it refuses to start without `NEXT_PUBLIC_APP_ORIGIN` and
+`BETTER_AUTH_SECRET`, and never falls back to localhost or the development secret. A deployment
+also sets `JAZZ_APP_ID`, and, to keep the data on a sync server such as Jazz Cloud,
+`JAZZ_SERVER_URL` and `JAZZ_ADMIN_SECRET`.
 
 ## Two-phase checkout
 
-`purchase()` in `src/warehouse.ts` runs in two exclusive transactions:
+`purchase()` in `src/warehouse.ts` runs in two serializable transactions:
 
 1. **Reserve.** Stock for every line, the district's order counter, the customer's balance and a
    `draft` order are accepted together or not at all. This is where two operators racing for the

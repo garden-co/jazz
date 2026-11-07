@@ -1,12 +1,11 @@
 import { useState } from "react";
 // #region reading-reactive-hooks-react
-import { useDb, useAll } from "jazz-tools/react";
+import { useAll } from "jazz-tools/react";
 import { app } from "../schema.js";
 
 export function TodoList() {
   // #region read-write-react
-  const db = useDb();
-  const { data: todos = [] } = useAll(app.todos);
+  const { data: todos = [], db } = useAll(app.todos);
   // #endregion reading-reactive-hooks-react
   // #region reading-filtering-react
   const { data: incompleteTodos } = useAll(
@@ -19,7 +18,7 @@ export function TodoList() {
   // #endregion where-subscription-react
 
   // #region reading-tier-react
-  const todosAtGlobalDurability = useAll(app.todos, { tier: "global" });
+  const remoteTodos = useAll(app.todos, { tier: "remote" });
   // #endregion reading-tier-react
 
   // #region reading-loading-state-react

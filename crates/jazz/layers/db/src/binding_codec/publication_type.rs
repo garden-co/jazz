@@ -1,6 +1,6 @@
 //! Frozen native type envelope. Execution field identities are reconstructed
 //! by the compiler, never serialized in a native application's nested schema.
-use groove::records::{EnumSchema, RecordDescriptor, ValueType};
+use crate::records::{EnumSchema, RecordDescriptor, ValueType};
 use serde::{Serialize, Serializer};
 
 pub(super) fn serialize<S: Serializer>(
@@ -107,13 +107,13 @@ pub(super) fn read_descriptor(input: &mut &[u8]) -> Result<RecordDescriptor, Str
     read_fields(input, &mut 1024, 0)
 }
 
-fn take<'a, T: serde::Deserialize<'a>>(input: &mut &'a [u8]) -> Result<T, String> {
+pub(super) fn take<'a, T: serde::Deserialize<'a>>(input: &mut &'a [u8]) -> Result<T, String> {
     let (value, rest) = postcard::take_from_bytes(input).map_err(|error| error.to_string())?;
     *input = rest;
     Ok(value)
 }
 
-fn count(input: &mut &[u8], budget: usize) -> Result<usize, String> {
+pub(super) fn count(input: &mut &[u8], budget: usize) -> Result<usize, String> {
     let count: usize = take(input)?;
     if count > budget || count > input.len() {
         return Err("binding descriptor node limit exceeded".to_owned());
@@ -131,8 +131,8 @@ fn read_fields(
     for _ in 0..count {
         let name: Option<String> = take(input)?;
         let value_type = read_type(input, budget, depth)?;
-        fields.push(groove::records::DescriptorField {
-            identity: name.clone().map(groove::records::FieldIdentity::Name),
+        fields.push(crate::records::DescriptorField {
+            identity: name.clone().map(crate::records::FieldIdentity::Name),
             name,
             value_type,
         });
@@ -140,7 +140,11 @@ fn read_fields(
     Ok(RecordDescriptor::new_with_fields(fields))
 }
 
-fn read_type(input: &mut &[u8], budget: &mut usize, depth: usize) -> Result<ValueType, String> {
+pub(super) fn read_type(
+    input: &mut &[u8],
+    budget: &mut usize,
+    depth: usize,
+) -> Result<ValueType, String> {
     if *budget == 0 || depth >= 128 {
         return Err("binding descriptor node or depth limit exceeded".to_owned());
     }
@@ -176,7 +180,7 @@ fn read_type(input: &mut &[u8], budget: &mut usize, depth: usize) -> Result<Valu
                     .ok_or("binding descriptor node limit exceeded")?;
                 let name: String = take(input)?;
                 let payload = read_fields(input, budget, depth + 1)?;
-                cases.push(groove::records::EnumCase::new(name, payload));
+                cases.push(crate::records::EnumCase::new(name, payload));
             }
             ValueType::Enum(Box::new(
                 EnumSchema::new(name, cases)

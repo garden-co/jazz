@@ -26,13 +26,20 @@ Or follow one of the setup guides:
 
 ## Architecture specs
 
-The authoritative architecture contracts live with the crates: [`crates/jazz/SPEC/`](crates/jazz/SPEC/) (data model, transactions, authorization, sync, queries, lowering, API) and [`crates/groove/SPEC/`](crates/groove/SPEC/) (storage model, operators, incremental maintenance). Each chapter is structured as Overview (read this) / Details / Open Questions.
+The authoritative architecture contracts live with the crates: [`crates/jazz/SPEC/`](crates/jazz/SPEC/) (data model, transactions, authorization, sync, queries, storage, API). Each chapter is structured as Overview (read this) / Details / Open Questions.
 
 ## Prerequisites
 
-- [wasm-pack](https://rustwasm.github.io/wasm-pack/installer/) — install via `cargo install wasm-pack` or `curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh`
-- [Node.js](https://nodejs.org/) (LTS)
-- [pnpm](https://pnpm.io/) 10+
+- [Node.js](https://nodejs.org/) (LTS) and [pnpm](https://pnpm.io/) 10+
+- [Rust via rustup](https://rustup.rs/). The repository pins its toolchain in
+  `rust-toolchain.toml`.
+- [wasm-pack](https://rustwasm.github.io/wasm-pack/) 0.13.1, which the WASM build
+  (`jazz-wasm`, and so `jazz-tools`) shells out to. It is not installed by
+  `pnpm install`. `pnpm run ensure:rust-toolchain` installs it, or run
+  `cargo install wasm-pack@0.13.1 --locked` yourself.
+- A C compiler, because native builds compile the bundled SQLite from source
+  (`xcode-select --install` on macOS, `build-essential` on Linux). WASM builds on
+  macOS also need LLVM's archiver (`brew install llvm`).
 
 ## Getting started
 
@@ -49,6 +56,15 @@ matching TypeScript expectations before building consumers. Source-only checks,
 including React Native scaffold compilation, use declaration-only contracts;
 running Node/WASM consumers still requires the generated artifacts.
 
+### Building only jazz-tools
+
+`pnpm --filter jazz-tools build:runtime` works from a fresh checkout on any
+supported host (Linux x64 and arm64, macOS). When the `jazz-wasm` package, the
+host's `jazz-napi` binding or their fingerprints are missing, it builds them
+(release profile) and stages the fingerprints before compiling. Inputs that are
+already present are reused. In CI (`CI` set) it fails instead, because
+workflows produce or download every native artifact explicitly.
+
 `pnpm run ensure:rust-toolchain` adds the `wasm32-unknown-unknown` Rust target
 and installs `wasm-pack` if it is missing. It requires an existing Rust/rustup
 installation. React Native build dependencies have a separate bootstrap script:
@@ -58,7 +74,7 @@ The homepage and documentation are a self-contained Next.js application under
 `docs/`. Build them with `pnpm build:vercel-docs`; they do not need a Rust or
 React Native bootstrap.
 
-Server builds compile RocksDB from source on first build (cached afterwards by `sccache`); this requires a C/C++ toolchain and `libclang` (`xcode-select --install` on macOS; `libclang-dev`/`clang-devel` on Linux).
+Native builds compile the bundled SQLite from source on first build (cached afterwards by `sccache`).
 
 ## Package versioning
 
@@ -102,11 +118,10 @@ preparing changesets and let versioning record consumed entries.
 The release workflow dispatches
 [Release preview (alpha)](.github/workflows/preview-jazz-tools-alpha-release.yml)
 on the generated release branch. Before merging the release PR, verify its
-versions and release notes, and require a successful preview on that exact head,
-the separate [Starters E2E](.github/workflows/starters-e2e.yml) matrix, and the
-required correctness and React Native device-acceptance receipts. The preview
+versions and release notes, and require a successful preview on that exact head
+and the required correctness and React Native device-acceptance receipts. The preview
 builds and verifies packed native/React Native artifacts and their consumers.
-If a preview or starter run is missing, dispatch its workflow on
+If a preview run is missing, dispatch its workflow on
 `changeset-release/main`.
 
 Merging the versioned release PR triggers the

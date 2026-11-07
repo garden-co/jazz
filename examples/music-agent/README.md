@@ -11,6 +11,8 @@ The family is split by concern:
 
 - `apps/nextjs/` is the full app: Next.js, Better Auth and the Astryx chat
   components with the Jazz theme.
+- `apps/ts-hono/` is the same app without a UI framework: plain TypeScript and
+  DOM in the browser, with Jazz, Better Auth and the agent in a Hono server.
 - `apps/ts-localfirst/` is a small headless TypeScript library with the same
   transcript shape and a provider-free agent, tested against a real Jazz
   runtime.
@@ -24,8 +26,14 @@ The family is split by concern:
 pnpm install
 pnpm build:ci            # builds the Jazz runtime and jazz-tools once
 cd examples/music-agent/apps/nextjs
-pnpm dev                 # starts Next.js and a local Jazz server
+pnpm dev                 # starts Next.js, with Jazz running inside it
 ```
+
+Jazz runs inside the Next app (`createJazz` in `src/lib/backend-jazz-client.ts`),
+mounted under `/jazz`. Its `authenticate` reads the Better Auth session cookie:
+there are no JWTs or token routes. Data lives in the git-ignored `.jazz/`
+directory; set `JAZZ_SERVER_URL` and `JAZZ_ADMIN_SECRET` to
+sync through Jazz Cloud or your own sync server with `remote()` instead.
 
 Open <http://127.0.0.1:3000>, create an account and the first conversation
 seeds itself: a request with an attached rough mix, answered live by the agent.
@@ -53,11 +61,11 @@ the turn's row, like every other open client.
 
 **Streaming is a lease write.** The runner (`src/agent/runner.ts`) collects
 tokens while its previous write is in flight and writes each batch in an
-exclusive transaction that first checks the turn is still `streaming` under
+serializable transaction that first checks the turn is still `streaming` under
 this runner's lease:
 
 ```ts
-const write = await db.exclusiveTransaction(async (tx) => {
+const write = await db.serializableTransaction(async (tx) => {
   const turn = await tx.one(app.turns.where({ id: turnId }));
   if (turn?.runnerId !== lease.id || turn.status !== "streaming") return false;
   const end = turn.body.length;
@@ -86,7 +94,7 @@ kind of lease transaction), so they show up in `ChatToolCalls` while they run.
 **Durable execution.** The server writes with backend authority; permissions
 let a client write only its own user turns and attachments, never an agent
 reply. Queueing a reply and moving the conversation's head to it happen in one
-exclusive transaction. A runner claims the turn with a lease id of its own
+serializable transaction. A runner claims the turn with a lease id of its own
 (`runnerId`). Everything it writes afterwards (body batches, tool calls, a
 heartbeat every 3 seconds when nothing else was written, and the final
 status) goes through that lease transaction, one at a time. Each commits only
@@ -97,7 +105,7 @@ runner that was taken over can't land a late write.
 `instrumentation.ts` checks the provider and starts a sweeper when the server
 boots: a `streaming` turn whose heartbeat is older than 15 seconds lost its
 process, and a `queued` turn that no runner claimed within 15 seconds never
-started; both are marked `interrupted` (in an exclusive transaction, so two
+started; both are marked `interrupted` (in a serializable transaction, so two
 servers never disagree). The conversation then offers **Resume**, which claims
 the turn again and continues in place, or **Regenerate**. The scripted agent is
 deterministic, so resuming replays it and skips what was already written; Claude

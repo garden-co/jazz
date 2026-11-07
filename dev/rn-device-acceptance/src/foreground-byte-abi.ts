@@ -133,17 +133,19 @@ export function proveForegroundWriteAbi(
   factory: NativeForegroundRuntimeFactory,
   capability: Uint8Array,
   codec: ForegroundByteCodec,
+  markFailure: (code: DeviceDiagnosticCode) => void = () => {},
 ): void {
   const foreground = factory.openAttached(capability);
   const execute = (command: NativeForegroundCommand): NativeForegroundResponse =>
     codec.decode(foreground.execute(codec.encode(command)));
-  const requireTransaction = (kind: "mergeable" | "exclusive") => {
+  const requireTransaction = (kind: "mergeable" | "serializable") => {
     const response = execute({ type: "beginTransaction", kind });
     if (response.type !== "transactionOpened")
       throw new Error(`${kind} foreground transaction did not open`);
     return response.transaction;
   };
   const rowId = Uint8Array.from({ length: 16 }, () => 0x71);
+  markFailure("foreground-write-insert-failed");
   const mergeable = requireTransaction("mergeable");
   const inserted = execute({
     type: "insert",
@@ -154,6 +156,7 @@ export function proveForegroundWriteAbi(
   });
   if (inserted.type !== "inserted" || !sameBytes(inserted.rowId, rowId))
     throw new Error("foreground Insert did not return its supplied row id");
+  markFailure("foreground-write-mutation-failed");
   for (const command of [
     { type: "update" as const, patch: fixtureCells("updated") },
     { type: "upsert" as const, cells: fixtureCells("upserted") },
@@ -168,6 +171,7 @@ export function proveForegroundWriteAbi(
     if (response.type !== "mutationStaged")
       throw new Error(`foreground ${command.type} was not staged`);
   }
+  markFailure("foreground-write-commit-failed");
   const committed = execute({
     type: "commitTransaction",
     transaction: mergeable,
@@ -178,14 +182,24 @@ export function proveForegroundWriteAbi(
     committed.txId.every((byte) => byte === 0)
   )
     throw new Error("foreground Commit did not return a non-zero public txId");
+  markFailure("foreground-write-retire-failed");
+  // A committed handle is retired: committing it again is refused, and a
+  // rollback is the relay's idempotent no-op, reporting nothing rolled back.
+  const recommitted = execute({
+    type: "commitTransaction",
+    transaction: mergeable,
+  });
+  if (recommitted.type !== "operationError")
+    throw new Error("foreground committed a terminal transaction handle twice");
   const retired = execute({
     type: "rollbackTransaction",
     transaction: mergeable,
   });
-  if (retired.type !== "operationError")
-    throw new Error("foreground accepted a terminal transaction handle");
+  if (retired.type !== "transactionRolledBack" || retired.rolledBack)
+    throw new Error("foreground rolled back a terminal transaction handle");
 
-  const exclusive = requireTransaction("exclusive");
+  markFailure("foreground-write-rollback-failed");
+  const exclusive = requireTransaction("serializable");
   const rollbackRowId = Uint8Array.from({ length: 16 }, () => 0x72);
   const rollbackInsert = execute({
     type: "insert",
@@ -203,6 +217,7 @@ export function proveForegroundWriteAbi(
   if (rolledBack.type !== "transactionRolledBack" || !rolledBack.rolledBack)
     throw new Error("exclusive foreground transaction did not roll back");
 
+  markFailure("foreground-write-alias-failed");
   // Handles are local to their foreground alias. A sibling cannot commit an
   // otherwise well-formed handle from this terminal transaction.
   const sibling = factory.openAttached(capability);
@@ -366,7 +381,7 @@ export async function proveSameJsiRuntimeWriteSubscription(
           nativeSubscriptionDeltaHasFieldBytes(
             event.delta,
             "title",
-            Uint8Array.from([2, ...new TextEncoder().encode("subscription from foreground A")]),
+            Uint8Array.from([0, ...new TextEncoder().encode("subscription from foreground A")]),
           ),
         )
       ) {
@@ -767,15 +782,15 @@ function fixtureCells(
 ): Uint8Array {
   const bytes = {
     mergeable: [
-      1, 1, 5, 116, 105, 116, 108, 101, 8, 10, 2, 109, 101, 114, 103, 101, 97, 98, 108, 101,
+      1, 1, 5, 116, 105, 116, 108, 101, 8, 10, 0, 109, 101, 114, 103, 101, 97, 98, 108, 101,
     ],
-    updated: [1, 1, 5, 116, 105, 116, 108, 101, 8, 8, 2, 117, 112, 100, 97, 116, 101, 100],
-    upserted: [1, 1, 5, 116, 105, 116, 108, 101, 8, 9, 2, 117, 112, 115, 101, 114, 116, 101, 100],
+    updated: [1, 1, 5, 116, 105, 116, 108, 101, 8, 8, 0, 117, 112, 100, 97, 116, 101, 100],
+    upserted: [1, 1, 5, 116, 105, 116, 108, 101, 8, 9, 0, 117, 112, 115, 101, 114, 116, 101, 100],
     "rolled back": [
-      1, 1, 5, 116, 105, 116, 108, 101, 8, 12, 2, 114, 111, 108, 108, 101, 100, 32, 98, 97, 99, 107,
+      1, 1, 5, 116, 105, 116, 108, 101, 8, 12, 0, 114, 111, 108, 108, 101, 100, 32, 98, 97, 99, 107,
     ],
     "subscription from foreground A": [
-      1, 1, 5, 116, 105, 116, 108, 101, 8, 30, 2, 102, 111, 114, 101, 103, 114, 111, 117, 110, 100,
+      1, 1, 5, 116, 105, 116, 108, 101, 8, 30, 0, 102, 111, 114, 101, 103, 114, 111, 117, 110, 100,
       45, 97, 45, 115, 117, 98, 115, 99, 114, 105, 112, 116, 105, 111, 110, 45, 114, 111, 119,
     ],
   } as const;

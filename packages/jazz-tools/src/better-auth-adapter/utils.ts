@@ -259,28 +259,3 @@ export function isWhereBySingleField<T extends string>(
 
   return isStringEqWhereByField(field, cond);
 }
-
-export function containWhereByField<T extends string>(
-  field: T,
-  where: CleanedWhere[] | undefined,
-): boolean {
-  if (where === undefined) {
-    return false;
-  }
-
-  return where.some((cond) => isWhereByField(field, cond));
-}
-
-export function extractWhereByField<T extends string>(
-  field: T,
-  where: CleanedWhere[] | undefined,
-): [CleanedWhere | undefined, CleanedWhere[]] {
-  if (where === undefined) {
-    return [undefined, []];
-  }
-
-  return [
-    where.find((cond) => isWhereByField(field, cond)),
-    where.filter((cond) => !isWhereByField(field, cond)),
-  ];
-}

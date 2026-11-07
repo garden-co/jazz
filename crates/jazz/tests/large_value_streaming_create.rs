@@ -1,45 +1,66 @@
+//! Streamed creates, updates and upserts of large values: resumable
+//! uploads, the staging policy's ingress limit and lease expiry, and the
+//! cleanup every failure path owes.
+
 use std::collections::BTreeMap;
 use std::io::{Cursor, Read};
 
-mod common;
+use crate::common;
 
 use common::{allow_all_policies, compile_schema};
-use jazz::db::{Db, DbConfig, DbIdentity, StreamingMutationKind};
-use jazz::groove::large_values::{INLINE_VALUE_MAX_BYTES, LEAF_MAX_BYTES};
-use jazz::groove::records::Value;
-use jazz::groove::storage::TestStorage;
+use jazz::db::{
+    Db, DbConfig, DbIdentity, LargeValueStagingPolicy, ReadOpts, StreamingMutationKind,
+};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::node::LargeValueStagingPolicy;
-use jazz::schema::JazzSchema;
-use jazz::tools::{ColumnDescriptor, ColumnType, RowDescriptor, Schema, TableName, TableSchema};
+use jazz::large_values::{INLINE_VALUE_MAX_BYTES, LEAF_MAX_BYTES};
+use jazz::query::Query;
+use jazz::records::Value;
+use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 
-fn schema() -> JazzSchema {
-    let columns = RowDescriptor::new(vec![
-        ColumnDescriptor::new("title", ColumnType::Text),
-        ColumnDescriptor::new("payload", ColumnType::Json { schema: None }),
-        ColumnDescriptor::new("done", ColumnType::Boolean),
-    ]);
-    compile_schema(&Schema::from([(
-        TableName::new("todos"),
-        TableSchema::with_policies(columns, allow_all_policies()),
-    )]))
-}
-
 fn open_db() -> Db {
-    let schema = schema();
-    let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    jazz::block_on(Db::open(DbConfig {
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    // Nullable, so each test may stream either one alone.
+                    .nullable_column("title", ColumnType::Text)
+                    .nullable_column("payload", ColumnType::Json { schema: None })
+                    .column("done", ColumnType::Boolean)
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    );
+    jazz::block_on(Db::open(DbConfig::new(
         schema,
-        storage: TestStorage::new(&refs),
-        identity: DbIdentity {
+        DbIdentity {
             node: NodeUuid::from_bytes([0x91; 16]),
             author: AuthorSubject::for_test_bytes([0xa1; 16]),
         },
-        id_source: None,
-    }))
+    )))
     .expect("open db")
+}
+
+/// Every row of `todos`, as (column -> value) maps, nullable cells unwrapped.
+fn rows(db: &Db) -> Vec<BTreeMap<String, Value>> {
+    let query = db
+        .prepare_query(&Query::from("todos"))
+        .expect("prepare query");
+    jazz::block_on(db.all(&query, ReadOpts::default()))
+        .expect("read rows")
+        .iter()
+        .map(|row| {
+            row.cells()
+                .filter_map(|(name, value)| {
+                    let value = match value.cloned()? {
+                        Value::Nullable(Some(value)) => *value,
+                        value => value,
+                    };
+                    Some((name.to_owned(), value))
+                })
+                .collect()
+        })
+        .collect()
 }
 
 struct NarrowReader {
@@ -86,12 +107,10 @@ fn streaming_create_publishes_one_ordinary_logical_row() {
     .expect("streaming insert");
     jazz::block_on(write.wait(DurabilityTier::Local)).expect("local durability");
 
-    let table = schema().tables()[0].clone();
-    let query = db.prepare_query(&db.table("todos")).expect("prepare query");
-    let rows = db.read(&query).expect("read row");
+    let rows = rows(&db);
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].cell(&table, "title"), Some(Value::String(text)));
-    assert_eq!(rows[0].cell(&table, "done"), Some(Value::Bool(false)));
+    assert_eq!(rows[0].get("title").cloned(), Some(Value::String(text)));
+    assert_eq!(rows[0].get("done").cloned(), Some(Value::Bool(false)));
 }
 
 #[test]
@@ -107,10 +126,8 @@ fn streaming_create_derives_json_kind_from_the_column_schema() {
     .expect("the JSON column, not a caller ABI argument, determines staging kind");
     jazz::block_on(write.wait(DurabilityTier::Local)).expect("local durability");
 
-    let table = schema().tables()[0].clone();
-    let query = db.prepare_query(&db.table("todos")).expect("prepare query");
-    let rows = db.read(&query).expect("read row");
-    assert_eq!(rows[0].cell(&table, "payload"), Some(Value::String(json)));
+    let rows = rows(&db);
+    assert_eq!(rows[0].get("payload").cloned(), Some(Value::String(json)));
 }
 
 #[test]
@@ -130,8 +147,7 @@ fn streaming_create_validation_failure_publishes_no_row() {
     ));
     assert!(result.is_err());
 
-    let query = db.prepare_query(&db.table("todos")).expect("prepare query");
-    assert!(db.read(&query).expect("read rows").is_empty());
+    assert!(rows(&db).is_empty());
     db.set_large_value_staging_policy(LargeValueStagingPolicy {
         incoming_bytes_per_window: u64::MAX,
         window_ms: 60_000,
@@ -184,15 +200,13 @@ fn streaming_update_and_upsert_publish_ordinary_logical_rows() {
     ))
     .expect("streaming upsert");
 
-    let table = schema().tables()[0].clone();
-    let query = db.prepare_query(&db.table("todos")).expect("prepare query");
-    let rows = db.read(&query).expect("read row");
+    let rows = rows(&db);
     assert_eq!(rows.len(), 1);
     assert_eq!(
-        rows[0].cell(&table, "title"),
+        rows[0].get("title").cloned(),
         Some(Value::String("upserted".to_owned()))
     );
-    assert_eq!(rows[0].cell(&table, "done"), Some(Value::Bool(true)));
+    assert_eq!(rows[0].get("done").cloned(), Some(Value::Bool(true)));
 }
 
 #[test]
@@ -272,8 +286,7 @@ fn push_streaming_stops_at_the_ingress_limit_and_closes_the_upload() {
         .expect_err("a rejected upload cannot resume after its emitted batch was discarded");
     assert!(closed.to_string().contains("closed"));
 
-    let query = db.prepare_query(&db.table("todos")).expect("prepare query");
-    assert!(db.read(&query).expect("read rows").is_empty());
+    assert!(rows(&db).is_empty());
 }
 
 /// Two local streams establish pending journals, maintenance expires them,
@@ -335,8 +348,7 @@ fn maintenance_evicted_local_stream_handles_cannot_recreate_pending_uploads() {
         0,
         "stale operations must not recreate pending journals"
     );
-    let query = db.prepare_query(&db.table("todos")).expect("prepare query");
-    assert!(db.read(&query).expect("read rows").is_empty());
+    assert!(rows(&db).is_empty());
 }
 
 #[test]
@@ -367,8 +379,7 @@ fn native_reader_streaming_uses_the_managed_ingress_and_cleanup_path() {
         0,
         "a rejected native upload leaves no second-path pending claim"
     );
-    let query = db.prepare_query(&db.table("todos")).expect("prepare query");
-    assert!(db.read(&query).expect("read rows").is_empty());
+    assert!(rows(&db).is_empty());
 }
 
 #[test]

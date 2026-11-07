@@ -1,7 +1,12 @@
 import { createInspectorAdminClient } from "jazz-tools/_dev/inspector-client";
 import { BrowserRouter } from "react-router";
 import { JazzClientProvider } from "jazz-tools/react";
-import { fetchSchemaHashes, fetchStoredPermissions, fetchStoredWasmSchema } from "jazz-tools";
+import {
+  fetchPublishedBundles,
+  fetchSchemaHashes,
+  fetchStoredWasmSchema,
+  type PublishedBundle,
+} from "jazz-tools";
 import { useEffect, useRef, useState } from "react";
 import { StandaloneProvider } from "./contexts/standalone-context.js";
 import { DevtoolsProvider } from "./contexts/devtools-context.js";
@@ -131,9 +136,7 @@ export default function App() {
   const [availableSchemaHashes, setAvailableSchemaHashes] = useState<SchemaHashInfo[]>([]);
   const [client, setClient] = useState<InspectorAdminClient | null>(null);
   const [wasmSchema, setWasmSchema] = useState<import("jazz-tools").WasmSchema | null>(null);
-  const [storedPermissions, setStoredPermissions] = useState<Awaited<
-    ReturnType<typeof fetchStoredPermissions>
-  > | null>(null);
+  const [bundle, setBundle] = useState<PublishedBundle | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isSwitchingSchema, setIsSwitchingSchema] = useState(false);
 
@@ -161,7 +164,7 @@ export default function App() {
       return null;
     });
     setWasmSchema(null);
-    setStoredPermissions(null);
+    setBundle(null);
   };
 
   const updateConnectionStore = (nextStore: StoredConnections) => {
@@ -319,7 +322,7 @@ export default function App() {
           () => undefined,
         );
 
-        const [resolvedClient, { schema }, schemaHashesResult, permissions] = await Promise.all([
+        const [resolvedClient, { schema }, schemaHashesResult, bundles] = await Promise.all([
           clientPromise,
           fetchStoredWasmSchema(activeConnection.serverUrl, {
             appId: activeConnection.appId,
@@ -330,10 +333,10 @@ export default function App() {
             appId: activeConnection.appId,
             adminSecret: activeAdminSecret,
           }) as Promise<SchemaHashesResult>,
-          fetchStoredPermissions(activeConnection.serverUrl, {
+          fetchPublishedBundles(activeConnection.serverUrl, {
             appId: activeConnection.appId,
             adminSecret: activeAdminSecret,
-          }).catch(() => null),
+          }),
         ]);
 
         if (!active) {
@@ -350,7 +353,11 @@ export default function App() {
           return resolvedClient;
         });
         setWasmSchema(schema);
-        setStoredPermissions(permissions);
+        setBundle(
+          bundles
+            .filter((candidate) => candidate.schemaHash === activeConnection.schemaHash)
+            .at(-1) ?? null,
+        );
         setAvailableSchemaHashes(
           normalizeSchemaHashInfos(schemaHashesResult.hashes, schemaHashesResult.schemas),
         );
@@ -461,11 +468,7 @@ export default function App() {
 
   return (
     <JazzClientProvider client={client}>
-      <DevtoolsProvider
-        wasmSchema={wasmSchema}
-        storedPermissions={storedPermissions}
-        runtime="standalone"
-      >
+      <DevtoolsProvider wasmSchema={wasmSchema} bundle={bundle} runtime="standalone">
         <StandaloneProvider
           onManageConnections={handleManageConnections}
           schemaHashes={availableSchemaHashes}

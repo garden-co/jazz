@@ -33,7 +33,7 @@ export function startFulfilmentWorker(db: Db, packingMs = PACKING_MS): () => voi
         console.error("[jamazon] fulfilment subscription failed", error);
       },
     },
-    { tier: "global" },
+    { tier: "remote" },
   );
   return () => {
     unsubscribe();

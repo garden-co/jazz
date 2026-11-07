@@ -9,7 +9,7 @@ import {
   type RowOf,
 } from "../../src/index.js";
 import { deploy } from "../../src/dev/catalogue.js";
-import { createJazzClient } from "../../src/web/create-jazz-client.js";
+import { openJazzClient } from "../../src/web/create-jazz-client.js";
 import { createInspectorLocalQueryOptions as inspectorLocalQueryOptions } from "../../src/internal/inspector-query.js";
 import { getSubscriptionStore } from "../../src/subscription-store-internal.js";
 import {
@@ -21,110 +21,119 @@ import {
   waitForQuery,
   withTimeout,
 } from "./support.js";
-import { getJazzServerInfo, getJazzServerJwtForUser } from "./testing-server.js";
+import {
+  getJazzServerInfo,
+  jazzAppUser,
+  startJazzApp,
+  type JazzServerInfo,
+} from "./testing-server.js";
 
-const app = schema.defineApp({
-  chats: schema.table(
-    {
-      title: schema.string(),
-      visibility: schema.string(),
-      owner_id: schema.uuid(),
-    },
-    {
-      chat_membersViaChat: schema.reverse("chat_members", "chat"),
-      messagesViaChat: schema.reverse("messages", "chat"),
-    },
-  ),
-  chat_members: schema.table(
-    {
-      chat_id: schema.uuid(),
-      user_id: schema.uuid(),
-    },
-    { chat: schema.rel("chats", "chat_id") },
-  ),
-  messages: schema.table(
-    {
-      chat_id: schema.uuid(),
-      body: schema.string(),
-      author_id: schema.uuid(),
-      owner_id: schema.uuid(),
-    },
-    { chat: schema.rel("chats", "chat_id") },
-  ),
-  announcements: schema.table(
-    {
-      title: schema.string(),
-    },
-    {},
-  ),
-});
+const app = schema.defineApp(
+  {
+    chats: schema.table(
+      {
+        title: schema.string(),
+        visibility: schema.string(),
+        owner_id: schema.uuid(),
+      },
+      {
+        chat_membersViaChat: schema.reverse("chat_members", "chat"),
+        messagesViaChat: schema.reverse("messages", "chat"),
+      },
+    ),
+    chat_members: schema.table(
+      {
+        chat_id: schema.uuid(),
+        user_id: schema.uuid(),
+      },
+      { chat: schema.rel("chats", "chat_id") },
+    ),
+    messages: schema.table(
+      {
+        chat_id: schema.uuid(),
+        body: schema.string(),
+        author_id: schema.uuid(),
+        owner_id: schema.uuid(),
+      },
+      { chat: schema.rel("chats", "chat_id") },
+    ),
+    announcements: schema.table(
+      {
+        title: schema.string(),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+);
 
-const camelChatApp = schema.defineApp({
-  chats: schema.table(
-    {
-      name: schema.string().optional(),
-      isPublic: schema.boolean(),
-      createdBy: schema.string(),
-      joinCode: schema.string().optional(),
-    },
-    {
-      chatMembersViaChat: schema.reverse("chatMembers", "chat"),
-      messagesViaChat: schema.reverse("messages", "chat"),
-    },
-  ),
-  profiles: schema.table(
-    {
-      userId: schema.string(),
-      name: schema.string(),
-      avatar: schema.string().optional(),
-    },
-    { messagesViaSender: schema.reverse("messages", "sender") },
-  ),
-  chatMembers: schema.table(
-    {
-      chatId: schema.uuid(),
-      userId: schema.string(),
-      joinCode: schema.string().optional(),
-    },
-    { chat: schema.rel("chats", "chatId") },
-  ),
-  messages: schema.table(
-    {
-      chatId: schema.uuid(),
-      senderId: schema.uuid(),
-      text: schema.string(),
-      createdAt: schema.timestamp(),
-    },
-    {
-      chat: schema.rel("chats", "chatId"),
-      sender: schema.rel("profiles", "senderId"),
-      reactionsViaMessage: schema.reverse("reactions", "message"),
-    },
-  ),
-  reactions: schema.table(
-    {
-      messageId: schema.uuid(),
-      userId: schema.string(),
-      emoji: schema.string(),
-    },
-    { message: schema.rel("messages", "messageId") },
-  ),
-});
+const camelChatApp = schema.defineApp(
+  {
+    chats: schema.table(
+      {
+        name: schema.string().optional(),
+        isPublic: schema.boolean(),
+        createdBy: schema.string(),
+        joinCode: schema.string().optional(),
+      },
+      {
+        chatMembersViaChat: schema.reverse("chatMembers", "chat"),
+        messagesViaChat: schema.reverse("messages", "chat"),
+      },
+    ),
+    profiles: schema.table(
+      {
+        userId: schema.string(),
+        name: schema.string(),
+        avatar: schema.string().optional(),
+      },
+      { messagesViaSender: schema.reverse("messages", "sender") },
+    ),
+    chatMembers: schema.table(
+      {
+        chatId: schema.uuid(),
+        userId: schema.string(),
+        joinCode: schema.string().optional(),
+      },
+      { chat: schema.rel("chats", "chatId") },
+    ),
+    messages: schema.table(
+      {
+        chatId: schema.uuid(),
+        senderId: schema.uuid(),
+        text: schema.string(),
+        createdAt: schema.timestamp(),
+      },
+      {
+        chat: schema.rel("chats", "chatId"),
+        sender: schema.rel("profiles", "senderId"),
+        reactionsViaMessage: schema.reverse("reactions", "message"),
+      },
+    ),
+    reactions: schema.table(
+      {
+        messageId: schema.uuid(),
+        userId: schema.string(),
+        emoji: schema.string(),
+      },
+      { message: schema.rel("messages", "messageId") },
+    ),
+  },
+  { migrations: "none" },
+);
 
 const permissions = schema.definePermissions(app, ({ policy, anyOf, session }) => [
-  policy.chats.allowRead.where(
-    anyOf([{ visibility: "public" }, { owner_id: session.user.account }]),
-  ),
+  policy.chats.allowRead.where(anyOf([{ visibility: "public" }, { owner_id: session.user }])),
   policy.chats.allowInsert.always(),
   policy.chats.allowUpdate.always(),
   policy.chats.allowDelete.always(),
 
-  policy.chat_members.allowRead.where({ user_id: session.user.account }),
+  policy.chat_members.allowRead.where({ user_id: session.user }),
   policy.chat_members.allowInsert.always(),
   policy.chat_members.allowUpdate.always(),
   policy.chat_members.allowDelete.always(),
 
-  policy.messages.allowRead.where({ owner_id: session.user.account }),
+  policy.messages.allowRead.where({ owner_id: session.user }),
   policy.messages.allowInsert.always(),
   policy.messages.allowUpdate.always(),
   policy.messages.allowDelete.always(),
@@ -141,7 +150,7 @@ const chatStyleMessagePermissions = schema.definePermissions(app, ({ policy, any
       { visibility: "public" },
       policy.chat_members.exists.where({
         chat_id: chat.id,
-        user_id: session.user.account,
+        user_id: session.user,
       }),
     ]),
   ),
@@ -149,10 +158,10 @@ const chatStyleMessagePermissions = schema.definePermissions(app, ({ policy, any
   policy.chats.allowUpdate.always(),
   policy.chats.allowDelete.always(),
 
-  policy.chat_members.allowRead.where({ user_id: session.user.account }),
-  policy.chat_members.allowInsert.where({ user_id: session.user.account }),
+  policy.chat_members.allowRead.where({ user_id: session.user }),
+  policy.chat_members.allowInsert.where({ user_id: session.user }),
   policy.chat_members.allowUpdate.always(),
-  policy.chat_members.allowDelete.where({ user_id: session.user.account }),
+  policy.chat_members.allowDelete.where({ user_id: session.user }),
 
   policy.messages.allowRead.where((message) =>
     anyOf([
@@ -162,14 +171,14 @@ const chatStyleMessagePermissions = schema.definePermissions(app, ({ policy, any
       }),
       policy.chat_members.exists.where({
         chat_id: message.chat_id,
-        user_id: session.user.account,
+        user_id: session.user,
       }),
     ]),
   ),
   policy.messages.allowInsert.where((message) =>
     policy.chat_members.exists.where({
       chat_id: message.chat_id,
-      user_id: session.user.account,
+      user_id: session.user,
     }),
   ),
   policy.messages.allowUpdate.always(),
@@ -185,79 +194,82 @@ const camelChatStyleMessagePermissions = schema.definePermissions(
   camelChatApp,
   ({ policy, anyOf, allowedTo, session }) => [
     policy.profiles.allowRead.where({}),
-    policy.profiles.allowInsert.where({ userId: session.user.identity.subject }),
-    policy.profiles.allowUpdate.where({ userId: session.user.identity.subject }),
+    policy.profiles.allowInsert.where({ userId: session.identity.subject }),
+    policy.profiles.allowUpdate.where({ userId: session.identity.subject }),
 
     policy.chats.allowRead.where((chat) =>
       anyOf([
         { isPublic: true },
         policy.chatMembers.exists.where({
           chatId: chat.id,
-          userId: session.user.identity.subject,
+          userId: session.identity.subject,
         }),
         { joinCode: session.claims["join_code"] },
       ]),
     ),
-    policy.chats.allowInsert.where({ createdBy: session.user.identity.subject }),
-    policy.chats.allowUpdate.where({ createdBy: session.user.identity.subject }),
-    policy.chats.allowDelete.where({ createdBy: session.user.identity.subject }),
+    policy.chats.allowInsert.where({ createdBy: session.identity.subject }),
+    policy.chats.allowUpdate.where({ createdBy: session.identity.subject }),
+    policy.chats.allowDelete.where({ createdBy: session.identity.subject }),
 
     policy.chatMembers.allowRead.where((member) =>
       anyOf([
-        { userId: session.user.identity.subject },
+        { userId: session.identity.subject },
         policy.chatMembers.exists.where({
           chatId: member.chatId,
-          userId: session.user.identity.subject,
+          userId: session.identity.subject,
         }),
       ]),
     ),
-    policy.chatMembers.allowInsert.where({ userId: session.user.identity.subject }),
+    policy.chatMembers.allowInsert.where({ userId: session.identity.subject }),
     policy.chatMembers.allowUpdate.always(),
-    policy.chatMembers.allowDelete.where({ userId: session.user.identity.subject }),
+    policy.chatMembers.allowDelete.where({ userId: session.identity.subject }),
 
     policy.messages.allowRead.where((message) =>
       anyOf([
         policy.chats.exists.where({ id: message.chatId, isPublic: true }),
         policy.chatMembers.exists.where({
           chatId: message.chatId,
-          userId: session.user.identity.subject,
+          userId: session.identity.subject,
         }),
       ]),
     ),
     policy.messages.allowInsert.where((message) =>
       policy.chatMembers.exists.where({
         chatId: message.chatId,
-        userId: session.user.identity.subject,
+        userId: session.identity.subject,
       }),
     ),
     policy.messages.allowDelete.where((message) =>
       policy.profiles.exists.where({
         id: message.senderId,
-        userId: session.user.identity.subject,
+        userId: session.identity.subject,
       }),
     ),
 
     policy.reactions.allowRead.where(allowedTo.read("message")),
-    policy.reactions.allowInsert.where({ userId: session.user.identity.subject }),
-    policy.reactions.allowDelete.where({ userId: session.user.identity.subject }),
+    policy.reactions.allowInsert.where({ userId: session.identity.subject }),
+    policy.reactions.allowDelete.where({ userId: session.identity.subject }),
   ],
 );
 
-const createdByApp = schema.defineApp({
-  todos: schema.table(
-    {
-      title: schema.string(),
-      done: schema.boolean(),
-    },
-    {},
-  ),
-});
+const createdByApp = schema.defineApp(
+  {
+    todos: schema.table(
+      {
+        title: schema.string(),
+        done: schema.boolean(),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+);
 
 const createdByPermissions = schema.definePermissions(createdByApp, ({ policy, session }) => {
-  policy.todos.allowRead.where({ "$createdBy.account": session.user.account });
+  policy.todos.allowRead.where({ "$createdBy.account": session.user });
   policy.todos.allowInsert.always();
-  policy.todos.allowUpdate.where({ "$createdBy.account": session.user.account });
-  policy.todos.allowDelete.where({ "$createdBy.account": session.user.account });
+  policy.todos.allowUpdate.where({ "$createdBy.account": session.user });
+  policy.todos.allowDelete.where({ "$createdBy.account": session.user });
 });
 
 type Chat = RowOf<typeof app.chats>;
@@ -280,20 +292,13 @@ afterEach(async () => {
 
 describe("raw websocket private read gate", () => {
   it("delivers main-thread subscription updates for $createdBy-scoped inserts", async () => {
-    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
-      uniqueDbName("created-by-async-channel-subscription"),
-    );
-    await publishSchemaAndPermissions(
-      appId,
-      serverUrl,
-      adminSecret,
-      createdByPermissions,
-      createdByApp,
-    );
+    const core = await getJazzServerInfo(uniqueDbName("created-by-async-channel-subscription"));
+    const backend = await publishSchemaAndPermissions(core, createdByPermissions, createdByApp);
+    const { appId, serverUrl } = backend;
 
     const accounts = await createAccountManager({ appId, serverUrl });
     const account = accounts.restoreLocalFirst(generateAuthSecret());
-    const client = await createJazzClient({
+    const client = await openJazzClient({
       appId,
       serverUrl,
       account,
@@ -342,16 +347,13 @@ describe("raw websocket private read gate", () => {
   }, 60_000);
 
   it("lets Bob insert a camelCase chat message after global-confirmed membership", async () => {
-    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
-      uniqueDbName("camel-chat-member-message-insert"),
-    );
-    await publishSchemaAndPermissions(
-      appId,
-      serverUrl,
-      adminSecret,
+    const core = await getJazzServerInfo(uniqueDbName("camel-chat-member-message-insert"));
+    const backend = await publishSchemaAndPermissions(
+      core,
       camelChatStyleMessagePermissions,
       camelChatApp,
     );
+    const { appId, serverUrl } = backend;
 
     const alice = await openUserDb(appId, serverUrl, "camel-chat-insert-alice");
     const bob = await openUserDb(appId, serverUrl, "camel-chat-insert-bob");
@@ -428,7 +430,7 @@ describe("raw websocket private read gate", () => {
         (rows) => rows.some((row) => row.userId === bobUserId),
         "Bob should read the camelCase chat member list after joining",
         15_000,
-        "global",
+        "remote",
       ),
     ).resolves.toBeDefined();
 
@@ -456,7 +458,7 @@ describe("raw websocket private read gate", () => {
         (rows) => rows.some((row) => row.id === bobMessage.id),
         "Bob should read his camelCase member message after global-confirmed membership",
         15_000,
-        "global",
+        "remote",
       ),
     ).resolves.toBeDefined();
 
@@ -467,7 +469,7 @@ describe("raw websocket private read gate", () => {
         (rows) => rows.length === 0,
         "Bob should settle reaction reads that inherit through camelCase message membership",
         15_000,
-        "global",
+        "remote",
       ),
     ).resolves.toBeDefined();
 
@@ -478,7 +480,7 @@ describe("raw websocket private read gate", () => {
         (rows) => rows.some((row) => row.id === bobProfile.id),
         "Bob should read the sender profile mounted by rendered chat messages",
         15_000,
-        "global",
+        "remote",
       ),
     ).resolves.toBeDefined();
 
@@ -519,7 +521,7 @@ describe("raw websocket private read gate", () => {
             predicate as (rows: unknown[]) => boolean,
             `Bob subscription should settle: ${label}`,
             15_000,
-            { tier: "global" },
+            { tier: "remote" },
           ).then((unsubscribe) => {
             unsubscribeSubscriptions.push(unsubscribe);
           }),
@@ -553,7 +555,7 @@ describe("raw websocket private read gate", () => {
         (rows) => rows.some((row) => row.id === bobPendingMessage.value.id),
         "Alice should receive Bob's fire-and-forget member message through websocket sync",
         15_000,
-        { tier: "global" },
+        { tier: "remote" },
       ),
       bobPendingMessageGlobalWait,
     ]).then(([unsubscribe]) => unsubscribe);
@@ -561,29 +563,21 @@ describe("raw websocket private read gate", () => {
   }, 60_000);
 
   it("converts a private chat invite code into normal membership visibility", async () => {
-    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
-      uniqueDbName("camel-chat-private-invite"),
-    );
-    await publishSchemaAndPermissions(
-      appId,
-      serverUrl,
-      adminSecret,
+    const core = await getJazzServerInfo(uniqueDbName("camel-chat-private-invite"));
+    const backend = await publishSchemaAndPermissions(
+      core,
       camelChatStyleMessagePermissions,
       camelChatApp,
     );
+    const { appId, serverUrl } = backend;
 
     const alice = await openUserDb(appId, serverUrl, "camel-chat-invite-alice");
     // Use the same external issuer/subject for both the invite-scoped and
     // normal sessions. This fixture deliberately compares the external
     // identity subject, so a local-first identity is not interchangeable with
-    // this JWT identity.
+    // the identity the app's backend signs Bob in as.
     const bobSubject = "invite-bob";
-    const bob = await openJwtUserDb(
-      appId,
-      serverUrl,
-      "camel-chat-invite-bob",
-      await getJazzServerJwtForUser(bobSubject, undefined, appId),
-    );
+    const bob = await openBackendUserDb(backend, "camel-chat-invite-bob", bobSubject);
     const aliceUserId = requireUserSubject(alice, "Alice");
     const bobUserId = requireUserSubject(bob, "Bob");
     const joinCode = `join-${Date.now()}`;
@@ -644,18 +638,11 @@ describe("raw websocket private read gate", () => {
       "Alice private seed message global wait",
     );
 
-    const inviteSession = {
-      issuer: "https://issuer.jazz.test",
-      user_id: bobSubject,
-      claims: { join_code: joinCode },
-      authMode: "external" as const,
-    };
-    const inviteBob = await openJwtUserDb(
-      appId,
-      serverUrl,
-      "camel-chat-invite-bob-scoped",
-      await getJazzServerJwtForUser(bobSubject, { join_code: joinCode }, appId),
-    );
+    const inviteBob = await openBackendUserDb(backend, "camel-chat-invite-bob-scoped", bobSubject, {
+      join_code: joinCode,
+    });
+    // The backend vouches for the invite claim on this session.
+    expect(inviteBob.getAuthState().session?.claims).toMatchObject({ join_code: joinCode });
 
     await expect(
       waitForQuery(
@@ -664,7 +651,7 @@ describe("raw websocket private read gate", () => {
         (rows) => rows.some((row) => row.id === chat.id),
         "Bob should query the private chat through the invite-authenticated connection",
         15_000,
-        "global",
+        "remote",
       ),
     ).resolves.toBeDefined();
 
@@ -674,8 +661,7 @@ describe("raw websocket private read gate", () => {
       (rows) => rows.some((row) => row.id === chat.id),
       "Bob should subscribe to the private chat through the invite claim",
       15_000,
-      { tier: "global" },
-      inviteSession,
+      { tier: "remote" },
     );
     unsubscribeInviteRead();
 
@@ -698,7 +684,7 @@ describe("raw websocket private read gate", () => {
         (rows) => rows.some((row) => row.id === chat.id),
         "Bob should read the private chat through normal membership after accepting invite",
         15_000,
-        "global",
+        "remote",
       ),
     ).resolves.toBeDefined();
 
@@ -709,7 +695,7 @@ describe("raw websocket private read gate", () => {
         (rows) => rows.some((row) => row.userId === bobUserId),
         "Bob should read his confirmed private chat membership",
         15_000,
-        "global",
+        "remote",
       ),
     ).resolves.toBeDefined();
 
@@ -720,7 +706,7 @@ describe("raw websocket private read gate", () => {
         (rows) => rows.some((row) => row.id === seedMessage.id),
         "Bob should read private seed messages without include/order after accepting invite",
         15_000,
-        "global",
+        "remote",
       ),
     ).resolves.toBeDefined();
 
@@ -734,7 +720,7 @@ describe("raw websocket private read gate", () => {
         (rows) => rows.some((row) => row.id === seedMessage.id),
         "Bob should read private seed messages through normal membership after accepting invite",
         15_000,
-        "global",
+        "remote",
       ),
     ).resolves.toBeDefined();
 
@@ -748,7 +734,7 @@ describe("raw websocket private read gate", () => {
       (rows) => rows.some((row) => row.id === seedMessage.id),
       "Bob should subscribe to private seed messages through normal membership",
       15_000,
-      { tier: "global" },
+      { tier: "remote" },
     );
     unsubscribeBobMessages();
 
@@ -772,7 +758,7 @@ describe("raw websocket private read gate", () => {
         (rows) => rows.some((row) => row.id === bobMessage.id),
         "Bob should read his own private invite message after global wait",
         15_000,
-        "global",
+        "remote",
       ),
     ).resolves.toBeDefined();
 
@@ -786,7 +772,7 @@ describe("raw websocket private read gate", () => {
         (rows) => rows.some((row) => row.id === bobMessage.id),
         "Alice should receive Bob's private invite message",
         15_000,
-        "global",
+        "remote",
       ),
     ).resolves.toBeDefined();
 
@@ -809,16 +795,15 @@ describe("raw websocket private read gate", () => {
         (rows) => !rows.some((row) => row.id === bobMessage.id),
         "Alice should observe Bob's own message deletion",
         15_000,
-        "global",
+        "remote",
       ),
     ).resolves.toBeDefined();
   }, 60_000);
 
   it("reads messages through public-chat or membership read policy after global writes", async () => {
-    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
-      uniqueDbName("chat-style-message-read"),
-    );
-    await publishSchemaAndPermissions(appId, serverUrl, adminSecret, chatStyleMessagePermissions);
+    const core = await getJazzServerInfo(uniqueDbName("chat-style-message-read"));
+    const backend = await publishSchemaAndPermissions(core, chatStyleMessagePermissions);
+    const { appId, serverUrl } = backend;
 
     const alice = await openUserDb(appId, serverUrl, "chat-style-message-alice");
     const bob = await openUserDb(appId, serverUrl, "chat-style-message-bob");
@@ -854,7 +839,7 @@ describe("raw websocket private read gate", () => {
         (rows) => rows.some((row) => row.id === publicChat.id),
         "Bob should read the public chat dependency",
         15_000,
-        "global",
+        "remote",
       ),
     ).resolves.toBeDefined();
 
@@ -865,7 +850,7 @@ describe("raw websocket private read gate", () => {
         (rows) => rows.some((row) => row.id === publicMessage.id),
         "Bob should read a public-chat message through the message read policy",
         15_000,
-        "global",
+        "remote",
       ),
     ).resolves.toBeDefined();
 
@@ -891,16 +876,15 @@ describe("raw websocket private read gate", () => {
         (rows) => rows.some((row) => row.id === bobMessage.id),
         "Bob should read his member message after a global-confirmed membership",
         15_000,
-        "global",
+        "remote",
       ),
     ).resolves.toBeDefined();
   }, 60_000);
 
   it("does not expose Alice's private chat or message rows to Bob without adminSecret", async () => {
-    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
-      uniqueDbName("private-read-gate"),
-    );
-    await publishSchemaAndPermissions(appId, serverUrl, adminSecret, permissions);
+    const core = await getJazzServerInfo(uniqueDbName("private-read-gate"));
+    const backend = await publishSchemaAndPermissions(core, permissions);
+    const { appId, serverUrl } = backend;
 
     const alice = await openUserDb(appId, serverUrl, "private-read-gate-alice");
     const bob = await openUserDb(appId, serverUrl, "private-read-gate-bob");
@@ -967,7 +951,7 @@ describe("raw websocket private read gate", () => {
       (rows) => rows.some((row) => row.id === publicAnnouncement.id),
       "Bob should see the public control row from the server",
       15_000,
-      "global",
+      "remote",
     );
 
     const afterPublicAnnouncement = await snapshotBobLocalExposure(
@@ -981,14 +965,14 @@ describe("raw websocket private read gate", () => {
       privateMessageVisibleToBob: false,
     });
 
-    const bobChats = await bob.all(app.chats, { tier: "global" });
+    const bobChats = await bob.all(app.chats, { tier: "remote" });
     const afterChatsGlobalQuery = await snapshotBobLocalExposure(
       bob,
       "after private chats global query",
       privateChat.id,
       privateMessage.id,
     );
-    const bobMessages = await bob.all(app.messages, { tier: "global" });
+    const bobMessages = await bob.all(app.messages, { tier: "remote" });
     const afterMessagesGlobalQuery = await snapshotBobLocalExposure(
       bob,
       "after private messages global query",
@@ -1035,7 +1019,7 @@ describe("raw websocket private read gate", () => {
         (rows) => {
           chatSnapshots.push(rows);
         },
-        { tier: "global" },
+        { tier: "remote" },
       ),
     );
     const unsubscribeMessages = ctx.trackSubscription(
@@ -1044,7 +1028,7 @@ describe("raw websocket private read gate", () => {
         (rows) => {
           messageSnapshots.push(rows);
         },
-        { tier: "global" },
+        { tier: "remote" },
       ),
     );
 
@@ -1079,41 +1063,32 @@ async function openUserDb(
   );
 }
 
-async function openJwtUserDb(
-  appId: string,
-  serverUrl: string,
+/** Open a Db for `userId` signed in through the app's backend. */
+async function openBackendUserDb(
+  backend: JazzServerInfo,
   label: string,
-  jwtToken: string,
+  userId: string,
+  claims?: Record<string, unknown>,
 ): Promise<Db> {
   return ctx.track(
     await createBrowserTestDb({
-      appId,
-      serverUrl,
-      jwtToken,
-      registerJwt: true,
+      ...(await jazzAppUser(backend, userId, claims)),
       driver: { type: "persistent", dbName: uniqueDbName(label) },
     }),
   );
 }
 
 async function publishSchemaAndPermissions(
-  appId: string,
-  serverUrl: string,
-  adminSecret: string,
+  core: JazzServerInfo,
   permissions: CompiledPermissions,
   appSchema: { wasmSchema: typeof app.wasmSchema } = app,
-): Promise<void> {
-  await deploy({
-    appId,
-    serverUrl,
-    adminSecret,
-    schema: appSchema.wasmSchema,
-    permissions,
-  });
+): Promise<JazzServerInfo> {
+  await deploy({ ...core, schema: appSchema.wasmSchema, permissions });
+  return startJazzApp(core, { schema: appSchema.wasmSchema, permissions });
 }
 
 function requireUserAccountId(db: Db, label: string): string {
-  const accountId = db.getAuthState().session?.user.account;
+  const accountId = db.getAuthState().session?.user;
   if (!accountId) {
     throw new Error(`${label} Db did not initialize a local-first session`);
   }
@@ -1121,7 +1096,7 @@ function requireUserAccountId(db: Db, label: string): string {
 }
 
 function requireUserSubject(db: Db, label: string): string {
-  const subject = db.getAuthState().session?.user.identity.subject;
+  const subject = db.getAuthState().session?.identity.subject;
   if (!subject) {
     throw new Error(`${label} Db did not initialize an identity subject`);
   }
@@ -1134,7 +1109,7 @@ async function waitForSubscription<T extends { id: string }>(
   predicate: (rows: T[]) => boolean,
   label: string,
   timeoutMs = 15_000,
-  options?: { tier?: "local" | "global" },
+  options?: { tier?: "local-first" | "remote" },
   session?: {
     issuer: string;
     user_id: string;

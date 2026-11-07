@@ -12,16 +12,16 @@ window.migratedOwnerIdentity = {
     const accounts = await createAccountManager(config);
     account = await accounts.createLocalFirst();
     db = await createDb({ ...config, account });
-    await db.all(oldApp.entries, { tier: "global" });
+    await db.all(oldApp.entries, { tier: "remote" });
   },
   async admitMigration() {
     // Keep A open while fetching the published lineage, avoiding #2999's
     // separate offline-new-schema bootstrap boundary.
-    await db.all(oldApp.entries, { tier: "global" });
+    await db.all(oldApp.entries, { tier: "remote" });
     await db.shutdown();
     db = await createDb({ ...config, account });
     await db.insert(newApp.entries, { text: marker }).wait({ tier: "global" });
-    const rows = await db.all(newApp.entries, { tier: "global" });
+    const rows = await db.all(newApp.entries, { tier: "remote" });
     if (!rows.some((row) => row.text === marker)) throw new Error("B seed missing");
     await db.shutdown();
     db = undefined;
@@ -31,10 +31,10 @@ window.migratedOwnerIdentity = {
     db = await createDb({ ...config, account });
     // Exercise a local read before the strict authority read after reopening.
     // This is a smoke check; it does not reproduce the native identity conflict.
-    return await db.all(oldApp.entries, { tier: "local" });
+    return await db.all(oldApp.entries, { tier: "local-first" });
   },
   async readOldGlobal() {
-    return await db.all(oldApp.entries, { tier: "global" });
+    return await db.all(oldApp.entries, { tier: "remote" });
   },
   async close() {
     await db?.shutdown();

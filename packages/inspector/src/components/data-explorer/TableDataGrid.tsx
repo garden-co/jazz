@@ -29,6 +29,7 @@ import {
   useState,
   type Dispatch,
   type KeyboardEvent,
+  type ReactNode,
   type RefObject,
   type SetStateAction,
 } from "react";
@@ -58,6 +59,12 @@ const NULL_CELL_MARKER = "<null>";
 function formatCellValue(value: unknown): string {
   if (value === null) return NULL_CELL_MARKER;
   if (value === undefined) return "";
+  if (value instanceof Uint8Array) {
+    const preview = Array.from(value.subarray(0, 16), (byte) =>
+      byte.toString(16).padStart(2, "0"),
+    ).join(" ");
+    return `${value.byteLength.toLocaleString()} bytes${preview ? ` · ${preview}` : ""}${value.byteLength > 16 ? " …" : ""}`;
+  }
   if (value instanceof Date) return value.toISOString();
   if (typeof value === "string") return value;
   if (typeof value === "number" || typeof value === "boolean") return String(value);
@@ -394,6 +401,19 @@ function getChangedCellIds(
   const changedCellIds: string[] = [];
 
   for (const column of gridColumns) {
+    const previousBytes = previousRow[column.accessorKey];
+    const nextBytes = nextRow[column.accessorKey];
+    // A change outside the displayed prefix must still trigger the cell pulse.
+    if (previousBytes instanceof Uint8Array && nextBytes instanceof Uint8Array) {
+      if (
+        previousBytes !== nextBytes &&
+        (previousBytes.length !== nextBytes.length ||
+          previousBytes.some((byte, index) => byte !== nextBytes[index]))
+      ) {
+        changedCellIds.push(column.id);
+      }
+      continue;
+    }
     const previousValue = formatCellValue(previousRow[column.accessorKey]);
     const nextValue = formatCellValue(nextRow[column.accessorKey]);
     if (previousValue !== nextValue) {
@@ -862,54 +882,45 @@ export function TableDataGrid() {
     return [];
   }, [searchParams]);
 
-  const setPageSize = (next: number) => {
+  // Replace the URL's search params in place. Unless `keepPage`, any change
+  // returns to the first page. An `undefined` value removes the param.
+  const patchSearchParams = (
+    patch: (current: URLSearchParams) => Record<string, string | undefined>,
+    { keepPage = false } = {},
+  ) => {
     setSearchParams(
       (prev) => {
         const p = new URLSearchParams(prev);
-        if (next !== DEFAULT_PAGE_SIZE) {
-          p.set("pageSize", String(next));
-        } else {
-          p.delete("pageSize");
+        if (!keepPage) p.delete("page");
+        for (const [key, value] of Object.entries(patch(p))) {
+          if (value === undefined) p.delete(key);
+          else p.set(key, value);
         }
-        p.delete("page");
         return p;
       },
       { replace: true },
     );
   };
 
-  const setPageIndex = (next: number | ((current: number) => number)) => {
-    setSearchParams(
-      (prev) => {
-        const p = new URLSearchParams(prev);
+  const setPageSize = (next: number) =>
+    patchSearchParams(() => ({
+      pageSize: next !== DEFAULT_PAGE_SIZE ? String(next) : undefined,
+    }));
+
+  const setPageIndex = (next: number | ((current: number) => number)) =>
+    patchSearchParams(
+      (p) => {
         const currentPage = Number(p.get("page") ?? 0);
         const resolved = typeof next === "function" ? next(currentPage) : next;
-        if (resolved > 0) {
-          p.set("page", String(resolved));
-        } else {
-          p.delete("page");
-        }
-        return p;
+        return { page: resolved > 0 ? String(resolved) : undefined };
       },
-      { replace: true },
+      { keepPage: true },
     );
-  };
 
-  const setFilters = (next: TableFilterClause[]) => {
-    setSearchParams(
-      (prev) => {
-        const p = new URLSearchParams(prev);
-        if (next.length > 0) {
-          p.set("filters", serializeFilterClauses(next));
-        } else {
-          p.delete("filters");
-        }
-        p.delete("page");
-        return p;
-      },
-      { replace: true },
-    );
-  };
+  const setFilters = (next: TableFilterClause[]) =>
+    patchSearchParams(() => ({
+      filters: next.length > 0 ? serializeFilterClauses(next) : undefined,
+    }));
   const explorerContext = useOutletContext<{
     mutationStateByTable: Record<string, TableMutationState>;
     setMutationStateByTable: Dispatch<SetStateAction<Record<string, TableMutationState>>>;
@@ -1173,22 +1184,12 @@ export function TableDataGrid() {
         ? [{ columnKey: "id", direction: "ASC" as const }]
         : [nextSortColumns.at(-1)!];
 
-    setSearchParams(
-      (prev) => {
-        const p = new URLSearchParams(prev);
-        const col = nextSort[0];
-        if (col && (col.columnKey !== "id" || col.direction !== "ASC")) {
-          p.set("sort", col.columnKey);
-          p.set("dir", col.direction);
-        } else {
-          p.delete("sort");
-          p.delete("dir");
-        }
-        p.delete("page");
-        return p;
-      },
-      { replace: true },
-    );
+    const col = nextSort[0];
+    const isDefault = !col || (col.columnKey === "id" && col.direction === "ASC");
+    patchSearchParams(() => ({
+      sort: isDefault ? undefined : col.columnKey,
+      dir: isDefault ? undefined : col.direction,
+    }));
   };
   const handleDiscardQueuedEdits = (): void => {
     if (pendingSaveByTable.has(table)) return;
@@ -1834,7 +1835,8 @@ function CrossIcon({ className }: { className?: string }) {
   );
 }
 
-function PlusIcon({ className }: { className?: string }) {
+/** A 24px outline icon drawn with the current text color. */
+function StrokeIcon({ className, children }: { className?: string; children: ReactNode }) {
   return (
     <svg
       className={className}
@@ -1847,94 +1849,62 @@ function PlusIcon({ className }: { className?: string }) {
       strokeLinejoin="round"
       strokeWidth="2"
     >
+      {children}
+    </svg>
+  );
+}
+
+function PlusIcon({ className }: { className?: string }) {
+  return (
+    <StrokeIcon className={className}>
       <path d="M12 5v14" />
       <path d="M5 12h14" />
-    </svg>
+    </StrokeIcon>
   );
 }
 
 function TrashIcon({ className }: { className?: string }) {
   return (
-    <svg
-      className={className}
-      viewBox="0 0 24 24"
-      aria-hidden="true"
-      focusable="false"
-      fill="none"
-      stroke="currentColor"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      strokeWidth="2"
-    >
+    <StrokeIcon className={className}>
       <path d="M3 6h18" />
       <path d="M8 6V4h8v2" />
       <path d="m6 6 1 14h10l1-14" />
       <path d="M10 11v5" />
       <path d="M14 11v5" />
-    </svg>
+    </StrokeIcon>
   );
 }
 
 function BackArrowIcon({ className }: { className?: string }) {
   return (
-    <svg
-      className={className}
-      viewBox="0 0 24 24"
-      aria-hidden="true"
-      focusable="false"
-      fill="none"
-      stroke="currentColor"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      strokeWidth="2"
-    >
+    <StrokeIcon className={className}>
       <path d="m9 14-4-4 4-4" />
       <path d="M5 10h9a5 5 0 0 1 0 10h-1" />
-    </svg>
+    </StrokeIcon>
   );
 }
 
 function CatalogIcon({ className }: { className?: string }) {
   return (
-    <svg
-      className={className}
-      viewBox="0 0 24 24"
-      aria-hidden="true"
-      focusable="false"
-      fill="none"
-      stroke="currentColor"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      strokeWidth="2"
-    >
+    <StrokeIcon className={className}>
       <path d="M4 19.5V5a2 2 0 0 1 2-2h12v18H6a2 2 0 0 1-2-1.5Z" />
       <path d="M8 7h6" />
       <path d="M8 11h8" />
       <path d="M8 15h5" />
-    </svg>
+    </StrokeIcon>
   );
 }
 
 function ColumnsIcon({ className }: { className?: string }) {
   return (
-    <svg
-      className={className}
-      viewBox="0 0 24 24"
-      aria-hidden="true"
-      focusable="false"
-      fill="none"
-      stroke="currentColor"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      strokeWidth="2"
-    >
+    <StrokeIcon className={className}>
       <path d="M4 6h16" />
       <path d="M4 12h16" />
       <path d="M4 18h16" />
       <path d="M8 4v4" />
       <path d="M15 10v4" />
       <path d="M11 16v4" />
-    </svg>
+    </StrokeIcon>
   );
 }
 

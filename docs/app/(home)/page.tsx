@@ -58,7 +58,7 @@ import { app } from "./schema";
 export default s.definePermissions(
   app,
   ({ policy, session }) => {
-    const mine = { owner_id: session.user.account };
+    const mine = { owner_id: session.user };
 
     policy.todos.allowRead.where(mine);
     policy.todos.allowInsert.where(mine);
@@ -69,12 +69,11 @@ export default s.definePermissions(
   },
 );`;
 
-const componentCode = `import { useAll, useDb } from "jazz-tools/react";
+const componentCode = `import { useAll } from "jazz-tools/react";
 import { app } from "./schema";
 
 export function OpenTodos() {
-  const db = useDb();
-  const { data: todos = [] } = useAll(
+  const { data: todos = [], db } = useAll(
     app.todos.where({ done: false }),
   );
 
@@ -129,7 +128,7 @@ const features: {
         </p>
       </>
     ),
-    links: [{ label: "Permissions", href: "/docs/auth/permissions" }],
+    links: [{ label: "Permissions", href: "/docs/schemas/policies" }],
     diagram: <PermissionsDiagram />,
     caption: "A query and its read policy, planned together",
   },
@@ -176,7 +175,7 @@ const features: {
       </>
     ),
     links: [
-      { label: "How sync works", href: "/docs/concepts/how-sync-works" },
+      { label: "How sync works", href: "/docs/how-jazz-works" },
       { label: "Durability tiers", href: "/docs/reference/durability-tiers" },
     ],
     diagram: <ConsistencyDiagram />,
@@ -198,8 +197,8 @@ const features: {
       </>
     ),
     links: [
-      { label: "Branches", href: "/docs/concepts/branches" },
-      { label: "Edit metadata", href: "/docs/reading/queries#magic-columns" },
+      { label: "Branches", href: "/docs/recipes/drafts-and-branches" },
+      { label: "Edit metadata", href: "/docs/reading/metadata" },
     ],
     diagram: <HistoryDiagram />,
     caption: "The history of one row, with a draft branch",
@@ -239,10 +238,10 @@ const features: {
       </>
     ),
     links: [
-      { label: "Server setup", href: "/docs/getting-started/server-setup" },
-      { label: "Auth providers", href: "/docs/recipes/auth/auth-provider-integration" },
-      { label: "Permissions", href: "/docs/auth/permissions" },
-      { label: "How sync works", href: "/docs/concepts/how-sync-works" },
+      { label: "Server setup", href: "/docs/setup/backend" },
+      { label: "Auth providers", href: "/docs/setup/auth/custom" },
+      { label: "Permissions", href: "/docs/schemas/policies" },
+      { label: "How sync works", href: "/docs/how-jazz-works" },
     ],
     diagram: <BackendDiagram />,
     caption: "What moves out of your code into Jazz",
@@ -438,7 +437,7 @@ export default function HomePage() {
           </div>
           <Text as="p" display="block" color="secondary" className="mt-6">
             Also for Vue, Svelte, Solid, React Native, plain TypeScript and Rust.{" "}
-            <AppLink href="/docs/install/client">Install guides</AppLink>
+            <AppLink href="/docs/setup/web-client/local-first-client">Install guides</AppLink>
           </Text>
         </div>
       </section>
@@ -536,7 +535,7 @@ export default function HomePage() {
                     <Button
                       label="How to self-host"
                       variant="secondary"
-                      href="/docs/getting-started/server-setup#self-hosted-database-server"
+                      href="/docs/setup/deployment/own-server"
                     />
                   </TableCell>
                   <TableCell>
@@ -617,7 +616,7 @@ export default function HomePage() {
           <div className="flex flex-col gap-4 lg:col-span-5 lg:items-end">
             <CreateJazzCommand />
             <Text as="p" display="block" color="secondary">
-              Read the <AppLink href="/docs/quickstart">quickstart</AppLink> or join the{" "}
+              Read the <AppLink href="/docs/setup/run-locally">quickstart</AppLink> or join the{" "}
               <AstryxLink href="https://discord.gg/RN9UKh52be">Jazz Discord</AstryxLink>.
             </Text>
           </div>

@@ -14,15 +14,20 @@ if (!project || !stateDir) throw new Error("usage: mixed-version-client.mjs <pro
 mkdirSync(stateDir, { recursive: true, mode: 0o700 });
 const require = createRequire(join(project, "package.json"));
 const { schema: s } = await import(pathToFileURL(require.resolve("jazz-tools")));
-const { createJazzSession } = await import(pathToFileURL(require.resolve("jazz-tools/backend")));
+const backendModule = await import(pathToFileURL(require.resolve("jazz-tools/backend")));
+// Releases before alpha.60 call it createJazzSession.
+const createJazzClient = backendModule.createJazzClient ?? backendModule.createJazzSession;
 const version = JSON.parse(
   readFileSync(join(project, "node_modules", "jazz-tools", "package.json"), "utf8"),
 ).version;
 
 // Keep in sync with FIXTURE_SCHEMA in mixed-version.mjs (deployed via the CLI).
-const app = s.defineApp({
-  docs: s.table({ label: s.string(), body: s.string(), author: s.string() }, {}),
-});
+const app = s.defineApp(
+  {
+    docs: s.table({ label: s.string(), body: s.string(), author: s.string() }, {}),
+  },
+  { migrations: "none" },
+);
 const permissions = s.definePermissions(app, ({ policy }) => {
   for (const op of ["allowRead", "allowInsert", "allowUpdate", "allowDelete"])
     policy.docs[op].always();
@@ -30,7 +35,7 @@ const permissions = s.definePermissions(app, ({ policy }) => {
 
 let session, db;
 const subs = new Map();
-// Open exclusive transactions by harness key, so one can stay open across
+// Open serializable transactions by harness key, so one can stay open across
 // commands while another client writes.
 const txs = new Map();
 const out = (msg) => process.stdout.write(`${JSON.stringify(msg)}\n`);
@@ -71,7 +76,7 @@ async function waitFor(check, label, ms) {
 
 const ops = {
   async open({ name, appId, serverUrl }) {
-    session = await createJazzSession({
+    session = await createJazzClient({
       appId,
       serverUrl,
       app,
@@ -170,11 +175,13 @@ const ops = {
     );
     return { updates: state.updates, counts: [...counts], ms: Date.now() - started };
   },
-  // Exclusive transactions, one command per step: begin, read or write,
+  // Serializable transactions, one command per step: begin, read or write,
   // then commit. `commit` reports the outcome instead of failing on a
   // rejection, so a harness check can expect either.
   async txBegin({ tx }) {
-    txs.set(tx, db.beginExclusiveTransaction());
+    // Releases before alpha.60 name these exclusive transactions.
+    const begin = db.beginSerializableTransaction ?? db.beginExclusiveTransaction;
+    txs.set(tx, begin.call(db));
     return null;
   },
   async txReadById({ tx, id }) {
@@ -203,7 +210,9 @@ const ops = {
       return { outcome: "accepted" };
     } catch (error) {
       if (!error?.code) throw error;
-      return { outcome: "rejected", code: error.code };
+      // Releases before alpha.60 report a conflict as `exclusive_conflict`.
+      const code = error.code === "exclusive_conflict" ? "serialization_conflict" : error.code;
+      return { outcome: "rejected", code };
     }
   },
   async disconnect() {

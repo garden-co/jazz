@@ -6,10 +6,16 @@ import react from "@vitejs/plugin-react";
 import topLevelAwait from "vite-plugin-top-level-await";
 import wasm from "vite-plugin-wasm";
 import {
-  blockJazzServerNetwork,
   jazzServerInfo,
-  jazzServerJwtForUser,
-  unblockJazzServerNetwork,
+  stopJazzServerByUrl,
+  createJazzServerTransportControl,
+  blockJazzServerTransport,
+  unblockJazzServerTransport,
+  stopJazzServerTransportControl,
+  jazzAppFront,
+  jazzAppRequest,
+  jazzAppUser,
+  jazzAppBackendInsert,
 } from "../../../../packages/jazz-tools/tests/browser/testing-server-node.js";
 
 interface ConnectedPeerInput {
@@ -19,9 +25,8 @@ interface ConnectedPeerInput {
   table: string;
   queryJson?: string;
   schemaJson: string;
-  serverUrl: string;
-  jwtToken?: string;
-  adminSecret?: string;
+  /** The peer's user's own origin of the app backend (from `jazzAppUserUrl`). */
+  userUrl: string;
 }
 
 const connectedPeers = new Map<string, { context: BrowserContext; page: Page }>();
@@ -56,6 +61,8 @@ async function openConnectedPeer(
   if (!browser) throw new Error("PosterShop connected peer needs an attached browser");
   const context = await browser.newContext();
   const page = await context.newPage();
+  // The peer signs in at its user's origin through Node: the backend answers no CORS.
+  await page.exposeFunction("__jazzAppRequest", jazzAppRequest);
   await page.goto(new URL(remoteHarnessHtmlPath, currentPage.url()).toString(), {
     waitUntil: "domcontentloaded",
   });
@@ -66,7 +73,7 @@ async function openConnectedPeer(
 async function queryConnectedPeer(id: string): Promise<Record<string, unknown>[]> {
   const peer = connectedPeers.get(id);
   if (!peer) throw new Error(`PosterShop connected peer ${id} is not open`);
-  return callRemotePeer(peer.page, "queryRemoteBrowserDbRows", { id, tier: "global" });
+  return callRemotePeer(peer.page, "queryRemoteBrowserDbRows", { id, tier: "remote" });
 }
 
 async function insertConnectedPeer(
@@ -108,18 +115,26 @@ export default defineConfig({
       instances: [{ browser: "chromium", headless: true }],
       commands: {
         jazzServerInfo: async (_context, appId) => jazzServerInfo(appId),
-        jazzServerBlockNetwork: async ({ context }, serverUrl) =>
-          blockJazzServerNetwork(context, serverUrl),
-        jazzServerUnblockNetwork: async ({ context }, serverUrl) =>
-          unblockJazzServerNetwork(context, serverUrl),
+        jazzServerStop: async (_context, url) => stopJazzServerByUrl(url),
+        jazzServerTransportControlCreate: async (_context, url) =>
+          createJazzServerTransportControl(url),
+        jazzServerTransportControlBlock: async (_context, url, direction: "both" | "inbound") =>
+          blockJazzServerTransport(url, direction),
+        jazzServerTransportControlUnblock: async (_context, url) => unblockJazzServerTransport(url),
+        jazzServerTransportControlStop: async (_context, url) =>
+          stopJazzServerTransportControl(url),
         posterShopOpenConnectedPeer: async ({ context, page }, input) =>
           openConnectedPeer(context, page, input),
         posterShopQueryConnectedPeer: async (_context, id) => queryConnectedPeer(id),
         posterShopInsertConnectedPeer: async (_context, id, table, row) =>
           insertConnectedPeer(id, table, row),
         posterShopCloseConnectedPeer: async (_context, id) => closeConnectedPeer(id),
-        jazzServerJwtForUser: async (_context, userId, claims, appId) =>
-          jazzServerJwtForUser(userId, claims, appId),
+        jazzAppFront: async (_context, coreUrl, app) => jazzAppFront(coreUrl, app),
+        jazzAppUser: async (_context, frontUrl, userId, claims) =>
+          jazzAppUser(frontUrl, userId, claims),
+        jazzAppRequest: async (_context, url, init) => jazzAppRequest(url, init),
+        jazzAppBackendInsert: async (_context, frontUrl, table, row) =>
+          jazzAppBackendInsert(frontUrl, table, row),
         jazzBrowserTopologyLog: async (_context, status, label, elapsedMs) => {
           console.info(`[jazz-browser-topology] ${status} ${label} (${elapsedMs}ms)`);
         },

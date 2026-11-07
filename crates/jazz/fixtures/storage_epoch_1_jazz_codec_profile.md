@@ -1,39 +1,86 @@
-# Jazz storage epoch 1 codec-profile receipt
+# Jazz storage profile receipts
 
-This fixture freezes the closed codec inventory supplied whenever Jazz opens a
-durable ordered-KV root. Groove receives these IDs as opaque manifest metadata;
-the identifiers below are the complete Jazz-owned byte families reachable from
-that root at the epoch-one settlement baseline.
+## Independent root profiles
 
-- epoch: `1`
-- adapter sample: `memory`, format version `1`
-- codec registry, in canonical order:
-  `groove.large-value.v1`, `groove.ordered-chunk-storage.v1`,
-  `groove.ordered-kv.v1`, `jazz.branch-key.v1`,
-  `jazz.catalogue.activation.v1`, `jazz.catalogue.bootstrap-ready.v1`,
-  `jazz.catalogue.lens.v1`, `jazz.catalogue.lineage.v1`, `jazz.catalogue.physical-mapping.v1`,
-  `jazz.catalogue.schema.v1`, `jazz.catalogue.write-pointer.v1`,
-  `jazz.subscription-program-fact-key.v1`
-- adapter parameter: `key-order=unsigned-lexicographic`
-- SHA-256 of the committed canonical `JSM1` bytes:
-  `a3e89ed15b6b2b243fb15c3eef650d843398cf081ecf3be73f650e741349fe96`
-- receipt: `storage_codec_profile::tests::epoch_one_jazz_profile_has_a_pinned_manifest_receipt`
+The physical storage epoch remains 1. Each independently persisted root
+requires exactly one Jazz-owned format marker in addition to Groove's base:
+`groove.large-value.v2`, `groove.ordered-chunk-storage.v2`, and
+`groove.ordered-kv.v1`.
 
-An omitted, added, duplicate, or substituted ID fails profile admission before
-the adapter decodes or mutates ordinary data. After epoch-one freeze, any incompatible inventory change
-requires a new storage epoch, migration decision, and updated fixture; this is
-not a per-adapter `Bytes` compatibility exception.
+| Root                | Jazz marker                 | Additional Groove families                        |
+| ------------------- | --------------------------- | ------------------------------------------------- |
+| Client, relay, Core | `jazz.node-storage.v2`      | `groove.dictionary.v1`, `groove.durable-index.v2` |
+| Server catalogue    | `jazz.catalogue-storage.v1` | None                                              |
+| Account registry    | `jazz.account-storage.v1`   | None                                              |
 
-The browser IndexedDB adapter additionally stores `storage-manifest`/
-`replica-node-v1`: one random exact 16-byte `NodeUuid` for that physical
-replica. It is created atomically with a fresh browser epoch manifest and
-validated before Jazz opens, but is deliberately outside this shared codec
-profile and its `JSM1` checksum: it identifies a physical transaction issuer,
-whereas this fixture identifies a common decode contract. The browser physical
-receipt proves same-replica reopen stability and distinct values for independent
-stores with the same logical name.
+Node format v2 covers branch keys, catalogue state, linear row history
+(including union row cases, SPEC 10 §10.3), transactions (including the
+view-scoped cardinality flag), durability, touched-row lists, and all other
+node-owned records. Node format v1 was the same layout without union row
+cases; a v1 build refuses a v2 root at open instead of failing at its first
+union row (`dev/proofs/linear-history-storage-compatibility.md`). Catalogue
+format v1 covers entry
+keys, entry envelopes and persisted catalogue payloads. Account format v1
+covers journal keys and command records. None inherits another Jazz profile.
 
-The pre-freeze #2578 cleanup removes the two dormant result codec IDs. The
-required-family count changes from 14 to 12; source payload codecs remain
-unchanged. Old roots advertising those retired families fail real current
-manifest admission. No compatibility profile is selected to bypass this check.
+Node format v1 also covers the alpha.60 transaction record layout
+(`jazz.tx-record.v2`, SPEC 2 §2.8): `jazz_transactions` with a flags byte and
+the kind-specific rejection payload, `jazz_pending_transactions`,
+`jazz_tx_provenance` and `jazz_history_horizon`. `groove.dictionary.v1` is
+Groove's dictionary of interned column values (Groove SPEC 2, "Interned
+columns and dictionaries"): every stored author column (`made_by` in
+`jazz_transactions` and `jazz_rejected_transactions`, `created_by`/`updated_by`
+in history, global-current and ahead-current rows) holds a 4-byte code into
+one node-local `authors` dictionary; reads, queries, policies and the wire see
+full authors. A node root without it is refused with `missing:
+["groove.dictionary.v1"]` (`node_root_without_the_dictionary_family_is_refused`).
+
+Individual byte families keep their named receipts in
+`persistent_codec_family_registry.json`; only entries with `profile` are
+manifest members. This separates encoding documentation from root admission.
+
+## Byte receipts
+
+`storage_codec_profile::tests::root_profiles_have_pinned_manifest_bytes`
+pins all three exact `JSM1` manifests (memory adapter version 1, no parameters):
+
+- node: `37a0adcfdbfb471db9c872d57ee9e1798799519ed83a4a74ccf31c5ea30de1cd`
+- catalogue: `92b82965f6a8d36cd85299b6f8c1af345ddec20b52f09b24b27cdde68cc792db`
+- account: `815ca7a4044e7888ff605cc7a7f7ed00c5e8f36b9bfdd7c9f131e8cdc9008e1b`
+
+## Compatibility
+
+Manifest admission compares complete inventories, not independently negotiated
+features. Previous per-family Jazz profiles, missing/future formats, and roots
+opened as the wrong kind are refused before ordinary data is decoded or
+mutated, with the typed `UnsupportedStorageCodecs { missing, unknown }` error
+(also for roots that still declare the retired `groove.large-value.v1` and
+`groove.ordered-chunk-storage.v1`). Older binaries likewise reject these
+consolidated profiles. No migration or fallback reader is introduced, and the
+physical storage epoch stays 1.
+
+This is not wire compatible, although the wire protocol version is unchanged
+(v6) in this change:
+
+- `JVRR\x02` row payload bytes change (large-value scalar tags, descriptor and
+  edit layouts, record layouts) while keeping the `JVRR\x02` marker.
+- Large-value scalar tags `Primitive`/`Chunked` move from 2/3 to 0/1, so
+  `BranchKey` column-value bytes change (Groove SPEC 9, "Scalar tag history").
+- Catalogue schema bytes always use version 2 and lineage publications always
+  use the counted `jazz-schema-lineage-publication-v2` identity, so
+  single-predecessor lineage publication IDs change.
+- React Native foreground row payloads carry the new scalar tags, but the
+  native relay ABI stays 2.
+
+Until the alpha.60 release bumps the wire version (and the native relay ABI)
+together with this storage cleanup, a peer built before this change and a peer
+built with it both advertise v6, pass the Hello, and then fail with opaque
+decode or content-ID errors instead of a typed version refusal. This change
+must not ship in a release without that bump. Details and receipts:
+`dev/proofs/storage-format-cleanup-compatibility.md`.
+
+Historical published/epoch-one/pre-linear fixtures remain immutable refusal
+evidence. Current native and browser fixtures are regenerated through their
+production-adapter producers. Node, catalogue and account reopen tests cover
+their independent current profiles. The browser's replica identity and lease
+metadata remain independent physical metadata and are unchanged.

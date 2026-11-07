@@ -1,7 +1,7 @@
 #![allow(clippy::items_after_test_module, clippy::wrong_self_convention)]
 
 use std::future::Future;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use jazz::query::Query;
 use jazz::tools::native_transport_connector::{
@@ -12,9 +12,8 @@ use jazz::tools::{
     AppContext, ClientStorage, DurabilityTier, JazzClient, ObjectId, OrderedRowDelta, Schema,
     SubscriptionStream, SubscriptionStreamItem, TransactionId, Value,
 };
-use jazz_server::{JazzServer, TEST_JWT_AUDIENCE, TEST_JWT_ISSUER};
-use jsonwebtoken::{EncodingKey, Header, encode};
-use serde::{Deserialize, Serialize};
+use jazz_server::{JazzServer, TEST_JWT_ISSUER};
+use serde::Deserialize;
 use serde_json::Value as JsonValue;
 
 // Retry at the adapter boundary, before JazzClient renders transport errors as
@@ -49,8 +48,6 @@ const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const DEFAULT_ROWS_TIMEOUT: Duration = Duration::from_secs(25);
 #[allow(dead_code)]
 const DEFAULT_STREAM_POLL_INTERVAL: Duration = Duration::from_millis(50);
-const TEST_JWT_SECRET: &str = "test-jwt-secret-for-integration";
-const TEST_JWT_KID: &str = "test-jwks-kid";
 
 #[allow(unused_imports)]
 pub use jazz::tools::test_support::{QueryRows, wait_for_query, wait_for_query_results};
@@ -59,8 +56,8 @@ pub use jazz_server::push_catalogue_in_memory;
 
 #[allow(unused_imports)]
 pub use crate::permissions::{
-    PublishedPermissionsHead, allow_all_permissions, deny_all_select_permissions,
-    publish_allow_all_permissions, publish_permissions,
+    PublishedBundle, allow_all_permissions, deny_all_select_permissions,
+    publish_allow_all_permissions, publish_permissions, schema_deployment,
 };
 
 #[cfg(test)]
@@ -81,16 +78,6 @@ fn split_base_url(server_url: &str) -> Result<(String, String), Box<dyn std::err
     ))
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct JwtClaims {
-    sub: String,
-    iss: String,
-    aud: String,
-    #[serde(flatten)]
-    claims: serde_json::Map<String, JsonValue>,
-    exp: u64,
-}
-
 #[allow(dead_code)]
 enum TestingClientAuth {
     Admin,
@@ -107,8 +94,9 @@ enum TestingClientStorage {
 /// Builder-style helper for test clients backed by `JazzServer`.
 ///
 /// Supports the three common auth shapes used across the integration suite:
-/// admin-capable clients, normal JWT-only clients, and JWT-only clients with
-/// custom claims.
+/// admin-capable clients, and user sessions (with default or custom claims)
+/// that the app's backend states with its secret, as `createJazz` relays its
+/// users' clients. A core admits nothing else.
 pub struct TestingClient<'a> {
     server: Option<&'a JazzServer>,
     schema: Option<Schema>,
@@ -201,9 +189,14 @@ impl<'a> TestingClient<'a> {
         let ready_table = self.ready_table.clone();
         let ready_timeout = self.ready_timeout;
         let mut context = self.build_context();
-        enroll_test_context(&mut context)
-            .await
-            .expect("enroll public test client");
+        enroll_test_context_with_admin_secret(
+            self.server
+                .expect("TestingClient requires `with_server(...)`")
+                .admin_secret(),
+            &mut context,
+        )
+        .await
+        .expect("enroll test user");
         let deadline = tokio::time::Instant::now() + timeout;
 
         let connector =
@@ -233,9 +226,14 @@ impl<'a> TestingClient<'a> {
         let ready_table = self.ready_table.clone();
         let ready_timeout = self.ready_timeout;
         let mut context = self.build_context();
-        enroll_test_context(&mut context)
-            .await
-            .expect("enroll public test client");
+        enroll_test_context_with_admin_secret(
+            self.server
+                .expect("TestingClient requires `with_server(...)`")
+                .admin_secret(),
+            &mut context,
+        )
+        .await
+        .expect("enroll test user");
 
         let connector = self.controlled_connector(std::sync::Arc::new(
             jazz_native_transport::NativeWebSocketConnector,
@@ -304,13 +302,15 @@ impl<'a> TestingClient<'a> {
                 );
             }
             TestingClientAuth::User => {
-                context.backend_secret = None;
-                context.admin_secret = None;
+                context.backend_session = Some(
+                    jazz::tools::Session::new(TEST_JWT_ISSUER, user_id)
+                        .with_claims(serde_json::json!({ "role": "user" })),
+                );
             }
             TestingClientAuth::Claims(claims) => {
-                context.jwt_token = Some(make_jwt(user_id, claims.clone()));
-                context.backend_secret = None;
-                context.admin_secret = None;
+                context.backend_session = Some(
+                    jazz::tools::Session::new(TEST_JWT_ISSUER, user_id).with_claims(claims.clone()),
+                );
             }
         }
 
@@ -318,77 +318,49 @@ impl<'a> TestingClient<'a> {
             TestingClientStorage::Memory => ClientStorage::Memory,
             TestingClientStorage::Persistent => ClientStorage::Persistent,
         };
-        if matches!(self.storage, TestingClientStorage::Persistent) {
-            #[cfg(feature = "rocksdb")]
-            {
-                context.storage_factory = Some(std::sync::Arc::new(
-                    jazz_storage_rocksdb::RocksDbStorageFactory,
-                ));
-            }
-            #[cfg(not(feature = "rocksdb"))]
-            panic!("persistent test clients require the rocksdb adapter feature");
-        }
-
         context
     }
 }
 
-/// Explicit positive-fixture enrollment, outside the client context lifecycle.
-/// Generic `connect` intentionally never registers an identity; admission-negative
-/// tests may use it to exercise an unassigned or revoked bearer directly.
+/// Explicit positive-fixture enrollment, outside the client context lifecycle:
+/// the backend enrolls the user its session names (with the core's admin
+/// secret, as `createJazz` does) and the session then carries that account.
+/// Generic `connect` never enrolls; admission-negative tests rely on that.
+/// For a [`JazzServer`] with its default admin secret.
 pub async fn enroll_test_context(context: &mut AppContext) -> jazz::tools::Result<()> {
-    use jazz::tools::{JazzError, unverified_jwt_scope_subject};
-    if context.backend_secret.is_some() || context.admin_secret.is_some() {
-        return Ok(());
-    }
-    let Some(token) = context.jwt_token.as_deref() else {
-        return Ok(());
-    };
+    enroll_test_context_with_admin_secret(JazzServer::ADMIN_SECRET, context).await
+}
+
+/// [`enroll_test_context`] for a core this process did not start.
+pub async fn enroll_test_context_with_admin_secret(
+    admin_secret: &str,
+    context: &mut AppContext,
+) -> jazz::tools::Result<()> {
+    use jazz::tools::JazzError;
     if context.server_url.is_empty() {
         return Ok(());
     }
-    let (issuer, subject) = unverified_jwt_scope_subject(token)
-        .ok_or_else(|| JazzError::Connection("invalid fixture identity token".into()))?;
-    let base = format!(
-        "{}/apps/{}/accounts",
-        context.server_url.trim_end_matches('/'),
-        context.app_id
-    );
-    let http = reqwest::Client::builder()
+    let Some(session) = context.backend_session.as_mut() else {
+        return Ok(());
+    };
+    let identity = jazz::account_registry::Principal {
+        issuer: session.issuer.clone(),
+        subject: session.user_id.clone(),
+    };
+    let response = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
+        .map_err(|error| JazzError::Connection(error.to_string()))?
+        .post(format!(
+            "{}/apps/{}/admin/accounts/login-or-register",
+            context.server_url.trim_end_matches('/'),
+            context.app_id
+        ))
+        .header("X-Jazz-Admin-Secret", admin_secret)
+        .json(&serde_json::json!({ "identity": identity }))
+        .send()
+        .await
         .map_err(|error| JazzError::Connection(error.to_string()))?;
-    let post = |operation: &str| {
-        http.post(format!("{base}/{operation}"))
-            .bearer_auth(token)
-            .send()
-    };
-    let mut response = if issuer == jazz::tools::identity::LOCAL_FIRST_ISSUER {
-        post("found-local-first").await
-    } else {
-        post("login").await
-    }
-    .map_err(|error| JazzError::Connection(error.to_string()))?;
-    if response.status() == reqwest::StatusCode::NOT_FOUND {
-        let reason = response
-            .text()
-            .await
-            .map_err(|error| JazzError::Connection(error.to_string()))?;
-        if reason != "identity_not_assigned" {
-            return Err(JazzError::Connection(
-                "fixture registry route is unavailable".into(),
-            ));
-        }
-        response = post("register")
-            .await
-            .map_err(|error| JazzError::Connection(error.to_string()))?;
-        // Concurrent positive fixtures may have enrolled this exact identity.
-        if response.status() == reqwest::StatusCode::CONFLICT {
-            response = post("login")
-                .await
-                .map_err(|error| JazzError::Connection(error.to_string()))?;
-        }
-    }
     if !response.status().is_success() {
         return Err(JazzError::Connection(format!(
             "fixture account admission failed: {}",
@@ -404,11 +376,12 @@ pub async fn enroll_test_context(context: &mut AppContext) -> jazz::tools::Resul
         .json()
         .await
         .map_err(|error| JazzError::Connection(error.to_string()))?;
-    if admitted.identity.issuer != issuer || admitted.identity.subject != subject {
+    if admitted.identity != identity {
         return Err(JazzError::Connection(
             "fixture account admission identity mismatch".into(),
         ));
     }
+    session.account_id = Some(admitted.account);
     context.account_id = Some(admitted.account);
     Ok(())
 }
@@ -466,33 +439,6 @@ pub async fn connect_ready_claims(
         .ready_on(ready_table, ready_timeout)
         .connect()
         .await
-}
-
-fn make_jwt(sub: &str, claims: JsonValue) -> String {
-    let jwt_claims = JwtClaims {
-        sub: sub.to_string(),
-        // These values deliberately mirror the server's configured external
-        // issuer and audience. A signed token without either claim must still
-        // be rejected by the fail-closed server admission boundary.
-        iss: TEST_JWT_ISSUER.to_owned(),
-        aud: TEST_JWT_AUDIENCE.to_owned(),
-        claims: claims.as_object().cloned().unwrap_or_default(),
-        exp: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock drift")
-            .as_secs()
-            + 3600,
-    };
-
-    let mut header = Header::new(jsonwebtoken::Algorithm::HS256);
-    header.kid = Some(TEST_JWT_KID.to_string());
-
-    encode(
-        &header,
-        &jwt_claims,
-        &EncodingKey::from_secret(TEST_JWT_SECRET.as_bytes()),
-    )
-    .expect("encode jwt")
 }
 
 #[allow(dead_code)]
@@ -670,7 +616,7 @@ pub async fn wait_for_subscription_update<F>(
             });
         let delta = match item {
             SubscriptionStreamItem::Delta(delta) => delta,
-            SubscriptionStreamItem::Rejected { reason } => {
+            SubscriptionStreamItem::Rejected { reason, .. } => {
                 panic!("subscription rejected while waiting for {description}: {reason:?}")
             }
         };
@@ -700,7 +646,7 @@ pub async fn collect_stream_deltas(
         let next_wait = (deadline - now).min(DEFAULT_STREAM_POLL_INTERVAL);
         match tokio::time::timeout(next_wait, stream.next()).await {
             Ok(Some(SubscriptionStreamItem::Delta(delta))) => log.push(delta),
-            Ok(Some(SubscriptionStreamItem::Rejected { reason })) => {
+            Ok(Some(SubscriptionStreamItem::Rejected { reason, .. })) => {
                 panic!("subscription rejected while collecting deltas: {reason:?}")
             }
             Ok(None) => return,

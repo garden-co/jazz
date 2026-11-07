@@ -1,5 +1,6 @@
 import { schema as s } from "jazz-tools";
 import { schema as betterAuthSchema } from "./schema-better-auth/schema";
+import { migrations } from "./migrations";
 
 const schema = {
   ...betterAuthSchema,
@@ -30,7 +31,7 @@ const schema = {
   // (app/api/join) that checks the token with backend authority and adds a
   // membership; clients never write their own membership row. The token only
   // ever travels in a URL fragment, and a single-use invite is deleted in the
-  // same exclusive transaction that admits its first redeemer.
+  // same serializable transaction that admits its first redeemer.
   canvasInvites: s
     .table(
       {
@@ -132,7 +133,7 @@ const schema = {
 };
 
 type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema);
+export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
 export type Canvas = s.RowOf<typeof app.canvases>;
 export type Layer = s.RowOf<typeof app.layers>;
 export type Shape = s.RowOf<typeof app.shapes>;

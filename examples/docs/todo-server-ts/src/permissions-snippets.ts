@@ -35,33 +35,36 @@ const schema = {
 };
 // #endregion permissions-schema-ts
 
-const exampleApp = s.defineApp(schema);
+const exampleApp = s.defineApp(schema, { migrations: "none" });
 
 // #region permissions-simple-ts
 s.definePermissions(exampleApp, ({ policy, allOf, session }) => {
-  policy.todos.allowRead.where({ owner_id: session.user.account });
+  policy.todos.allowRead.where({ owner_id: session.user });
   // Users cannot create todos with different owners
-  policy.todos.allowInsert.where({ owner_id: session.user.account });
+  policy.todos.allowInsert.where({ owner_id: session.user });
   // Users can update their own todos, but only if not already done
   policy.todos.allowUpdate
-    .whereOld(allOf([{ owner_id: session.user.account }, { done: false }]))
-    .whereNew({ owner_id: session.user.account });
+    .whereOld(allOf([{ owner_id: session.user }, { done: false }]))
+    .whereNew({ owner_id: session.user });
   // Users can only delete their own todos
-  policy.todos.allowDelete.where({ owner_id: session.user.account });
+  policy.todos.allowDelete.where({ owner_id: session.user });
 });
 // #endregion permissions-simple-ts
 
 // #region permissions-created-by-ts
-s.definePermissions(exampleApp, ({ policy }) => {
-  // Sugar for applying `$createdBy === session.user` to read/insert/update/delete.
-  policy.todos.managedByCreator();
+s.definePermissions(exampleApp, ({ policy, session }) => {
+  // Only the row's creator can read, create, update, or delete it.
+  policy.todos.allowRead.where({ $createdBy: session.user });
+  policy.todos.allowInsert.where({ $createdBy: session.user });
+  policy.todos.allowUpdate.where({ $createdBy: session.user });
+  policy.todos.allowDelete.where({ $createdBy: session.user });
 });
 // #endregion permissions-created-by-ts
 
 // #region permissions-created-by-combinator-ts
-s.definePermissions(exampleApp, ({ policy, anyOf, isCreator }) => {
-  // The same creator condition can still be composed with other rules.
-  policy.todos.allowRead.where(anyOf([isCreator, { done: true }]));
+s.definePermissions(exampleApp, ({ policy, anyOf, session }) => {
+  // The creator condition composes with other rules like any row predicate.
+  policy.todos.allowRead.where(anyOf([{ $createdBy: session.user }, { done: true }]));
 });
 // #endregion permissions-created-by-combinator-ts
 
@@ -98,10 +101,7 @@ s.definePermissions(exampleApp, ({ policy, anyOf, allOf, allowedTo }) => {
 s.definePermissions(exampleApp, ({ policy, allOf, anyOf, allowedTo, session }) => {
   // Users can read a todo if they own it, or if it's not done and they can read its project.
   policy.todos.allowRead.where(
-    anyOf([
-      { owner_id: session.user.account },
-      allOf([{ done: false }, allowedTo.read("project")]),
-    ]),
+    anyOf([{ owner_id: session.user }, allOf([{ done: false }, allowedTo.read("project")])]),
   );
 });
 // #endregion permissions-combinators-ts
@@ -109,7 +109,7 @@ s.definePermissions(exampleApp, ({ policy, allOf, anyOf, allowedTo, session }) =
 // #region permissions-session-claims-ts
 s.definePermissions(exampleApp, ({ policy, anyOf, session }) => {
   policy.todos.allowRead.where(
-    anyOf([{ owner_id: session.user.account }, session.where({ "claims.role": "manager" })]),
+    anyOf([{ owner_id: session.user }, session.where({ "claims.role": "manager" })]),
   );
 });
 // #endregion permissions-session-claims-ts
@@ -130,10 +130,10 @@ s.definePermissions(exampleApp, ({ policy, anyOf, session }) => {
   // Users can read a todo if they own it, or if someone shared it with them.
   policy.todos.allowRead.where((todo) =>
     anyOf([
-      { owner_id: session.user.account },
+      { owner_id: session.user },
       policy.todoShares.exists.where({
         todoId: todo.id,
-        user_id: session.user.account,
+        user_id: session.user,
         can_read: true,
       }),
     ]),
@@ -143,9 +143,9 @@ s.definePermissions(exampleApp, ({ policy, anyOf, session }) => {
 
 // #region permissions-update-protected-columns
 s.definePermissions(exampleApp, ({ policy, allOf, session }) => {
-  policy.todos.allowUpdate.whereOld({ owner_id: session.user.account }).whereNew((updatedTodo) =>
+  policy.todos.allowUpdate.whereOld({ owner_id: session.user }).whereNew((updatedTodo) =>
     allOf([
-      { owner_id: session.user.account },
+      { owner_id: session.user },
       // `parentId` and `projectId` cannot be updated.
       policy.todos.exists.where({
         id: updatedTodo.id,
@@ -161,7 +161,7 @@ s.definePermissions(exampleApp, ({ policy, allOf, session }) => {
 s.definePermissions(exampleApp, ({ policy, session }) => {
   // User can only update their own rows, and the result must still be owned by them
   policy.todos.allowUpdate
-    .whereOld({ owner_id: session.user.account })
-    .whereNew({ owner_id: session.user.account });
+    .whereOld({ owner_id: session.user })
+    .whereNew({ owner_id: session.user });
 });
 // #endregion permissions-whereold-wherenew-ts

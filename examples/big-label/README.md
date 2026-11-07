@@ -3,13 +3,15 @@
 BigLabel is a synthetic, multi-tenant record-label operations app. It gives the examples-and-benchmarks program a recognizable SaaS workload: organization membership graphs, teams and roles, indexed tenant lists, artist/release relations, cold loads, and ordinary workflow churn.
 
 Run it locally with `pnpm --dir examples/big-label dev`. It is a small Next.js
-app with its own Better Auth route and JWKS endpoint. After sign-in,
-`POST /api/bootstrap` uses the server-only Jazz backend secret to ensure one
-personal organization and its first admin membership for the stable Better Auth
-user ID. The browser then obtains a short-lived Better Auth JWT and mounts the
-operations UI inside `JazzProvider`; token expiry is handled by fetching a fresh
-JWT. Browser clients never receive the backend secret, and normal membership
-and tenant mutations remain policy checked at the Jazz edge.
+app with its own Better Auth route, and Jazz runs inside it (`createJazz` in
+`src/lib/jazz.server.ts`, mounted at `/jazz`) with its data in `.jazz/`. The
+browser signs in through that backend: `authenticate` reads the Better Auth
+session cookie, so the browser holds no token of its own. After sign-in,
+`POST /api/bootstrap` uses the backend's authority to ensure one personal
+organization and its first admin membership for the stable Better Auth user ID,
+while the operations UI renders inside `JazzProvider`. Browser clients never get
+backend authority, and normal membership and tenant mutations remain policy
+checked at the Jazz edge.
 
 ## The app
 
@@ -56,16 +58,16 @@ read its own profile and the profiles of members of its labels, nothing more.
 To add a member, an admin enters their email. `POST /api/members` uses the
 backend only to look the email up in `personEmails` (written only by the
 bootstrap route from the verified sign-in, and unreadable by browsers). It then
-writes the membership as the caller, via `forRequest()`, so `permissions.ts`
+writes the membership as the caller, via `forReqUser()`, so `permissions.ts`
 decides: only admins add members, only as editors or viewers. The route
 answers non-admins with "forbidden" before looking anything up, so it can't be
-used to probe emails or membership. The write is an exclusive
+used to probe emails or membership. The write is a serializable
 transaction that first reads the person's membership, so a double submit adds
 them once. The person needs to have signed in once.
 
 Catalogue numbers are unique per label, but the permissions don't enforce
 that: a policy can't compare a row with its siblings. `saveRelease` in
-`src/lib/mutations.ts` does, in an exclusive transaction that reads the
+`src/lib/mutations.ts` does, in a serializable transaction that reads the
 number's current holders; the authority rejects the transaction if a
 concurrent one changed that read. The release form uses it, so numbers stay
 unique for writes made through the app. A client writing to `releases`
@@ -78,8 +80,8 @@ its assignments in the same transaction.
 ## Demo data
 
 Settings → Demo data calls `POST /api/demo-data` with the `smoke` or `small`
-profile. Like the bootstrap route, it verifies the caller's JWT and writes with
-the backend secret: it loads `createFixture(profile)` as extra organizations
+profile. Like the bootstrap route, it identifies the caller from their session
+cookie and writes with backend authority: it loads `createFixture(profile)` as extra organizations
 with the caller as admin, plus synthetic members, teams, catalogues, artists and
 releases. Fixture IDs map to UUIDs derived from the caller, so loading twice is
 a no-op and callers never share demo tenants.
@@ -112,7 +114,7 @@ All names, emails and IDs are generated; no real data is used.
 ## Admission boundary
 
 The first organization is provisioned by the app-owned, authenticated bootstrap
-route—not by a client-settable JWT claim. Its exclusive transaction reads and
+route—not by a client-settable claim. Its serializable transaction reads and
 then gets-or-creates the external user's one profile,
 `personal-<external-user-id>` organization, and admin membership as one
 durable triple. A concurrent request retries its transaction against the
@@ -126,9 +128,11 @@ membership cannot grant itself authority. This bootstrap is intentionally not a
 general invitation, account-linking, profile deletion, or cross-organization
 membership workflow.
 
-Production deployments must supply `BACKEND_SECRET` and `BETTER_AUTH_SECRET`
-server-side. The repository's deterministic development/build fixtures are not
-production fallbacks: startup fails if either production secret is absent.
+Production deployments must supply `BETTER_AUTH_SECRET` and
+`JAZZ_APP_ID`, plus `JAZZ_SERVER_URL` and `JAZZ_ADMIN_SECRET` to keep
+the data on a sync server such as Jazz Cloud. The
+repository's deterministic development/build fixtures are not production
+fallbacks: startup fails if a production secret is absent.
 
 The deployed authority receipt also proves cross-tenant assignments are denied
 by the edge rather than hidden by a synthetic fixture.

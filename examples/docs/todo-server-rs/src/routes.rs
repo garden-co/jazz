@@ -99,7 +99,10 @@ fn row_to_todo(object_id: ObjectId, values: &[Value]) -> Option<Todo> {
 }
 
 fn todo_values(title: String, description: String) -> std::collections::HashMap<String, Value> {
-    jazz::row_input!("title" => title, "done" => false, "description" => description)
+    jazz::row_input!(
+        "title" => title, "done" => false, "description" => description,
+        "parent" => Value::Null, "project" => Value::Null,
+    )
 }
 
 /// List all todos.

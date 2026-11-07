@@ -3,16 +3,14 @@ import { parseAuthSecret } from "../runtime/auth-secret-codec.js";
 import { generateAuthSecret } from "../runtime/auth-secret-store.js";
 import { parseJwtPayload } from "../runtime/client-session.js";
 import type { LocalFirstAccountFactory } from "./enrollment.js";
+import { formatUuidAt, parseUuidBytes } from "../runtime/hex.js";
 
 const encoder = new TextEncoder();
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DNS_NAMESPACE = "6ba7b810-9dad-11d1-80b4-00c04fd430c8";
 function uuidV5(namespace: string, name: string): string {
   if (!UUID_PATTERN.test(namespace)) throw new Error("Invalid account namespace");
-  const raw = namespace.replaceAll("-", "");
-  const ns = Uint8Array.from({ length: 16 }, (_, i) =>
-    Number.parseInt(raw.slice(i * 2, i * 2 + 2), 16),
-  );
+  const ns = parseUuidBytes(namespace)!;
   const text = encoder.encode(name);
   const bytes = new Uint8Array(16 + text.length);
   bytes.set(ns);
@@ -20,8 +18,7 @@ function uuidV5(namespace: string, name: string): string {
   const digest = sha1(bytes).slice(0, 16);
   digest[6] = (digest[6]! & 0x0f) | 0x50;
   digest[8] = (digest[8]! & 0x3f) | 0x80;
-  const hex = Array.from(digest, (value) => value.toString(16).padStart(2, "0")).join("");
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  return formatUuidAt(digest, 0);
 }
 /** Same namespace normalization as Rust AppId and local-first JWT admission. */
 export function accountAppId(appId: string): string {

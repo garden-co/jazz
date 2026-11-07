@@ -10,7 +10,7 @@ import {
 } from "./client-session.js";
 import { getDbInternalSession, setTrustedReservedSession } from "./db-internal-session.js";
 function author(issuer: string, subject: string) {
-  return { account: null, identity: { issuer, subject } };
+  return { user: null, identity: { issuer, subject } };
 }
 
 function withTrustedSession(config: DbConfig, session: Session): DbConfig {
@@ -109,7 +109,7 @@ function transportSnapshot(db: TestDb, runtimeClient: AuthTestRuntimeClient) {
   const hasCookie = config.cookieSession !== undefined;
   return {
     mode: hasJwt ? "bearer" : "cookie",
-    exclusive: { hasJwt, hasCookie },
+    serializable: { hasJwt, hasCookie },
     claimVersion: hasJwt ? jwtClaimVersion(config.jwtToken) : config.cookieSession?.claims.version,
     forwarded: {
       bearer: runtimeClient.updateAuthToken.mock.calls.length,
@@ -217,7 +217,7 @@ describe("Db auth state", () => {
       claims: { role: "reader" },
     });
     expect(db.getAuthState().session).toMatchObject({
-      user: author("https://issuer.example", "alice"),
+      ...author("https://issuer.example", "alice"),
       claims: expect.objectContaining({ role: "reader" }),
     });
   });
@@ -269,7 +269,7 @@ describe("Db auth state", () => {
 
     expect(db.getAuthState()).toMatchObject({
       authMode: "local-first",
-      session: { user: author(LOCAL_FIRST_JWT_ISSUER, "alice") },
+      session: { ...author(LOCAL_FIRST_JWT_ISSUER, "alice") },
     });
     expect(runtimeClient.updateTrustedAuthToken).toHaveBeenCalledWith(
       refreshedToken,
@@ -353,6 +353,29 @@ describe("Db auth state", () => {
     }
   });
 
+  it("renews an expired owned token even when an auth observer throws", () => {
+    vi.useFakeTimers();
+    try {
+      const { db, runtimeClient } = makeLocalFirstDb();
+      db.ownRefresh(true);
+      const failure = new Error("observer failed");
+      const stop = db.onAuthChanged((state) => {
+        if (state.error === "expired") throw failure;
+      });
+      try {
+        expect(() => db.failAuth("expired")).toThrow(failure);
+        expect(runtimeClient.updateTrustedAuthToken).toHaveBeenCalledOnce();
+        expect(jwtClaimVersion(db.getConfig().jwtToken)).toBe(1);
+        expect(db.getAuthState().error).toBeUndefined();
+      } finally {
+        stop();
+      }
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
   it("spaces out remints a skewed server keeps rejecting until a token lives to its refresh", () => {
     vi.useFakeTimers();
     try {
@@ -413,7 +436,7 @@ describe("Db auth state", () => {
     expect(db.getAuthState()).toMatchObject({
       authMode: "external",
       session: {
-        user: author("https://issuer.example", "alice"),
+        ...author("https://issuer.example", "alice"),
         claims: expect.objectContaining({ role: "reader" }),
       },
     });
@@ -421,7 +444,7 @@ describe("Db auth state", () => {
 
   it("reports backend-scoped auth state for session-backed dbs", () => {
     const session = {
-      user: author("https://issuer.example", "alice"),
+      ...author("https://issuer.example", "alice"),
       claims: { role: "writer" },
       authMode: "external" as const,
     };
@@ -475,7 +498,7 @@ describe("Db auth state", () => {
       {
         authMode: "external",
         session: {
-          user: author("https://issuer.example", "bob"),
+          ...author("https://issuer.example", "bob"),
           claims: { role: "writer" },
           authMode: "external",
         },
@@ -488,13 +511,13 @@ describe("Db auth state", () => {
     expect(sharedDb.getAuthState()).toMatchObject({
       authMode: "external",
       session: {
-        user: author("https://issuer.example", "alice"),
+        ...author("https://issuer.example", "alice"),
       },
     });
     expect(scopedDb.getAuthState()).toMatchObject({
       authMode: "external",
       session: {
-        user: author("https://issuer.example", "bob"),
+        ...author("https://issuer.example", "bob"),
       },
     });
   });
@@ -505,7 +528,7 @@ describe("Db auth state", () => {
     expect(db.getAuthState()).toMatchObject({
       authMode: "external",
       session: {
-        user: author("https://issuer.example", "alice"),
+        ...author("https://issuer.example", "alice"),
         claims: expect.objectContaining({ role: "reader" }),
       },
     });
@@ -531,7 +554,7 @@ describe("Db auth state", () => {
     expect(db.getAuthState()).toMatchObject({
       authMode: "external",
       session: {
-        user: author("https://issuer.example", "alice"),
+        ...author("https://issuer.example", "alice"),
         claims: expect.objectContaining({ role: "writer" }),
       },
     });
@@ -562,7 +585,7 @@ describe("Db auth state", () => {
     expect(states[0]).toMatchObject({
       authMode: "external",
       session: {
-        user: author("https://issuer.example", "alice"),
+        ...author("https://issuer.example", "alice"),
       },
     });
     expect(states[0]?.error).toBeUndefined();
@@ -580,7 +603,7 @@ describe("Db auth state", () => {
     expect(db.getAuthState()).toMatchObject({
       authMode: "external",
       session: {
-        user: author("https://issuer.example", "alice"),
+        ...author("https://issuer.example", "alice"),
       },
     });
     expect(db.getAuthState().error).toBeUndefined();
@@ -625,7 +648,7 @@ describe("Db auth state", () => {
     expect(db.getAuthState()).toMatchObject({
       authMode: "external",
       session: {
-        user: author("https://issuer.example", "alice"),
+        ...author("https://issuer.example", "alice"),
         claims: expect.objectContaining({ role: "writer" }),
       },
     });
@@ -660,7 +683,7 @@ describe("Db auth state", () => {
     const stop = db.onAuthChanged((state) => {
       observedStates.push({
         authMode: state.authMode,
-        subject: state.session?.user.identity.subject,
+        subject: state.session?.identity.subject,
         version: state.session?.claims.version,
       });
     });
@@ -684,25 +707,25 @@ describe("Db auth state", () => {
     expect(snapshots).toEqual([
       {
         mode: "bearer",
-        exclusive: { hasJwt: true, hasCookie: false },
+        serializable: { hasJwt: true, hasCookie: false },
         claimVersion: "A",
         forwarded: { bearer: 0, cookie: 0 },
       },
       {
         mode: "cookie",
-        exclusive: { hasJwt: false, hasCookie: true },
+        serializable: { hasJwt: false, hasCookie: true },
         claimVersion: "B",
         forwarded: { bearer: 0, cookie: 1 },
       },
       {
         mode: "bearer",
-        exclusive: { hasJwt: true, hasCookie: false },
+        serializable: { hasJwt: true, hasCookie: false },
         claimVersion: "C",
         forwarded: { bearer: 1, cookie: 1 },
       },
       {
         mode: "cookie",
-        exclusive: { hasJwt: false, hasCookie: true },
+        serializable: { hasJwt: false, hasCookie: true },
         claimVersion: "D",
         forwarded: { bearer: 1, cookie: 2 },
       },
@@ -761,6 +784,34 @@ describe("Db auth state", () => {
     expect(db.getAuthState().session?.claims.version).toBe("C");
   });
 
+  it("publishes the coherent snapshot to later observers before rethrowing an observer failure", () => {
+    const { db, runtimeClient } = makeDbWithJwt(makeJwt({ sub: "alice", version: "A" }));
+    db.touchClient();
+    const observerError = new Error("synthetic auth observer failure");
+    const stopThrowing = db.onAuthChanged((state) => {
+      if (state.session?.claims.version === "B") throw observerError;
+    });
+    const snapshots: AuthPublicationSnapshot[] = [];
+    const stopRecording = db.onAuthChanged((state) => {
+      snapshots.push(authPublicationSnapshot(db, runtimeClient, state));
+    });
+    snapshots.length = 0;
+
+    expect(() => db.updateCookieSession(makeCookieSession("B"))).toThrow(observerError);
+    expect(snapshots).toEqual([
+      {
+        publicState: { authMode: "external", version: "B" },
+        config: { bearerVersion: undefined, cookieVersion: "B" },
+        internal: { authMode: "external", userId: "alice", version: "B" },
+        transport: { bearerVersion: undefined, cookieVersion: "B" },
+      },
+    ]);
+    db.updateCookieSession(makeCookieSession("B"));
+    expect(snapshots).toHaveLength(1);
+    stopRecording();
+    stopThrowing();
+  });
+
   it("rejects stale principals and live clears without changing the accepted snapshot", () => {
     const { db, runtimeClient } = makeDbWithJwt(makeJwt({ sub: "alice", version: "A" }));
     db.touchClient();
@@ -812,7 +863,7 @@ describe("Db auth state", () => {
     expect(db.getAuthState()).toBe(beforeState);
     expect(transportSnapshot(db, runtimeClient)).toMatchObject({
       mode: beforeTransport.mode,
-      exclusive: beforeTransport.exclusive,
+      serializable: beforeTransport.serializable,
       claimVersion: beforeTransport.claimVersion,
     });
     expect(getDbInternalSession(db)).toBe(beforeInternalSession);
@@ -824,7 +875,7 @@ describe("Db auth state", () => {
     expect(db.getAuthState().session?.claims.version).toBe("C");
     expect(transportSnapshot(db, runtimeClient)).toEqual({
       mode: "cookie",
-      exclusive: { hasJwt: false, hasCookie: true },
+      serializable: { hasJwt: false, hasCookie: true },
       claimVersion: "C",
       forwarded: { bearer: 0, cookie: 2 },
     });

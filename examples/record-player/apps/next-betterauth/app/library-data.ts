@@ -12,14 +12,14 @@ export function useStore(): JazzRecordPlayerStore {
 
 /** The signed-in user's Jazz account ID: the value other people invite. */
 export function useAccountId(): string | undefined {
-  return useSession()?.user.account ?? undefined;
+  return useSession()?.user ?? undefined;
 }
 
 /**
  * First reads on a fresh device: an empty local result waits for the server's
  * answer, so the library doesn't flash its empty state before sync arrives.
  */
-export const FIRST_READ = { tier: "local-first-unless-empty" } as const;
+export const FIRST_READ = { tier: "local-first", firstLoadRemoteWaitMs: 5_000 } as const;
 
 export type Album = { id: string; title: string; artist: string; cover_mime?: string | null };
 

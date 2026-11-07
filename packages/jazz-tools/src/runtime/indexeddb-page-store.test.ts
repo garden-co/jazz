@@ -1,6 +1,5 @@
 import { acquireBrowserPhysicalDatabaseEpoch } from "./browser-physical-database-epoch.js";
-import { IDBFactory, indexedDB as fakeIndexedDb } from "fake-indexeddb";
-import { readFile } from "node:fs/promises";
+import { IDBFactory, IDBObjectStore, indexedDB as fakeIndexedDb } from "fake-indexeddb";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   INDEXEDDB_BTREE_DATABASE_VERSION,
@@ -17,6 +16,8 @@ import {
   INDEXEDDB_REPLICA_NODE_BYTES,
   INDEXEDDB_REPLICA_NODE_KEY,
   IndexedDbPageStore,
+  IndexedDbStorageFullError,
+  UnsupportedStorageCodecsError,
 } from "./indexeddb-page-store.js";
 
 async function ownReclamation(store: IndexedDbPageStore) {
@@ -562,6 +563,66 @@ describe("IndexedDbPageStore", () => {
     store.close();
   });
 
+  it("reports a commit the browser refuses for lack of space as a storage failure", async () => {
+    const name = databaseName();
+    const store = await IndexedDbPageStore.open(name);
+    // As a browser does when the origin is over its quota: the transaction
+    // aborts with QuotaExceededError.
+    const put = IDBObjectStore.prototype.put;
+    IDBObjectStore.prototype.put = function (
+      this: IDBObjectStore,
+      ...args: [unknown, IDBValidKey?]
+    ) {
+      const request = put.apply(this, args);
+      (this.transaction as unknown as { _abort(name: string): void })._abort("QuotaExceededError");
+      return request;
+    } as typeof put;
+    try {
+      const refused = store.acquireForegroundNodeLease();
+      await expect(refused).rejects.toBeInstanceOf(IndexedDbStorageFullError);
+      await expect(refused).rejects.toMatchObject({
+        code: "storage",
+        message: expect.stringMatching(/IndexedDB.*QuotaExceededError/),
+      });
+    } finally {
+      IDBObjectStore.prototype.put = put;
+    }
+    // With room again, leasing works.
+    const lease = await store.acquireForegroundNodeLease();
+    await store.retireForegroundNodeLease(lease.leaseId);
+    store.close();
+  });
+
+  it("reports a put the browser refuses for lack of space as a storage failure", async () => {
+    const name = databaseName();
+    const store = await IndexedDbPageStore.open(name);
+    // As a browser may: the put request itself fails with QuotaExceededError.
+    const quotaExceeded = Object.assign(new Error("over quota"), { name: "QuotaExceededError" });
+    const put = IDBObjectStore.prototype.put;
+    IDBObjectStore.prototype.put = function (this: IDBObjectStore) {
+      return (
+        this.transaction as unknown as {
+          _execRequestAsync(request: { operation: () => never; source: unknown }): IDBRequest;
+        }
+      )._execRequestAsync({
+        operation: () => {
+          throw quotaExceeded;
+        },
+        source: this,
+      });
+    } as typeof put;
+    try {
+      const refused = store.acquireForegroundNodeLease();
+      await expect(refused).rejects.toBeInstanceOf(IndexedDbStorageFullError);
+      await expect(refused).rejects.toMatchObject({ code: "storage", cause: quotaExceeded });
+    } finally {
+      IDBObjectStore.prototype.put = put;
+    }
+    const lease = await store.acquireForegroundNodeLease();
+    await store.retireForegroundNodeLease(lease.leaseId);
+    store.close();
+  });
+
   it("retires an abandoned foreground lease on worker restart", async () => {
     const name = databaseName();
     let store = await IndexedDbPageStore.open(name);
@@ -619,6 +680,45 @@ describe("IndexedDbPageStore", () => {
     }
   });
 
+  it("reports a codec-family mismatch as a typed storage-format refusal", async () => {
+    const required = INDEXEDDB_STORAGE_MANIFEST.requiredCodecIds;
+    // The last Groove browser root's inventory (alpha.59).
+    const groove = [
+      "groove.dictionary.v1",
+      "groove.durable-index.v2",
+      "groove.large-value.v2",
+      "groove.ordered-chunk-storage.v2",
+      "groove.ordered-kv.v1",
+      "jazz.node-storage.v2",
+    ];
+    for (const [requiredCodecIds, missing, unknown] of [
+      [groove, ["jazz.sqlite-storage.v1"], groove],
+      [[], ["jazz.sqlite-storage.v1"], []],
+      [[...required, "jazz.future.v2"], [], ["jazz.future.v2"]],
+      [["jazz.sqlite-storage.v2"], ["jazz.sqlite-storage.v1"], ["jazz.sqlite-storage.v2"]],
+    ] as const) {
+      const name = databaseName();
+      await installRawEpochOneFixture(name, { ...INDEXEDDB_STORAGE_MANIFEST, requiredCodecIds });
+      const refusal = await IndexedDbPageStore.open(name).then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      expect(refusal).toBeInstanceOf(UnsupportedStorageCodecsError);
+      expect(refusal).toMatchObject({
+        name: "UnsupportedStorageCodecsError",
+        code: "unsupported_storage_codecs",
+        missing,
+        unknown,
+      });
+      const raw = await openRawDatabase(name);
+      const tx = raw.transaction(INDEXEDDB_BTREE_PAGES_STORE, "readonly");
+      expect(await requestResult(tx.objectStore(INDEXEDDB_BTREE_PAGES_STORE).get(1))).toEqual(
+        new Uint8Array([1]).buffer,
+      );
+      raw.close();
+    }
+  });
+
   it("does not mutate a pre-settlement version-two namespace when rejecting its missing manifest", async () => {
     const name = databaseName();
     const raw = await createLegacyVersionTwoDatabase(name);
@@ -660,24 +760,6 @@ describe("IndexedDbPageStore", () => {
     );
     expect(metadata).toMatchObject({ generation: 1, rootPageId: 4, nextPageId: 5 });
     expect(await store.readPage(4)).toEqual(new Uint8Array([8, 6, 7, 5, 3, 0, 9]));
-    store.close();
-  });
-
-  it("persists the Rust-owned v1 page fixture byte-for-byte", async () => {
-    const fixture = hexBytes(
-      await readFile(
-        new URL("../../../../crates/idb-tree/fixtures/page-v1-leaf.hex", import.meta.url),
-        "utf8",
-      ),
-    );
-    const name = databaseName();
-    const store = await IndexedDbPageStore.open(name);
-    await store.commit({
-      expectedGeneration: 0,
-      metadata: { pageSize: INDEXEDDB_BTREE_PAGE_SIZE, rootPageId: 1, nextPageId: 2 },
-      pages: new Map([[1, fixture]]),
-    });
-    expect(await store.readPage(1)).toEqual(fixture);
     store.close();
   });
 
@@ -803,14 +885,4 @@ function transactionDone(tx: IDBTransaction): Promise<void> {
     tx.onerror = () => reject(tx.error ?? new Error("IndexedDB transaction failed"));
     tx.onabort = () => reject(tx.error ?? new Error("IndexedDB transaction aborted"));
   });
-}
-
-function hexBytes(value: string): Uint8Array {
-  const trimmed = value.trim();
-  if (trimmed.length % 2 !== 0) throw new Error("hex fixture must have even length");
-  return Uint8Array.from(
-    Array.from({ length: trimmed.length / 2 }, (_, index) =>
-      Number.parseInt(trimmed.slice(index * 2, index * 2 + 2), 16),
-    ),
-  );
 }

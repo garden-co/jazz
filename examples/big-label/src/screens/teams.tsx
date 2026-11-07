@@ -14,7 +14,7 @@ import {
   VStack,
   VisuallyHidden,
 } from "@astryxdesign/core";
-import { useAll, useDb, useOne } from "jazz-tools/react";
+import { useAll, useOne } from "jazz-tools/react";
 import { app } from "../../schema";
 import { TeamDialog } from "../components/forms";
 import { StatusBadge, formatCount, formatDate, sentence } from "../components/list";
@@ -87,14 +87,15 @@ export function TeamsPage() {
 export function TeamPage({ id }: { id: string }) {
   const organization = useOrganization();
   const canManage = useCan("manageTeams");
-  const db = useDb();
   const write = useWrite();
   const [isRenaming, setIsRenaming] = useState(false);
   const [membershipId, setMembershipId] = useState<string | null>(null);
   const [teamRole, setTeamRole] = useState<string>("member");
-  const { data: team, isLoading } = useOne(
-    app.teams.where({ id, organizationId: organization.id }),
-  );
+  const {
+    data: team,
+    isLoading,
+    db,
+  } = useOne(app.teams.where({ id, organizationId: organization.id }));
   const { data: assignments = [] } = useAll(
     app.teamAssignments
       .where({ organizationId: organization.id, teamId: id })

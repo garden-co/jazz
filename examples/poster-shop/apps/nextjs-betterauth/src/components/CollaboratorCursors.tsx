@@ -27,7 +27,10 @@ export function useCursorPublisher(canvasId: string, author: string | null, name
       const key = `${canvasId}:${author}`;
       if (row.current?.key !== key) {
         const id = db
-          .one(app.cursors.where({ canvasId, author }), { tier: "local-first-unless-empty" })
+          .one(app.cursors.where({ canvasId, author }), {
+            tier: "local-first",
+            firstLoadRemoteWaitMs: 5_000,
+          })
           .then((existing) => {
             if (existing) return existing.id;
             const { value } = db.insert(app.cursors, {

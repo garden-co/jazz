@@ -14,7 +14,7 @@ const membership = {
 };
 
 describe("personal-organization bootstrap state", () => {
-  it("reuses the committed triple after a competing exclusive transaction wins", () => {
+  it("reuses the committed triple after a competing serializable transaction wins", () => {
     const initial = planPersonalBootstrap(userId, slug, {
       people: [],
       organizations: [],

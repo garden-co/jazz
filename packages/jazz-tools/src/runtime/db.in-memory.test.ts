@@ -1,7 +1,7 @@
 import { localAccountConfig } from "./testing/account-fixtures.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
-import { type Db } from "./db.js";
+import { type Db, type DbSubscriptionUpdate } from "./db.js";
 import { createDb } from "./default-create-db.js";
 
 const schema = {
@@ -15,7 +15,7 @@ const schema = {
 };
 
 type AppSchema = s.Schema<typeof schema>;
-const app: s.App<AppSchema> = s.defineApp(schema);
+const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
 type Note = s.RowOf<typeof app.notes>;
 
 const largeValueSchema = {
@@ -30,7 +30,15 @@ const largeValueSchema = {
   ),
 };
 type LargeValueAppSchema = s.Schema<typeof largeValueSchema>;
-const largeValues: s.App<LargeValueAppSchema> = s.defineApp(largeValueSchema);
+const largeValues: s.App<LargeValueAppSchema> = s.defineApp(largeValueSchema, {
+  migrations: "none",
+});
+
+const textSchema = {
+  pages: s.table({ body: s.string().merge("markdown") }, {}),
+};
+type TextAppSchema = s.Schema<typeof textSchema>;
+const texts: s.App<TextAppSchema> = s.defineApp(textSchema, { migrations: "none" });
 
 const optionalJsonSchema = {
   jobs: s.table(
@@ -42,7 +50,9 @@ const optionalJsonSchema = {
   ),
 };
 type OptionalJsonAppSchema = s.Schema<typeof optionalJsonSchema>;
-const optionalJson: s.App<OptionalJsonAppSchema> = s.defineApp(optionalJsonSchema);
+const optionalJson: s.App<OptionalJsonAppSchema> = s.defineApp(optionalJsonSchema, {
+  migrations: "none",
+});
 
 describe("createDb in-memory driver", () => {
   let db: Db | undefined;
@@ -61,6 +71,135 @@ describe("createDb in-memory driver", () => {
     // Opening the native client decodes and compiles the TypeScript-authored
     // source schema before this query can run.
     await expect(db.all(app.notes)).resolves.toEqual([]);
+  });
+
+  it("merges a text edit over a value its editor had not shown yet", async () => {
+    db = await createDb({
+      ...(await localAccountConfig("in-memory-text-edit-test")),
+      driver: { type: "memory" },
+    });
+    const { value: page } = db.insert(texts.pages, { body: "Hello world" });
+    // A merged value arrives in the store before the editor shows it...
+    await db.update(texts.pages, page.id, { body: "Hello there world" }).wait({ tier: "local" });
+    // ...and the editor, still showing "Hello world", types "!".
+    await db
+      .update(
+        texts.pages,
+        page.id,
+        { body: "Hello world!" },
+        { editedFrom: { body: "Hello world" } },
+      )
+      .wait({ tier: "local" });
+    const [read] = await db.all(texts.pages.where({ id: page.id }));
+    expect(read?.body).toBe("Hello there world!");
+
+    // An edit of the value the column holds is written as it is.
+    await db
+      .update(
+        texts.pages,
+        page.id,
+        { body: "Hi there world!" },
+        { editedFrom: { body: "Hello there world!" } },
+      )
+      .wait({ tier: "local" });
+    const [again] = await db.all(texts.pages.where({ id: page.id }));
+    expect(again?.body).toBe("Hi there world!");
+  });
+
+  it("merges a transaction's text edit over a value its editor had not shown yet", async () => {
+    db = await createDb({
+      ...(await localAccountConfig("in-memory-text-edit-transaction-test")),
+      driver: { type: "memory" },
+    });
+    const { value: page } = db.insert(texts.pages, { body: "Hello world" });
+    await db.update(texts.pages, page.id, { body: "Hello there world" }).wait({ tier: "local" });
+    const committed = await db.transaction((tx) => {
+      tx.update(
+        texts.pages,
+        page.id,
+        { body: "Hello world!" },
+        { editedFrom: { body: "Hello world" } },
+      );
+    });
+    await committed.wait({ tier: "local" });
+    const [read] = await db.all(texts.pages.where({ id: page.id }));
+    expect(read?.body).toBe("Hello there world!");
+  });
+
+  it("writes a column left undefined in editedFrom as usual", async () => {
+    db = await createDb({
+      ...(await localAccountConfig("in-memory-text-edit-undefined-test")),
+      driver: { type: "memory" },
+    });
+    const { value: page } = db.insert(texts.pages, { body: "Hello world" });
+    await db.update(texts.pages, page.id, { body: "Hello there" }).wait({ tier: "local" });
+    await db
+      .update(texts.pages, page.id, { body: "Bye" }, { editedFrom: { body: undefined } })
+      .wait({ tier: "local" });
+    const [read] = await db.all(texts.pages.where({ id: page.id }));
+    expect(read?.body).toBe("Bye");
+  });
+
+  it("refuses editedFrom it cannot honour", async () => {
+    const transformedSchema = {
+      pages: s.table(
+        {
+          body: s
+            .string()
+            .transform({ from: (value: string) => value, to: (value: string) => value })
+            .merge("markdown"),
+        },
+        {},
+      ),
+    };
+    const transformed: s.App<s.Schema<typeof transformedSchema>> = s.defineApp(transformedSchema, {
+      migrations: "none",
+    });
+    // A Db holds one schema: each app below gets its own.
+    const open = async (name: string) => {
+      await db?.shutdown();
+      db = await createDb({
+        ...(await localAccountConfig(`in-memory-text-edit-refusals-${name}`)),
+        driver: { type: "memory" },
+      });
+      return db;
+    };
+    await open("texts");
+    const { value: page } = db!.insert(texts.pages, { body: "Hello" });
+    // A value to edit from, but no text to write.
+    expect(() => db!.update(texts.pages, page.id, {}, { editedFrom: { body: "Hello" } })).toThrow(
+      'a string replacement for "body"',
+    );
+    // A column that does not merge text.
+    await open("plain");
+    const { value: note } = db!.insert(largeValues.documents, {
+      payload: new Uint8Array(),
+      body: "Hello",
+      metadata: {},
+      done: false,
+    });
+    await expect(
+      (async () =>
+        db!
+          .update(
+            largeValues.documents,
+            note.id,
+            { body: "Hello!" },
+            { editedFrom: { body: "Hello" } },
+          )
+          .wait({ tier: "local" }))(),
+    ).rejects.toThrow();
+    // A column with a transform.
+    await open("transformed");
+    const { value: other } = db!.insert(transformed.pages, { body: "Hello" });
+    expect(() =>
+      db!.update(
+        transformed.pages,
+        other.id,
+        { body: "Hello!" },
+        { editedFrom: { body: "Hello" } },
+      ),
+    ).toThrow("which has a transform");
   });
 
   it("can read and write data without connecting to a server", async () => {
@@ -99,14 +238,14 @@ describe("createDb in-memory driver", () => {
     });
     const { value: unset } = db.insert(optionalJson.jobs, { title: "unset" });
     await db.update(optionalJson.jobs, unset.id, { meta: [1, "two"] }).wait({ tier: "local" });
-    const { value: exclusive } = await db.exclusiveTransaction((tx) =>
-      tx.insert(optionalJson.jobs, { title: "exclusive", meta: { b: 2 } }),
+    const { value: serializable } = await db.serializableTransaction((tx) =>
+      tx.insert(optionalJson.jobs, { title: "serializable", meta: { b: 2 } }),
     );
 
     const rows = await db.all(optionalJson.jobs);
     expect(rows.find((row) => row.id === withObject.id)?.meta).toEqual({ a: 1 });
     expect(rows.find((row) => row.id === unset.id)?.meta).toEqual([1, "two"]);
-    expect(rows.find((row) => row.id === exclusive.id)?.meta).toEqual({ b: 2 });
+    expect(rows.find((row) => row.id === serializable.id)?.meta).toEqual({ b: 2 });
   });
 
   it("executes typed partial selects and page-relative diffs end to end", async () => {
@@ -199,7 +338,7 @@ describe("createDb in-memory driver", () => {
     });
   });
 
-  it("composes page-relative diffs inside mergeable and exclusive transactions", async () => {
+  it("composes page-relative diffs inside mergeable and serializable transactions", async () => {
     db = await createDb({
       ...(await localAccountConfig("in-memory-large-value-transaction-diff-test")),
       driver: { type: "memory" },
@@ -258,7 +397,7 @@ describe("createDb in-memory driver", () => {
       done: true,
     });
 
-    await db.exclusiveTransaction((tx) => {
+    await db.serializableTransaction((tx) => {
       tx.update(
         largeValues.documents,
         inserted.id,
@@ -282,6 +421,161 @@ describe("createDb in-memory driver", () => {
     expect(metadata).toEqual({ id: inserted.id, metadata: 43 });
   });
 
+  it("delivers opted-in columns' changes as splices, page-relative on a range select", async () => {
+    db = await createDb({
+      ...(await localAccountConfig("in-memory-large-value-subscription-splices-test")),
+      driver: { type: "memory" },
+    });
+
+    const prefix = "a".repeat(70_000);
+    const { value: inserted } = db.insert(largeValues.documents, {
+      payload: new Uint8Array(70_000),
+      body: `${prefix}hello world`,
+      metadata: {},
+      done: false,
+    });
+    await Promise.resolve();
+    const whole: DbSubscriptionUpdate[] = [];
+    const page: Array<{ rows: unknown[]; update: DbSubscriptionUpdate }> = [];
+    const stopWhole = db.subscribe(
+      largeValues.documents.where({ id: inserted.id }),
+      { onUpdate: (_rows, update) => whole.push(update) },
+      { splices: ["body", "payload"] },
+    );
+    const stopPage = db.subscribe(
+      largeValues.documents
+        .where({ id: inserted.id })
+        .select({ body: { from: prefix.length + 6, to: prefix.length + 11 } }),
+      { onUpdate: (rows, update) => page.push({ rows, update }) },
+      { splices: ["body"] },
+    );
+    await expect.poll(() => whole.length > 0 && page.length > 0).toBe(true);
+
+    await db
+      .update(
+        largeValues.documents,
+        inserted.id,
+        {},
+        {
+          applyDiffs: {
+            body: {
+              within: { from: prefix.length + 6, to: prefix.length + 11 },
+              splices: [{ at: 0, delete: 5, insert: "🪩 wide" }],
+            },
+            payload: {
+              within: { from: 10, to: 12 },
+              splices: [{ at: 0, delete: 2, insert: new Uint8Array([7]) }],
+            },
+          },
+        },
+      )
+      .wait({ tier: "local" });
+
+    await expect.poll(() => whole.at(-1)?.splices.get(inserted.id)).toBeDefined();
+    expect(whole.at(-1)!.splices.get(inserted.id)).toEqual({
+      body: [{ at: prefix.length + 6, delete: 5, insert: "🪩 wide" }],
+      payload: [{ at: 10, delete: 2, insert: new Uint8Array([7]) }],
+    });
+    // The window now covers "🪩 wi"; its splice turns "world" into exactly that.
+    await expect.poll(() => page.at(-1)?.update.splices.get(inserted.id)).toBeDefined();
+    const last = page.at(-1)!;
+    expect(last.rows).toEqual([{ id: inserted.id, body: "🪩 wi" }]);
+    const splices = last.update.splices.get(inserted.id)!.body!;
+    let text = "world";
+    for (const splice of splices) {
+      text =
+        text.slice(0, splice.at) +
+        (splice.insert as string) +
+        text.slice(splice.at + splice.delete);
+    }
+    expect(text).toBe("🪩 wi");
+
+    stopWhole();
+    stopPage();
+    expect(() =>
+      db!.subscribe(largeValues.documents, { onUpdate: () => {} }, { splices: ["metadata"] }),
+    ).toThrow(/not supported yet/);
+  });
+
+  it("refuses splices on a range-selected column that a computed column makes it read whole", async () => {
+    const computedApp = s.defineApp(
+      {
+        documents: s.table(
+          { body: s.string() },
+          { preview: s.computed((row: { body: string }) => row.body.slice(0, 3)) },
+        ),
+      },
+      { migrations: "none" },
+    );
+    db = await createDb({
+      ...(await localAccountConfig("in-memory-splices-whole-read-test")),
+      driver: { type: "memory" },
+    });
+    const { value: inserted } = db.insert(computedApp.documents, { body: "abcdefgh" });
+    await Promise.resolve();
+    const errors: unknown[] = [];
+    let threw: unknown;
+    try {
+      const stop = db.subscribe(
+        computedApp.documents
+          .where({ id: inserted.id })
+          .select({ body: { from: 2, to: 5 } }, "preview"),
+        { onUpdate: () => {}, onError: (error) => errors.push(error) },
+        { splices: ["body"] },
+      );
+      await expect.poll(() => errors.length).toBeGreaterThan(0);
+      stop();
+    } catch (error) {
+      threw = error;
+    }
+    expect(String(threw ?? errors[0])).toMatch(/read whole; splices are not supported yet/);
+  });
+
+  it("delivers splices for a hopped query's output rows", async () => {
+    const hopApp = s.defineApp(
+      {
+        documents: s.table({ body: s.string() }, {}),
+        links: s.table({ documentId: s.uuid() }, { document: s.rel("documents", "documentId") }),
+      },
+      { migrations: "none" },
+    );
+    db = await createDb({
+      ...(await localAccountConfig("in-memory-splices-hop-test")),
+      driver: { type: "memory" },
+    });
+    const prefix = "a".repeat(70_000);
+    const { value: doc } = db.insert(hopApp.documents, { body: `${prefix}hello` });
+    const { value: link } = db.insert(hopApp.links, { documentId: doc.id });
+    await Promise.resolve();
+    const updates: DbSubscriptionUpdate[] = [];
+    const stop = db.subscribe(
+      hopApp.links.where({ id: link.id }).hopTo("document"),
+      { onUpdate: (_rows, update) => updates.push(update) },
+      { splices: ["body"] },
+    );
+    await expect.poll(() => updates.length).toBeGreaterThan(0);
+    await db
+      .update(
+        hopApp.documents,
+        doc.id,
+        {},
+        {
+          applyDiffs: {
+            body: {
+              within: { from: prefix.length, to: prefix.length + 5 },
+              splices: [{ at: 0, delete: 5, insert: "world" }],
+            },
+          },
+        },
+      )
+      .wait({ tier: "local" });
+    await expect.poll(() => updates.at(-1)?.splices.get(doc.id)).toBeDefined();
+    expect(updates.at(-1)!.splices.get(doc.id)).toEqual({
+      body: [{ at: prefix.length, delete: 5, insert: "world" }],
+    });
+    stop();
+  });
+
   it("keeps descriptor-shaped JSON values ordinary for direct and transactional upserts", async () => {
     db = await createDb({
       ...(await localAccountConfig("in-memory-large-value-json-upsert-shape-test")),
@@ -299,7 +593,7 @@ describe("createDb in-memory driver", () => {
       .upsert(largeValues.documents, inserted.id, { metadata: direct })
       .wait({ tier: "local" });
     await expect(
-      db.one(largeValues.documents.where({ id: inserted.id }), { tier: "local" }),
+      db.one(largeValues.documents.where({ id: inserted.id }), { tier: "local-first" }),
     ).resolves.toMatchObject({ metadata: direct });
 
     const transactional = { edits: [{ op: "set", at: "/ordinary", value: "transaction" }] };
@@ -308,7 +602,7 @@ describe("createDb in-memory driver", () => {
     });
     await committed.wait({ tier: "local" });
     await expect(
-      db.one(largeValues.documents.where({ id: inserted.id }), { tier: "local" }),
+      db.one(largeValues.documents.where({ id: inserted.id }), { tier: "local-first" }),
     ).resolves.toMatchObject({ metadata: transactional });
   });
 });

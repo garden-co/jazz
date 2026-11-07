@@ -1,0 +1,8 @@
+---
+"jazz-tools": major
+"jazz-napi": major
+"jazz-wasm": major
+"jazz-rn": major
+---
+
+Rename exclusive transactions to serializable transactions. `db.exclusiveTransaction(...)` is now `db.serializableTransaction(...)`, `db.beginExclusiveTransaction()` is now `db.beginSerializableTransaction()`, the Effect `jazz.exclusiveTransaction` is now `jazz.serializableTransaction`, `ExclusiveWriteResult` and `ExclusiveWriteHandle` are now `SerializableWriteResult` and `SerializableWriteHandle`, and the transaction kind `"exclusive"` is now `"serializable"`. A conflict rejection now has the code `"serialization_conflict"` instead of `"exclusive_conflict"`. The error for reads that are not supported yet now says "is not supported in serializable transactions yet". In Rust, `Db::exclusive_tx` is now `Db::serializable_tx`, and `ExclusiveTx`, `ExclusiveTxOps` and `ExclusiveTxRef` are now `SerializableTx`, `SerializableTxOps` and `SerializableTxRef`. The core Rust names follow: `TxKind::Exclusive` is now `TxKind::Serializable`, `RejectionReason::ExclusiveConflict` is now `RejectionReason::SerializationConflict`, `node::Error::UnsupportedExclusiveRead` is now `node::Error::UnsupportedSerializableRead`, `open_exclusive*` and `commit_exclusive*` are now `open_serializable*` and `commit_serializable*`, `Snapshot::exclusive_base` is now `Snapshot::serializable_base`, and `ViewCompleteExclusiveCoverage` is now `ViewCompleteSerializableCoverage`. The raw `writeState` JSON from the napi, wasm and React Native bindings now spells the conflict fate `SerializationConflict` instead of `ExclusiveConflict`. Only the names changed: validation, conflicts, and stored and synced data are the same, and the old names have no alias.

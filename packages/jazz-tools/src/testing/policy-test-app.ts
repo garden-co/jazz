@@ -2,7 +2,7 @@ import { createJazzContext, type JazzContext } from "../backend/create-jazz-cont
 import { Db } from "../runtime/db.js";
 import { localFirstAccountId } from "../accounts/local-first.js";
 import { createHash } from "node:crypto";
-import { mintLocalFirstToken } from "jazz-napi";
+import { mintLocalFirstTokenFromSeed } from "../runtime/local-first-token.js";
 import { localFirstSessionFromToken } from "../backend/request-auth.js";
 import { ANONYMOUS_JWT_ISSUER, LOCAL_FIRST_JWT_ISSUER } from "../runtime/client-session.js";
 import type { Session } from "../runtime/context.js";
@@ -108,7 +108,7 @@ const LOCAL_FIRST_TOKEN_TTL_SECONDS = 3600;
 /**
  * Build the session a real local-first client presents to a backend: a
  * self-signed local-first token for a key derived from `user_id`, verified and
- * bound to the registry's founding account exactly as `forRequest()` does.
+ * bound to the registry's founding account exactly as `forReqUser()` does.
  * The native runtime then admits it through the same proof check, so no
  * reserved-issuer check is bypassed.
  */
@@ -128,7 +128,7 @@ function localFirstPolicySession(appId: string, session: PolicyTestSession): Ses
   const seed = createHash("sha256")
     .update(`jazz-policy-test-local-first\0${session.user_id}`)
     .digest("base64url");
-  const token = mintLocalFirstToken(seed, appId, LOCAL_FIRST_TOKEN_TTL_SECONDS);
+  const token = mintLocalFirstTokenFromSeed(seed, appId, LOCAL_FIRST_TOKEN_TTL_SECONDS);
   return localFirstSessionFromToken(token, appId);
 }
 
@@ -143,6 +143,18 @@ function withPolicyTestAccount(session: Session): Session {
     ...session,
     account_id: policyTestAccountId(session),
   };
+}
+
+/** Rethrow `error` unless it is a policy's denial of the write. */
+function throwUnlessDenial(error: unknown): void {
+  const { code, message } = (error ?? {}) as { code?: unknown; message?: unknown };
+  if (code === "permission_denied") return;
+  if (
+    typeof message === "string" &&
+    /AuthorizationDenied|authorization_denied|Write rejected by server authorization/.test(message)
+  )
+    return;
+  throw error;
 }
 
 function asTestDb(db: Db, expect: ExpectLike): TestDb {
@@ -161,10 +173,22 @@ function asTestDb(db: Db, expect: ExpectLike): TestDb {
     },
     expectDenied: {
       value: async (callback: (db: Db) => PendingWrite) => {
-        const write = callback(db);
-        await expect(write.wait({ tier: "global" })).rejects.toThrow(
-          /AuthorizationDenied|Write rejected by server authorization/,
-        );
+        // A write can be denied at once, as it is staged (a row this
+        // replica holds deleted), or later by the server: both count.
+        let write: PendingWrite;
+        try {
+          write = callback(db);
+        } catch (error) {
+          throwUnlessDenial(error);
+          return;
+        }
+        try {
+          await write.wait({ tier: "global" });
+        } catch (error) {
+          throwUnlessDenial(error);
+          return;
+        }
+        throw new Error("expectDenied: expected the write to be denied, but it was accepted");
       },
     },
   });
@@ -263,7 +287,8 @@ export async function createPolicyTestApp(
     adminSecret,
   });
 
-  await deploy({
+  // Published as createJazz publishes it; the backend link is pinned to it.
+  const { bundle } = await deploy({
     appId: server.appId,
     serverUrl: server.url,
     adminSecret,
@@ -281,6 +306,7 @@ export async function createPolicyTestApp(
       options.clientBackendSecret === undefined
         ? backendSecret
         : (options.clientBackendSecret ?? undefined),
+    bundle,
     env: "test",
   });
 

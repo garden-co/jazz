@@ -19,7 +19,7 @@ export async function redeemInvite(
   displayName: string,
 ): Promise<RedeemResult | null> {
   return await retryOnConflict(async () => {
-    const write = await db.exclusiveTransaction(async (tx) => {
+    const write = await db.serializableTransaction(async (tx) => {
       const invite = await tx.one(app.invites.where({ token }));
       if (!invite) return null;
       const { workspaceId, pageId } = invite;

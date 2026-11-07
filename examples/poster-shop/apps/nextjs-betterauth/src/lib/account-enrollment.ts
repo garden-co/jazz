@@ -17,19 +17,17 @@ export function parseInviteFragment(hash: string): InviteLink | null {
   return match ? { canvasId: match[1]!, token: match[2]! } : null;
 }
 
-export async function bootstrapPersonalCanvas(token: string): Promise<Response> {
-  return await fetch("/api/bootstrap", {
-    method: "POST",
-    credentials: "same-origin",
-    headers: { authorization: `Bearer ${token}` },
-  });
+// Both requests carry only the Better Auth session cookie: the routes ask
+// Jazz which account it belongs to.
+export async function bootstrapPersonalCanvas(): Promise<Response> {
+  return await fetch("/api/bootstrap", { method: "POST", credentials: "same-origin" });
 }
 
-export async function joinCanvasWithInvite(token: string, invite: InviteLink): Promise<Response> {
+export async function joinCanvasWithInvite(invite: InviteLink): Promise<Response> {
   return await fetch("/api/join", {
     method: "POST",
     credentials: "same-origin",
-    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    headers: { "content-type": "application/json" },
     body: JSON.stringify(invite),
   });
 }
@@ -48,21 +46,52 @@ export type StudioPreparation =
 // sending two bootstrap requests.
 const inFlight = new Map<string, Promise<StudioPreparation>>();
 
+const bootstrappedKey = (userId: string) => `poster-shop:bootstrapped:${userId}`;
+
+function wasBootstrapped(userId: string): boolean {
+  try {
+    return localStorage.getItem(bootstrappedKey(userId)) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function rememberBootstrapped(userId: string) {
+  try {
+    localStorage.setItem(bootstrappedKey(userId), "1");
+  } catch {
+    // Storage unavailable: the next load asks the (idempotent) server again.
+  }
+}
+
+/** Whether the studio has anything left to ask the server for. */
+export function needsPreparation(userId: string, invite: InviteLink | null): boolean {
+  return !!invite || !wasBootstrapped(userId);
+}
+
+/**
+ * Creates the user's first poster (once per user: the browser remembers it
+ * did) and redeems an invite link. The studio renders from local data while
+ * this runs. The bootstrap goes first because it seeds a poster only for a
+ * user with no membership yet; joining first would skip the personal poster.
+ */
 export function prepareStudio(
   userId: string,
-  getToken: () => Promise<string | null>,
   invite: InviteLink | null,
 ): Promise<StudioPreparation> {
   const key = `${userId}:${invite?.token ?? ""}`;
   let pending = inFlight.get(key);
   if (!pending) {
     pending = (async (): Promise<StudioPreparation> => {
-      const token = await getToken();
-      if (!token) return { ok: false };
-      const bootstrapped = await bootstrapPersonalCanvas(token);
-      if (!bootstrapped.ok) return { ok: false };
+      if (!needsPreparation(userId, invite))
+        return { ok: true, joinedCanvasId: null, inviteRejected: false };
+      if (!wasBootstrapped(userId)) {
+        const bootstrapped = await bootstrapPersonalCanvas();
+        if (!bootstrapped.ok) return { ok: false };
+        rememberBootstrapped(userId);
+      }
       if (!invite) return { ok: true, joinedCanvasId: null, inviteRejected: false };
-      const joined = await joinCanvasWithInvite(token, invite);
+      const joined = await joinCanvasWithInvite(invite);
       // 400/404 are final answers about the link; retrying cannot help.
       if (joined.status === 400 || joined.status === 404)
         return { ok: true, joinedCanvasId: null, inviteRejected: true };

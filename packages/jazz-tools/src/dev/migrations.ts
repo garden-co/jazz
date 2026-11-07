@@ -156,6 +156,15 @@ function builderExpressionForColumn(column: ColumnDescriptor): string {
   if (column.merge_strategy === "GSet") {
     return `${withOptional}.merge("g-set")`;
   }
+  if (column.merge_strategy === "Text") {
+    return `${withOptional}.merge("text")`;
+  }
+  if (column.merge_strategy === "Markdown") {
+    return `${withOptional}.merge("markdown")`;
+  }
+  if (column.merge_strategy === "Html") {
+    return `${withOptional}.merge("html")`;
+  }
   return withOptional;
 }
 
@@ -195,7 +204,9 @@ function renderSchemaWitness(schema: WasmSchema): string {
         tableSchema.branchBy === undefined
           ? ""
           : `.branchBy(${JSON.stringify(tableSchema.branchBy)})`;
-      return `${JSON.stringify(tableName)}: s.table({\n${indentBlock(columnLines.join("\n"), 2)}\n}, {\n${indentBlock(relationLines.join("\n"), 2)}\n})${index}${compositeIndexes}${branch}`;
+      const history =
+        tableSchema.history === undefined ? "" : `.history(${JSON.stringify(tableSchema.history)})`;
+      return `${JSON.stringify(tableName)}: s.table({\n${indentBlock(columnLines.join("\n"), 2)}\n}, {\n${indentBlock(relationLines.join("\n"), 2)}\n})${index}${compositeIndexes}${branch}${history}`;
     });
 
   if (tableEntries.length === 0) {
@@ -211,86 +222,108 @@ type TableSuggestion = {
   properties: string[];
 };
 
-function renderArrayElementExpression(columnType: WasmColumnType): string {
-  return baseBuilderExpression(columnType);
-}
-
-function renderAddOperationExpression(column: ColumnDescriptor, defaultExpression: string): string {
-  switch (column.column_type.type) {
+/**
+ * Render a migration column operation such as `m.add.string({ default: null })`.
+ * `drop` operations carry their default under `backwardsDefault`.
+ */
+function renderColumnOperationExpression(
+  operation: "add" | "drop",
+  column: ColumnDescriptor,
+  defaultExpression: string,
+): string {
+  const m = `m.${operation}`;
+  const defaultEntry = `${operation === "add" ? "default" : "backwardsDefault"}: ${defaultExpression}`;
+  const columnType = column.column_type;
+  switch (columnType.type) {
     case "Text":
-      return `s.add.string({ default: ${defaultExpression} })`;
+      return `${m}.string({ ${defaultEntry} })`;
     case "Boolean":
-      return `s.add.boolean({ default: ${defaultExpression} })`;
+      return `${m}.boolean({ ${defaultEntry} })`;
     case "Integer":
-      return `s.add.int({ default: ${defaultExpression} })`;
+      return `${m}.int({ ${defaultEntry} })`;
     case "Double":
-      return `s.add.float({ default: ${defaultExpression} })`;
+      return `${m}.float({ ${defaultEntry} })`;
     case "Timestamp":
-      return `s.add.timestamp({ default: ${defaultExpression} })`;
+      return `${m}.timestamp({ ${defaultEntry} })`;
     case "Bytea":
-      return `s.add.bytes({ default: ${defaultExpression} })`;
+      return `${m}.bytes({ ${defaultEntry} })`;
     case "Json":
-      return column.column_type.schema
-        ? `s.add.json({ default: ${defaultExpression}, schema: ${jsonSchemaExpression(column.column_type.schema)} })`
-        : `s.add.json({ default: ${defaultExpression} })`;
+      return columnType.schema
+        ? `${m}.json({ ${defaultEntry}, schema: ${jsonSchemaExpression(columnType.schema)} })`
+        : `${m}.json({ ${defaultEntry} })`;
     case "Enum":
-      return `s.add.enum(${column.column_type.variants
+      return `${m}.enum(${columnType.variants
         .map((variant) => JSON.stringify(variant))
-        .join(", ")}, { default: ${defaultExpression} })`;
+        .join(", ")}, { ${defaultEntry} })`;
     case "EnumPayload":
       throw new Error("Migration stub generation does not yet support payload enums.");
     case "Uuid":
-      if (column.references) {
-        return `s.add.ref(${JSON.stringify(column.references)}, { default: ${defaultExpression} })`;
-      }
-      return `s.add.ref("TODO_TABLE", { default: ${defaultExpression} })`;
+      return column.references
+        ? `${m}.ref(${JSON.stringify(column.references)}, { ${defaultEntry} })`
+        : `${m}.uuid({ ${defaultEntry} })`;
     case "Array":
-      return `s.add.array({ of: ${renderArrayElementExpression(column.column_type.element)}, default: ${defaultExpression} })`;
+      return `${m}.array({ of: ${baseBuilderExpression(columnType.element)}, ${defaultEntry} })`;
     case "BigInt":
-      return `s.add.bigint({ default: ${defaultExpression} })`;
+      return `${m}.bigint({ ${defaultEntry} })`;
     case "Row":
       throw new Error("Migration stub generation does not yet support row-valued columns.");
   }
 }
 
-function renderDropOperationExpression(
-  column: ColumnDescriptor,
-  defaultExpression: string,
-): string {
-  switch (column.column_type.type) {
-    case "Text":
-      return `s.drop.string({ backwardsDefault: ${defaultExpression} })`;
-    case "Boolean":
-      return `s.drop.boolean({ backwardsDefault: ${defaultExpression} })`;
-    case "Integer":
-      return `s.drop.int({ backwardsDefault: ${defaultExpression} })`;
-    case "Double":
-      return `s.drop.float({ backwardsDefault: ${defaultExpression} })`;
-    case "Timestamp":
-      return `s.drop.timestamp({ backwardsDefault: ${defaultExpression} })`;
-    case "Bytea":
-      return `s.drop.bytes({ backwardsDefault: ${defaultExpression} })`;
-    case "Json":
-      return column.column_type.schema
-        ? `s.drop.json({ backwardsDefault: ${defaultExpression}, schema: ${jsonSchemaExpression(column.column_type.schema)} })`
-        : `s.drop.json({ backwardsDefault: ${defaultExpression} })`;
-    case "Enum":
-      return `s.drop.enum(${column.column_type.variants
-        .map((variant) => JSON.stringify(variant))
-        .join(", ")}, { backwardsDefault: ${defaultExpression} })`;
-    case "EnumPayload":
-      throw new Error("Migration stub generation does not yet support payload enums.");
-    case "Uuid":
-      if (column.references) {
-        return `s.drop.ref(${JSON.stringify(column.references)}, { backwardsDefault: ${defaultExpression} })`;
-      }
-      return `s.drop.ref("TODO_TABLE", { backwardsDefault: ${defaultExpression} })`;
-    case "Array":
-      return `s.drop.array({ of: ${renderArrayElementExpression(column.column_type.element)}, backwardsDefault: ${defaultExpression} })`;
-    case "BigInt":
-      return `s.drop.bigint({ backwardsDefault: ${defaultExpression} })`;
-    case "Row":
-      throw new Error("Migration stub generation does not yet support row-valued columns.");
+// A column added in another's place starts every existing row at its
+// default: say how to keep the values instead of suggesting a swap that
+// silently drops them.
+const KEEP_VALUES_ADVICE =
+  "A migration can add, drop or rename a column but not convert its values, and a column " +
+  "added in its place starts every existing row at its default. To keep the values, add " +
+  "the new column under another name next to this one, copy the values into it from your " +
+  "backend, and drop this column in a later release. Clients on the older schema keep " +
+  "writing this column until then, so copy again before you drop it.";
+
+/**
+ * The TODOs a generated stub leaves where a step needs the author's value:
+ * a migration file that still holds one does not reproduce its target
+ * schema, so it cannot deploy.
+ */
+export const UNFILLED_STUB_TODO =
+  /\/\/ TODO: ((?:Added|Removed)(?: required)? column "([^"]+)" (?:needs an explicit (?:default|backwardsDefault)|may be a rename of [^:]+:[^\n]*)\.)/;
+
+/**
+ * A column kept under the same name must keep its type and optionality: no
+ * migration step changes them in place, so a stub for such a change could
+ * never typecheck (#2163). That includes a JSON column's schema and an enum
+ * column's variants. Refuse it with the supported alternative.
+ */
+function refuseUnsupportedSharedColumnChanges(
+  tableName: string,
+  fromTable: WasmSchema[string],
+  toTable: WasmSchema[string],
+): void {
+  for (const column of toTable.columns) {
+    const source = fromTable.columns.find((candidate) => candidate.name === column.name);
+    if (!source) continue;
+    const name = `${tableName}.${column.name}`;
+    if (source.nullable !== column.nullable) {
+      throw new Error(
+        `Changing column ${JSON.stringify(name)} from ${source.nullable ? "optional" : "required"} ` +
+          `to ${column.nullable ? "optional" : "required"} is not supported yet. ` +
+          KEEP_VALUES_ADVICE,
+      );
+    }
+    if (columnTypeSignature(source.column_type) !== columnTypeSignature(column.column_type)) {
+      // A migration can only add, drop or rename a column, so a column's
+      // JSON Schema and its enum variants are part of its type too.
+      const change =
+        source.column_type.type === "Json" && column.column_type.type === "Json"
+          ? "the JSON Schema of"
+          : source.column_type.type === "Enum" && column.column_type.type === "Enum"
+            ? "the enum variants of"
+            : "the type of";
+      throw new Error(
+        `Changing ${change} column ${JSON.stringify(name)} is not supported yet. ` +
+          KEEP_VALUES_ADVICE,
+      );
+    }
   }
 }
 
@@ -307,25 +340,37 @@ function inferTableSuggestions(
   const removedColumns = [...fromColumns.keys()].filter((name) => !toColumns.has(name));
   const addedColumns = [...toColumns.keys()].filter((name) => !fromColumns.has(name));
 
-  if (removedColumns.length === 1 && addedColumns.length === 1) {
-    const removed = fromColumns.get(removedColumns[0]!)!;
-    const added = toColumns.get(addedColumns[0]!)!;
-    if (
-      removed.nullable === added.nullable &&
-      removed.references === added.references &&
-      columnTypeSignature(removed.column_type) === columnTypeSignature(added.column_type)
-    ) {
-      comments.push(
-        `Possible rename detected: ${JSON.stringify(removed.name)} -> ${JSON.stringify(added.name)}.`,
-      );
-    }
+  // An added column with the same shape as a removed one may be that column
+  // renamed. Adding one and dropping the other would start every row empty,
+  // so neither gets a step: the author says which it is, and validate
+  // refuses the file until they do.
+  const sameShape = (removed: ColumnDescriptor, added: ColumnDescriptor) =>
+    removed.nullable === added.nullable &&
+    removed.references === added.references &&
+    columnTypeSignature(removed.column_type) === columnTypeSignature(added.column_type);
+  const undecided = new Set<string>();
+  for (const addedName of addedColumns) {
+    const added = toColumns.get(addedName)!;
+    const candidates = removedColumns.filter((name) => sameShape(fromColumns.get(name)!, added));
+    if (candidates.length === 0) continue;
+    undecided.add(addedName);
+    for (const name of candidates) undecided.add(name);
+    const of = candidates.map((name) => JSON.stringify(name)).join(" or ");
+    comments.push(
+      `Added column ${JSON.stringify(addedName)} may be a rename of ${of}: to keep its values, ` +
+        `give it the step m.renameFrom(${JSON.stringify(candidates[0])}); to start it empty, ` +
+        `add it with m.add and drop the old column with m.drop.`,
+    );
   }
 
   for (const columnName of addedColumns) {
+    if (undecided.has(columnName)) continue;
     const column = toColumns.get(columnName)!;
-    if (column.nullable) {
+    if (column.nullable || column.default !== undefined) {
+      // Existing rows take the column's declared default.
+      const fill = column.default === undefined ? "null" : defaultExpression(column.default);
       properties.push(
-        `${JSON.stringify(columnName)}: ${renderAddOperationExpression(column, "null")},`,
+        `${JSON.stringify(columnName)}: ${renderColumnOperationExpression("add", column, fill)},`,
       );
     } else {
       comments.push(
@@ -335,10 +380,13 @@ function inferTableSuggestions(
   }
 
   for (const columnName of removedColumns) {
+    if (undecided.has(columnName)) continue;
     const column = fromColumns.get(columnName)!;
-    if (column.nullable) {
+    if (column.nullable || column.default !== undefined) {
+      // Older clients read the dropped column back as its declared default.
+      const fill = column.default === undefined ? "null" : defaultExpression(column.default);
       properties.push(
-        `${JSON.stringify(columnName)}: ${renderDropOperationExpression(column, "null")},`,
+        `${JSON.stringify(columnName)}: ${renderColumnOperationExpression("drop", column, fill)},`,
       );
     } else {
       comments.push(
@@ -410,6 +458,7 @@ function renderMigrationBody(
     const fromTable = fromSchema[tableName]!;
     const toTable = toSchema[tableName]!;
 
+    refuseUnsupportedSharedColumnChanges(tableName, fromTable, toTable);
     const suggestion = inferTableSuggestions(tableName, fromTable, toTable);
     lines.push(`${JSON.stringify(tableName)}: {`);
     for (const comment of suggestion.comments) {
@@ -481,7 +530,7 @@ function renderMigrationBody(
         ? renameSuggestions
             .map(
               (renameSuggestion) =>
-                `${renameSuggestion.newTableName}: s.renameTableFrom(${JSON.stringify(renameSuggestion.oldTableName)}),`,
+                `${renameSuggestion.newTableName}: m.renameTableFrom(${JSON.stringify(renameSuggestion.oldTableName)}),`,
             )
             .join("\n")
         : undefined,
@@ -520,9 +569,9 @@ export function renderMigrationStub(input: {
   sections.push(`  from: ${renderSchemaWitness(rendered.witnessFrom)},`);
   sections.push(`  to: ${renderSchemaWitness(rendered.witnessTo)},`);
 
-  return `import { schema as s } from "jazz-tools";
+  return `import { schema as s, migration as m } from "jazz-tools";
 
-export default s.defineMigration({
+export default m.defineMigration({
 ${sections.join("\n")}
 });
 `;

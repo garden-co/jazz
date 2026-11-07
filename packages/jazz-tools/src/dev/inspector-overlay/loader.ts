@@ -14,7 +14,6 @@ const HIDE_TOGGLE_KEY = "jazz-inspector-overlay:hide-toggle";
 // packages/inspector/src/utility/overlay-settings.ts.
 const CLOSE_MESSAGE_TYPE = "jazz-inspector-overlay:close";
 const OVERLAY_CONTROL_GLOBAL = "__jazzInspectorOverlay";
-const OVERLAY_ROUTE_MESSAGE_TYPE = "jazz-inspector-overlay:route";
 const DETACHED_WINDOW_NAME = "jazz-inspector-detached";
 const MIN_HEIGHT = 200;
 const DEFAULT_RATIO = 0.42;
@@ -207,7 +206,7 @@ const JAZZ_MARK =
 const TEMPLATE = `
 <div class="jzov-dock" id="jzov-dock" role="dialog" aria-label="Jazz inspector">
   <div class="jzov-resize" aria-hidden="true" title="Drag to resize"></div>
-  <iframe class="jzov-frame" title="Jazz inspector" src="/__jazz/embedded/embedded.html"></iframe>
+  <iframe class="jzov-frame" title="Jazz inspector"></iframe>
 </div>
 <button type="button" class="jzov-toggle"
   title="Jazz inspector — click to open, drag to move (Alt+Shift+J)"
@@ -298,7 +297,7 @@ class JazzInspectorOverlay extends HTMLElement {
   }
 
   connectedCallback(): void {
-    // Build the shadow tree once (keeps the iframe alive across moves), but
+    // Build the shadow tree once, but
     // re-wire every (re)connect with a fresh AbortController so the element
     // isn't left dead if it's ever removed and re-added to the DOM.
     let root = this.shadowRoot;
@@ -343,6 +342,21 @@ class JazzInspectorOverlay extends HTMLElement {
       dock.dataset.open = dockOpen ? "true" : "false";
       toggle.hidden = dockOpen || detachedWindow !== null || hideToggle;
       toggle.setAttribute("aria-expanded", dockOpen ? "true" : "false");
+      // Publish the bridge before loading the inspector. A closed dock has no
+      // inspector document, subscriptions, or host subscription feed.
+      if (signal.aborted) return;
+      hostBinding.setIframeWindow(
+        detachedWindow ?? (dockOpen ? (iframe.contentWindow ?? undefined) : undefined),
+      );
+      if (dockOpen) {
+        if (!iframe.hasAttribute("src")) {
+          const url = new URL("/__jazz/embedded/embedded.html", window.location.href);
+          url.searchParams.set("route", this.#activeRoute);
+          iframe.src = url.href;
+        }
+      } else {
+        iframe.removeAttribute("src");
+      }
     };
     const setOpen = (next: boolean): void => {
       if (open === next) return;
@@ -361,10 +375,6 @@ class JazzInspectorOverlay extends HTMLElement {
       if (!detachedWindow?.closed) return false;
       detachedWindow = null;
       stopDetachedWindowCheck();
-      iframe.contentWindow?.postMessage(
-        { type: OVERLAY_ROUTE_MESSAGE_TYPE, route: this.#activeRoute },
-        window.location.origin,
-      );
       apply();
       return true;
     };
@@ -375,7 +385,7 @@ class JazzInspectorOverlay extends HTMLElement {
       apply();
     };
     const openDetachedWindow = (route: string): boolean => {
-      const url = new URL(iframe.src);
+      const url = new URL("/__jazz/embedded/embedded.html", window.location.href);
       url.searchParams.set("detached", "1");
       url.searchParams.set("route", route);
       const rect = dock.getBoundingClientRect();
@@ -530,11 +540,14 @@ class JazzInspectorOverlay extends HTMLElement {
 
     apply();
 
-    // Publish the host handle + push the active-subscription list to the iframe.
-    // The overlay reads the config and subscription channel off
-    // window.__jazzInspectorHost; we only push the stack-less subscription list.
-    hostBinding.setIframeWindow(iframe.contentWindow ?? undefined);
-    signal.addEventListener("abort", () => hostBinding.unbind(), { once: true });
+    signal.addEventListener(
+      "abort",
+      () => {
+        iframe.removeAttribute("src");
+        hostBinding.unbind();
+      },
+      { once: true },
+    );
 
     // The iframe posts here when the dock closes.
     window.addEventListener(
@@ -565,11 +578,9 @@ function mount(): void {
 
 /**
  * Start the inspector for an app db: record the db and mount the overlay UI
- * (floating toggle + bottom dock + iframe). The first call's mount() triggers
- * connectedCallback, which publishes the host handle (window.__jazzInspectorHost)
- * and pushes the active subscription list to the iframe; the overlay connects
- * through the handle's subscription channel into the host's own store. Safe to
- * call again — with an
+ * (floating toggle + bottom dock). Opening the inspector loads its iframe and
+ * publishes the host handle; closing it unloads the iframe and stops the host
+ * subscription feed. Safe to call again — with an
  * unchanged db the binding is a no-op, and with a new db (e.g. the host
  * recreated its client on login/logout) it rebinds the already-mounted iframe.
  * No-op at module load — providers call this from a dev-only dynamic import, so

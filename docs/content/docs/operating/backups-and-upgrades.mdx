@@ -1,0 +1,42 @@
+---
+title: Backups & Upgrades
+description: "Keep a self-hosted Jazz server's data safe across releases."
+---
+
+<Callout type="info">
+  Preview: this page is a rough outline for the server-first docs restructure. The bullets below are
+  what it will cover.
+</Callout>
+
+- What the data dir holds (one SQLite database)
+- Backups and restores per platform
+- Upgrading between releases
+
+## Upgrading a self-hosted alpha.59 server
+
+alpha.60 stores an app's data in one SQLite database, and its server can't read an alpha.59 data dir. Move the data with the two `alpha59-alpha60` binaries attached to the [2.0.0-alpha.60 GitHub release](https://github.com/garden-co/jazz/releases/tag/v2.0.0-alpha.60). They stay attached to that release, so you can upgrade from alpha.59 whenever you're ready.
+
+Ship your new backend and clients at the same cutover: an alpha.60 server admits only your app's backend, and alpha.59 clients can't reach it.
+
+1. Stop the alpha.59 server. Keep its data dir; nothing below writes to it.
+2. Download `jazz-alpha59-alpha60-export-<platform>` and `jazz-alpha59-alpha60-import-<platform>` (Linux x64/arm64, macOS arm64), check them against `jazz-alpha59-alpha60-export.sha256` and `jazz-alpha59-alpha60-import.sha256`, and make them executable.
+3. Export. `--work` is an empty scratch dir; the exporter reads a private copy of the data dir, never the original.
+
+   ```sh
+   jazz-alpha59-alpha60-export --data-dir ./data --work ./export-work --out app.dump
+   ```
+
+4. Import into a new, empty dir, then verify:
+
+   ```sh
+   jazz-alpha59-alpha60-import import --dump app.dump --data-dir ./data-new --app-id <app id>
+   jazz-alpha59-alpha60-import verify --dump app.dump --data-dir ./data-new --app-id <app id>
+   ```
+
+   `--app-id` must be the alpha.59 app's id exactly, case included.
+
+5. Serve `./data-new` from your backend with `createJazz({ store: sqlite({ path: "./data-new" }) })`. Keep `./data` until you're satisfied.
+
+The dump holds all of the app's data. Keep it on the same machine as the data dir, and delete it when you're done.
+
+The import keeps every row with its authors and timestamps, the accounts, and the active schema and permissions. It links each user's existing identity to `(jazz:backend, sub)`, so returning users keep their accounts when your `authenticate` answers with their old `sub` (as [`fromJWT()`](/docs/setup/auth/custom) does). Pass `--no-backend-identity-links` to skip that.

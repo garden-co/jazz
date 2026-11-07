@@ -24,9 +24,9 @@ test("the topology browser project provides the complete Jazz server command con
   for (const command of [
     "jazzServerInfo",
     "jazzServerStop",
-    "jazzServerBlockNetwork",
-    "jazzServerUnblockNetwork",
-    "jazzServerJwtForUser",
+    "jazzAppFront",
+    "jazzAppUser",
+    "jazzAppRequest",
   ]) {
     assert.match(browserConfig, new RegExp(`\\b${command}\\s*:`));
   }

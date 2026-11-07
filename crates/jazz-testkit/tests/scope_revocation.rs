@@ -30,19 +30,11 @@ fn owned_docs_schema() -> jazz::tools::Schema {
                 .with_select(PolicyExpr::or(vec![
                     PolicyExpr::eq_session(
                         "owner_id",
-                        vec![
-                            "user".to_owned(),
-                            "identity".to_owned(),
-                            "subject".to_owned(),
-                        ],
+                        vec!["identity".to_owned(), "subject".to_owned()],
                     ),
                     PolicyExpr::eq_session(
                         "transfer_writer_id",
-                        vec![
-                            "user".to_owned(),
-                            "identity".to_owned(),
-                            "subject".to_owned(),
-                        ],
+                        vec!["identity".to_owned(), "subject".to_owned()],
                     ),
                 ]))
                 .with_update(Some(PolicyExpr::True), PolicyExpr::True)
@@ -56,8 +48,7 @@ fn user_client_context(
     schema: jazz::tools::Schema,
     user_id: &str,
 ) -> jazz::tools::AppContext {
-    let mut context = server.make_client_context_for_user(schema, user_id);
-    context.backend_secret = None;
+    let mut context = server.make_user_context(schema, user_id);
     context.admin_secret = None;
     context
 }
@@ -66,14 +57,13 @@ fn canonical_user(user_id: &str) -> String {
     user_id.to_owned()
 }
 
-/// Revocation is forward-looking sync narrowing, not post-delivery redaction.
-///
-/// Bob first receives a row whose owner matches his authenticated `user_id`.
-/// A trusted writer then transfers ownership away. Bob's next Global-settled
-/// one-shot query must remove the row from the settled result set, but Bob's
-/// purely local read may still see the already-delivered copy.
+/// Revocation evicts: Bob first receives a row whose owner matches his
+/// authenticated `user_id`. A trusted writer then transfers ownership away.
+/// Bob's next Global-settled one-shot query must leave the row out, and the
+/// server's eviction drops Bob's local copy, so his local read leaves it out
+/// too. (Eviction is coherence, not redaction: Bob already received it.)
 #[tokio::test(flavor = "current_thread")]
-async fn scope_revocation_removes_global_results_without_redacting_local_copy() {
+async fn scope_revocation_removes_global_results_and_evicts_the_local_copy() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let server = JazzServer::start().await.expect("start test server");
@@ -98,7 +88,6 @@ async fn scope_revocation_removes_global_results_without_redacting_local_copy() 
                     .iter()
                     .map(|(table_name, table_schema)| (*table_name, table_schema.policies.clone()))
                     .collect::<Vec<_>>(),
-                None,
             )
             .await;
 
@@ -188,8 +177,8 @@ async fn scope_revocation_removes_global_results_without_redacting_local_copy() 
                 .map(jazz::tools::test_support::ordinary_rows)
                 .expect("bob local query after revocation");
             assert!(
-                local_rows_after_revoke.iter().any(|(id, _)| *id == doc_id),
-                "local reads are not a redaction boundary; already-delivered row should remain locally readable: {local_rows_after_revoke:?}"
+                local_rows_after_revoke.iter().all(|(id, _)| *id != doc_id),
+                "the server evicts the revoked row, so bob's local copy is dropped too: {local_rows_after_revoke:?}"
             );
 
             writer.shutdown().await.expect("shutdown writer");

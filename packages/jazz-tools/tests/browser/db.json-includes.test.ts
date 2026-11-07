@@ -2,32 +2,35 @@ import { expect, it } from "vitest";
 import { schema as s, generateAuthSecret } from "../../src/index.js";
 import { createBrowserTestDb } from "./support.js";
 import { deploy } from "../../src/dev/catalogue.js";
-import { getJazzServerInfo, stopJazzServer } from "./testing-server.js";
+import { getJazzServerInfo, startJazzApp, stopJazzServer } from "./testing-server.js";
 
-const app = s.defineApp({
-  parents: s.table(
-    {
-      name: s.string(),
-      state: s.enum("draft", "open", "closed"),
-      summaryId: s.uuid().optional(),
-    },
-    {
-      summary: s.rel("summaries", "summaryId"),
-      childrenViaParent: s.reverse("children", "parent"),
-    },
-  ),
-  summaries: s.table(
-    { metadata: s.json() },
-    { parentsViaSummary: s.reverse("parents", "summary") },
-  ),
-  children: s.table(
-    { parentId: s.uuid(), metadata: s.json() },
-    { parent: s.rel("parents", "parentId") },
-  ),
-});
+const app = s.defineApp(
+  {
+    parents: s.table(
+      {
+        name: s.string(),
+        state: s.enum("draft", "open", "closed"),
+        summaryId: s.uuid().optional(),
+      },
+      {
+        summary: s.rel("summaries", "summaryId"),
+        childrenViaParent: s.reverse("children", "parent"),
+      },
+    ),
+    summaries: s.table(
+      { metadata: s.json() },
+      { parentsViaSummary: s.reverse("parents", "summary") },
+    ),
+    children: s.table(
+      { parentId: s.uuid(), metadata: s.json() },
+      { parent: s.rel("parents", "parentId") },
+    ),
+  },
+  { migrations: "none" },
+);
 
 it("reads JSON forward and reverse includes offline before and after persistent reopen", async () => {
-  const server = await getJazzServerInfo(crypto.randomUUID());
+  const core = await getJazzServerInfo(crypto.randomUUID());
   const permissions = s.definePermissions(app, ({ policy }) => [
     policy.parents.allowRead.always(),
     policy.parents.allowInsert.always(),
@@ -36,7 +39,8 @@ it("reads JSON forward and reverse includes offline before and after persistent 
     policy.children.allowRead.always(),
     policy.children.allowInsert.always(),
   ]);
-  await deploy({ ...server, schema: app, permissions });
+  await deploy({ ...core, schema: app, permissions });
+  const server = await startJazzApp(core, { schema: app, permissions });
   const config = {
     appId: server.appId,
     serverUrl: server.serverUrl,
@@ -60,20 +64,23 @@ it("reads JSON forward and reverse includes offline before and after persistent 
     serverStopped = true;
     for (let cycle = 0; cycle < 2; cycle++) {
       const q = app.parents.where({ id: parent.id });
-      expect(await db.one(q, { tier: "local" })).toMatchObject({ id: parent.id, state: "draft" });
-      expect(await db.one(q.include({ summary: true }), { tier: "local" })).toMatchObject({
+      expect(await db.one(q, { tier: "local-first" })).toMatchObject({
+        id: parent.id,
+        state: "draft",
+      });
+      expect(await db.one(q.include({ summary: true }), { tier: "local-first" })).toMatchObject({
         summary: { id: summary.id, metadata: { total: 1 } },
       });
-      expect(await db.one(q.include({ childrenViaParent: true }), { tier: "local" })).toMatchObject(
-        { childrenViaParent: [{ id: child.id, metadata: { title: "Note" } }] },
-      );
+      expect(
+        await db.one(q.include({ childrenViaParent: true }), { tier: "local-first" }),
+      ).toMatchObject({ childrenViaParent: [{ id: child.id, metadata: { title: "Note" } }] });
       expect(
         await db.one(
           q.select("id").include({
             summary: app.summaries.select("id"),
             childrenViaParent: app.children.select("id"),
           }),
-          { tier: "local" },
+          { tier: "local-first" },
         ),
       ).toEqual({
         id: parent.id,

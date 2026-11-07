@@ -2,16 +2,9 @@
 
 use std::collections::BTreeMap;
 
-use jazz::groove::records::Value;
-use jazz::groove::storage::{OrderedKvStorage, ReopenableStorage};
 use jazz::ids::{AuthorSubject, RowUuid};
-use jazz::node::{Error as NodeError, MergeableCommit, NodeState, PublicationOutcome};
-use jazz::peer::PeerState;
-use jazz::protocol::{SyncMessage, VersionRecord};
-use jazz::tools::OpenTransactionId;
-use jazz::tx::{Transaction, TxId};
+use jazz::records::Value;
 
-use crate::DriverContext;
 use crate::distributions::{Lcg, Zipf};
 
 /// Declarative fixture builder.
@@ -152,6 +145,26 @@ pub struct Fixture {
 }
 
 impl Fixture {
+    /// Insert every generated row into `db`, in one transaction per `batch`
+    /// rows.
+    pub fn insert_into(&self, db: &jazz::db::Db, batch: usize) {
+        for chunk in self.commits.chunks(batch.max(1)) {
+            let tx = jazz::db::block_on(db.mergeable_tx()).expect("open fixture transaction");
+            for commit in chunk {
+                jazz::db::block_on(tx.insert(
+                    &commit.table,
+                    commit.cells.clone(),
+                    jazz::db::InsertOptions {
+                        row_id: Some(commit.row_uuid),
+                        ..Default::default()
+                    },
+                ))
+                .expect("insert fixture row");
+            }
+            jazz::db::block_on(tx.commit()).expect("commit fixture rows");
+        }
+    }
+
     /// Count generated rows for one table.
     pub fn table_count(&self, table: &str) -> usize {
         self.commits
@@ -380,358 +393,6 @@ pub struct WriteStep {
 #[derive(Clone, Debug)]
 pub struct WriteStream {
     steps: Vec<WriteStep>,
-}
-
-/// Commit one fixture row through a writer/core peer using the active driver.
-#[derive(Clone, Copy, Debug)]
-pub struct FixtureCommitApply<'a> {
-    /// Writer node name in the topology.
-    pub writer_name: &'a str,
-    /// Core node name in the topology.
-    pub core_name: &'a str,
-    /// Transaction author.
-    pub made_by: AuthorSubject,
-    /// Abstract wall clock at the writer.
-    pub now_ms: u64,
-}
-
-/// Commit one fixture row through a writer/core peer using the active driver.
-pub fn apply_fixture_commit<S>(
-    ctx: &mut dyn DriverContext,
-    writer: &mut NodeState<S>,
-    core: &mut NodeState<S>,
-    commit: &FixtureCommit,
-    options: FixtureCommitApply<'_>,
-) -> Result<(), String>
-where
-    S: OrderedKvStorage + ReopenableStorage,
-{
-    let (published, unit) = jazz::db::block_on(
-        writer.commit_mergeable_unit(
-            MergeableCommit::new(&commit.table, commit.row_uuid, options.now_ms)
-                .made_by(options.made_by)
-                .cells(commit.cells.clone()),
-        ),
-    )
-    .map_err(|err| format!("writer commit failed: {err}"))?;
-    jazz::db::block_on(writer.persist_and_settle_transaction(published))
-        .map_err(|err| format!("writer commit persistence failed: {err}"))?;
-    ctx.send(options.writer_name, options.core_name, unit);
-    let delivered = ctx.recv(options.core_name);
-    let fates = jazz::db::block_on(core.apply_sync_message(delivered.message))
-        .map_err(|err| format!("core ingest failed: {err}"))?;
-    let fates = jazz::db::block_on(core.persist_and_settle_outcome(fates))
-        .map_err(|err| format!("core ingest persistence failed: {err}"))?;
-    for fate in fates {
-        ctx.send(options.core_name, options.writer_name, fate);
-        let delivered = ctx.recv(options.writer_name);
-        let outcome = jazz::db::block_on(writer.apply_sync_message(delivered.message))
-            .map_err(|err| format!("writer fate apply failed: {err}"))?;
-        jazz::db::block_on(writer.persist_and_settle_outcome(outcome))
-            .map_err(|err| format!("writer fate persistence failed: {err}"))?;
-    }
-    ctx.record_counter("fixture_commits_applied", 1);
-    Ok(())
-}
-
-/// Commit, persist, and settle one mergeable unit at a synchronous simulator boundary.
-pub fn commit_mergeable_unit_settled<S>(
-    node: &mut NodeState<S>,
-    commit: MergeableCommit,
-) -> Result<(TxId, SyncMessage), NodeError>
-where
-    S: OrderedKvStorage + ReopenableStorage,
-{
-    let (published, unit) = jazz::db::block_on(node.commit_mergeable_unit(commit))?;
-    let tx_id = jazz::db::block_on(node.persist_and_settle_transaction(published))?;
-    Ok((tx_id, unit))
-}
-
-/// Commit, persist, and settle one exclusive transaction.
-pub fn commit_exclusive_settled<S>(
-    node: &mut NodeState<S>,
-    open_tx: OpenTransactionId,
-    made_by: AuthorSubject,
-    now_ms: u64,
-) -> Result<(TxId, SyncMessage), NodeError>
-where
-    S: OrderedKvStorage + ReopenableStorage,
-{
-    let (published, unit) = jazz::db::block_on(node.commit_exclusive(open_tx, made_by, now_ms))?;
-    let tx_id = jazz::db::block_on(node.persist_and_settle_transaction(published))?;
-    Ok((tx_id, unit))
-}
-
-/// Persist and settle an already-produced publication outcome.
-pub fn settle_outcome<S, T>(
-    node: &mut NodeState<S>,
-    outcome: PublicationOutcome<T>,
-) -> Result<T, NodeError>
-where
-    S: OrderedKvStorage + ReopenableStorage,
-{
-    jazz::db::block_on(node.persist_and_settle_outcome(outcome))
-}
-
-/// Apply, persist, and settle one sync message at a synchronous simulator boundary.
-pub fn apply_sync_message_settled<S>(
-    node: &mut NodeState<S>,
-    message: SyncMessage,
-) -> Result<Vec<SyncMessage>, NodeError>
-where
-    S: OrderedKvStorage + ReopenableStorage,
-{
-    let outcome = jazz::db::block_on(node.apply_sync_message(message))?;
-    settle_outcome(node, outcome)
-}
-
-/// Install the receiving half of an ordinary direct-peer query subscription.
-/// Transport-driven Db fixtures must use their real subscribe handshake instead.
-/// Direct NodeState fixtures still need the exact shape, view, and claim scope
-/// before applying the peer's covered-input updates; a row bundle is not a
-/// substitute for that registration.
-pub fn register_query_receiver<S>(
-    node: &mut NodeState<S>,
-    shape: &jazz::query::ValidatedQuery,
-    binding: &jazz::query::Binding,
-    opts: jazz::protocol::RegisterShapeOptions,
-    session: jazz::protocol::DelegatedSessionBinding,
-) -> Result<jazz::protocol::SubscriptionKey, NodeError>
-where
-    S: OrderedKvStorage + ReopenableStorage,
-{
-    let subscription = jazz::protocol::SubscriptionKey {
-        shape_id: shape.shape_id(),
-        binding_id: binding.binding_id(),
-        read_view: opts.read_view_key(),
-    };
-    register_query_receiver_for_subscription(node, subscription, shape, binding, opts, session)?;
-    Ok(subscription)
-}
-
-/// Register an explicit usage-site handle, keeping upstream and downstream
-/// registrations distinct when a direct fixture both receives and serves.
-pub fn register_query_receiver_for_subscription<S>(
-    node: &mut NodeState<S>,
-    subscription: jazz::protocol::SubscriptionKey,
-    shape: &jazz::query::ValidatedQuery,
-    binding: &jazz::query::Binding,
-    opts: jazz::protocol::RegisterShapeOptions,
-    session: jazz::protocol::DelegatedSessionBinding,
-) -> Result<(), NodeError>
-where
-    S: OrderedKvStorage + ReopenableStorage,
-{
-    apply_sync_message_settled(
-        node,
-        SyncMessage::RegisterShape {
-            shape_id: shape.shape_id(),
-            ast: jazz::protocol::ShapeAst::from_validated(shape),
-            opts,
-        },
-    )?;
-    let values = shape
-        .params()
-        .keys()
-        .map(|name| binding.values()[name].clone())
-        .collect();
-    apply_sync_message_settled(
-        node,
-        SyncMessage::Subscribe(jazz::protocol::Subscribe {
-            shape_id: shape.shape_id(),
-            subscription,
-            values,
-            known_state: None,
-            delegated_session: Some(session),
-        }),
-    )?;
-    Ok(())
-}
-
-/// Query-control adapter for simulator transports that drive transaction
-/// admission separately. It serves the Db's real usage-site handles; commit
-/// units and other messages remain owned by the scenario's transport driver.
-pub struct DirectDbQueryServer {
-    session: jazz::protocol::DelegatedSessionBinding,
-    opened: std::collections::BTreeSet<jazz::protocol::SubscriptionKey>,
-    shapes: BTreeMap<
-        jazz::query::ShapeId,
-        (
-            jazz::query::ValidatedQuery,
-            jazz::protocol::RegisterShapeOptions,
-        ),
-    >,
-    subscriptions: BTreeMap<
-        jazz::protocol::SubscriptionKey,
-        (
-            jazz::query::ValidatedQuery,
-            jazz::query::Binding,
-            jazz::protocol::RegisterShapeOptions,
-        ),
-    >,
-}
-
-impl DirectDbQueryServer {
-    /// The session authenticated by the fixture's connection. Plain client
-    /// subscriptions need not carry an additional delegated-session field.
-    pub fn new(session: jazz::protocol::DelegatedSessionBinding) -> Self {
-        Self {
-            session,
-            opened: Default::default(),
-            shapes: Default::default(),
-            subscriptions: Default::default(),
-        }
-    }
-    /// Consume query controls only. Returning false leaves the message with
-    /// the caller; in particular a queued commit must never be discarded.
-    pub fn handle<S>(
-        &mut self,
-        node: &mut NodeState<S>,
-        peer: &mut PeerState,
-        schema: &jazz::schema::JazzSchema,
-        message: &SyncMessage,
-    ) -> Result<bool, NodeError>
-    where
-        S: OrderedKvStorage + ReopenableStorage,
-    {
-        match message {
-            SyncMessage::RegisterShape {
-                shape_id,
-                ast,
-                opts,
-            } => {
-                let query = ast.query().expect("scenario uses ordinary query ASTs");
-                let shape = query.validate(schema).expect("scenario query validates");
-                assert_eq!(*shape_id, shape.shape_id());
-                self.shapes.insert(*shape_id, (shape, opts.clone()));
-            }
-            SyncMessage::Subscribe(request) => {
-                let (shape, opts) = self
-                    .shapes
-                    .get(&request.shape_id)
-                    .expect("Db sends RegisterShape before Subscribe");
-                assert_eq!(shape.params().len(), request.values.len());
-                let binding = shape
-                    .bind(
-                        shape
-                            .params()
-                            .keys()
-                            .cloned()
-                            .zip(request.values.iter().cloned())
-                            .collect(),
-                    )
-                    .expect("Db binding matches its shape");
-                let session = request.delegated_session.as_ref().unwrap_or(&self.session);
-                peer.set_subscription_policy_binding(
-                    request.subscription,
-                    (session.identity, session.claims.clone()),
-                );
-                self.subscriptions
-                    .insert(request.subscription, (shape.clone(), binding, opts.clone()));
-            }
-            SyncMessage::Unsubscribe { subscription } => {
-                self.subscriptions.remove(subscription);
-                self.opened.remove(subscription);
-                peer.forget_subscription_with_node(node, *subscription);
-            }
-            _ => return Ok(false),
-        }
-        Ok(true)
-    }
-
-    /// Publish ordinary query updates after the upstream state has settled.
-    pub fn updates<S>(
-        &mut self,
-        node: &mut NodeState<S>,
-        peer: &mut PeerState,
-    ) -> Result<Vec<SyncMessage>, NodeError>
-    where
-        S: OrderedKvStorage + ReopenableStorage,
-    {
-        let updates: Vec<Option<SyncMessage>> = self
-            .subscriptions
-            .iter()
-            .map(|(subscription, (shape, binding, opts))| {
-                if self.opened.contains(subscription) {
-                    jazz::db::block_on(peer.query_update_for_subscription_with_opts(
-                        node,
-                        *subscription,
-                        shape,
-                        binding,
-                        opts.clone(),
-                    ))
-                } else {
-                    let update =
-                        jazz::db::block_on(peer.rehydrate_query_for_subscription_with_opts(
-                            node,
-                            *subscription,
-                            shape,
-                            binding,
-                            opts.clone(),
-                        ))?;
-                    if update.is_some() {
-                        self.opened.insert(*subscription);
-                    }
-                    Ok(update)
-                }
-            })
-            .collect::<Result<_, _>>()?;
-        Ok(updates.into_iter().flatten().collect())
-    }
-}
-
-/// Ingest, persist, and settle one authority commit unit.
-pub fn ingest_commit_unit_settled<S>(
-    node: &mut NodeState<S>,
-    tx: Transaction,
-    versions: Vec<VersionRecord>,
-    now_ms: u64,
-) -> Result<Vec<SyncMessage>, NodeError>
-where
-    S: OrderedKvStorage + ReopenableStorage,
-{
-    let outcome = jazz::db::block_on(node.ingest_commit_unit(tx, versions, now_ms))?;
-    settle_outcome(node, outcome)
-}
-
-/// Sync one table's current-row view from an upstream node to a downstream node.
-#[derive(Clone, Copy, Debug)]
-pub struct CurrentRowsSync<'a> {
-    /// Upstream node name.
-    pub from_name: &'a str,
-    /// Downstream node name.
-    pub to_name: &'a str,
-    /// Table to sync.
-    pub table: &'a str,
-}
-
-/// Sync one table's current-row view from an upstream node to a downstream node.
-pub fn sync_current_rows<S>(
-    ctx: &mut dyn DriverContext,
-    from: &mut NodeState<S>,
-    to: &mut NodeState<S>,
-    peer: &mut PeerState,
-    options: CurrentRowsSync<'_>,
-) -> Result<(), String>
-where
-    S: OrderedKvStorage + ReopenableStorage,
-{
-    let update = jazz::db::block_on(peer.current_rows_update(from, options.table))
-        .map_err(|err| format!("view update failed: {err}"))?;
-    if !matches!(
-        update,
-        SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload { .. })
-    ) {
-        return Err("expected view update".to_owned());
-    }
-    ctx.send(options.from_name, options.to_name, update);
-    let delivered = ctx.recv(options.to_name);
-    let outcome = jazz::db::block_on(to.apply_sync_message(delivered.message))
-        .map_err(|err| format!("view apply failed: {err}"))?;
-    jazz::db::block_on(to.persist_and_settle_outcome(outcome))
-        .map_err(|err| format!("view persistence failed: {err}"))?;
-    ctx.record_counter("fixture_view_updates_applied", 1);
-    Ok(())
 }
 
 impl WriteStream {

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "vitest";
 import { createAccountManager, createDb, type Db } from "jazz-tools";
 import { definePermissions } from "jazz-tools/permissions";
-import { startLocalJazzServer, type LocalJazzServerHandle } from "jazz-tools/testing";
+import { startTestJazz, type TestJazz } from "jazz-tools/testing";
 import { app } from "../schema.js";
 import {
   DeterministicMusicAgent,
@@ -16,7 +16,7 @@ const openDbs: Db[] = [];
 async function* byteChunks(parts: readonly string[]): AsyncIterable<Uint8Array> {
   for (const part of parts) yield new TextEncoder().encode(part);
 }
-let server: LocalJazzServerHandle | undefined;
+let server: TestJazz | undefined;
 
 afterEach(async () => {
   await Promise.all(openDbs.splice(0).map((db) => db.shutdown()));
@@ -113,7 +113,8 @@ describe("MusicAgent across synced Jazz clients", () => {
         table.allowUpdate.always();
       }
     });
-    server = await startLocalJazzServer({ inMemory: true, schema: app, permissions });
+    // Guests sync through the app's backend: a core admits only its backend.
+    server = await startTestJazz({ app, permissions });
     const writerDb = await openDb(server.appId, server.url);
     const readerDb = await openDb(server.appId, server.url);
     const store = new JazzMusicStore(writerDb);
@@ -138,7 +139,7 @@ describe("MusicAgent across synced Jazz clients", () => {
           notify?.();
         }
       },
-      { tier: "global" },
+      { tier: "remote" },
     );
     const until = (expected: string) =>
       new Promise<void>((resolve, reject) => {

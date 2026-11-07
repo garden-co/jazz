@@ -9,7 +9,7 @@ use super::support::{
 };
 use super::{pe, permissions};
 use jazz::tools::PolicyExpr;
-use jazz::tools::public_schema::RelPredicateExpr as PredicateExpr;
+use jazz::tools::public_schema::RelationPredicate as PredicateExpr;
 use jazz::tools::{
     ColumnType, DurabilityTier, JazzClient, ObjectId, Schema, SchemaBuilder, TablePolicies,
     TableSchema, TableSchemaBuilder, Value,

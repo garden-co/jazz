@@ -36,7 +36,7 @@ describe("TS Upsert API", () => {
     expect(result).toMatchObject({ value: undefined, wait: expect.any(Function) });
     await result.wait({ tier: "local" });
 
-    const project = await db.one(app.projects.where({ id: { eq: id } }), { tier: "local" });
+    const project = await db.one(app.projects.where({ id: { eq: id } }), { tier: "local-first" });
     expect(project).toEqual({
       id,
       name: "Test Project",

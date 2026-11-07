@@ -14,7 +14,7 @@ import {
   waitForQuery,
   withTimeout,
 } from "./support.js";
-import { getJazzServerInfo, type JazzServerInfo } from "./testing-server.js";
+import { getJazzServerInfo, startJazzApp, type JazzServerInfo } from "./testing-server.js";
 
 const schema = {
   todos: s.table(
@@ -27,7 +27,7 @@ const schema = {
 };
 
 type AppSchema = s.Schema<typeof schema>;
-const app: s.App<AppSchema> = s.defineApp(schema);
+const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
 const { todos } = app;
 type Todo = s.RowOf<typeof todos>;
 
@@ -97,14 +97,14 @@ describe("Db disconnect/reconnect", () => {
         SYNC_OPERATION_TIMEOUT_MS,
         "local subscription did not show its own write",
       );
-      await db.all(pending, { tier: "global" });
+      await db.all(pending, { tier: "remote" });
       await db.disconnect();
       if (mode === "reopen") {
         stop();
         await db.shutdown();
         ctx.untrack(db);
       }
-      await peer.all(todoByTitle(label), { tier: "global" });
+      await peer.all(todoByTitle(label), { tier: "remote" });
       await peer.update(todos, row.id, { done: true }).wait({ tier: "global" });
       if (mode === "reopen") {
         db = await open();
@@ -116,15 +116,17 @@ describe("Db disconnect/reconnect", () => {
         );
       }
       await db.reconnect();
-      expect(await db.all(pending, { tier: "global" })).toEqual([]);
+      expect(await db.all(pending, { tier: "remote" })).toEqual([]);
       // No broader remote query may fetch the missing newer version for us.
+      // Nothing watches a row that left every subscription: the resumed
+      // answer's listing evicts it rather than refreshing it.
       await waitForCondition(
         async () => {
           const cached = await db.all(todoByTitle(label), inspectorLocalQueryOptions());
-          return cached.some((item) => item.done) && !visible.some((item) => item.id === row.id);
+          return cached.length === 0 && !visible.some((item) => item.id === row.id);
         },
         SYNC_OPERATION_TIMEOUT_MS,
-        "current-row repair did not reach the foreground local cache",
+        "the row that left the query stayed in the foreground local cache",
       );
       stop();
     },
@@ -133,17 +135,15 @@ describe("Db disconnect/reconnect", () => {
 
   it("removes a remotely deleted owned row from the current default local worker snapshot", async () => {
     const label = uniqueDbName("local-worker-live-delete");
-    const server = await getJazzServerInfo(label);
-    await deploy({
-      ...server,
-      schema: app,
-      permissions: s.definePermissions(app, ({ policy, session }) => {
-        policy.todos.allowRead.where({ "$createdBy.account": session.user.account });
-        policy.todos.allowInsert.always();
-        policy.todos.allowUpdate.where({ "$createdBy.account": session.user.account });
-        policy.todos.allowDelete.where({ "$createdBy.account": session.user.account });
-      }),
+    const core = await getJazzServerInfo(label);
+    const permissions = s.definePermissions(app, ({ policy, session }) => {
+      policy.todos.allowRead.where({ "$createdBy.account": session.user });
+      policy.todos.allowInsert.always();
+      policy.todos.allowUpdate.where({ "$createdBy.account": session.user });
+      policy.todos.allowDelete.where({ "$createdBy.account": session.user });
     });
+    await deploy({ ...core, schema: app, permissions });
+    const server = await startJazzApp(core, { schema: app, permissions });
     const secret = generateAuthSecret();
     const db = await createWorkerDb(ctx, `${label}-reader`, secret, server);
     const peer = await createWorkerDb(ctx, `${label}-writer`, secret, server);
@@ -222,7 +222,7 @@ describe("Db disconnect/reconnect", () => {
         (rows) => rows.some((row) => row.title === serverTitle),
         "db did not receive the existing server row",
         SYNC_OPERATION_TIMEOUT_MS,
-        "global",
+        "remote",
       );
       await db.disconnect();
 
@@ -244,7 +244,7 @@ describe("Db disconnect/reconnect", () => {
               afterReconnect: reconnectRequested,
             });
           },
-          { tier: "global" },
+          { tier: "remote" },
         ),
       );
 
@@ -298,7 +298,7 @@ describe("Db disconnect/reconnect", () => {
         (rows) => rows.some((row) => row.id === serverRow.id),
         "db did not receive the row to update",
         SYNC_OPERATION_TIMEOUT_MS,
-        "global",
+        "remote",
       );
       await db.disconnect();
 
@@ -319,7 +319,7 @@ describe("Db disconnect/reconnect", () => {
               afterReconnect: reconnectRequested,
             });
           },
-          { tier: "global" },
+          { tier: "remote" },
         ),
       );
 
@@ -374,7 +374,7 @@ describe("Db disconnect/reconnect", () => {
         (rows) => rows.some((row) => row.id === serverRow.id),
         "db did not receive the row to delete",
         SYNC_OPERATION_TIMEOUT_MS,
-        "global",
+        "remote",
       );
       await db.disconnect();
 
@@ -411,7 +411,7 @@ describe("Db disconnect/reconnect", () => {
               afterReconnect: reconnectRequested,
             });
           },
-          { tier: "global" },
+          { tier: "remote" },
         ),
       );
       await expectStillPending(
@@ -455,7 +455,7 @@ describe("Db disconnect/reconnect", () => {
           (rows) => {
             snapshots.push(rows);
           },
-          { tier: "global" },
+          { tier: "remote" },
         ),
       );
 
@@ -487,7 +487,7 @@ describe("Db disconnect/reconnect", () => {
 
       const localRowsWhileOffline = await withTimeout(
         db.all(todoByTitle(offlineTitle), {
-          tier: "local",
+          tier: "local-first",
         }),
         LOCAL_OPERATION_TIMEOUT_MS,
         "direct server connection: local-tier read for disconnected write did not resolve",
@@ -508,7 +508,7 @@ describe("Db disconnect/reconnect", () => {
         (rows) => rows.some((row) => row.title === offlineTitle),
         "direct server connection: peer sees disconnected write after reconnect",
         SYNC_OPERATION_TIMEOUT_MS,
-        "global",
+        "remote",
       );
     }, 60_000);
 
@@ -526,7 +526,7 @@ describe("Db disconnect/reconnect", () => {
 
       const localRowsWhileOffline = await withTimeout(
         db.all(todoByTitle(serverOnlyTitle), {
-          tier: "local",
+          tier: "local-first",
         }),
         LOCAL_OPERATION_TIMEOUT_MS,
         "direct server connection: local-tier read while disconnected did not resolve",
@@ -540,7 +540,7 @@ describe("Db disconnect/reconnect", () => {
         (rows) => rows.some((row) => row.title === serverOnlyTitle),
         "direct server connection: disconnected client receives server update after reconnect",
         SYNC_OPERATION_TIMEOUT_MS,
-        "global",
+        "remote",
       );
     }, 60_000);
   });
@@ -559,7 +559,7 @@ describe("Db disconnect/reconnect", () => {
           secret,
         }),
       );
-      await owner.all(app.todos, { tier: "global" });
+      await owner.all(app.todos, { tier: "remote" });
       await owner.disconnect();
 
       const title = "namespace-wide offline write";
@@ -571,7 +571,7 @@ describe("Db disconnect/reconnect", () => {
 
       // Attach only after the namespace is already offline. The late tab must
       // learn the worker's offline state during its init handshake so a
-      // local-first-unless-empty read never waits on the missing server.
+      // local-first read with a server wait never waits on the missing server.
       const editor = ctx.track(
         await createDb({
           appId: server.appId,
@@ -585,7 +585,10 @@ describe("Db disconnect/reconnect", () => {
       // worker and must therefore make the same explicit-offline read choice.
       // A remote read would exclude this not-yet-settled row.
       const localFallback = await withWorkerOperationTimeout(
-        editor.all(todoByTitle(title), { tier: ReadTier.LocalFirstUnlessEmpty }),
+        editor.all(todoByTitle(title), {
+          tier: ReadTier.LocalFirst,
+          firstLoadRemoteWaitMs: 60_000,
+        }),
         "worker namespace: editor did not use local fallback after owner disconnect",
       );
       expect(localFallback).toHaveLength(1);
@@ -594,7 +597,8 @@ describe("Db disconnect/reconnect", () => {
       const snapshots: Todo[][] = [];
       const unsubscribe = ctx.trackSubscription(
         editor.subscribe(todoByTitle(title), (rows) => snapshots.push(rows), {
-          tier: ReadTier.LocalFirstUnlessEmpty,
+          tier: ReadTier.LocalFirst,
+          firstLoadRemoteWaitMs: 60_000,
         }),
       );
       await waitForCondition(
@@ -631,7 +635,7 @@ describe("Db disconnect/reconnect", () => {
 
       const localRows = await withWorkerOperationTimeout(
         db.all(todoByTitle(offlineTitle), {
-          tier: "local",
+          tier: "local-first",
         }),
         "worker mode: local-tier read for disconnected write did not resolve",
       );
@@ -650,7 +654,7 @@ describe("Db disconnect/reconnect", () => {
         (rows) => rows.some((row) => row.title === offlineTitle),
         "worker mode: peer sees disconnected write after reconnect",
         SYNC_OPERATION_TIMEOUT_MS,
-        "global",
+        "remote",
       );
     }, 60_000);
 
@@ -668,7 +672,7 @@ describe("Db disconnect/reconnect", () => {
 
       const disconnectedLocalRows = await withWorkerOperationTimeout(
         db.all(todoByTitle(serverOnlyTitle), {
-          tier: "local",
+          tier: "local-first",
         }),
         "worker mode: local-tier read while disconnected did not resolve",
       );
@@ -681,7 +685,7 @@ describe("Db disconnect/reconnect", () => {
         (rows) => rows.some((row) => row.title === serverOnlyTitle),
         "worker mode: disconnected client receives server update after reconnect",
         SYNC_OPERATION_TIMEOUT_MS,
-        "global",
+        "remote",
       );
     }, 60_000);
 
@@ -846,7 +850,7 @@ describe("Db disconnect/reconnect", () => {
         () => {
           callbacks += 1;
         },
-        { tier: "global" },
+        { tier: "remote" },
       );
       const connection = (db as unknown as { connection: { reconnectWaiters: Set<unknown> } })
         .connection;
@@ -975,7 +979,7 @@ async function waitForTodos(
   predicate: (rows: Todo[]) => boolean,
   label: string,
   timeoutMs = SYNC_OPERATION_TIMEOUT_MS,
-  tier?: "local" | "global",
+  tier?: "local-first" | "remote",
 ): Promise<Todo[]> {
   return waitForQuery(db, app.todos, predicate, label, timeoutMs, tier);
 }
@@ -992,5 +996,5 @@ async function publishSyncServerSchemaAndPermissions(
     schema: app,
     permissions: allowAllPermissions,
   });
-  return testingServer;
+  return startJazzApp(testingServer, { schema: app, permissions: allowAllPermissions });
 }

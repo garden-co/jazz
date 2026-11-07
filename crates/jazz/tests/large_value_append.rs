@@ -2,23 +2,24 @@
 //!
 //! An append derived from an already published descriptor must produce the
 //! exact logical value, keep rejecting invalid input, and validate only what
-//! it added before its staging receipt is issued. The scale check uses
-//! Groove's test-only `finalize_validation_bytes_for_test` counter: it is the
+//! it added before it is admitted. The scale check uses
+//! the test-only `finalize_validation_bytes_for_test` counter: it is the
 //! one internal hook here, because "how much of the value was re-read" has no
 //! public observable other than elapsed time, which cannot prove scaling.
 
 use std::collections::BTreeMap;
 
-mod common;
+use crate::common;
 
 use common::{allow_all_policies, compile_schema};
-use jazz::db::{Db, DbConfig, DbIdentity, InsertOptions};
-use jazz::groove::large_values::{
-    INLINE_VALUE_MAX_BYTES, LEAF_MAX_BYTES, MAX_EDIT_COUNT, finalize_validation_bytes_for_test,
-};
-use jazz::groove::records::Value;
-use jazz::groove::storage::TestStorage;
+use jazz::db::LargeValueUpdateSplice;
+use jazz::db::{Db, DbConfig, DbIdentity, ErrorCode, InsertOptions};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
+use jazz::large_values::epoch::{EPOCH_EDIT_BYTES, EPOCH_INSERT_BYTES};
+use jazz::large_values::{
+    INLINE_VALUE_MAX_BYTES, LEAF_MAX_BYTES, finalize_validation_bytes_for_test,
+};
+use jazz::records::Value;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 
 fn open_db(node: u8) -> Db {
@@ -32,17 +33,13 @@ fn open_db(node: u8) -> Db {
             )
             .build(),
     );
-    let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    jazz::block_on(Db::open(DbConfig {
+    jazz::block_on(Db::open(DbConfig::new(
         schema,
-        storage: TestStorage::new(&refs),
-        identity: DbIdentity {
+        DbIdentity {
             node: NodeUuid::from_bytes([node; 16]),
             author: AuthorSubject::for_test_bytes([0xa1; 16]),
         },
-        id_source: None,
-    }))
+    )))
     .expect("open db")
 }
 
@@ -102,9 +99,10 @@ fn string_appends_across_consolidation_keep_exact_multibyte_text() {
     let mut expected = format!("{}🙂", text(INLINE_VALUE_MAX_BYTES * 8, 7));
     insert(&db, row, expected.clone(), bytes(16, 1));
 
-    // Well past one consolidation (every MAX_EDIT_COUNT appends), mixing
-    // one-, two-, three- and four-byte code points at append boundaries.
-    for step in 0..(MAX_EDIT_COUNT * 2 + 7) {
+    // Well past one consolidation (an epoch holds `EPOCH_EDIT_BYTES` of
+    // encoded edits, a few bytes per append here), mixing one-, two-,
+    // three- and four-byte code points at append boundaries.
+    for step in 0..(EPOCH_EDIT_BYTES / 2 + 7) {
         let suffix = match step % 4 {
             0 => format!("<{step}>"),
             1 => "é".to_owned(),
@@ -136,7 +134,7 @@ fn bytes_appends_across_consolidation_keep_exact_bytes() {
     let mut expected = bytes(INLINE_VALUE_MAX_BYTES * 8, 3);
     insert(&db, row, "short".to_owned(), expected.clone());
 
-    for step in 0..(MAX_EDIT_COUNT * 2 + 3) {
+    for step in 0..(EPOCH_EDIT_BYTES / 2 + 3) {
         // Arbitrary bytes, including ones that are never valid UTF-8.
         let suffix = [0xff, step as u8, 0x00, 0xc3];
         append(&db, row, "blob", &suffix);
@@ -161,7 +159,7 @@ fn splices_across_consolidation_keep_exact_text() {
         bytes(16, 1),
     );
 
-    for step in 0..(MAX_EDIT_COUNT + 6) {
+    for step in 0..70 {
         let len = expected.len();
         let (offset, delete) = match step % 3 {
             // A large deletion spanning several leaves.
@@ -169,14 +167,22 @@ fn splices_across_consolidation_keep_exact_text() {
             1 => (len / 2 + step, 3),
             _ => (len - 10, 10),
         };
-        let insert = format!("[{step}é]");
+        // Every seventh insertion is too large for an epoch's edits, so
+        // the value is consolidated into a new tree.
+        let insert = match step % 7 {
+            6 => format!("[{step}é{}]", "x".repeat(EPOCH_INSERT_BYTES)),
+            _ => format!("[{step}é]"),
+        };
         jazz::block_on(db.splice_value(
             "docs",
             row,
             "body",
-            offset as u64,
-            delete as u64,
-            insert.clone().into_bytes(),
+            LargeValueUpdateSplice {
+                at: offset as u64,
+                delete: delete as u64,
+                insert: insert.clone().into_bytes(),
+            },
+            Default::default(),
         ))
         .expect("splice");
         expected.splice(offset..offset + delete, insert.into_bytes());
@@ -184,6 +190,31 @@ fn splices_across_consolidation_keep_exact_text() {
 
     let actual = read_all(&db, row, "body", expected.len());
     assert!(actual == expected, "spliced text diverged");
+}
+
+#[test]
+fn a_splice_that_splits_a_code_point_is_rejected() {
+    let db = open_db(0x37);
+    let row = RowUuid::from_bytes([0x37; 16]);
+    let base = format!("{}é{}", text(INLINE_VALUE_MAX_BYTES * 2, 13), text(64, 14));
+    insert(&db, row, base.clone(), bytes(16, 1));
+    let inside = (INLINE_VALUE_MAX_BYTES * 2 + 1) as u64;
+    for (at, delete) in [(inside, 0), (inside - 1, 1), (inside, 3)] {
+        let error = jazz::block_on(db.splice_value(
+            "docs",
+            row,
+            "body",
+            LargeValueUpdateSplice {
+                at,
+                delete,
+                insert: b"x".to_vec(),
+            },
+            Default::default(),
+        ))
+        .expect_err("a split code point is refused");
+        assert_eq!(error.code, ErrorCode::WriteRejected, "{error:?}");
+    }
+    assert_eq!(read_all(&db, row, "body", base.len()), base.as_bytes());
 }
 
 #[test]
@@ -238,14 +269,14 @@ fn validation_bytes(node: u8, size: usize, appends: usize) -> (u64, u64) {
 fn local_append_validation_does_not_scale_with_value_size() {
     // Cover the first consolidation, which stages new nodes and retains the
     // untouched remainder of the base tree.
-    let appends = MAX_EDIT_COUNT + 2;
+    // 24-byte appends fill an epoch after about `EPOCH_EDIT_BYTES / 25`.
+    let appends = EPOCH_EDIT_BYTES / 24 + 2;
     let (small_insert, small_append) = validation_bytes(0x34, 128 * 1024, appends);
     let (large_insert, large_append) = validation_bytes(0x35, 1024 * 1024, appends);
 
-    // Control: a fresh value is still fully re-read before its receipt, so
-    // the counter observes this thread's finalization work.
-    assert!(small_insert >= 128 * 1024, "{small_insert}");
-    assert!(large_insert >= 1024 * 1024, "{large_insert}");
+    // A value built by this store is trusted as built, so its insert reads
+    // nothing back; uploaded values are fully validated on admission instead.
+    assert_eq!((small_insert, large_insert), (0, 0));
 
     // A derived append re-reads only its newly staged nodes and the base
     // branches/ranges needed to prove reuse and replay its tail. That is

@@ -6,7 +6,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 
 import jazzNapi from "../../../crates/jazz-napi/index.js";
 
-const { JazzServer, TestJwtIssuer } = jazzNapi;
+const { JazzServer } = jazzNapi;
 
 const DEFAULT_SCENARIOS = ["w4", "b2"];
 const DEFAULT_OUT_DIR = "/tmp/jazz-browser-profiles";
@@ -704,7 +704,7 @@ function buildW4Setup(config, dbName) {
       const state = await h.seedDataset(db, cfg);
       await db.all(
         h.query("tasks", [{ column: "project_id", op: "eq", value: state.projects[0] }], [["updated_at", "desc"]], 200),
-        { tier: "local" }
+        { tier: "local-first" }
       );
       await db.shutdown();
       globalThis.__w4Profile = { dbName, hotProjectId: state.projects[0] };
@@ -722,7 +722,7 @@ function buildW4Run() {
       const db = await h.createDb({ appId: "profile-w4-app", dbName, logLevel: "warn" });
       const rows = await db.all(
         h.query("tasks", [{ column: "project_id", op: "eq", value: hotProjectId }], [["updated_at", "desc"]], 200),
-        { tier: "local" }
+        { tier: "local-first" }
       );
       globalThis.__w4Profile.db = db;
       return { rows: rows.length, elapsedMs: performance.now() - t0 };
@@ -915,6 +915,11 @@ function buildB5Cleanup() {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  // The profiled clients synced as a minted-JWT user with the core's admin
+  // secret, straight to the core. A core now admits only its app's backend.
+  throw new Error(
+    "The browser profile is not supported yet: its clients need porting to an app backend (createJazz).",
+  );
   const outDir = args.outDir;
   await mkdir(outDir, { recursive: true });
 
@@ -945,7 +950,6 @@ async function main() {
   );
 
   let jazzServer;
-  let jwtIssuer;
   let chrome;
   let userDataDir = null;
   const pageUrl = `http://127.0.0.1:${args.vitePort}/tests/browser/remote-db-harness.html`;
@@ -977,10 +981,8 @@ async function main() {
       { stdio: "ignore" },
     );
 
-    jwtIssuer = await TestJwtIssuer.start();
     const server = await JazzServer.start({
       appId: "00000000-0000-0000-0000-000000000001",
-      jwksUrl: jwtIssuer.jwksUrl,
       inMemory: true,
       adminSecret: "jazz-browser-profile-admin",
       backendSecret: "jazz-browser-profile-backend",
@@ -990,7 +992,6 @@ async function main() {
       appId: server.appId,
       serverUrl: server.url,
       adminSecret: server.adminSecret,
-      jwtToken: jwtIssuer.jwtForUser("browser-profile-user", {}),
     };
 
     const { webSocketDebuggerUrl } = await waitForJson(
@@ -1151,11 +1152,6 @@ async function main() {
     if (jazzServer) {
       try {
         await jazzServer.stop();
-      } catch {}
-    }
-    if (jwtIssuer) {
-      try {
-        await jwtIssuer.stop();
       } catch {}
     }
     if (chrome) {

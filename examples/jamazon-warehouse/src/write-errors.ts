@@ -6,7 +6,7 @@ import { PersistedWriteRejectedError } from "jazz-tools";
  *
  * Two kinds of error carry one. The authority's verdict on a committed
  * transaction is a `PersistedWriteRejectedError` with its fate `code`
- * (`permission_denied`, `exclusive_conflict`, ...). A core error raised while
+ * (`permission_denied`, `serialization_conflict`, ...). A core error raised while
  * staging a transaction crosses the native boundary as an `Error` whose `code`
  * is the core error code (`transaction_conflict`, `write_rejected`, ...).
  *
@@ -23,10 +23,10 @@ export function writeRejectionCode(error: unknown): string | undefined {
   return undefined;
 }
 
-const RETRYABLE = new Set(["exclusive_conflict", "transaction_conflict", "cascade_rejected"]);
+const RETRYABLE = new Set(["serialization_conflict", "transaction_conflict"]);
 const DEFINITIVE = new Set(["permission_denied", "write_rejected"]);
 
-/** An exclusive transaction lost to a concurrent write; running it again may succeed. */
+/** A serializable transaction lost to a concurrent write; running it again may succeed. */
 export function isRetryableConflict(error: unknown): boolean {
   const code = writeRejectionCode(error);
   return code !== undefined && RETRYABLE.has(code);
@@ -38,7 +38,7 @@ export function isDefinitiveRejection(error: unknown): boolean {
   return code !== undefined && DEFINITIVE.has(code);
 }
 
-/** Re-run an exclusive write the authority rejected as a conflict. Every other error is final. */
+/** Re-run a serializable write the authority rejected as a conflict. Every other error is final. */
 export async function retryOnConflict<T>(
   attempt: () => Promise<T>,
   beforeRetry?: () => Promise<unknown>,

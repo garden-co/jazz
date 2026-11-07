@@ -1,7 +1,7 @@
 "use client";
 
 import type { Db } from "jazz-tools";
-import { useAll, useDb } from "jazz-tools/react";
+import { useAll } from "jazz-tools/react";
 import { useMemo } from "react";
 import { MAX_LINE_QUANTITY } from "@/permissions";
 import { app, type Cart, type CartLine, type Product, type Stock } from "@/schema";
@@ -21,9 +21,8 @@ import { shippingCents } from "./pricing";
 export type CartItem = { line: CartLine; product: Product; stock?: Stock };
 
 export function useCart(account: string) {
-  const db = useDb();
   const cartId = ids.cart(account);
-  const { data: carts } = useAll(app.carts.where({ id: cartId }));
+  const { data: carts, db } = useAll(app.carts.where({ id: cartId }));
   const { data: lines } = useAll(app.cartLines.where({ cartId }));
   // Subscribe to just the products in the cart (and their stock), not the
   // whole catalogue.
@@ -113,10 +112,17 @@ export async function readGuestCart(db: Db, account: string): Promise<GuestCartL
  */
 export async function claimGuestCart(db: Db, account: string, guest: GuestCartLine[]) {
   const cartId = ids.cart(account);
-  // Read what the account already holds at the server, not just this device.
-  const existing = await db.all(app.cartLines.where({ cartId }), { tier: "global" });
+  // What the account holds at the server, plus this device's unsynced lines.
+  const [atServer, onDevice] = await Promise.all([
+    db.all(app.cartLines.where({ cartId }), { tier: "remote" }),
+    db.all(app.cartLines.where({ cartId }), { tier: "local-first" }),
+  ]);
+  const existing = [...atServer, ...onDevice];
   for (const line of guest) {
-    const current = existing.find((e) => e.productId === line.productId)?.quantity ?? 0;
+    const current = Math.max(
+      0,
+      ...existing.filter((e) => e.productId === line.productId).map((e) => e.quantity),
+    );
     if (line.quantity > current) setLineQuantity(db, account, line.productId, line.quantity);
   }
 }

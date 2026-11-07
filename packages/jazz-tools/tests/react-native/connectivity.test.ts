@@ -6,28 +6,29 @@ import type { NativeForegroundModule } from "../../src/react-native/native-foreg
 const { encodeNativeForegroundCommand, decodeNativeForegroundResponse } =
   nativeCommands as unknown as NativeForegroundModule;
 import { withNativeRelayFixture } from "./fixture.js";
+import type { TestJazz } from "../../src/testing/index.js";
 
-const app = schema.defineApp({ notes: schema.table({ title: schema.string() }, {}) });
+const app = schema.defineApp(
+  { notes: schema.table({ title: schema.string() }, {}) },
+  { migrations: "none" },
+);
 
 it("rejects disconnect without a native upstream and leaves local reads usable", async () => {
   await withNativeRelayFixture(app, {}, async (fixture) => {
     const db = await fixture.createDb();
     await expect(db.disconnect()).rejects.toThrow("requires a configured serverUrl");
     const row = await db.insert(app.notes, { title: "still local" }).wait({ tier: "local" });
-    expect(await db.all(app.notes, { tier: "local" })).toEqual([row]);
+    expect(await db.all(app.notes, { tier: "local-first" })).toEqual([row]);
   });
 });
 
 it("disconnects before any query and reconnects using only native credentials", async () => {
-  const { startLocalJazzServer, startTestJwtIssuer, deploy } =
+  const { startLocalJazzServer, startTestJazz, deploy } =
     await import("../../src/testing/index.js");
-  const issuer = await startTestJwtIssuer();
   const server = await startLocalJazzServer({
     inMemory: true,
-    jwksUrl: issuer.jwksUrl,
-    jwtIssuer: issuer.issuer,
-    jwtAudience: issuer.audience,
   });
+  let backend: TestJazz | undefined;
   try {
     const permissions = schema.definePermissions(app, ({ policy }) => [
       policy.notes.allowRead.always(),
@@ -40,6 +41,7 @@ it("disconnects before any query and reconnects using only native credentials", 
       schema: app,
       permissions,
     });
+    backend = await startTestJazz({ core: server, app, permissions });
     await withNativeRelayFixture(
       app,
       permissions,
@@ -69,12 +71,15 @@ it("disconnects before any query and reconnects using only native credentials", 
           configured: true,
           explicitlyOffline: true,
           connected: false,
+          authRejected: null,
         });
         let globallyAccepted = false;
         const global = write.wait({ tier: "global" }).then(() => {
           globallyAccepted = true;
         });
-        expect(await db.all(app.notes, { tier: ReadTier.LocalFirstUnlessEmpty })).toEqual([row]);
+        expect(
+          await db.all(app.notes, { tier: ReadTier.LocalFirst, firstLoadRemoteWaitMs: 60_000 }),
+        ).toEqual([row]);
         let settled = false;
         const remote = db.all(app.notes, { tier: ReadTier.Remote }).then((rows) => {
           settled = true;
@@ -89,7 +94,9 @@ it("disconnects before any query and reconnects using only native credentials", 
         await global;
         expect(await db.all(app.notes, { tier: ReadTier.Remote })).toEqual([row]);
         await Promise.all([db.disconnect(), db.reconnect(), db.disconnect()]);
-        expect(await db.all(app.notes, { tier: ReadTier.LocalFirstUnlessEmpty })).toEqual([row]);
+        expect(
+          await db.all(app.notes, { tier: ReadTier.LocalFirst, firstLoadRemoteWaitMs: 60_000 }),
+        ).toEqual([row]);
         await db.reconnect();
         expect(await db.all(app.notes, { tier: ReadTier.Remote })).toEqual([row]);
         await db.disconnect();
@@ -100,17 +107,11 @@ it("disconnects before any query and reconnects using only native credentials", 
       },
       {
         appId: server.appId,
-        session: {
-          issuer: issuer.issuer,
-          user_id: "connectivity-user",
-          claims: {},
-          authMode: "external",
-        },
-        upstream: { serverUrl: server.url, jwt: issuer.jwtForUser("connectivity-user") },
+        upstream: { backend: backend!, userId: "connectivity-user" },
       },
     );
   } finally {
+    await backend?.stop();
     await server.stop();
-    await issuer.stop();
   }
 }, 30_000);

@@ -12,12 +12,12 @@
     error?: Snippet<[Error, () => Promise<void>]>;
     autoAttachDevTools?: boolean;
   };
-  let { children, signedOut, loading, error, autoAttachDevTools = true, auth, ...config }: Props = $props();
+  let { children, signedOut, loading, error, autoAttachDevTools = true, ...config }: Props = $props();
   // Configuration belongs to one mounted provider. Key the provider to replace it.
-  const app = untrack(() => createJazzApp({ ...config, auth }, { start: false }));
+  const app = untrack(() => createJazzApp({ ...config }, { start: false }));
   const snapshotStore = writable(app.getSnapshot());
   const retry = () => app.retry().catch(() => {});
-  setJazzAuth({ subscribe: snapshotStore.subscribe, retry, logout: () => app.logout().catch(() => {}), sessionActions: app.sessionActions });
+  setJazzAuth({ subscribe: snapshotStore.subscribe, retry, reauthenticate: () => app.reauthenticate().catch(() => {}), logout: () => app.logout().catch(() => {}), sessionActions: app.sessionActions });
   onMount(() => {
     const lease = app.attachConsumer();
     const update = () => {
@@ -34,7 +34,6 @@
       void app.dispose().catch(console.error);
     };
   });
-  $effect.pre(() => { app.updateAuth(auth); });
 </script>
 
 {#snippet pending()}

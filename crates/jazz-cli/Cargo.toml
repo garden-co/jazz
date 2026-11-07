@@ -3,12 +3,10 @@ name = "jazz-cli"
 version = "0.1.0"
 edition = "2024"
 autobins = false
-autotests = true
+autotests = false
 
 [features]
-default = ["rocksdb", "transport-compression-zstd", "heap-profiling"]
-rocksdb = ["dep:jazz-storage-rocksdb"]
-sqlite = []
+default = ["transport-compression-zstd", "heap-profiling"]
 transport-compression-lz4 = ["jazz/transport-compression-lz4"]
 transport-compression-zstd = ["jazz/transport-compression-zstd"]
 transport-compression-ruzstd = ["jazz/transport-compression-ruzstd"]
@@ -21,9 +19,9 @@ heap-profiling = ["dep:flate2", "dep:libc", "dep:mappings", "dep:prost", "dep:ru
 [dependencies]
 jazz = { workspace = true, default-features = false, features = ["runtime"] }
 jazz-server = { path = "../jazz-server" }
+jazz-alpha59-alpha60-dump = { path = "../jazz-alpha59-alpha60-dump" }
+serde_json = "1.0"
 mimalloc = { version = "0.1", default-features = false }
-jazz-native-transport.workspace = true
-jazz-storage-rocksdb = { workspace = true, optional = true }
 jazz-otel = { workspace = true, optional = true }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
 clap = { version = "4", features = ["derive", "env"] }
@@ -41,7 +39,7 @@ tokio = { version = "1", features = [
 ] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-uuid = "1.18.1"
+uuid = { version = "1.18.1", features = ["v4"] }
 
 # Used only on Linux with the `heap-profiling` feature.
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -54,6 +52,7 @@ rustc-demangle = { version = "0.1", optional = true }
 [dev-dependencies]
 base64 = "0.22"
 flate2 = "1"
+jazz-native-transport.workspace = true
 jazz-testkit = { path = "../jazz-testkit" }
 futures-util = "0.3"
 jsonwebtoken = { version = "10.4", default-features = false, features = ["rust_crypto", "use_pem"] }
@@ -70,9 +69,15 @@ name = "jazz-tools"
 path = "src/bin/jazz-tools.rs"
 
 [[bin]]
-name = "jazz-server"
-path = "src/bin/jazz-server.rs"
+name = "jazz-alpha59-alpha60-import"
+path = "src/bin/jazz-alpha59-alpha60-import.rs"
 
 [[test]]
 name = "client_restart_integration"
+path = "tests/client_restart_integration.rs"
 required-features = ["test"]
+
+[[test]]
+name = "heap_sampler"
+path = "tests/heap_sampler.rs"
+

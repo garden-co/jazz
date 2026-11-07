@@ -107,10 +107,10 @@ describe("binding codec golden contract", () => {
     expect(bytesToHex(snapshot.rows[1]!.rows[0]!.rowId)).toBe("21".repeat(16));
   });
 
-  it("keeps added, updated, and removed ResultKey V1 sidecars aligned", () => {
+  it("keeps added, updated, and removed ResultKey sidecars aligned", () => {
     const fixture = bindingCodecGoldenFixture();
     const deltaCase = fixture.subscription_deltas.find(
-      (candidate) => candidate.name === "added_updated_removed_with_complete_v1_occurrence_keys",
+      (candidate) => candidate.name === "added_updated_removed_with_complete_occurrence_keys",
     )!;
     const delta = readNativeSubscriptionDelta(
       new PostcardReader(hexToBytes(deltaCase.payload_hex)),
@@ -119,13 +119,29 @@ describe("binding codec golden contract", () => {
     expect(delta.added.map((batch) => batch.table)).toEqual(["todos"]);
     expect(delta.updated.map((batch) => batch.table)).toEqual(["notes"]);
     expect(delta.removed).toEqual([{ table: "todos", rowId: expect.any(Uint8Array) }]);
-    expect(delta.addedOccurrenceKeys.map((key) => key[0])).toEqual([1]);
-    expect(delta.updatedOccurrenceKeys.map((key) => key[0])).toEqual([1]);
-    expect(delta.removedOccurrenceKeys.map((key) => key[0])).toEqual([1]);
+    expect(delta.addedOccurrenceKeys.map((key) => key[0])).toEqual([2]);
+    expect(delta.updatedOccurrenceKeys.map((key) => key[0])).toEqual([2]);
+    expect(delta.removedOccurrenceKeys.map((key) => key[0])).toEqual([2]);
     expect(delta.addedIndices).toEqual([2]);
     expect(delta.updatedPreviousIndices).toEqual([4]);
     expect(delta.updatedIndices).toEqual([1]);
     expect(delta.removedIndices).toEqual([3]);
+    expect(delta.updatedSplices).toEqual([
+      [
+        {
+          column: "title",
+          splices: [
+            {
+              at: 1,
+              delete: 2,
+              insert: new TextEncoder().encode("xy"),
+              atUtf16: 1,
+              deleteUtf16: 2,
+            },
+          ],
+        },
+      ],
+    ]);
   });
 
   it("keeps the terminal JSON codec contract stable", () => {
@@ -154,7 +170,7 @@ describe("binding codec golden contract", () => {
     ).toThrow("relation snapshot has trailing postcard bytes");
 
     const delta = fixture.subscription_deltas.find(
-      (candidate) => candidate.name === "added_updated_removed_with_complete_v1_occurrence_keys",
+      (candidate) => candidate.name === "added_updated_removed_with_complete_occurrence_keys",
     )!;
     const deltaWithSuffix = Uint8Array.from([...hexToBytes(delta.payload_hex), 0]);
     expect(() => readNativeSubscriptionDelta(new PostcardReader(deltaWithSuffix))).toThrow(

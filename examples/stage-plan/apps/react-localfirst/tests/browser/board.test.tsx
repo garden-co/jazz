@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createAccountManager, createDb, type Db } from "jazz-tools";
 import { App } from "../../src/App.js";
 import { app } from "../../schema.js";
-import { APP_ID, serverUrl } from "./test-constants.js";
+import { SCOPE, serverUrl } from "./test-constants.js";
 
 async function waitFor<T>(
   check: () => T | null | undefined | false,
@@ -64,7 +64,7 @@ describe("StagePlan board", () => {
   });
 
   it("runs the stage-prep flow and syncs it to a crew member", async () => {
-    const accounts = await createAccountManager({ appId: APP_ID, serverUrl: serverUrl() });
+    const accounts = await createAccountManager({ appId: SCOPE, serverUrl: serverUrl() });
     const chiefAccount = accounts.createLocalFirst();
 
     window.location.hash = "#/";
@@ -75,7 +75,7 @@ describe("StagePlan board", () => {
       root!.render(
         <App
           config={{
-            appId: APP_ID,
+            appId: SCOPE,
             serverUrl: serverUrl(),
             account: chiefAccount,
             driver: { type: "persistent", dbName: crypto.randomUUID() },
@@ -150,12 +150,12 @@ describe("StagePlan board", () => {
 
     const crewAccount = accounts.createLocalFirst();
     crewDb = await createDb({
-      appId: APP_ID,
+      appId: SCOPE,
       serverUrl: serverUrl(),
       account: crewAccount,
       driver: { type: "memory" },
     });
-    const crewId = crewDb.getAuthState().session?.user.account;
+    const crewId = crewDb.getAuthState().session?.user;
     if (!crewId) throw new Error("crew client has no session");
     const profile = await crewDb
       .insert(app.crew, { account: crewId, name: "Cole" })

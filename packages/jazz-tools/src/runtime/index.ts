@@ -5,6 +5,8 @@ export {
   type TransactionFate,
   type PermissionAdvice,
   PersistedWriteRejectedError,
+  WriteWaitTimeoutError,
+  type WriteWaitOptions,
   type DurabilityTier,
   ReadTier,
   type Row,
@@ -14,18 +16,37 @@ export {
   type StreamingValueSource,
   WriteHandle,
   WriteResult,
-  ExclusiveWriteHandle,
-  ExclusiveWriteResult,
+  SerializableWriteHandle,
+  SerializableWriteResult,
 } from "./client.js";
 export { loadWasmModule, type WasmModule } from "./wasm-loader.js";
+export {
+  UnsupportedStorageCodecsError,
+  isUnsupportedStorageCodecsError,
+} from "./unsupported-storage-codecs-error.js";
+export { AuthorityChangedError, isAuthorityChangedError } from "./authority-changed-error.js";
+export {
+  StoreHeldByAnotherTabError,
+  isStoreHeldByAnotherTabError,
+} from "./store-held-by-another-tab-error.js";
+export { DbReplacedError, type DbReplacedReason } from "./db-replaced-error.js";
 export { createDb } from "./default-create-db.js";
+export {
+  type SnapshotRef,
+  parseSnapshotRef,
+  serializeSnapshotRef,
+  SnapshotRefFormatError,
+  UnsupportedSnapshotError,
+} from "./snapshot-ref.js";
 export type { PublicSession, RuntimeSourcesConfig } from "./context.js";
-/** Encode the opaque logical identity exposed as `session.user` by bindings. */
+export type { ValueSplices } from "./subscription-manager.js";
+/** Encode a login (`session.identity`) as its canonical opaque `[issuer, subject]` string. */
 export { canonicalAuthorSubject as userIdentity } from "./author-id.js";
 export {
   Db,
   type ActiveQuerySubscriptionTrace,
   type DbSubscriptionCallbacks,
+  type DbSubscriptionUpdate,
   type LogoutOptions,
   Transaction,
   type TransactionKind,
@@ -41,20 +62,23 @@ export {
   type StreamingInsertOptions,
   type RestoreOptions,
   type UpdateOptions,
+  type UpdateEditOptions,
   type DeleteOptions,
   type TableProxy,
 } from "./db.js";
 export type { AccountDbConfig as DbConfig } from "../accounts/context.js";
+export type { ClientMigrations } from "./client-migrations.js";
 export type { AuthFailureReason, AuthState } from "./auth-state.js";
+export type { LinkStatus, OfflineReason, SyncStatus } from "./sync-status.js";
 export {
-  fetchStoredPermissions,
+  fetchPublishedBundles,
   fetchSchemaHashes,
   fetchStoredWasmSchema,
-  type FetchStoredPermissionsOptions,
+  type FetchPublishedBundlesOptions,
   type FetchStoredWasmSchemaOptions,
+  type PublishedBundle,
   type StoredSchemaHash,
-  type StoredPermissionsResponse,
-} from "./schema-fetch.js";
+} from "../dev/catalogue-api.js";
 export {
   fetchServerSubscriptions,
   type FetchServerSubscriptionsOptions,
@@ -70,3 +94,11 @@ export {
   AuthSecretFormatError,
 } from "./auth-secret-store.js";
 export type { AuthSecretStore, BrowserAuthSecretStoreOptions } from "./auth-secret-store.js";
+export type {
+  ResolvedTextAnchor,
+  ResolvedTextRange,
+  TextAnchor,
+  TextAnchors,
+  TextRange,
+  TextSide,
+} from "./text-anchors.js";

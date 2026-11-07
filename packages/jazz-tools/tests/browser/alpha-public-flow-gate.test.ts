@@ -16,44 +16,50 @@ import {
   waitForQuery,
   withTimeout,
 } from "./support.js";
-import { getJazzServerInfo } from "./testing-server.js";
+import { getJazzServerInfo, startJazzApp } from "./testing-server.js";
 import {
   closeRemoteBrowserDb,
   createRemoteBrowserDb,
   waitForRemoteBrowserDbTitle,
 } from "./remote-browser-db.js";
 
-const app = schema.defineApp({
-  todos: schema.table(
-    {
-      title: schema.string(),
-      done: schema.boolean(),
-      list: schema.string(),
-    },
-    {},
-  ),
-});
+const app = schema.defineApp(
+  {
+    todos: schema.table(
+      {
+        title: schema.string(),
+        done: schema.boolean(),
+        list: schema.string(),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+);
 
-const richApp = schema.defineApp({
-  users: schema.table(
-    {
-      name: schema.string(),
-    },
-    { todosViaOwner: schema.reverse("todos", "owner") },
-  ),
-  todos: schema.table(
-    {
-      title: schema.string(),
-      done: schema.boolean(),
-      list: schema.string(),
-      priority: schema.int(),
-      tags: schema.array(schema.string()),
-      payload: schema.bytes().optional(),
-      ownerId: schema.uuid().optional(),
-    },
-    { owner: schema.rel("users", "ownerId") },
-  ),
-});
+const richApp = schema.defineApp(
+  {
+    users: schema.table(
+      {
+        name: schema.string(),
+      },
+      { todosViaOwner: schema.reverse("todos", "owner") },
+    ),
+    todos: schema.table(
+      {
+        title: schema.string(),
+        done: schema.boolean(),
+        list: schema.string(),
+        priority: schema.int(),
+        tags: schema.array(schema.string()),
+        payload: schema.bytes().optional(),
+        ownerId: schema.uuid().optional(),
+      },
+      { owner: schema.rel("users", "ownerId") },
+    ),
+  },
+  { migrations: "none" },
+);
 
 const permissions = schema.definePermissions(app, ({ policy }) => [
   policy.todos.allowRead.always(),
@@ -200,7 +206,9 @@ describe("alpha public package flow", () => {
         driver: { type: "persistent", dbName: persistentDbName },
       }),
     );
-    expect(await db.one(app.todos.where({ id: created.id }), { tier: "local" })).toEqual(created);
+    expect(await db.one(app.todos.where({ id: created.id }), { tier: "local-first" })).toEqual(
+      created,
+    );
   });
 
   it("moves rows into and out of a filtered public subscription after local updates", async () => {
@@ -236,15 +244,15 @@ describe("alpha public package flow", () => {
       })
       .wait({ tier: "local" });
 
-    await expectTodoSummariesForQuery(db, openTodos, ["Starts open:open"], "local");
+    await expectTodoSummariesForQuery(db, openTodos, ["Starts open:open"], "local-first");
     await waitForSnapshotSummaries(snapshots, ["Starts open:open"], "initial open predicate");
 
     await db.update(app.todos, startsOpen.id, { done: true }).wait({ tier: "local" });
-    await expectTodoSummariesForQuery(db, openTodos, [], "local");
+    await expectTodoSummariesForQuery(db, openTodos, [], "local-first");
     await waitForSnapshotSummaries(snapshots, [], "row leaves open predicate after update");
 
     await db.update(app.todos, startsDone.id, { done: false }).wait({ tier: "local" });
-    await expectTodoSummariesForQuery(db, openTodos, ["Starts done:open"], "local");
+    await expectTodoSummariesForQuery(db, openTodos, ["Starts done:open"], "local-first");
     await waitForSnapshotSummaries(
       snapshots,
       ["Starts done:open"],
@@ -252,11 +260,11 @@ describe("alpha public package flow", () => {
     );
 
     unsubscribe();
-    expect(await db.one(app.todos.where({ id: startsOpen.id }), { tier: "local" })).toEqual({
+    expect(await db.one(app.todos.where({ id: startsOpen.id }), { tier: "local-first" })).toEqual({
       ...startsOpen,
       done: true,
     });
-    expect(await db.one(app.todos.where({ id: startsDone.id }), { tier: "local" })).toEqual({
+    expect(await db.one(app.todos.where({ id: startsDone.id }), { tier: "local-first" })).toEqual({
       ...startsDone,
       done: false,
     });
@@ -307,7 +315,7 @@ describe("alpha public package flow", () => {
       })
       .wait({ tier: "local" });
 
-    expect(await db.one(richQuery, { tier: "local" })).toEqual(created);
+    expect(await db.one(richQuery, { tier: "local-first" })).toEqual(created);
     await waitForCondition(
       async () =>
         snapshots.some(
@@ -323,14 +331,14 @@ describe("alpha public package flow", () => {
     );
 
     await db.update(richApp.todos, created.id, { payload: null }).wait({ tier: "local" });
-    expect(await db.one(richQuery, { tier: "local" })).toEqual({ ...created, payload: null });
+    expect(await db.one(richQuery, { tier: "local-first" })).toEqual({ ...created, payload: null });
     unsubscribe();
   });
 
   it("opens public createDb with websocket server config and converges between clients", async () => {
     const requestedAppId = uniqueDbName("alpha-public-websocket-flow");
-    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
-    await publishSchemaAndPermissions(appId, serverUrl, adminSecret, permissions);
+    const { appId, serverUrl: coreUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
+    const serverUrl = await publishSchemaAndPermissions(appId, coreUrl, adminSecret, permissions);
 
     const sharedSecret = generateAuthSecret();
     const dbA = await openAlphaMemoryDb(appId, serverUrl, adminSecret, sharedSecret);
@@ -362,7 +370,7 @@ describe("alpha public package flow", () => {
       10_000,
       "writer update was not accepted at the server",
     );
-    await expectTodoSummaries(dbB, ["Adopt alpha websocket flow:done"], "local");
+    await expectTodoSummaries(dbB, ["Adopt alpha websocket flow:done"], "local-first");
 
     const remoteBrowserDbId = uniqueDbName("alpha-public-remote-browser-reader");
     await createRemoteBrowserDb({
@@ -379,7 +387,7 @@ describe("alpha public package flow", () => {
         id: remoteBrowserDbId,
         title: "Adopt alpha websocket flow",
         timeoutMs: 45_000,
-        tier: "local",
+        tier: "local-first",
       });
       expect(remoteRows).toContainEqual({
         ...created,
@@ -399,8 +407,14 @@ describe("alpha public package flow", () => {
 
   it("publishes richer public row shapes over websocket and converges arrays, bytes, nullable refs, and integer predicates", async () => {
     const requestedAppId = uniqueDbName("alpha-public-rich-websocket-flow");
-    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
-    await publishSchemaAndPermissions(appId, serverUrl, adminSecret, richPermissions, richApp);
+    const { appId, serverUrl: coreUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
+    const serverUrl = await publishSchemaAndPermissions(
+      appId,
+      coreUrl,
+      adminSecret,
+      richPermissions,
+      richApp,
+    );
 
     const sharedSecret = generateAuthSecret();
     const dbA = await openAlphaMemoryDb(appId, serverUrl, adminSecret, sharedSecret);
@@ -491,8 +505,14 @@ describe("alpha public package flow", () => {
     "converges memory writer to persistent IndexedDB reader over websocket and reopens locally",
     async () => {
       const requestedAppId = uniqueDbName("alpha-public-mixed-websocket-flow");
-      const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
-      await publishSchemaAndPermissions(appId, serverUrl, adminSecret, richPermissions, richApp);
+      const { appId, serverUrl: coreUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
+      const serverUrl = await publishSchemaAndPermissions(
+        appId,
+        coreUrl,
+        adminSecret,
+        richPermissions,
+        richApp,
+      );
 
       const sharedSecret = generateAuthSecret();
       const readerDbName = uniqueDbName("alpha-public-mixed-reader-indexeddb");
@@ -507,7 +527,7 @@ describe("alpha public package flow", () => {
       // handshake is diagnosed separately from row convergence.
       expect(
         await withTimeout(
-          reader.all(richQuery, { tier: "global" }),
+          reader.all(richQuery, { tier: "remote" }),
           10_000,
           "mixed persistent reader did not establish its upstream server link",
         ),
@@ -565,7 +585,7 @@ describe("alpha public package flow", () => {
         (todos) => todos.length === 1 && todos[0]?.id === created.id,
         "mixed persistent reader local reopen",
         45_000,
-        "local",
+        "local-first",
       );
       expect(reopenedRow).toMatchObject({
         id: created.id,
@@ -583,8 +603,8 @@ describe("alpha public package flow", () => {
     "reopens a public persistent websocket client and catches up writes made while offline",
     async () => {
       const requestedAppId = uniqueDbName("alpha-public-reconnect-canary");
-      const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
-      await publishSchemaAndPermissions(appId, serverUrl, adminSecret, permissions);
+      const { appId, serverUrl: coreUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
+      const serverUrl = await publishSchemaAndPermissions(appId, coreUrl, adminSecret, permissions);
 
       const sharedSecret = generateAuthSecret();
       const readerDbName = uniqueDbName("alpha-public-reconnect-reader-indexeddb");
@@ -642,20 +662,20 @@ describe("alpha public package flow", () => {
         (todos) => summariesEqual(todos, summaries),
         "reopened public websocket client catches up via all",
         45_000,
-        "local",
+        "local-first",
       );
       expect(allRows).toEqual([initial, offlineWrite]);
-      expect(await reader.one(app.todos.where({ id: offlineWrite.id }), { tier: "local" })).toEqual(
-        offlineWrite,
-      );
+      expect(
+        await reader.one(app.todos.where({ id: offlineWrite.id }), { tier: "local-first" }),
+      ).toEqual(offlineWrite);
     },
     MULTI_STAGE_REMOTE_FLOW_TIMEOUT_MS,
   );
 
   it("opens public createDb with persistent IndexedDB and websocket server config, then converges todo CRUD", async () => {
     const requestedAppId = uniqueDbName("alpha-public-flow");
-    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
-    await publishSchemaAndPermissions(appId, serverUrl, adminSecret, permissions);
+    const { appId, serverUrl: coreUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
+    const serverUrl = await publishSchemaAndPermissions(appId, coreUrl, adminSecret, permissions);
 
     const sharedSecret = generateAuthSecret();
     const persistentDbName = uniqueDbName("alpha-public-indexeddb");
@@ -698,7 +718,7 @@ describe("alpha public package flow", () => {
     );
     expect(
       await db.one(app.todos.where({ id: createdRow.id }), {
-        tier: "global",
+        tier: "remote",
       }),
     ).toEqual({
       id: createdRow.id,
@@ -722,7 +742,7 @@ describe("alpha public package flow", () => {
 
     expect(
       await db.one(app.todos.where({ id: secondRow.id }), {
-        tier: "global",
+        tier: "remote",
       }),
     ).toBeNull();
 
@@ -750,7 +770,7 @@ describe("alpha public package flow", () => {
     });
     expect(
       await db.one(app.todos.where({ id: createdRow.id }), {
-        tier: "local",
+        tier: "local-first",
       }),
     ).toEqual({
       id: createdRow.id,
@@ -767,8 +787,8 @@ describe("alpha public package flow", () => {
 
   it("keeps deleted rows hidden by default and restores them over websocket", async () => {
     const requestedAppId = uniqueDbName("alpha-public-delete-restore");
-    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
-    await publishSchemaAndPermissions(appId, serverUrl, adminSecret, permissions);
+    const { appId, serverUrl: coreUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
+    const serverUrl = await publishSchemaAndPermissions(appId, coreUrl, adminSecret, permissions);
 
     const sharedSecret = generateAuthSecret();
     const db = await openAlphaDb(
@@ -802,7 +822,7 @@ describe("alpha public package flow", () => {
       (todos) => todos.length === 0,
       "deleted todo is hidden from default reads",
       45_000,
-      "global",
+      "remote",
     );
     const restored = await withTimeout(
       db
@@ -835,8 +855,8 @@ describe("alpha public package flow", () => {
 
   it("exposes globally confirmed browser deletes through includeDeleted over websocket", async () => {
     const requestedAppId = uniqueDbName("alpha-public-include-deleted");
-    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
-    await publishSchemaAndPermissions(appId, serverUrl, adminSecret, permissions);
+    const { appId, serverUrl: coreUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
+    const serverUrl = await publishSchemaAndPermissions(appId, coreUrl, adminSecret, permissions);
 
     const db = await openAlphaDb(
       appId,
@@ -860,7 +880,7 @@ describe("alpha public package flow", () => {
       (todos) => todos.length === 1,
       "deleted todo is visible with includeDeleted",
       45_000,
-      "global",
+      "remote",
     );
     expect(deletedTodo).toEqual(todo);
     expect(Object.keys(deletedTodo).includes("deleted")).toBe(false);
@@ -910,14 +930,11 @@ async function publishSchemaAndPermissions(
   adminSecret: string,
   permissions: CompiledPermissions,
   schemaApp: { wasmSchema: typeof app.wasmSchema } = app,
-): Promise<void> {
-  await deploy({
-    appId,
-    serverUrl,
-    adminSecret,
-    schema: schemaApp.wasmSchema,
-    permissions,
-  });
+): Promise<string> {
+  const core = { appId, serverUrl, adminSecret };
+  await deploy({ ...core, schema: schemaApp.wasmSchema, permissions });
+  // Clients sync through the app's backend; return its URL.
+  return (await startJazzApp(core, { schema: schemaApp.wasmSchema, permissions })).serverUrl;
 }
 
 async function expectTodoTitles(db: Db, snapshots: Todo[][], titles: string[]): Promise<void> {
@@ -939,7 +956,7 @@ async function expectTodoTitles(db: Db, snapshots: Todo[][], titles: string[]): 
 async function expectTodoSummaries(
   db: Db,
   summaries: string[],
-  tier?: "local" | "global",
+  tier?: "local-first" | "remote",
 ): Promise<void> {
   await expectTodoSummariesForQuery(db, app.todos.orderBy("title"), summaries, tier);
 }
@@ -948,7 +965,7 @@ async function expectTodoSummariesForQuery(
   db: Db,
   query: Query<"todos">,
   summaries: string[],
-  tier?: "local" | "global",
+  tier?: "local-first" | "remote",
 ): Promise<void> {
   const rows = await waitForQuery(
     db,
@@ -1009,7 +1026,7 @@ async function waitForRichTodos(
   predicate: (todos: RichTodo[]) => boolean,
   label: string,
 ): Promise<RichTodo[]> {
-  return await waitForQuery(db, query, predicate, label, 45_000, "global");
+  return await waitForQuery(db, query, predicate, label, 45_000, "remote");
 }
 
 function titlesEqual(rows: Todo[], titles: string[]): boolean {

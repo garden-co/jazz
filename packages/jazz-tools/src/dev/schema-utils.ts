@@ -2,14 +2,25 @@ import { canonicalJsonSchema, columnTypeSignature } from "../runtime/schema-meta
 import { structuralValuesEqual } from "../runtime/structural-values.js";
 import type {
   ColumnDescriptor,
+  ColumnMergeStrategy,
   ColumnType as WasmColumnType,
   Value,
   WasmSchema,
 } from "../drivers/types.js";
-import { blake3 } from "@noble/hashes/blake3.js";
+import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
+import { parseUuidBytes } from "../runtime/hex.js";
 
 const SHORT_SCHEMA_HASH_LENGTH = 12;
+
+// Must match the merge-strategy bytes in Rust's schema hash (branch.rs).
+const MERGE_STRATEGY_HASH_BYTES: Record<ColumnMergeStrategy, number> = {
+  Counter: 1,
+  GSet: 2,
+  Text: 3,
+  Markdown: 4,
+  Html: 5,
+};
 
 export function normalizeSchemaHashInput(hash: string, label: string): string {
   const normalized = hash.trim().toLowerCase();
@@ -55,6 +66,11 @@ function compareCodePoints(left: string, right: string): number {
 }
 
 export function structuralSchemaHash(schema: WasmSchema): string {
+  return bytesToHex(sha256(structuralSchemaBytes(schema)));
+}
+
+/** The canonical bytes a schema's structural hash is taken over. */
+export function structuralSchemaBytes(schema: WasmSchema): Uint8Array {
   const writer = new StructuralHashWriter();
 
   for (const tableName of Object.keys(schema).sort()) {
@@ -80,9 +96,13 @@ export function structuralSchemaHash(schema: WasmSchema): string {
       writer.stringBytes(JSON.stringify(table.branchBy));
       writer.byte(0);
     }
+    // Full history is not hashed, as in Rust's `SchemaHash::compute`.
+    if (table.history === "latest") {
+      writer.stringBytes("history\0latest\0");
+    }
   }
 
-  return bytesToHex(blake3(writer.bytes()));
+  return writer.bytes();
 }
 
 export { columnTypeSignature };
@@ -158,7 +178,7 @@ function hashColumns(writer: StructuralHashWriter, columns: ColumnDescriptor[]):
 
     if (column.merge_strategy) {
       writer.byte(1);
-      writer.byte(column.merge_strategy === "Counter" ? 1 : 2);
+      writer.byte(MERGE_STRATEGY_HASH_BYTES[column.merge_strategy]);
     } else {
       writer.byte(0);
     }
@@ -312,14 +332,8 @@ function hashColumnType(writer: StructuralHashWriter, columnType: WasmColumnType
 }
 
 function uuidBytes(value: string): Uint8Array {
-  const hex = value.replace(/-/g, "");
-  if (!/^[0-9a-fA-F]{32}$/.test(hex)) {
-    throw new Error(`Invalid UUID default value: ${value}`);
-  }
-  const bytes = new Uint8Array(16);
-  for (let index = 0; index < bytes.length; index += 1) {
-    bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
-  }
+  const bytes = parseUuidBytes(value);
+  if (!bytes) throw new Error(`Invalid UUID default value: ${value}`);
   return bytes;
 }
 
@@ -378,6 +392,9 @@ export function tableSchemasEqual(
     return false;
   }
   if (!indexedColumnsEqual(left.branchBy, right.branchBy)) {
+    return false;
+  }
+  if (left.history !== right.history) {
     return false;
   }
 

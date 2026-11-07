@@ -4,9 +4,7 @@ import type { ReactNode } from "react";
 import {
   Db,
   JazzProvider,
-  UnimplementedSqliteStorageDriver,
   createDb,
-  createJazzClient,
   schema,
   useAll,
   useAllSuspense,
@@ -17,22 +15,21 @@ import {
   type AuthSecretStore,
   type DbConfig,
   type JazzClient,
-  type JazzClientConfig,
-  type ReactNativeSqliteConnection,
-  type ReactNativeSqliteStorageDriver,
 } from "./index.js";
+import { openJazzClient, type OpenJazzClientConfig } from "./create-jazz-client.js";
 
-const app = schema.defineApp({
-  todos: schema.table(
-    {
-      title: schema.string(),
-      done: schema.boolean().optional(),
-    },
-    {},
-  ),
-});
-
-const sqliteStorage: ReactNativeSqliteStorageDriver = new UnimplementedSqliteStorageDriver();
+const app = schema.defineApp(
+  {
+    todos: schema.table(
+      {
+        title: schema.string(),
+        done: schema.boolean().optional(),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+);
 
 declare const authSecretStore: AuthSecretStore;
 declare const account: AccountHandle;
@@ -41,13 +38,12 @@ const config: DbConfig = {
   appId: "rn-typecheck",
   account,
   serverUrl: "https://sync.example.test",
-  sqliteStorage,
 };
 
 // Persistent RN admission is intentionally a field on the ordinary public
 // client config. It does not expose JSI factories, byte encoders, or a
 // JavaScript-selectable durable path.
-const admittedConfig: JazzClientConfig = {
+const admittedConfig: OpenJazzClientConfig = {
   appId: "rn-native-relay-typecheck",
   nativeRelay: { capability: new Uint8Array(32) },
   account,
@@ -56,7 +52,7 @@ const admittedConfig: JazzClientConfig = {
 
 async function clientFactory(): Promise<JazzClient> {
   const db = await createDb(config);
-  const client = await createJazzClient(config);
+  const client = await openJazzClient(config);
   const rows = await db.all(app.todos);
   const one = await db.one(app.todos.where({ title: { eq: "milk" } }));
 
@@ -72,7 +68,6 @@ function Hooks({ children }: { children: ReactNode }) {
   const session = useSession();
   const auth = useLocalFirstAuth({
     key: "rn-auth-key",
-    appId: "rn-typecheck",
     store: authSecretStore,
   });
   const todos = useAll(app.todos);
@@ -82,12 +77,14 @@ function Hooks({ children }: { children: ReactNode }) {
   client satisfies { db: Db; shutdown(): Promise<void> };
   session satisfies ReturnType<typeof useSession>;
   if (session) {
-    session.user.account satisfies string | null;
-    session.user.identity.subject satisfies string;
+    session.user satisfies string | null;
+    session.identity.subject satisfies string;
   }
   auth.secret satisfies string | null;
   todos satisfies ReturnType<typeof useAll<typeof app.todos._rowType>>;
-  suspenseTodos satisfies Array<{ id: string; title: string; done?: boolean | null }>;
+  suspenseTodos.data satisfies Array<{ id: string; title: string; done?: boolean | null }>;
+  suspenseTodos.db satisfies Db;
+  todos.db satisfies Db;
 
   return (
     <JazzProvider config={config} fallback={null}>
@@ -96,15 +93,6 @@ function Hooks({ children }: { children: ReactNode }) {
   );
 }
 
-async function storageDriverShape(connection: ReactNativeSqliteConnection) {
-  await connection.execute("create table if not exists jazz_kv (key text primary key, value blob)");
-  const rows = await connection.query<{ key: string }>("select key from jazz_kv");
-  await connection.transaction((tx) => tx.execute("delete from jazz_kv where key = ?", ["k"]));
-  await connection.close();
-  rows satisfies readonly { key: string }[];
-}
-
 void clientFactory;
 void Hooks;
-void storageDriverShape;
 void admittedConfig;

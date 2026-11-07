@@ -111,7 +111,7 @@ export class JazzRecordPlayerStore {
   async readAudioRange(trackId: string, from: number, to: number): Promise<Uint8Array | null> {
     const [row] = await this.db.all(
       app.tracks.where({ id: trackId }).select({ audio_bytes: { from, to } }),
-      { tier: "local-first-unless-empty" },
+      { tier: "local-first", firstLoadRemoteWaitMs: 5_000 },
     );
     return row?.audio_bytes ?? null;
   }
@@ -119,12 +119,16 @@ export class JazzRecordPlayerStore {
   /** Whole-value read, for tracks whose byte length was not recorded. */
   async readAudio(trackId: string): Promise<Uint8Array | null> {
     const [row] = await this.db.all(app.tracks.where({ id: trackId }).select("audio_bytes"), {
-      tier: "local-first-unless-empty",
+      tier: "local-first",
+      firstLoadRemoteWaitMs: 5_000,
     });
     return row?.audio_bytes ?? null;
   }
 
-  /** Authority-relative while the server can answer; offsets use cached rows offline. */
+  /**
+   * The server's page when it answers within `firstLoadRemoteWaitMs`; the cached
+   * page offline or after the timeout.
+   */
   async playlistWindow(
     playlistId: string,
     offset = PLAYLIST_WINDOW_OFFSET,
@@ -136,7 +140,7 @@ export class JazzRecordPlayerStore {
         .orderBy("position", "asc")
         .offset(offset)
         .limit(limit),
-      { tier: "local-first-unless-empty" },
+      { tier: "local-first", firstLoadRemoteWaitMs: 5_000 },
     );
     return rows.map((row) => ({
       id: row.id,

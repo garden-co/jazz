@@ -7,16 +7,23 @@ const [configPath, phase] = process.argv.slice(2);
 const c = JSON.parse(readFileSync(configPath, "utf8"));
 const require = createRequire(join(c.project, "package.json"));
 const { schema: s } = await import(pathToFileURL(require.resolve("jazz-tools")));
-const { createJazzSession } = await import(pathToFileURL(require.resolve("jazz-tools/backend")));
-const app = s.defineApp({
-  docs: s.table({ label: s.string(), body: s.string(), metadata: s.json() }, {}),
-  denied: s.table({ value: s.string() }, {}),
-});
+const backendModule = await import(pathToFileURL(require.resolve("jazz-tools/backend")));
+const { createJazz, remote } = backendModule;
+// Baseline packages that predate the rename call it createJazzSession.
+const createJazzClient = backendModule.createJazzClient ?? backendModule.createJazzSession;
+const app = s.defineApp(
+  {
+    docs: s.table({ label: s.string(), body: s.string(), metadata: s.json() }, {}),
+    denied: s.table({ value: s.string() }, {}),
+  },
+  { migrations: "none" },
+);
 const permissions = s.definePermissions(app, ({ policy }) => {
   for (const op of ["allowRead", "allowInsert", "allowUpdate", "allowDelete"])
     policy.docs[op].always();
 });
 const sessions = new Set();
+const backends = new Set();
 const timeout = async (promise, label, ms = 20000) => {
   let timer;
   try {
@@ -47,26 +54,57 @@ function store(name) {
     },
   };
 }
-async function open(name, backend = false) {
+/** The app's own backend: Jazz in it (`createJazz`) in front of the core, with backend authority. */
+async function openBackend() {
+  if (typeof remote !== "function") {
+    // Baseline packages that predate `remote({ secret })` admit their
+    // backend session with the core's backend secret instead.
+    assert.equal(c.phase, "baseline", "candidate packages must provide createJazz with remote()");
+    const session = await timeout(
+      createJazzClient({
+        appId: c.appId,
+        serverUrl: c.serverUrl,
+        app,
+        permissions,
+        driver: { type: "persistent", dataPath: join(c.state, "backend") },
+        store: store("backend"),
+        initial: { backendSecret: c.backendSecret },
+      }),
+      "open backend",
+    );
+    sessions.add(session);
+    return { db: session.getSnapshot().client.db };
+  }
+  const jazz = await timeout(
+    createJazz({
+      app,
+      permissions,
+      store: remote({ url: c.serverUrl, appId: c.appId, secret: c.adminSecret }),
+      authenticate: async () => null,
+    }),
+    "open backend",
+  );
+  backends.add(jazz);
+  return { db: jazz.db };
+}
+async function open(name) {
   const session = await timeout(
-    createJazzSession({
+    createJazzClient({
       appId: c.appId,
       serverUrl: c.serverUrl,
       app,
       permissions,
       driver: { type: "persistent", dataPath: join(c.state, name) },
       store: store(name),
-      initial: backend ? { backendSecret: c.backendSecret } : "local-first",
+      initial: "local-first",
     }),
     `open ${name}`,
   );
   sessions.add(session);
   const snap = session.getSnapshot();
   assert(snap.client, snap.error?.message ?? snap.status);
-  if (!backend) {
-    assert(snap.account);
-    assert.notEqual(snap.account.id, "00000000-0000-0000-0000-000000000000");
-  }
+  assert(snap.account);
+  assert.notEqual(snap.account.id, "00000000-0000-0000-0000-000000000000");
   return { session, db: snap.client.db, account: snap.account?.id };
 }
 async function close(x) {
@@ -74,7 +112,7 @@ async function close(x) {
   await timeout(x.session.close(), "close");
   sessions.delete(x.session);
 }
-async function one(db, id, tier = "global") {
+async function one(db, id, tier = "remote") {
   return timeout(db.one(app.docs.where({ id }), { tier }), `read ${tier}`);
 }
 async function wait(write, tier = "global") {
@@ -100,19 +138,19 @@ try {
     assert.equal(await one(reader.db, remove.id), null);
     assert.equal((await one(reader.db, keep.id)).body, "retained");
     log("ordinary-crud-delete-one-keep-one");
-    const backend = await open("backend", true);
+    const backend = await openBackend();
     const hidden = await wait(backend.db.insert(app.denied, { value: "control-confirmed" }));
     assert.equal(
       (
         await timeout(
-          backend.db.one(app.denied.where({ id: hidden.id }), { tier: "global" }),
+          backend.db.one(app.denied.where({ id: hidden.id }), { tier: "remote" }),
           "control read",
         )
       ).value,
       "control-confirmed",
     );
     assert.deepEqual(
-      await timeout(reader.db.all(app.denied, { tier: "global" }), "denied read"),
+      await timeout(reader.db.all(app.denied, { tier: "remote" }), "denied read"),
       [],
     );
     log("backend-auth-and-ordinary-default-deny-read");
@@ -142,15 +180,15 @@ try {
     );
     state.pending = pending.id;
     assert.equal(await one(reader.db, pending.id), null);
-    assert.equal((await one(writer.db, pending.id, "local")).body, "offline");
+    assert.equal((await one(writer.db, pending.id, "local-first")).body, "offline");
     writeFileSync(statePath, JSON.stringify(state), { mode: 0o600 });
     log("pending-local-write-not-visible-at-authority");
   } else if (phase === "offline") {
     const writer = await open("writer");
     assert.equal(writer.account, state.account);
-    assert.equal((await one(writer.db, state.pending, "local")).body, "offline");
-    assert.equal((await one(writer.db, state.keep, "local")).body, "retained");
-    assert.equal(await one(writer.db, state.remove, "local"), null);
+    assert.equal((await one(writer.db, state.pending, "local-first")).body, "offline");
+    assert.equal((await one(writer.db, state.keep, "local-first")).body, "retained");
+    assert.equal(await one(writer.db, state.remove, "local-first"), null);
     log("offline-process-reopen-same-account-and-store");
   } else if (phase === "reconnect") {
     const writer = await open("writer");
@@ -161,7 +199,7 @@ try {
     assert.equal((await one(reader.db, state.keep)).body, "retained");
     assert.equal(await one(reader.db, state.remove), null);
     const rows = await timeout(
-      reader.db.all(app.docs.where({ id: state.pending }), { tier: "global" }),
+      reader.db.all(app.docs.where({ id: state.pending }), { tier: "remote" }),
       "pending authority read",
     );
     assert.equal(rows.length, 1);
@@ -170,4 +208,5 @@ try {
   } else throw new Error(`Unknown phase ${phase}`);
 } finally {
   for (const session of sessions) await close({ session });
+  for (const jazz of backends) await timeout(jazz.close(), "close backend");
 }

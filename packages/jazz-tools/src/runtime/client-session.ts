@@ -3,11 +3,12 @@ import { runtimeRandomBytes } from "./runtime-entropy.js";
 import type { PublicSession, Session } from "./context.js";
 import { attachPublicSessionClaims, isUsableSubject, withCanonicalUser } from "./author-id.js";
 import { getTrustedReservedSession } from "./db-internal-session.js";
+import { isRecord } from "./util.js";
 
 export interface ClientSessionInput {
   /** @internal Assignment supplied by a validated account handle. */
   accountId?: string;
-  appId: string;
+  appId?: string;
   jwtToken?: string;
   cookieSession?: Session;
   /** @internal Session produced by a first-party reserved-issuer auth flow. */
@@ -167,10 +168,6 @@ function asUsableSubjectString(value: unknown): string | undefined {
   return typeof value === "string" && isUsableSubject(value) ? value : undefined;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function maybeBuffer(): BufferLike | undefined {
   return (globalThis as { Buffer?: BufferLike }).Buffer;
 }
@@ -296,6 +293,7 @@ export function resolveJwtSession(jwtToken: string): PublicSession | null {
  *
  * Resolves the JWT bearer token to a session, or returns no session.
  */
+/** @internal True for a context opened from a retained assignment, before any credential. */
 export function resolveClientSessionStateSync(config: ClientSessionInput): ClientSessionState {
   // Configs carry the trusted session in a side table so it never becomes
   // public configuration; inline inputs are accepted for transport payloads.

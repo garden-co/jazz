@@ -1,7 +1,7 @@
 import type { Db } from "jazz-tools";
 import { app } from "../../schema";
 import { normalizeEmail } from "./emails";
-import { isExclusiveConflict, isPermissionDenied } from "./write-errors";
+import { isSerializationConflict, isPermissionDenied } from "./write-errors";
 
 /**
  * Looks up who signed in with `email`. Emails are private: only the trusted
@@ -22,7 +22,7 @@ export type AddMemberStatus = "added" | "already-member" | "forbidden";
  * Adds a person to an organization, writing as the caller so `permissions.ts`
  * decides whether they may: only admins add members, and never as admins.
  *
- * The exclusive transaction reads the person's existing membership first, so
+ * The serializable transaction reads the person's existing membership first, so
  * two submits racing each other can't both insert: the authority rejects the
  * one whose read went stale, and the retry finds the membership.
  */
@@ -33,7 +33,7 @@ export async function addMember(
 ): Promise<AddMemberStatus> {
   for (let attempt = 0; ; attempt++) {
     try {
-      const write = await caller.exclusiveTransaction(async (tx) => {
+      const write = await caller.serializableTransaction(async (tx) => {
         const existing = await tx.all(
           app.memberships.where({
             organizationId: input.organizationId,
@@ -52,7 +52,7 @@ export async function addMember(
       return await write.wait();
     } catch (error) {
       if (isPermissionDenied(error)) return "forbidden";
-      if (attempt < 3 && isExclusiveConflict(error)) {
+      if (attempt < 3 && isSerializationConflict(error)) {
         options.onConflict?.(error);
         continue;
       }

@@ -24,7 +24,7 @@ import {
 } from "./support.js";
 import { createDb as createPublicDb } from "../../src/runtime/default-create-db.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
-import { getJazzServerJwtForUser } from "./testing-server.js";
+import { createJazzServerTransportControl, jazzAppUser } from "./testing-server.js";
 import { type BrowserInspectorControlRequest } from "../../src/runtime/native-runtime/browser-worker-protocol.js";
 import {
   listWorkerContexts,
@@ -63,7 +63,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       30_000,
       "both large browser writes settle",
     );
-    const rows = await db.all(todos, { tier: "global" });
+    const rows = await db.all(todos, { tier: "remote" });
     for (const title of bodies) expect(rows.some((row) => row.title === title)).toBe(true);
   }, 60_000);
 
@@ -176,7 +176,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
     const openWindow = app.todos.where({ done: false }).orderBy("title", "asc").limit(2);
     const snapshots: Todo[][] = [];
     const unsubscribe = trackSubscription(
-      db.subscribe(openWindow, (rows) => snapshots.push(rows), { tier: "local" }),
+      db.subscribe(openWindow, (rows) => snapshots.push(rows), { tier: "local-first" }),
     );
 
     const alpha = await db.insert(todos, { title: "alpha", done: false }).wait({ tier: "local" });
@@ -197,7 +197,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       8_000,
       "tombstoning the first window member should promote the next equality match",
     );
-    expect((await db.all(openWindow, { tier: "local" })).map((row) => row.title)).toEqual([
+    expect((await db.all(openWindow, { tier: "local-first" })).map((row) => row.title)).toEqual([
       "bravo",
       "charlie",
     ]);
@@ -222,7 +222,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
     const {
       value: { id: projectId },
     } = seeder.insert(projects, { name: `server-project-${Date.now()}` });
-    await seeder.all(app.projects.where({ id: projectId }), { tier: "global" });
+    await seeder.all(app.projects.where({ id: projectId }), { tier: "remote" });
 
     const expectedTitles: string[] = [];
     for (let i = 0; i < 12; i += 1) {
@@ -251,7 +251,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
         (rows) => {
           snapshots.push(rows);
         },
-        { tier: "global" },
+        { tier: "remote" },
       ),
     );
 
@@ -321,7 +321,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       fresh.subscribe(
         maintainedIndexedTodos.where({ title: seededTitle, done: false }),
         (rows) => settledSnapshots.push(rows),
-        { tier: "global" },
+        { tier: "remote" },
       ),
     );
     await waitForCondition(
@@ -347,7 +347,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
         maintainedIndexedTodos.where({ title: emptyTitle, done: false }),
         (rows) => emptySnapshots.push(rows),
         {
-          tier: "global",
+          tier: "remote",
         },
       ),
     );
@@ -384,7 +384,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       fresh.subscribe(
         maintainedIndexedTodos.where({ title: transitionTitle, done: false }),
         (rows) => transitionSnapshots.push(rows),
-        { tier: "global" },
+        { tier: "remote" },
       ),
     );
     const matchingTransition = { id: transition.id, title: transitionTitle, done: false };
@@ -490,26 +490,22 @@ describe("SharedWorker bridge with IndexedDB", () => {
     unsub();
   }, 60000);
 
-  it("delivers an initial scoped subscription snapshot for jwt-backed synced rows", async () => {
-    const { appId, serverUrl } =
-      await publishSyncServerSchemaAndPermissions("subscribe-initial-jwt");
+  it("delivers an initial scoped subscription snapshot for backend-signed-in synced rows", async () => {
+    const backend = await publishSyncServerSchemaAndPermissions("subscribe-initial-backend");
     const db = track(
       await createDb({
-        appId,
+        ...(await jazzAppUser(backend, "subscribe-initial-backend")),
         driver: {
           type: "persistent",
-          dbName: uniqueDbName("subscribe-initial-jwt"),
+          dbName: uniqueDbName("subscribe-initial-backend"),
         },
-        serverUrl,
-        jwtToken: await getJazzServerJwtForUser("subscribe-initial-jwt", undefined, appId),
-        registerJwt: true,
       }),
     );
 
     const insertedIds: string[] = [];
     for (let i = 0; i < 120; i += 1) {
       const { id } = await db
-        .insert(todos, { title: `seeded-jwt-${i}`, done: i % 2 === 0 })
+        .insert(todos, { title: `seeded-backend-${i}`, done: i % 2 === 0 })
         .wait({ tier: "local" });
       insertedIds.push(id);
     }
@@ -526,13 +522,13 @@ describe("SharedWorker bridge with IndexedDB", () => {
       async () =>
         received.some((rows) => rows.length === 1 && rows[0]?.id === targetId && rows[0]?.title),
       8000,
-      "JWT-backed seeded row should appear in initial scoped subscription snapshot",
+      "Backend-signed-in seeded row should appear in initial scoped subscription snapshot",
     );
 
     const last = received[received.length - 1];
     expect(last).toHaveLength(1);
     expect(last[0].id).toBe(targetId);
-    expect(last[0].title).toBe("seeded-jwt-0");
+    expect(last[0].title).toBe("seeded-backend-0");
 
     unsub();
   }, 60000);
@@ -709,12 +705,12 @@ describe("SharedWorker bridge with IndexedDB", () => {
     track(reopenedFirst);
     track(reopenedSecond);
     await expect(
-      reopenedFirst.all(transactionIdentityApp.projects, { tier: "local" }),
+      reopenedFirst.all(transactionIdentityApp.projects, { tier: "local-first" }),
     ).resolves.toEqual(
       expect.arrayContaining([expect.objectContaining({ id: firstWrite.value.id })]),
     );
     await expect(
-      reopenedSecond.all(transactionIdentityApp.projects, { tier: "local" }),
+      reopenedSecond.all(transactionIdentityApp.projects, { tier: "local-first" }),
     ).resolves.toEqual(
       expect.arrayContaining([expect.objectContaining({ id: secondWrite.value.id })]),
     );
@@ -743,7 +739,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       (rows) => rows.some((row) => row.id === insertedTodo.id && row.title === title),
       "insert wait(global) row becomes queryable at global tier",
       20000,
-      "global",
+      "remote",
     );
     expect(rowsAtGlobal.some((row) => row.id === insertedTodo.id)).toBe(true);
   }, 60000);
@@ -787,7 +783,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       code: "permission_denied",
     });
 
-    const todosAfterRevert = await db.all(allTodos, { tier: "local" });
+    const todosAfterRevert = await db.all(allTodos, { tier: "local-first" });
     expect(todosAfterRevert.length).toBe(0);
   });
 
@@ -819,8 +815,8 @@ describe("SharedWorker bridge with IndexedDB", () => {
     const writerPeer = track(await createDb(config));
 
     await Promise.all([
-      appPeer.all(allTodos, { tier: "global" }),
-      writerPeer.all(allTodos, { tier: "global" }),
+      appPeer.all(allTodos, { tier: "remote" }),
+      writerPeer.all(allTodos, { tier: "remote" }),
     ]);
     // Disconnect from server so both in-memory `Db`s receive the optimistic insert
     // before the server rejection
@@ -832,7 +828,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
     });
     await rejected.wait({ tier: "local" });
     await waitForCondition(
-      async () => (await appPeer.all(allTodos, { tier: "local" })).length === 1,
+      async () => (await appPeer.all(allTodos, { tier: "local-first" })).length === 1,
       5000,
       "non-originating app peer should observe the optimistic insert",
     );
@@ -842,10 +838,10 @@ describe("SharedWorker bridge with IndexedDB", () => {
       name: "PersistedWriteRejectedError",
       code: "permission_denied",
     });
-    expect(await writerPeer.all(allTodos, { tier: "local" })).toEqual([]);
-    expect(await appPeer.all(allTodos, { tier: "global" })).toEqual([]);
+    expect(await writerPeer.all(allTodos, { tier: "local-first" })).toEqual([]);
+    expect(await appPeer.all(allTodos, { tier: "remote" })).toEqual([]);
     await waitForCondition(
-      async () => (await appPeer.all(allTodos, { tier: "local" })).length === 0,
+      async () => (await appPeer.all(allTodos, { tier: "local-first" })).length === 0,
       5000,
       "non-originating app peer should receive the rejection rollback",
     );
@@ -915,7 +911,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
     });
     expect(mutationErrorSpy).toHaveBeenCalledTimes(1);
 
-    const todosAfterRevert = await db.all(allTodos, { tier: "local" });
+    const todosAfterRevert = await db.all(allTodos, { tier: "local-first" });
     expect(todosAfterRevert.length).toBe(0);
   });
 
@@ -1012,7 +1008,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       const dbAfterAcknowledgement = track(await createPersistentDb(undefined));
       const replayAfterAckSpy = vi.fn();
       dbAfterAcknowledgement.onMutationError(replayAfterAckSpy);
-      expect(await dbAfterAcknowledgement.all(allTodos, { tier: "local" })).toEqual([
+      expect(await dbAfterAcknowledgement.all(allTodos, { tier: "local-first" })).toEqual([
         durableControl.value,
       ]);
       const secondInspectorControl = await dbAfterAcknowledgement.openInspectorControlPort();
@@ -1029,7 +1025,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       await shutdownDbAndWorker(dbAfterAcknowledgement, secondInspectorControl);
 
       const dbAfterSecondRestart = track(await createPersistentDb(undefined));
-      expect(await dbAfterSecondRestart.all(allTodos, { tier: "local" })).toEqual([
+      expect(await dbAfterSecondRestart.all(allTodos, { tier: "local-first" })).toEqual([
         durableControl.value,
       ]);
       const thirdInspectorControl = await dbAfterSecondRestart.openInspectorControlPort();
@@ -1045,6 +1041,130 @@ describe("SharedWorker bridge with IndexedDB", () => {
       inspectorControl.postMessage({ type: "close" } satisfies BrowserInspectorControlRequest);
     }
   });
+
+  // alpha.60 adopter pass V3: an update made offline under permissions that
+  // allowed it, uploaded after the deployment tightened them, is refused;
+  // the writer hears of it and the row returns to the accepted version.
+  it("reports an offline update a tightened deployment refuses", async () => {
+    const syncServer = await publishSyncServerSchemaAndPermissions("offline-update-tightened");
+    const dbName = uniqueDbName("offline-update-tightened");
+    const account = await acquireBrowserTestAccount({
+      appId: syncServer.appId,
+      serverUrl: syncServer.serverUrl,
+      key: dbName,
+    });
+    const openDb = (serverUrl?: string) =>
+      createDb({
+        appId: syncServer.appId,
+        driver: { type: "persistent" as const, dbName },
+        serverUrl,
+        account,
+      });
+
+    const online = track(await openDb(syncServer.serverUrl));
+    const row = online.insert(todos, { title: "accepted", done: false });
+    await row.wait({ tier: "global" });
+    const inspector = await online.openInspectorControlPort();
+    inspector.start();
+    await shutdownDbAndWorker(online, inspector);
+
+    // Offline: the update is allowed by the permissions this client knows.
+    const offline = track(await openDb(undefined));
+    expect((await offline.all(allTodos, { tier: "local-first" })).length).toBe(1);
+    await offline.update(todos, row.value.id, { title: "offline edit" }).wait({ tier: "local" });
+    const offlineInspector = await offline.openInspectorControlPort();
+    offlineInspector.start();
+    await shutdownDbAndWorker(offline, offlineInspector);
+
+    // The deployment comes back with updates forbidden.
+    const tightened = await publishPermissionsForServer(syncServer, readOnlyPermissions);
+    const reconnected = track(await openDb(tightened.serverUrl));
+    const errors = vi.fn();
+    reconnected.onMutationError(errors);
+    await reconnected.all(allTodos, { tier: "remote" });
+
+    await waitForCondition(
+      () => errors.mock.calls.length > 0,
+      10_000,
+      `the refused offline update reaches onMutationError (sync status ${JSON.stringify(
+        reconnected.getSyncStatus(),
+      )})`,
+    );
+    expect(errors.mock.calls[0]![0]).toMatchObject({ code: "permission_denied" });
+    await waitForCondition(
+      async () =>
+        (await reconnected.all(allTodos, { tier: "local-first" }))
+          .map((todo) => todo.title)
+          .join() === "accepted",
+      5000,
+      "the row returns to its accepted version",
+    );
+  });
+
+  // The same with the tab open throughout, as the adopter saw it: the
+  // backend goes down, the update is made, the backend comes back tightened
+  // at the address the tab knows.
+  it("reports an offline update a tightened deployment refuses to a tab open throughout", async () => {
+    const syncServer = await publishSyncServerSchemaAndPermissions("offline-update-open-tab");
+    const control = await createJazzServerTransportControl(syncServer.serverUrl);
+    try {
+      const dbName = uniqueDbName("offline-update-open-tab");
+      const account = await acquireBrowserTestAccount({
+        appId: syncServer.appId,
+        serverUrl: control.url,
+        key: dbName,
+      });
+      const db = track(
+        await createDb({
+          appId: syncServer.appId,
+          driver: { type: "persistent" as const, dbName },
+          serverUrl: control.url,
+          account,
+        }),
+      );
+      const errors = vi.fn();
+      db.onMutationError(errors);
+      const row = db.insert(todos, { title: "accepted", done: false });
+      await row.wait({ tier: "global" });
+
+      await control.down();
+      await db.update(todos, row.value.id, { title: "offline edit" }).wait({ tier: "local" });
+      const later = db.update(todos, row.value.id, { title: "second offline edit" });
+      const laterOutcome = later.wait({ tier: "global" }).then(
+        () => "accepted",
+        (error: unknown) => error,
+      );
+
+      const tightened = await publishPermissionsForServer(syncServer, readOnlyPermissions);
+      await control.up(tightened.serverUrl);
+
+      await waitForCondition(
+        async () => errors.mock.calls.length > 0,
+        20_000,
+        "the refused offline edit reaches onMutationError",
+      );
+      expect(errors.mock.calls[0]![0]).toMatchObject({ code: "permission_denied" });
+      const outcome = await withTimeout(
+        laterOutcome,
+        10_000,
+        "the later edit's global wait settles",
+      );
+      expect(String(outcome)).toMatch(/permission denied/i);
+      await waitForCondition(
+        async () =>
+          (await db.all(allTodos, { tier: "local-first" })).map((todo) => todo.title).join() ===
+          "accepted",
+        5000,
+        "the row returns to its accepted version",
+      );
+      // The refusal of the edit waited for only locally reaches the
+      // listener once; the later edit's refusal went to its global wait.
+      await sleep(500);
+      expect(errors).toHaveBeenCalledTimes(1);
+    } finally {
+      await control.stop();
+    }
+  }, 60_000);
 
   it("delivers a rejection to a runtime attached while the worker rehydrates", async () => {
     const syncServer = await publishSyncServerSchemaAndPermissions(
@@ -1089,7 +1209,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
     dbAfterRestart.onMutationError(replayAfterRestartSpy);
 
     // Run a query to set up the runtime
-    await dbAfterRestart.all(allTodos, { tier: "global" });
+    await dbAfterRestart.all(allTodos, { tier: "remote" });
     const inspectorAfterRestart = await dbAfterRestart.openInspectorControlPort();
     inspectorAfterRestart.start();
     const [contextAfterRestart] = (await listWorkerContexts(inspectorAfterRestart)).filter(
@@ -1098,7 +1218,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
     expect(contextAfterRestart?.workerRealmId).not.toBe(contextBeforeRestart?.workerRealmId);
 
     await waitForCondition(
-      async () => (await dbAfterRestart.all(allTodos, { tier: "local" })).length === 0,
+      async () => (await dbAfterRestart.all(allTodos, { tier: "local-first" })).length === 0,
       5000,
       "rejected transaction should not rehydrate into the restarted local view",
     );
@@ -1115,7 +1235,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
     await shutdownDbAndWorker(dbAfterRestart, inspectorAfterRestart);
 
     const dbAfterSecondRestart = track(await createPersistentDb(undefined));
-    expect(await dbAfterSecondRestart.all(allTodos, { tier: "local" })).toEqual([]);
+    expect(await dbAfterSecondRestart.all(allTodos, { tier: "local-first" })).toEqual([]);
     const inspectorAfterSecondRestart = await dbAfterSecondRestart.openInspectorControlPort();
     inspectorAfterSecondRestart.start();
     const [contextAfterSecondRestart] = (
@@ -1177,11 +1297,11 @@ describe("SharedWorker bridge with IndexedDB", () => {
     // `createDb` is intentionally lazy. Attach the foreground runtime before
     // opening the inspector so this receipt observes the same public startup
     // path as an application's first local query.
-    await successor.all(allTodos, { tier: "local" });
+    await successor.all(allTodos, { tier: "local-first" });
 
     await waitForCondition(
       async () => {
-        const rows = await successor.all(allTodos, { tier: "local" });
+        const rows = await successor.all(allTodos, { tier: "local-first" });
         return rows.length === 1 && rows[0]?.id === accepted.value.id;
       },
       10_000,
@@ -1199,10 +1319,10 @@ describe("SharedWorker bridge with IndexedDB", () => {
       }),
     );
 
-    await successor.all(allTodos, { tier: "global" });
+    await successor.all(allTodos, { tier: "remote" });
     await sleep(250);
     expect(mutationErrors).toHaveBeenCalledTimes(1);
-    await expect(successor.all(allTodos, { tier: "local" })).resolves.toEqual([
+    await expect(successor.all(allTodos, { tier: "local-first" })).resolves.toEqual([
       expect.objectContaining({ id: accepted.value.id, title: "accepted after worker restart" }),
     ]);
 
@@ -1211,7 +1331,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
     const later = track(await createPersistentDb(undefined));
     const laterErrors = vi.fn();
     later.onMutationError(laterErrors);
-    await expect(later.all(allTodos, { tier: "local" })).resolves.toEqual([
+    await expect(later.all(allTodos, { tier: "local-first" })).resolves.toEqual([
       expect.objectContaining({ id: accepted.value.id }),
     ]);
     await sleep(250);

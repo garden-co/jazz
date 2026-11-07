@@ -14,18 +14,15 @@ use jazz::tools::public_schema::PolicyExpr;
 use jazz::tools::public_schema::SchemaHash;
 use jazz::tools::public_schema::TablePolicies;
 use jazz::tools::schema_lens::{Lens, LensOp, LensTransform};
-use jazz::tools::{ColumnType, DurabilityTier, SchemaBuilder, TableSchema, Value};
+use jazz::tools::{ColumnType, SchemaBuilder, TableSchema, Value};
 use jazz_server::JazzServer;
 use reqwest::StatusCode;
-use serde::Deserialize;
 use serde_json::json;
 use support::{
-    PublishedPermissionsHead, TestingClient, deny_all_select_permissions, has_added_id,
-    has_removed, publish_allow_all_permissions, publish_permissions, push_catalogue_in_memory,
-    wait_for, wait_for_query, wait_for_query_results, wait_for_remote_query_ready,
+    TestingClient, has_added_id, publish_allow_all_permissions, publish_permissions,
+    push_catalogue_in_memory, wait_for_query, wait_for_query_results, wait_for_remote_query_ready,
     wait_for_subscription_update,
 };
-use tempfile::TempDir;
 use uuid::Uuid;
 
 fn test_user_id(subject: &str) -> String {
@@ -545,53 +542,17 @@ fn removed_readded_v2_to_v3_lens() -> Lens {
     )
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PublishSchemaHttpResponse {
-    hash: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct SchemaHashesHttpResponse {
-    hashes: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PublishMigrationHttpResponse {
-    from_hash: String,
-    to_hash: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct SchemaConnectivityHttpResponse {
-    connected: bool,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct StoredSchemaHttpResponse {
-    schema: jazz::tools::Schema,
-}
-
-#[derive(Debug, Deserialize)]
-struct PermissionsHeadHttpResponse {
-    head: Option<PublishedPermissionsHead>,
-}
-
 async fn seed_schema_catalogue(server: &JazzServer, schema: &jazz::tools::Schema) {
-    let response = reqwest::Client::new()
-        .post(format!(
-            "{}/apps/{}/admin/schemas",
-            server.base_url(),
-            server.app_id()
-        ))
-        .header("X-Jazz-Admin-Secret", server.admin_secret())
-        .json(&json!({ "schema": schema }))
-        .send()
-        .await
-        .expect("publish schema catalogue");
-    assert_eq!(response.status(), StatusCode::CREATED);
+    // Internal fixtures exercise queries against incomplete legacy catalogues.
+    push_catalogue_in_memory(
+        server.server_state(),
+        server.app_id(),
+        "dev",
+        std::slice::from_ref(schema),
+        &[],
+    )
+    .await
+    .expect("seed internal catalogue fixture");
 }
 
 /// Publish the explicit v1 -> v2 lineage required before the v2 schema can
@@ -601,13 +562,16 @@ async fn seed_schema_catalogue(server: &JazzServer, schema: &jazz::tools::Schema
 async fn publish_v1_to_v2_catalogue_migration(server: &JazzServer) {
     let response = reqwest::Client::new()
         .post(format!(
-            "{}/apps/{}/admin/migrations",
+            "{}/apps/{}/admin/bundles",
             server.base_url(),
             server.app_id()
         ))
         .header("X-Jazz-Admin-Secret", server.admin_secret())
         .json(&json!({
-            "fromHash": SchemaHash::compute(&schema_v1()).to_string(),
+            "targetSchemaHash": SchemaHash::compute(&schema_v2()).to_string(),
+            "schemas": [],
+            "permissions": support::allow_all_permissions(&schema_v2()).into_iter().collect::<std::collections::HashMap<_, _>>(),
+            "migrations": [{ "fromHash": SchemaHash::compute(&schema_v1()).to_string(),
             "toHash": SchemaHash::compute(&schema_v2()).to_string(),
             "forward": [{
                 "table": "users",
@@ -617,7 +581,7 @@ async fn publish_v1_to_v2_catalogue_migration(server: &JazzServer) {
                     "column_type": { "type": "Text" },
                     "value": { "type": "Null" }
                 }]
-            }]
+            }]}]
         }))
         .send()
         .await
@@ -625,575 +589,9 @@ async fn publish_v1_to_v2_catalogue_migration(server: &JazzServer) {
     let status = response.status();
     assert_eq!(
         status,
-        StatusCode::CREATED,
+        StatusCode::OK,
         "v2 must be admitted through its explicit v1-to-v2 lineage"
     );
-}
-
-/// Retightening permissions invalidates Alice and Bob's existing subscriptions.
-/// Carol writes a row; the admin then revokes reads for both readers.
-///
-/// ```text
-/// carol --> Core --> alice, bob subscriptions
-/// admin --deny select--> Core --> remove row for alice and bob
-/// ```
-#[tokio::test]
-async fn core_permission_retightening_reaches_all_subscribed_clients() {
-    tokio::task::LocalSet::new()
-        .run_until(core_permission_retightening_reaches_all_subscribed_clients_impl())
-        .await
-}
-
-async fn core_permission_retightening_reaches_all_subscribed_clients_impl() {
-    let app_id = JazzServer::default_app_id();
-    let schema = schema_v1();
-    let core = JazzServer::builder()
-        .with_app_id(app_id)
-        .start()
-        .await
-        .expect("start test server");
-    seed_schema_catalogue(&core, &schema).await;
-    let allow_head =
-        publish_allow_all_permissions(&core.base_url(), app_id, core.admin_secret(), &schema).await;
-    let alice = TestingClient::builder()
-        .with_server(&core)
-        .with_schema(schema.clone())
-        .with_user_id(test_user_id("alice-retighten-us"))
-        .ready_on("users", Duration::from_secs(30))
-        .connect_after_retry_later(Duration::from_secs(30))
-        .await;
-    let bob = TestingClient::builder()
-        .with_server(&core)
-        .with_schema(schema.clone())
-        .with_user_id(test_user_id("bob-retighten-eu"))
-        .ready_on("users", Duration::from_secs(30))
-        .connect_after_retry_later(Duration::from_secs(30))
-        .await;
-    let carol = TestingClient::builder()
-        .with_server(&core)
-        .with_schema(schema.clone())
-        .with_user_id(test_user_id("carol-retighten-core"))
-        .ready_on("users", Duration::from_secs(30))
-        .connect()
-        .await;
-    let query = jazz::query::Query::from("users");
-    let mut alice_stream = alice
-        .subscribe(query.clone())
-        .await
-        .expect("alice subscribes");
-    let mut bob_stream = bob.subscribe(query.clone()).await.expect("bob subscribes");
-    let mut alice_log = Vec::new();
-    let mut bob_log = Vec::new();
-
-    let (row_id, _, transaction_id) = carol
-        .insert("users", user_values_v1("visible before retightening"))
-        .expect("core writer inserts visible row");
-    carol
-        .wait_for_transaction(
-            transaction_id.expect("ordinary mutation commits immediately"),
-            DurabilityTier::GlobalServer,
-        )
-        .await
-        .expect("core write settles globally");
-    wait_for_subscription_update(
-        &mut alice_stream,
-        &mut alice_log,
-        Duration::from_secs(30),
-        "alice receives row from Core before retightening",
-        |log| has_added_id(log, row_id),
-    )
-    .await;
-    wait_for_subscription_update(
-        &mut bob_stream,
-        &mut bob_log,
-        Duration::from_secs(30),
-        "bob receives row from Core before retightening",
-        |log| has_added_id(log, row_id),
-    )
-    .await;
-
-    publish_permissions(
-        &core.base_url(),
-        app_id,
-        core.admin_secret(),
-        &schema,
-        deny_all_select_permissions(&schema),
-        Some(allow_head.bundle_object_id),
-    )
-    .await;
-    wait_for_subscription_update(
-        &mut alice_stream,
-        &mut alice_log,
-        Duration::from_secs(30),
-        "alice loses row after core permission retightening",
-        |log| has_removed(log, row_id),
-    )
-    .await;
-    wait_for_subscription_update(
-        &mut bob_stream,
-        &mut bob_log,
-        Duration::from_secs(30),
-        "bob loses row after core permission retightening",
-        |log| has_removed(log, row_id),
-    )
-    .await;
-
-    wait_for(
-        Duration::from_secs(25),
-        "both client queries become empty after retightening",
-        || async {
-            let alice_rows = alice
-                .query(query.clone(), jazz::tools::ReadTier::Remote)
-                .await
-                .map(jazz::tools::test_support::ordinary_rows)
-                .ok()?;
-            let bob_rows = bob
-                .query(query.clone(), jazz::tools::ReadTier::Remote)
-                .await
-                .map(jazz::tools::test_support::ordinary_rows)
-                .ok()?;
-            (alice_rows.is_empty() && bob_rows.is_empty()).then_some(())
-        },
-    )
-    .await;
-
-    carol.shutdown().await.expect("shutdown carol");
-    bob.shutdown().await.expect("shutdown bob");
-    alice.shutdown().await.expect("shutdown alice");
-    core.shutdown().await;
-}
-
-/// A dynamic server should fail closed before any permissions head is
-/// published, then expose rows once an explicit head is installed.
-#[tokio::test]
-async fn dynamic_server_denies_reads_until_permissions_head_is_published() {
-    tokio::task::LocalSet::new()
-        .run_until(dynamic_server_denies_reads_until_permissions_head_is_published_impl())
-        .await
-}
-
-async fn dynamic_server_denies_reads_until_permissions_head_is_published_impl() {
-    let server = JazzServer::start().await.expect("start test server");
-    let schema = schema_v1();
-    seed_schema_catalogue(&server, &schema).await;
-
-    let mut reader_context =
-        server.make_client_context_for_user(schema.clone(), test_user_id("reader-dynamic"));
-    reader_context.backend_secret = None;
-    reader_context.admin_secret = None;
-    support::enroll_test_context(&mut reader_context)
-        .await
-        .expect("enroll reader");
-    let reader = jazz_testkit::connect(reader_context)
-        .await
-        .expect("connect reader");
-
-    assert!(
-        tokio::time::timeout(
-            Duration::from_secs(3),
-            reader.query(
-                jazz::query::Query::from("users"),
-                jazz::tools::ReadTier::Remote,
-            ),
-        )
-        .await
-        .is_err(),
-        "dynamic server should not settle reads before any permissions head is published"
-    );
-
-    publish_allow_all_permissions(
-        &server.base_url(),
-        server.app_id(),
-        server.admin_secret(),
-        &schema,
-    )
-    .await;
-
-    wait_for_remote_query_ready(&reader, "users", Duration::from_secs(30)).await;
-
-    let admin = jazz_testkit::connect(
-        server.make_client_context_for_user(schema.clone(), test_user_id("admin-dynamic")),
-    )
-    .await
-    .expect("connect admin");
-    wait_for_remote_query_ready(&admin, "users", Duration::from_secs(30)).await;
-
-    let (user_obj_id, _, transaction_id) = admin
-        .insert("users", user_values_v1("visible after permissions"))
-        .expect("admin creates user after permissions publish");
-    support::wait_for_global_txs(
-        &admin,
-        &[transaction_id.expect("ordinary mutation commits immediately")],
-    )
-    .await;
-
-    let rows_after_permissions = wait_for_query(
-        &reader,
-        jazz::query::Query::from("users"),
-        jazz::tools::ReadTier::Remote,
-        Duration::from_secs(25),
-        "reader sees row after permissions head publish",
-        |rows| (rows.len() == 1 && rows[0].0 == user_obj_id).then_some(rows),
-    )
-    .await;
-    assert_eq!(
-        rows_after_permissions[0].1,
-        vec![Value::Text("visible after permissions".to_string()),]
-    );
-
-    admin.shutdown().await.expect("shutdown admin");
-    reader.shutdown().await.expect("shutdown reader");
-    server.shutdown().await;
-}
-
-#[tokio::test]
-async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish() {
-    tokio::task::LocalSet::new()
-        .run_until(dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish_impl())
-        .await
-}
-
-async fn dynamic_server_keeps_pre_permissions_user_write_hidden_after_publish_impl() {
-    let server = JazzServer::start().await.expect("start test server");
-    let schema = schema_v1();
-    seed_schema_catalogue(&server, &schema).await;
-    let query = jazz::query::Query::from("users");
-    let observer = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id(test_user_id("observer-queued-write"))
-        .connect()
-        .await;
-    let writer = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id(test_user_id("writer-queued-write"))
-        .as_user()
-        .connect()
-        .await;
-
-    let queued_row_id = jazz::tools::ObjectId::new();
-    let (_, _, transaction_id) = writer
-        .insert_with_id(
-            "users",
-            *queued_row_id.uuid(),
-            user_values_v1("queued before permissions"),
-        )
-        .expect("pre-permissions create should stage locally");
-    let queued_write_error = writer
-        .wait_for_transaction(
-            transaction_id.expect("ordinary mutation commits immediately"),
-            DurabilityTier::GlobalServer,
-        )
-        .await
-        .expect_err("pre-permissions persisted create should be rejected");
-    let queued_write_error = queued_write_error.to_string();
-    assert!(
-        queued_write_error.contains("permissions_head_missing"),
-        "expected permissions-head rejection, got: {queued_write_error}"
-    );
-    assert!(
-        queued_write_error.contains("no published permissions head"),
-        "expected missing permissions-head reason, got: {queued_write_error}"
-    );
-
-    assert!(
-        tokio::time::timeout(
-            Duration::from_secs(3),
-            observer.query(query.clone(), jazz::tools::ReadTier::Remote),
-        )
-        .await
-        .is_err(),
-        "server should not settle observer queries before permissions arrive"
-    );
-
-    publish_allow_all_permissions(
-        &server.base_url(),
-        server.app_id(),
-        server.admin_secret(),
-        &schema,
-    )
-    .await;
-    wait_for_remote_query_ready(&observer, "users", Duration::from_secs(30)).await;
-    wait_for_remote_query_ready(&writer, "users", Duration::from_secs(30)).await;
-
-    let rows_after_publish = wait_for_query(
-        &observer,
-        query.clone(),
-        jazz::tools::ReadTier::Remote,
-        Duration::from_secs(25),
-        "pre-permissions user write stays hidden after permissions publish",
-        |rows| rows.is_empty().then_some(rows),
-    )
-    .await;
-    assert!(rows_after_publish.is_empty());
-
-    let (accepted_row_id, _, transaction_id) = writer
-        .insert("users", user_values_v1("accepted after permissions"))
-        .expect("post-publish create should succeed");
-    support::wait_for_global_txs(
-        &writer,
-        &[transaction_id.expect("ordinary mutation commits immediately")],
-    )
-    .await;
-
-    let rows_after_create = wait_for_query(
-        &observer,
-        query.clone(),
-        jazz::tools::ReadTier::Remote,
-        Duration::from_secs(25),
-        "observer sees accepted row after permissions publish",
-        |rows| {
-            (rows.len() == 1
-                && rows[0].0 == accepted_row_id
-                && rows[0].1 == vec![Value::Text("accepted after permissions".to_string())])
-            .then_some(rows)
-        },
-    )
-    .await;
-    assert_eq!(rows_after_create.len(), 1);
-    assert_ne!(
-        rows_after_create[0].0, queued_row_id,
-        "pre-permissions row should stay hidden after permissions arrive"
-    );
-
-    let transaction_id = writer
-        .update(
-            "users",
-            accepted_row_id,
-            vec![(
-                "name".to_string(),
-                Value::Text("updated after permissions".to_string()),
-            )],
-        )
-        .expect("update should succeed once permissions exist");
-    support::wait_for_global_txs(
-        &writer,
-        &[transaction_id.expect("ordinary mutation commits immediately")],
-    )
-    .await;
-
-    let rows_after_update = wait_for_query(
-        &observer,
-        query.clone(),
-        jazz::tools::ReadTier::Remote,
-        Duration::from_secs(25),
-        "observer sees update after permissions publish",
-        |rows| {
-            (rows.len() == 1
-                && rows[0].0 == accepted_row_id
-                && rows[0].1 == vec![Value::Text("updated after permissions".to_string())])
-            .then_some(rows)
-        },
-    )
-    .await;
-    assert_eq!(rows_after_update.len(), 1);
-
-    let transaction_id = writer
-        .delete("users", accepted_row_id)
-        .expect("delete should succeed once permissions exist");
-    support::wait_for_global_txs(
-        &writer,
-        &[transaction_id.expect("ordinary mutation commits immediately")],
-    )
-    .await;
-
-    let rows_after_delete = wait_for_query(
-        &observer,
-        query,
-        jazz::tools::ReadTier::Remote,
-        Duration::from_secs(25),
-        "observer sees delete after permissions publish",
-        |rows| rows.is_empty().then_some(rows),
-    )
-    .await;
-    assert!(rows_after_delete.is_empty());
-
-    observer.shutdown().await.expect("shutdown observer");
-    writer.shutdown().await.expect("shutdown writer");
-    server.shutdown().await;
-}
-
-#[tokio::test]
-async fn dynamic_server_rejects_user_write_after_permissions_timeout() {
-    tokio::task::LocalSet::new()
-        .run_until(dynamic_server_rejects_user_write_after_permissions_timeout_impl())
-        .await
-}
-
-async fn dynamic_server_rejects_user_write_after_permissions_timeout_impl() {
-    let server = JazzServer::start().await.expect("start test server");
-    let schema = schema_v1();
-    seed_schema_catalogue(&server, &schema).await;
-    let query = jazz::query::Query::from("users");
-    let observer = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id(test_user_id("observer-timeout-write"))
-        .connect()
-        .await;
-    let writer = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id(test_user_id("writer-timeout-write"))
-        .as_user()
-        .connect()
-        .await;
-
-    let (denied_row_id, _, _) = writer
-        .insert("users", user_values_v1("timed out before permissions"))
-        .expect("optimistic local create before timeout");
-
-    tokio::time::sleep(Duration::from_secs(12)).await;
-    assert!(
-        tokio::time::timeout(
-            Duration::from_secs(3),
-            observer.query(query.clone(), jazz::tools::ReadTier::Remote),
-        )
-        .await
-        .is_err(),
-        "observer query should remain unsettled before permissions are published"
-    );
-    publish_allow_all_permissions(
-        &server.base_url(),
-        server.app_id(),
-        server.admin_secret(),
-        &schema,
-    )
-    .await;
-    wait_for_remote_query_ready(&observer, "users", Duration::from_secs(30)).await;
-    wait_for_remote_query_ready(&writer, "users", Duration::from_secs(30)).await;
-
-    let (allowed_row_id, _, transaction_id) = writer
-        .insert("users", user_values_v1("accepted after timeout window"))
-        .expect("create should succeed after permissions publish");
-    support::wait_for_global_txs(
-        &writer,
-        &[transaction_id.expect("ordinary mutation commits immediately")],
-    )
-    .await;
-
-    let observer_rows = wait_for_query(
-        &observer,
-        query,
-        jazz::tools::ReadTier::Remote,
-        Duration::from_secs(25),
-        "observer sees only post-timeout allowed row",
-        |rows| (rows.len() == 1 && rows[0].0 == allowed_row_id).then_some(rows),
-    )
-    .await;
-    assert_eq!(observer_rows.len(), 1);
-    assert_eq!(observer_rows[0].0, allowed_row_id);
-    assert_ne!(
-        observer_rows[0].0, denied_row_id,
-        "timed-out row should stay rejected even after permissions arrive"
-    );
-    assert_eq!(
-        observer_rows[0].1,
-        vec![Value::Text("accepted after timeout window".to_string()),]
-    );
-
-    observer.shutdown().await.expect("shutdown observer");
-    writer.shutdown().await.expect("shutdown writer");
-    server.shutdown().await;
-}
-
-#[tokio::test]
-async fn dynamic_server_live_subscription_replays_on_first_permissions_head_and_retightening() {
-    tokio::task::LocalSet::new().run_until(dynamic_server_live_subscription_replays_on_first_permissions_head_and_retightening_impl()).await
-}
-
-async fn dynamic_server_live_subscription_replays_on_first_permissions_head_and_retightening_impl()
-{
-    let server = JazzServer::start().await.expect("start test server");
-    let schema = schema_v1();
-    seed_schema_catalogue(&server, &schema).await;
-    let query = jazz::query::Query::from("users");
-
-    let reader = TestingClient::builder()
-        .with_server(&server)
-        .with_schema(schema.clone())
-        .with_user_id(test_user_id("reader-subscribe"))
-        .as_user()
-        .connect()
-        .await;
-    let mut stream = reader
-        .subscribe(query.clone())
-        .await
-        .expect("subscribe reader before permissions");
-    // This server-backed subscription requests an authority tier, so its
-    // provisional empty local view remains withheld until permissions and the
-    // matching authority-side write settle.
-    let mut log = Vec::new();
-
-    let allow_head = publish_allow_all_permissions(
-        &server.base_url(),
-        server.app_id(),
-        server.admin_secret(),
-        &schema,
-    )
-    .await;
-
-    let admin = jazz_testkit::connect(
-        server.make_client_context_for_user(schema.clone(), test_user_id("admin-subscribe")),
-    )
-    .await
-    .expect("connect admin");
-    wait_for_remote_query_ready(&admin, "users", Duration::from_secs(30)).await;
-
-    let (user_obj_id, _, transaction_id) = admin
-        .insert("users", user_values_v1("subscription target"))
-        .expect("admin creates user after permissions publish");
-    support::wait_for_global_txs(
-        &admin,
-        &[transaction_id.expect("ordinary mutation commits immediately")],
-    )
-    .await;
-
-    wait_for_subscription_update(
-        &mut stream,
-        &mut log,
-        Duration::from_secs(25),
-        "subscription add after first permissions head",
-        |updates| has_added_id(updates, user_obj_id),
-    )
-    .await;
-
-    publish_permissions(
-        &server.base_url(),
-        server.app_id(),
-        server.admin_secret(),
-        &schema,
-        deny_all_select_permissions(&schema),
-        Some(allow_head.bundle_object_id),
-    )
-    .await;
-    wait_for_subscription_update(
-        &mut stream,
-        &mut log,
-        Duration::from_secs(25),
-        "subscription remove after tighter permissions head",
-        |updates| has_removed(updates, user_obj_id),
-    )
-    .await;
-
-    let rows_after_retighten = wait_for_query(
-        &reader,
-        query,
-        jazz::tools::ReadTier::Remote,
-        Duration::from_secs(25),
-        "reader query after tighter permissions head",
-        Some,
-    )
-    .await;
-    assert!(
-        rows_after_retighten.is_empty(),
-        "reader should lose visibility after permissions are tightened"
-    );
-
-    admin.shutdown().await.expect("shutdown admin");
-    reader.shutdown().await.expect("shutdown reader");
-    server.shutdown().await;
 }
 
 /// Alice writes under schema v1. The v2 schema and v1→v2 lens are pushed
@@ -1347,11 +745,24 @@ async fn cannot_read_from_old_schema_until_lens_is_added_impl() {
 
     seed_schema_catalogue(&server, &v2_schema).await;
 
-    let bob =
-        jazz_testkit::connect(server.make_client_context_for_user(
-            v2_schema.clone(),
-            test_user_id("bob-schema-before-lens"),
-        ))
+    // Bob's app ships v2 with its lens from v1 before the server has it.
+    let mut context = server
+        .make_client_context_for_user(v2_schema.clone(), test_user_id("bob-schema-before-lens"));
+    context.migrations = jazz::db::Migrations {
+        schemas: vec![
+            jazz::schema::JazzSchema::new(&schema_v1()).unwrap(),
+            jazz::schema::JazzSchema::new(&schema_v2()).unwrap(),
+        ],
+        lenses: vec![
+            jazz::tools::schema_lens::runtime::compile_lens(
+                &v1_to_v2_lens(),
+                &schema_v1(),
+                &schema_v2(),
+            )
+            .unwrap(),
+        ],
+    };
+    let bob = jazz_testkit::connect(context)
         .await
         .expect("connect bob with unpublished draft schema");
     let query = jazz::query::Query::from("users");
@@ -1751,6 +1162,14 @@ async fn table_rename_new_client_can_read_old_rows_impl() {
     let v1_schema = table_rename_schema_v1();
     let v2_schema = table_rename_schema_v2();
 
+    publish_allow_all_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &v1_schema,
+    )
+    .await;
+
     push_catalogue_in_memory(
         server.server_state(),
         server.app_id(),
@@ -1760,13 +1179,6 @@ async fn table_rename_new_client_can_read_old_rows_impl() {
     )
     .await
     .expect("push table-rename catalogue");
-    publish_allow_all_permissions(
-        &server.base_url(),
-        server.app_id(),
-        server.admin_secret(),
-        &v1_schema,
-    )
-    .await;
 
     let alice = jazz_testkit::connect(
         server.make_client_context_for_user(v1_schema, test_user_id("alice-table-rename")),
@@ -1826,6 +1238,14 @@ async fn table_rename_subscription_reacts_to_old_branch_updates_impl() {
     let v1_schema = table_rename_schema_v1();
     let v2_schema = table_rename_schema_v2();
 
+    publish_allow_all_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &v1_schema,
+    )
+    .await;
+
     push_catalogue_in_memory(
         server.server_state(),
         server.app_id(),
@@ -1835,13 +1255,6 @@ async fn table_rename_subscription_reacts_to_old_branch_updates_impl() {
     )
     .await
     .expect("push table-rename catalogue");
-    publish_allow_all_permissions(
-        &server.base_url(),
-        server.app_id(),
-        server.admin_secret(),
-        &v1_schema,
-    )
-    .await;
 
     let bob = jazz_testkit::connect(
         server.make_client_context_for_user(v2_schema, test_user_id("bob-table-rename-sub")),
@@ -2054,6 +1467,14 @@ async fn table_rename_update_and_delete_copy_on_write_impl() {
     let v1_schema = table_rename_schema_v1();
     let v2_schema = table_rename_copy_on_write_schema_v2();
 
+    publish_allow_all_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &v1_schema,
+    )
+    .await;
+
     push_catalogue_in_memory(
         server.server_state(),
         server.app_id(),
@@ -2063,13 +1484,6 @@ async fn table_rename_update_and_delete_copy_on_write_impl() {
     )
     .await
     .expect("push table-rename catalogue");
-    publish_allow_all_permissions(
-        &server.base_url(),
-        server.app_id(),
-        server.admin_secret(),
-        &v1_schema,
-    )
-    .await;
 
     let alice = jazz_testkit::connect(server.make_client_context_for_user(
         v1_schema.clone(),
@@ -2187,6 +1601,14 @@ async fn table_rename_join_query_translates_join_target_on_old_branch_impl() {
     let v1_schema = table_rename_join_schema_v1();
     let v2_schema = table_rename_join_schema_v2();
 
+    publish_allow_all_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &v1_schema,
+    )
+    .await;
+
     push_catalogue_in_memory(
         server.server_state(),
         server.app_id(),
@@ -2196,13 +1618,6 @@ async fn table_rename_join_query_translates_join_target_on_old_branch_impl() {
     )
     .await
     .expect("push join table-rename catalogue");
-    publish_allow_all_permissions(
-        &server.base_url(),
-        server.app_id(),
-        server.admin_secret(),
-        &v1_schema,
-    )
-    .await;
 
     let alice = jazz_testkit::connect(
         server.make_client_context_for_user(v1_schema, test_user_id("alice-join-rename")),
@@ -2297,6 +1712,14 @@ async fn table_rename_fk_array_lookup_finds_related_rows_on_old_branch_impl() {
     let v1_schema = table_rename_join_schema_v1();
     let v2_schema = table_rename_join_schema_v2();
 
+    publish_allow_all_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &v1_schema,
+    )
+    .await;
+
     push_catalogue_in_memory(
         server.server_state(),
         server.app_id(),
@@ -2306,13 +1729,6 @@ async fn table_rename_fk_array_lookup_finds_related_rows_on_old_branch_impl() {
     )
     .await
     .expect("push array table-rename catalogue");
-    publish_allow_all_permissions(
-        &server.base_url(),
-        server.app_id(),
-        server.admin_secret(),
-        &v1_schema,
-    )
-    .await;
 
     let alice = jazz_testkit::connect(
         server.make_client_context_for_user(v1_schema, test_user_id("alice-array-rename")),
@@ -2419,7 +1835,6 @@ async fn local_join_query_uses_current_permissions_for_joined_provenance_after_l
         server.admin_secret(),
         &current_schema,
         current_permissions,
-        None,
     )
     .await;
 
@@ -2593,19 +2008,6 @@ async fn multi_hop_table_renames_and_column_rename_impl() {
     let v2_schema = multi_hop_table_rename_schema_v2();
     let v3_schema = multi_hop_table_rename_schema_v3();
 
-    push_catalogue_in_memory(
-        server.server_state(),
-        server.app_id(),
-        "dev",
-        &[v1_schema.clone(), v2_schema.clone(), v3_schema.clone()],
-        &[
-            multi_hop_table_rename_v1_to_v2_lens(),
-            multi_hop_table_rename_v2_to_v3_lens(),
-        ],
-    )
-    .await
-    .expect("push multi-hop table-rename catalogue");
-
     publish_allow_all_permissions(
         &server.base_url(),
         server.app_id(),
@@ -2632,6 +2034,15 @@ async fn multi_hop_table_renames_and_column_rename_impl() {
     )
     .await;
 
+    push_catalogue_in_memory(
+        server.server_state(),
+        server.app_id(),
+        "dev",
+        &[multi_hop_table_rename_schema_v1(), v2_schema.clone()],
+        &[multi_hop_table_rename_v1_to_v2_lens()],
+    )
+    .await
+    .expect("admit next migration");
     publish_allow_all_permissions(
         &server.base_url(),
         server.app_id(),
@@ -2658,6 +2069,15 @@ async fn multi_hop_table_renames_and_column_rename_impl() {
     )
     .await;
 
+    push_catalogue_in_memory(
+        server.server_state(),
+        server.app_id(),
+        "dev",
+        &[multi_hop_table_rename_schema_v2(), v3_schema.clone()],
+        &[multi_hop_table_rename_v2_to_v3_lens()],
+    )
+    .await
+    .expect("admit next migration");
     publish_allow_all_permissions(
         &server.base_url(),
         server.app_id(),
@@ -2734,11 +2154,19 @@ async fn removed_table_then_readded_does_not_resurface_old_rows_impl() {
     let v2_schema = removed_readded_schema_v2();
     let v3_schema = removed_readded_schema_v3();
 
+    publish_allow_all_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &v1_schema,
+    )
+    .await;
+
     push_catalogue_in_memory(
         server.server_state(),
         server.app_id(),
         "dev",
-        &[v1_schema.clone(), v2_schema, v3_schema.clone()],
+        &[v1_schema.clone(), v2_schema.clone(), v3_schema.clone()],
         &[
             removed_readded_v1_to_v2_lens(),
             removed_readded_v2_to_v3_lens(),
@@ -2747,13 +2175,8 @@ async fn removed_table_then_readded_does_not_resurface_old_rows_impl() {
     .await
     .expect("push removed/re-added table catalogue");
 
-    publish_allow_all_permissions(
-        &server.base_url(),
-        server.app_id(),
-        server.admin_secret(),
-        &v1_schema,
-    )
-    .await;
+    // The empty historical version is meaningful once its lenses are admitted.
+    seed_schema_catalogue(&server, &v2_schema).await;
 
     let alice = jazz_testkit::connect(
         server.make_client_context_for_user(v1_schema, test_user_id("alice-removed-readded-v1")),
@@ -3027,5 +2450,108 @@ async fn keeps_authorization_through_v1_head_impl() {
 
     alice.shutdown().await.expect("shutdown alice");
     bob.shutdown().await.expect("shutdown bob");
+    server.shutdown().await;
+}
+
+/// A permission change reaches a user's client when its backend redeploys:
+/// publishing a tighter bundle changes nothing for the session pinned to the
+/// old one, and the client reconnecting pinned to the new one loses the row
+/// it held, remotely and in its own store.
+#[tokio::test]
+async fn retightened_bundle_reaches_a_client_reconnecting_pinned_to_it() {
+    tokio::task::LocalSet::new()
+        .run_until(retightened_bundle_reaches_a_client_reconnecting_pinned_to_it_impl())
+        .await
+}
+
+async fn retightened_bundle_reaches_a_client_reconnecting_pinned_to_it_impl() {
+    let schema = schema_v1();
+    let server = JazzServer::start().await.expect("start test server");
+    let open = publish_allow_all_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &schema,
+    )
+    .await;
+    // The app's backend writes the row on its own link.
+    let backend =
+        support::connect(server.make_client_context_for_user(schema.clone(), "retighten-backend"))
+            .await
+            .expect("connect the backend");
+    let (row_id, _, tx) = backend
+        .insert("users", user_values_v1("visible until retightened"))
+        .expect("backend inserts");
+    support::wait_for_global_txs(&backend, &[tx.expect("insert transaction")]).await;
+
+    let mut alice_context =
+        server.make_user_context(schema.clone(), test_user_id("alice-retighten"));
+    alice_context.client_id = Some(jazz::tools::ClientId::new());
+    alice_context.storage = jazz::tools::ClientStorage::Persistent;
+    alice_context.bundle = Some(open.bundle.clone());
+    support::enroll_test_context(&mut alice_context)
+        .await
+        .expect("enroll alice");
+    let alice = support::connect(alice_context.clone())
+        .await
+        .expect("connect alice pinned to the open bundle");
+    let query = Query::from("users");
+    let mut stream = alice
+        .subscribe(query.clone())
+        .await
+        .expect("alice subscribes");
+    let mut log = Vec::new();
+    wait_for_subscription_update(
+        &mut stream,
+        &mut log,
+        Duration::from_secs(30),
+        "alice reads the row by the open bundle",
+        |log| has_added_id(log, row_id),
+    )
+    .await;
+
+    let closed = publish_permissions(
+        &server.base_url(),
+        server.app_id(),
+        server.admin_secret(),
+        &schema,
+        support::deny_all_select_permissions(&schema),
+    )
+    .await;
+    assert_ne!(closed, open);
+    let rows = alice
+        .query(query.clone(), jazz::tools::ReadTier::Remote)
+        .await
+        .map(jazz::tools::test_support::ordinary_rows)
+        .expect("alice reads remotely");
+    assert_eq!(
+        rows.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        vec![row_id],
+        "publishing a bundle changes nothing for a session pinned to another"
+    );
+    drop(stream);
+    alice.shutdown().await.expect("shutdown alice");
+
+    // The backend redeployed: alice's client reconnects pinned to its bundle.
+    alice_context.bundle = Some(closed.bundle);
+    let alice = support::connect(alice_context)
+        .await
+        .expect("reconnect alice pinned to the closed bundle");
+    support::wait_for_rows(
+        &alice,
+        query.clone(),
+        "alice reads nothing by the closed bundle",
+        |rows| rows.is_empty().then_some(()),
+    )
+    .await;
+    let local = alice
+        .query(query, jazz::tools::ReadTier::LocalOnly)
+        .await
+        .map(jazz::tools::test_support::ordinary_rows)
+        .expect("alice reads her store");
+    assert!(local.is_empty(), "alice's store dropped the row: {local:?}");
+
+    alice.shutdown().await.expect("shutdown alice");
+    backend.shutdown().await.expect("shutdown backend");
     server.shutdown().await;
 }

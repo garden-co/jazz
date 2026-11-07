@@ -24,7 +24,7 @@ const importSchema = {
   ),
 };
 
-const importApp = s.defineApp(importSchema);
+const importApp = s.defineApp(importSchema, { migrations: "none" });
 const txCount = Number(process.env.JAZZ_WRITEPATH_TXS ?? "100");
 
 function rowId(index: number): string {
@@ -40,7 +40,6 @@ describe("native write path", () => {
       permissions: {},
       driver: { type: "persistent", dataPath: dir },
       adminSecret: "backend-authority-admin",
-      tier: "local",
     });
 
     try {
@@ -67,7 +66,6 @@ describe("native write path", () => {
       permissions: {},
       driver: { type: "persistent", dataPath: dir },
       adminSecret: "writepath-repro-admin",
-      tier: "local",
     });
     const db = context.asBackend();
     const parentWrite = db.insert(importApp.parents, {
@@ -128,7 +126,6 @@ describe("native write path", () => {
       adminSecret: server.adminSecret,
       backendSecret: server.backendSecret,
       env: "test",
-      tier: "local",
     });
     const db = context.asBackend();
     const parentWrite = db.insert(importApp.parents, {

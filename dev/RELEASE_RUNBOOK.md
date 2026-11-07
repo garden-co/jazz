@@ -36,8 +36,9 @@ this document or public receipts.
   receipts, exact dependency versions and tarball size budgets.
 - Ensure RN payload packages are part of the fixed release group and published
   before the wrapper. Verify the exact tarballs that will be uploaded.
-- Smoke-test published preview packages as an adopter: `npm create jazz`, CLI
-  validation/deployment, local CLI server, authentication, write/read/delete of a
+- Check that `npm create jazz` from the preview prints the live agent brief
+  (https://jazz.tools/agent-brief.md). Smoke-test published preview packages as an
+  adopter: CLI validation/deployment, local CLI server, authentication, write/read/delete of a
   specific row while another remains, reconnect and persistent reopen.
 - Include browser/worker and Android/iOS acceptance appropriate to changed code.
   For storage changes, run the published-version compatibility fixtures. Reuse a
@@ -106,7 +107,10 @@ this document or public receipts.
   packaging, then retry through the publisher's existing-version handling. Never
   republish different bytes under an existing version.
 - Verify every expected npm package/version, native payload, dependency and dist-tag
-  using registry reads and installation. Confirm the source tag matches the exact
+  using registry reads and installation. Since alpha.60 the publisher moves both
+  `alpha` and `latest` to the new version for every v2 package, so a plain
+  `npm install jazz-tools` gets v2 and Classic is `jazz-tools@0`. To roll `latest`
+  back, run `npm dist-tag add <pkg>@<previous> latest` for each package. Confirm the source tag matches the exact
   released source. Build artifacts alone are not proof of npm publication.
 - Promote the verified docs deployment. The publisher stages and promotes the
   Inspector itself; if its Inspector jobs fail, re-run the failed jobs on that
@@ -117,6 +121,19 @@ this document or public receipts.
   a controlled fleet rollout. Have infra confirm the exact version and image digest
   in the status API and both regions. Never include legacy or preview tenants in a
   stable fleet rollout.
+- The release go-ahead names each activation it covers: the npm publish, the
+  catalog default for new apps, the fleet rollout of existing tenants and the
+  GitHub Release. If the owner defers one, record that in the release checklist
+  with who will do it next.
+- Right after npm verification, the release coordinator opens the catalog PR that
+  makes the release the default for new apps and asks infra to start the fleet
+  rollout. The coordinator owns both until infra reports the tenant counts per
+  version; the release is not finished while eligible stable tenants remain on an
+  older version without a recorded reason.
+- With the fleet rollout, hand infra the smoke probe update: bump `jazz-tools`
+  and `jazz-napi` in `kubernetes/tests/v2-sync` (garden-co/infra) to the new
+  release, port any API changes the release requires, and redeploy the probe.
+  Probes left on an old client stop testing what adopters run.
 - Create a new ordinary tenant with the real npm release; validate/deploy schema
   and permissions and run authenticated write/read/update/delete plus
   reconnect/reopen. Delete test tenants. Check existing sync probes and rollout
@@ -135,6 +152,10 @@ this document or public receipts.
   Publish it with `prerelease=false`; do not use generated commit lists as a
   substitute for the audited changelog. Set latest deliberately for the new normal
   release rather than leaving the benchmark-fixtures release as latest.
+- Merge `release` back into `main` with a merge commit (a PR from a branch cut
+  from `main`, never squashed), as described under "Release branch lifecycle"
+  below. Without it `main` keeps stale package versions, changelogs and
+  `.changeset/pre.json`.
 - Publish the announcement only with explicit authorization, linking to release
   notes, upgrade instructions and relevant measured benchmarks.
 - Close the completed milestone after moving unresolved work to its agreed target.

@@ -32,8 +32,8 @@ test("schema views sharing an Inspector port correlate their own replies", async
   channel.port1.start();
   try {
     const results = await Promise.all([
-      left.query("first", null, "local", '{"propagation":"local-only"}'),
-      right.query("second", null, "local", '{"propagation":"local-only"}'),
+      left.query("first", null, "local-only"),
+      right.query("second", null, "local-only"),
     ]);
     expect(results).toEqual(["first", "second"]);
   } finally {

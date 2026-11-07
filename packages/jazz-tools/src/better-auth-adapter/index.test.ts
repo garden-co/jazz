@@ -1,15 +1,11 @@
-import { accountRegistryUrl } from "../accounts/context.js";
-import { requestAccountRegistry } from "../accounts/registry-client.js";
-import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, test, vi } from "vitest";
 import { betterAuth, type BetterAuthOptions, type DBAdapter } from "better-auth";
 import { createJazzContext, type JazzContext } from "../backend/create-jazz-context.js";
 import {
   startLocalJazzServer,
-  startTestJwtIssuer,
+  deploy as deployFixture,
   type LocalJazzServerHandle,
 } from "../testing/index.js";
-import { deploy as deployProject } from "../dev/catalogue-project.js";
 import {
   app as fixtureApp,
   permissions as fixturePermissions,
@@ -17,6 +13,8 @@ import {
   wasmSchema as wasmSchemaExample,
 } from "./fixtures/schema.js";
 import { jazzAdapter } from "./index.js";
+import { accountRegistryUrl } from "../accounts/context.js";
+import { readAccountAssignment, requestVouchedAccount } from "../accounts/registry-client.js";
 
 const atomicAdapterOptions = {
   user: {
@@ -51,6 +49,27 @@ type AtomicUser = {
   transitionStatus: string;
 };
 
+/** A signed-in app user's session, with the account the core assigns them. */
+async function appUserSession(
+  server: { url: string; appId: string; backendSecret: string },
+  userId: string,
+) {
+  const identity = { issuer: "https://app.example", subject: userId };
+  const assignment = await requestVouchedAccount(
+    accountRegistryUrl(server.url, server.appId),
+    "login-or-register",
+    identity,
+    server.backendSecret,
+  );
+  return {
+    issuer: identity.issuer,
+    user_id: userId,
+    account_id: readAccountAssignment(assignment, identity),
+    claims: {},
+    authMode: "external" as const,
+  };
+}
+
 describe("jazzAdapter", () => {
   describe("generated auth-table permissions", () => {
     it("denies client CRUD for every generated Better Auth table", () => {
@@ -69,18 +88,16 @@ describe("jazzAdapter", () => {
   });
 
   it("rejects ordinary-session reads and writes to Better Auth tables", async () => {
-    const jwtIssuer = await startTestJwtIssuer();
     const server = await startLocalJazzServer({
       allowLocalFirstAuth: true,
-      jwksUrl: jwtIssuer.jwksUrl,
-      jwtIssuer: jwtIssuer.issuer,
-      jwtAudience: jwtIssuer.audience,
     });
-    await deployProject({
+    // Published as createJazz publishes it; the backend link is pinned to it.
+    const { bundle } = await deployFixture({
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
-      schemaDir: join(import.meta.dirname, "fixtures"),
+      schema: fixtureApp,
+      permissions: fixturePermissions,
     });
     const context = createJazzContext({
       appId: server.appId,
@@ -89,9 +106,7 @@ describe("jazzAdapter", () => {
       driver: { type: "memory" },
       serverUrl: server.url,
       backendSecret: server.backendSecret,
-      jwksUrl: jwtIssuer.jwksUrl,
-      jwtIssuer: jwtIssuer.issuer,
-      jwtAudience: jwtIssuer.audience,
+      bundle,
     });
 
     try {
@@ -109,13 +124,10 @@ describe("jazzAdapter", () => {
         },
       });
 
-      const token = jwtIssuer.jwtForUser("ordinary-session-user");
-      await requestAccountRegistry(accountRegistryUrl(server.url, server.appId), "register", token);
-      const sessionDb = await context.forRequest({
-        headers: { authorization: `Bearer ${token}` },
-      });
+      // An app user the backend vouches for, as createJazz's authenticate would.
+      const sessionDb = context.forSession(await appUserSession(server, "ordinary-session-user"));
 
-      await expect(sessionDb.all(fixtureApp.better_auth_user, { tier: "global" })).resolves.toEqual(
+      await expect(sessionDb.all(fixtureApp.better_auth_user, { tier: "remote" })).resolves.toEqual(
         [],
       );
       await expect(
@@ -132,22 +144,18 @@ describe("jazzAdapter", () => {
     } finally {
       await context.shutdown();
       await server.stop();
-      await jwtIssuer.stop();
     }
   }, 30_000);
 
   it("applies generated deny-all policies to a verified external session", async () => {
-    const jwtIssuer = await startTestJwtIssuer();
-    const server = await startLocalJazzServer({
-      jwksUrl: jwtIssuer.jwksUrl,
-      jwtIssuer: jwtIssuer.issuer,
-      jwtAudience: jwtIssuer.audience,
-    });
-    await deployProject({
+    const server = await startLocalJazzServer();
+    // Published as createJazz publishes it; the backend link is pinned to it.
+    const { bundle } = await deployFixture({
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
-      schemaDir: join(import.meta.dirname, "fixtures"),
+      schema: fixtureApp,
+      permissions: fixturePermissions,
     });
     const context = createJazzContext({
       appId: server.appId,
@@ -156,9 +164,7 @@ describe("jazzAdapter", () => {
       driver: { type: "memory" },
       serverUrl: server.url,
       backendSecret: server.backendSecret,
-      jwksUrl: jwtIssuer.jwksUrl,
-      jwtIssuer: jwtIssuer.issuer,
-      jwtAudience: jwtIssuer.audience,
+      bundle,
     });
 
     try {
@@ -225,24 +231,21 @@ describe("jazzAdapter", () => {
         })
         .wait({ tier: "global" });
 
-      const token = jwtIssuer.jwtForUser("external-policy-user");
-      await requestAccountRegistry(accountRegistryUrl(server.url, server.appId), "register", token);
-      const sessionDb = await context.forRequest({
-        headers: { authorization: `Bearer ${token}` },
-      });
-      await expect(sessionDb.all(fixtureApp.better_auth_user, { tier: "global" })).resolves.toEqual(
+      // An app user the backend vouches for, as createJazz's authenticate would.
+      const sessionDb = context.forSession(await appUserSession(server, "external-policy-user"));
+      await expect(sessionDb.all(fixtureApp.better_auth_user, { tier: "remote" })).resolves.toEqual(
         [],
       );
       await expect(
-        sessionDb.all(fixtureApp.better_auth_session, { tier: "global" }),
+        sessionDb.all(fixtureApp.better_auth_session, { tier: "remote" }),
       ).resolves.toEqual([]);
       await expect(
-        sessionDb.all(fixtureApp.better_auth_account, { tier: "global" }),
+        sessionDb.all(fixtureApp.better_auth_account, { tier: "remote" }),
       ).resolves.toEqual([]);
       await expect(
-        sessionDb.all(fixtureApp.better_auth_verification, { tier: "global" }),
+        sessionDb.all(fixtureApp.better_auth_verification, { tier: "remote" }),
       ).resolves.toEqual([]);
-      await expect(sessionDb.all(fixtureApp.better_auth_jwks, { tier: "global" })).resolves.toEqual(
+      await expect(sessionDb.all(fixtureApp.better_auth_jwks, { tier: "remote" })).resolves.toEqual(
         [],
       );
 
@@ -276,7 +279,6 @@ describe("jazzAdapter", () => {
     } finally {
       await context.shutdown();
       await server.stop();
-      await jwtIssuer.stop();
     }
   }, 30_000);
 
@@ -290,11 +292,12 @@ describe("jazzAdapter", () => {
         backendSecret: "backend-secret-for-adapter-methods",
       });
 
-      await deployProject({
+      await deployFixture({
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
-        schemaDir: join(import.meta.dirname, "fixtures"),
+        schema: fixtureApp,
+        permissions: fixturePermissions,
       });
 
       context = createJazzContext({
@@ -365,30 +368,97 @@ describe("jazzAdapter", () => {
       expect(JSON.parse(query._build())).toMatchObject({ limit: 2, offset: 3 });
     });
 
-    it("backend access can insert and read despite deny-all client policies", async () => {
-      const created = await adapter.create({
+    it("backend access can insert, read, update, and delete despite deny-all client policies", async () => {
+      const alpha = await adapter.create<any>({
         model: "user",
         data: {
-          name: "Alice",
-          email: "alice@example.com",
+          name: "Alpha",
+          email: "alpha@example.com",
           emailVerified: false,
           image: null,
         },
       });
+      expect(alpha.id).toEqual(expect.any(String));
+      expect(alpha.name).toBe("Alpha");
+      await expect(
+        adapter.findOne<any>({
+          model: "user",
+          where: [{ field: "id", operator: "eq", value: alpha.id, connector: "AND" }],
+        }),
+      ).resolves.toMatchObject({
+        id: alpha.id,
+        email: "alpha@example.com",
+        name: "Alpha",
+      });
 
-      expect(created.id).toEqual(expect.any(String));
-      expect(created.name).toBe("Alice");
-
-      const found = await adapter.findOne({
+      const beta = await adapter.create<any>({
         model: "user",
-        where: [{ field: "id", operator: "eq", value: created.id, connector: "AND" }],
+        data: {
+          name: "Beta",
+          email: "beta@example.com",
+          emailVerified: false,
+          image: null,
+        },
+      });
+      await adapter.create<any>({
+        model: "user",
+        data: {
+          name: "Gamma",
+          email: "gamma@example.com",
+          emailVerified: true,
+          image: null,
+        },
       });
 
-      expect(found).toMatchObject({
-        id: created.id,
-        email: "alice@example.com",
-        name: "Alice",
+      const updated = await adapter.update<any>({
+        model: "user",
+        where: [{ field: "email", operator: "eq", value: "beta@example.com", connector: "AND" }],
+        update: { name: "Beta Prime" },
       });
+
+      expect(updated).toMatchObject({
+        id: beta.id,
+        name: "Beta Prime",
+      });
+
+      await expect(
+        adapter.updateMany({
+          model: "user",
+          where: [{ field: "image", operator: "eq", value: null, connector: "AND" }],
+          update: { emailVerified: true },
+        }),
+      ).resolves.toBe(3);
+
+      await adapter.delete({
+        model: "user",
+        where: [{ field: "email", operator: "eq", value: "alpha@example.com", connector: "AND" }],
+      });
+
+      await expect(
+        adapter.findOne<any>({
+          model: "user",
+          where: [{ field: "id", operator: "eq", value: alpha.id, connector: "AND" }],
+        }),
+      ).resolves.toBeNull();
+
+      await expect(
+        adapter.deleteMany({
+          model: "user",
+          where: [
+            { field: "email", operator: "eq", value: "missing@example.com", connector: "AND" },
+            { field: "name", operator: "contains", value: "mm", connector: "OR" },
+          ],
+        }),
+      ).resolves.toBe(1);
+
+      const remaining = await adapter.findMany<any>({
+        model: "user",
+        limit: 100,
+        offset: 0,
+        sortBy: { field: "id", direction: "asc" },
+      });
+
+      expect(remaining.map((row) => row.id)).toEqual([beta.id]);
     });
 
     it("supports findMany, count, select, sort, limit, and offset on Jazz ids", async () => {
@@ -489,86 +559,6 @@ describe("jazzAdapter", () => {
       expect(withoutOneEmail.map((row) => row.id)).toEqual(
         [createdUsers[0]!.id, createdUsers[2]!.id].sort(),
       );
-    });
-
-    it("backend access can update and delete despite deny-all client policies", async () => {
-      const alpha = await adapter.create<any>({
-        model: "user",
-        data: {
-          name: "Alpha",
-          email: "alpha@example.com",
-          emailVerified: false,
-          image: null,
-        },
-      });
-      const beta = await adapter.create<any>({
-        model: "user",
-        data: {
-          name: "Beta",
-          email: "beta@example.com",
-          emailVerified: false,
-          image: null,
-        },
-      });
-      await adapter.create<any>({
-        model: "user",
-        data: {
-          name: "Gamma",
-          email: "gamma@example.com",
-          emailVerified: true,
-          image: null,
-        },
-      });
-
-      const updated = await adapter.update<any>({
-        model: "user",
-        where: [{ field: "email", operator: "eq", value: "beta@example.com", connector: "AND" }],
-        update: { name: "Beta Prime" },
-      });
-
-      expect(updated).toMatchObject({
-        id: beta.id,
-        name: "Beta Prime",
-      });
-
-      await expect(
-        adapter.updateMany({
-          model: "user",
-          where: [{ field: "image", operator: "eq", value: null, connector: "AND" }],
-          update: { emailVerified: true },
-        }),
-      ).resolves.toBe(3);
-
-      await adapter.delete({
-        model: "user",
-        where: [{ field: "email", operator: "eq", value: "alpha@example.com", connector: "AND" }],
-      });
-
-      await expect(
-        adapter.findOne<any>({
-          model: "user",
-          where: [{ field: "id", operator: "eq", value: alpha.id, connector: "AND" }],
-        }),
-      ).resolves.toBeNull();
-
-      await expect(
-        adapter.deleteMany({
-          model: "user",
-          where: [
-            { field: "email", operator: "eq", value: "missing@example.com", connector: "AND" },
-            { field: "name", operator: "contains", value: "mm", connector: "OR" },
-          ],
-        }),
-      ).resolves.toBe(1);
-
-      const remaining = await adapter.findMany<any>({
-        model: "user",
-        limit: 100,
-        offset: 0,
-        sortBy: { field: "id", direction: "asc" },
-      });
-
-      expect(remaining.map((row) => row.id)).toEqual([beta.id]);
     });
 
     it("consumes at most one matching row and returns the deleted row", async () => {
@@ -1147,7 +1137,9 @@ describe("jazzAdapter", () => {
         overwrite: true,
       });
       expect(generated.code).toContain('import { schema as s } from "jazz-tools";');
-      expect(generated.code).toContain("export const app: s.App<AppSchema> = s.defineApp(schema);");
+      expect(generated.code).toContain(
+        'export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });',
+      );
       expect(generated.code).toContain(
         "export const permissions = s.definePermissions(app, ({ policy }) => {",
       );
@@ -1171,11 +1163,12 @@ describe("jazzAdapter", () => {
         backendSecret: "backend-secret-for-common-user-flows",
       });
 
-      await deployProject({
+      await deployFixture({
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
-        schemaDir: join(import.meta.dirname, "fixtures"),
+        schema: fixtureApp,
+        permissions: fixturePermissions,
       });
 
       context = createJazzContext({
@@ -1542,11 +1535,12 @@ describe("jazzAdapter", () => {
         backendSecret: "backend-secret-for-better-auth-usage",
       });
 
-      await deployProject({
+      await deployFixture({
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
-        schemaDir: join(import.meta.dirname, "fixtures"),
+        schema: fixtureApp,
+        permissions: fixturePermissions,
       });
 
       context = createJazzContext({
@@ -1622,11 +1616,12 @@ describe("jazzAdapter", () => {
         backendSecret: "backend-secret-for-integration-tests",
       });
 
-      await deployProject({
+      await deployFixture({
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
-        schemaDir: join(import.meta.dirname, "fixtures"),
+        schema: fixtureApp,
+        permissions: fixturePermissions,
       });
 
       context = createJazzContext({
@@ -1688,11 +1683,12 @@ describe("jazzAdapter", () => {
     });
 
     test("creates and reads records through the sync server", async () => {
-      await deployProject({
+      await deployFixture({
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
-        schemaDir: join(import.meta.dirname, "fixtures"),
+        schema: fixtureApp,
+        permissions: fixturePermissions,
       });
 
       const ctx1 = createJazzContext({
@@ -1764,11 +1760,12 @@ describe("jazzAdapter", () => {
       "admits exactly one concurrent composite account identity across two backends",
       { timeout: 30_000 },
       async () => {
-        await deployProject({
+        await deployFixture({
           serverUrl: server.url,
           appId: server.appId,
           adminSecret: server.adminSecret,
-          schemaDir: join(import.meta.dirname, "fixtures"),
+          schema: fixtureApp,
+          permissions: fixturePermissions,
         });
         const ctx1 = createJazzContext({
           appId: server.appId,

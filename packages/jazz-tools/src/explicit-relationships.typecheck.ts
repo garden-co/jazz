@@ -1,4 +1,4 @@
-import { schema as s } from "./index.js";
+import { schema as s, migration as m } from "./index.js";
 
 // @ts-expect-error Required explicit relationship map, even for empty tables.
 s.table({ name: s.string() });
@@ -10,12 +10,11 @@ s.table({ authorId: s.uuid() }, { author: s.rel("users", "missing") });
 s.table({ author: s.uuid() }, { author: s.rel("users", "author") });
 // @ts-expect-error Row ID is reserved.
 s.table({ authorId: s.uuid() }, { id: s.rel("users", "authorId") });
+// @ts-expect-error One reference column cannot target two tables.
 s.table(
   { authorId: s.uuid() },
   {
-    // @ts-expect-error One reference column cannot target two tables.
     author: s.rel("users", "authorId"),
-    // @ts-expect-error Conflicting target on the same column.
     writer: s.rel("writers", "authorId"),
   },
 );
@@ -25,9 +24,9 @@ const invalidTarget = {
 // @ts-expect-error Unknown table rejected at schema construction.
 s.defineSchema(invalidTarget);
 // @ts-expect-error Unknown table rejected at app construction.
-s.defineApp(invalidTarget);
+s.defineApp(invalidTarget, { migrations: "none" });
 // @ts-expect-error Whole schema validated even before slicing.
-s.defineSliceableApp(invalidTarget);
+s.defineSliceableApp(invalidTarget, { migrations: "none" });
 const invalidReverse = {
   posts: s.table({ authorId: s.uuid() }, { author: s.rel("users", "authorId") }),
   users: s.table({}, { posts: s.reverse("posts", "authorId") }),
@@ -47,14 +46,14 @@ const schema = s.defineSchema({
     .indexOnly(["authorId"]),
   users: s.table({ name: s.string() }, { authored: s.reverse("posts", "author") }).branchBy("name"),
 });
-const app = s.defineApp(schema);
+const app = s.defineApp(schema, { migrations: "none" });
 app.posts.include({ author: true });
 app.users.hopTo("authored");
 // @ts-expect-error No inferred inverse.
 app.users.hopTo("postsViaAuthor");
 // @ts-expect-error Stored UUID column is not a relationship alias.
 app.posts.hopTo("authorId");
-const slice = s.defineSliceableApp(schema).slice("posts", "users");
+const slice = s.defineSliceableApp(schema, { migrations: "none" }).slice("posts", "users");
 slice.posts.include({ author: true });
 slice.users.hopTo("authored");
 // @ts-expect-error Legacy shortcut removed.
@@ -75,8 +74,8 @@ const migrationTo = {
   posts: s.table({ owner: s.uuid() }, { author: s.rel("teams", "owner") }),
 };
 // @ts-expect-error Changing the effective stored reference target requires a supported migration, not an empty lens.
-s.defineMigration({ from: migrationFrom, to: migrationTo });
-s.defineMigration({
+m.defineMigration({ from: migrationFrom, to: migrationTo });
+m.defineMigration({
   from: migrationFrom,
   to: {
     ...migrationFrom,

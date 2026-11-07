@@ -26,8 +26,8 @@ const source = execFileSync(
   "git",
   [
     "-C", root, "ls-tree", "-r", "--full-tree", "HEAD", "--",
-    "Cargo.lock", "Cargo.toml", "crates/groove", "crates/idb-tree",
-    "crates/jazz", "crates/jazz-compression", "crates/jazz-native-relay", "crates/jazz-native-transport", "crates/jazz-storage-sqlite",
+    "Cargo.lock", "Cargo.toml",
+    "crates/jazz", "crates/jazz-compression", "crates/jazz-native-relay", "crates/jazz-native-transport",
     "crates/jazz-rn/scripts/build-relay-artifacts.sh",
   ],
 );
@@ -113,6 +113,11 @@ case "$platform" in
       echo "iOS relay artifacts require macOS Xcode and xcodebuild" >&2
       exit 1
     }
+    # The oldest iOS an app using jazz-rn may target (React Native 0.81 /
+    # Expo SDK 54: 15.1). rustc and cc-rs both read it; unset, cc-rs compiles
+    # ring and SQLite for the Xcode SDK version and apps get "built for newer
+    # iOS version" link warnings. verify-relay-artifacts.mjs checks every object.
+    export IPHONEOS_DEPLOYMENT_TARGET=15.1
     device_target=aarch64-apple-ios
     stage_header
     simulator_targets=(aarch64-apple-ios-sim x86_64-apple-ios)

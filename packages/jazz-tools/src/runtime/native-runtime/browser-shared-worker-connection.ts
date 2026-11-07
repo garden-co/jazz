@@ -9,6 +9,7 @@ import {
   type BrowserSharedWorkerConnectRequest,
   type BrowserSharedWorkerConnectResponse,
   type BrowserSharedWorkerBootstrapCancelRequest,
+  type BrowserForegroundNodeLeaseProbeRequest,
   type BrowserForegroundNodeLeaseAcquireResponse,
   type BrowserForegroundNodeLeasePortEvent,
   type BrowserForegroundNodeLeasePortRequest,
@@ -16,6 +17,7 @@ import {
   type BrowserFollowerPortRequest,
   type BrowserInspectorControlEvent,
   type BrowserWorkerInitOptions,
+  BROWSER_STORE_HELD_BY_ANOTHER_SIGN_IN,
 } from "./browser-worker-protocol.js";
 import type {
   BrowserForegroundNodeLease,
@@ -25,6 +27,7 @@ import type {
 import { MessagePortBrowserFollowerConnection } from "./browser-follower-connection.js";
 import type { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
 import { waitForInspectorOpening } from "./inspector-control-lifecycle.js";
+import { toError } from "../util.js";
 
 /**
  * The only place the broker SharedWorker is constructed.
@@ -84,6 +87,18 @@ type ForegroundNodeLeaseAttemptOutcome =
 const pendingForegroundLeaseCleanups = new Map<string, symbol>();
 
 /**
+ * Ask a newly started worker to fetch, compile and instantiate its WASM while the lease,
+ * IndexedDB admission and the page's own setup run. Only URL-addressed assets
+ * are prefetched: in-memory modules are never cloned twice.
+ */
+function workerWasmPrefetch(
+  runtimeSources: BrowserWorkerInitOptions["runtimeSources"],
+): BrowserForegroundNodeLeaseProbeRequest["wasmPrefetch"] {
+  if (runtimeSources?.wasmModule || runtimeSources?.wasmSource) return undefined;
+  return { runtimeSources };
+}
+
+/**
  * The one physical SharedWorker realm that may own a browser persistence root.
  *
  * Authentication is intentionally not a part of this name. An explicitly
@@ -122,6 +137,7 @@ export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLe
     readonly node: Uint8Array,
     readonly confirmedTxTime: bigint,
     private readonly leaseId: string,
+    readonly workerRealmId?: string,
   ) {}
 
   static async acquire(
@@ -164,6 +180,7 @@ export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLe
           cleanupKey,
           crypto.randomUUID(),
           remainingAdmissionMs,
+          workerWasmPrefetch(runtimeSources),
         );
         if (outcome.type === "ready") return outcome.lease;
         if (outcome.type === "worker-closing") {
@@ -214,6 +231,7 @@ export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLe
     cleanupKey: string,
     attemptId: string,
     timeoutMs: number,
+    wasmPrefetch?: BrowserForegroundNodeLeaseProbeRequest["wasmPrefetch"],
   ): Promise<ForegroundNodeLeaseAttemptOutcome> {
     const port = worker.port;
     return new Promise<ForegroundNodeLeaseAttemptOutcome>((resolve, reject) => {
@@ -315,6 +333,7 @@ export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLe
           message.node.slice(),
           BigInt(message.confirmedTxTime),
           message.leaseId,
+          message.workerRealmId,
         );
         lease.worker = worker;
         lease.port = port;
@@ -333,7 +352,8 @@ export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLe
       port.postMessage({
         type: "probe-foreground-node-lease-worker",
         attemptId,
-      });
+        ...(wasmPrefetch ? { wasmPrefetch } : {}),
+      } satisfies BrowserForegroundNodeLeaseProbeRequest);
     });
   }
 
@@ -376,6 +396,12 @@ export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLe
     this.failFinish(reason);
   }
 
+  releaseAfterWorkerReplacement(reason: Error): void {
+    // The foreground has quiesced and the fenced successor owns persistence.
+    // Never return this identity as reusable through a dead predecessor port.
+    this.failFinish(reason);
+  }
+
   private failFinish(error: Error): void {
     this.terminalError ??= error;
     this.finishWaiter?.reject(this.terminalError);
@@ -398,7 +424,7 @@ export class SharedBrowserForegroundNodeLease implements BrowserForegroundNodeLe
     try {
       port.postMessage(message);
     } catch (error) {
-      this.failFinish(error instanceof Error ? error : new Error(String(error)));
+      this.failFinish(toError(error));
     }
     return this.finishPromise;
   }
@@ -439,12 +465,15 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
   private worker: SharedWorker | null = null;
   private readonly readyPromise: Promise<void>;
   private initialConfigurationAdmissionRejected = false;
+  private heldByAnotherSignIn = false;
   private readyError: Error | null = null;
   private connection: MessagePortBrowserFollowerConnection | null = null;
   private closed = false;
   private readonly workerName: string;
   private connectedGeneration: number | null = null;
   private cancelBootstrap: (() => void) | null = null;
+  /** Lets go of this connection's liveness lock (see `holdLivenessLock`). */
+  private releaseLivenessLock: (() => void) | null = null;
 
   constructor(
     runtime: NativeRuntimeAdapter,
@@ -484,10 +513,32 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
     ).then(
       () => undefined,
       (error: unknown) => {
-        this.readyError = error instanceof Error ? error : new Error(String(error));
+        this.readyError = toError(error);
+        this.releaseLivenessLock?.();
         callbacks.onFailure(this.readyError);
       },
     );
+  }
+
+  /**
+   * Hold a Web Lock for as long as this page lives, and name it to the
+   * worker: the browser releases it when the page goes away without a word
+   * (closed, crashed, discarded), and the worker then detaches this tab, so
+   * a tab waiting for this store under another sign-in gets in.
+   *
+   * Requested before the connect message is posted, so the tab is first in
+   * the lock's queue: the worker only asks for it once it has admitted the
+   * tab. Connecting doesn't wait for the grant.
+   */
+  private holdLivenessLock(): string | undefined {
+    const locks = globalThis.navigator?.locks;
+    if (!locks) return undefined;
+    const name = `jazz-tab-alive:${crypto.randomUUID()}`;
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => (release = resolve));
+    this.releaseLivenessLock = release;
+    void locks.request(name, () => released).catch(() => undefined);
+    return name;
   }
 
   private async connect(
@@ -497,6 +548,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
     workerName: string,
     createWorker: (name: string) => SharedWorker,
   ): Promise<void> {
+    const livenessLock = this.holdLivenessLock();
     let generation = readWorkerGeneration(workerName);
     for (let attempt = 0; attempt < MAX_SHARED_WORKER_GENERATION_ATTEMPTS; attempt += 1) {
       if (this.closed) return;
@@ -507,6 +559,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
         fingerprint,
         generationName,
         createWorker,
+        livenessLock,
       );
       if (outcome.error) throw outcome.error;
       if (this.closed) return;
@@ -525,6 +578,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
     fingerprint: string,
     workerName: string,
     createWorker: (name: string) => SharedWorker,
+    livenessLock: string | undefined,
   ): Promise<{ connected: boolean; error?: Error }> {
     const worker = createWorker(workerName);
     this.worker = worker;
@@ -639,8 +693,10 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
           port.close();
           if (this.worker === worker) this.worker = null;
           const error = deserializeBrowserRelayError(event.data.error);
+          this.heldByAnotherSignIn = error.message === BROWSER_STORE_HELD_BY_ANOTHER_SIGN_IN;
           this.initialConfigurationAdmissionRejected =
-            error.message === "incompatible persistent browser configuration";
+            error.message === "incompatible persistent browser configuration" ||
+            this.heldByAnotherSignIn;
           settle({ connected: false, error });
           return;
         }
@@ -680,7 +736,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
             if (this.worker === worker) this.worker = null;
             settle({
               connected: false,
-              error: error instanceof Error ? error : new Error(String(error)),
+              error: toError(error),
             });
           },
         );
@@ -709,6 +765,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
         port.postMessage({
           type: "connect-runtime",
           tabId: crypto.randomUUID(),
+          ...(livenessLock ? { livenessLock } : {}),
           fingerprint,
           options,
         } satisfies BrowserSharedWorkerConnectRequest);
@@ -718,10 +775,14 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
         if (this.worker === worker) this.worker = null;
         settle({
           connected: false,
-          error: error instanceof Error ? error : new Error(String(error)),
+          error: toError(error),
         });
       }
     });
+  }
+
+  getWorkerRealmId(): string | undefined {
+    return this.connection?.getWorkerRealmId();
   }
 
   ready(): Promise<void> {
@@ -757,14 +818,22 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
     return this.initialConfigurationAdmissionRejected;
   }
 
+  waitsForAnotherSignIn(): boolean {
+    return this.heldByAnotherSignIn;
+  }
+
   async shutdown(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
     this.cancelBootstrap?.();
-    await this.connection?.shutdown(true);
-    this.connection = null;
-    this.worker?.port.close();
-    this.worker = null;
+    try {
+      await this.connection?.shutdown(true);
+    } finally {
+      this.connection = null;
+      this.worker?.port.close();
+      this.worker = null;
+      this.releaseLivenessLock?.();
+    }
   }
 
   async waitForPendingWrites(): Promise<void> {

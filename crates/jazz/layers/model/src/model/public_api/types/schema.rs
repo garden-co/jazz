@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 use std::ops::{Deref, DerefMut};
-use std::sync::OnceLock;
 
 use internment::Intern;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -136,38 +135,6 @@ pub enum ColumnType {
 }
 
 impl ColumnType {
-    /// Returns the fixed byte size for this type, or None for variable-length types.
-    pub fn fixed_size(&self) -> Option<usize> {
-        match self {
-            ColumnType::Integer => Some(4),
-            ColumnType::BigInt => Some(8),
-            ColumnType::Double => Some(8),
-            ColumnType::Boolean => Some(1),
-            ColumnType::Timestamp => Some(8),
-            ColumnType::Uuid => Some(16),
-            ColumnType::TransactionId => Some(16),
-            ColumnType::Text => None,
-            ColumnType::Bytea => None,
-            ColumnType::Json { .. } => None,
-            ColumnType::Enum { variants } | ColumnType::ScalarEnum { variants, .. }
-                if variants.len() <= u8::MAX as usize + 1 =>
-            {
-                Some(1)
-            }
-            ColumnType::Enum { .. }
-            | ColumnType::ScalarEnum { .. }
-            | ColumnType::EnumPayload { .. }
-            | ColumnType::CatalogueEnumPayload { .. } => None,
-            ColumnType::Array { .. } => None, // Arrays are variable-length
-            ColumnType::Row { .. } => None,   // Rows are variable-length
-        }
-    }
-
-    /// Returns true if this type is variable-length.
-    pub fn is_variable(&self) -> bool {
-        self.fixed_size().is_none()
-    }
-
     /// Returns the element type if this is an array, None otherwise.
     pub fn element_type(&self) -> Option<&ColumnType> {
         match self {
@@ -192,10 +159,67 @@ pub struct EnumCaseDescriptor {
     pub fields: Vec<ColumnDescriptor>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum ColumnMergeStrategy {
     Counter,
     GSet,
+    /// Concurrent edits to a plain-text string are merged three-way.
+    Text,
+    /// As [`Self::Text`], never splitting markdown syntax.
+    Markdown,
+    /// As [`Self::Text`], never splitting HTML tags or entities.
+    Html,
+}
+
+impl ColumnMergeStrategy {
+    const NAMES: [(&'static str, Self); 5] = [
+        ("Counter", Self::Counter),
+        ("GSet", Self::GSet),
+        ("Text", Self::Text),
+        ("Markdown", Self::Markdown),
+        ("Html", Self::Html),
+    ];
+
+    /// Whether this strategy merges the text of a string column.
+    pub fn is_text(self) -> bool {
+        matches!(self, Self::Text | Self::Markdown | Self::Html)
+    }
+}
+
+/// A strategy this version does not know (a schema written by a newer
+/// Jazz) is refused by name rather than as an unknown serde variant.
+/// Binary encodings keep the derived variant-index form.
+impl<'de> Deserialize<'de> for ColumnMergeStrategy {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename = "ColumnMergeStrategy")]
+        enum Indexed {
+            Counter,
+            GSet,
+            Text,
+            Markdown,
+            Html,
+        }
+        if !deserializer.is_human_readable() {
+            return Ok(match Indexed::deserialize(deserializer)? {
+                Indexed::Counter => Self::Counter,
+                Indexed::GSet => Self::GSet,
+                Indexed::Text => Self::Text,
+                Indexed::Markdown => Self::Markdown,
+                Indexed::Html => Self::Html,
+            });
+        }
+        let name = String::deserialize(deserializer)?;
+        Self::NAMES
+            .iter()
+            .find(|(known, _)| *known == name)
+            .map(|(_, strategy)| *strategy)
+            .ok_or_else(|| {
+                serde::de::Error::custom(format!(
+                    "merge strategy `{name}` is not supported by this version of Jazz"
+                ))
+            })
+    }
 }
 
 /// Interned column name type.
@@ -332,6 +356,21 @@ impl ColumnDescriptor {
                     Ok(())
                 }
             }
+            Some(
+                strategy @ (ColumnMergeStrategy::Text
+                | ColumnMergeStrategy::Markdown
+                | ColumnMergeStrategy::Html),
+            ) => {
+                if !matches!(self.column_type, ColumnType::Text) {
+                    Err(format!(
+                        "{strategy:?} merge strategy is only supported on TEXT columns, got {} ({:?})",
+                        self.name_str(),
+                        self.column_type,
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
             Some(ColumnMergeStrategy::GSet) => {
                 if self.nullable || !matches!(self.column_type, ColumnType::Array { .. }) {
                     Err(format!(
@@ -349,27 +388,11 @@ impl ColumnDescriptor {
 }
 
 /// Descriptor for a row's schema, defining column order and types.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct RowDescriptor {
     pub columns: Vec<ColumnDescriptor>,
-    #[serde(skip)]
-    content_hash_cache: OnceLock<[u8; 32]>,
 }
-
-impl Clone for RowDescriptor {
-    fn clone(&self) -> Self {
-        Self::new(self.columns.clone())
-    }
-}
-
-impl PartialEq for RowDescriptor {
-    fn eq(&self, other: &Self) -> bool {
-        self.columns == other.columns
-    }
-}
-
-impl Eq for RowDescriptor {}
 
 impl From<Vec<ColumnDescriptor>> for RowDescriptor {
     fn from(columns: Vec<ColumnDescriptor>) -> Self {
@@ -379,10 +402,7 @@ impl From<Vec<ColumnDescriptor>> for RowDescriptor {
 
 impl RowDescriptor {
     pub fn new(columns: Vec<ColumnDescriptor>) -> Self {
-        Self {
-            columns,
-            content_hash_cache: OnceLock::new(),
-        }
+        Self { columns }
     }
 
     /// Find column index by name.
@@ -395,22 +415,6 @@ impl RowDescriptor {
         self.columns.iter().find(|c| c.name.as_str() == name)
     }
 
-    /// Count of fixed-size columns.
-    pub fn fixed_column_count(&self) -> usize {
-        self.columns
-            .iter()
-            .filter(|c| !c.column_type.is_variable())
-            .count()
-    }
-
-    /// Count of variable-length columns.
-    pub fn variable_column_count(&self) -> usize {
-        self.columns
-            .iter()
-            .filter(|c| c.column_type.is_variable())
-            .count()
-    }
-
     /// Combine multiple descriptors into one (for join outputs).
     /// Column names from later descriptors are preserved as-is.
     /// Use with table-qualified names to avoid ambiguity.
@@ -418,15 +422,6 @@ impl RowDescriptor {
         let columns: Vec<ColumnDescriptor> =
             descriptors.iter().flat_map(|d| d.columns.clone()).collect();
         Self::new(columns)
-    }
-
-    /// Compute a content hash of this descriptor, preserving declared column order.
-    pub fn content_hash(&self) -> [u8; 32] {
-        *self.content_hash_cache.get_or_init(|| {
-            let mut hasher = blake3::Hasher::new();
-            super::branch::hash_row_descriptor(&mut hasher, self);
-            *hasher.finalize().as_bytes()
-        })
     }
 }
 
@@ -463,6 +458,29 @@ pub struct TableSchema {
     /// Ordinary immutable columns that form this table's branch key.
     #[serde(default, rename = "branchBy", skip_serializing_if = "Vec::is_empty")]
     pub branch_by: Vec<ColumnName>,
+    /// How much of each row's history nodes keep (SPEC 4 §4.9). `Full`
+    /// is omitted, so a table that keeps full history serializes and
+    /// hashes as it did before retention existed.
+    #[serde(default, skip_serializing_if = "HistoryRetention::is_full")]
+    pub history: HistoryRetention,
+}
+
+/// How much of a table's row history nodes keep (SPEC 4 §4.9).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HistoryRetention {
+    /// Every accepted version, for history reads, snapshots and branches.
+    #[default]
+    Full,
+    /// Only each row's newest accepted version (and any pending ones
+    /// above it). Reads of older versions are refused.
+    Latest,
+}
+
+impl HistoryRetention {
+    pub fn is_full(&self) -> bool {
+        *self == Self::Full
+    }
 }
 
 impl PartialEq for TableSchema {
@@ -473,6 +491,7 @@ impl PartialEq for TableSchema {
                 == canonical_composite_index_order(&other.composite_indexes)
             && self.policies == other.policies
             && self.branch_by == other.branch_by
+            && self.history == other.history
     }
 }
 
@@ -539,6 +558,7 @@ impl TableSchema {
             composite_indexes: Vec::new(),
             policies: TablePolicies::default(),
             branch_by: Vec::new(),
+            history: HistoryRetention::Full,
         }
     }
 
@@ -550,6 +570,7 @@ impl TableSchema {
             composite_indexes: Vec::new(),
             policies,
             branch_by: Vec::new(),
+            history: HistoryRetention::Full,
         }
     }
 
@@ -596,6 +617,7 @@ pub struct TableSchemaBuilder {
     composite_indexes: Vec<Vec<ColumnName>>,
     policies: TablePolicies,
     branch_by: Vec<ColumnName>,
+    history: HistoryRetention,
 }
 
 impl TableSchemaBuilder {
@@ -608,6 +630,7 @@ impl TableSchemaBuilder {
             composite_indexes: Vec::new(),
             policies: TablePolicies::default(),
             branch_by: Vec::new(),
+            history: HistoryRetention::Full,
         }
     }
 
@@ -679,6 +702,12 @@ impl TableSchemaBuilder {
         self
     }
 
+    /// Keep only each row's latest version (SPEC 4 §4.9).
+    pub fn latest_only(mut self) -> Self {
+        self.history = HistoryRetention::Latest;
+        self
+    }
+
     /// Index only this explicit user-column subset.
     ///
     /// Internal `_id` and `_id_deleted` indexes are always maintained.
@@ -715,6 +744,7 @@ impl TableSchemaBuilder {
             composite_indexes: canonicalize_composite_indexes(self.composite_indexes),
             policies: self.policies,
             branch_by: self.branch_by,
+            history: self.history,
         }
     }
 
@@ -727,6 +757,7 @@ impl TableSchemaBuilder {
             composite_indexes: canonicalize_composite_indexes(self.composite_indexes),
             policies: self.policies,
             branch_by: self.branch_by,
+            history: self.history,
         };
         (name, schema)
     }

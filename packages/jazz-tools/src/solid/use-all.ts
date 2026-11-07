@@ -1,16 +1,21 @@
 import { batch, createEffect, onCleanup, type Accessor } from "solid-js";
 import { createStore, produce, reconcile } from "solid-js/store";
-import { applyDelta } from "../reconcile-array.js";
-import type { QueryBuilder, QueryOptions } from "../runtime/db.js";
+import { applyDelta, applyDeltaToRows } from "../reconcile-array.js";
+import type { Db, QueryBuilder, QueryOptions } from "../runtime/db.js";
 import type { SubscriptionDelta } from "../runtime/subscription-manager.js";
 import { getSubscriptionStore } from "../subscription-store-internal.js";
 import { useJazzClient } from "./provider.js";
+import { toError } from "../runtime/util.js";
 
 export type UseAllResult<T extends { id: string }> = {
   data: T[] | undefined;
   isLoading: boolean;
   error: Error | null;
+  /** The {@link Db} handle for writes, so components don't need a separate `useDb()`. */
+  readonly db: Db;
 };
+
+type UseAllState<T extends { id: string }> = Omit<UseAllResult<T>, "db">;
 
 export function useAll<T extends { id: string }>(
   args: Accessor<{
@@ -20,7 +25,7 @@ export function useAll<T extends { id: string }>(
 ): UseAllResult<T> {
   const client = useJazzClient();
   const store = getSubscriptionStore(client);
-  const [state, setState] = createStore<UseAllResult<T>>({
+  const [state, setState] = createStore<UseAllState<T>>({
     data: undefined,
     isLoading: false,
     error: null,
@@ -46,7 +51,7 @@ export function useAll<T extends { id: string }>(
       setState({
         data: entry.state.data && [...entry.state.data],
         isLoading: entry.state.status === "pending",
-        error: entry.state.error ? normalizeError(entry.state.error) : null,
+        error: entry.state.error ? toError(entry.state.error) : null,
       });
 
       const unsubscribe = entry.subscribe({
@@ -54,7 +59,7 @@ export function useAll<T extends { id: string }>(
           setState({
             data: undefined,
             isLoading: false,
-            error: normalizeError(error),
+            error: toError(error),
           }),
         onReset: () =>
           batch(() => {
@@ -78,12 +83,8 @@ export function useAll<T extends { id: string }>(
                   applyDelta(current, delta);
                 }),
               );
-            } else if (delta.reset) {
-              setState("data", reconcile([...delta.all]));
             } else {
-              const current: T[] = [];
-              applyDelta(current, delta);
-              setState("data", reconcile(current));
+              setState("data", reconcile(applyDeltaToRows(undefined, delta)));
             }
             setState("isLoading", false);
             setState("error", null);
@@ -95,14 +96,22 @@ export function useAll<T extends { id: string }>(
       setState({
         data: undefined,
         isLoading: false,
-        error: normalizeError(error),
+        error: toError(error),
       });
     }
   });
 
-  return state;
-}
-
-function normalizeError(error: unknown): Error {
-  return error instanceof Error ? error : new Error(String(error));
+  const db = client.db as Db;
+  return {
+    get data() {
+      return state.data;
+    },
+    get isLoading() {
+      return state.isLoading;
+    },
+    get error() {
+      return state.error;
+    },
+    db,
+  };
 }

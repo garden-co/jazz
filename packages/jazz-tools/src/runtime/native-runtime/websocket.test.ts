@@ -5,8 +5,9 @@ import type { BrowserWebSocket } from "./websocket.js";
 import { PostcardReader, PostcardWriter } from "./native-codec.js";
 import {
   CLIENT_WIRE_FEATURES,
+  FEATURE_HEARTBEAT,
   FEATURE_PAYLOAD_ZSTD,
-  FEATURE_SYNC_MESSAGE_PAYLOAD,
+  HEARTBEAT_SILENCE_MS,
   MAX_WIRE_PROTOCOL_VERSION,
   MIN_WIRE_PROTOCOL_VERSION,
   WIRE_PROTOCOL_VERSION,
@@ -19,7 +20,7 @@ import {
   encodeWebSocketFrameBatch,
   isWireHello,
   isWireError,
-  isWireMessage,
+  isSocketDropWireError,
   peerIdentityForWebSocketAuth,
   policyClaimsForAdmittedWebSocket,
 } from "./websocket.js";
@@ -96,6 +97,49 @@ describe("websocket frame carrier", () => {
       code: number;
       reason: string;
     }>();
+  });
+
+  it("encodes a large frame among small ones whole, in order, and quickly", () => {
+    const leaf = new Uint8Array(1_000_000);
+    for (let i = 0; i < leaf.length; i += 1) leaf[i] = (i * 31) & 0xff;
+    const frames = [Uint8Array.from([1, 2, 3]), leaf, Uint8Array.from([4, 5])];
+    const batch = encodeWebSocketFrameBatch(frames);
+    leaf[0] = 99; // the batch holds its own copy
+    const decoded = decodeWebSocketFrameBatch(batch);
+    expect(decoded.map((frame) => frame.byteLength)).toEqual([3, 1_000_000, 2]);
+    expect(decoded[1]![0]).toBe(0);
+    expect(Buffer.from(decoded[1]!.subarray(1)).equals(Buffer.from(leaf.subarray(1)))).toBe(true);
+    expect([...decoded[2]!]).toEqual([4, 5]);
+    // A large value used to be pushed byte by byte: ~80 ms per MB on the
+    // event loop, over a second for these 16 MB. The bound leaves room for
+    // a busy runner.
+    const large = new Uint8Array(16_000_000);
+    const started = performance.now();
+    const timed = new PostcardWriter();
+    timed.bytes(large);
+    const encoded = timed.finish();
+    const took = performance.now() - started;
+    expect(encoded.byteLength).toBeGreaterThan(16_000_000);
+    expect(took).toBeLessThan(500);
+
+    // A Node Buffer is copied too, not shared.
+    const buffer = Buffer.alloc(1024, 7);
+    const fromBuffer = encodeWebSocketFrameBatch([buffer]);
+    buffer[0] = 99;
+    expect(decodeWebSocketFrameBatch(fromBuffer)[0]![0]).toBe(7);
+
+    // Scalars and short strings around a large value keep their order.
+    const writer = new PostcardWriter();
+    writer.u64(7);
+    writer.string("short");
+    writer.bytes(leaf);
+    writer.bool(true);
+    const reader = new PostcardReader(writer.finish());
+    expect(reader.u64()).toBe(7);
+    expect(reader.string()).toBe("short");
+    expect(reader.bytes().byteLength).toBe(leaf.length);
+    expect(reader.bool()).toBe(true);
+    expect(reader.done()).toBe(true);
   });
 
   it("encodes websocket messages as postcard batches of encoded frames", () => {
@@ -458,7 +502,6 @@ describe("websocket frame carrier", () => {
     const reader = new PostcardReader(hello);
 
     expect(isWireHello(hello)).toBe(true);
-    expect(isWireMessage(hello)).toBe(false);
     expect(reader.u64()).toBe(0);
     expect(reader.u64()).toBe(MIN_WIRE_PROTOCOL_VERSION);
     expect(reader.u64()).toBe(MAX_WIRE_PROTOCOL_VERSION);
@@ -572,10 +615,10 @@ describe("websocket frame carrier", () => {
     }
   });
 
-  it("accepts the exact v3 Core advertisement for deployment-aware snapshots", async () => {
-    expect(WIRE_PROTOCOL_VERSION).toBe(3);
+  it("accepts the exact v6 Core advertisement for current and historical support", async () => {
+    expect(WIRE_PROTOCOL_VERSION).toBe(6);
     const { carrier, socket } = carrierForTest();
-    socket.emitMessage(encodeWebSocketFrameBatch([encodeServerHello(1n, 3)]));
+    socket.emitMessage(encodeWebSocketFrameBatch([encodeServerHello(1n, 6)]));
     await expect(carrier.ready()).resolves.toBeDefined();
     carrier.close();
   });
@@ -586,7 +629,16 @@ describe("websocket frame carrier", () => {
       [1, 2],
       [2, 2],
       [2, 3],
+      [3, 3],
+      [3, 4],
       [3, 15],
+      [4, 4],
+      [4, 5],
+      [5, 5],
+      [5, 6],
+      [4, 15],
+      [5, 15],
+      [6, 15],
       [1, 15],
       [12, 12],
     ]) {
@@ -605,6 +657,28 @@ describe("websocket frame carrier", () => {
       );
       expect(socket.closed).toBe(true);
     }
+  });
+
+  it("reports a later-version server Hello as a version mismatch, whatever its body (#2468)", async () => {
+    // Only the tag and version range are shared across wire versions. A later
+    // server may lay out the rest of its Hello differently.
+    const next = WIRE_PROTOCOL_VERSION + 1;
+    const writer = new PostcardWriter();
+    writer.u64(0); // WireFrame::Hello
+    writer.u64(next);
+    writer.u64(next);
+    writer.u64(0x7f); // a body this version cannot parse
+    writer.u64(0x3fff);
+    writer.u64(42);
+    const laterHello = writer.finish();
+
+    expect(isWireHello(laterHello)).toBe(true);
+    const { carrier, socket } = carrierForTest();
+    socket.emitMessage(encodeWebSocketFrameBatch([laterHello]));
+    await expect(carrier.ready()).rejects.toThrow(
+      `server must advertise exactly wire protocol ${WIRE_PROTOCOL_VERSION}, got ${next}..=${next}`,
+    );
+    expect(socket.closed).toBe(true);
   });
 
   it("sends an authority-unbound hello first on every reconnect", async () => {
@@ -875,13 +949,14 @@ describe("websocket frame carrier", () => {
     });
 
     const suffixed = Uint8Array.from([...encoded, 0]);
-    expect(new PostcardReader(suffixed).u64()).toBe(2);
+    expect(new PostcardReader(suffixed).u64()).toBe(1);
     expect(() => isWireError(suffixed)).toThrow("WireFrame::Error has trailing postcard bytes");
     expect(() => decodeWireError(suffixed)).toThrow("WireFrame::Error has trailing postcard bytes");
 
-    expect(encoded[0]).toBe(2);
-    const nonminimalTag = Uint8Array.from([0x82, 0x00, ...encoded.slice(1)]);
-    expect(() => isWireError(nonminimalTag)).toThrow("postcard u64 is not minimally encoded");
+    expect(encoded[0]).toBe(1);
+    const nonminimalTag = Uint8Array.from([0x81, 0x00, ...encoded.slice(1)]);
+    // Frames are told apart by their first byte, so this is no Error frame.
+    expect(isWireError(nonminimalTag)).toBe(false);
     expect(() => decodeWireError(nonminimalTag)).toThrow("postcard u64 is not minimally encoded");
 
     const unknownCode = encodeWireError(7, 3, "future code");
@@ -891,6 +966,152 @@ describe("websocket frame carrier", () => {
     const unknownRetry = encodeWireError(6, 4, "future retry");
     expect(() => isWireError(unknownRetry)).toThrow("unknown WireRetry discriminant 4");
     expect(() => decodeWireError(unknownRetry)).toThrow("unknown WireRetry discriminant 4");
+  });
+
+  describe("heartbeat", () => {
+    function heartbeatCarrier() {
+      // Records what the carrier sends; the test plays the server.
+      class SilentServerSocket extends MessageWebSocket {
+        sent: Uint8Array[] = [];
+        override send(data: Uint8Array | string): void {
+          if (data instanceof Uint8Array) this.sent.push(data);
+        }
+      }
+      let socket: SilentServerSocket | undefined;
+      const frames: Uint8Array[] = [];
+      const terminals: unknown[] = [];
+      const carrier = new WebSocketCarrier({
+        endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
+        peerIdentity: new Uint8Array(16),
+        onFrame: (frame) => frames.push(frame),
+        onTerminal: (error) => terminals.push(error),
+        WebSocket: class extends SilentServerSocket {
+          constructor(url: string) {
+            super(url, (created) => {
+              socket = created as SilentServerSocket;
+            });
+          }
+        },
+      });
+      return { carrier, socket: socket!, frames, terminals };
+    }
+    const heartbeat = encodeWebSocketFrameBatch([Uint8Array.of(7)]);
+
+    it("asks every server for a heartbeat, and keeps it from the runtime above", async () => {
+      vi.useFakeTimers();
+      try {
+        const { carrier, socket, frames, terminals } = heartbeatCarrier();
+        await vi.advanceTimersByTimeAsync(0);
+        const hello = decodeWebSocketFrameBatch(socket.sent.at(-1)!)[0]!;
+        const reader = new PostcardReader(hello);
+        reader.u64();
+        reader.u64();
+        reader.u64();
+        expect(reader.u64()).toBe(CLIENT_WIRE_FEATURES | FEATURE_HEARTBEAT);
+
+        socket.emitMessage(
+          encodeWebSocketFrameBatch([
+            encodeServerHello(1n, WIRE_PROTOCOL_VERSION, {
+              features: CLIENT_WIRE_FEATURES | FEATURE_HEARTBEAT,
+            }),
+          ]),
+        );
+        // The runtime above never hears of the feature or its frames.
+        await expect(carrier.ready()).resolves.toMatchObject({ features: CLIENT_WIRE_FEATURES });
+        for (let beat = 0; beat < 10; beat += 1) {
+          await vi.advanceTimersByTimeAsync(20_000);
+          socket.emitMessage(heartbeat);
+        }
+        await vi.advanceTimersByTimeAsync(0);
+        expect(frames).toEqual([]);
+        expect(terminals).toEqual([]);
+        expect(socket.closed).toBe(false);
+        carrier.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("gives a heartbeat link up once the server goes silent", async () => {
+      vi.useFakeTimers();
+      try {
+        const { socket, terminals } = heartbeatCarrier();
+        await vi.advanceTimersByTimeAsync(0);
+        socket.emitMessage(
+          encodeWebSocketFrameBatch([
+            encodeServerHello(1n, WIRE_PROTOCOL_VERSION, {
+              features: CLIENT_WIRE_FEATURES | FEATURE_HEARTBEAT,
+            }),
+          ]),
+        );
+        await vi.advanceTimersByTimeAsync(20_000);
+        socket.emitMessage(heartbeat);
+        // Then nothing at all, as from a half-open TCP link. Past the limit
+        // the silence is confirmed a moment later.
+        await vi.advanceTimersByTimeAsync(HEARTBEAT_SILENCE_MS);
+        expect(terminals).toEqual([]);
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(terminals).toEqual([
+          expect.objectContaining({ code: "websocket_silent", retry: "later" }),
+        ]);
+        expect(socket.closed).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("keeps a link whose held-back messages arrive once the silence is noticed", async () => {
+      vi.useFakeTimers();
+      try {
+        const { carrier, socket, terminals } = heartbeatCarrier();
+        await vi.advanceTimersByTimeAsync(0);
+        socket.emitMessage(
+          encodeWebSocketFrameBatch([
+            encodeServerHello(1n, WIRE_PROTOCOL_VERSION, {
+              features: CLIENT_WIRE_FEATURES | FEATURE_HEARTBEAT,
+            }),
+          ]),
+        );
+        // A frozen page: its timer fires first, then the heartbeats queued
+        // meanwhile are delivered.
+        await vi.advanceTimersByTimeAsync(HEARTBEAT_SILENCE_MS);
+        socket.emitMessage(heartbeat);
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(terminals).toEqual([]);
+        expect(socket.closed).toBe(false);
+        carrier.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("classes a silent link as a network drop, which clients retry", () => {
+      expect(isSocketDropWireError({ code: "websocket_silent", retry: "later", message: "" })).toBe(
+        true,
+      );
+      expect(isSocketDropWireError({ code: "websocket_closed", retry: "later", message: "" })).toBe(
+        true,
+      );
+      expect(isSocketDropWireError({ code: "protocol_error", retry: "never", message: "" })).toBe(
+        false,
+      );
+    });
+
+    it("never times out a server that sends no heartbeat", async () => {
+      vi.useFakeTimers();
+      try {
+        const { carrier, socket, terminals } = heartbeatCarrier();
+        await vi.advanceTimersByTimeAsync(0);
+        socket.emitMessage(encodeWebSocketFrameBatch([encodeServerHello(1n)]));
+        await carrier.ready();
+        await vi.advanceTimersByTimeAsync(10 * HEARTBEAT_SILENCE_MS);
+        expect(terminals).toEqual([]);
+        expect(socket.closed).toBe(false);
+        carrier.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   it("surfaces structured wire error frames without forwarding them as payload frames", async () => {
@@ -920,46 +1141,59 @@ describe("websocket frame carrier", () => {
     expect(errors).toEqual([{ code: "auth_failed", retry: "after_auth", message: "expired" }]);
   });
 
-  it("round-trips run-bearing Rust wire fixtures through the TS websocket frame codec", () => {
+  it("passes the parts of a split sync message on, whatever bytes follow their marker", async () => {
+    let socket: MessageWebSocket | undefined;
+    const frames: Uint8Array[] = [];
+    const errors: unknown[] = [];
+    const carrier = new WebSocketCarrier({
+      endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
+      peerIdentity: new Uint8Array(16),
+      onFrame: (frame) => frames.push(frame),
+      onError: (error) => errors.push(error),
+      WebSocket: class extends MessageWebSocket {
+        constructor(url: string) {
+          super(url, (created) => {
+            socket = created;
+          });
+        }
+      },
+    });
+    socket!.emitMessage(encodeWebSocketFrameBatch([encodeServerHello(1n)]));
+    await carrier.ready();
+
+    // A message too large for one frame travels as parts behind a marker
+    // byte (`encode_frames` in sync.rs). A last part whose bytes start with
+    // 0 reads as a non-minimal varint if taken for a postcard tag: a large
+    // query answer did, and the link closed for good.
+    const parts = [Uint8Array.of(0xff, 0x08, 0xca), Uint8Array.of(0xfe, 0x00, 0x00, 0x1a)];
+    socket!.emitMessage(encodeWebSocketFrameBatch(parts));
+    await Promise.resolve();
+
+    expect(errors).toEqual([]);
+    expect(frames).toEqual(parts);
+    expect(socket!.closed).toBe(false);
+  });
+
+  it("round-trips channel batches from Rust wire fixtures through the TS websocket codec", () => {
     const manifest = rustWireFixtureManifest();
+    expect(manifest.protocol_version).toBe(WIRE_PROTOCOL_VERSION);
+    for (const fixture of manifest.fixtures) {
+      const batch = hexToBytes(fixture.batch_hex);
+      const frames = decodeWebSocketFrameBatch(batch);
+      expect(bytesEqual(encodeWebSocketFrameBatch(frames), batch), fixture.name).toBe(true);
+      for (const frame of frames) {
+        const reader = new PostcardReader(frame);
+        expect(reader.u64()).toBe(2); // WireFrame::Channel
+        expect(reader.u64()).toBe(WIRE_PROTOCOL_VERSION);
+        expect(reader.u64()).toBe(0);
+        expect(reader.option(() => "session")).toBeUndefined();
+      }
+    }
     const fixture = manifest.fixtures.find(
       (candidate) => candidate.name === "view_update_mixed_version_carrier_runs",
     );
-
-    expect(manifest.protocol_version).toBe(WIRE_PROTOCOL_VERSION);
-    for (const candidate of manifest.fixtures) {
-      const candidateFrame = hexToBytes(candidate.frame_hex);
-      expect(isWireMessage(candidateFrame), candidate.name).toBe(true);
-      expect(
-        bytesEqual(
-          decodeWebSocketFrameBatch(encodeWebSocketFrameBatch([candidateFrame]))[0]!,
-          candidateFrame,
-        ),
-        candidate.name,
-      ).toBe(true);
-      const suffixed = Uint8Array.from([...candidateFrame, 0]);
-      expect(() => isWireMessage(suffixed), candidate.name).toThrow(
-        "WireFrame::Message has trailing postcard bytes",
-      );
-    }
-    expect(fixture?.name).toBe("view_update_mixed_version_carrier_runs");
     expect(fixture?.message_family).toBe("ViewUpdate");
-
-    const frame = hexToBytes(fixture!.frame_hex);
-    expect(isWireMessage(frame)).toBe(true);
-    expect([...decodeWebSocketFrameBatch(encodeWebSocketFrameBatch([frame]))[0]!]).toEqual([
-      ...frame,
-    ]);
-
-    const reader = new PostcardReader(frame);
-    expect(reader.u64()).toBe(1);
-    expect(reader.u64()).toBe(WIRE_PROTOCOL_VERSION);
-    expect(reader.u64()).toBe(FEATURE_SYNC_MESSAGE_PAYLOAD);
-    expect(reader.option(() => "session")).toBeUndefined();
-    const payload = reader.bytes();
-    // Protocol v11 removed the legacy branch-metadata variants; the two
-    // auxiliary chunk-I/O variants now precede ViewUpdate in the postcard enum.
-    expect(payload[0]).toBe(14);
+    expect(hexToBytes(fixture!.payload_hex)[0]).toBe(13);
   });
 });
 
@@ -968,7 +1202,8 @@ type RustWireFixtureManifest = {
   fixtures: Array<{
     name: string;
     message_family: string;
-    frame_hex: string;
+    batch_hex: string;
+    payload_hex: string;
   }>;
 };
 
@@ -986,7 +1221,7 @@ type RustWireHelloFixtureManifest = {
 function rustWireFixtureManifest(): RustWireFixtureManifest {
   return JSON.parse(
     readFileSync(
-      new URL("../../../../../crates/jazz/fixtures/wire_message_frames.json", import.meta.url),
+      new URL("../../../../../crates/jazz/fixtures/wire_message_frames_v6.json", import.meta.url),
       "utf8",
     ),
   ) as RustWireFixtureManifest;
@@ -995,7 +1230,7 @@ function rustWireFixtureManifest(): RustWireFixtureManifest {
 function rustWireHelloFixtureManifest(): RustWireHelloFixtureManifest {
   return JSON.parse(
     readFileSync(
-      new URL("../../../../../crates/jazz/fixtures/wire_hello_frames.json", import.meta.url),
+      new URL("../../../../../crates/jazz/fixtures/wire_hello_frames_v6.json", import.meta.url),
       "utf8",
     ),
   ) as RustWireHelloFixtureManifest;
@@ -1021,7 +1256,7 @@ function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
 
 function encodeWireError(code: number, retry: number, message: string): Uint8Array {
   const writer = new PostcardWriter();
-  writer.u64(2);
+  writer.u64(1);
   writer.u64(code);
   writer.u64(retry);
   writer.string(message);

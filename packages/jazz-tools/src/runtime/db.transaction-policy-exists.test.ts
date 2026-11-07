@@ -4,46 +4,42 @@ import { definePermissions } from "../permissions/index.js";
 import { PersistedWriteRejectedError } from "./client.js";
 import { createDb } from "./default-create-db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
-import { deploy, startLocalJazzServer } from "../testing/index.js";
+import { startTestJazz } from "../testing/index.js";
 
 // garden-co/jazz#3755: a policy `exists` sees committed rows plus the rows the
 // same transaction inserts or updates, so the server accepts the transaction the
 // client already applied optimistically. A committed row the transaction deletes
 // still counts; a row it both inserts and deletes never does.
-const app = s.defineApp({
-  shows: s.table({ chiefAccount: s.uuid() }, {}),
-  tasks: s.table({ showId: s.uuid(), title: s.string() }, { show: s.rel("shows", "showId") }),
-});
+const app = s.defineApp(
+  {
+    shows: s.table({ chiefAccount: s.uuid() }, {}),
+    tasks: s.table({ showId: s.uuid(), title: s.string() }, { show: s.rel("shows", "showId") }),
+  },
+  { migrations: "none" },
+);
 const permissions = definePermissions(app, ({ policy, session }) => {
-  policy.shows.allowRead.where({ chiefAccount: session.user.account });
-  policy.shows.allowInsert.where({ chiefAccount: session.user.account });
-  policy.shows.allowDelete.where({ chiefAccount: session.user.account });
+  policy.shows.allowRead.where({ chiefAccount: session.user });
+  policy.shows.allowInsert.where({ chiefAccount: session.user });
+  policy.shows.allowDelete.where({ chiefAccount: session.user });
   policy.tasks.allowRead.always();
   policy.tasks.allowInsert.where((task) =>
-    policy.shows.exists.where({ id: task.showId, chiefAccount: session.user.account }),
+    policy.shows.exists.where({ id: task.showId, chiefAccount: session.user }),
   );
 });
 
 async function withChief(
   run: (db: Awaited<ReturnType<typeof createDb>>, me: string) => Promise<void>,
 ): Promise<void> {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  const jazz = await startTestJazz({ app, permissions });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
   try {
-    await deploy({
-      serverUrl: server.url,
-      appId: server.appId,
-      adminSecret: server.adminSecret,
-      schema: app,
-      permissions,
-    });
-    const account = await localAccountConfig(server.appId, server.url);
+    const account = await localAccountConfig(jazz.appId, jazz.url);
     db = await createDb(account);
-    await db.all(app.tasks, { tier: "global" });
+    await db.all(app.tasks, { tier: "remote" });
     await run(db, account.account.id);
   } finally {
     await db?.shutdown();
-    await server.stop();
+    await jazz.stop();
   }
 }
 
@@ -56,21 +52,21 @@ it("accepts a task inserted in the same transaction as the show it requires", as
     });
     const { show, task } = await result.wait({ tier: "global" });
 
-    expect(await db.all(app.tasks, { tier: "global" })).toEqual([
+    expect(await db.all(app.tasks, { tier: "remote" })).toEqual([
       { id: task.id, showId: show.id, title: "Load-in" },
     ]);
     expect(await db.all(app.tasks)).toEqual([{ id: task.id, showId: show.id, title: "Load-in" }]);
   });
 }, 60_000);
 
-it("accepts the same rows in one exclusive transaction", async () => {
+it("accepts the same rows in one serializable transaction", async () => {
   await withChief(async (db, me) => {
-    const tx = db.beginExclusiveTransaction();
+    const tx = db.beginSerializableTransaction();
     const show = tx.insert(app.shows, { chiefAccount: me });
     const task = tx.insert(app.tasks, { showId: show.id, title: "Load-in" });
     await tx.commit().wait();
 
-    expect(await db.all(app.tasks, { tier: "global" })).toEqual([
+    expect(await db.all(app.tasks, { tier: "remote" })).toEqual([
       { id: task.id, showId: show.id, title: "Load-in" },
     ]);
   });
@@ -90,7 +86,7 @@ it("rejects a task whose show the same transaction inserts and deletes, on clien
     );
     expect(rejection).toBeInstanceOf(PersistedWriteRejectedError);
     expect(rejection).toMatchObject({ code: "permission_denied" });
-    expect(await db.all(app.tasks, { tier: "global" })).toEqual([]);
+    expect(await db.all(app.tasks, { tier: "remote" })).toEqual([]);
     await expect.poll(() => db.all(app.tasks)).toEqual([]);
   });
 }, 60_000);
@@ -106,9 +102,9 @@ it("accepts a task whose committed show the same transaction deletes", async () 
     });
     const task = await result.wait({ tier: "global" });
 
-    expect(await db.all(app.tasks, { tier: "global" })).toEqual([
+    expect(await db.all(app.tasks, { tier: "remote" })).toEqual([
       { id: task.id, showId: show.id, title: "Strike" },
     ]);
-    expect(await db.all(app.shows, { tier: "global" })).toEqual([]);
+    expect(await db.all(app.shows, { tier: "remote" })).toEqual([]);
   });
 }, 60_000);

@@ -13,7 +13,7 @@
       }
       main {
         display: grid;
-        grid-template-columns: 1fr 1fr;
+        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
         gap: 1rem;
       }
       section {
@@ -36,16 +36,22 @@
   <body>
     <h1>Branching project planner</h1>
     <p>
-      The right side is a draft scenario over the live main scenario. Edit an inherited task and
-      notice that only the draft changes.
+      Change main to compare a live base with a frozen base. Edit an inherited task in the frozen
+      draft, then reopen the database to restore the saved snapshot and your draft changes.
     </p>
+    <p><button id="change-main">Change main</button><button id="reopen">Save and reopen</button></p>
+    <p id="status" role="status"></p>
     <main>
       <section>
         <h2>Main</h2>
         <ul id="main-tasks"></ul>
       </section>
       <section>
-        <h2>Draft over main</h2>
+        <h2>Draft over live main</h2>
+        <ul id="live-draft-tasks"></ul>
+      </section>
+      <section>
+        <h2>Draft over frozen main</h2>
         <ul id="draft-tasks"></ul>
       </section>
     </main>

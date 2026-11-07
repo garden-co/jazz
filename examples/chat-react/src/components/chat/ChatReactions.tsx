@@ -1,6 +1,6 @@
 import { Suspense } from "react";
 import clsx from "clsx";
-import { useAll, useDb, useSession } from "jazz-tools/react";
+import { useAll, useSession } from "jazz-tools/react";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
 import { fireAndReport } from "@/lib/db-write";
 import { app } from "../../../schema.js";
@@ -89,11 +89,10 @@ interface MessageReactionsProps {
 }
 
 export const MessageReactions = ({ messageId, isMe }: MessageReactionsProps) => {
-  const db = useDb();
   const session = useSession();
-  const userId = session?.user.account ?? undefined;
+  const userId = session?.user ?? undefined;
 
-  const { data: reactions = [] } = useAll(app.reactions.where({ messageId }));
+  const { data: reactions = [], db } = useAll(app.reactions.where({ messageId }));
 
   if (reactions.length === 0) return null;
 

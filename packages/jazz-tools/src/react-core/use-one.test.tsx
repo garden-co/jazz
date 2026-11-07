@@ -27,6 +27,12 @@ function makeHarness() {
     getAuthState: () => ({ authMode: "local-first" as const, session: null }),
     onAuthChanged: () => () => {},
     updateAuthToken: () => {},
+    getSyncStatus: () => ({
+      link: { state: "local-only" as const },
+      pendingUploads: 0,
+      synced: true,
+    }),
+    onSyncStatusChange: () => () => {},
     subscribeDelta: (query: QueryBuilder<Todo>, callbacks: DbDeltaSubscriptionCallbacks<Todo>) => {
       subscribedQuery = query;
       callback = callbacks.onDelta;
@@ -66,6 +72,7 @@ describe("react-core/useOne", () => {
     );
 
     expect(container.textContent).toBe("loading");
+    expect(result.db).toBe(harness.client.db);
     expect(JSON.parse(harness.getSubscribedQuery()!._build()).limit).toBe(1);
 
     act(() => harness.emit([]));
@@ -74,6 +81,7 @@ describe("react-core/useOne", () => {
 
     act(() => harness.emit([{ id: "1", title: "first" }]));
     expect(result.data).toEqual({ id: "1", title: "first" });
+    expect(result.db).toBe(harness.client.db);
     expect(container.textContent).toBe("first");
 
     act(() => harness.emit([]));

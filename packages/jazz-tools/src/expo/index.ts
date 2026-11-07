@@ -19,10 +19,10 @@ export {
 export { createAccountManager, type AccountManagerConfig } from "./create-account-manager.js";
 
 export {
-  createJazzSession,
+  createJazzClient,
   JazzSessionProvider,
   useJazzSession,
-  type JazzSessionConfig,
+  type JazzClientConfig,
   type JazzSessionProviderProps,
   type UseJazzSessionResult,
   type JazzSession,
@@ -34,7 +34,10 @@ export { useJazzSessionOwner, type JazzSessionOwnerResult } from "./session.js";
 
 export { JazzProvider, type JazzProviderProps } from "./provider.js";
 export { useJazzAuth, type JazzAuthState } from "../react-core/app.js";
-export { betterAuth, jwtAuth, type JazzAuth } from "../session/app.js";
+export type { JazzUser } from "../session/app.js";
 export { useDb, useJazzClient, useSession } from "../react-native/provider.js";
 export { useAll, useAllSuspense } from "../react-native/use-all.js";
 export { useOne, useOneSuspense } from "../react-native/use-one.js";
+export { useAccountState } from "../react-core/use-account-state.js";
+export { useSyncStatus } from "../react-core/use-sync-status.js";
+export type { LinkStatus, SyncStatus } from "../runtime/sync-status.js";

@@ -1,52 +1,27 @@
 import type { Db } from "jazz-tools";
-import { createJazzSession, type JazzClient } from "jazz-tools/backend";
-import { deploy, startLocalJazzServer, type LocalJazzServerHandle } from "jazz-tools/testing";
+import { createJazz, memory, type Jazz } from "jazz-tools/backend";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import permissions from "../../permissions.js";
 import { app } from "../../schema.js";
 import { ensurePersonalCanvas, seedPersonalCanvas } from "../../src/lib/bootstrap.js";
 import { redeemInvite } from "../../src/lib/join.js";
 
-// The server actions run against a real local Jazz server with backend
-// authority, exactly as the API routes run them.
-let server: LocalJazzServerHandle;
-let session: Awaited<ReturnType<typeof createJazzSession>>;
+// The server actions run against the app's own Jazz with backend authority,
+// exactly as the API routes run them.
+let jazz: Jazz;
 let db: Db;
 
 beforeAll(async () => {
-  const backendSecret = "poster-shop-test-backend-secret";
-  const adminSecret = "poster-shop-test-admin-secret";
-  server = await startLocalJazzServer({ backendSecret, adminSecret });
-  await deploy({
-    appId: server.appId,
-    serverUrl: server.url,
-    adminSecret,
-    schema: app,
-    permissions,
-  });
-  session = await createJazzSession({
-    app,
-    permissions,
-    appId: server.appId,
-    driver: { type: "memory" },
-    serverUrl: server.url,
-    initial: { backendSecret },
-    env: "test",
-    tier: "global",
-  });
-  const snapshot = session.getSnapshot();
-  if (snapshot.status !== "ready" || !snapshot.client)
-    throw snapshot.error ?? new Error("not ready");
-  db = (snapshot.client as JazzClient).db;
+  jazz = createJazz({ app, permissions, store: memory() });
+  db = jazz.db;
 }, 120_000);
 
 afterAll(async () => {
-  await session?.close();
-  await server?.stop();
+  await jazz?.close();
 });
 
 const membershipsOf = (memberAuthor: string) =>
-  db.all(app.canvasMembers.where({ memberAuthor }), { tier: "global" });
+  db.all(app.canvasMembers.where({ memberAuthor }), { tier: "remote" });
 
 describe("ensurePersonalCanvas", () => {
   it("seeds one demo poster and is idempotent", async () => {
@@ -56,12 +31,12 @@ describe("ensurePersonalCanvas", () => {
     expect(again).toBe(first);
     const memberships = await membershipsOf(account);
     expect(memberships.map((row) => [row.canvasId, row.role])).toEqual([[first, "admin"]]);
-    const canvas = await db.one(app.canvases.where({ id: first }), { tier: "global" });
+    const canvas = await db.one(app.canvases.where({ id: first }), { tier: "remote" });
     expect(canvas?.title).toBe("Ada's poster");
-    const layers = await db.all(app.layers.where({ canvasId: first }), { tier: "global" });
+    const layers = await db.all(app.layers.where({ canvasId: first }), { tier: "remote" });
     expect(layers.map((layer) => layer.name).sort()).toEqual(["Artwork", "Background", "Type"]);
     const checkpoints = await db.all(app.checkpoints.where({ canvasId: first }), {
-      tier: "global",
+      tier: "remote",
     });
     expect(checkpoints).toHaveLength(1);
   });
@@ -76,7 +51,7 @@ describe("ensurePersonalCanvas", () => {
     expect(left).toBe(right);
     expect(await membershipsOf(account)).toHaveLength(1);
 
-    // Across processes the exclusive transaction decides: bypass the dedupe.
+    // Across processes the serializable transaction decides: bypass the dedupe.
     const racer = crypto.randomUUID();
     const [a, b] = await Promise.all([
       seedPersonalCanvas(db, racer, "Hedy"),
@@ -104,7 +79,7 @@ describe("redeemInvite", () => {
     expect(await redeemInvite(db, guest, { canvasId, token })).toBe("joined");
     expect(await redeemInvite(db, guest, { canvasId, token })).toBe("already-member");
     const rows = await db.all(app.canvasMembers.where({ canvasId, memberAuthor: guest }), {
-      tier: "global",
+      tier: "remote",
     });
     expect(rows.map((row) => row.role)).toEqual(["editor"]);
     // A multi-use link keeps working for the next person.
@@ -115,7 +90,7 @@ describe("redeemInvite", () => {
     const { admin, canvasId, token } = await adminWithInvite("viewer", false);
     expect(await redeemInvite(db, admin, { canvasId, token })).toBe("already-member");
     const rows = await db.all(app.canvasMembers.where({ canvasId, memberAuthor: admin }), {
-      tier: "global",
+      tier: "remote",
     });
     expect(rows.map((row) => row.role)).toEqual(["admin"]);
   });
@@ -127,7 +102,7 @@ describe("redeemInvite", () => {
       redeemInvite(db, crypto.randomUUID(), { canvasId, token }).catch(() => "rejected"),
     ]);
     expect(results.filter((result) => result === "joined")).toHaveLength(1);
-    expect(await db.all(app.canvasInvites.where({ canvasId }), { tier: "global" })).toEqual([]);
+    expect(await db.all(app.canvasInvites.where({ canvasId }), { tier: "remote" })).toEqual([]);
   });
 
   it("rejects unknown tokens and tokens for another canvas", async () => {

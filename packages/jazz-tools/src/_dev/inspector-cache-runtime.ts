@@ -93,8 +93,7 @@ export function attachInspectorCacheRuntime(
   const failed = () => dispose();
   port.addEventListener("message", receive);
   port.addEventListener("messageerror", failed);
-  const cacheOnly = (tier?: string | null, options?: string | null) =>
-    tier === "local" && options != null && JSON.parse(options).propagation === "local-only";
+  const cacheOnly = (tier?: string | null) => tier === "local-only";
   const request = (message: Record<string, unknown>): Promise<unknown> => {
     if (closed) return Promise.reject(new Error("Inspector cache connection closed"));
     return new Promise((resolve, reject) => {
@@ -192,7 +191,7 @@ export function attachInspectorCacheRuntime(
           tier?: string | null,
           options?: string | null,
         ) => {
-          if (!cacheOnly(tier, options)) return target.query(query, session, tier, options);
+          if (!cacheOnly(tier)) return target.query(query, session, tier, options);
           if (closed) return Promise.reject(new Error("Inspector cache connection closed"));
           return request({ type: "inspect-query", query, options });
         };
@@ -203,8 +202,7 @@ export function attachInspectorCacheRuntime(
           tier?: string | null,
           options?: string | null,
         ) => {
-          if (!cacheOnly(tier, options))
-            return target.createSubscription(query, session, tier, options);
+          if (!cacheOnly(tier)) return target.createSubscription(query, session, tier, options);
           if (closed) throw new Error("Inspector cache connection closed");
           const id = nextRequestId(port);
           subscriptions.set(id, { query, options, started: false });

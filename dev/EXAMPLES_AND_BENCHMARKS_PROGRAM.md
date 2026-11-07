@@ -29,27 +29,27 @@ question; GitHub is the inbox rather than a repository-local queue.
 
 **Non-goals**
 
-- Replacing framework starters or making one app per framework/auth provider.
+- Making one app per framework/auth provider. Framework and auth coverage comes from a few variants of the hero apps (`examples/<app>/apps/<framework>-<auth>`), which replace the removed starters as the tested environment matrix.
 - Treating benchmark scores as a product-compatibility promise or a substitute for focused core tests.
 - Importing customer schemas, production traces, identifiers, or PII. Those remain in `jazz-private`; public scenarios preserve load _shape_, not customer data.
 - Generalizing app-specific UI models into a new public API before an actual API proposal is reviewed.
 
 ## Catalogue
 
-| App                   | Product slice                                                            | Distinct Jazz feature/workload role                                                                                                                                                                                          |
-| --------------------- | ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **StagePlan**         | Task board for putting on a show: tasks, activity, crews and departments | Local-first task CRUD and bulk updates, reopen, bounded activity pages, filtered live boards, many small permissioned subscriptions (crew dashboard), row-dependent policies, archive/restore, offline resume.               |
-| **BandChat**          | Band/fan chat with rooms, invites, images, and reactions                 | Small hello-world reference; identity and permission boundaries, attachments, fan-out, offline/reconnect.                                                                                                                    |
-| **WorldTour**         | Plan a tour with venues, dates, maps, and collaborators                  | Relations, filtered/ordered queries, calendar/map views, shared planning.                                                                                                                                                    |
-| **RecordPlayer**      | Personal/shared music library and playlists                              | Files and durable streams, large values, partial availability, playlist sharing.                                                                                                                                             |
-| **Jamazon**           | Music-instrument storefront                                              | Public catalogue with live search, offline-first cart, guest-cart claim on sign-in, idempotent checkout with backend authority, Stripe test-mode payments.                                                                   |
-| **Jamazon Warehouse** | Warehouse operations console for Jamazon                                 | Recognizably TPC-C-shaped warehouses, districts, customers, stock, orders, order lines, and payments; multi-row exclusive transactions, stock contention, indexed status reads, batch delivery, and stock-level aggregation. |
-| **BandBook**          | Notion clone with issues, for running a band                             | Nested pages and blocks plus issues for songs, notes, setlists and planning; owner/organization-scoped page policies over large workspaces, one-shot and live.                                                               |
-| **Wequencer**         | Collaborative step sequencer                                             | High-frequency collaborative writes, hotspot behavior, presence, synchronization/reconnect; clock-perfect playback is an app aspiration, not a benchmark assertion until its contract exists.                                |
-| **PosterShop**        | Collaborative gig-poster design canvas                                   | Real-time cursors/edits, canvas-shaped fan-out, history rewind, and branches.                                                                                                                                                |
-| **BigLabel**          | Multi-tenant record-label operations                                     | SaaS-scale tenant filtering, organization/team policy graphs, indexed relational reads, migrations, and large synthetic datasets.                                                                                            |
-| **MusicAgent**        | LLM agent for a music agent                                              | Streamed transcript turns, tool calls/results, attachments, conversation branches, durable server execution, and recovery after interrupted generation.                                                                      |
-| **EpicDrop**          | Web file browser plus native mounted folder                              | Large binary values, streaming and range access, partial residency, local cache eviction, shared-folder permissions, filesystem events, and offline file conflicts.                                                          |
+| App                   | Product slice                                                            | Distinct Jazz feature/workload role                                                                                                                                                                                             |
+| --------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **StagePlan**         | Task board for putting on a show: tasks, activity, crews and departments | Local-first task CRUD and bulk updates, reopen, bounded activity pages, filtered live boards, many small permissioned subscriptions (crew dashboard), row-dependent policies, archive/restore, offline resume.                  |
+| **BandChat**          | Band/fan chat with rooms, invites, images, and reactions                 | Small hello-world reference; identity and permission boundaries, attachments, fan-out, offline/reconnect.                                                                                                                       |
+| **WorldTour**         | Plan a tour with venues, dates, maps, and collaborators                  | Relations, filtered/ordered queries, calendar/map views, shared planning.                                                                                                                                                       |
+| **RecordPlayer**      | Personal/shared music library and playlists                              | Files and durable streams, large values, partial availability, playlist sharing.                                                                                                                                                |
+| **Jamazon**           | Music-instrument storefront                                              | Public catalogue with live search, offline-first cart, guest-cart claim on sign-in, idempotent checkout with backend authority, Stripe test-mode payments.                                                                      |
+| **Jamazon Warehouse** | Warehouse operations console for Jamazon                                 | Recognizably TPC-C-shaped warehouses, districts, customers, stock, orders, order lines, and payments; multi-row serializable transactions, stock contention, indexed status reads, batch delivery, and stock-level aggregation. |
+| **BandBook**          | Notion clone with issues, for running a band                             | Nested pages and blocks plus issues for songs, notes, setlists and planning; owner/organization-scoped page policies over large workspaces, one-shot and live.                                                                  |
+| **Wequencer**         | Collaborative step sequencer                                             | High-frequency collaborative writes, hotspot behavior, presence, synchronization/reconnect; clock-perfect playback is an app aspiration, not a benchmark assertion until its contract exists.                                   |
+| **PosterShop**        | Collaborative gig-poster design canvas                                   | Real-time cursors/edits, canvas-shaped fan-out, history rewind, and branches.                                                                                                                                                   |
+| **BigLabel**          | Multi-tenant record-label operations                                     | SaaS-scale tenant filtering, organization/team policy graphs, indexed relational reads, migrations, and large synthetic datasets.                                                                                               |
+| **MusicAgent**        | LLM agent for a music agent                                              | Streamed transcript turns, tool calls/results, attachments, conversation branches, durable server execution, and recovery after interrupted generation.                                                                         |
+| **EpicDrop**          | Web file browser plus native mounted folder                              | Large binary values, streaming and range access, partial residency, local cache eviction, shared-folder permissions, filesystem events, and offline file conflicts.                                                             |
 
 Jamazon and Jamazon Warehouse share branding and synthetic product assets, but
 remain separate schemas and scenarios. The warehouse schema stays close enough
@@ -83,7 +83,7 @@ keep independent microbenchmarks and core canaries.
 | `examples/chat-react` and `examples/auth-*-chat`         | BandChat                               | Preserve auth-specific teaching value as small shells; migrate product workflow, room policy, attachments, and fan-out scenarios. |
 | `examples/world-tour`                                    | WorldTour                              | Evolve it into the canonical WorldTour app rather than rebuild it elsewhere.                                                      |
 | `examples/branching-project-planner-ts`                  | BandBook and PosterShop                | Split branch/history lessons by product flow; keep any minimal branch API example needed for reference.                           |
-| Todo local-first families                                | StagePlan plus framework shells        | Retain framework-baseline starters/examples; adopt offline persistence and CRUD load shape only where it belongs.                 |
+| Todo local-first families                                | StagePlan plus framework shells        | Retain framework-baseline examples; adopt offline persistence and CRUD load shape only where it belongs.                          |
 | Realistic `W1`, `W3`, `W4`                               | StagePlan, WorldTour, Jamazon          | Recast interactive, offline-reconnect, and cold-start behavior as app scenarios; retain shared runner plumbing.                   |
 | Realistic `B1`/`R1`, `B2`/`R2`, `B3`/`R3`                | BigLabel and Jamazon Warehouse         | Use for sustained CRUD, indexed reads, and cold-load scale profiles.                                                              |
 | Realistic `B4`/`R4`, `R9`                                | BandChat, PosterShop, Wequencer        | Adopt subscription fan-out and subscribed-write semantics.                                                                        |
@@ -96,7 +96,7 @@ keep independent microbenchmarks and core canaries.
 | `jazz-sim` `s4_order_processing`, `s9_durable_execution` | Jamazon Warehouse, Jamazon, MusicAgent | Keep order-processing/reference comparison and durable-workflow semantics, surfaced through their respective UIs.                 |
 | `jazz-sim` `s5_durable_stream`                           | RecordPlayer, EpicDrop, MusicAgent     | Adopt stream lifecycle, persistence, resume, and bounded-memory transfer behavior.                                                |
 
-Server/runtime examples and framework/auth starters remain
+Server/runtime examples remain
 valuable focused references. They are out of catalogue scope unless a later
 scenario needs their specific runtime surface.
 
@@ -113,7 +113,7 @@ row may be deferred only with a named blocker and a focused substitute check.
 | Client ↔ edge ↔ global service                  | Sync, permissions, reconnect/resume, and server-side reads where applicable.       |
 | Offline edit → reconnect                        | Convergence plus authorization/rejection behavior.                                 |
 | Edge or worker restart during subscription      | Recovery without duplicate, missing, or unauthorized visible state.                |
-| Native RocksDB restart                          | Persistent data, subscriptions, and recovery behavior.                             |
+| Native client restart                           | Persistent data, subscriptions, and recovery behavior.                             |
 | Native SQLite relay/server restart              | Server persistence and reconnection behavior.                                      |
 | React Native client through native SQLite relay | Included when the runtime supports the app's required persistence/device features. |
 

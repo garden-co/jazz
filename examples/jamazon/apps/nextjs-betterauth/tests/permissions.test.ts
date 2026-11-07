@@ -23,13 +23,13 @@ describe("catalogue", () => {
     const visitor = guest(testApp, "visitor-device").db;
     const alice = shopper(testApp, "alice");
     for (const db of [visitor, alice.db]) {
-      const products = await db.all(app.products.where({ id: strings }), { tier: "global" });
+      const products = await db.all(app.products.where({ id: strings }), { tier: "remote" });
       expect(products.map((p) => p.sku)).toEqual(["JAM-001"]);
       expect(
-        await db.all(app.stock.where({ productId: strings }), { tier: "global" }),
+        await db.all(app.stock.where({ productId: strings }), { tier: "remote" }),
       ).toHaveLength(1);
     }
-    const [stock] = await alice.db.all(app.stock.where({ productId: strings }), { tier: "global" });
+    const [stock] = await alice.db.all(app.stock.where({ productId: strings }), { tier: "remote" });
     await alice.db.expectDenied((db) => db.update(app.stock, stock!.id, { onHand: 9999 }));
     await alice.db.expectDenied((db) => db.update(app.products, strings, { priceCents: 1 }));
     await visitor.expectDenied((db) => db.update(app.stock, stock!.id, { onHand: 0 }));
@@ -53,8 +53,8 @@ describe("carts", () => {
       })
       .wait({ tier: "global" });
 
-    expect(await mallory.db.all(app.carts.where({ id: cartId }), { tier: "global" })).toEqual([]);
-    expect(await mallory.db.all(app.cartLines.where({ cartId }), { tier: "global" })).toEqual([]);
+    expect(await mallory.db.all(app.carts.where({ id: cartId }), { tier: "remote" })).toEqual([]);
+    expect(await mallory.db.all(app.cartLines.where({ cartId }), { tier: "remote" })).toEqual([]);
     // Mallory cannot slip a line into Alice's cart, or take over the cart.
     await mallory.db.expectDenied((db) =>
       db.insert(app.cartLines, { cartId, productId: ids.product("JAM-002"), quantity: 1 }),
@@ -105,13 +105,13 @@ describe("guest carts", () => {
       })
       .wait({ tier: "global" });
     expect(
-      (await visitor.db.all(app.cartLines.where({ cartId }), { tier: "global" })).map(
+      (await visitor.db.all(app.cartLines.where({ cartId }), { tier: "remote" })).map(
         (line) => line.quantity,
       ),
     ).toEqual([3]);
 
     for (const outsider of [other.db, alice.db]) {
-      expect(await outsider.all(app.carts.where({ id: cartId }), { tier: "global" })).toEqual([]);
+      expect(await outsider.all(app.carts.where({ id: cartId }), { tier: "remote" })).toEqual([]);
       await outsider.expectDenied((db) =>
         db.insert(app.cartLines, { cartId, productId: ids.product("JAM-002"), quantity: 1 }),
       );
@@ -162,14 +162,14 @@ describe("orders", () => {
       ),
     );
 
-    expect(await alice.db.all(app.orders.where({ id: orderId }), { tier: "global" })).toHaveLength(
+    expect(await alice.db.all(app.orders.where({ id: orderId }), { tier: "remote" })).toHaveLength(
       1,
     );
-    expect(await alice.db.all(app.payments.where({ orderId }), { tier: "global" })).toHaveLength(1);
-    expect(await mallory.db.all(app.orders.where({ id: orderId }), { tier: "global" })).toEqual([]);
-    expect(await mallory.db.all(app.payments.where({ orderId }), { tier: "global" })).toEqual([]);
+    expect(await alice.db.all(app.payments.where({ orderId }), { tier: "remote" })).toHaveLength(1);
+    expect(await mallory.db.all(app.orders.where({ id: orderId }), { tier: "remote" })).toEqual([]);
+    expect(await mallory.db.all(app.payments.where({ orderId }), { tier: "remote" })).toEqual([]);
     const visitor = guest(testApp, "visitor-device").db;
-    expect(await visitor.all(app.orders.where({ id: orderId }), { tier: "global" })).toEqual([]);
+    expect(await visitor.all(app.orders.where({ id: orderId }), { tier: "remote" })).toEqual([]);
 
     // Only the backend marks an order paid or shipped.
     await alice.db.expectDenied((db) => db.update(app.orders, orderId, { status: "paid" }));

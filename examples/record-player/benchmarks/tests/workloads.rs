@@ -6,7 +6,7 @@ fn catalogue_and_ordered_playlist_are_bounded() {
     assert_eq!(fixture.track_metadata_count(), 8);
     assert_eq!(
         fixture.track_metadata_projection(),
-        ["album_id", "duration_ms", "ordinal", "title"]
+        ["album_id", "title", "ordinal", "duration_ms"]
     );
     assert_eq!(fixture.playlist_window_count(), 16);
     let documented_access_paths = serde_json::from_str(include_str!("../../access-paths.json"))

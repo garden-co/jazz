@@ -6,7 +6,7 @@ import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import { loadWasmModule } from "../../src/runtime/wasm-loader.js";
 import { schema as s } from "../../src/index.js";
-import { getJazzServerInfo, getJazzServerJwtForUser } from "./testing-server.js";
+import { getJazzServerInfo } from "./testing-server.js";
 
 import schemaJson from "../../../../dev/benchmarks/realistic/schema/project_board.schema.json";
 import profileJson from "../../../../dev/benchmarks/realistic/profiles/s.json";
@@ -346,7 +346,7 @@ const projectBoardSchema = {
     },
   ),
 };
-const projectBoardApp = s.defineApp(projectBoardSchema);
+const projectBoardApp = s.defineApp(projectBoardSchema, { migrations: "none" });
 
 function resolveBrowserLimitOverrides(): BrowserLimitOverrides {
   const raw = (__JAZZ_REALISTIC_BROWSER_LIMIT_OVERRIDES_JSON__ ?? "").trim();
@@ -600,6 +600,18 @@ function scaledLargeProfile(input: ProfileConfig, multiplier: number): ProfileCo
   };
 }
 
+/**
+ * The server-backed scenarios synced as a minted-JWT user with the core's
+ * admin secret, straight to the core. A core now admits only its app's
+ * backend, and these scenarios are not ported to one yet.
+ */
+function serverBackedScenariosNotSupported(): never {
+  throw new Error(
+    "The realistic browser bench's server-backed scenarios are not supported yet: they " +
+      "need porting to an app backend (createJazz). Run the local scenarios (W1, W4) instead.",
+  );
+}
+
 async function createServerDb(
   appId: string,
   dbName: string,
@@ -611,21 +623,8 @@ async function createServerDb(
     localFirstSecret?: string;
   } = {},
 ): Promise<Db> {
-  const { serverUrl, adminSecret } = await getJazzServerInfo();
-  const config: Parameters<typeof createDb>[0] = {
-    appId,
-    dbName,
-    serverUrl,
-    adminSecret: options.includeAdminSecret === false ? undefined : adminSecret,
-    logLevel: "warn",
-  };
-  if (options.includeJwt !== false) {
-    config.jwtToken = await getJazzServerJwtForUser(sub, claims);
-  }
-  if (options.localFirstSecret) {
-    config.secret = options.localFirstSecret;
-  }
-  return createDb(config);
+  void [appId, dbName, sub, claims, options];
+  return serverBackedScenariosNotSupported();
 }
 
 async function waitForCondition(
@@ -906,8 +905,6 @@ async function runW3(config: ProfileConfig): Promise<ScenarioResult> {
   progressLog("W3 start");
   const dbName = uniqueDbName("w3");
   const appId = await benchmarkAppId("w3");
-  const { serverUrl, adminSecret } = await getJazzServerInfo();
-  const token = await getJazzServerJwtForUser("realistic-user");
   const rng = new Lcg(w3.seed ^ config.seed);
   const offlineWrites = Math.min(w3.offline_write_count, 20);
   let offlineDb: Db | null = null;
@@ -936,14 +933,7 @@ async function runW3(config: ProfileConfig): Promise<ScenarioResult> {
     offlineDb = null;
 
     const reconnectStart = performance.now();
-    onlineDb = await createDb({
-      appId,
-      dbName,
-      serverUrl,
-      jwtToken: token,
-      adminSecret,
-      logLevel: "warn",
-    });
+    onlineDb = serverBackedScenariosNotSupported();
 
     const target = baseline + offlineWrites;
     const timeoutAt = performance.now() + Math.min(w3.timeout_seconds, 20) * 1000;
@@ -2264,7 +2254,7 @@ async function runB7(config: ProfileConfig): Promise<ScenarioResult> {
   try {
     db = await createServerDb(appId, dbName, "realistic-b7");
     await seedDataset(db, largeConfig);
-    const warmRows = await db.all(hydrationQuery, { tier: "local" });
+    const warmRows = await db.all(hydrationQuery, { tier: "local-first" });
     rootRows = warmRows.length;
     commentRows = warmRows.reduce(
       (total, row) => total + (row.task_commentsViaTask?.length ?? 0),
@@ -2274,12 +2264,12 @@ async function runB7(config: ProfileConfig): Promise<ScenarioResult> {
     const wallStart = performance.now();
     for (let cycle = 0; cycle < cycles; cycle += 1) {
       const startedAt = performance.now();
-      const rows = await db.all(hydrationQuery, { tier: "local" });
+      const rows = await db.all(hydrationQuery, { tier: "local-first" });
       latencies.push(performance.now() - startedAt);
       expect(rows.length).toBe(rootRows);
     }
     const wallMs = performance.now() - wallStart;
-    const validationRows = await db.all(hydrationQuery, { tier: "local" });
+    const validationRows = await db.all(hydrationQuery, { tier: "local-first" });
     const relationIdentity = (rows: typeof warmRows) =>
       rows.map((row) => [row.id, (row.task_commentsViaTask ?? []).map((comment) => comment.id)]);
     expect(relationIdentity(validationRows)).toEqual(relationIdentity(warmRows));

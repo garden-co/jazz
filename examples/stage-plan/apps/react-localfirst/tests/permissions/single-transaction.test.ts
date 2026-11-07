@@ -47,11 +47,11 @@ it("creates a show with its crew chief and invite in one transaction", async () 
   expect(writes).toHaveLength(1);
   await writes[0]!.wait({ tier: "global" });
 
-  const global = { tier: "global" } as const;
-  await expect(chief.all(app.showCrew.where({ showId: show.id }), global)).resolves.toEqual([
+  const remote = { tier: "remote" } as const;
+  await expect(chief.all(app.showCrew.where({ showId: show.id }), remote)).resolves.toEqual([
     expect.objectContaining({ account: chiefAccount, role: "chief" }),
   ]);
-  await expect(chief.all(app.showInvites.where({ showId: show.id }), global)).resolves.toHaveLength(
+  await expect(chief.all(app.showInvites.where({ showId: show.id }), remote)).resolves.toHaveLength(
     1,
   );
 });
@@ -63,9 +63,9 @@ it("writes the whole demo show in one transaction", async () => {
   expect(writes).toHaveLength(1);
   await writes[0]!.wait({ tier: "global" });
 
-  const global = { tier: "global" } as const;
-  await expect(chief.all(app.showCrew.where({ showId }), global)).resolves.toHaveLength(1);
-  await expect(chief.all(app.tasks.where({ showId }), global)).resolves.toHaveLength(8);
-  await expect(chief.all(app.activity.where({ showId }), global)).resolves.toHaveLength(9);
-  await expect(chief.all(app.comments, global)).resolves.toHaveLength(1);
+  const remote = { tier: "remote" } as const;
+  await expect(chief.all(app.showCrew.where({ showId }), remote)).resolves.toHaveLength(1);
+  await expect(chief.all(app.tasks.where({ showId }), remote)).resolves.toHaveLength(8);
+  await expect(chief.all(app.activity.where({ showId }), remote)).resolves.toHaveLength(9);
+  await expect(chief.all(app.comments, remote)).resolves.toHaveLength(1);
 });

@@ -1,3 +1,4 @@
+import { todoCrudTest } from "../../../../testing/todo-app-scenarios.js";
 import { createAccountManager } from "jazz-tools";
 import { prepareTestAccount } from "../../../../testing/accounts.js";
 /**
@@ -10,7 +11,7 @@ import { prepareTestAccount } from "../../../../testing/accounts.js";
 import { describe, it, expect, afterEach } from "vitest";
 import { startApp } from "../../src/main.js";
 import { app } from "../../schema.js";
-import { TEST_PORT, APP_ID } from "./test-constants.js";
+import { SCOPE, SERVER_URL } from "./test-constants.js";
 import { type Db, type DbConfig } from "jazz-tools";
 
 // ---------------------------------------------------------------------------
@@ -70,12 +71,12 @@ describe("Vanilla TS Todo App E2E", () => {
       overrides.account ??
       (await prepareTestAccount(
         createAccountManager,
-        overrides.appId ?? APP_ID,
-        overrides.serverUrl ?? `http://127.0.0.1:${TEST_PORT}`,
+        overrides.appId ?? SCOPE,
+        overrides.serverUrl ?? SERVER_URL,
         secret,
       ));
     const { db, destroy } = await startApp(el, {
-      appId: overrides.appId ?? APP_ID,
+      appId: overrides.appId ?? SCOPE,
       driver: { type: "persistent", dbName: crypto.randomUUID() },
       ...overrides,
       account,
@@ -103,37 +104,7 @@ describe("Vanilla TS Todo App E2E", () => {
     }
   });
 
-  // -------------------------------------------------------------------------
-  // 1. App renders with empty list
-  // -------------------------------------------------------------------------
-
-  it("renders the app with an empty todo list", async () => {
-    const el = await mount();
-
-    expect(el.querySelector("h1")!.textContent).toBe("Todos");
-    expect(el.querySelector("#todo-list")).toBeTruthy();
-    expect(el.querySelectorAll("#todo-list li").length).toBe(0);
-  });
-
-  // -------------------------------------------------------------------------
-  // 2. Add todo via form
-  // -------------------------------------------------------------------------
-
-  it("adds a todo via the form", async () => {
-    const el = await mount();
-
-    addTodo(el, "Buy milk");
-
-    await waitFor(
-      () => el.querySelectorAll("#todo-list li").length === 1,
-      3000,
-      "Todo should appear after form submit",
-    );
-
-    const li = el.querySelector("#todo-list li")!;
-    expect(li.querySelector("span")!.textContent).toBe("Buy milk");
-    expect(li.classList.contains("done")).toBe(false);
-  });
+  todoCrudTest({ it, expect, mount, waitFor, submit: addTodo });
 
   it("renders todo titles and descriptions as text instead of HTML", async () => {
     const { container: el, db } = await mountWithDb();
@@ -189,92 +160,9 @@ describe("Vanilla TS Todo App E2E", () => {
     expect(items[1].dataset.depth).toBe("1");
   });
 
-  // -------------------------------------------------------------------------
-  // 3. Toggle todo
-  // -------------------------------------------------------------------------
-
-  it("toggles a todo's done state via checkbox", async () => {
-    const el = await mount();
-
-    addTodo(el, "Toggle me");
-
-    await waitFor(
-      () => el.querySelectorAll("#todo-list li").length === 1,
-      3000,
-      "Todo should appear",
-    );
-
-    const li = el.querySelector("#todo-list li")!;
-    expect(li.classList.contains("done")).toBe(false);
-
-    // Click the checkbox to update the todo's done state.
-    const checkbox = li.querySelector<HTMLInputElement>("input.toggle")!;
-    checkbox.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-
-    await waitFor(
-      () => el.querySelector("#todo-list li")!.classList.contains("done"),
-      5000,
-      "Todo should be marked done",
-    );
-  });
-
-  // -------------------------------------------------------------------------
-  // 4. Delete todo
-  // -------------------------------------------------------------------------
-
-  it("deletes a todo via the delete button", async () => {
-    const el = await mount();
-
-    addTodo(el, "Delete me");
-
-    await waitFor(
-      () => el.querySelectorAll("#todo-list li").length === 1,
-      3000,
-      "Todo should appear",
-    );
-
-    const deleteBtn = el.querySelector<HTMLButtonElement>(".delete-btn")!;
-    deleteBtn.click();
-
-    await waitFor(
-      () => el.querySelectorAll("#todo-list li").length === 0,
-      3000,
-      "Todo should be removed",
-    );
-  });
-
-  // -------------------------------------------------------------------------
-  // 5. Multiple todos
-  // -------------------------------------------------------------------------
-
-  it("renders multiple todos", async () => {
-    const el = await mount();
-
-    addTodo(el, "First");
-    addTodo(el, "Second");
-    addTodo(el, "Third");
-
-    await waitFor(
-      () => el.querySelectorAll("#todo-list li").length === 3,
-      3000,
-      "Should have 3 todos",
-    );
-
-    const titles = [...el.querySelectorAll("#todo-list li span")].map((s) => s.textContent);
-    expect(titles.sort()).toEqual(["First", "Second", "Third"]);
-  });
-
-  // -------------------------------------------------------------------------
-  // 6. IndexedDB persistence across reload
-  // -------------------------------------------------------------------------
-
   it("persists todos across app destroy and remount (IndexedDB)", async () => {
     const dbName = crypto.randomUUID();
-    const account = await prepareTestAccount(
-      createAccountManager,
-      APP_ID,
-      `http://127.0.0.1:${TEST_PORT}`,
-    );
+    const account = await prepareTestAccount(createAccountManager, SCOPE, SERVER_URL);
 
     // First session: mount, add todo, destroy
     const el1 = await mount({ account, driver: { type: "persistent", dbName } });
@@ -300,20 +188,16 @@ describe("Vanilla TS Todo App E2E", () => {
     expect(el2.querySelector("#todo-list li span")!.textContent).toBe("Survive reload");
   });
 
-  // -------------------------------------------------------------------------
-  // 7. Server sync between two app instances
-  // -------------------------------------------------------------------------
-
   it("syncs a todo between two app instances through the server", async () => {
-    const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
+    const serverUrl = SERVER_URL;
 
     const { container: el1, db: db1 } = await mountWithDb({
-      appId: APP_ID,
+      appId: SCOPE,
       serverUrl,
       secret: "jazz-auth-v1:IsHiz7lWH1KJEuM5J8Hn_oleBb6SBcuGSE9Ro3H0G68",
     });
     const { container: el2, db: db2 } = await mountWithDb({
-      appId: APP_ID,
+      appId: SCOPE,
       serverUrl,
       secret: "jazz-auth-v1:C5-etNr9-YLchXK15XLhDVIn-An8mgb35sc5lfJpAQE",
     });

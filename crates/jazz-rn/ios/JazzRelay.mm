@@ -115,6 +115,12 @@ static NSURL *JazzRelayStorageRoot(void) {
   jazz_native_relay_bytes output = {0};
   jazz_native_relay_status status = jazz_native_relay_host_execute(
       relayHost, (const uint8_t *)request.bytes, request.length, &output);
+  if (status == JAZZ_NATIVE_RELAY_UNSUPPORTED_STORAGE_CODECS) {
+    reject(@"unsupported_storage_codecs",
+           @"Unsupported storage format: the local Jazz store was written by an older version; delete it and resync from Core",
+           nil);
+    return;
+  }
   if (status != JAZZ_NATIVE_RELAY_OK) {
     reject(@"E_JAZZ_RELAY_COMMAND", @"Jazz native relay command failed", nil);
     return;

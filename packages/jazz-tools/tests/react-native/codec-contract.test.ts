@@ -60,8 +60,8 @@ const cases: [string, unknown, unknown][] = [
 
   ["probe", "probe", "Probe"],
   [
-    "exclusive transaction",
-    { type: "beginTransaction", kind: "exclusive" },
+    "serializable transaction",
+    { type: "beginTransaction", kind: "serializable" },
     { BeginTransaction: { kind: "Exclusive" } },
   ],
   [
@@ -139,6 +139,7 @@ const cases: [string, unknown, unknown][] = [
   ["reconnect", { type: "reconnectNativeUpstream" }, "ReconnectNativeUpstream"],
   ["status", { type: "nativeConnectionStatus" }, "NativeConnectionStatus"],
   ["metadata", { type: "nativeSessionMetadata" }, "NativeSessionMetadata"],
+  ["pending uploads", { type: "pendingUploadCount" }, "PendingUploadCount"],
 ];
 
 describe("RN Rust/TypeScript foreground codec contract", () => {
@@ -156,12 +157,27 @@ describe("RN Rust/TypeScript foreground codec contract", () => {
       { type: "permissionAdvice", advice: "unknown" },
       { type: "pending", operation: 256 },
       { type: "operationError", reason: "codec boundary: λ" },
+      { type: "operationError", code: "query", reason: "Query: unknown table λ" },
+      {
+        type: "operationError",
+        code: "write_rejected",
+        reasonName: "authorization_denied",
+        reason: "WriteRejected: authorization_denied: λ",
+      },
       { type: "transactionSettled", txId },
       {
         type: "nativeConnectionStatus",
         configured: true,
         explicitlyOffline: false,
         connected: true,
+        authRejected: null,
+      },
+      {
+        type: "nativeConnectionStatus",
+        configured: true,
+        explicitlyOffline: false,
+        connected: false,
+        authRejected: "bearer expired: λ",
       },
       {
         type: "nativeSessionMetadata",
@@ -178,6 +194,16 @@ describe("RN Rust/TypeScript foreground codec contract", () => {
       ).toThrow();
       expect(() => decodeNativeForegroundResponse(Uint8Array.from([...response, 0]))).toThrow();
     }
+  });
+
+  test("the appended pending upload count answer decodes", () => {
+    // Pinned by `pending_upload_count_has_pinned_bytes_and_answers` in Rust.
+    expect(decodeNativeForegroundResponse(Uint8Array.of(29, 172, 2))).toEqual({
+      type: "pendingUploadCount",
+      count: 300,
+    });
+    expect(() => decodeNativeForegroundResponse(Uint8Array.of(29))).toThrow();
+    expect(() => decodeNativeForegroundResponse(Uint8Array.of(29, 172, 2, 0))).toThrow();
   });
 
   test("noncanonical Rust request encodings fail closed", () => {

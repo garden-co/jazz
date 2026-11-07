@@ -217,8 +217,8 @@ async fn core_websocket_transport_helper_negotiates_route_hello() {
     )
     .await
     .expect("native transport negotiates public route");
-    let (_, _, session) = client.negotiated_transport_metadata();
-    assert!(session.is_some(), "admitted hello carries session context");
+    let (protocol_version, _) = client.negotiated_transport_metadata();
+    assert_eq!(protocol_version, jazz::wire::WIRE_PROTOCOL_VERSION);
     task.abort();
 }
 
@@ -243,6 +243,8 @@ async fn connected_native_transport_reports_idle_websocket_closure() {
             app_id,
             peer_identity: jazz::ids::AuthorSubject::SYSTEM,
             auth: transport_auth("secret"),
+            authorization: None,
+            bundle: None,
             wake: Arc::new(|| {}),
         })
         .await
@@ -287,6 +289,8 @@ async fn connected_native_transport_reports_owner_drop() {
             app_id,
             peer_identity: jazz::ids::AuthorSubject::SYSTEM,
             auth: transport_auth("secret"),
+            authorization: None,
+            bundle: None,
             wake: Arc::new(|| {}),
         })
         .await
@@ -338,18 +342,24 @@ async fn websocket_transport_wakes_only_for_inbound_db_work() {
     task.abort();
 }
 
-/// Alice's unchanged public `JazzClient::connect` call retains a real online
-/// session through the temporary core WebSocket compatibility adapter.
+/// Alice's unchanged public `JazzClient` calls sync through the explicit
+/// native adapter: her write settles at the server and a remote read sees it.
 ///
 /// alice ──explicit native adapter composition──► websocket ──► server
 #[tokio::test]
-async fn public_jazz_client_connects_through_explicit_native_adapter() {
+async fn public_jazz_client_syncs_through_explicit_native_adapter() {
     tokio::task::LocalSet::new()
         .run_until(async {
             let app_id = AppId::from_name("adapter-public-client-connect");
+            let schema = jazz::tools::SchemaBuilder::new()
+                .table(
+                    jazz::tools::TableSchema::builder("items")
+                        .column("title", jazz::tools::ColumnType::Text),
+                )
+                .build();
             let (url, task) = serve(
                 ServerBuilder::new(app_id)
-                    .with_schema(schema())
+                    .with_schema(schema.clone())
                     .with_auth_config(auth("secret")),
             )
             .await;
@@ -357,20 +367,59 @@ async fn public_jazz_client_connects_through_explicit_native_adapter() {
                 AppContext {
                     app_id,
                     client_id: None,
-                    schema: schema(),
+                    schema,
                     server_url: url,
                     data_dir: std::env::temp_dir(),
                     storage: ClientStorage::Memory,
-                    storage_factory: None,
                     account_id: None,
                     jwt_token: None,
                     backend_secret: None,
+                    backend_session: None,
+                    bundle: None,
                     admin_secret: Some("secret".to_owned()),
+                    migrations: Default::default(),
                 },
                 Arc::new(NativeWebSocketConnector),
             )
             .await
-            .expect("public client connect retains online WebSocket compatibility");
+            .expect("public client connects online");
+            assert!(client.is_connected());
+
+            let (id, _, tx) = client
+                .insert(
+                    "items",
+                    std::collections::HashMap::from([(
+                        "title".to_owned(),
+                        jazz::tools::Value::Text("synced".to_owned()),
+                    )]),
+                )
+                .expect("insert");
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                client.wait_for_transaction(
+                    tx.expect("standalone insert commits"),
+                    jazz::tools::DurabilityTier::GlobalServer,
+                ),
+            )
+            .await
+            .expect("settles in time")
+            .expect("server accepts the insert");
+            let rows = tokio::time::timeout(
+                Duration::from_secs(10),
+                client.query(
+                    jazz::query::Query::from("items"),
+                    jazz::tools::ReadTier::Remote,
+                ),
+            )
+            .await
+            .expect("remote read answers in time")
+            .expect("remote read");
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].key.row_id(), Some(id));
+            assert_eq!(
+                rows[0].get("title"),
+                Some(&jazz::tools::Value::Text("synced".to_owned()))
+            );
             client.shutdown().await.expect("shutdown online client");
             task.abort();
         })

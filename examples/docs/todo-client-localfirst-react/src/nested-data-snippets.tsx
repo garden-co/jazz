@@ -27,16 +27,16 @@ const schema = {
 };
 
 type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema);
+export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
 // #endregion nested-schema
 
 // #region nested-permissions
 s.definePermissions(app, ({ policy, allowedTo, session }) => {
   // Projects: only the creator
-  policy.projects.allowRead.where({ "$createdBy.account": session.user.account });
+  policy.projects.allowRead.where({ "$createdBy.account": session.user });
   policy.projects.allowInsert.always();
-  policy.projects.allowUpdate.where({ "$createdBy.account": session.user.account });
-  policy.projects.allowDelete.where({ "$createdBy.account": session.user.account });
+  policy.projects.allowUpdate.where({ "$createdBy.account": session.user });
+  policy.projects.allowDelete.where({ "$createdBy.account": session.user });
 
   // Tasks: inherit from project
   policy.tasks.allowRead.where(allowedTo.read("project"));
@@ -47,8 +47,8 @@ s.definePermissions(app, ({ policy, allowedTo, session }) => {
   // Comments: inherit from task
   policy.comments.allowRead.where(allowedTo.read("task"));
   policy.comments.allowInsert.where(allowedTo.read("task"));
-  policy.comments.allowUpdate.where({ "$createdBy.account": session.user.account });
-  policy.comments.allowDelete.where({ "$createdBy.account": session.user.account });
+  policy.comments.allowUpdate.where({ "$createdBy.account": session.user });
+  policy.comments.allowDelete.where({ "$createdBy.account": session.user });
 });
 // #endregion nested-permissions
 

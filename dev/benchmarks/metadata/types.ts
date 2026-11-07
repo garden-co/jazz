@@ -1,6 +1,8 @@
 /** Documentation of ONE timed harness iteration, not inferred from table size. */
 export type BenchmarkMetadata = {
   name: string;
+  /** Native suites use Divan; browser user flows use Vitest and Playwright. */
+  harness?: "divan" | "vitest";
   title: string;
   description: string;
   fixture: string;

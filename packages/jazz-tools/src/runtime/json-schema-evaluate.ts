@@ -1168,12 +1168,9 @@ function validate(
     }
 
     if ($uniqueItems) {
-      // Natively, arrays of more than 15 items are checked by hashing, which
-      // tells 0 and -0.0 apart.
-      const signedZero = length > 15;
       outer: for (let j = 0; j < length; j++) {
         for (let k = j + 1; k < length; k++) {
-          if (jsonEqual(array[j], array[k], signedZero)) {
+          if (jsonEqual(array[j], array[k])) {
             errors.push({
               instanceLocation,
               keyword: "uniqueItems",

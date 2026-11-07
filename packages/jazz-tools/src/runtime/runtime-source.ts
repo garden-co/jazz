@@ -1,8 +1,12 @@
+import { mintLocalFirstTokenFromSeed } from "./local-first-token.js";
+import type { ClientMigrations } from "./client-migrations.js";
 import type { RemoteLinkState } from "./remote-link-state.js";
+import type { LinkStatus } from "./sync-status.js";
 import type { WasmSchema } from "../drivers/types.js";
 import type { JazzClient } from "./client.js";
 import type { DbConfig } from "./db.js";
 import type { AuthFailureReason } from "./auth-state.js";
+import type { TextAnchors } from "./text-anchors.js";
 
 export interface RuntimeTokenOptions {
   secret: string;
@@ -14,6 +18,8 @@ export interface RuntimeTokenOptions {
 export interface RuntimeClientContext<RuntimeConfig extends DbConfig = DbConfig> {
   config: RuntimeConfig;
   schema: WasmSchema;
+  /** The migrations the app defining `schema` ships (see {@link ClientMigrations}). */
+  migrations?: ClientMigrations;
   onAuthFailure: (reason: AuthFailureReason) => void;
   /**
    * Browser-only identity leased by the durable SharedWorker before the
@@ -34,10 +40,14 @@ export interface ForegroundNodeLease {
 
 /** Browser-only terminal cleanup; the durable retirement outcome remains unknown. */
 export interface BrowserForegroundNodeLease extends ForegroundNodeLease {
+  /** Ephemeral owner identity; a successor realm cannot acknowledge this port. */
+  readonly workerRealmId?: string;
   /** The caller must first disable the foreground lifetime that can mint this node's TxIds. */
   abandonAfterWorkerFailure(error: Error): void;
   /** Locally releases an erased epoch after its worker-authored reset receipt; never writes a handoff. */
   releaseAfterStorageReset(reason: Error): void;
+  /** Release a dead owner's port after quiescing; its node remains non-reusable. */
+  releaseAfterWorkerReplacement?(reason: Error): void;
 }
 
 export interface RuntimeTelemetryContext<RuntimeConfig extends DbConfig = DbConfig> {
@@ -49,7 +59,14 @@ export interface RuntimeTelemetryContext<RuntimeConfig extends DbConfig = DbConf
 export interface BrowserWorkerConnection {
   /** Only a rejected initial configuration admission permits a later API call to retry. */
   canRetryInitialConfigurationAdmission?(): boolean;
+  /**
+   * The worker refused this connection because another tab holds the store
+   * under another sign-in to the same account: the tab tries again on its
+   * own (see `BROWSER_STORE_HELD_BY_ANOTHER_SIGN_IN`).
+   */
+  waitsForAnotherSignIn?(): boolean;
   ready(): Promise<void>;
+  getWorkerRealmId?(): string | undefined;
   waitForServerConnection(): Promise<void>;
   updateAuth(authJson: string, sessionClaims: Record<string, unknown>): Promise<void>;
   disconnect(): Promise<void>;
@@ -82,7 +99,7 @@ export interface BrowserWorkerConnectionContext<RuntimeConfig extends DbConfig =
   /** The worker namespace's explicit offline state changed. */
   onExplicitOfflineChange?: (offline: boolean) => void;
   /** The worker's live upstream server reachability changed. */
-  onRemoteLinkChange?: (state: RemoteLinkState) => void;
+  onRemoteLinkChange?: (state: RemoteLinkState, link?: LinkStatus) => void;
   onFailure: (error: unknown) => void;
   onStorageReset?: (resetId: number) => void;
   onStorageInvalidated?: () => void;
@@ -97,7 +114,7 @@ export interface BrowserFollowerConnectionContext<RuntimeConfig extends DbConfig
   /** The worker namespace's explicit offline state changed. */
   onExplicitOfflineChange?: (offline: boolean) => void;
   /** The worker's live upstream server reachability changed. */
-  onRemoteLinkChange?: (state: RemoteLinkState) => void;
+  onRemoteLinkChange?: (state: RemoteLinkState, link?: LinkStatus) => void;
   onFailure: (error: unknown) => void;
   onStorageReset?: (resetId: number) => void;
   onStorageInvalidated?: () => void;
@@ -112,11 +129,6 @@ export interface BrowserFollowerConnectionContext<RuntimeConfig extends DbConfig
  * concrete schemas.
  */
 export abstract class RuntimeSource<RuntimeConfig extends DbConfig = DbConfig> {
-  /** Client hosts can select local-first reads independently of DOM globals. */
-  get defaultDurabilityTier(): "local" | "global" | undefined {
-    return undefined;
-  }
-
   /** Set to true when this source can host browser persistence in a dedicated worker. */
   readonly supportsBrowserWorker: boolean = false;
   /** Set to false when the runtime must receive schemas exactly as declared. */
@@ -199,11 +211,21 @@ export abstract class RuntimeSource<RuntimeConfig extends DbConfig = DbConfig> {
     return null;
   }
 
-  mintLocalFirstToken(_options: RuntimeTokenOptions): string {
-    throw new Error("Db runtime source does not support local-first auth");
+  /** Same on every host: minted in TypeScript by `src/local-first-auth`. */
+  mintLocalFirstToken(options: RuntimeTokenOptions): string {
+    return mintLocalFirstTokenFromSeed(
+      options.secret,
+      options.audience,
+      options.ttlSeconds,
+      Number(options.nowSeconds),
+    );
   }
 
   mintAnonymousToken(_options: RuntimeTokenOptions): string {
     throw new Error("Db runtime source does not support anonymous auth");
+  }
+
+  textAnchors(): TextAnchors {
+    throw new Error("Db runtime source does not support text anchors yet");
   }
 }

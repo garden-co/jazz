@@ -1,33 +1,26 @@
-import { createJazzSession } from "../../src/backend/create-jazz-session.js";
+import { createJazz, remote, type Jazz } from "../../src/backend/create-jazz.js";
 import {
   largeValueRewriteApp as app,
   largeValueRewritePermissions,
 } from "./large-value-rewrite-schema.js";
 import type { JazzServerInfo } from "./testing-server.js";
 
-type Session = Awaited<ReturnType<typeof createJazzSession>>;
-const sessions = new Map<string, Session>();
+// The app's backend, run against the core in `info` (as the app runs it).
+const backends = new Map<string, Jazz>();
 
 function backendDb(appId: string) {
-  const snapshot = sessions.get(appId)?.getSnapshot();
-  if (!snapshot || snapshot.status !== "ready" || !snapshot.client) {
-    throw snapshot?.error ?? new Error("Large-value rewrite backend is not open");
-  }
-  return snapshot.client.db;
+  const jazz = backends.get(appId);
+  if (!jazz) throw new Error("Large-value rewrite backend is not open");
+  return jazz.db;
 }
 
 export async function largeValueRewriteBackendOpen(info: JazzServerInfo): Promise<void> {
-  const session = await createJazzSession({
-    appId: info.appId,
-    serverUrl: info.serverUrl,
-    initial: { backendSecret: "jazz-browser-test-backend" },
+  const jazz = createJazz({
     app,
     permissions: largeValueRewritePermissions,
-    driver: { type: "memory" },
-    tier: "global",
-    defaultDurabilityTier: "global",
+    store: remote({ url: info.serverUrl, appId: info.appId, secret: info.adminSecret }),
   });
-  sessions.set(info.appId, session);
+  backends.set(info.appId, jazz);
 }
 
 /** Insert a large attachment and an empty reply into the conversation. */
@@ -53,7 +46,7 @@ export async function largeValueRewriteBackendSeed(
 }
 
 /**
- * Append each word to the reply in its own exclusive read-modify-write
+ * Append each word to the reply in its own serializable read-modify-write
  * transaction, as MusicAgent's runner streams a model reply.
  */
 export async function largeValueRewriteBackendAppend(
@@ -64,7 +57,7 @@ export async function largeValueRewriteBackendAppend(
 ): Promise<string> {
   const db = backendDb(appId);
   for (const word of words) {
-    const write = await db.exclusiveTransaction(async (tx) => {
+    const write = await db.serializableTransaction(async (tx) => {
       const turn = await tx.one(app.turns.where({ id: turnId }));
       tx.update(app.turns, turnId, { body: (turn?.body ?? "") + word });
     });
@@ -72,13 +65,13 @@ export async function largeValueRewriteBackendAppend(
     await new Promise((resolve) => setTimeout(resolve, delayMs));
   }
   const turn = await db.one(app.turns.where({ id: turnId }), {
-    tier: "global",
+    tier: "remote",
   });
   return turn?.body ?? "";
 }
 
 export async function largeValueRewriteBackendClose(appId: string): Promise<void> {
-  const session = sessions.get(appId);
-  await session?.close();
-  if (sessions.get(appId) === session) sessions.delete(appId);
+  const jazz = backends.get(appId);
+  await jazz?.close();
+  if (backends.get(appId) === jazz) backends.delete(appId);
 }

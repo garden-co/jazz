@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { PersistedWriteRejectedError } from "jazz-tools";
-import { isExclusiveConflict, retryOnConflict } from "../../src/lib/retry.js";
+import { isSerializationConflict, retryOnConflict } from "../../src/lib/retry.js";
 
 type TxId = ConstructorParameters<typeof PersistedWriteRejectedError>[0];
 const rejected = (code: string) =>
@@ -16,16 +16,17 @@ function foreignRejection(code: string) {
 
 describe("conflict retries", () => {
   it("retries local and authority conflicts, and nothing else", () => {
-    expect(isExclusiveConflict(rejected("transaction_conflict"))).toBe(true);
-    expect(isExclusiveConflict(rejected("exclusive_conflict"))).toBe(true);
-    expect(isExclusiveConflict(rejected("cascade_rejected"))).toBe(true);
-    expect(isExclusiveConflict(rejected("permission_denied"))).toBe(false);
-    expect(isExclusiveConflict(new Error("(transaction_conflict): not a rejection"))).toBe(false);
+    expect(isSerializationConflict(rejected("transaction_conflict"))).toBe(true);
+    expect(isSerializationConflict(rejected("serialization_conflict"))).toBe(true);
+    expect(isSerializationConflict(rejected("permission_denied"))).toBe(false);
+    expect(isSerializationConflict(new Error("(transaction_conflict): not a rejection"))).toBe(
+      false,
+    );
   });
 
   it("recognises a conflict thrown by another copy of jazz-tools", () => {
-    expect(isExclusiveConflict(foreignRejection("transaction_conflict"))).toBe(true);
-    expect(isExclusiveConflict(foreignRejection("permission_denied"))).toBe(false);
+    expect(isSerializationConflict(foreignRejection("transaction_conflict"))).toBe(true);
+    expect(isSerializationConflict(foreignRejection("permission_denied"))).toBe(false);
   });
 
   it("runs the transaction again after a conflict, and gives up after a bound", async () => {

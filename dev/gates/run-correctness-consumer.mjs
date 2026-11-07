@@ -44,9 +44,18 @@ export function processStartIdentityFromStat(stat) {
 }
 
 function processStartIdentity(pid) {
-  if (process.platform !== "linux") return undefined;
   try {
-    return processStartIdentityFromStat(readFileSync(`/proc/${pid}/stat`, "utf8"));
+    if (process.platform === "linux")
+      return processStartIdentityFromStat(readFileSync(`/proc/${pid}/stat`, "utf8"));
+    if (process.platform === "darwin") {
+      const start = execFileSync("/bin/ps", ["-o", "lstart=", "-p", String(pid)], {
+        encoding: "utf8",
+        env: { ...process.env, LC_ALL: "C", TZ: "UTC" },
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim();
+      if (/^[A-Z][a-z]{2} [A-Z][a-z]{2} +\d{1,2} \d{2}:\d{2}:\d{2} \d{4}$/.test(start))
+        return `darwin:${start}`;
+    }
   } catch {
     return undefined;
   }

@@ -4,10 +4,10 @@ import { prepareTestAccount } from "../../../testing/accounts.js";
 import { app } from "../../schema.js";
 import { hexDump, readFileBlob, readFileRange } from "../../src/large-values.js";
 import { createInvite, inviteLink, parseInviteHash, redeemInvite } from "../../src/sharing.js";
-import { APP_ID, TEST_PORT } from "./test-constants.js";
+import { SCOPE, SERVER_URL } from "./test-constants.js";
 
 const dbs: Db[] = [];
-const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
+const serverUrl = SERVER_URL;
 
 afterEach(async () => {
   await Promise.all(dbs.splice(0).map((db) => db.shutdown()));
@@ -15,14 +15,9 @@ afterEach(async () => {
 
 async function openRemoteDb(label: string): Promise<Db> {
   const db = await createDb({
-    appId: APP_ID,
+    appId: SCOPE,
     serverUrl,
-    account: await prepareTestAccount(
-      createAccountManager,
-      APP_ID,
-      serverUrl,
-      generateAuthSecret(),
-    ),
+    account: await prepareTestAccount(createAccountManager, SCOPE, serverUrl, generateAuthSecret()),
     driver: { type: "persistent", dbName: `epic-drop-${label}-${crypto.randomUUID()}` },
   });
   dbs.push(db);
@@ -30,7 +25,7 @@ async function openRemoteDb(label: string): Promise<Db> {
 }
 
 function sessionUser(db: Db): string {
-  const id = db.getAuthState().session?.user.account;
+  const id = db.getAuthState().session?.user;
   if (!id) throw new Error("expected local-first user session");
   return id;
 }
@@ -108,7 +103,7 @@ describe("EpicDrop download and preview", () => {
     expect(parsed).toEqual(invite);
 
     // Before joining, Bob sees nothing.
-    await expect(bob.all(app.folders, { tier: "global" })).resolves.toEqual([]);
+    await expect(bob.all(app.folders, { tier: "remote" })).resolves.toEqual([]);
 
     // A forged code is rejected by the server.
     await expect(
@@ -116,17 +111,17 @@ describe("EpicDrop download and preview", () => {
     ).rejects.toThrow();
 
     await redeemInvite(bob, parsed!, bobId);
-    const folders = await bob.all(app.folders, { tier: "global" });
+    const folders = await bob.all(app.folders, { tier: "remote" });
     expect(folders.map((folder) => folder.name)).toEqual(["Demos"]);
 
     const [listed] = await bob.all(
       app.files.where({ folder_id: demos.value.id }).select("id", "name", "size_bytes"),
-      { tier: "global" },
+      { tier: "remote" },
     );
     expect(listed).toMatchObject({ name: "lyrics.txt", size_bytes: bytes.length });
     const [page] = await bob.all(
       app.files.where({ id: listed!.id }).select({ contents: { from: 4090, to: 4100 } }),
-      { tier: "global" },
+      { tier: "remote" },
     );
     expect(page!.contents).toEqual(bytes.subarray(4090, 4100));
 

@@ -1,5 +1,5 @@
 import * as React from "react";
-import { JazzSessionProvider, type JazzSessionConfig } from "jazz-tools/expo";
+import { JazzSessionProvider, type JazzClientConfig } from "jazz-tools/expo";
 import {
   ActivityIndicator,
   Platform,
@@ -11,23 +11,20 @@ import {
 } from "react-native";
 import { TodoList } from "./src/TodoList";
 
+// The app's backend (`pnpm backend`), as the simulator reaches it.
 const defaultServerUrl = Platform.select({
   // Android emulator cannot reach host via localhost.
-  android: "http://10.0.2.2:1625",
+  android: "http://10.0.2.2:1625/jazz",
   // iOS simulator can use host localhost directly.
-  ios: "http://127.0.0.1:1625",
-  default: "http://127.0.0.1:1625",
+  ios: "http://127.0.0.1:1625/jazz",
+  default: "http://127.0.0.1:1625/jazz",
 });
-
-const defaultAppId = "00000000-0000-0000-0000-000000000002";
 
 // Expo's Metro bundler inlines process.env.EXPO_PUBLIC_* at bundle time.
 // They must be accessed as literal process.env.KEY expressions — dynamic
 // lookups like globalThis.process.env[key] won't be replaced.
 declare const process: { env: Record<string, string | undefined> };
-const envAppId = process.env.EXPO_PUBLIC_JAZZ_APP_ID;
 const envServerUrl = process.env.EXPO_PUBLIC_JAZZ_SERVER_URL;
-const appId = envAppId ?? defaultAppId;
 const serverUrl = envServerUrl ?? defaultServerUrl;
 const styles = StyleSheet.create({
   container: {
@@ -67,7 +64,7 @@ const defaultFallback = (
 );
 
 type AppProps = {
-  config?: JazzSessionConfig;
+  config?: JazzClientConfig;
   fallback?: React.ReactNode;
 };
 
@@ -75,7 +72,7 @@ type AppProps = {
 export default function App({ config, fallback }: AppProps = {}) {
   return (
     <JazzSessionProvider
-      config={config ?? { appId, serverUrl, initial: "local-first" }}
+      config={config ?? { serverUrl, initial: "local-first" }}
       fallback={fallback ?? defaultFallback}
     >
       <SafeAreaView style={styles.container}>

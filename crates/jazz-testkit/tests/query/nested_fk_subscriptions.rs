@@ -72,7 +72,7 @@ async fn next_list(stream: &mut SubscriptionStream) -> Row {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             match stream.next().await.expect("subscription must remain open") {
-                SubscriptionStreamItem::Rejected { reason } => {
+                SubscriptionStreamItem::Rejected { reason, .. } => {
                     panic!("subscription rejected: {reason:?}")
                 }
                 SubscriptionStreamItem::Delta(delta) => {

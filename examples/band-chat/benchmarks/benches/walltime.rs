@@ -28,15 +28,15 @@ fn band_chat_unread_recent_rooms(bencher: divan::Bencher<'_, '_>, message_count:
     bencher.bench_local(|| divan::black_box(fixture.unread_room_count()));
 }
 
-/// Measure the remaining manifest cost for thesis #2136. A fresh usage cannot
-/// infer its input closure from a cursor; known row bodies remain deduplicated.
+/// Measure reconnecting a caught-up client (thesis #2136): it declares the
+/// rows it holds and the server ships none of them again.
 #[divan::bench(args = [100, 10_000])]
 fn band_chat_caught_up_fast_resume(bencher: divan::Bencher<'_, '_>, message_count: usize) {
     let mut fixture = FastResumeFixture::new(message_count);
     bencher.bench_local(|| {
         let receipt = fixture.caught_up_fast_resume();
         assert!(
-            receipt.is_body_deduplicated_reset(),
+            receipt.ships_no_rows(),
             "caught-up resume leaked a payload: {receipt:?}"
         );
         divan::black_box(receipt)

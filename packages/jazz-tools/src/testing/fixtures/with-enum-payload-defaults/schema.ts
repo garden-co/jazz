@@ -1,19 +1,22 @@
-import { col } from "../../../dsl.js";
+import { schema as s } from "../../../schema-namespace.js";
 import { defineApp } from "../../../typed-app.js";
 
-const generatedApp = defineApp({
-  records: {
-    state: col
-      .enum({
-        ready: {
-          count: col.int().default(3),
-          label: col.string().default("queued"),
-          note: col.string().optional().default(null),
-        },
-      })
-      .default({ type: "ready", count: 7, label: "live", note: "unused" }),
+const generatedApp = defineApp(
+  {
+    records: {
+      state: s
+        .enum({
+          ready: {
+            count: s.int().default(3),
+            label: s.string().default("queued"),
+            note: s.string().optional().default(null),
+          },
+        })
+        .default({ type: "ready", count: 7, label: "live", note: "unused" }),
+    },
   },
-});
+  { migrations: "none" },
+);
 
 const stateColumn = generatedApp.wasmSchema.records.columns[0]!;
 if (stateColumn.default?.type !== "Enum") {

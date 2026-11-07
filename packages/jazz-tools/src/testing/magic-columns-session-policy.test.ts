@@ -7,11 +7,11 @@ const schema = {
   notes: s.table({ title: s.string(), ownerId: s.uuid() }, {}),
 };
 type Schema = s.Schema<typeof schema>;
-const app: s.App<Schema> = s.defineApp(schema);
+const app: s.App<Schema> = s.defineApp(schema, { migrations: "none" });
 
 const sessionPolicy = definePermissions(app, ({ policy, session }) => {
-  policy.notes.allowRead.where({ ownerId: session.user.account });
-  policy.notes.allowInsert.where({ ownerId: session.user.account });
+  policy.notes.allowRead.where({ ownerId: session.user });
+  policy.notes.allowInsert.where({ ownerId: session.user });
 });
 const openPolicy = definePermissions(app, ({ policy }) => {
   policy.notes.allowRead.always();
@@ -38,7 +38,7 @@ describe.each([
       await db.insert(app.notes, { title: "one", ownerId: account }).wait({ tier: "global" });
 
       const rows = await db.all(app.notes.select("title", "$createdAt", "$updatedAt"), {
-        tier: "global",
+        tier: "remote",
       });
 
       expect(rows).toHaveLength(1);

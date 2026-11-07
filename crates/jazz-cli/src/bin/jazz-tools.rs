@@ -26,7 +26,7 @@ static GLOBAL: jazz_cli::heap_profiling::SamplingAllocator<mimalloc::MiMalloc> =
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use clap::{Parser, Subcommand};
-use jazz_cli::commands;
+use jazz::tools::AppId;
 #[cfg(feature = "otel")]
 use jazz_otel as otel;
 use jazz_server::AuthConfig;
@@ -53,29 +53,6 @@ fn resolve_dev_default_flag(mode: NodeEnvMode, enabled_in_production: bool) -> b
         NodeEnvMode::Production => enabled_in_production,
         NodeEnvMode::DevelopmentLike => true,
     }
-}
-
-fn resolve_jwt_public_key_input(value: String) -> Result<String, String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return Err("JWT public key cannot be empty".to_string());
-    }
-
-    if trimmed.starts_with('{') || trimmed.starts_with("-----BEGIN") {
-        return Ok(trimmed.to_string());
-    }
-
-    let path = std::path::Path::new(trimmed);
-    if path.exists() {
-        return std::fs::read_to_string(path).map_err(|error| {
-            format!(
-                "failed to read JWT public key file '{}': {error}",
-                path.display()
-            )
-        });
-    }
-
-    Ok(trimmed.to_string())
 }
 
 fn parse_app_id(value: &str) -> Result<String, String> {
@@ -111,6 +88,14 @@ struct Cli {
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 enum Commands {
+    /// Import an alpha.59 server data dir into a new one, from the dump that
+    /// `jazz-alpha59-alpha60-export` writes (`import`), and check the result
+    /// (`verify`). Run `jazz-tools alpha59-alpha60` for its usage.
+    #[command(name = "alpha59-alpha60")]
+    Alpha59Alpha60 {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Create a new resource
     Create {
         #[command(subcommand)]
@@ -134,40 +119,101 @@ enum Commands {
         #[arg(long)]
         in_memory: bool,
 
-        /// URL to fetch JWKS keys for JWT validation (production)
-        #[arg(long, env = "JAZZ_JWKS_URL")]
-        jwks_url: Option<String>,
+        /// Where large values' bytes live once they settle: `files` (the
+        /// `blobs/` directory next to the data, or --blobs-dir), `s3` (an
+        /// S3-compatible bucket, see --s3-*), `vercel-blob` (a Vercel Blob
+        /// store, see --vercel-blob-*) or `sqlite` (inside the database
+        /// file). A data directory keeps its choice, except that `sqlite`
+        /// may later move to any other.
+        #[arg(long, default_value = "files", value_parser = ["files", "s3", "vercel-blob", "sqlite"])]
+        blobs: String,
 
-        /// Single JWK JSON object or PEM public key for JWT validation.
-        ///
-        /// Accepts inline contents or a path to a file containing the key.
-        #[arg(long, env = "JAZZ_JWT_PUBLIC_KEY", conflicts_with = "jwks_url")]
-        jwt_public_key: Option<String>,
+        /// Directory for `--blobs files` (defaults to `<data-dir>/blobs`).
+        #[arg(long)]
+        blobs_dir: Option<String>,
 
-        /// Required issuer for externally verified JWTs.
-        #[arg(long, env = "JAZZ_JWT_ISSUER")]
-        jwt_issuer: Option<String>,
+        /// Bucket for `--blobs s3` (defaults to S3_BUCKET_NAME). Credentials
+        /// come from AWS_ROLE_ARN with an OIDC token, or AWS_ACCESS_KEY_ID
+        /// and AWS_SECRET_ACCESS_KEY.
+        #[arg(long)]
+        s3_bucket: Option<String>,
 
-        /// Required audience for externally verified JWTs.
-        #[arg(long, env = "JAZZ_JWT_AUDIENCE")]
-        jwt_audience: Option<String>,
+        /// The bucket's region (defaults to AWS_REGION; `auto` for R2).
+        #[arg(long)]
+        s3_region: Option<String>,
 
-        /// Cookie name used for browser auth on the `/ws` upgrade.
-        #[arg(long, env = "JAZZ_AUTH_COOKIE_NAME")]
-        auth_cookie_name: Option<String>,
+        /// An S3-compatible endpoint other than AWS, e.g. R2's.
+        #[arg(long)]
+        s3_endpoint: Option<String>,
 
-        /// Trust X-Forwarded-Host for cookie WebSocket origin checks.
-        ///
-        /// Enable only when Jazz is reachable exclusively through a trusted
-        /// proxy that removes client-supplied forwarded headers.
-        #[arg(long = "trust-proxy", env = "JAZZ_TRUST_PROXY")]
-        trust_forwarded_host: bool,
+        /// Prefix for every object name; defaults to jazz/<store id>/,
+        /// one per data dir. A prefix is claimed by the first store to use it.
+        #[arg(long)]
+        s3_prefix: Option<String>,
+
+        /// Assume AWS_ROLE_ARN with the trusted workload's own OIDC token
+        /// (as a `vercel()` core does), not AWS_WEB_IDENTITY_TOKEN_FILE.
+        #[arg(long)]
+        s3_role_from_workload: bool,
+
+        /// Store for `--blobs vercel-blob` (defaults to BLOB_STORE_ID, or the
+        /// store BLOB_READ_WRITE_TOKEN is for). Credentials come from
+        /// VERCEL_OIDC_TOKEN, or BLOB_READ_WRITE_TOKEN.
+        #[arg(long)]
+        vercel_blob_store_id: Option<String>,
+
+        /// Prefix for every blob's pathname; defaults to
+        /// jazz/<store id>/, one per data dir.
+        #[arg(long)]
+        vercel_blob_prefix: Option<String>,
+
+        /// Authenticate to Vercel Blob with the trusted workload's own OIDC
+        /// token (as a `vercel()` core does), not VERCEL_OIDC_TOKEN.
+        #[arg(long)]
+        vercel_blob_token_from_workload: bool,
+
+        /// The deployment environment (production, preview, …) this server
+        /// runs in. With `--blobs s3` or `--blobs vercel-blob`, the bucket or
+        /// Blob store is claimed for it, and a server of another environment
+        /// is refused there (a `vercel()` core passes it).
+        #[arg(long)]
+        blobs_environment: Option<String>,
 
         /// Enable local-first auth (Authorization: Bearer <self-signed Jazz JWT>).
         ///
         /// Required in NODE_ENV=production.
         #[arg(long, env = "JAZZ_ALLOW_LOCAL_FIRST_AUTH")]
         allow_local_first_auth: bool,
+
+        /// Trust only this OIDC workload instead of shared secrets: every
+        /// request and session must carry its token in
+        /// X-Jazz-Backend-Credential, and states its access in
+        /// X-Jazz-Backend-Access. Needs the subject and audience flags too;
+        /// replaces the backend and admin secrets. Graceful shutdown then
+        /// goes through SIGTERM.
+        #[arg(
+            long,
+            env = "JAZZ_TRUSTED_WORKLOAD_ISSUER",
+            requires_all = ["trusted_workload_audience", "trusted_workload_subject"],
+            conflicts_with_all = ["backend_secret", "admin_secret"]
+        )]
+        trusted_workload_issuer: Option<String>,
+
+        /// Audience a trusted workload token must target.
+        #[arg(
+            long,
+            env = "JAZZ_TRUSTED_WORKLOAD_AUDIENCE",
+            requires = "trusted_workload_issuer"
+        )]
+        trusted_workload_audience: Option<String>,
+
+        /// Exact subject a trusted workload token must carry.
+        #[arg(
+            long,
+            env = "JAZZ_TRUSTED_WORKLOAD_SUBJECT",
+            requires = "trusted_workload_issuer"
+        )]
+        trusted_workload_subject: Option<String>,
 
         /// Secret for backend session impersonation
         #[arg(long, env = "JAZZ_BACKEND_SECRET")]
@@ -185,6 +231,40 @@ enum Commands {
             value_parser = parse_shutdown_timeout_secs,
         )]
         shutdown_timeout_secs: u64,
+
+        /// Maximum live WebSocket connections. Upgrades beyond it get
+        /// `503 Service Unavailable` with `Retry-After`.
+        #[arg(
+            long,
+            env = "JAZZ_MAX_CONNECTIONS",
+            default_value_t = jazz_server::server::DEFAULT_MAX_WEBSOCKET_CONNECTIONS,
+            value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..),
+        )]
+        max_connections: usize,
+
+        /// Memory the server sizes its caches against, in bytes. Defaults to
+        /// the container's cgroup memory limit.
+        #[arg(long, env = "JAZZ_MEMORY_LIMIT_BYTES", value_parser = clap::value_parser!(u64).range(1..))]
+        memory_limit_bytes: Option<u64>,
+
+        /// Read the query indexes of stored tables from storage by key,
+        /// keeping only a bounded cache of them in memory. `0` holds them
+        /// all in memory instead.
+        #[arg(
+            long,
+            env = "JAZZ_STORED_ARRANGEMENTS",
+            default_value_t = true,
+            action = clap::ArgAction::Set,
+            value_parser = clap::builder::BoolishValueParser::new(),
+        )]
+        stored_arrangements: bool,
+
+        /// Bytes the query cache may keep while memory is plentiful.
+        /// Defaults to a quarter of the memory limit; it is lowered under
+        /// memory pressure either way. `0` keeps nothing resident, so every
+        /// query reads the indexes of stored tables from storage.
+        #[arg(long, env = "JAZZ_QUERY_CACHE_BUDGET_BYTES", value_parser = clap::value_parser!(u64))]
+        query_cache_budget_bytes: Option<u64>,
 
         /// Internal testing hook: write the resolved listen port after binding.
         #[arg(long, env = "JAZZ_BOUND_PORT_FILE", hide = true)]
@@ -229,10 +309,10 @@ fn main() {
 }
 
 async fn run() {
-    // Initialize tracing with layered subscriber
-    init_tracing();
-
     let cli = Cli::parse();
+    // alpha59-alpha60 prints its JSON summary on stdout, so its logs go to
+    // stderr.
+    init_tracing(matches!(cli.command, Commands::Alpha59Alpha60 { .. }));
     if let Err(error) = validate_server_cli_options(&cli.command) {
         eprintln!("Server error: {error}");
         shutdown_tracing();
@@ -240,9 +320,15 @@ async fn run() {
     }
 
     match cli.command {
+        Commands::Alpha59Alpha60 { args } => {
+            let code = jazz_cli::alpha59_alpha60::main("jazz-tools alpha59-alpha60", args).await;
+            shutdown_tracing();
+            std::process::exit(code);
+        }
         Commands::Create { resource } => match resource {
             CreateResource::App { name } => {
-                commands::create::app(name);
+                let app_id = name.map_or_else(AppId::random, |name| AppId::from_name(&name));
+                println!("{app_id}");
             }
         },
         Commands::Server {
@@ -250,16 +336,28 @@ async fn run() {
             port,
             data_dir,
             in_memory,
-            jwks_url,
-            jwt_public_key,
-            jwt_issuer,
-            jwt_audience,
-            auth_cookie_name,
-            trust_forwarded_host,
+            blobs,
+            blobs_dir,
+            s3_bucket,
+            s3_region,
+            s3_endpoint,
+            s3_prefix,
+            s3_role_from_workload,
+            vercel_blob_store_id,
+            vercel_blob_prefix,
+            vercel_blob_token_from_workload,
+            blobs_environment,
             allow_local_first_auth,
             backend_secret,
             admin_secret,
+            trusted_workload_issuer,
+            trusted_workload_audience,
+            trusted_workload_subject,
             shutdown_timeout_secs,
+            max_connections,
+            memory_limit_bytes,
+            stored_arrangements,
+            query_cache_budget_bytes,
             bound_port_file,
             diagnostics_listen,
             diagnostics_token,
@@ -277,35 +375,46 @@ async fn run() {
                      acknowledge this explicitly."
                 );
             }
-            let jwt_public_key = match jwt_public_key {
-                Some(value) => match resolve_jwt_public_key_input(value) {
-                    Ok(value) => Some(value),
-                    Err(error) => {
-                        eprintln!("Server error: {error}");
-                        shutdown_tracing();
-                        std::process::exit(1);
-                    }
-                },
-                None => None,
-            };
-
             let auth_config = AuthConfig {
-                jwks_url,
-                jwt_public_key,
-                jwt_issuer,
-                jwt_audience,
-                auth_cookie_name,
-                trust_forwarded_host,
                 allow_local_first_auth,
                 backend_secret,
                 admin_secret,
+                trusted_workload: trusted_workload_issuer.map(|issuer| {
+                    jazz_server::middleware::workload::TrustedWorkload {
+                        issuer,
+                        audience: trusted_workload_audience.unwrap_or_default(),
+                        subject: trusted_workload_subject.unwrap_or_default(),
+                    }
+                }),
                 ..Default::default()
             };
-            if let Err(e) = commands::server::run(
+            let blobs = match (jazz_server::BlobOptions {
+                kind: blobs,
+                dir: blobs_dir,
+                s3_bucket,
+                s3_region,
+                s3_endpoint,
+                s3_prefix,
+                s3_role_from_workload,
+                vercel_blob_store_id,
+                vercel_blob_prefix,
+                vercel_blob_token_from_workload,
+                environment: blobs_environment,
+            })
+            .resolve()
+            {
+                Ok(blobs) => blobs,
+                Err(error) => {
+                    eprintln!("Error: {error}");
+                    std::process::exit(1);
+                }
+            };
+            if let Err(e) = jazz_server::run(
                 &app_id,
                 port,
                 &data_dir,
                 in_memory,
+                blobs,
                 auth_config,
                 bound_port_file,
                 std::time::Duration::from_secs(shutdown_timeout_secs),
@@ -316,6 +425,13 @@ async fn run() {
                     heap_profiler: None,
                     listen: diagnostics_listen,
                     token: diagnostics_token,
+                },
+                jazz_server::resources::ServerResourceLimits {
+                    max_websocket_connections: max_connections,
+                    memory_limit_bytes: memory_limit_bytes
+                        .or_else(jazz_server::resources::detect_memory_limit_bytes),
+                    stored_arrangements,
+                    query_cache_budget_bytes,
                 },
             )
             .await
@@ -339,15 +455,19 @@ fn validate_removed_edge_environment(
     Ok(())
 }
 
+/// User-auth settings a core no longer reads: the app's backend verifies its
+/// users itself and opens their sessions with its backend secret.
+const REMOVED_USER_AUTH_ENV: [&str; 6] = [
+    "JAZZ_JWKS_URL",
+    "JAZZ_JWT_PUBLIC_KEY",
+    "JAZZ_JWT_ISSUER",
+    "JAZZ_JWT_AUDIENCE",
+    "JAZZ_AUTH_COOKIE_NAME",
+    "JAZZ_TRUST_PROXY",
+];
+
 fn validate_server_cli_options(command: &Commands) -> Result<(), String> {
-    let Commands::Server {
-        jwks_url,
-        jwt_public_key,
-        jwt_issuer,
-        jwt_audience,
-        ..
-    } = command
-    else {
+    let Commands::Server { .. } = command else {
         return Ok(());
     };
 
@@ -355,35 +475,26 @@ fn validate_server_cli_options(command: &Commands) -> Result<(), String> {
         std::env::var_os("JAZZ_UPSTREAM_URL").is_some(),
         std::env::var_os("JAZZ_EDGE_CACHE_BUDGET_BYTES").is_some(),
     )?;
+    validate_removed_user_auth_environment(
+        REMOVED_USER_AUTH_ENV
+            .iter()
+            .copied()
+            .filter(|name| std::env::var_os(name).is_some()),
+    )
+}
 
-    let external_jwt_key_configured = jwks_url.is_some() || jwt_public_key.is_some();
-    if external_jwt_key_configured {
-        if jwt_issuer
-            .as_deref()
-            .is_none_or(|value| value.trim().is_empty())
-        {
-            return Err(
-                "--jwt-issuer / JAZZ_JWT_ISSUER is required with --jwks-url or --jwt-public-key"
-                    .to_owned(),
-            );
-        }
-        if jwt_audience
-            .as_deref()
-            .is_none_or(|value| value.trim().is_empty())
-        {
-            return Err(
-                "--jwt-audience / JAZZ_JWT_AUDIENCE is required with --jwks-url or --jwt-public-key"
-                    .to_owned(),
-            );
-        }
-    } else if jwt_issuer.is_some() || jwt_audience.is_some() {
-        return Err(
-            "--jwt-issuer and --jwt-audience require --jwks-url / JAZZ_JWKS_URL or --jwt-public-key / JAZZ_JWT_PUBLIC_KEY"
-                .to_owned(),
-        );
+fn validate_removed_user_auth_environment<'a>(
+    set: impl Iterator<Item = &'a str>,
+) -> Result<(), String> {
+    let set: Vec<&str> = set.collect();
+    if set.is_empty() {
+        return Ok(());
     }
-
-    Ok(())
+    Err(format!(
+        "{} {} not supported: a core verifies no user tokens or cookies. Authenticate users in your app's backend (createJazz), which syncs for them with its backend secret.",
+        set.join(", "),
+        if set.len() == 1 { "is" } else { "are" },
+    ))
 }
 
 fn make_env_filter() -> tracing_subscriber::EnvFilter {
@@ -403,11 +514,17 @@ static OTEL_LOGGER_PROVIDER: std::sync::OnceLock<opentelemetry_sdk::logs::SdkLog
 static OTEL_METER_PROVIDER: std::sync::OnceLock<opentelemetry_sdk::metrics::SdkMeterProvider> =
     std::sync::OnceLock::new();
 
-fn init_tracing() {
+fn init_tracing(to_stderr: bool) {
+    use tracing_subscriber::fmt::writer::BoxMakeWriter;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
-    let fmt_layer = tracing_subscriber::fmt::layer();
+    let writer = if to_stderr {
+        BoxMakeWriter::new(std::io::stderr)
+    } else {
+        BoxMakeWriter::new(std::io::stdout)
+    };
+    let fmt_layer = tracing_subscriber::fmt::layer().with_writer(writer);
 
     #[cfg(feature = "otel")]
     {
@@ -556,70 +673,95 @@ mod tests {
     }
 
     #[test]
-    fn server_command_accepts_fully_bound_external_jwt_config() {
+    fn removed_user_auth_settings_are_refused() {
+        assert!(validate_removed_user_auth_environment(std::iter::empty()).is_ok());
+        let error = validate_removed_user_auth_environment(
+            ["JAZZ_JWKS_URL", "JAZZ_AUTH_COOKIE_NAME"].into_iter(),
+        )
+        .expect_err("a core no longer reads user-auth settings");
+        assert!(
+            error.starts_with("JAZZ_JWKS_URL, JAZZ_AUTH_COOKIE_NAME are not supported"),
+            "{error}"
+        );
+        assert!(
+            Cli::try_parse_from([
+                "jazz-tools",
+                "server",
+                "7c5fd0da-4bd1-4ba9-9203-41e1f0da142c",
+                "--jwks-url",
+                "https://issuer.example/.well-known/jwks.json",
+            ])
+            .is_err(),
+            "the flag is gone"
+        );
+    }
+
+    #[test]
+    fn server_command_reads_query_cache_switches_from_env() {
         let _lock = ENV_LOCK.lock().expect("env lock");
+        let _stored_guard = EnvVarGuard::set("JAZZ_STORED_ARRANGEMENTS", "0");
+        let _budget_guard = EnvVarGuard::set("JAZZ_QUERY_CACHE_BUDGET_BYTES", "1048576");
         let cli = Cli::try_parse_from([
             "jazz-tools",
             "server",
             "7c5fd0da-4bd1-4ba9-9203-41e1f0da142c",
-            "--jwt-public-key",
-            r#"{"kty":"oct","kid":"test-kid","alg":"HS256","k":"c2VjcmV0"}"#,
-            "--jwt-issuer",
-            "https://issuer.example",
-            "--jwt-audience",
-            "test-app",
-            "--trust-proxy",
         ])
         .expect("server command should parse");
-
-        validate_server_cli_options(&cli.command)
-            .expect("bound external JWT configuration should be valid");
         match cli.command {
             Commands::Server {
-                jwt_issuer,
-                jwt_audience,
-                trust_forwarded_host,
+                stored_arrangements,
+                query_cache_budget_bytes,
                 ..
             } => {
-                assert_eq!(jwt_issuer.as_deref(), Some("https://issuer.example"));
-                assert_eq!(jwt_audience.as_deref(), Some("test-app"));
-                assert!(trust_forwarded_host);
+                assert!(!stored_arrangements);
+                assert_eq!(query_cache_budget_bytes, Some(1 << 20));
             }
             _ => panic!("expected server command"),
         }
     }
 
     #[test]
-    fn server_cli_validation_requires_external_jwt_issuer_and_audience() {
+    fn server_command_defaults_and_validates_max_connections() {
         let _lock = ENV_LOCK.lock().expect("env lock");
-        let _issuer = EnvVarGuard::remove("JAZZ_JWT_ISSUER");
-        let _audience = EnvVarGuard::remove("JAZZ_JWT_AUDIENCE");
+        let _env_guard = EnvVarGuard::remove("JAZZ_MAX_CONNECTIONS");
+        let _stored_guard = EnvVarGuard::remove("JAZZ_STORED_ARRANGEMENTS");
+        let _budget_guard = EnvVarGuard::remove("JAZZ_QUERY_CACHE_BUDGET_BYTES");
         let cli = Cli::try_parse_from([
             "jazz-tools",
             "server",
             "7c5fd0da-4bd1-4ba9-9203-41e1f0da142c",
-            "--jwks-url",
-            "https://issuer.example/.well-known/jwks.json",
         ])
         .expect("server command should parse");
+        match cli.command {
+            Commands::Server {
+                max_connections,
+                memory_limit_bytes,
+                stored_arrangements,
+                query_cache_budget_bytes,
+                ..
+            } => {
+                assert_eq!(
+                    max_connections,
+                    jazz_server::server::DEFAULT_MAX_WEBSOCKET_CONNECTIONS
+                );
+                assert_eq!(memory_limit_bytes, None);
+                assert!(stored_arrangements);
+                assert_eq!(query_cache_budget_bytes, None);
+            }
+            _ => panic!("expected server command"),
+        }
 
-        let error = validate_server_cli_options(&cli.command)
-            .expect_err("external JWT verifier without issuer must fail");
-        assert!(error.contains("--jwt-issuer"), "{error}");
-
-        let cli = Cli::try_parse_from([
-            "jazz-tools",
-            "server",
-            "7c5fd0da-4bd1-4ba9-9203-41e1f0da142c",
-            "--jwks-url",
-            "https://issuer.example/.well-known/jwks.json",
-            "--jwt-issuer",
-            "https://issuer.example",
-        ])
-        .expect("server command should parse");
-        let error = validate_server_cli_options(&cli.command)
-            .expect_err("external JWT verifier without audience must fail");
-        assert!(error.contains("--jwt-audience"), "{error}");
+        assert!(
+            Cli::try_parse_from([
+                "jazz-tools",
+                "server",
+                "7c5fd0da-4bd1-4ba9-9203-41e1f0da142c",
+                "--max-connections",
+                "0",
+            ])
+            .is_err(),
+            "a zero connection cap would refuse every client"
+        );
     }
 
     #[test]

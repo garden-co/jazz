@@ -1,7 +1,8 @@
-import { applyDelta } from "../shared/index.js";
-import { limitQueryToOne } from "../runtime/db.js";
+import { applyDelta, applyDeltaToRows } from "../reconcile-array.js";
+import { limitQueryToOne, type Db } from "../runtime/db.js";
 import type { QueryBuilder, QueryOptions, SubscriptionDelta } from "../shared/index.js";
-import { getJazzContext } from "./context.svelte.js";
+import { getJazzContext, type JazzContext } from "./context.svelte.js";
+import { toError } from "../runtime/util.js";
 
 type MaybeGetter<T> = T | (() => T);
 
@@ -11,7 +12,7 @@ function resolve<T>(value: MaybeGetter<T>): T {
 
 /**
  * Reactive query subscription. Instantiate in a component script block,
- * access results via `.current`.
+ * access results via `.current` and the {@link Db} handle for writes via `.db`.
  *
  * @param query - the database query, or a getter for a dynamic query
  *   (e.g. `() => filter ? app.todos.where({ title: { contains: filter } }) : undefined`).
@@ -21,7 +22,7 @@ function resolve<T>(value: MaybeGetter<T>): T {
  *
  * ```svelte
  * <script lang="ts">
- *   const todos = new QuerySubscription(app.todos.where({ done: false }), { tier: "global" });
+ *   const todos = new QuerySubscription(app.todos.where({ done: false }), { tier: "remote" });
  * </script>
  *
  * {#if todos.isLoading}
@@ -30,7 +31,7 @@ function resolve<T>(value: MaybeGetter<T>): T {
  *   <p>Error: {todos.error.message}</p>
  * {:else}
  *   {#each todos.current ?? [] as todo}
- *     <p>{todo.title}</p>
+ *     <p onclick={() => todos.db.update(app.todos, todo.id, { done: true })}>{todo.title}</p>
  *   {/each}
  * {/if}
  * ```
@@ -39,6 +40,18 @@ class QuerySubscriptionBase<T extends { id: string }, Result> {
   current: Result | undefined = $state();
   isLoading: boolean = $state(true);
   error: Error | null = $state(null);
+  readonly #ctx: JazzContext;
+
+  /**
+   * The {@link Db} handle for writes, so components don't need a separate
+   * `getDb()`. Throws if the provider has not finished opening the database.
+   */
+  get db(): Db {
+    if (!this.#ctx.db) {
+      throw new Error("Jazz database is not yet initialised");
+    }
+    return this.#ctx.db;
+  }
 
   protected constructor(
     query: MaybeGetter<QueryBuilder<T> | undefined>,
@@ -46,6 +59,7 @@ class QuerySubscriptionBase<T extends { id: string }, Result> {
     mode: "all" | "one",
   ) {
     const ctx = getJazzContext();
+    this.#ctx = ctx;
 
     $effect(() => {
       const resolvedQuery = resolve(query);
@@ -95,17 +109,12 @@ class QuerySubscriptionBase<T extends { id: string }, Result> {
               const rows = delta.all ?? (this.current ? [this.current as unknown as T] : []);
               if (!delta.all) applyDelta(rows, delta);
               this.current = (rows[0] ?? null) as unknown as Result;
-            } else if (this.current) {
-              applyDelta(this.current as T[], delta);
-            } else if (delta.reset) {
-              this.current = [...delta.all] as unknown as Result;
             } else {
-              this.current = [] as unknown as Result;
-              applyDelta(this.current as T[], delta);
+              this.current = applyDeltaToRows(this.current as T[] | undefined, delta) as Result;
             }
           },
           onError: (error: unknown) => {
-            this.error = error instanceof Error ? error : new Error(String(error));
+            this.error = toError(error);
             this.current = undefined;
             this.isLoading = false;
           },
@@ -116,7 +125,7 @@ class QuerySubscriptionBase<T extends { id: string }, Result> {
           },
         });
       } catch (e) {
-        this.error = e instanceof Error ? e : new Error(String(e));
+        this.error = toError(e);
         this.isLoading = false;
       }
 

@@ -1,3 +1,4 @@
+use crate::{ids::NodeUuid, time::TxTime};
 use internment::Intern;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use smallvec::SmallVec;
@@ -73,32 +74,60 @@ impl Ord for ObjectId {
 mod occurrence {
     use super::*;
 
+    /// Complete identity of one occurrence emitted by a query source.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct SourceOccurrenceId {
+        row: ObjectId,
+        version: Option<(TxTime, NodeUuid)>,
+    }
+
+    impl SourceOccurrenceId {
+        pub fn current(row: ObjectId) -> Self {
+            Self { row, version: None }
+        }
+
+        pub fn history(row: ObjectId, time: TxTime, node: NodeUuid) -> Self {
+            Self {
+                row,
+                version: Some((time, node)),
+            }
+        }
+
+        pub fn row_id(&self) -> ObjectId {
+            self.row
+        }
+
+        pub fn version(&self) -> Option<(TxTime, NodeUuid)> {
+            self.version
+        }
+    }
+
     /// Stable identity of one rendered query-output occurrence.
     ///
     /// The root source row is always first. `joined` contains contributing source
     /// rows in the query's declared join order. This is deliberately distinct from
     /// a source [`ObjectId`]: one source row can contribute to more than one output
-    /// occurrence.
+    /// occurrence. Serialization delegates to ResultKey so every identity field
+    /// survives a round trip through the single result-key encoding.
     #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+    #[serde(from = "ResultKey", into = "ResultKey")]
     pub struct OutputOccurrenceId {
-        pub(super) root: ObjectId,
-        pub(super) joined: SmallVec<[ObjectId; 2]>,
+        root: SourceOccurrenceId,
+        joined: SmallVec<[SourceOccurrenceId; 2]>,
         /// Stable typed derivation discriminators keyed by joined-source position.
-        /// Empty for the ordinary row-only identity and omitted from its wire form.
-        // The postcard OutputOccurrenceId carrier remains exactly `(root, joined)`.
-        // ResultKey owns the complete typed V1 sidecar envelope and must never add
-        // a positional postcard field here.
-        #[serde(skip)]
         union_arms: SmallVec<[(usize, String); 1]>,
     }
 
     impl OutputOccurrenceId {
         pub fn has_typed_discriminators(&self) -> bool {
             !self.union_arms.is_empty()
+                || self
+                    .source_occurrences()
+                    .any(|source| source.version().is_some())
         }
 
         pub fn root_source(&self) -> ObjectId {
-            self.root
+            self.root.row_id()
         }
 
         pub fn union_arms(&self) -> &[(usize, String)] {
@@ -111,8 +140,11 @@ mod occurrence {
         /// cases stay inline.
         pub fn new(root: ObjectId, joined: impl IntoIterator<Item = ObjectId>) -> Self {
             Self {
-                root,
-                joined: joined.into_iter().collect(),
+                root: SourceOccurrenceId::current(root),
+                joined: joined
+                    .into_iter()
+                    .map(SourceOccurrenceId::current)
+                    .collect(),
                 union_arms: SmallVec::new(),
             }
         }
@@ -120,6 +152,19 @@ mod occurrence {
         pub fn with_union_arms(
             root: ObjectId,
             joined: impl IntoIterator<Item = ObjectId>,
+            union_arms: impl IntoIterator<Item = (usize, String)>,
+        ) -> Option<Self> {
+            Self::from_source_occurrences(
+                SourceOccurrenceId::current(root),
+                joined.into_iter().map(SourceOccurrenceId::current),
+                union_arms,
+            )
+        }
+
+        /// Compose complete source identities in declared join order.
+        pub fn from_source_occurrences(
+            root: SourceOccurrenceId,
+            joined: impl IntoIterator<Item = SourceOccurrenceId>,
             union_arms: impl IntoIterator<Item = (usize, String)>,
         ) -> Option<Self> {
             let joined = joined.into_iter().collect::<SmallVec<[_; 2]>>();
@@ -139,15 +184,34 @@ mod occurrence {
         /// Construct the single-source occurrence used by plain-table output.
         pub fn single_source(root: ObjectId) -> Self {
             Self {
-                root,
+                root: SourceOccurrenceId::current(root),
                 joined: SmallVec::new(),
                 union_arms: SmallVec::new(),
             }
         }
 
+        /// Identify one retained content version without synthesizing a row UUID.
+        pub fn history(root: ObjectId, time: TxTime, node: NodeUuid) -> Self {
+            Self {
+                root: SourceOccurrenceId::history(root, time, node),
+                joined: SmallVec::new(),
+                union_arms: SmallVec::new(),
+            }
+        }
+
+        /// Full portable transaction identity of a historical root, if any.
+        pub fn root_version(&self) -> Option<(TxTime, NodeUuid)> {
+            self.root.version()
+        }
+
         /// Source rows contributed after the root, in declared join order.
-        pub fn joined_sources(&self) -> &[ObjectId] {
-            &self.joined
+        pub fn joined_sources(&self) -> impl ExactSizeIterator<Item = ObjectId> + '_ {
+            self.joined.iter().map(SourceOccurrenceId::row_id)
+        }
+
+        /// Complete source keys in declared join order, including the root.
+        pub fn source_occurrences(&self) -> impl Iterator<Item = SourceOccurrenceId> + '_ {
+            std::iter::once(self.root).chain(self.joined.iter().copied())
         }
 
         /// Canonical positional bytes for terminal-state keys and consolidation.
@@ -155,30 +219,46 @@ mod occurrence {
         /// Each component is a fixed-width UUID, so concatenating root followed by
         /// joined rows is unambiguous; byte length records the number of joined
         /// sources and component position records declared join position.
+        /// Historical occurrences use their complete ResultKey bytes so every
+        /// contributing version remains part of identity, independently of payload.
         pub fn canonical_bytes(&self) -> SmallVec<[u8; 48]> {
-            if !self.union_arms.is_empty() {
-                return self.typed_canonical_bytes();
+            if self.has_typed_discriminators() {
+                let mut bytes = self.typed_canonical_bytes();
+                if self
+                    .source_occurrences()
+                    .any(|source| source.version().is_some())
+                {
+                    bytes.insert(0, RESULT_KEY_WIRE_VERSION);
+                }
+                return bytes;
             }
             let mut bytes = SmallVec::with_capacity((self.joined.len() + 1) * 16);
-            bytes.extend_from_slice(self.root.uuid().as_bytes());
+            bytes.extend_from_slice(self.root.row_id().uuid().as_bytes());
             for id in &self.joined {
-                bytes.extend_from_slice(id.uuid().as_bytes());
+                bytes.extend_from_slice(id.row_id().uuid().as_bytes());
             }
             bytes
         }
 
         pub(super) fn typed_canonical_bytes(&self) -> SmallVec<[u8; 48]> {
             let mut bytes = SmallVec::new();
-            bytes.extend_from_slice(self.root.uuid().as_bytes());
+            bytes.extend_from_slice(self.root.row_id().uuid().as_bytes());
             bytes.extend_from_slice(&(self.joined.len() as u32).to_be_bytes());
             for id in &self.joined {
-                bytes.extend_from_slice(id.uuid().as_bytes());
+                bytes.extend_from_slice(id.row_id().uuid().as_bytes());
             }
             bytes.extend_from_slice(&(self.union_arms.len() as u32).to_be_bytes());
             for (position, label) in &self.union_arms {
                 bytes.extend_from_slice(&(*position as u32).to_be_bytes());
                 bytes.extend_from_slice(&(label.len() as u32).to_be_bytes());
                 bytes.extend_from_slice(label.as_bytes());
+            }
+            for source in self.source_occurrences() {
+                bytes.push(u8::from(source.version().is_some()));
+                if let Some((time, node)) = source.version() {
+                    bytes.extend_from_slice(&time.0.to_be_bytes());
+                    bytes.extend_from_slice(node.0.as_bytes());
+                }
             }
             bytes
         }
@@ -195,7 +275,9 @@ mod occurrence {
     /// row id would recreate the flat-join collapse this type prevents.
     impl PartialEq<ObjectId> for OutputOccurrenceId {
         fn eq(&self, other: &ObjectId) -> bool {
-            self.joined.is_empty() && self.union_arms.is_empty() && self.root == *other
+            self.joined.is_empty()
+                && !self.has_typed_discriminators()
+                && self.root.row_id() == *other
         }
     }
 
@@ -207,7 +289,7 @@ mod occurrence {
 }
 
 #[doc(hidden)]
-pub use occurrence::OutputOccurrenceId;
+pub use occurrence::{OutputOccurrenceId, SourceOccurrenceId};
 
 /// Stable, opaque identity of one query result.
 ///
@@ -217,7 +299,7 @@ pub use occurrence::OutputOccurrenceId;
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ResultKey(OutputOccurrenceId);
 
-const RESULT_KEY_WIRE_VERSION: u8 = 1;
+const RESULT_KEY_WIRE_VERSION: u8 = 2;
 
 impl Serialize for ResultKey {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -242,13 +324,10 @@ impl<'de> Deserialize<'de> for ResultKey {
             return Err(serde::de::Error::custom("unsupported ResultKey version"));
         };
         let identity = &encoded[1..];
-        if version != RESULT_KEY_WIRE_VERSION {
-            return Err(serde::de::Error::custom(
-                "unsupported or malformed ResultKey identity",
-            ));
-        }
-        decode_typed_result_key(identity)
-            .ok_or_else(|| serde::de::Error::custom("malformed ResultKey V1 identity"))
+        let key = (version == RESULT_KEY_WIRE_VERSION)
+            .then(|| decode_typed_result_key(identity))
+            .flatten();
+        key.ok_or_else(|| serde::de::Error::custom("unsupported or malformed ResultKey identity"))
     }
 }
 
@@ -303,10 +382,25 @@ fn decode_typed_result_key(identity: &[u8]) -> Option<ResultKey> {
         previous_position = Some(position);
         union_arms.push((position, label));
     }
+    let mut sources = Vec::with_capacity(joined_count + 1);
+    for row in std::iter::once(root).chain(joined) {
+        sources.push(match take(identity, &mut cursor, 1)?[0] {
+            0 => SourceOccurrenceId::current(row),
+            1 => {
+                let time = TxTime(u64::from_be_bytes(
+                    take(identity, &mut cursor, 8)?.try_into().ok()?,
+                ));
+                let node = NodeUuid(Uuid::from_slice(take(identity, &mut cursor, 16)?).ok()?);
+                SourceOccurrenceId::history(row, time, node)
+            }
+            _ => return None,
+        });
+    }
     if cursor != identity.len() {
         return None;
     }
-    OutputOccurrenceId::with_union_arms(root, joined, union_arms).map(ResultKey)
+    let mut sources = sources.into_iter();
+    OutputOccurrenceId::from_source_occurrences(sources.next()?, sources, union_arms).map(ResultKey)
 }
 
 impl ResultKey {
@@ -328,9 +422,21 @@ impl ResultKey {
         &self.0
     }
 
-    /// Return the source row id when this result is a plain, single-row result.
+    /// Return the logical source row id for a single-source result, including history.
     pub fn row_id(&self) -> Option<ObjectId> {
-        self.0.joined.is_empty().then_some(self.0.root)
+        (self.0.joined_sources().len() == 0).then(|| self.0.root_source())
+    }
+}
+
+impl From<OutputOccurrenceId> for ResultKey {
+    fn from(value: OutputOccurrenceId) -> Self {
+        Self(value)
+    }
+}
+
+impl From<ResultKey> for OutputOccurrenceId {
+    fn from(value: ResultKey) -> Self {
+        value.0
     }
 }
 
@@ -410,8 +516,106 @@ mod tests {
         assert_ne!(id1, id2);
     }
 
+    /// Alice's two retained versions keep distinct portable keys even when
+    /// their logical row is the same. This lower-layer test pins exact binding
+    /// bytes, which public subscription tests deliberately treat as opaque.
     #[test]
-    fn result_key_v1_is_complete_for_ordinary_joined_and_union_occurrences() {
+    fn result_key_preserves_full_transaction_identity() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../fixtures/result-key.json")).unwrap();
+        let root = ObjectId::from_uuid(Uuid::parse_str(fixture["root"].as_str().unwrap()).unwrap());
+        let node = NodeUuid(Uuid::parse_str(fixture["node"].as_str().unwrap()).unwrap());
+        let time = TxTime(fixture["time"].as_str().unwrap().parse().unwrap());
+        let occurrence = OutputOccurrenceId::history(root, time, node);
+        let key = ResultKey::from_occurrence(occurrence.clone());
+        let bytes: Vec<u8> = serde_json::from_value(fixture["key"].clone()).unwrap();
+        assert_eq!(serde_json::to_value(&key).unwrap(), fixture["key"]);
+        assert_eq!(
+            serde_json::from_value::<ResultKey>(fixture["key"].clone()).unwrap(),
+            key
+        );
+        // Postcard's byte-string length prefix is 50, followed by the same bytes.
+        let mut postcard = vec![50];
+        postcard.extend_from_slice(&bytes);
+        assert_eq!(postcard::to_allocvec(&key).unwrap(), postcard);
+        assert_eq!(postcard::from_bytes::<ResultKey>(&postcard).unwrap(), key);
+        assert_eq!(occurrence.root_version(), Some((time, node)));
+        assert_eq!(occurrence.canonical_bytes().as_slice(), bytes);
+        assert_eq!(key.row_id(), Some(root));
+        assert_ne!(key, root);
+        assert_ne!(key, ResultKey::from(root));
+        for other in [
+            OutputOccurrenceId::history(root, TxTime(time.0 - 1), node),
+            OutputOccurrenceId::history(root, time, NodeUuid(Uuid::from_bytes([0x33; 16]))),
+        ] {
+            assert_ne!(occurrence.canonical_bytes(), other.canonical_bytes());
+            assert_ne!(key, ResultKey::from_occurrence(other));
+        }
+        for length in 0..bytes.len() {
+            assert!(
+                serde_json::from_value::<ResultKey>(serde_json::json!(&bytes[..length])).is_err()
+            );
+        }
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(serde_json::from_value::<ResultKey>(serde_json::json!(trailing)).is_err());
+        let mut invalid_flag = bytes.clone();
+        invalid_flag[25] = 2;
+        assert!(serde_json::from_value::<ResultKey>(serde_json::json!(invalid_flag)).is_err());
+        // Corrupt counts cannot manufacture missing joined/union components.
+        for offset in [17, 21] {
+            let mut invalid = bytes.clone();
+            invalid[offset] = 1;
+            assert!(serde_json::from_value::<ResultKey>(serde_json::json!(invalid)).is_err());
+        }
+    }
+
+    /// Alice's joined historical versions round-trip with both source keys.
+    /// Byte fixtures belong here because public queries treat keys as opaque.
+    #[test]
+    fn joined_history_result_key_preserves_each_source_version() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../fixtures/result-key.json")).unwrap();
+        let root = SourceOccurrenceId::history(
+            ObjectId::from_uuid(Uuid::from_bytes([0x11; 16])),
+            TxTime(u64::MAX),
+            NodeUuid(Uuid::from_bytes([0x22; 16])),
+        );
+        let joined = SourceOccurrenceId::history(
+            ObjectId::from_uuid(Uuid::from_bytes([0x33; 16])),
+            TxTime(7),
+            NodeUuid(Uuid::from_bytes([0x44; 16])),
+        );
+        let occurrence = OutputOccurrenceId::from_source_occurrences(root, [joined], []).unwrap();
+        let key = ResultKey::from_occurrence(occurrence.clone());
+        assert_eq!(serde_json::to_value(&key).unwrap(), fixture["joined_key"]);
+        assert_eq!(
+            serde_json::from_value::<ResultKey>(fixture["joined_key"].clone()).unwrap(),
+            key
+        );
+        assert_eq!(
+            postcard::from_bytes::<ResultKey>(&postcard::to_allocvec(&key).unwrap()).unwrap(),
+            key
+        );
+        assert_eq!(
+            occurrence.source_occurrences().collect::<Vec<_>>(),
+            vec![root, joined]
+        );
+        let replaced = OutputOccurrenceId::from_source_occurrences(
+            root,
+            [SourceOccurrenceId::history(
+                joined.row_id(),
+                TxTime(8),
+                joined.version().unwrap().1,
+            )],
+            [],
+        )
+        .unwrap();
+        assert_ne!(occurrence.canonical_bytes(), replaced.canonical_bytes());
+    }
+
+    #[test]
+    fn result_key_is_complete_for_ordinary_joined_and_union_occurrences() {
         let root = ObjectId::from_uuid(Uuid::from_u128(1));
         let joined = ObjectId::from_uuid(Uuid::from_u128(2));
         let plain = ResultKey(OutputOccurrenceId::new(root, [joined]));
@@ -419,11 +623,12 @@ mod tests {
             serde_json::from_slice(&serde_json::to_vec(&plain).expect("encode plain key"))
                 .expect("inspect plain key");
         assert_eq!(plain_wire[0], RESULT_KEY_WIRE_VERSION);
-        let mut expected_v1 = Vec::from(root.uuid().as_bytes());
-        expected_v1.extend_from_slice(&1_u32.to_be_bytes());
-        expected_v1.extend_from_slice(joined.uuid().as_bytes());
-        expected_v1.extend_from_slice(&0_u32.to_be_bytes());
-        assert_eq!(&plain_wire[1..], expected_v1);
+        let mut expected = Vec::from(root.uuid().as_bytes());
+        expected.extend_from_slice(&1_u32.to_be_bytes());
+        expected.extend_from_slice(joined.uuid().as_bytes());
+        expected.extend_from_slice(&0_u32.to_be_bytes());
+        expected.extend_from_slice(&[0, 0]);
+        assert_eq!(&plain_wire[1..], expected);
 
         let typed = ResultKey(
             OutputOccurrenceId::with_union_arms(root, [joined], [(0, "direct".to_owned())])
@@ -445,45 +650,34 @@ mod tests {
         assert_ne!(typed, plain);
     }
 
+    /// Alice's current, joined, union, and history identities must survive
+    /// direct serialization. This lower-layer test checks that all callers use
+    /// the same complete ResultKey codec, rather than a lossy field subset.
     #[test]
-    fn output_occurrence_postcard_remains_exact_legacy_two_field_wire() {
-        #[derive(Serialize)]
-        struct LegacyOccurrence {
-            root: ObjectId,
-            joined: SmallVec<[ObjectId; 2]>,
-        }
-
+    fn output_occurrence_serializes_through_result_key() {
         let root = ObjectId::from_uuid(Uuid::from_u128(1));
         let joined = ObjectId::from_uuid(Uuid::from_u128(2));
-        let legacy = postcard::to_allocvec(&LegacyOccurrence {
-            root,
-            joined: SmallVec::from_slice(&[joined]),
-        })
-        .expect("encode legacy fixture");
-        let mut golden = vec![16];
-        golden.extend_from_slice(&[0_u8; 15]);
-        golden.push(1);
-        golden.push(1);
-        golden.push(16);
-        golden.extend_from_slice(&[0_u8; 15]);
-        golden.push(2);
-        assert_eq!(legacy, golden, "pin the historical postcard fixture");
-        let current = postcard::to_allocvec(&OutputOccurrenceId::new(root, [joined]))
-            .expect("encode current occurrence");
-        assert_eq!(current, legacy, "row-only postcard bytes are unchanged");
-        assert_eq!(
-            postcard::from_bytes::<OutputOccurrenceId>(&legacy)
-                .expect("decode exact legacy two-field bytes"),
-            OutputOccurrenceId::new(root, [joined])
-        );
-
-        let typed = OutputOccurrenceId::with_union_arms(root, [joined], [(0, "direct".to_owned())])
-            .expect("typed occurrence");
-        assert_eq!(
-            postcard::to_allocvec(&typed).expect("encode legacy occurrence carrier"),
-            legacy,
-            "typed derivation is deliberately not smuggled into the legacy wire struct"
-        );
+        for occurrence in [
+            OutputOccurrenceId::single_source(root),
+            OutputOccurrenceId::new(root, [joined]),
+            OutputOccurrenceId::with_union_arms(root, [joined], [(0, "direct".to_owned())])
+                .unwrap(),
+            OutputOccurrenceId::history(root, TxTime(u64::MAX), NodeUuid(Uuid::from_u128(3))),
+        ] {
+            let key = ResultKey::from_occurrence(occurrence.clone());
+            let bytes = postcard::to_allocvec(&occurrence).unwrap();
+            assert_eq!(bytes, postcard::to_allocvec(&key).unwrap());
+            assert_eq!(
+                postcard::from_bytes::<OutputOccurrenceId>(&bytes).unwrap(),
+                occurrence
+            );
+            let json = serde_json::to_value(&occurrence).unwrap();
+            assert_eq!(json, serde_json::to_value(&key).unwrap());
+            assert_eq!(
+                serde_json::from_value::<OutputOccurrenceId>(json).unwrap(),
+                occurrence
+            );
+        }
     }
 
     #[test]
@@ -513,9 +707,10 @@ mod tests {
         zero_arm.extend_from_slice(&valid.typed_canonical_bytes());
         zero_arm[37..41].copy_from_slice(&0_u32.to_be_bytes());
         zero_arm.truncate(41);
+        zero_arm.extend_from_slice(&[0, 0]);
         assert_eq!(
             serde_json::from_value::<ResultKey>(serde_json::json!(zero_arm))
-                .expect("ordinary joined V1 is valid"),
+                .expect("ordinary joined key is valid"),
             ResultKey(OutputOccurrenceId::new(root, [joined]))
         );
 
@@ -539,7 +734,8 @@ mod tests {
 
         let mut invalid_utf8 = vec![RESULT_KEY_WIRE_VERSION];
         invalid_utf8.extend_from_slice(&valid.typed_canonical_bytes());
-        *invalid_utf8.last_mut().expect("typed key has arm label") = 0xff;
+        let label_end = invalid_utf8.len() - 3;
+        invalid_utf8[label_end] = 0xff;
         assert!(
             serde_json::from_value::<ResultKey>(serde_json::json!(invalid_utf8)).is_err(),
             "typed discriminator labels must be valid UTF-8"
@@ -559,6 +755,10 @@ mod tests {
             serde_json::from_value::<ResultKey>(serde_json::json!(superseded_uuid_vector)).is_err()
         );
         assert!(serde_json::from_value::<ResultKey>(serde_json::json!([2_u8])).is_err());
+        let mut old = vec![1];
+        old.extend_from_slice(root.uuid().as_bytes());
+        old.extend_from_slice(&[0; 8]);
+        assert!(serde_json::from_value::<ResultKey>(serde_json::json!(old)).is_err());
     }
 
     #[test]

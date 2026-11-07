@@ -5,20 +5,20 @@
 A read resolves the version DAG (ch. 4) against a deliberately chosen frontier:
 either the current state at a durability tier, a fixed transaction snapshot, or a
 historical global position. This chapter defines those read frontiers, the
-current-row visibility rule, the snapshot model that gives exclusive
+current-row visibility rule, the snapshot model that gives serializable
 transactions stable reads, and historical (as-of) reads. It builds on the
 currency and deletion semantics of chapter 4 and feeds queries (ch. 6) and the
 `Db` read API (ch. 13).
 
 Invariant digest:
 
-- `INV-READ-1`: Opening an exclusive transaction MUST capture a `Snapshot` whose `owner` is the node UUID, whose `global_base` is the highest authority-committed `GlobalTime` known to the node, and whose `local_base` is the current `TxTime`. A history-complete core has no dots; a partial node MUST represent held accepted global transactions above its known authority cut as explicit dots and hydrate missing snapshot data from the authority at that fixed cut.
+- `INV-READ-1`: Opening a serializable transaction MUST capture a `Snapshot` whose `owner` is the node UUID, whose `global_base` is the highest authority-committed `GlobalTime` known to the node, and whose `local_base` is the current `TxTime`. A history-complete core has no dots; a partial node MUST represent held accepted global transactions above its known authority cut as explicit dots and hydrate missing snapshot data from the authority at that fixed cut.
 - `INV-READ-2`: A snapshot MUST cover exactly transactions with stored `global_time <= Snapshot.global_base`, transactions from `Snapshot.owner` with `tx_id.time <= Snapshot.local_base`, or transactions explicitly listed in `Snapshot.dots`.
-- `INV-READ-3`: Reads inside an open exclusive transaction MUST choose the domination winner among snapshot-covered versions per `VersionLayer` and MUST NOT observe later uncovered current-winner changes.
-- `INV-READ-4`: Reads inside an open exclusive transaction MUST overlay that transaction's own pending writes on top of the snapshot-covered base view.
+- `INV-READ-3`: Reads inside an open serializable transaction MUST choose the domination winner among snapshot-covered versions per `VersionLayer` and MUST NOT observe later uncovered current-winner changes.
+- `INV-READ-4`: Reads inside an open serializable transaction MUST overlay that transaction's own pending writes on top of the snapshot-covered base view.
 - `INV-READ-5`: `tx_read` MUST record a `RowRead` for a present snapshot-visible row and an `AbsentRead` for an absent snapshot-visible row.
 - `INV-READ-6`: `tx_current_rows` and `tx_query` MUST record predicate reads as `PredicateRead` values carrying `table`, `shape_id`, `shape`, `binding_id`, and `binding_values`; whole-table transaction reads are degenerate query shapes.
-- `INV-READ-7`: Local current-row reads MUST use argmax `TxId` currency per `(row_uuid, VersionLayer)` over held non-rejected versions, independent of sender arrival order.
+- `INV-READ-7`: A node's current row MUST be the Core post-image with the highest seq it holds for that row, with the node's pending overlay on top for `Local`/`None` reads. Receiving Core's images of a row out of seq order MUST leave the same current row as receiving them in order.
 - `INV-READ-8`: Global current-row reads MUST use the per-lineage combined global-current source and MUST exclude rows whose stored visibility is false.
 - `INV-READ-9`: Global as-of reads at `GlobalTime` MUST choose independent content and deletion winners from `jazz_global_changes` at or before the requested `global_base`, then derive visibility before returning content.
 - `INV-READ-10`: Current-row visibility MUST be derived from independent content and deletion-register winners; content writes alone MUST NOT restore a deleted row, while `DeletionEvent::Restored` reveals current content.
@@ -38,8 +38,10 @@ non-rejected versions held by that node (node-local derived state, ch. 2).
 tables described below.
 
 A settled read names a `DurabilityTier` (ch. 3). A `none`/`local` read resolves
-against local currency: the argmax-by-`TxId` winner per `(row_uuid, layer)` over
-held non-rejected versions, independent of arrival order (`INV-READ-7`). This
+against local currency: the Core post-image with the highest seq the node holds
+for the row, with the node's pending overlay on top. Core's images of a row
+may arrive out of seq order; an older seq never replaces a newer one, so the
+result is independent of arrival order (`INV-READ-7`). This
 means it **includes the reading node's own pending committed writes**. A
 `global` read resolves against the per-layer global-current tables, which contain
 accepted state only, and therefore **excludes a write that has not yet been
@@ -70,7 +72,7 @@ exercised by `sync::reopened_core_continues_sync_after_restart`.
 
 ### 5.3 Snapshots
 
-Snapshots give an exclusive transaction a stable read frontier. A snapshot
+Snapshots give a serializable transaction a stable read frontier. A snapshot
 (`Snapshot { owner: NodeUuid, global_base: GlobalTime, local_base: TxTime, dots:
 Vec<TxId> }` in the reference implementation) is a compact dotted description of
 that frontier, owned by the node that created it. A transaction is **covered** by
@@ -78,7 +80,7 @@ a snapshot when its stored `global_time <= global_base`, or it is owned by
 `owner` with `tx_id.time <= local_base`, or it is explicitly listed in `dots`
 (`INV-READ-2`).
 
-Opening an exclusive transaction on a history-complete core captures `owner =
+Opening a serializable transaction on a history-complete core captures `owner =
 self`, `global_base = committed_global_time`, `local_base = the current TxTime`,
 and empty `dots` (`INV-READ-1`). Core settlement serializes HLC allocation with
 the durable accepted commit, so this is a clean prefix even though timestamp
@@ -99,28 +101,28 @@ absent, and predicate reads at commit (ch. 3).
 The `dots` field is the escape hatch for the general snapshot model: a snapshot
 ref can name explicit transaction dots outside the contiguous/global and
 owner-local prefixes. A history-complete core needs no dots. A partial node's
-exclusive base may contain foreign dots, but only for locally held transactions
+serializable base may contain foreign dots, but only for locally held transactions
 already carrying an accepted global fate; those dots describe the actual read
 cut and authority validation evaluates the full dotted snapshot. They are not a
 claim that intervening global history is complete. Sync payload dedup and
 reconnect state remain separate (ch. 8): mere receipt of an unfated payload does
 not create a snapshot dot.
 
-### 5.4 Reads inside an exclusive transaction
+### 5.4 Reads inside a serializable transaction
 
-Inside an exclusive transaction, reads are stable by construction. The read first
+Inside a serializable transaction, reads are stable by construction. The read first
 computes the domination winner among the **snapshot-covered** versions per layer,
 then overlays the transaction's own pending writes (`INV-READ-3`). Because it
 reads the covered set rather than the live currency tables, later arrivals can
 change ordinary current reads but cannot change a read inside an already-open
-transaction. The exclusive validation rules in chapter 3 depend on this
+transaction. The serializable validation rules in chapter 3 depend on this
 stability.
 
 **Implementation status.** Stable snapshot reads and the pending-write overlay
 are covered by
-`exclusive_transactions::exclusive_tx_snapshot_read_ignores_newer_commits_after_open`
+`serializable_transactions::serializable_tx_snapshot_read_ignores_newer_commits_after_open`
 and
-`exclusive_transactions::exclusive_tx_pending_writes_overlay_snapshot_for_point_and_table_reads`.
+`serializable_transactions::serializable_tx_pending_writes_overlay_snapshot_for_point_and_table_reads`.
 
 Every transactional read is recorded for that validation. A point read records a
 `RowRead` when the row is present in the snapshot-visible view, or an

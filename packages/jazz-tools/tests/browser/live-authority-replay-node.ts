@@ -1,4 +1,4 @@
-import { createJazzSession } from "../../src/backend/create-jazz-session.js";
+import { createJazz, remote, type Jazz } from "../../src/backend/create-jazz.js";
 import {
   liveAuthorityApp as app,
   liveAuthorityPermissions,
@@ -6,25 +6,17 @@ import {
 } from "./live-authority-replay-schema.js";
 import type { JazzServerInfo } from "./testing-server.js";
 
-const sessions = new Map<string, Awaited<ReturnType<typeof createJazzSession>>>();
+// The app's backend, run against the core in `info` (as the app runs it).
+const backends = new Map<string, Jazz>();
 export async function liveAuthorityBackendOpen(info: JazzServerInfo): Promise<LiveAuthoritySeed> {
-  const session = await createJazzSession({
-    appId: info.appId,
-    serverUrl: info.serverUrl,
-    initial: { backendSecret: "jazz-browser-test-backend" },
+  const jazz = createJazz({
     app,
     permissions: liveAuthorityPermissions,
-    driver: { type: "memory" },
-    tier: "global",
-    defaultDurabilityTier: "global",
+    store: remote({ url: info.serverUrl, appId: info.appId, secret: info.adminSecret }),
   });
-  sessions.set(info.appId, session);
+  backends.set(info.appId, jazz);
   try {
-    const snapshot = session.getSnapshot();
-    if (snapshot.status !== "ready" || !snapshot.client) {
-      throw snapshot.error ?? new Error("Backend session is not ready");
-    }
-    const db = snapshot.client.db;
+    const db = jazz.db;
     const parent = await db.insert(app.parents, { name: "Parent" }).wait({ tier: "global" });
     const author = await db.insert(app.authors, { name: "Author" }).wait({ tier: "global" });
     const label = await db.insert(app.labels, { name: "Label" }).wait({ tier: "global" });
@@ -46,13 +38,9 @@ export async function liveAuthorityBackendInsert(
   seed: LiveAuthoritySeed,
   title: string,
 ): Promise<string> {
-  const session = sessions.get(appId);
-  if (!session) throw new Error("Live-authority backend was not opened");
-  const snapshot = session.getSnapshot();
-  if (snapshot.status !== "ready" || !snapshot.client) {
-    throw snapshot.error ?? new Error("Backend session is not ready");
-  }
-  const db = snapshot.client.db;
+  const jazz = backends.get(appId);
+  if (!jazz) throw new Error("Live-authority backend was not opened");
+  const db = jazz.db;
   const row = await db
     .insert(app.items, {
       title,
@@ -61,12 +49,12 @@ export async function liveAuthorityBackendInsert(
       label_id: seed.labelId,
     })
     .wait({ tier: "global" });
-  const readable = await db.all(app.items.where({ id: row.id }), { tier: "global" });
+  const readable = await db.all(app.items.where({ id: row.id }), { tier: "remote" });
   if (readable.length !== 1) throw new Error("Globally settled backend insert is not readable");
   return row.id;
 }
 export async function liveAuthorityBackendClose(appId: string): Promise<void> {
-  const session = sessions.get(appId);
-  await session?.close();
-  if (sessions.get(appId) === session) sessions.delete(appId);
+  const jazz = backends.get(appId);
+  await jazz?.close();
+  if (backends.get(appId) === jazz) backends.delete(appId);
 }

@@ -1,3 +1,4 @@
+import type { AccountHandle } from "../../../../../../packages/jazz-tools/src/index.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { commands } from "vitest/browser";
 import type { Db } from "../../../../../../packages/jazz-tools/src/runtime/index.js";
@@ -15,10 +16,13 @@ import {
   runTopologyScenario,
 } from "../../../../../../packages/jazz-tools/tests/browser/topology-harness.js";
 import {
-  blockJazzServerNetwork,
+  createJazzServerTransportControl,
+  type JazzServerTransportControl,
   getJazzServerInfo,
-  getJazzServerJwtForUser,
-  unblockJazzServerNetwork,
+  insertAsJazzAppBackend,
+  jazzAppUserUrl,
+  loginAtJazzAppUser,
+  startJazzApp,
 } from "../../../../../../packages/jazz-tools/tests/browser/testing-server.js";
 import permissions from "../../permissions.js";
 import { app } from "../../schema.js";
@@ -34,9 +38,7 @@ const peerCommands = commands as unknown as {
     table: string;
     queryJson?: string;
     schemaJson: string;
-    serverUrl: string;
-    jwtToken?: string;
-    adminSecret?: string;
+    userUrl: string;
   }): Promise<void>;
   posterShopQueryConnectedPeer(id: string): Promise<Record<string, unknown>[]>;
   posterShopInsertConnectedPeer(
@@ -59,11 +61,13 @@ describe("PosterShop cross-topology recovery", () => {
   it("replays an offline canvas edit across restart and rejects a revoked editor", async () => {
     const requestedSeed = Number(__JAZZ_EXAMPLE_TOPOLOGY_SEED__);
     const seed = Number.isSafeInteger(requestedSeed) ? requestedSeed : 47;
-    let server: Awaited<ReturnType<typeof getJazzServerInfo>>;
+    let server: Awaited<ReturnType<typeof startJazzApp>>;
     let owner: Db;
+    let ownerTransport: JazzServerTransportControl;
+    let ownerAccount: AccountHandle;
     let editor: Db;
     let reader: Db;
-    let ownerToken: string;
+    let ownerUrl: string;
     let ownerDbName: string;
     let canvas: { id: string };
     let layer: { id: string };
@@ -86,14 +90,14 @@ describe("PosterShop cross-topology recovery", () => {
         targets: {
           owner: {
             disconnect: async ({ defer }) => {
-              defer("unblock PosterShop Jazz server route", async () => {
-                await unblockJazzServerNetwork(server.serverUrl);
+              defer("unblock PosterShop owner transport", async () => {
+                await ownerTransport.unblock();
               });
-              await blockJazzServerNetwork(server.serverUrl);
+              await ownerTransport.block();
               await owner.disconnect();
             },
             reconnect: async () => {
-              await unblockJazzServerNetwork(server.serverUrl);
+              await ownerTransport.unblock();
               await owner.reconnect();
             },
             restart: async () => {
@@ -101,21 +105,20 @@ describe("PosterShop cross-topology recovery", () => {
               ctx.untrack(owner);
               owner = await openClient(
                 server.appId,
-                server.serverUrl,
+                ownerTransport.url,
                 "owner",
-                ownerToken,
                 ownerDbName,
+                ownerAccount,
               );
             },
           },
           authorization: {
             failure: async () => {
-              const token = await getJazzServerJwtForUser(
-                "poster-outsider",
-                undefined,
+              const outsider = await openClient(
                 server.appId,
+                await jazzAppUserUrl(server, "poster-outsider"),
+                "outsider",
               );
-              const outsider = await openClient(server.appId, server.serverUrl, "outsider", token);
               await expect(
                 outsider
                   .insert(app.shapes, shape(canvas.id, layer.id, 99))
@@ -128,40 +131,46 @@ describe("PosterShop cross-topology recovery", () => {
           {
             name: "owner bootstrap and editor admission",
             run: async () => {
-              server = await getJazzServerInfo(uniqueDbName("poster-shop-topology"));
+              const core = await getJazzServerInfo(uniqueDbName("poster-shop-topology"));
               await deploy({
-                appId: server.appId,
-                serverUrl: server.serverUrl,
-                adminSecret: server.adminSecret,
+                appId: core.appId,
+                serverUrl: core.serverUrl,
+                adminSecret: core.adminSecret,
                 schema: app,
                 permissions,
               });
-              const [issuedOwnerToken, editorToken, readerToken] = await Promise.all([
-                getJazzServerJwtForUser("poster-owner", undefined, server.appId),
-                getJazzServerJwtForUser("poster-editor", undefined, server.appId),
-                getJazzServerJwtForUser("poster-reader", undefined, server.appId),
+              server = await startJazzApp(core, { schema: app, permissions });
+              const [editorUrl, readerUrl] = await Promise.all([
+                jazzAppUserUrl(server, "poster-editor"),
+                jazzAppUserUrl(server, "poster-reader"),
               ]);
-              ownerToken = issuedOwnerToken;
+              ownerUrl = await jazzAppUserUrl(server, "poster-owner");
+              // The owner's faults partition only the owner: a proxy in front
+              // of their own origin, signed in as them.
+              ownerTransport = ctx.trackTransport(await createJazzServerTransportControl(ownerUrl));
+              ownerAccount = await loginAtJazzAppUser(server.appId, ownerTransport.url);
               ownerDbName = uniqueDbName("poster-shop-owner");
               owner = await openClient(
                 server.appId,
-                server.serverUrl,
+                ownerTransport.url,
                 "owner",
-                ownerToken,
                 ownerDbName,
+                ownerAccount,
               );
-              editor = await openClient(server.appId, server.serverUrl, "editor", editorToken);
-              reader = await openClient(server.appId, server.serverUrl, "reader", readerToken);
-              canvas = await owner
-                .insert(app.canvases, { title: "Midnight", width: 1080, height: 1350 })
-                .wait({ tier: "global" });
-              await owner
-                .insert(app.canvasMembers, {
-                  canvasId: canvas.id,
-                  memberAuthor: accountFromDb(owner),
-                  role: "admin",
-                })
-                .wait({ tier: "global" });
+              editor = await openClient(server.appId, editorUrl, "editor");
+              reader = await openClient(server.appId, readerUrl, "reader");
+              // Only the backend creates a canvas and its first admin, as the
+              // app's bootstrap route does.
+              canvas = await insertAsJazzAppBackend(server, app.canvases, {
+                title: "Midnight",
+                width: 1080,
+                height: 1350,
+              });
+              await insertAsJazzAppBackend(server, app.canvasMembers, {
+                canvasId: canvas.id,
+                memberAuthor: accountFromDb(owner),
+                role: "admin",
+              });
               editorMembership = await owner
                 .insert(app.canvasMembers, {
                   canvasId: canvas.id,
@@ -190,7 +199,7 @@ describe("PosterShop cross-topology recovery", () => {
                 (rows) => rows.length === 1,
                 "reader receives canvas layer",
                 15_000,
-                "global",
+                "remote",
               );
               ctx.trackSubscription(
                 reader.subscribe(
@@ -198,7 +207,7 @@ describe("PosterShop cross-topology recovery", () => {
                   (rows) => {
                     windowSnapshots.push(rows.map((row) => ({ id: row.id, zIndex: row.zIndex })));
                   },
-                  { tier: "global" },
+                  { tier: "remote" },
                 ),
               );
               await waitForCondition(
@@ -213,8 +222,7 @@ describe("PosterShop cross-topology recovery", () => {
                 table: "shapes",
                 queryJson: canvasQueries(canvas.id).shapes._build(),
                 schemaJson: JSON.stringify(app.wasmSchema),
-                serverUrl: server.serverUrl,
-                jwtToken: readerToken,
+                userUrl: readerUrl,
               };
               await peerCommands.posterShopOpenConnectedPeer(connectedPeerInput);
               await peerCommands.posterShopOpenConnectedPeer({
@@ -223,8 +231,8 @@ describe("PosterShop cross-topology recovery", () => {
                 dbName: uniqueDbName("poster-shop-connected-writer-store"),
                 table: "shapes",
                 schemaJson: JSON.stringify(app.wasmSchema),
-                serverUrl: server.serverUrl,
-                adminSecret: server.adminSecret,
+                // The control write comes from the owner, on another connection.
+                userUrl: ownerUrl,
               });
             },
             faultsAfter: [{ kind: "failure", target: "authorization" }],
@@ -274,7 +282,7 @@ describe("PosterShop cross-topology recovery", () => {
                 (rows) => rows.some((row) => row.x === 60),
                 "reader receives the latest cursor position",
                 15_000,
-                "global",
+                "remote",
               );
               // The reader's shape subscription saw no new result for any of
               // the six presence writes.
@@ -295,7 +303,7 @@ describe("PosterShop cross-topology recovery", () => {
                 .insert(app.shapes, shape(canvas.id, layer.id, 2))
                 .wait({ tier: "local" });
               expect(
-                (await owner.all(canvasQueries(canvas.id).shapes, { tier: "local" })).map(
+                (await owner.all(canvasQueries(canvas.id).shapes, { tier: "local-first" })).map(
                   (row) => row.id,
                 ),
               ).toContain(offlineShape.id);
@@ -319,7 +327,7 @@ describe("PosterShop cross-topology recovery", () => {
                 "independently connected peer did not receive the control write",
               );
               expect(
-                (await owner.all(canvasQueries(canvas.id).shapes, { tier: "local" })).map(
+                (await owner.all(canvasQueries(canvas.id).shapes, { tier: "local-first" })).map(
                   (row) => row.id,
                 ),
               ).not.toContain(connectedShapeId);
@@ -338,7 +346,9 @@ describe("PosterShop cross-topology recovery", () => {
           {
             name: "persistent reopen retains offline local state",
             run: async () => {
-              const reopened = await owner.all(canvasQueries(canvas.id).shapes, { tier: "local" });
+              const reopened = await owner.all(canvasQueries(canvas.id).shapes, {
+                tier: "local-first",
+              });
               expect(reopened.map((row) => [row.id, row.zIndex])).toContainEqual([
                 offlineShape.id,
                 2,
@@ -356,7 +366,7 @@ describe("PosterShop cross-topology recovery", () => {
                 (rows) => rows.length === 5,
                 "reader receives offline replay",
                 20_000,
-                "global",
+                "remote",
               );
               expect(shapes.map((row) => row.zIndex)).toEqual([0, 1, 2, 3, 4]);
               await waitForCondition(
@@ -368,12 +378,12 @@ describe("PosterShop cross-topology recovery", () => {
                 "reader bounded shape window did not receive the offline replay",
               );
               expect(
-                (await reader.all(queries.shapeWindow, { tier: "global" })).map(
+                (await reader.all(queries.shapeWindow, { tier: "remote" })).map(
                   (row) => row.zIndex,
                 ),
               ).toEqual([1, 2]);
               expect(
-                (await reader.all(queries.checkpoints, { tier: "global" })).map((row) => row.label),
+                (await reader.all(queries.checkpoints, { tier: "remote" })).map((row) => row.label),
               ).toEqual(["Approved"]);
             },
           },
@@ -382,9 +392,8 @@ describe("PosterShop cross-topology recovery", () => {
             run: async () => {
               const coreEditor = await openClient(
                 server.appId,
-                server.serverUrl,
+                await jazzAppUserUrl(server, "poster-editor"),
                 "revoked-core-editor",
-                await getJazzServerJwtForUser("poster-editor", undefined, server.appId),
               );
               await expect(
                 coreEditor
@@ -414,7 +423,7 @@ describe("PosterShop cross-topology recovery", () => {
 });
 
 function accountFromDb(db: Db): string {
-  const account = db.getAuthState().session?.user.account;
+  const account = db.getAuthState().session?.user;
   if (!account) throw new Error("test client is missing an admitted account");
   return account;
 }
@@ -443,19 +452,19 @@ function canvasQueries(canvasId: string) {
   };
 }
 
+/** A client syncing as the user whose own origin is `userUrl` (from `jazzAppUserUrl`). */
 async function openClient(
   appId: string,
-  serverUrl: string,
+  userUrl: string,
   label: string,
-  jwtToken: string,
   dbName = uniqueDbName(`poster-shop-${label}`),
+  account?: AccountHandle,
 ): Promise<Db> {
   return ctx.track(
     await createBrowserTestDb({
       appId,
-      serverUrl,
-      jwtToken,
-      registerJwt: true,
+      serverUrl: userUrl,
+      account: account ?? (await loginAtJazzAppUser(appId, userUrl)),
       driver: { type: "persistent", dbName },
     }),
   );

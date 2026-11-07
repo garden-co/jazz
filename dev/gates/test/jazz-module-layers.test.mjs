@@ -9,6 +9,7 @@ import { analyze, layerOf } from "../jazz-module-layers.mjs";
 // Fixtures name their own files' layers, so they stay valid as real files move
 // out into layer crates.
 const fixtureLayers = {
+  "ids.rs": "types",
   "schema.rs": "model",
   "tx.rs": "model",
   "protocol.rs": "protocol",
@@ -134,6 +135,26 @@ test("impls a split crate could not hold are reported", () => {
       [5, "schema.rs", "impl groove::records::RecordField for Alias"],
       [6, "schema.rs", "impl groove::records::RecordField for Tag"],
     ],
+  );
+});
+
+test("impl Trait parameters are not implementation blocks", () => {
+  const src = crateFixture({
+    "lib.rs": "pub mod ids;\npub mod node;\n",
+    "ids.rs": "pub struct Hash;\n",
+    "node/mod.rs": [
+      "fn opaque_hash(value: &impl std::hash::Hash) -> u64 {",
+      "    use std::hash::Hasher;",
+      "    let mut hash = std::collections::hash_map::DefaultHasher::new();",
+      "    value.hash(&mut hash);",
+      "    hash.finish()",
+      "}",
+      "impl crate::ids::Hash {}",
+    ].join("\n"),
+  });
+  assert.deepEqual(
+    analyzeFixture({ src }).map((v) => [v.line, v.path]),
+    [[7, "impl crate::ids::Hash"]],
   );
 });
 

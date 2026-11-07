@@ -1,14 +1,24 @@
+import { clientScope } from "../runtime/client-scope.js";
 import { PlatformURL } from "../runtime/platform-url.js";
+import { resolveServerUrl } from "../runtime/url.js";
 import { admitAccountConfig } from "./config-capability.js";
 import type { AccountHandle } from "./state.js";
 import {
   accountRegistry,
   accountToken,
+  delegatedAccountClaims,
   AccountAuthError,
   onAccountInvalidated,
 } from "./enrollment.js";
 import { accountAppId } from "./local-first.js";
-import { createDbWithRuntimeSource, type Db, type DbConfig } from "../runtime/db.js";
+import {
+  createDbWithRuntimeSource,
+  holdCredentialRenewal,
+  releaseUnusedLease,
+  startBrowserWorkerLease,
+  type Db,
+  type DbConfig,
+} from "../runtime/db.js";
 import type { RuntimeSource } from "../runtime/runtime-source.js";
 import {
   internalSessionFromVerifiedReservedJwtPayload,
@@ -16,6 +26,7 @@ import {
 } from "../runtime/client-session.js";
 import { setTrustedReservedSession } from "../runtime/db-internal-session.js";
 import { AuthRenewalBackoff, authRetryDelay } from "../runtime/auth-renewal-backoff.js";
+import { isRenewableAuthFailure } from "../runtime/auth-state.js";
 
 /** Public clients always select an enrolled account, never an unverified principal. */
 export type AccountDbConfig = Omit<
@@ -27,7 +38,7 @@ export type AccountDbConfig = Omit<
 
 /** One canonical application endpoint for enrollment and context scope validation. */
 export function accountRegistryUrl(serverUrl: string, appId: string): string {
-  const url = new PlatformURL(serverUrl);
+  const url = new PlatformURL(resolveServerUrl(serverUrl));
   if (url.protocol === "ws:") url.protocol = "http:";
   if (url.protocol === "wss:") url.protocol = "https:";
   if (url.protocol !== "http:" && url.protocol !== "https:")
@@ -53,9 +64,11 @@ function accountContextScope(config: AccountDbConfig): string {
   const registry = accountRegistry(account);
   // Offline creation still has a configured registry authority; no request is made.
   if (
-    !new PlatformURL(registry).pathname.endsWith(`/apps/${accountAppId(config.appId)}/accounts`) ||
+    !new PlatformURL(registry).pathname.endsWith(
+      `/apps/${accountAppId(clientScope(config))}/accounts`,
+    ) ||
     (config.serverUrl !== undefined &&
-      accountRegistryUrl(config.serverUrl, config.appId) !== registry)
+      accountRegistryUrl(config.serverUrl, clientScope(config)) !== registry)
   ) {
     throw new AccountAuthError("account_application_mismatch");
   }
@@ -66,6 +79,26 @@ function accountContextScope(config: AccountDbConfig): string {
 export async function resolveAccountRuntimeConfig(config: AccountDbConfig): Promise<DbConfig> {
   const registry = accountContextScope(config);
   const { account, ...runtimeConfig } = config;
+  const delegatedClaims = delegatedAccountClaims(account, registry);
+  if (delegatedClaims) {
+    // Signed in through the app's backend: no credential leaves this client.
+    // The backend states the identity on every connection; this mirrored
+    // session only shapes local permission checks.
+    const delegated: DbConfig = {
+      ...runtimeConfig,
+      cookieSession: {
+        account_id: account.id,
+        issuer: account.identity.issuer,
+        user_id: account.identity.subject,
+        claims: { ...delegatedClaims },
+        authMode: "external",
+      },
+      accountId: account.id,
+      accountRegistryAuthority: registry,
+    };
+    admitAccountConfig(delegated, account);
+    return delegated;
+  }
   const jwtToken = await accountToken(account, registry);
   const resolved: DbConfig = {
     ...runtimeConfig,
@@ -103,10 +136,25 @@ export async function createAccountDbWithRuntimeSource(
         .catch((error) => console.error("Account context shutdown failed", error));
     }
   });
+  let lease: ReturnType<typeof startBrowserWorkerLease>;
   try {
+    // The browser root is named by the account alone: boot its worker while
+    // the account's credential resolves.
+    const { account: _account, ...scope } = config;
+    lease = startBrowserWorkerLease(
+      {
+        ...scope,
+        accountId: account.id,
+        accountRegistryAuthority: accountRegistry(account),
+      },
+      runtimeSource,
+    );
     const resolved = await resolveAccountRuntimeConfig(config);
-    const jwtToken = resolved.jwtToken!;
-    db = await createDbWithRuntimeSource(resolved, runtimeSource);
+    const jwtToken = resolved.jwtToken;
+    // From here the runtime adopts the lease or returns it itself.
+    const opening = lease;
+    lease = undefined;
+    db = await createDbWithRuntimeSource(resolved, runtimeSource, opening);
     if (invalidated) {
       await db.shutdown();
       throw new AccountAuthError("account_logged_out");
@@ -127,23 +175,28 @@ export async function createAccountDbWithRuntimeSource(
     };
     const schedule = (token: string) => {
       const expires = parseJwtPayload(token)?.exp;
-      if (typeof expires !== "number" || !Number.isFinite(expires) || expires * 1000 <= Date.now())
+      if (typeof expires !== "number" || !Number.isFinite(expires)) return;
+      // Already expired, as when the app slept past its renewal timer (mobile
+      // platforms suspend timers in the background): renew now rather than
+      // leave nothing to renew it (#4248).
+      if (expires * 1000 <= Date.now()) {
+        renew();
         return;
+      }
       // A token that lives to its scheduled refresh ends any renewal streak.
       scheduleIn(Math.max(1000, Math.min(2_147_483_647, (expires * 1000 - Date.now()) * 0.8)), () =>
         renewals.reset(),
       );
     };
-    const renew = () => {
-      const delay = renewals.next();
-      if (delay === 0) void refresh();
-      else scheduleIn(delay);
-    };
+    // Always through the timer, never inline: `schedule()` runs inside a
+    // refresh, which an inline refresh would find still running and skip.
+    const renew = () => scheduleIn(renewals.next());
     const refresh = async () => {
       if (refreshing || stopped) return;
       refreshing = true;
       try {
-        const token = await opened.refreshAccountAuth(account);
+        // Its own runtime's credential, even after an upgrade forwards the Db.
+        const token = await opened.refreshOwnAccountAuth(account);
         failedRefreshes = 0;
         if (!stopped) schedule(token);
       } catch (error) {
@@ -156,18 +209,33 @@ export async function createAccountDbWithRuntimeSource(
         refreshing = false;
       }
     };
-    const stopAuth = opened.onAuthChanged((state) => {
-      if (state.error === "expired" || state.error === "missing") renew();
+    // The refresh cycle below renews every refusal a new token can fix. A
+    // user the backend signed in is held too, as a browser's cookie renews:
+    // createJazzClient's backend watch reconnects or signs them in again.
+    // With createAccountManager and createDb alone, nothing does, and Global
+    // waits outlast the refusal until the app reconnects.
+    const releaseRenewal = holdCredentialRenewal(opened);
+    const stopAuth = opened.onOwnAuthChanged((state) => {
+      // A refused credential renews whatever the server called it: a
+      // rotated signing key reads as "invalid" until a new token is issued.
+      // A new token cannot fix an auth mode the app has turned off or a
+      // revoked account identity. A user the backend signed in has no token
+      // to renew: a new cookie is the backend's to set, and under
+      // createJazzClient its backend watch asks the backend again.
+      if (jwtToken && state.error && isRenewableAuthFailure(state.error)) renew();
     });
     opened.onShutdown(() => {
       stopped = true;
       if (timer) clearTimeout(timer);
       stopAuth();
+      releaseRenewal();
       unsubscribe();
     });
-    schedule(jwtToken);
+    if (jwtToken) schedule(jwtToken);
     return opened;
   } catch (error) {
+    // Return a lease the runtime never received before tearing it down.
+    await releaseUnusedLease(lease);
     unsubscribe();
     if (!db) await runtimeSource.shutdown();
     throw error;

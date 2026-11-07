@@ -51,7 +51,7 @@
 
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import { useAll, useDb } from "jazz-tools/vue";
+import { useAll } from "jazz-tools/vue";
 import { app, type Band } from "../../schema.js";
 import { bandLink, inviteLink as buildInviteLink } from "../lib/routes.js";
 import { newInviteCode } from "../seed-loader.js";
@@ -60,9 +60,8 @@ import Button from "./ui/Button.vue";
 
 const props = defineProps<{ band: Band; userId: string }>();
 
-const db = useDb();
 const isOwner = computed(() => props.band.ownerId === props.userId);
-const { data: members } = useAll(() =>
+const { data: members, db } = useAll(() =>
   app.members.where({ bandId: props.band.id }).orderBy("name", "asc"),
 );
 // Only the owner can read invites; for everyone else this stays empty.

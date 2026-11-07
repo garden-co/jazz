@@ -18,10 +18,16 @@ import {
 } from "../../src/runtime/indexeddb-page-store.js";
 import { setBrowserFollowerProbeTimingForTest } from "../../src/runtime/native-runtime/browser-follower-connection.js";
 import { TestCleanup, uniqueDbName, waitForCondition, waitForQuery } from "./support.js";
-import { getJazzServerInfo, type JazzServerInfo } from "./testing-server.js";
+import {
+  getJazzServerInfo,
+  jazzCore,
+  startJazzApp,
+  type JazzServerInfo,
+} from "./testing-server.js";
 import { closeRemoteBrowserDb, waitForRemoteBrowserDbTitle } from "./remote-browser-db.js";
-import { CompiledPermissions, schema as s } from "../../src/";
+import { CompiledPermissions, schema as s, migration as m } from "../../src/";
 import { computeSchemaHash, deploy } from "../../src/dev/catalogue.js";
+import { appMigrations } from "../../src/testing/client-migrations.js";
 import {
   deserializeBrowserRelayError,
   type BrowserInspectorContext,
@@ -128,7 +134,7 @@ export const schema = {
 };
 
 export type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema);
+export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
 export const { projects, todos } = app;
 export type Todo = s.RowOf<typeof todos>;
 
@@ -153,8 +159,10 @@ export const maintainedIndexedSchema = {
     .indexOnly(["title", "done"]),
 };
 export type MaintainedIndexedSchema = s.Schema<typeof maintainedIndexedSchema>;
-export const maintainedIndexedApp: s.App<MaintainedIndexedSchema> =
-  s.defineApp(maintainedIndexedSchema);
+export const maintainedIndexedApp: s.App<MaintainedIndexedSchema> = s.defineApp(
+  maintainedIndexedSchema,
+  { migrations: "none" },
+);
 export const { todos: maintainedIndexedTodos } = maintainedIndexedApp;
 export type MaintainedIndexedTodo = s.RowOf<typeof maintainedIndexedTodos>;
 
@@ -177,7 +185,9 @@ export const transactionIdentitySchema = {
     )
     .branchBy("branch"),
 };
-export const transactionIdentityApp = s.defineApp(transactionIdentitySchema);
+export const transactionIdentityApp = s.defineApp(transactionIdentitySchema, {
+  migrations: "none",
+});
 export const transactionIdentityPermissions = s.definePermissions(
   transactionIdentityApp,
   ({ policy }) => [
@@ -252,7 +262,9 @@ export const nullableSchema = {
 };
 
 export type NullableSchema = s.Schema<typeof nullableSchema>;
-export const nullableApp: s.App<NullableSchema> = s.defineApp(nullableSchema);
+export const nullableApp: s.App<NullableSchema> = s.defineApp(nullableSchema, {
+  migrations: "none",
+});
 export const nullablePermissions = s.definePermissions(nullableApp, ({ policy }) => [
   policy.todos.allowRead.always(),
   policy.todos.allowInsert.always(),
@@ -287,8 +299,22 @@ export const catalogueSchemaV2 = {
   ),
 };
 
-export const catalogueAppV1 = s.defineApp(catalogueSchemaV1);
-export const catalogueAppV2 = s.defineApp(catalogueSchemaV2);
+const catalogueMigrate = {
+  todos: {
+    description: m.add.string({ default: null }),
+  },
+};
+// Both versions ship the family's lens, as the app's generated module holds it.
+const catalogueMigrations = await appMigrations(catalogueSchemaV1, {
+  to: catalogueSchemaV2,
+  migration: m.defineMigration({
+    from: catalogueSchemaV1,
+    to: catalogueSchemaV2,
+    migrate: catalogueMigrate,
+  }),
+});
+export const catalogueAppV1 = s.defineApp(catalogueSchemaV1, { migrations: catalogueMigrations });
+export const catalogueAppV2 = s.defineApp(catalogueSchemaV2, { migrations: catalogueMigrations });
 export const { todos: catalogueTodos } = catalogueAppV2;
 export type CatalogueTodo = s.RowOf<typeof catalogueTodos>;
 export const allCatalogueTodos: QueryBuilder<CatalogueTodo> = catalogueAppV2.todos;
@@ -311,14 +337,14 @@ export const cataloguePermissionsV2 = s.definePermissions(catalogueAppV2, ({ pol
  * Structurally valid JWT with a deliberately invalid signature: parses fine on
  * the client (sub/exp claims) but the testing server rejects it at handshake.
  */
-export function makeStructurallyValidJwt(userId: string): string {
+export function makeStructurallyValidJwt(userId: string, issuer = "urn:jazz:test"): string {
   const encode = (value: unknown) =>
     btoa(JSON.stringify(value)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
   const header = encode({ alg: "HS256", typ: "JWT" });
   const payload = encode({
-    // Match TestJwtIssuer's ordinary external identity so this remains a
-    // same-principal refresh after the server rejects the signature.
-    iss: "urn:jazz:test",
+    // Pass the signed-in user's issuer for a same-principal token the
+    // server rejects for its signature.
+    iss: issuer,
     sub: userId,
     exp: Math.floor(Date.now() / 1000) + 3600,
   });
@@ -411,7 +437,7 @@ export async function waitForTodos(
   predicate: (rows: Todo[]) => boolean,
   label: string,
   timeoutMs = 15000,
-  tier?: "local" | "global",
+  tier?: "local-first" | "remote",
 ): Promise<Todo[]> {
   return waitForQuery(db, allTodos, predicate, label, timeoutMs, tier);
 }
@@ -421,7 +447,7 @@ export async function waitForCatalogueTodos(
   predicate: (rows: CatalogueTodo[]) => boolean,
   label: string,
   timeoutMs = 15_000,
-  tier?: "local" | "global",
+  tier?: "local-first" | "remote",
 ): Promise<CatalogueTodo[]> {
   return waitForQuery(db, allCatalogueTodos, predicate, label, timeoutMs, tier);
 }
@@ -438,16 +464,12 @@ export async function publishCatalogueSchemaFamily(scope: string): Promise<JazzS
     permissions: cataloguePermissionsV1,
   });
 
-  const migration = s.defineMigration({
+  const migration = m.defineMigration({
     fromHash: v1.schema.hash,
     toHash: await computeSchemaHash(catalogueAppV2.wasmSchema),
     from: catalogueSchemaV1,
     to: catalogueSchemaV2,
-    migrate: {
-      todos: {
-        description: s.add.string({ default: null }),
-      },
-    },
+    migrate: catalogueMigrate,
   });
 
   await deploy({
@@ -459,7 +481,10 @@ export async function publishCatalogueSchemaFamily(scope: string): Promise<JazzS
     migration,
   });
 
-  return testingServer;
+  return startJazzApp(testingServer, {
+    schema: catalogueAppV2.wasmSchema,
+    permissions: cataloguePermissionsV2,
+  });
 }
 
 export async function publishSyncServerSchemaAndPermissions(
@@ -488,23 +513,22 @@ export async function publishSyncServerSchemaAndPermissions(
       delete: { using: { type: "True" } },
     },
   };
-  await publishPermissionsForServer(testingServer, permissionsToPublish, schema);
-  return testingServer;
+  return publishPermissionsForServer(testingServer, permissionsToPublish, schema);
 }
 
+/**
+ * Deploy `permissions` to the core behind `testingServer`, then (re)start the
+ * app backend for them on the same origin, so clients reconnect to the new
+ * bundle. Returns the app backend's info.
+ */
 export async function publishPermissionsForServer(
   testingServer: JazzServerInfo,
   permissions: CompiledPermissions,
   schema?: Schema,
-): Promise<void> {
-  const { appId, serverUrl, adminSecret } = testingServer;
-  await deploy({
-    appId,
-    serverUrl,
-    adminSecret,
-    schema: schema ?? app.wasmSchema,
-    permissions,
-  });
+): Promise<JazzServerInfo> {
+  const deployedSchema = schema ?? app.wasmSchema;
+  await deploy({ ...jazzCore(testingServer), schema: deployedSchema, permissions });
+  return startJazzApp(testingServer, { schema: deployedSchema, permissions });
 }
 
 export async function replaceStorageManifest(name: string, manifest: unknown): Promise<void> {
@@ -574,7 +598,7 @@ export function useSharedWorkerBridgeHarness() {
     title: string,
     label: string,
     timeoutMs: number,
-    tier?: "local" | "global",
+    tier?: "local-first" | "remote",
   ): Promise<Record<string, unknown>[]> {
     try {
       return await waitForRemoteBrowserDbTitle({ id, title, timeoutMs, tier });

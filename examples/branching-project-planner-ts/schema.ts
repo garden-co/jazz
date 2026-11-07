@@ -1,4 +1,5 @@
 import { schema as s } from "jazz-tools";
+import { migrations } from "./migrations";
 
 const schema = {
   // Branches are application data. Jazz assigns no lifecycle semantics to them.
@@ -6,6 +7,7 @@ const schema = {
     {
       name: s.string(),
       base_scenario_id: s.uuid().optional(),
+      base_snapshot_ref: s.string().optional(),
       status: s.enum("open", "approved", "archived"),
     },
     {
@@ -29,6 +31,6 @@ const schema = {
 };
 
 type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema);
+export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
 export type Scenario = s.RowOf<typeof app.scenarios>;
 export type Task = s.RowOf<typeof app.tasks>;

@@ -1,17 +1,26 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createJazzSession } from "jazz-tools/backend";
-import { deploy, startLocalJazzServer, type LocalJazzServerHandle } from "jazz-tools/testing";
+import { createAccountManager, createDb, type Db } from "jazz-tools";
+import { createJazz, remote, type Jazz } from "jazz-tools/backend";
+import {
+  deploy,
+  startLocalJazzServer,
+  startTestJazz,
+  type LocalJazzServerHandle,
+  type TestJazz,
+} from "jazz-tools/testing";
 import permissions from "../permissions";
 import { app } from "../schema";
 
 describe("Better Auth storage boundary", () => {
   let server: LocalJazzServerHandle | undefined;
-  let session: Awaited<ReturnType<typeof createJazzSession>> | undefined;
-  let ordinarySession: Awaited<ReturnType<typeof createJazzSession>> | undefined;
+  let session: Jazz | undefined;
+  let front: TestJazz | undefined;
+  let client: Db | undefined;
 
   afterEach(async () => {
     await session?.close();
-    await ordinarySession?.close();
+    await client?.shutdown();
+    await front?.stop();
     await server?.stop();
   });
 
@@ -25,20 +34,16 @@ describe("Better Auth storage boundary", () => {
       permissions,
     });
 
+    // The app's backend, as its server runs it.
     const openSession = () =>
-      createJazzSession({
-        appId: server!.appId,
+      createJazz({
         app,
         permissions,
-        driver: { type: "memory" },
-        serverUrl: server!.url,
-        initial: { backendSecret: server!.backendSecret },
-        env: "test",
+        store: remote({ url: server!.url, appId: server!.appId, secret: server!.adminSecret }),
       });
 
     session = await openSession();
-    const backend = session.getSnapshot().client!;
-    const stored = await backend.db
+    const stored = await session.db
       .insert(app.better_auth_user, {
         name: "Persisted auth user",
         email: "persisted@example.test",
@@ -48,17 +53,27 @@ describe("Better Auth storage boundary", () => {
       })
       .wait({ tier: "global" });
 
-    ordinarySession = await createJazzSession({
+    // An ordinary client is a local-first guest, syncing through the app's
+    // backend: a core admits only its app's backend.
+    front = await startTestJazz({ core: server, app, permissions });
+    let storedAccount: string | null = null;
+    const accounts = await createAccountManager({
       appId: server.appId,
-      app,
-      permissions,
-      driver: { type: "memory" },
-      serverUrl: server.url,
-      env: "test-client",
-      initial: "local-first",
+      serverUrl: front.url,
+      store: {
+        read: async () => storedAccount,
+        update: async (transform) => {
+          storedAccount = transform(storedAccount);
+        },
+      },
     });
-    const client = ordinarySession.getSnapshot().client!.db;
-    await expect(client.all(app.better_auth_user, { tier: "global" })).resolves.toEqual([]);
+    client = await createDb({
+      appId: server.appId,
+      serverUrl: front.url,
+      account: accounts.createLocalFirst(),
+      driver: { type: "memory" },
+    });
+    await expect(client.all(app.better_auth_user, { tier: "remote" })).resolves.toEqual([]);
     await expect(
       client
         .insert(app.better_auth_user, {
@@ -76,9 +91,9 @@ describe("Better Auth storage boundary", () => {
     await expect
       .poll(
         async () =>
-          (
-            await session!.getSnapshot().client!.db.all(app.better_auth_user, { tier: "global" })
-          ).find((row) => row.id === stored.id),
+          (await session!.db.all(app.better_auth_user, { tier: "remote" })).find(
+            (row) => row.id === stored.id,
+          ),
         { timeout: 10_000 },
       )
       .toEqual(expect.objectContaining({ email: "persisted@example.test" }));

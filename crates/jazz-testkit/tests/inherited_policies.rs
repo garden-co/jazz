@@ -38,28 +38,16 @@ fn inherited_update_schema() -> jazz::tools::Schema {
                         .with_update(
                             Some(PolicyExpr::eq_session(
                                 "owner_id",
-                                vec![
-                                    "user".to_owned(),
-                                    "identity".to_owned(),
-                                    "subject".to_owned(),
-                                ],
+                                vec!["identity".to_owned(), "subject".to_owned()],
                             )),
                             PolicyExpr::eq_session(
                                 "owner_id",
-                                vec![
-                                    "user".to_owned(),
-                                    "identity".to_owned(),
-                                    "subject".to_owned(),
-                                ],
+                                vec!["identity".to_owned(), "subject".to_owned()],
                             ),
                         )
                         .with_delete(PolicyExpr::eq_session(
                             "owner_id",
-                            vec![
-                                "user".to_owned(),
-                                "identity".to_owned(),
-                                "subject".to_owned(),
-                            ],
+                            vec!["identity".to_owned(), "subject".to_owned()],
                         )),
                 ),
         )
@@ -76,33 +64,21 @@ fn inherited_update_schema() -> jazz::tools::Schema {
                             Some(PolicyExpr::or(vec![
                                 PolicyExpr::eq_session(
                                     "owner_id",
-                                    vec![
-                                        "user".to_owned(),
-                                        "identity".to_owned(),
-                                        "subject".to_owned(),
-                                    ],
+                                    vec!["identity".to_owned(), "subject".to_owned()],
                                 ),
                                 PolicyExpr::inherits(Operation::Update, "organization_id"),
                             ])),
                             PolicyExpr::or(vec![
                                 PolicyExpr::eq_session(
                                     "owner_id",
-                                    vec![
-                                        "user".to_owned(),
-                                        "identity".to_owned(),
-                                        "subject".to_owned(),
-                                    ],
+                                    vec!["identity".to_owned(), "subject".to_owned()],
                                 ),
                                 PolicyExpr::inherits(Operation::Update, "organization_id"),
                             ]),
                         )
                         .with_delete(PolicyExpr::eq_session(
                             "owner_id",
-                            vec![
-                                "user".to_owned(),
-                                "identity".to_owned(),
-                                "subject".to_owned(),
-                            ],
+                            vec!["identity".to_owned(), "subject".to_owned()],
                         )),
                 ),
         )
@@ -134,11 +110,7 @@ fn inherited_select_schema() -> jazz::tools::Schema {
                     TablePolicies::new()
                         .with_select(PolicyExpr::eq_session(
                             "owner_id",
-                            vec![
-                                "user".to_owned(),
-                                "identity".to_owned(),
-                                "subject".to_owned(),
-                            ],
+                            vec!["identity".to_owned(), "subject".to_owned()],
                         ))
                         .with_insert(PolicyExpr::True)
                         .with_update(Some(PolicyExpr::True), PolicyExpr::True)
@@ -155,11 +127,7 @@ fn inherited_select_schema() -> jazz::tools::Schema {
                         .with_select(PolicyExpr::or(vec![
                             PolicyExpr::eq_session(
                                 "owner_id",
-                                vec![
-                                    "user".to_owned(),
-                                    "identity".to_owned(),
-                                    "subject".to_owned(),
-                                ],
+                                vec!["identity".to_owned(), "subject".to_owned()],
                             ),
                             PolicyExpr::inherits(Operation::Select, "organization_id"),
                         ]))
@@ -209,11 +177,7 @@ fn reverse_inherited_select_schema() -> jazz::tools::Schema {
                     TablePolicies::new()
                         .with_select(PolicyExpr::eq_session(
                             "owner_id",
-                            vec![
-                                "user".to_owned(),
-                                "identity".to_owned(),
-                                "subject".to_owned(),
-                            ],
+                            vec!["identity".to_owned(), "subject".to_owned()],
                         ))
                         .with_insert(PolicyExpr::True),
                 ),
@@ -274,7 +238,6 @@ async fn publish_schema(server: &JazzServer, schema: &jazz::tools::Schema) {
             .iter()
             .map(|(table_name, table_schema)| (*table_name, table_schema.policies.clone()))
             .collect::<Vec<_>>(),
-        None,
     )
     .await;
 }
@@ -284,8 +247,7 @@ fn user_context(
     schema: jazz::tools::Schema,
     user_id: &str,
 ) -> jazz::tools::AppContext {
-    let mut context = server.make_client_context_for_user(schema, user_id);
-    context.backend_secret = None;
+    let mut context = server.make_user_context(schema, user_id);
     context
 }
 
@@ -755,14 +717,12 @@ async fn inherited_update_policy_allows_update_through_parent() {
                     .iter()
                     .map(|(table_name, table_schema)| (*table_name, table_schema.policies.clone()))
                     .collect::<Vec<_>>(),
-                None,
             )
             .await;
 
             let alice_owner_id = test_author_id("alice");
             let alice_user_id = test_user_id("alice");
-            let mut context = server.make_client_context_for_user(schema.clone(), &alice_user_id);
-            context.backend_secret = None;
+            let mut context = server.make_user_context(schema.clone(), &alice_user_id);
             support::enroll_test_context(&mut context)
                 .await
                 .expect("enroll alice");
@@ -871,14 +831,12 @@ async fn inherited_update_policy_allows_multi_hop_update_chain() {
                     .iter()
                     .map(|(table_name, table_schema)| (*table_name, table_schema.policies.clone()))
                     .collect::<Vec<_>>(),
-                None,
             )
             .await;
 
             let alice_owner_id = test_author_id("alice");
             let alice_user_id = test_user_id("alice");
-            let mut context = server.make_client_context_for_user(schema.clone(), &alice_user_id);
-            context.backend_secret = None;
+            let mut context = server.make_user_context(schema.clone(), &alice_user_id);
             support::enroll_test_context(&mut context)
                 .await
                 .expect("enroll alice");
@@ -971,14 +929,12 @@ async fn inherited_update_policy_allows_reparenting_when_old_and_new_parents_gra
                     .iter()
                     .map(|(table_name, table_schema)| (*table_name, table_schema.policies.clone()))
                     .collect::<Vec<_>>(),
-                None,
             )
             .await;
 
             let alice_owner_id = test_author_id("alice");
             let alice_user_id = test_user_id("alice");
-            let mut context = server.make_client_context_for_user(schema.clone(), &alice_user_id);
-            context.backend_secret = None;
+            let mut context = server.make_user_context(schema.clone(), &alice_user_id);
             support::enroll_test_context(&mut context)
                 .await
                 .expect("enroll alice");

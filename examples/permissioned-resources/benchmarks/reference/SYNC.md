@@ -96,7 +96,7 @@ The SQL topology does not serialize a real Jazz network connection.
 
 The experiment preserves the data and permission outcomes of this initial
 shallow-history fixture. It omits ongoing IVM maintenance, authority receipt
-bookkeeping, cancellation, reconnect reconciliation, branching, exclusive
+bookkeeping, cancellation, reconnect reconciliation, branching, serializable
 transactions and other behaviors not exercised by the captured load. A ratio
 to Jazz is evidence of remaining work to explain, not proof that all omitted
 machinery is removable overhead.

@@ -6,22 +6,28 @@ import { createServer, startServer, stopServer, type RunningServer } from "../sr
 globalThis.WebSocket ??= UndiciWebSocket as unknown as typeof globalThis.WebSocket;
 
 describe("Todo Server backend context", () => {
-  it("requires upstream sync config", async () => {
-    await expect(
-      createServer({
-        appId: "todo-server-ts",
-        serverUrl: undefined,
-        backendSecret: undefined,
-        adminSecret: undefined,
-      }),
-    ).rejects.toThrow(/JAZZ_SERVER_URL and JAZZ_BACKEND_SECRET are required/i);
+  it("refuses a Jazz core without its app id and admin secret", async () => {
+    await expect(createServer({ serverUrl: "http://127.0.0.1:1" })).rejects.toThrow(
+      /JAZZ_SERVER_URL needs JAZZ_APP_ID and JAZZ_ADMIN_SECRET/,
+    );
+  });
+
+  it("answers a request without a signed-in user as unauthorized", async () => {
+    const server = await startServer(await createServer(), 0);
+    try {
+      const response = await fetch(`${server.baseUrl}/todos/as/someone`);
+      expect(response.status).toBe(401);
+      await expect(response.json()).resolves.toEqual({ error: "Unauthorized" });
+    } finally {
+      await stopServer(server);
+    }
   });
 
   // `startLocalJazzServer` resolves only after the native server is ready,
   // but durable-store startup can contend with the workspace's parallel TS
   // suites in CI. Keep the normal 6s budget for request behavior and grant
   // this explicit server-lifecycle test its own readiness budget.
-  it("boots against an upstream Jazz server", async () => {
+  it("boots against a Jazz core elsewhere", async () => {
     const upstream = await startLocalJazzServer();
     let server: RunningServer | undefined;
     try {
@@ -29,7 +35,6 @@ describe("Todo Server backend context", () => {
         await createServer({
           appId: upstream.appId,
           serverUrl: upstream.url,
-          backendSecret: upstream.backendSecret,
           adminSecret: upstream.adminSecret,
         }),
         0,

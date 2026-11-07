@@ -1,5 +1,5 @@
 import { Suspense, useEffect, useState } from "react";
-import { useDb, useAll, useSession } from "jazz-tools/react";
+import { useAll, useSession } from "jazz-tools/react";
 import { LogOutIcon, Share2Icon } from "lucide-react";
 import { Avatar } from "@/components/Avatar";
 import { ShareModal } from "@/components/composer/ShareModal";
@@ -58,12 +58,11 @@ function ChatSettingsContent({
   chatId: string;
   onOpenChange: (open: boolean) => void;
 }) {
-  const db = useDb();
   const session = useSession();
-  const userId = session?.user.account ?? null;
+  const userId = session?.user ?? null;
   const [willShare, setWillShare] = useState(false);
 
-  const { data: chatRows = [] } = useAll(app.chats.where({ id: chatId }));
+  const { data: chatRows = [], db } = useAll(app.chats.where({ id: chatId }));
   const chat = chatRows[0];
   const [draftName, setDraftName] = useState("");
 

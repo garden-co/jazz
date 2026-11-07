@@ -1,15 +1,15 @@
 use jazz_example_band_chat_benchmark::{FastResumeFixture, Fixture, expected_counts};
 
 #[test]
-fn caught_up_fast_resume_emits_no_membership_or_version_payload() {
+fn caught_up_fast_resume_ships_no_rows() {
     for message_count in [100, 1_000] {
         let mut fixture = FastResumeFixture::new(message_count);
         let receipt = fixture.caught_up_fast_resume();
         assert!(
-            receipt.is_body_deduplicated_reset(),
+            receipt.ships_no_rows(),
             "{message_count} messages leaked a caught-up resume payload: {receipt:?}"
         );
-        assert_eq!(receipt.covered_inputs, message_count);
+        assert_eq!(receipt.rows_held, message_count);
     }
 }
 

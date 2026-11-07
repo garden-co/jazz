@@ -38,7 +38,7 @@ fn big_label_ingest_batch_amortization(bencher: divan::Bencher<'_, '_>, batch_si
 #[divan::bench(sample_count = 3)]
 fn big_label_releases_live_view_100k(bencher: divan::Bencher<'_, '_>) {
     let fixture = LiveViewFixture::new(100_000);
-    let baseline = fixture.active_groove_subscriptions();
+    let baseline = fixture.active_subscriptions();
     fixture.assert_selective_hydration();
     fixture.assert_subscription_baseline(baseline, "validation hydration");
     bencher.bench_local(|| divan::black_box(fixture.hydrate()));
@@ -47,9 +47,9 @@ fn big_label_releases_live_view_100k(bencher: divan::Bencher<'_, '_>) {
 
 /// A release plan's first edit under a sign-off policy that needs a lead or a
 /// deputy grant on every one of `desks` desks (`2^desks` policy branches): a
-/// fresh node compiles the update authorization-support view and hydrates
-/// each of its subscriptions. Schema compilation and node opening are untimed
-/// per-sample inputs, so no compiled program is reused between samples.
+/// fresh authority compiles the update policy and checks the edit against it.
+/// Schema compilation and opening the database are untimed per-sample
+/// inputs, so no compiled statement is reused between samples.
 #[divan::bench(args = [4, 6], sample_count = 5)]
 fn big_label_sign_off_first_edit(bencher: divan::Bencher<'_, '_>, desks: usize) {
     let fixture = PolicyGraphFixture::new(desks);

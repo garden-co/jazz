@@ -248,7 +248,8 @@ fn cases() -> Vec<Case> {
             offset: 0,
             limit: None,
             nested_images: false,
-            expected: Some(&[11, 13, 14, 12]),
+            // The 13/14 tie follows the last key's direction.
+            expected: Some(&[11, 14, 13, 12]),
         },
         Case {
             label: "unselected sort with a nested include",
@@ -491,7 +492,7 @@ async fn next_menu_snapshot(
             .unwrap_or_else(|| panic!("{what}: subscription stream closed"));
         let delta = match item {
             SubscriptionStreamItem::Delta(delta) => delta,
-            SubscriptionStreamItem::Rejected { reason } => {
+            SubscriptionStreamItem::Rejected { reason, .. } => {
                 panic!("{what}: subscription rejected: {reason:?}")
             }
         };
