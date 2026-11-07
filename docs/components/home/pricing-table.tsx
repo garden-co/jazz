@@ -108,7 +108,7 @@ const tiers: Tier[] = [
 /** Brackets under pairs of tiers: who each pair is for. */
 const brackets = [
   { after: 1, tiers: "Jazz and Jazz Pro", label: "typically enough for apps with 1K–10K active users" },
-  { after: 3, tiers: "Jazz Scale and Custom", label: "scale to millions of users across regions" },
+  { after: 3, tiers: "Jazz Scale and Custom", label: "scale to millions of active users across regions" },
 ];
 
 function TierColumn({ tier }: { tier: Tier }) {
