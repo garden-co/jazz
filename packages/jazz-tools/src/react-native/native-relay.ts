@@ -1,4 +1,5 @@
-import { Platform } from "react-native";
+// A namespace import: a host or test stub without Platform is then native, not a link error.
+import * as ReactNative from "react-native";
 import { REACT_NATIVE_WEB_UNSUPPORTED_ERROR } from "./errors.js";
 
 /**
@@ -7,6 +8,7 @@ import { REACT_NATIVE_WEB_UNSUPPORTED_ERROR } from "./errors.js";
  * lookup alone would fail with an unrelated TypeError.
  */
 export function importNativeRelay(): Promise<typeof import("jazz-rn/relay")> {
-  if (Platform?.OS === "web") return Promise.reject(new Error(REACT_NATIVE_WEB_UNSUPPORTED_ERROR));
+  if (ReactNative.Platform?.OS === "web")
+    return Promise.reject(new Error(REACT_NATIVE_WEB_UNSUPPORTED_ERROR));
   return import("jazz-rn/relay");
 }
