@@ -1,0 +1,205 @@
+---
+title: Vercel
+description: "Learn how to run Jazz inside your Next.js app on Vercel, with each environment's data in its own Sandbox."
+---
+
+On Vercel, your Next.js app is the whole deployment. The `vercel()` store keeps each environment's
+data in a persistent [Vercel Sandbox](https://vercel.com/docs/vercel-sandbox) that your functions
+start on demand. There's no separate service to set up and no secrets to copy.
+
+This page sets up your **main backend**: the backend that runs `createJazz`, serves sync to your
+browsers and apps, and decides who each user is. Other trusted machines reach Jazz through it as
+[backend clients](/docs/setup/backend-client).
+
+<include>../../../partials/install-alpha.mdx</include>
+
+## Set it up
+
+Install the Sandbox SDK next to `jazz-tools`:
+
+```bash title="Terminal"
+pnpm add @vercel/sandbox
+```
+
+Use the `vercel()` store:
+
+```ts title="jazz.server.ts"
+import { createJazz, vercel } from "jazz-tools/backend";
+import { app } from "./schema";
+import permissions from "./permissions";
+
+export const jazz = createJazz({
+  app,
+  permissions,
+  store: vercel(),
+  authenticate: async (request) => {
+    const session = await getSession(request); // your own auth
+    return session ? { userId: session.user.id } : null;
+  },
+});
+```
+
+<include>../../../partials/main-backend-config.mdx</include>
+
+In a Next.js app, install `ws` and `@vercel/functions` (both also needed under `next dev`) and keep
+Jazz's native module out of Next's server bundle:
+
+```bash title="Terminal"
+npm install ws @vercel/functions
+```
+
+```ts title="next.config.ts"
+import type { NextConfig } from "next";
+
+const nextConfig: NextConfig = {
+  // Your backend loads Jazz's native module; Next must not bundle it.
+  serverExternalPackages: ["jazz-napi"],
+};
+
+export default nextConfig;
+```
+
+Mount it with a catch-all route under `/jazz`, where clients connect by default:
+
+```ts title="app/jazz/[...path]/route.ts"
+import { jazz } from "@/jazz.server";
+
+export const { GET, POST, DELETE } = jazz.next();
+```
+
+Then deploy as usual with `git push` or `vercel deploy`. Your functions authenticate to Vercel with
+their own OIDC token, and the core's secrets are generated inside the Sandbox, so there are no
+environment variables to set.
+
+On Vercel, sync uses a WebSocket (through `upgradeWebSocket` from `@vercel/functions`). Under plain
+`next dev`, which can't upgrade sockets, the browser
+switches to an HTTP stream on its own.
+
+<include>../../../partials/main-backend-use.mdx</include>
+
+## Large values
+
+Large values, such as files and long streams, are stored in chunks outside the core's database.
+On Vercel, `vercel()` picks where they go:
+
+- **Vercel Blob**, when a Blob store is connected to the project (the Storage tab in the Vercel
+  dashboard sets `BLOB_STORE_ID`). A store created through the Vercel API or CLI sets only
+  `BLOB_READ_WRITE_TOKEN`, so pass its id as `vercelBlob({ storeId })`. Nothing else to set up: browsers send and fetch large values
+  through your `/jazz` route, and the core reads and writes the blobs itself with your function's
+  OIDC token. Blobs are private, and each is checked against its SHA-256 when read.
+- **The core's SQLite file** on its Drive, when no Blob store is connected. This works, but the
+  file grows with every large value, and the backend logs a warning saying how to connect one.
+
+To choose yourself, pass `blobs`:
+
+```ts title="jazz.server.ts"
+import { s3, vercel, vercelBlob } from "jazz-tools/backend";
+
+vercel(); // Vercel Blob if a Blob store is connected, otherwise SQLite
+vercel({ blobs: vercelBlob({ storeId: "store_..." }) }); // a specific Blob store
+vercel({ blobs: s3() }); // an S3 bucket connected through the Vercel Marketplace
+vercel({ blobs: "sqlite" }); // always the core's SQLite file
+```
+
+`s3()` reads `S3_BUCKET_NAME`, `AWS_REGION` and `AWS_ROLE_ARN`, which the Marketplace's AWS
+integration sets, and the core assumes that role with your function's OIDC token. The bucket can be in
+any region: on Vercel, `AWS_REGION` is the function's region, so if it doesn't match the bucket, the
+backend learns the bucket's region from S3's first reply, signs for it from then on, and logs a
+warning suggesting you set `AWS_REGION` to it. Putting the bucket in your Sandbox's region still
+keeps latency and transfer costs down. Its options are the same
+as for [your own server](/docs/setup/deployment/own-server#large-values).
+
+Each Blob store or bucket serves one Vercel environment. A store you connect spans every
+environment unless you limit it, so create one store per environment, connect each to its own
+environment only, and enable OIDC for each environment in the project's settings. A store created
+through the API or CLI is connected to production, preview and development alike, and a second
+one fails with `project_env_var_not_unique`; connect and limit stores in the dashboard instead. A core given another environment's store refuses to start, for
+example "Blob store … serves the production environment, not preview; connect a separate Blob store
+to each environment". Both `vercelBlob()` and `s3()` also take a `prefix`, by default
+`jazz/<store id>/`.
+
+Where large values go is a one-way choice. A core that started on SQLite can move to Vercel Blob
+or S3 later: connect a store and redeploy. Every other change, including disconnecting or swapping
+the Blob store, moving between Vercel Blob and S3, or moving back to SQLite, is not supported yet
+and the core refuses to start.
+
+Upload files from the browser with `db.insertStreaming(..., file.stream())`, which goes through
+`/jazz` (see [Uploading and downloading files](/docs/writing/writing-data#uploading-and-downloading-files)),
+not through a route of your own: Vercel refuses a function request body over 4.5 MB with
+`413 FUNCTION_PAYLOAD_TOO_LARGE`, so an upload route that passes `request.body` to
+`insertStreaming` works locally and fails on Vercel. Downloads through your own route are fine.
+
+History keeps every version of a row, so deleting rows doesn't free their large values, and there
+is no way to erase them yet. Expect blob storage to only grow.
+
+A change to the `vercelBlob()` or `s3()` options doesn't reach a core that is already running the
+same `jazz-tools` version. It applies the next time the core starts: after it stops when idle, or
+when you deploy a new `jazz-tools` version.
+
+## Local development
+
+Outside Vercel, `vercel()` uses a local store instead, by default `sqlite({ path: ".jazz/local" })`.
+Only production and preview deployments use the Sandbox: `next dev`, `vercel dev` and an
+environment pulled with `vercel env pull` all run against a SQLite file on your machine. Pass `local` to
+choose a different one, such as `vercel({ local: sqlite({ path: ".jazz/dev" }) })` to keep data you
+already have.
+
+Add `.jazz/` to `.gitignore`.
+
+Use `vercel()` in development too, rather than switching to `sqlite()` yourself: `sqlite()` refuses
+to start on Vercel, which has no lasting disk.
+
+Only one process can open a SQLite directory at a time. If a second one tries, it fails with an
+error saying another process holds the directory, usually a second dev server. Stop it, or give
+each server its own `path`.
+
+## Options
+
+All options are optional.
+
+| Option           | Default                                                               | What it does                                                     |
+| :--------------- | :-------------------------------------------------------------------- | :--------------------------------------------------------------- |
+| `name`           | `jazz-<VERCEL_PROJECT_ID>-production`, or `-preview-<branch>-<hash>`  | The Sandbox and Drive name, one per production or preview branch |
+| `region`         | `iad1`                                                                | Where the Sandbox runs; put it near your functions               |
+| `vcpus`          | `1`                                                                   | Sandbox size, 2 GB of memory per vCPU                            |
+| `maxDriveBytes`  | 10 GiB                                                                | The most data the environment's Drive holds                      |
+| `idleMs`         | 5 minutes                                                             | How long the Sandbox stays up with no requests or clients        |
+| `coreTarballUrl` | the Linux `jazz-napi` package for your installed `jazz-tools` version | Which Jazz core build the Sandbox runs                           |
+| `blobs`          | `vercelBlob()` if a Blob store is connected, otherwise `"sqlite"`     | Where large values go; see [Large values](#large-values)         |
+| `local`          | `sqlite({ path: ".jazz/local" })`                                     | The store used outside Vercel                                    |
+
+The default `name` uses Vercel's system environment variables, which are exposed by default. If
+they aren't, `vercel()` throws and asks you to pass `name`. While `vercel()` throws, the browser
+stays on its loading state, so check the function logs when a deployment never finishes loading. It also throws for a preview with no
+Git branch, such as a deploy through the Vercel API or from the CLI outside a Git checkout: pass
+`name` to give such previews a core of their own.
+
+The default `coreTarballUrl` covers every published `jazz-tools` version, release candidates
+included; set it only for a build you made yourself. If the Sandbox can't download the core, the
+function's error says so and the Sandbox is stopped. A Sandbox that already holds another
+app's core is refused.
+
+## Limits
+
+- Production and each preview branch get one persistent Sandbox and its Drive.
+  Two apps in one project need their own `name`. The smallest size is 2 GB of memory and 1 vCPU.
+- Production has one core. Each Git branch's previews get their own core and data
+  (`jazz-<VERCEL_PROJECT_ID>-preview-<branch>-<hash>`). Nothing cleans up the Sandboxes and Drives
+  of merged or deleted branches yet; delete them in the Vercel dashboard.
+- The first request in an environment takes longer: it creates the Sandbox and downloads the Jazz
+  server onto the Drive. Vercel's own checks of a new deployment can make that first request,
+  or wake a stopped Sandbox, so the cold start may already be over when you first open the page.
+- The Sandbox stops after 5 minutes with no requests and no connected clients; a connected
+  client keeps it awake, even when idle. The next request wakes it, which took 0.6 to 1 s in our
+  benchmarks and 4.2 s on a real project; requests after the wake took about 0.45 s.
+- Vercel ends a function's WebSockets at the route's `maxDuration` (300 s by default). Just before
+  that, `jazz.next()` closes each sync socket and clients reconnect at once. To reconnect less
+  often, raise the limit in the route file with `export const maxDuration = 800;` (Pro plan).
+- A redeploy on the same `jazz-tools` version doesn't disturb connected clients. Deploying a newer
+  `jazz-tools` restarts the core on that version, which briefly drops open sockets; clients
+  reconnect. An older deployment that is still running never moves the core back.
+- A thin client resends unanswered writes after its socket reconnects, and each lands once; a
+  transaction in flight at the drop ends with `ThinConnectionLostError`. See
+  [Pending writes](/docs/setup/web-client/thin-client#pending-writes).
+- `vercel()` needs Next.js 16 for now: under Next 15's webpack build, every request fails with
+  "Cannot find module 'jazz-tools/package.json'".

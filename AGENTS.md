@@ -32,6 +32,9 @@ layers, WASM + NAPI + React Native bindings.
   the component (`const { data: todos = [], db } = useAll(...)`; `todos.db` in
   Solid and on a Svelte `QuerySubscription`). Use `useDb()` / `getDb()` only
   where a component has no query.
+- **Docs sidebar.** A sidebar entry is either a page link or a folder
+  expander, never both: docs folders get no `index.mdx` and no `"index"` in
+  `meta.json`. Put an overview in its own page or in the pages that need it.
 - **Backlog.** Follow-ups go in GitHub Issues, not in specs or docs.
 - **Changesets.** Name only published packages. Rust-facing notes go under
   `jazz-tools` (the crates ship at its version); private `@jazz/rust` makes

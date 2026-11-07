@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { RootProvider } from "fumadocs-ui/provider/next";
 import { Analytics } from "@vercel/analytics/next";
+import { CopyTracker } from "@/components/site/copy-tracker";
 import "@garden-co/design/jazz/fonts.css";
 import "./global.css";
 
@@ -30,6 +31,7 @@ export default function Layout({ children }: LayoutProps<"/">) {
         {/* Site search is the Astryx command palette in the top nav. */}
         <RootProvider search={{ enabled: false }}>{children}</RootProvider>
         <Analytics />
+        <CopyTracker />
       </body>
     </html>
   );
