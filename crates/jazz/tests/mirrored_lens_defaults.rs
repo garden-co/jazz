@@ -49,19 +49,26 @@ fn status() -> ColumnType {
     }
 }
 
-/// v1 plus a required `currency: text` and `status: enum`.
+/// v1 plus a required `currency: text` whose schema default the lens's
+/// overrides, `status: enum` and a nullable `review: enum`.
 fn v2() -> JazzSchema {
     compile_schema(
         &expenses(|t| {
-            t.column("currency", ColumnType::Text)
-                .column("status", status())
+            t.column_with_default(
+                "currency",
+                ColumnType::Text,
+                jazz::tools::Value::Text("USD".into()),
+            )
+            .column("status", status())
+            .nullable_column("review", status())
         })
         .build(),
     )
 }
 
-/// `currency: m.add.string({ default: "EUR" })`, and
-/// `status: m.add.enum(..., { default: "paid" })`.
+/// `currency: m.add.string({ default: "EUR" })` (over the schema's "USD"),
+/// `status: m.add.enum(..., { default: "paid" })` and a nullable
+/// `review` defaulting to "open".
 fn v1_to_v2() -> MigrationLens {
     MigrationLens::new(
         v1().version_id(),
@@ -77,6 +84,10 @@ fn v1_to_v2() -> MigrationLens {
                 LensOp::AddColumn {
                     column: "status".into(),
                     default: Value::String("paid".into()),
+                },
+                LensOp::AddColumn {
+                    column: "review".into(),
+                    default: Value::Nullable(Some(Box::new(Value::String("open".into())))),
                 },
             ],
         }],
@@ -179,8 +190,10 @@ fn insert(db: &Db, n: u8, columns: &[(&str, &str)]) {
     .unwrap();
 }
 
-/// Each local row as (title, currency, status), by row id.
-fn local_rows(db: &Db) -> Vec<(Option<Value>, Option<Value>, Option<Value>)> {
+type Row = (Option<Value>, Option<Value>, Option<Value>, Option<Value>);
+
+/// Each local row as (title, currency, status, review), by row id.
+fn local_rows(db: &Db) -> Vec<Row> {
     let prepared = db.prepare_query(&Query::from("expenses")).unwrap();
     let mut rows: Vec<_> = block_on(db.all(&prepared, ReadOpts::default()))
         .unwrap()
@@ -193,7 +206,12 @@ fn local_rows(db: &Db) -> Vec<(Option<Value>, Option<Value>, Option<Value>)> {
             };
             (
                 row.row_uuid(),
-                (cell("title"), cell("currency"), cell("status")),
+                (
+                    cell("title"),
+                    cell("currency"),
+                    cell("status"),
+                    cell("review"),
+                ),
             )
         })
         .collect();
@@ -232,11 +250,14 @@ fn ddl_defaults(path: &Path, column_prefix: &str) -> Vec<(String, Option<String>
     out
 }
 
-fn row(title: &str, currency: &str, status: &str) -> (Option<Value>, Option<Value>, Option<Value>) {
+fn row(title: &str, currency: &str, status: &str, review: Option<&str>) -> Row {
     (
         Some(Value::String(title.into())),
         Some(Value::String(currency.into())),
         Some(Value::String(status.into())),
+        Some(Value::Nullable(
+            review.map(|review| Box::new(Value::String(review.into()))),
+        )),
     )
 }
 
@@ -280,8 +301,9 @@ fn a_local_first_store_reloaded_onto_v2_reads_the_lens_default_in_its_v1_rows() 
         insert(&tab, 3, &[("title", "c")]);
         pump(&server, &[&tab]);
     }
-    // It mirrored v2 from the server, adding `currency` as the server did,
-    // and `status` with the tag its own `paid` has.
+    // It mirrored v2 from the server, adding `currency` as the server did
+    // (the lens's default, not the schema's). Enum defaults are stored as
+    // each store's own tags, so the rows below check those.
     let both = |sql: &str| {
         vec![
             ("expenses".to_owned(), Some(sql.to_owned())),
@@ -289,15 +311,11 @@ fn a_local_first_store_reloaded_onto_v2_reads_the_lens_default_in_its_v1_rows() 
         ]
     };
     assert_eq!(ddl_defaults(&browser, "currency"), both("'EUR'"));
-    assert_eq!(
-        ddl_defaults(&browser, "status"),
-        ddl_defaults(&core, "status")
-    );
     let tab = v2_tab(&browser);
     let expected = vec![
-        row("a", "EUR", "paid"),
-        row("b", "EUR", "paid"),
-        row("c", "EUR", "paid"),
+        row("a", "EUR", "paid", Some("open")),
+        row("b", "EUR", "paid", Some("open")),
+        row("c", "EUR", "paid", Some("open")),
     ];
     assert_eq!(local_rows(&tab), expected, "reloaded, before connecting");
     let _link = link(&tab, &server);
@@ -306,7 +324,7 @@ fn a_local_first_store_reloaded_onto_v2_reads_the_lens_default_in_its_v1_rows() 
     insert(
         &tab,
         4,
-        &[("title", "d"), ("currency", "USD"), ("status", "open")],
+        &[("title", "d"), ("currency", "GBP"), ("status", "open")],
     );
     pump(&server, &[&tab]);
 
@@ -320,6 +338,6 @@ fn a_local_first_store_reloaded_onto_v2_reads_the_lens_default_in_its_v1_rows() 
     let _held = block_on(fresh.subscribe(&all, ReadOpts::default())).unwrap();
     pump(&server, &[&fresh]);
     let mut everyone = expected.clone();
-    everyone.push(row("d", "USD", "open"));
+    everyone.push(row("d", "GBP", "open", None));
     assert_eq!(local_rows(&fresh), everyone, "a fresh store");
 }

@@ -967,12 +967,37 @@ fn ddl_literal(conn: &Connection, literal: &str) -> Result<Sql, Error> {
 }
 
 /// Whether an upstream's default `value` can be column `column`'s: of its
-/// type, or one of its variants for an enum column.
+/// type, or, for an enum column (or a nullable one, or an array of them),
+/// its variants' names. Never a large value: it would name the upstream's
+/// chunks.
 fn default_fits(column: &crate::values::Column, value: &Value) -> bool {
-    match &column.variants {
-        Some(variants) => {
-            matches!(value, Value::String(name) if variants.iter().any(|v| v == name))
+    fn names_variants(variants: &[String], ty: &ValueType, value: &Value) -> bool {
+        match (ty, value) {
+            (ValueType::Nullable(_), Value::Nullable(None)) => true,
+            (ValueType::Nullable(inner), Value::Nullable(Some(value))) => {
+                names_variants(variants, inner, value)
+            }
+            (ValueType::Array(inner), Value::Array(items)) => items
+                .iter()
+                .all(|item| names_variants(variants, inner, item)),
+            (ValueType::Nullable(_) | ValueType::Array(_), _) => false,
+            (_, Value::String(name)) => variants.iter().any(|variant| variant == name),
+            _ => false,
         }
+    }
+    fn large(value: &Value) -> bool {
+        match value {
+            Value::Large(_) => true,
+            Value::Nullable(Some(value)) => large(value),
+            Value::Array(items) | Value::Tuple(items) => items.iter().any(large),
+            _ => false,
+        }
+    }
+    if large(value) {
+        return false;
+    }
+    match &column.variants {
+        Some(variants) => names_variants(variants, &column.ty, value),
         None => value.check_type(&column.ty).is_ok(),
     }
 }
@@ -3574,9 +3599,9 @@ impl Inner {
         for table in target.tables.values_mut() {
             let stored = self.physical.tables.get(&table.stored);
             for column in &mut table.columns {
-                if column.default.is_some()
-                    || stored.is_some_and(|stored| stored.column(&column.stored).is_some())
-                {
+                // The upstream's default wins over the schema's own, as the
+                // lens's does on the authority (see `admit`).
+                if stored.is_some_and(|stored| stored.column(&column.stored).is_some()) {
                     continue;
                 }
                 let Some(value) = defaults.get(&(table.stored.as_str(), column.stored.as_str()))
@@ -3621,9 +3646,20 @@ impl Inner {
                         continue;
                     };
                     let value = match by_name.get(&column.stored) {
-                        Some(name) => Some(Value::String(name.clone())),
+                        Some(name) => {
+                            let name = Value::String(name.clone());
+                            Some(match column.nullable() {
+                                true => Value::Nullable(Some(Box::new(name))),
+                                false => name,
+                            })
+                        }
                         None => {
-                            let cell = ddl_literal(&self.conn, literal)?;
+                            // A default this store cannot read is left out
+                            // (see `add_with_upstream_defaults`), not a
+                            // reason to send no catalogue.
+                            let Ok(cell) = ddl_literal(&self.conn, literal) else {
+                                continue;
+                            };
                             if matches!(cell, Sql::Null) {
                                 continue;
                             }
