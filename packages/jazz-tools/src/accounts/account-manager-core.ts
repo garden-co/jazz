@@ -1,4 +1,5 @@
 import { accountRegistryUrl } from "./context.js";
+import { accountAppId } from "./local-first.js";
 import { clientScope, DEFAULT_SERVER_URL } from "../runtime/client-scope.js";
 import { prepareAccountManager, type AccountStore } from "./persistence.js";
 import type { AccountManagerConfig } from "./create-account-manager.js";
@@ -32,8 +33,17 @@ export async function createAccountManagerWithMinter(
       throw new Error("bearer signs in through the app's backend: a device-only client has none");
   }
   const registry = clientRegistryUrl(config);
-  const scope = clientScope({ ...config, serverUrl: resolvedServerUrl(config) });
-  const store = config.store ?? browserAccountStore(registry, config.env ?? "dev");
+  const scope = clientScope({
+    ...config,
+    serverUrl: resolvedServerUrl(config),
+  });
+  const store =
+    config.store ??
+    browserAccountStore(
+      registry,
+      config.env ?? "dev",
+      config.scope?.trim() ? accountAppId(config.scope.trim()) : undefined,
+    );
   return prepareAccountManager({
     appId: scope,
     registry,
@@ -110,21 +120,49 @@ export const cookielessFetch: typeof fetch = () =>
     ),
   );
 
-function browserAccountStore(registry: string, env: string): AccountStore {
+const SELECTION_PREFIX = "jazz-account-selection-v1:";
+
+/**
+ * The selection an earlier client of the app `scope` names kept on this
+ * origin under another registry URL, such as alpha.59's, whose browsers
+ * reached the Jazz server directly rather than the app's `/jazz`. The app id
+ * in the key makes the match exact; with no such key, or several (one app
+ * reached through more than one server), there is nothing to take over.
+ */
+function earlierSelection(scope: string, env: string): string | null {
+  const suffix = `${encodeURIComponent(`/apps/${scope}/accounts`)}:${encodeURIComponent(env)}`;
+  const found: string[] = [];
+  for (let index = 0; index < localStorage.length; index++) {
+    const key = localStorage.key(index);
+    if (key?.startsWith(SELECTION_PREFIX) && key.endsWith(suffix)) found.push(key);
+  }
+  if (found.length !== 1) return null;
+  return localStorage.getItem(found[0]!);
+}
+
+/**
+ * `scope`: the app id a client keeping earlier local-first users names. When
+ * this registry holds no selection yet, it starts from the one those users'
+ * earlier client kept, copied: the earlier key stays as it was, so that
+ * client still finds it after a rollback.
+ */
+function browserAccountStore(registry: string, env: string, scope?: string): AccountStore {
   if (typeof localStorage === "undefined") {
     throw new Error("createAccountManager requires an AccountStore outside the browser");
   }
   if (typeof navigator === "undefined" || !navigator.locks) {
     throw new Error("The browser account store requires Web Locks; supply an atomic AccountStore");
   }
-  const key = `jazz-account-selection-v1:${encodeURIComponent(registry)}:${encodeURIComponent(env)}`;
+  const key = `${SELECTION_PREFIX}${encodeURIComponent(registry)}:${encodeURIComponent(env)}`;
+  const current = () =>
+    localStorage.getItem(key) ?? (scope === undefined ? null : earlierSelection(scope, env));
   return {
     async read() {
-      return localStorage.getItem(key);
+      return current();
     },
     async update(transform) {
       await navigator.locks.request(key, () => {
-        localStorage.setItem(key, transform(localStorage.getItem(key)));
+        localStorage.setItem(key, transform(current()));
       });
     },
   };

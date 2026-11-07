@@ -57,6 +57,8 @@ grep -q "is not this dump's app" "$work/wrong-app.err"
   tee "$work/import.json"
 # user-1, user-2 and user-9 link as createJazz users; revoked user-3 does not.
 grep -q '"backend_identities_linked":3' "$work/import.json"
+# The synthetic tenant has no local-first guests to tell about.
+grep -q '"local_first_guests":0' "$work/import.json"
 # The import keeps the app id beside the data, exactly as given: sqlite()
 # on this dir runs as the alpha.59 app.
 test "$(cat "$work/a60/app-id")" = "$app"

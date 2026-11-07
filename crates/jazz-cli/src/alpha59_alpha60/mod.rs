@@ -281,10 +281,20 @@ async fn run(args: &Args) -> Result<Json, String> {
             .await
             .map_err(|error| format!("account command {}: {error}", account.revision))?;
     }
+    let identities = links::identities(&head.accounts, &head.principals);
     let mut linked = 0;
     if args.link_backend_identities {
-        let planned = links::plan(&links::identities(&head.accounts, &head.principals)?)?;
+        let planned = links::plan(identities.as_ref().map_err(Clone::clone)?)?;
         linked = links::apply(&state, &planned).await?;
+    }
+    let guests = identities.as_deref().map_or(0, local_first_guests);
+    if guests > 0 {
+        eprintln!(
+            "{guests} local-first guests came over. Their devices find their accounts \
+             again only with the client scoped to this app: \
+             createJazzClient({{ scope: \"{}\" }}) (<JazzProvider scope=\"{0}\"> in React).",
+            args.app_id_text
+        );
     }
 
     let mut rows = RowImport::default();
@@ -369,6 +379,7 @@ async fn run(args: &Args) -> Result<Json, String> {
         "permission_session_paths_renamed": session_paths_renamed,
         "account_commands": head.accounts.len(),
         "backend_identities_linked": linked,
+        "local_first_guests": guests,
         "versions_in_dump": footer.versions,
         "versions_written": rows.written,
         "versions_skipped_rejected": rows.rejected,
@@ -402,6 +413,16 @@ async fn replay_admin_catalogue(
         .await
         .map_err(|error| format!("active schema: {error}"))?;
     Ok((1, renamed))
+}
+
+/// The admitted local-first identities: alpha.59 founded each guest's
+/// account in the app id's namespace, so a client finds it again only when
+/// scoped to that id (`createJazzClient({ scope })`).
+fn local_first_guests(identities: &[links::Identity]) -> usize {
+    identities
+        .iter()
+        .filter(|identity| identity.active && identity.issuer == AuthorSubject::LOCAL_FIRST_ISSUER)
+        .count()
 }
 
 /// Refuse an `--app-id` other than the one alpha.59's admin catalogue was
@@ -1098,6 +1119,23 @@ fn err(error: impl std::fmt::Display) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_admitted_local_first_identities_count_as_guests() {
+        let identity = |issuer: &str, active| links::Identity {
+            issuer: issuer.to_owned(),
+            subject: "s".to_owned(),
+            account: "\"a\"".to_owned(),
+            active,
+            manage_identities: true,
+        };
+        let identities = [
+            identity(AuthorSubject::LOCAL_FIRST_ISSUER, true),
+            identity(AuthorSubject::LOCAL_FIRST_ISSUER, false),
+            identity("https://idp.example", true),
+        ];
+        assert_eq!(local_first_guests(&identities), 1);
+    }
 
     #[test]
     fn the_import_refuses_another_app_id_than_alpha59_served() {
