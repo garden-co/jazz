@@ -1133,3 +1133,293 @@ fn a_foreground_one_shot_falls_back_to_its_owner_when_a_live_server_is_silent() 
     assert!(started.elapsed() >= SHORT);
     assert_eq!(rows, 0, "the cold worker holds none of the server's rows");
 }
+
+/// Alice's cold foreground reads Bob's durable worker while its server is
+/// offline, inside the SAME mergeable handle and without a warming read.
+/// Its own staging remains visible; a later server change does not turn the
+/// mergeable commit into a serializable read-set conflict.
+///
+/// server(a..j) -> Bob(worker cache, offline upstream) -> Alice(cold tab)
+/// Alice: begin mergeable -> stage own -> LocalFirst -> server changes -> commit
+#[test]
+fn cold_mergeable_localfirst_uses_the_offline_workers_store_without_upgrade() {
+    for serialized in [false, true] {
+        let server = seeded_server();
+        let worker = warm_worker(0x82, &server);
+        worker.set_remote_link_hint(RemoteLinkHint::Failed);
+        let foreground = foreground_over(0x83, 0x82, worker);
+        foreground.tab.set_remote_link_hint(RemoteLinkHint::Failed);
+        for _ in 0..3 {
+            foreground.turn(None);
+        }
+        let id = jazz::tools::OpenTransactionId::new();
+        block_on(foreground.tab.begin_mergeable(id)).unwrap();
+        let own = block_on(foreground.tab.tx_ref(id).insert(
+            "items",
+            BTreeMap::from([("label".into(), Value::String("own-before".into()))]),
+            Default::default(),
+        ))
+        .unwrap()
+        .row_uuid();
+        let query = items();
+        let prepared = foreground.tab.prepare_query(&query).unwrap();
+        let bytes = postcard::to_allocvec(&query).unwrap();
+        let read = async {
+            if serialized {
+                let result = foreground
+                    .tab
+                    .all_serialized_query(
+                        &bytes,
+                        ReadOpts::for_read_tier(jazz::db::ReadTier::LocalFirst),
+                        Some(id),
+                        None,
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                let SerializedReadResult::Rows(rows) = result else {
+                    panic!("row query")
+                };
+                rows
+            } else {
+                foreground
+                    .tab
+                    .tx_ref(id)
+                    .all_prepared_at(&prepared, false, None, jazz::db::ReadTier::LocalFirst)
+                    .await
+                    .unwrap()
+            }
+        };
+        let rows = drive_cold_mergeable(&foreground, None, read);
+        let ids: Vec<_> = rows.iter().map(|r| r.row_uuid()).collect();
+        assert_eq!(
+            ids.len(),
+            LABELS.len() + 1,
+            "bound read must hydrate the worker's local rows"
+        );
+        assert!(ids.contains(&own));
+        assert!(all_rows().iter().all(|id| ids.contains(id)));
+        block_on(server.update(
+            "items",
+            row(0),
+            BTreeMap::from([(
+                "label".into(),
+                Value::String("server-changed-after-read".into()),
+            )]),
+            Default::default(),
+        ))
+        .unwrap();
+        let receipt = block_on(foreground.tab.commit_mergeable_handle(id)).unwrap();
+        foreground.worker.set_remote_link_hint(RemoteLinkHint::Live);
+        foreground.tab.set_remote_link_hint(RemoteLinkHint::Live);
+        drive_cold_mergeable(
+            &foreground,
+            Some(&server),
+            foreground
+                .tab
+                .wait_for_transaction(receipt.0, jazz::tx::DurabilityTier::Global),
+        )
+        .unwrap();
+    }
+}
+
+fn drive_cold_mergeable<T>(
+    foreground: &Foreground,
+    server: Option<&Db>,
+    future: impl Future<Output = T>,
+) -> T {
+    let mut future = pin!(future);
+    for _ in 0..MAX_TURNS {
+        if let Poll::Ready(result) = future
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+        {
+            return result;
+        }
+        foreground.turn(server);
+    }
+    panic!("cold mergeable read did not finish");
+}
+
+/// Alice admits a mergeable read before Bob's local worker answers, then stages
+/// a second row. Hydration must preserve the read's captured earlier prefix.
+#[test]
+fn cold_mergeable_localfirst_keeps_its_admitted_staging_prefix() {
+    let server = seeded_server();
+    let worker = warm_worker(0x84, &server);
+    worker.set_remote_link_hint(RemoteLinkHint::Failed);
+    let foreground = foreground_over(0x85, 0x84, worker);
+    foreground.tab.set_remote_link_hint(RemoteLinkHint::Failed);
+    for _ in 0..3 {
+        foreground.turn(None);
+    }
+    let id = jazz::tools::OpenTransactionId::new();
+    block_on(foreground.tab.begin_mergeable(id)).unwrap();
+    let transaction = foreground.tab.tx_ref(id);
+    let first = block_on(transaction.insert(
+        "items",
+        BTreeMap::from([("label".into(), Value::String("first".into()))]),
+        Default::default(),
+    ))
+    .unwrap()
+    .row_uuid();
+    let prepared = foreground.tab.prepare_query(&items()).unwrap();
+    let mut reading = Box::pin(transaction.all_prepared_at(
+        &prepared,
+        false,
+        None,
+        jazz::db::ReadTier::LocalFirst,
+    ));
+    assert!(
+        reading
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending(),
+        "the cold foreground must fetch its local worker"
+    );
+    let late = block_on(transaction.insert(
+        "items",
+        BTreeMap::from([("label".into(), Value::String("late".into()))]),
+        Default::default(),
+    ))
+    .unwrap()
+    .row_uuid();
+    let rows = drive_cold_mergeable(&foreground, None, reading).unwrap();
+    assert_eq!(rows.len(), LABELS.len() + 1);
+    assert!(rows.iter().any(|r| r.row_uuid() == first));
+    assert!(!rows.iter().any(|r| r.row_uuid() == late));
+    foreground.tab.abandon_transaction_handle(id).unwrap();
+}
+
+/// Alice abandons a mergeable fetch while Bob has not answered. Reusing the
+/// handle cannot revive the old read, and an unfinished read cannot commit.
+#[test]
+fn cold_mergeable_localfirst_refuses_abandonment_and_handle_reuse() {
+    let server = seeded_server();
+    let worker = warm_worker(0x86, &server);
+    worker.set_remote_link_hint(RemoteLinkHint::Failed);
+    let foreground = foreground_over(0x87, 0x86, worker);
+    foreground.tab.set_remote_link_hint(RemoteLinkHint::Failed);
+    for _ in 0..3 {
+        foreground.turn(None);
+    }
+    let id = jazz::tools::OpenTransactionId::new();
+    block_on(foreground.tab.begin_mergeable(id)).unwrap();
+    let prepared = foreground.tab.prepare_query(&items()).unwrap();
+    let transaction = foreground.tab.tx_ref(id);
+    let mut reading = Box::pin(transaction.all_prepared_at(
+        &prepared,
+        false,
+        None,
+        jazz::db::ReadTier::LocalFirst,
+    ));
+    assert!(
+        reading
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+    // A failed commit consumes its handle by the existing public contract.
+    // Abandon this attempt directly, then test consuming commit on a new read.
+    foreground.tab.abandon_transaction_handle(id).unwrap();
+    block_on(foreground.tab.begin_mergeable(id)).unwrap();
+    let Poll::Ready(Err(error)) = reading
+        .as_mut()
+        .poll(&mut Context::from_waker(Waker::noop()))
+    else {
+        panic!("old read survived handle reuse")
+    };
+    assert_eq!(error.code, jazz::db::ErrorCode::NotObserved);
+    drop(reading);
+    foreground.tab.abandon_transaction_handle(id).unwrap();
+    block_on(foreground.tab.begin_mergeable(id)).unwrap();
+    let transaction = foreground.tab.tx_ref(id);
+    let mut reading = Box::pin(transaction.all_prepared_at(
+        &prepared,
+        false,
+        None,
+        jazz::db::ReadTier::LocalFirst,
+    ));
+    assert!(
+        reading
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+    assert!(block_on(foreground.tab.commit_mergeable_handle(id)).is_err());
+    assert!(matches!(
+        reading
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop())),
+        Poll::Ready(Err(_))
+    ));
+}
+
+struct ColdMergeableReadPolicy {
+    inner: Box<dyn jazz::db::Transport>,
+    requests: std::rc::Rc<std::cell::RefCell<Vec<(jazz::db::ReadTier, Option<u64>)>>>,
+}
+impl jazz::db::Transport for ColdMergeableReadPolicy {
+    fn send(&mut self, message: jazz::db::SyncMessage) -> Result<(), jazz::db::TransportError> {
+        if let jazz::db::SyncMessage::Read { tier, wait, .. } = &message {
+            self.requests.borrow_mut().push((*tier, *wait));
+        }
+        self.inner.send(message)
+    }
+    fn try_recv(&mut self) -> Option<jazz::db::SyncMessage> {
+        self.inner.try_recv()
+    }
+}
+
+/// Alice's binding entry point keeps LocalFirst and her exact first-load wait
+/// when asking Bob's offline worker. Inspecting public transport is necessary:
+/// returned rows alone cannot distinguish it from a stronger Remote request.
+#[test]
+fn cold_mergeable_localfirst_preserves_the_binding_first_load_policy() {
+    let server = seeded_server();
+    let worker = warm_worker(0x88, &server);
+    worker.set_remote_link_hint(RemoteLinkHint::Failed);
+    let author = AuthorSubject::for_test_bytes([0x88; 16]);
+    let tab = block_on(Db::open(config(0x89, author))).unwrap();
+    tab.set_non_durable_client();
+    let requests = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let (up, down) = duplex();
+    block_on(tab.connect_upstream(Box::new(ColdMergeableReadPolicy {
+        inner: up,
+        requests: requests.clone(),
+    })));
+    worker.accept_subscriber(down, author).unwrap();
+    let foreground = Foreground { tab, worker };
+    foreground.tab.set_remote_link_hint(RemoteLinkHint::Failed);
+    for _ in 0..3 {
+        foreground.turn(None);
+    }
+    let id = jazz::tools::OpenTransactionId::new();
+    block_on(foreground.tab.begin_mergeable(id)).unwrap();
+    let query = postcard::to_allocvec(&items()).unwrap();
+    let result = drive_cold_mergeable(
+        &foreground,
+        None,
+        foreground.tab.all_serialized_query(
+            &query,
+            ReadOpts {
+                tier: jazz::db::ReadTier::LocalFirst,
+                first_load: FirstLoad::WaitForRemote { timeout_ms: 37 },
+                ..ReadOpts::default()
+            },
+            Some(id),
+            None,
+            None,
+        ),
+    )
+    .unwrap();
+    let SerializedReadResult::Rows(rows) = result else {
+        panic!("row query")
+    };
+    assert_eq!(rows.len(), LABELS.len());
+    assert_eq!(
+        *requests.borrow(),
+        vec![(jazz::db::ReadTier::LocalFirst, Some(37))]
+    );
+    foreground.tab.abandon_transaction_handle(id).unwrap();
+}
