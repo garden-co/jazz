@@ -50,6 +50,7 @@ import type {
 import { serializeRuntimeSchema } from "../../drivers/schema-wire.js";
 import { parseRelationQueryJsonLossless } from "../../ir.js";
 import type {
+  LocalObservationSnapshot,
   TxId,
   InsertResult,
   MutationErrorEvent,
@@ -252,6 +253,12 @@ type NativeRestoreOptions = NativeWriteOptions & {
 };
 
 type NativeDb = {
+  observeLocalBatch?(
+    queries: Uint8Array[],
+    author?: Uint8Array,
+    claims?: Record<string, unknown>,
+  ): unknown;
+
   coverCatalogue?(
     timeoutMs: number,
     author?: Uint8Array,
@@ -458,6 +465,8 @@ type NativeDb = {
     localNode: Uint8Array,
     localEpoch: bigint,
   ): Transport | Promise<Transport>;
+  /** Inherits native owner identity/live claims; takes no host scope arguments. */
+  acceptOwnObservationSubscriber?(): Transport;
   acceptSubscriber?(
     author: Uint8Array,
     claims: Record<string, unknown>,
@@ -513,6 +522,7 @@ type Write = {
 };
 
 export type Transport = {
+  observeLocalBatch?(queries: Uint8Array[], claims: Record<string, unknown>): unknown;
   close(): boolean;
   recvWireFrames(): unknown[];
   sendWireFrame(frame: Uint8Array): void;
@@ -1201,6 +1211,167 @@ export class NativeRuntimeAdapter implements Runtime {
     });
   }
 
+  private ownObservationPeer: Transport | null = null;
+  private ownObservationAdmission: Promise<Transport> | null = null;
+
+  async observeLocalBatch(
+    queries: readonly string[],
+    sessionJson?: string | null,
+    expectedSchema?: Uint8Array,
+  ): Promise<LocalObservationSnapshot[]> {
+    if (this.closed || this.ownerRuntime.closed) throw new Error("Native runtime is closed");
+    if (!queries.length) throw new Error("Local observation requires queries");
+    if (expectedSchema && !sameBytes(expectedSchema, this.schemaBytes))
+      throw new Error("Local observation schema view is not available on this durable owner");
+    if (this.ownerRuntime.nonDurableClient)
+      throw new Error("Local observation durable owner is unavailable");
+    const observe = this.db.observeLocalBatch;
+    if (!observe)
+      throw new Error(
+        "Native runtime does not expose local accepted observations; rebuild matching artifacts",
+      );
+    const session = readSession(sessionJson);
+    const context = this.nativeReadContext(session, undefined);
+    if (this === this.ownerRuntime && context.kind === "client-local" && session) {
+      if (session.backendAuthority || !sameBytes(session.identity, this.peerIdentity))
+        throw new Error("Local observation requires the admitted owner identity");
+      // Never restore cached JavaScript claims during observation. The native
+      // binding derives iss/sub from the admitted identity, both when the
+      // handshake installs provider-only claims and when reads include them.
+      // Compare that same projection while retaining every provider claim.
+      if (
+        !this.clientSessionClaimsKey ||
+        canonicalJson(session.claims) !==
+          canonicalJson(sessionClaims(JSON.parse(this.clientSessionClaimsKey), session))
+      )
+        throw new Error("Local observation requires the current installed owner claims");
+      if (!this.db.acceptOwnObservationSubscriber)
+        throw new Error(
+          "Native runtime lacks own observation admission; rebuild matching artifacts",
+        );
+      if (!this.ownObservationPeer) {
+        this.ownObservationAdmission ??= this.runWhenCoreIdle(() => {
+          if (this.closed) throw new Error("Native runtime is closed");
+          return this.db.acceptOwnObservationSubscriber!();
+        })
+          .then((peer) => {
+            if (this.closed) {
+              peer.close();
+              throw new Error("Native runtime is closed");
+            }
+            this.ownObservationPeer = peer;
+            return peer;
+          })
+          .finally(() => {
+            this.ownObservationAdmission = null;
+          });
+        await this.ownObservationAdmission;
+      }
+      if (this.closed || !this.ownObservationPeer) throw new Error("Native runtime is closed");
+      return this.observeLocalBatchForPeer(
+        this.ownObservationPeer,
+        queries,
+        session.claims,
+        this.schemaBytes,
+      );
+    }
+    await this.ensureClientSessionClaims(session);
+    await this.processPendingPeerActivityBeforeRead();
+    return this.runWhenCoreIdle(() => {
+      if (this.closed || this.ownerRuntime.closed) throw new Error("Native runtime is closed");
+      const raw = observe.call(
+        this.db,
+        queries.map((q) => nativeQueryInput(q, this.schema)),
+        this.nativeReadAuthor(context),
+        this.nativeReadClaims(context),
+      );
+      return this.decodeLocalObservationBatch(raw, queries);
+    });
+  }
+
+  /** @internal The actual admitted link supplies scope; no foreground token is interpreted here. */
+  async observeLocalBatchForPeer(
+    peer: Transport,
+    queries: readonly string[],
+    expectedClaims: Record<string, unknown>,
+    expectedSchema: Uint8Array,
+  ): Promise<LocalObservationSnapshot[]> {
+    if (!queries.length || !sameBytes(expectedSchema, this.schemaBytes))
+      throw new Error("Local observation schema view is not available on this durable owner");
+    if (!peer.observeLocalBatch)
+      throw new Error(
+        "Admitted link does not expose local observations; rebuild matching artifacts",
+      );
+    await this.processPendingPeerActivityBeforeRead();
+    return this.runWhenCoreIdle(() => {
+      if (this.closed || this.ownerRuntime.closed) throw new Error("Native runtime is closed");
+      return this.decodeLocalObservationBatch(
+        peer.observeLocalBatch!(
+          queries.map((q) => nativeQueryInput(q, this.schema)),
+          expectedClaims,
+        ),
+        queries,
+      );
+    });
+  }
+
+  private decodeLocalObservationBatch(
+    raw: unknown,
+    queries: readonly string[],
+  ): LocalObservationSnapshot[] {
+    if (!Array.isArray(raw) || raw.length !== queries.length)
+      throw new Error("Incomplete local observation batch");
+    let through: string | undefined;
+    return raw.map((value, index) => {
+      if (
+        !isRecord(value) ||
+        typeof value.through !== "string" ||
+        !/^[0-9]+$/.test(value.through) ||
+        !Array.isArray(value.rows) ||
+        !Array.isArray(value.evidence) ||
+        !Array.isArray(value.provenance)
+      )
+        throw new Error("Malformed local observation result");
+      through ??= value.through;
+      if (value.through !== through) throw new Error("Local observations do not share one cut");
+      const rows = rowsFromBatches(
+        readRowBatches(Uint8Array.from(value.rows)),
+        this.schema,
+        subscriptionOutputColumns(queries[index]!, this.schema).rootColumns,
+      );
+      const ids = new Set(rows.map((row) => row.id));
+      if (
+        ids.size !== rows.length ||
+        value.evidence.length !== rows.length ||
+        value.provenance.length !== rows.length
+      )
+        throw new Error("Incomplete local observation evidence");
+      for (const pair of value.evidence) {
+        if (!isRecord(pair) || typeof pair.rowId !== "string" || !ids.delete(pair.rowId))
+          throw new Error("Mismatched local observation row");
+        for (const origin of [pair.state, pair.content]) {
+          if (
+            !isRecord(origin) ||
+            typeof origin.transactionId !== "string" ||
+            !origin.transactionId ||
+            typeof origin.position !== "string" ||
+            !/^[0-9]+$/.test(origin.position) ||
+            BigInt(origin.position) > BigInt(value.through)
+          )
+            throw new Error("Malformed local observation origin");
+        }
+      }
+      if (value.provenance.some((p) => p !== "local-submission" && p !== "authority-read"))
+        throw new Error("Unknown local observation provenance");
+      return {
+        rows,
+        through: value.through,
+        evidence: value.evidence,
+        provenance: value.provenance,
+      } as LocalObservationSnapshot;
+    });
+  }
+
   createPeerAuthority(): { node: Uint8Array; epoch: bigint; features: number } {
     return {
       node: this.node,
@@ -1756,6 +1927,10 @@ export class NativeRuntimeAdapter implements Runtime {
     this.peerTransportWorkListeners.clear();
     this.localSettlementListeners.clear();
     this.pendingInboundServerFrames.length = 0;
+    const ownObservationPeer = this.ownObservationPeer;
+    this.ownObservationPeer = null;
+    if (ownObservationPeer)
+      void this.retirePeerTransport(ownObservationPeer).catch(reportAsyncRuntimeError);
     const serverTransport = this.serverTransport;
     this.serverTransport = null;
     if (serverTransport) {

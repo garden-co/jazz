@@ -181,7 +181,25 @@ export type AuthUpdate =
 /**
  * Common interface for the runtime backing `JazzClient`.
  */
+/** @internal Partial accepted local candidates; never SELECT or completeness proof. */
+export type LocalObservationSnapshot = {
+  rows: Row[];
+  through: string;
+  evidence: {
+    rowId: string;
+    state: { transactionId: string; position: string };
+    content: { transactionId: string; position: string };
+  }[];
+  provenance: ("local-submission" | "authority-read")[];
+};
+
 export interface Runtime {
+  /** @internal One shared cut on the actual durable owner, excluding pending prefixes. */
+  observeLocalBatch?(
+    queries: readonly string[],
+    sessionJson?: string | null,
+  ): Promise<LocalObservationSnapshot[]>;
+
   /**
    * Wait until every write committed so far reaches `tier`. `throughOutage`
    * keeps the wait pending through outages until a terminal failure.
