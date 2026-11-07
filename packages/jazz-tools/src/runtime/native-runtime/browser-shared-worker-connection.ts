@@ -526,19 +526,44 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
    * (closed, crashed, discarded), and the worker then detaches this tab, so
    * a tab waiting for this store under another sign-in gets in.
    *
-   * Requested before the connect message is posted, so the tab is first in
-   * the lock's queue: the worker only asks for it once it has admitted the
-   * tab. Connecting doesn't wait for the grant.
+   * Connecting doesn't wait for the grant, and the tab names the lock to the
+   * worker only once it holds it (`announceLivenessLock`): a worker that
+   * asked for it first would be granted it at once and drop a live tab.
    */
-  private holdLivenessLock(): string | undefined {
+  private holdLivenessLock(): { name: string; granted: Promise<void> } | undefined {
     const locks = globalThis.navigator?.locks;
     if (!locks) return undefined;
     const name = `jazz-tab-alive:${crypto.randomUUID()}`;
     let release!: () => void;
     const released = new Promise<void>((resolve) => (release = resolve));
     this.releaseLivenessLock = release;
-    void locks.request(name, () => released).catch(() => undefined);
-    return name;
+    const granted = new Promise<void>((resolve, reject) => {
+      locks
+        .request(name, () => {
+          resolve();
+          return released;
+        })
+        .catch(reject);
+    });
+    granted.catch(() => undefined);
+    return { name, granted };
+  }
+
+  /** Name the held liveness lock to the worker that admitted this tab on `port`. */
+  private announceLivenessLock(
+    lock: { name: string; granted: Promise<void> },
+    port: MessagePort,
+  ): void {
+    void lock.granted.then(
+      () => {
+        if (this.closed || this.worker?.port !== port) return;
+        port.postMessage({
+          type: "liveness-lock",
+          name: lock.name,
+        } satisfies BrowserFollowerPortRequest);
+      },
+      () => undefined,
+    );
   }
 
   private async connect(
@@ -559,12 +584,12 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
         fingerprint,
         generationName,
         createWorker,
-        livenessLock,
       );
       if (outcome.error) throw outcome.error;
       if (this.closed) return;
       if (outcome.connected) {
         this.connectedGeneration = generation;
+        if (livenessLock && this.worker) this.announceLivenessLock(livenessLock, this.worker.port);
         return;
       }
       generation = advanceWorkerGeneration(workerName, generation);
@@ -578,7 +603,6 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
     fingerprint: string,
     workerName: string,
     createWorker: (name: string) => SharedWorker,
-    livenessLock: string | undefined,
   ): Promise<{ connected: boolean; error?: Error }> {
     const worker = createWorker(workerName);
     this.worker = worker;
@@ -765,7 +789,6 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
         port.postMessage({
           type: "connect-runtime",
           tabId: crypto.randomUUID(),
-          ...(livenessLock ? { livenessLock } : {}),
           fingerprint,
           options,
         } satisfies BrowserSharedWorkerConnectRequest);
