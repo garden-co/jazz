@@ -1454,12 +1454,15 @@ pub enum SyncMessage {
 /// this upstream. `confirmed`: the versions whose names are the
 /// authority's, each with its names' digest (every version the authority
 /// admitted; on a relay, those its upstream confirmed). Only a confirmed
-/// version's tables and columns have an identity.
+/// version's tables and columns have an identity. `defaults`: the
+/// defaults the sender added `versions`' columns with, so the receiver adds
+/// them alike (a lens's default for a column it adds is in no schema).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CatalogueUpdate {
     pub namespace: Option<[u8; 16]>,
     pub versions: Vec<CatalogueVersion>,
     pub cells: Vec<CatalogueCell>,
+    pub defaults: Vec<CatalogueDefault>,
     pub confirmed: Vec<([u8; 16], [u8; 16])>,
 }
 
@@ -1495,6 +1498,17 @@ pub struct CatalogueCell {
     pub since: [u8; 16],
     pub source: Option<String>,
     pub default: Cell,
+}
+
+/// The default stored column `column` of stored table `table` was added
+/// with (`ADD COLUMN ... DEFAULT`): what rows written before it read. A
+/// lens's default for a column it adds travels only here. A value, not a
+/// cell: an enum default is its variant's name (SPEC 10.8).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CatalogueDefault {
+    pub table: String,
+    pub column: String,
+    pub default: Value,
 }
 
 impl SyncMessage {
@@ -6495,6 +6509,7 @@ impl Inner {
         };
         let mut versions = Vec::new();
         let mut sent = Vec::new();
+        let mut sent_schemas = Vec::new();
         for (version, names) in self.names.in_order() {
             let digest = crate::names::names_digest(names);
             let bytes = *version.as_bytes();
@@ -6515,6 +6530,7 @@ impl Inner {
                     None => continue,
                 }
             };
+            sent_schemas.push((jazz.clone(), names.clone()));
             versions.push(CatalogueVersion {
                 schema: crate::protocol::SchemaVersion {
                     id: version,
@@ -6558,6 +6574,8 @@ impl Inner {
                 }
             })
             .collect();
+        let defaults =
+            self.added_defaults(sent_schemas.iter().map(|(jazz, names)| (jazz, names)))?;
         let known_catalogue = self.sessions[index]
             .known_catalogue
             .get_or_insert_with(HashMap::new);
@@ -6568,6 +6586,7 @@ impl Inner {
             namespace,
             versions,
             cells,
+            defaults,
             confirmed,
         }))
     }
@@ -8686,9 +8705,12 @@ impl Db {
                         namespace,
                         versions,
                         cells,
+                        defaults,
                         confirmed,
                     }) => {
-                        match inner.mirror_catalogue(namespace, versions, cells, &confirmed) {
+                        match inner
+                            .mirror_catalogue(namespace, versions, cells, defaults, &confirmed)
+                        {
                             // Versions it took rebuilt the store's
                             // schema: its pending commits replay on top.
                             Ok(mirrored) => {

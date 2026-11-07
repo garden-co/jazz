@@ -939,6 +939,69 @@ fn stored_schema(conn: &Connection, jazz: &JazzSchema) -> Result<Schema, Error> 
     })
 }
 
+/// Each column of stored table `table` that its DDL gives a default, as
+/// the default's SQL text.
+fn ddl_defaults(conn: &Connection, table: &str) -> Result<BTreeMap<String, String>, Error> {
+    let mut statement = conn
+        .prepare(&format!("PRAGMA table_info({})", quote(table)))
+        .map_err(storage)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, Option<String>>(4)?))
+        })
+        .map_err(storage)?;
+    let mut defaults = BTreeMap::new();
+    for row in rows {
+        if let (column, Some(default)) = row.map_err(storage)? {
+            defaults.insert(column, default);
+        }
+    }
+    Ok(defaults)
+}
+
+/// The value of a DDL default's SQL text. It is this store's own DDL, as
+/// `Schema::union` and `Table::ddl` wrote it: a literal.
+fn ddl_literal(conn: &Connection, literal: &str) -> Result<Sql, Error> {
+    conn.query_row(&format!("SELECT {literal}"), [], |row| row.get::<_, Sql>(0))
+        .map_err(storage)
+}
+
+/// Whether an upstream's default `value` can be column `column`'s: of its
+/// type, or, for an enum column (or a nullable one, or an array of them),
+/// its variants' names. Never a large value: it would name the upstream's
+/// chunks.
+fn default_fits(column: &crate::values::Column, value: &Value) -> bool {
+    fn names_variants(variants: &[String], ty: &ValueType, value: &Value) -> bool {
+        match (ty, value) {
+            (ValueType::Nullable(_), Value::Nullable(None)) => true,
+            (ValueType::Nullable(inner), Value::Nullable(Some(value))) => {
+                names_variants(variants, inner, value)
+            }
+            (ValueType::Array(inner), Value::Array(items)) => items
+                .iter()
+                .all(|item| names_variants(variants, inner, item)),
+            (ValueType::Nullable(_) | ValueType::Array(_), _) => false,
+            (_, Value::String(name)) => variants.iter().any(|variant| variant == name),
+            _ => false,
+        }
+    }
+    fn large(value: &Value) -> bool {
+        match value {
+            Value::Large(_) => true,
+            Value::Nullable(Some(value)) => large(value),
+            Value::Array(items) | Value::Tuple(items) => items.iter().any(large),
+            _ => false,
+        }
+    }
+    if large(value) {
+        return false;
+    }
+    match &column.variants {
+        Some(variants) => names_variants(variants, &column.ty, value),
+        None => value.check_type(&column.ty).is_ok(),
+    }
+}
+
 /// Run a script of statements one at a time. SQLite's statement length
 /// limit applies to the whole text handed to one prepare, and schema DDL
 /// outgrows Durable Object SQLite's 100 KB.
@@ -3452,6 +3515,7 @@ impl Inner {
         namespace: Option<[u8; 16]>,
         versions: Vec<sync::CatalogueVersion>,
         cells: Vec<sync::CatalogueCell>,
+        defaults: Vec<sync::CatalogueDefault>,
         confirmed: &[([u8; 16], [u8; 16])],
     ) -> Result<bool, Error> {
         let known = self.namespace()?;
@@ -3462,7 +3526,7 @@ impl Inner {
         }
         let mirrored = !versions.is_empty();
         if mirrored {
-            self.mirror_versions(versions, cells)?;
+            self.mirror_versions(versions, cells, defaults)?;
         }
         let learned = known.is_none() && namespace.is_some();
         if let (true, Some(namespace)) = (learned, namespace) {
@@ -3487,6 +3551,7 @@ impl Inner {
         &mut self,
         versions: Vec<sync::CatalogueVersion>,
         cells: Vec<sync::CatalogueCell>,
+        defaults: Vec<sync::CatalogueDefault>,
     ) -> Result<(), Error> {
         let (physical, names, admitted) = (
             self.physical.clone(),
@@ -3495,7 +3560,7 @@ impl Inner {
         );
         let tags = self.names.tags().snapshot();
         begin_savepoint(&self.conn, "jazz_mirror")?;
-        let mirrored = self.mirror_versions_steps(versions, cells);
+        let mirrored = self.mirror_versions_steps(versions, cells, defaults);
         let ended = end_savepoint(&self.conn, "jazz_mirror", mirrored.is_ok());
         if let Err(error) = mirrored.and(ended) {
             self.physical = physical;
@@ -3516,12 +3581,120 @@ impl Inner {
         Ok(())
     }
 
+    /// Give each column of mirrored `target` this store does not store yet
+    /// the default its upstream added it with: a lens's default for a
+    /// column it adds is in no schema, and rows written before the column
+    /// read it (as on the authority) only if the `ADD COLUMN` gives it.
+    /// A default that does not fit the column is left out (the column then
+    /// reads as before) rather than refusing the whole catalogue: it only
+    /// changes how rows written before the column read.
+    fn add_with_upstream_defaults(
+        &self,
+        target: &mut Schema,
+        defaults: &BTreeMap<(&str, &str), &Value>,
+    ) {
+        if defaults.is_empty() {
+            return;
+        }
+        for table in target.tables.values_mut() {
+            let stored = self.physical.tables.get(&table.stored);
+            for column in &mut table.columns {
+                // The upstream's default wins over the schema's own, as the
+                // lens's does on the authority (see `admit`).
+                if stored.is_some_and(|stored| stored.column(&column.stored).is_some()) {
+                    continue;
+                }
+                let Some(value) = defaults.get(&(table.stored.as_str(), column.stored.as_str()))
+                else {
+                    continue;
+                };
+                if default_fits(column, value) {
+                    column.default = Some((*value).clone());
+                }
+            }
+        }
+    }
+
+    /// The defaults the columns of `versions` were added with in this
+    /// store, read from the stored tables' DDL, which is what rows written
+    /// before a column read (see [`sync::CatalogueDefault`]). An enum
+    /// default goes by its variant's name: tags are this store's own.
+    pub(crate) fn added_defaults<'a>(
+        &self,
+        versions: impl IntoIterator<Item = (&'a JazzSchema, &'a crate::values::StoredNames)>,
+    ) -> Result<Vec<sync::CatalogueDefault>, Error> {
+        let mut found = BTreeMap::new();
+        let mut ddl: HashMap<String, BTreeMap<String, String>> = HashMap::new();
+        for (jazz, names) in versions {
+            let schema = Schema::stored_as(jazz, names, self.names.tags());
+            for table in schema.tables.values() {
+                if !ddl.contains_key(&table.stored) {
+                    let defaults = ddl_defaults(&self.conn, &table.stored)?;
+                    ddl.insert(table.stored.clone(), defaults);
+                }
+                let by_name: BTreeMap<String, String> = self
+                    .names
+                    .enum_defaults(&table.stored)
+                    .into_iter()
+                    .collect();
+                for column in &table.columns {
+                    let key = (table.stored.clone(), column.stored.clone());
+                    if found.contains_key(&key) {
+                        continue;
+                    }
+                    let Some(literal) = ddl[&table.stored].get(&column.stored) else {
+                        continue;
+                    };
+                    let value = match by_name.get(&column.stored) {
+                        Some(name) => {
+                            let name = Value::String(name.clone());
+                            Some(match column.nullable() {
+                                true => Value::Nullable(Some(Box::new(name))),
+                                false => name,
+                            })
+                        }
+                        None => {
+                            // A default this store cannot read is left out
+                            // (see `add_with_upstream_defaults`), not a
+                            // reason to send no catalogue.
+                            let Ok(cell) = ddl_literal(&self.conn, literal) else {
+                                continue;
+                            };
+                            if matches!(cell, Sql::Null) {
+                                continue;
+                            }
+                            crate::values::column_from_sql(column, cell.as_ref(), &self.chunks)
+                                .ok()
+                                .flatten()
+                        }
+                    };
+                    if let Some(value) = value {
+                        found.insert(key, value);
+                    }
+                }
+            }
+        }
+        Ok(found
+            .into_iter()
+            .map(|((table, column), default)| sync::CatalogueDefault {
+                table,
+                column,
+                default,
+            })
+            .collect())
+    }
+
     fn mirror_versions_steps(
         &mut self,
         versions: Vec<sync::CatalogueVersion>,
         cells: Vec<sync::CatalogueCell>,
+        defaults: Vec<sync::CatalogueDefault>,
     ) -> Result<(), Error> {
         use crate::names::{LensCell, LensCellRule};
+        let defaults: BTreeMap<(&str, &str), &Value> = defaults
+            .iter()
+            .map(|d| ((d.table.as_str(), d.column.as_str()), &d.default))
+            .collect();
         let cells: Vec<LensCell> = cells
             .into_iter()
             .map(|cell| LensCell {
@@ -3574,7 +3747,8 @@ impl Inner {
             } else {
                 schema
             };
-            let target = Schema::stored_as(&jazz, &names, self.names.tags());
+            let mut target = Schema::stored_as(&jazz, &names, self.names.tags());
+            self.add_with_upstream_defaults(&mut target, &defaults);
             // A copy is filled once, when its version is first admitted.
             let fills = if fresh.contains(&version) {
                 cells

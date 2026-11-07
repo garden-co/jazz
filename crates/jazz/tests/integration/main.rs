@@ -87,6 +87,8 @@ mod local_first_first_load_gate;
 mod local_first_server_wait;
 #[path = "../maybe_conflicting.rs"]
 mod maybe_conflicting;
+#[path = "../mirrored_lens_defaults.rs"]
+mod mirrored_lens_defaults;
 #[path = "../mutation_admission.rs"]
 mod mutation_admission;
 #[path = "../order_by_unselected_column.rs"]
