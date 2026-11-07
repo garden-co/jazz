@@ -115,6 +115,8 @@ mod recheck_policies;
 mod recheck_queries;
 #[path = "../recheck_sync.rs"]
 mod recheck_sync;
+#[path = "../reconnect_fanout.rs"]
+mod reconnect_fanout;
 #[path = "../rejected_retry_store.rs"]
 mod rejected_retry_store;
 #[path = "../relation_policies.rs"]
