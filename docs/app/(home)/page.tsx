@@ -2,7 +2,6 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Metadata } from "next";
 import type { ReactNode } from "react";
-import { Button } from "@astryxdesign/core/Button";
 import { Heading } from "@astryxdesign/core/Heading";
 import { Link as AstryxLink } from "@astryxdesign/core/Link";
 import { Text } from "@astryxdesign/core/Text";
@@ -24,7 +23,7 @@ import {
 } from "@/components/home/deployment-carousel";
 import { CodeWindow } from "@/components/home/code-window";
 import { PricingCalculator } from "@/components/home/pricing-calculator";
-import { jazzTiers } from "@/lib/home-pricing";
+import { PricingTable } from "@/components/home/pricing-table";
 import { AgentPrompt } from "@/components/home/agent-prompt";
 import { FrameworkLogos } from "@/components/home/framework-logos";
 import { WalkthroughVideo } from "@/components/showcase/walkthrough-video";
@@ -483,41 +482,18 @@ export default function HomePage() {
       <section className="home-section">
         <div className="home-container">
           <SectionHeader id="pricing" title="Priced for flexible self-hosting & BYOC" />
-          <div className="mt-8 grid gap-6 border-t pt-6 sm:grid-cols-2 lg:grid-cols-4">
-            {(["oss", "pro", "scale", "custom"] as const).map((id) => (
-              <div key={id} className="grid content-start gap-2">
-                <Text as="p" display="block" weight="semibold">
-                  {jazzTiers[id].name}
-                </Text>
-                <Text as="p" display="block" type="large">
-                  {jazzTiers[id].price}
-                  {jazzTiers[id].priceExtra ? (
-                    <>
-                      <br />
-                      {jazzTiers[id].priceExtra}
-                    </>
-                  ) : null}
-                </Text>
-                <Text as="p" display="block" color="secondary">
-                  {jazzTiers[id].summary}
-                </Text>
-                {jazzTiers[id].note ? (
-                  <Text as="p" display="block" type="supporting" color="secondary">
-                    {jazzTiers[id].note}
-                  </Text>
-                ) : null}
-                {id === "custom" ? (
-                  <div className="mt-2">
-                    <Button
-                      label="Talk to us"
-                      variant="secondary"
-                      href="https://cal.com/anselm-io/cloud-pro-intro"
-                    />
-                  </div>
-                ) : null}
-              </div>
-            ))}
-          </div>
+          <PricingTable />
+          <Text
+            as="p"
+            display="block"
+            type="supporting"
+            color="secondary"
+            className="mt-6 max-w-3xl"
+          >
+            A paid license is a key your servers check offline: no metering and no phone-home, and
+            going over it only logs a reminder. As Jazz gets faster, your platform bill shrinks
+            while the license stays the same.
+          </Text>
           <div className="mt-12 grid gap-8">
             <Heading level={3}>What it costs on each platform</Heading>
             {/* Not ported to Astryx yet. A data-astryx-theme attribute ends the

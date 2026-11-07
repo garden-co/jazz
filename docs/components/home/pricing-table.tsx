@@ -1,0 +1,133 @@
+"use client";
+
+import type { ReactNode } from "react";
+import { Button } from "@astryxdesign/core/Button";
+import { Tooltip } from "@astryxdesign/core/Tooltip";
+
+/** Text that is the same across tiers is muted; what sets a tier apart is not. */
+const Muted = ({ children }: { children: ReactNode }) => (
+  <span className="home-pricing-muted">{children}</span>
+);
+
+function ActiveTerm() {
+  return (
+    <Tooltip
+      content="Wrote, subscribed or got an update in that minute"
+      placement="below"
+      touchTrigger="tap"
+    >
+      <button type="button" className="home-pricing-term">
+        active
+      </button>
+    </Tooltip>
+  );
+}
+
+type Tier = {
+  name: string;
+  kind: string;
+  price: string;
+  priceDetail: ReactNode;
+  features: ReactNode;
+  support: ReactNode;
+  operated: ReactNode;
+  action?: ReactNode;
+};
+
+const tiers: Tier[] = [
+  {
+    name: "Jazz",
+    kind: "Open-source (MIT)",
+    price: "Free",
+    priceDetail: "Limited only by what you can fit on a single server instance of any size.",
+    features: <Muted>All product features. No sharding.</Muted>,
+    support: <Muted>Community support</Muted>,
+    operated: <Muted>Operated by you</Muted>,
+  },
+  {
+    name: "Jazz Pro",
+    kind: "Source available",
+    price: "Free",
+    priceDetail:
+      "Limited only by what you can fit on any number of shards up to 4 GB RAM in total.",
+    features: (
+      <>
+        <Muted>All product features.</Muted> Limited sharding (soon).
+      </>
+    ),
+    support: <Muted>Community support</Muted>,
+    operated: <Muted>Operated by you</Muted>,
+  },
+  {
+    name: "Jazz Scale",
+    kind: "Self-serve license",
+    price: "$200/mo",
+    priceDetail: (
+      <>
+        <strong>+$50/mo</strong> per 1,000 peak <ActiveTerm /> sessions (p95 per minute).
+      </>
+    ),
+    features: (
+      <>
+        All product features. Unlimited sharding (soon).
+        <br />
+        Global data distribution (soon).
+      </>
+    ),
+    support: "Private support channel",
+    operated: <Muted>Operated by you</Muted>,
+  },
+  {
+    name: "Custom",
+    kind: "Bespoke contract",
+    price: "Let’s talk",
+    priceDetail: "Volume deals and tailored terms for large companies and early-stage startups.",
+    features: (
+      <>
+        All product features. Unlimited sharding (soon).
+        <br />
+        Global data distribution (soon).
+      </>
+    ),
+    support: (
+      <>
+        Private support channel
+        <br />
+        Custom support &amp; training
+      </>
+    ),
+    operated: "Operated by you or us (with SLAs)",
+    action: (
+      <Button
+        label="Talk to us"
+        variant="secondary"
+        href="https://cal.com/anselm-io/cloud-pro-intro"
+      />
+    ),
+  },
+];
+
+export function PricingTable() {
+  return (
+    <div className="home-pricing" role="list">
+      {tiers.map((tier) => (
+        <div key={tier.name} className="home-pricing-tier" role="listitem">
+          <div className="home-pricing-head">
+            <p className="home-pricing-name">{tier.name}</p>
+            <p>{tier.kind}</p>
+          </div>
+          <div className="home-pricing-cell">
+            <p className="home-pricing-price">{tier.price}</p>
+            <div>{tier.priceDetail}</div>
+          </div>
+          <p className="home-pricing-cell">{tier.features}</p>
+          <p className="home-pricing-cell">{tier.support}</p>
+          <div className="home-pricing-cell">
+            <p>{tier.operated}</p>
+            {tier.action ? <div className="mt-4">{tier.action}</div> : null}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
