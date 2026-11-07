@@ -3530,7 +3530,7 @@ mod tests {
                 .expect("refused, not left waiting");
             assert_eq!(answered, 1);
             assert!(
-                matches!(&body, jazz::thin::ThinBody::Error { code, .. } if code == "Storage"),
+                matches!(&body, jazz::thin::ThinBody::Error { code, .. } if code == "storage"),
                 "{body:?}"
             );
             let asked = bucket.state.calls.requests.load(Ordering::Relaxed);
