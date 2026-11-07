@@ -8938,6 +8938,22 @@ impl TxRef<'_> {
         identity: Option<AuthorSubject>,
         tier: ReadTier,
     ) -> Result<Vec<CurrentRow>, Error> {
+        let mut opts = ReadOpts::for_read_tier(tier);
+        opts.read_view.include_deleted = include_deleted;
+        self.all_prepared_with_options(prepared, identity, &opts, None)
+            .await
+    }
+
+    /// Binding entry point retaining the ordinary first-load policy. This does
+    /// not select a different identity or upgrade a mergeable read's read set.
+    pub(crate) async fn all_prepared_with_options(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        opts: &ReadOpts,
+        coverage: Option<&dyn Fn() -> bool>,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let tier = opts.tier;
         let identity = {
             let inner = self.db.inner.staging();
             let batch = inner
@@ -8995,19 +9011,21 @@ impl TxRef<'_> {
             .prefix();
         guard.wait().await?;
         self.db.check_read_guard(self.id, &guard)?;
-        self.all_prepared_guarded(prepared, include_deleted, identity, tier, &guard, prefix)
+        self.all_prepared_guarded(prepared, identity, opts, coverage, &guard, prefix)
             .await
     }
 
     async fn all_prepared_guarded(
         &self,
         prepared: &PreparedQuery,
-        include_deleted: bool,
         identity: Option<AuthorSubject>,
-        tier: ReadTier,
+        opts: &ReadOpts,
+        coverage: Option<&dyn Fn() -> bool>,
         guard: &transaction_reads::ReadGuard,
         prefix: BatchPrefix,
     ) -> Result<Vec<CurrentRow>, Error> {
+        let tier = opts.tier;
+        let include_deleted = opts.read_view.include_deleted;
         // Except for LocalOnly, a client hydrates a serializable read from
         // the authority at the snapshot first. LocalFirst may answer from
         // the replica when the link cannot answer.
@@ -9102,6 +9120,41 @@ impl TxRef<'_> {
                 }
                 *pinned = true;
             }
+        }
+        if snapshot.is_none()
+            && self.db.inner.staging().non_durable
+            && self.db.is_client()
+            && tier == ReadTier::LocalFirst
+            && matches!(opts.read_view.source, ReadViewSourceSpec::Current)
+        {
+            // A cold foreground's local store is its durable relay, including
+            // while that relay's server is offline. Preserve LocalFirst reach:
+            // Serializable BEST_EFFORT instead asks for Remote authority.
+            let reach = sync::remote_reach(opts, true, false).expect("foreground local reach");
+            let deadline = sync::remote_deadline(opts, true, true).expect("foreground local wait");
+            self.db.remote_shape(&prepared.query)?;
+            let fetch = self.db.fetch(
+                prepared,
+                None,
+                include_deleted,
+                reach,
+                deadline,
+                coverage,
+                false,
+                &ReadViewSourceSpec::Current,
+            );
+            let mut fetch = std::pin::pin!(fetch);
+            std::future::poll_fn(|cx| {
+                guard.watch(cx.waker());
+                if let Err(error) = self.db.check_read_guard(self.id, guard) {
+                    return std::task::Poll::Ready(Err(error));
+                }
+                fetch.as_mut().poll(cx)
+            })
+            .await?;
+            self.db.check_read_guard(self.id, guard)?;
+            // Keep the admitted prefix, ordinary current view and mergeable
+            // no-read-set semantics below. This is no accepted observation.
         }
         self.db
             .check_mixed_accepted_read(self.id, prepared, identity)?;
