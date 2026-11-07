@@ -64,7 +64,7 @@ const tiers: Tier[] = [
     price: "$200/mo",
     priceDetail: (
       <>
-        1,000 <PasTerm>peak active sessions</PasTerm> included
+        1,000 <PasTerm>Peak Active Sessions</PasTerm> included
         <br />
         <strong>+$50</strong> per additional 1,000 <PasTerm>PAS</PasTerm>
       </>
