@@ -73,8 +73,8 @@ To reach a backend on your computer, the Android emulator uses `http://10.0.2.2:
 `localhost`, and Android blocks plain `http://` unless you allow cleartext traffic for development.
 
 A bare React Native host uses the same direct dependency and New Architecture, with an OS-protected
-account store. The [Expo
-example](https://github.com/garden-co/jazz/tree/v2.0.0-alpha.60/examples/todo-client-localfirst-expo)
+account store. The [canonical Expo
+scaffold](https://github.com/garden-co/jazz/tree/v2.0.0-alpha.60/examples/todo-client-localfirst-expo)
 shows the complete lifecycle and platform configuration. The alpha has not yet proven two physical JSI
 runtimes attached to one relay.
 
@@ -98,7 +98,7 @@ function Startup() {
 </JazzSessionProvider>;
 ```
 
-### Which entry exports what
+## Which entry exports what
 
 Import from `jazz-tools/expo` in an Expo app and `jazz-tools/react-native` in a bare one. Both
 export the providers, `useJazzSession`, `useJazzAuth`, `useDb`, `useSession`, `useAll`, `useOne`
