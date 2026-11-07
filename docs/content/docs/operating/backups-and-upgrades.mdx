@@ -82,8 +82,10 @@ starts:
 
   Don't use `{ migrations: "none" }` here: it's for an app that only ever has one version, such as
   a test's. Then run `jazz-tools validate`. It creates `migrations/index.ts` if it's missing and moves
-  alpha.59's migrations to `migrations/legacy/`. The upgraded app's history starts again from its
-  current schema.
+  alpha.59's migrations to `migrations/legacy/`, and every snapshot except the one matching
+  `schema.ts` to `migrations/legacy/snapshots/`. The upgraded app's history starts again from its
+  current schema. If no snapshot matches `schema.ts`, validate keeps the newest one and tells you to
+  run `jazz-tools migrations create` before the app starts.
 
 - **Snapshot the current schema before you change it.** Run `jazz-tools migrations create` with no
   flags while `schema.ts` still matches what you imported. Later schema changes follow
