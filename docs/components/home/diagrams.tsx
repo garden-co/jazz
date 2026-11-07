@@ -72,26 +72,71 @@ function rounded(points: Point[], r = 10): string {
   return `${d} L${lx} ${ly}`;
 }
 
+/** Pulls both ends of a path in by `t`, so a halo stops short of the boxes it joins. */
+function trimmed(points: Point[], t: number): Point[] {
+  const pull = ([ax, ay]: Point, [bx, by]: Point): Point => {
+    const len = Math.hypot(bx - ax, by - ay);
+    const k = Math.min(t, len / 2) / len;
+    return [ax + (bx - ax) * k, ay + (by - ay) * k];
+  };
+  const out = points.slice();
+  out[0] = pull(points[0], points[1]);
+  out[out.length - 1] = pull(points[points.length - 1], points[points.length - 2]);
+  return out;
+}
+
+/**
+ * A wire, optionally over a halo in the figure's background color so it cuts
+ * cleanly through the lines it crosses. `part` draws only the halo or only the
+ * stroke, so a bundle of wires can lay all its halos down first.
+ */
 function Wire({
   points,
   tone = "ink",
   start,
   end = true,
   dashed,
+  halo,
+  part = "both",
 }: {
   points: Point[];
   tone?: Exclude<Tone, "shared">;
   start?: boolean;
   end?: boolean;
   dashed?: boolean;
+  halo?: boolean;
+  part?: "both" | "halo" | "stroke";
 }) {
+  const under =
+    halo && part !== "stroke" ? <path d={rounded(trimmed(points, 4))} className="dg-halo" /> : null;
+  const over =
+    part === "halo" ? null : (
+      <path
+        d={rounded(points)}
+        className={`dg-wire dg-stroke-${tone}${dashed ? " dg-wire-dashed" : ""}`}
+        markerStart={start ? `url(#dg-arrow-${tone})` : undefined}
+        markerEnd={end ? `url(#dg-arrow-${tone})` : undefined}
+      />
+    );
   return (
-    <path
-      d={rounded(points)}
-      className={`dg-wire dg-stroke-${tone}${dashed ? " dg-wire-dashed" : ""}`}
-      markerStart={start ? `url(#dg-arrow-${tone})` : undefined}
-      markerEnd={end ? `url(#dg-arrow-${tone})` : undefined}
-    />
+    <>
+      {under}
+      {over}
+    </>
+  );
+}
+
+/** Several wires that share segments: every halo first, then every stroke. */
+function Bundle({ wires }: { wires: Parameters<typeof Wire>[0][] }) {
+  return (
+    <g>
+      {wires.map((wire, index) => (
+        <Wire key={`h${index}`} {...wire} halo part="halo" />
+      ))}
+      {wires.map((wire, index) => (
+        <Wire key={`s${index}`} {...wire} part="stroke" />
+      ))}
+    </g>
   );
 }
 
@@ -498,6 +543,10 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
   const sw = (shardRow.w - gap * (shard.count - 1)) / shard.count;
   const shardXs = Array.from({ length: shard.count }, (_, i) => shardRow.x + i * (sw + gap));
   const coreMid = (jazz.y + jazz.divider) / 2;
+  // Where the API route's wire leaves it, toward its left, and where the
+  // large-value lane turns off to the local-first client.
+  const apiWireX = 172;
+  const blobBranchY = 332;
   // On a single server there are no platform services: local SQLite and
   // local files sit inside your backend, on top of the core. Everything else
   // stays where it is in the other variants.
@@ -540,6 +589,7 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
               ]}
               tone="blue"
               start
+              halo
             />
           ))}
         </g>
@@ -558,49 +608,46 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
               inner={shard.inner}
             />
           ))}
-          {shardXs.map((x, index) => (
-            <Wire
-              key={`w${x}`}
-              points={[
+          <Bundle
+            wires={shardXs.map((x, index) => ({
+              points: [
                 // A lone shard spans the row; drop straight into the core.
                 [shard.count === 1 ? 360 : x + sw / 2, shardRow.y + shardRow.h],
                 [shard.count === 1 ? 360 : x + sw / 2, 116],
                 [360, 116],
                 [360, jazz.y],
-              ]}
-              start
-              end={index === 0}
-              tone="blue"
-            />
-          ))}
-          {/* One large-value lane: from the store down the right, into the
-              core, and on to the Jazz clients, which read large values
-              directly. */}
-          <Wire
-            points={[
-              [lane, storeBox.y + storeBox.h],
-              [lane, rowY],
-            ]}
-            tone="blue"
-            dashed
-            start
+              ],
+              start: true,
+              end: index === 0,
+              tone: "blue",
+            }))}
           />
-          <Wire
-            points={[
-              [lane, coreMid],
-              [jazz.x + jazz.w, coreMid],
-            ]}
-            tone="blue"
-            dashed
-          />
-          <Wire
-            points={[
-              [lane, 338],
-              [colX[1] + cws[1] - 16, 338],
-              [colX[1] + cws[1] - 16, rowY],
-            ]}
-            tone="blue"
-            dashed
+          {/* One large-value lane: from the store down the right, curving off
+              into the core and to the local-first client on the way to the
+              thin client. Jazz clients read large values directly. */}
+          <Bundle
+            wires={[
+              [
+                [lane, storeBox.y + storeBox.h],
+                [lane, rowY],
+              ],
+              [
+                [lane, storeBox.y + storeBox.h],
+                [lane, coreMid],
+                [jazz.x + jazz.w, coreMid],
+              ],
+              [
+                [lane, storeBox.y + storeBox.h],
+                [lane, blobBranchY],
+                [colX[1] + cws[1] - 16, blobBranchY],
+                [colX[1] + cws[1] - 16, rowY],
+              ],
+            ].map((points, index) => ({
+              points: points as Point[],
+              tone: "blue" as const,
+              dashed: true,
+              start: index === 0,
+            }))}
           />
         </g>
       )}
@@ -631,12 +678,13 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
       <Box {...api} title="normal API route" center />
       <Wire
         points={[
-          [206, api.y],
-          [206, coreMid],
+          [apiWireX, api.y],
+          [apiWireX, coreMid],
           [jazz.x, coreMid],
         ]}
         tone="blue"
         start
+        halo
       />
       <Frame x={backend.x} y={backendBottom} w={backend.w} h={authH} tone="mint" />
       {/* Between the request and sync wires that pass through it. */}
@@ -651,6 +699,7 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
           [center(0), api.y + api.h],
         ]}
         start
+        halo
       />
       <Lines
         x={center(0) + 6}
@@ -668,6 +717,7 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
           ]}
           tone="blue"
           start
+          halo
         />
       ))}
       <Lines

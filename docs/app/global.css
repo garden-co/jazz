@@ -333,6 +333,15 @@ h6 {
   stroke-linecap: round;
   stroke-linejoin: round;
 }
+/* A solid band of the figure's background under a wire, so it cuts through
+   the lines it crosses. */
+.home-diagram .dg-halo {
+  fill: none;
+  stroke: var(--color-background-card);
+  stroke-width: 6;
+  stroke-linecap: butt;
+  stroke-linejoin: round;
+}
 .home-diagram .dg-wire-dashed {
   stroke-dasharray: 4 4;
 }
