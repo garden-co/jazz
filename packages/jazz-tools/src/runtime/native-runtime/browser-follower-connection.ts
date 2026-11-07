@@ -422,7 +422,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       // The worker keeps reconnecting after a published outage. Once it is
       // live again, release the relayed error so Global reads work again.
       if (message.state === "connected") this.runtime.clearRemoteServerTransportError();
-      this.callbacks.onRemoteLinkChange?.(message.state);
+      this.callbacks.onRemoteLinkChange?.(message.state, message.link);
       return;
     }
     if (message.type === "mutation-error") {
@@ -433,7 +433,10 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       // Keep this distinct from a fate rejection. The runtime records the
       // error before any later port teardown so active Global waits and
       // remote subscriptions wake, while Local durability stays valid.
-      this.runtime.reportRemoteServerTransportError(deserializeBrowserRelayError(message.error));
+      this.runtime.reportRemoteServerTransportError(
+        deserializeBrowserRelayError(message.error),
+        message.retrying === true,
+      );
       return;
     }
     if (message.type === "storage-reset") {
@@ -491,6 +494,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
   private fail(error: Error): void {
     if (this.failed || this.closed) return;
     this.failed = error;
+    this.runtime.reportLocalRelayError(error);
     // Tell the worker that this endpoint is gone so it can notify the broker,
     // which will issue a fresh channel while the leadership is still valid.
     try {

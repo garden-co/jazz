@@ -482,7 +482,11 @@ fn serializable_conflict_rolls_back_every_staged_row() {
 /// The authority authenticates the session and accepts the bytes and manifest.
 #[test]
 fn staged_payload_uses_normal_chunk_sync_and_authority_permissions() {
-    let server = open(0);
+    // A normal server owns no end-user identity; each subscriber below is
+    // admitted as its actual authenticated user, with that user's policy.
+    let mut server_config = config(0);
+    server_config.identity.author = AuthorSubject::SYSTEM;
+    let server = block_on(Db::open_history_complete(server_config)).unwrap();
     let alice = open(1);
     let mallory = open(2);
     claims(&server, user(1), "alice");
@@ -490,14 +494,16 @@ fn staged_payload_uses_normal_chunk_sync_and_authority_permissions() {
     for client in [&alice, &mallory] {
         let (up, down) = duplex_transport::duplex();
         let _link = block_on(client.connect_upstream(up));
-        server.accept_subscriber(
-            down,
-            if std::ptr::eq(client, &alice) {
-                user(1)
-            } else {
-                user(2)
-            },
-        );
+        server
+            .accept_subscriber(
+                down,
+                if std::ptr::eq(client, &alice) {
+                    user(1)
+                } else {
+                    user(2)
+                },
+            )
+            .unwrap();
     }
     for (client, id) in [(&alice, 1), (&mallory, 2)] {
         let mut staged = stage(
@@ -580,11 +586,15 @@ fn payload_size_boundaries_survive_commit_cleanup_and_sync() {
     use std::pin::pin;
     use std::task::{Context, Poll, Waker};
     let alice = open(1);
-    let server = open(0);
+    // A normal server owns no end-user identity; each subscriber below is
+    // admitted as its actual authenticated user, with that user's policy.
+    let mut server_config = config(0);
+    server_config.identity.author = AuthorSubject::SYSTEM;
+    let server = block_on(Db::open_history_complete(server_config)).unwrap();
     claims(&server, user(1), "alice");
     let (up, down) = duplex_transport::duplex();
     block_on(alice.connect_upstream(up));
-    server.accept_subscriber(down, user(1));
+    server.accept_subscriber(down, user(1)).unwrap();
     let inline = jazz::large_values::INLINE_VALUE_MAX_BYTES;
     for (index, size) in [0, 1, inline - 1, inline, inline + 1]
         .into_iter()

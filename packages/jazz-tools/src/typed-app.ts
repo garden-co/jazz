@@ -22,11 +22,12 @@ import type {
   ColumnBuilderInitValue,
   ColumnTransform,
 } from "./dsl.js";
-import { blake3 } from "@noble/hashes/blake3.js";
+import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { hasExternalProvenanceNameAllowance, isComputedColumn } from "./dsl.js";
 import { schemaToWasm } from "./codegen/schema-reader.js";
 import type { ColumnType, WasmSchema } from "./drivers/types.js";
+import { shipMigrations, type ClientMigrations } from "./runtime/client-migrations.js";
 import {
   magicColumnType,
   type ProvenanceMagicColumn,
@@ -155,7 +156,8 @@ export class DefinedTable<
  *   }),
  * });
  * type AppSchema = s.Schema<typeof schema>;
- * export const app: s.App<AppSchema> = s.defineApp(schema);
+ * // The module `jazz-tools` generates beside schema.ts.
+ * export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
  * ```
  */
 declare const tableRelationsBrand: unique symbol;
@@ -1241,6 +1243,9 @@ type BuiltRelation = {
   table?: string;
   conditions?: BuiltCondition[];
   hops?: string[];
+  orderBy?: Array<[string, "asc" | "desc"]>;
+  limit?: number;
+  offset?: number;
   gather?: BuiltGather;
   union?: {
     inputs: BuiltUnionArm[];
@@ -1270,6 +1275,15 @@ function cloneBuiltRelation(relation: BuiltRelation): BuiltRelation {
     ...(relation.table ? { table: relation.table } : {}),
     ...(relation.conditions ? { conditions: relation.conditions.map(cloneBuiltCondition) } : {}),
     ...(relation.hops ? { hops: [...relation.hops] } : {}),
+    ...(relation.orderBy
+      ? {
+          orderBy: relation.orderBy.map(
+            ([key, direction]) => [key, direction] as [string, "asc" | "desc"],
+          ),
+        }
+      : {}),
+    ...(relation.limit !== undefined ? { limit: relation.limit } : {}),
+    ...(relation.offset !== undefined ? { offset: relation.offset } : {}),
     ...(relation.gather ? { gather: cloneBuiltGather(relation.gather) } : {}),
     ...(relation.union
       ? {
@@ -1542,8 +1556,16 @@ export class TypedTableQueryBuilder<
       : seedSource._clone<TInclude, TSelection, TRequired, TDeleted>();
     clone._conditions = [];
     clone._hops = [];
+    const seed = needsExplicitSeed ? seedSource._serializeRelation() : undefined;
+    if (seed) {
+      // These modifiers remain on the gathered result. Keep only windows
+      // nested inside the seed (such as individual UNION arms).
+      delete seed.orderBy;
+      delete seed.limit;
+      delete seed.offset;
+    }
     clone._gatherVal = {
-      ...(needsExplicitSeed ? { seed: seedSource._serializeRelation() } : {}),
+      ...(seed ? { seed } : {}),
       max_depth: maxDepth,
       step_table: stepBuilt.table,
       step_current_column: currentCondition.column,
@@ -1666,14 +1688,26 @@ export class TypedTableQueryBuilder<
   }
 
   _serializeRelation(): BuiltRelation {
+    const output = {
+      ...(this._orderBys.length
+        ? {
+            orderBy: this._orderBys.map(
+              ([key, direction]) => [key, direction] as [string, "asc" | "desc"],
+            ),
+          }
+        : {}),
+      ...(this._limitVal !== undefined ? { limit: this._limitVal } : {}),
+      ...(this._offsetVal !== undefined ? { offset: this._offsetVal } : {}),
+    };
     if (this._unionVal) {
-      return cloneBuiltRelation(this._unionVal);
+      return { ...cloneBuiltRelation(this._unionVal), ...output };
     }
     return {
       table: this._table,
       conditions: this._conditions.map(cloneBuiltCondition),
       hops: [...this._hops],
       ...(this._gatherVal ? { gather: cloneBuiltGather(this._gatherVal) } : {}),
+      ...output,
     };
   }
 }
@@ -2091,22 +2125,42 @@ export function defineSchema<const TSchema extends SchemaDefinition>(
  *   }),
  * });
  * type AppSchema = s.Schema<typeof schema>;
- * export const app: s.App<AppSchema> = s.defineApp(schema);
+ * // The module `jazz-tools` generates beside schema.ts.
+ * export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
  * ```
  */
-export function defineApp<const TSchema extends Schema<any>>(definition: TSchema): App<TSchema>;
+/**
+ * What an app's clients ship besides its schema.
+ */
+export interface DefineAppOptions {
+  /**
+   * The app's schema versions and migrations, from the module `jazz-tools`
+   * generates beside schema.ts (`import { migrations } from "./migrations"`),
+   * even while the app has a single version. `"none"` is for an app defined
+   * in code that has no other versions, such as a test's.
+   */
+  migrations: ClientMigrations | "none";
+}
+
+export function defineApp<const TSchema extends Schema<any>>(
+  definition: TSchema,
+  options: DefineAppOptions,
+): App<TSchema>;
 export function defineApp<const TSchema extends SchemaDefinition>(
   definition: TSchema &
     ValidateSchemaRefs<TSchema> &
     ValidateSchemaColumnNames<TSchema> &
     ValidateSchemaTransformContexts<TSchema>,
+  options: DefineAppOptions,
 ): App<Schema<TSchema>>;
 export function defineApp(
   definition: SchemaDefinition | Schema<any>,
+  options: DefineAppOptions,
 ): App<Schema<SchemaDefinition>> {
   const normalizedDefinition = definition as unknown as SchemaDefinition;
   const schema = definitionToSchema(normalizedDefinition);
   const wasmSchema = schemaToWasm(schema);
+  shipMigrations(wasmSchema, options?.migrations);
   return createAppForTables(
     Object.keys(normalizedDefinition),
     wasmSchema,
@@ -2124,25 +2178,29 @@ export function defineApp(
  *
  * @example
  * ```typescript
- * const app = s.defineSliceableApp(schema);
+ * const app = s.defineSliceableApp(schema, { migrations });
  * export const orgApp = app.slice("teams", "projects", "members");
  * ```
  */
 export function defineSliceableApp<const TSchema extends Schema<any>>(
   definition: TSchema,
+  options: DefineAppOptions,
 ): SliceableApp<TSchema>;
 export function defineSliceableApp<const TSchema extends SchemaDefinition>(
   definition: TSchema &
     ValidateSchemaRefs<TSchema> &
     ValidateSchemaColumnNames<TSchema> &
     ValidateSchemaTransformContexts<TSchema>,
+  options: DefineAppOptions,
 ): SliceableApp<Schema<TSchema>>;
 export function defineSliceableApp(
   definition: SchemaDefinition | Schema<any>,
+  options: DefineAppOptions,
 ): SliceableApp<Schema<SchemaDefinition>> {
   const normalizedDefinition = definition as unknown as SchemaDefinition;
   const schema = definitionToSchema(normalizedDefinition);
   const wasmSchema = schemaToWasm(schema);
+  shipMigrations(wasmSchema, options?.migrations);
 
   return {
     wasmSchema,
@@ -2276,16 +2334,24 @@ function derivedUnionArmLabel(relation: BuiltRelation): string {
   // Hash the typed canonical relation instead of embedding JSON: Date, bigint
   // and byte values have non-JSON semantics, and a large literal must not turn
   // a valid array union into an overlong inferred label.
-  return `derived:${bytesToHex(blake3(utf8.encode(canonicalUnionRelation(relation))))}`;
+  return `derived:${bytesToHex(sha256(utf8.encode(canonicalUnionRelation(relation))))}`;
 }
 
 function canonicalUnionRelation(relation: BuiltRelation): string {
+  // jazz.sdk.union-arm-output.v1 extends only seeds with output modifiers.
+  // Existing unmodified seeds retain their exact canonical bytes and labels.
+  const output = {
+    ...(relation.orderBy ? { orderBy: relation.orderBy } : {}),
+    ...(relation.limit !== undefined ? { limit: relation.limit } : {}),
+    ...(relation.offset !== undefined ? { offset: relation.offset } : {}),
+  };
   const normalized = {
     ...(relation.table ? { table: relation.table } : {}),
     conditions: [...(relation.conditions ?? [])]
       .map((condition) => canonicalJson(condition))
       .sort(),
     hops: relation.hops ?? [],
+    ...(Object.keys(output).length ? { output_v1: output } : {}),
     ...(relation.gather ? { gather: relation.gather } : {}),
     ...(relation.union
       ? {

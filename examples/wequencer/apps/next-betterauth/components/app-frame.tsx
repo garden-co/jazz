@@ -37,7 +37,7 @@ function AccountMenu({ name }: { name: string }) {
       await gracefulSignOut();
       window.location.assign("/");
     } catch {
-      // The owner-held lifecycle reopens the selected client and renders the error.
+      // Sign-out failed: the account stays open.
     }
   }
 

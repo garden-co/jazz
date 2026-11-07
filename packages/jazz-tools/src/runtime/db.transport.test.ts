@@ -37,7 +37,7 @@ class TestRuntimeSource extends RuntimeSource<DbConfig> {
     return JazzClient.connectWithRuntime(
       makeRuntimeStub(),
       {
-        appId: config.appId,
+        appId: config.appId!,
         schema,
         driver: config.driver,
         serverUrl: config.serverUrl,
@@ -60,14 +60,17 @@ function makeSchema(): WasmSchema {
 }
 
 function makeTodosApp() {
-  return s.defineApp({
-    todos: s.table(
-      {
-        title: s.string(),
-      },
-      {},
-    ),
-  });
+  return s.defineApp(
+    {
+      todos: s.table(
+        {
+          title: s.string(),
+        },
+        {},
+      ),
+    },
+    { migrations: "none" },
+  );
 }
 
 function toBase64Url(value: unknown): string {

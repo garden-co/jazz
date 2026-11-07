@@ -100,7 +100,9 @@ describe("cli migrations", () => {
       (await readdir(join(migrationsDir, "snapshots"))).filter((name) => name.endsWith(".json")),
     ).toHaveLength(2);
     await expect(access(join(migrationsDir, ".jazz-create-migration.lock"))).rejects.toThrow();
-  });
+    // Four cold CLI processes, then four serialized generations: like the
+    // spawning generation test, this outlasts vitest's 5 s default on a busy runner.
+  }, 30_000);
 
   it("recovers a lock whose same-host owner was killed", async () => {
     const { root } = await createWorkspace();

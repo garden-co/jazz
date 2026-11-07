@@ -26,6 +26,33 @@ pub struct DbConfig {
     pub identity: DbIdentity,
     /// Row id source used by inserts. `None` selects the production source.
     pub id_source: Option<Box<dyn RowIdSource>>,
+    /// Where settled large-value leaf bytes live. `None` keeps them in the
+    /// SQLite file ([`crate::chunk_store`]).
+    pub chunk_store: Option<std::sync::Arc<dyn crate::chunk_store::ChunkStore>>,
+    /// The host runs chunk-store I/O ([`crate::db::Db::take_chunk_io`])
+    /// and the tick never awaits it.
+    pub host_chunk_io: bool,
+    /// The wall clock (Unix ms) the store draws commit positions from, as
+    /// hybrid-clock timestamps ([`crate::db::shard`]), so the positions of
+    /// every store compare by time. `None` reads the system clock
+    /// ([`crate::db::shard::wall_clock_ms`]).
+    pub clock: Option<Box<dyn Fn() -> u64>>,
+    /// The app's earlier schema versions and the lenses between them, as
+    /// it ships them. A store that has not admitted `schema` admits the
+    /// versions on a lens path to it first, so it stores each column where
+    /// the authority does without asking (SPEC 10.7).
+    pub migrations: Migrations,
+    /// The node SYSTEM provenance names, when it is not this replica's own:
+    /// a backend that draws a fresh node per open keeps one stable subject.
+    pub system_node: Option<NodeUuid>,
+}
+
+/// Schema versions and the lenses between them (see
+/// [`DbConfig::with_migrations`]).
+#[derive(Clone, Debug, Default)]
+pub struct Migrations {
+    pub schemas: Vec<JazzSchema>,
+    pub lenses: Vec<crate::protocol::MigrationLens>,
 }
 
 impl DbConfig {
@@ -35,12 +62,62 @@ impl DbConfig {
             schema,
             identity,
             id_source: None,
+            chunk_store: None,
+            host_chunk_io: false,
+            clock: None,
+            migrations: Migrations::default(),
+            system_node: None,
         }
+    }
+
+    /// Stamp SYSTEM provenance as `node` instead of this replica's node.
+    pub fn with_system_node(mut self, node: NodeUuid) -> Self {
+        self.system_node = Some(node);
+        self
     }
 
     /// Override the row id source, typically with [`SeededRowIdSource`] in tests.
     pub fn with_id_source(mut self, id_source: impl RowIdSource + 'static) -> Self {
         self.id_source = Some(Box::new(id_source));
+        self
+    }
+
+    /// Keep settled large-value leaf bytes in `store` instead of the SQLite
+    /// file. A store that once had one must always be opened with it.
+    pub fn with_chunk_store(
+        mut self,
+        store: std::sync::Arc<dyn crate::chunk_store::ChunkStore>,
+    ) -> Self {
+        self.chunk_store = Some(store);
+        self
+    }
+
+    /// Have the host run the chunk store's I/O: [`crate::db::Db::tick`]
+    /// then never awaits it, and the host takes each batch with
+    /// [`crate::db::Db::take_chunk_io`], runs it where it likes (a network
+    /// store on its own runtime) and hands the outcome back with
+    /// [`crate::db::Db::finish_chunk_io`]. For hosts whose tick is
+    /// synchronous, so a slow bucket never stalls sync.
+    pub fn with_host_chunk_io(mut self) -> Self {
+        self.host_chunk_io = true;
+        self
+    }
+
+    /// Draw commit positions from `clock` (Unix ms) instead of the system
+    /// clock: a simulation's virtual time, or a skewed clock in a test.
+    pub fn with_clock(mut self, clock: impl Fn() -> u64 + 'static) -> Self {
+        self.clock = Some(Box::new(clock));
+        self
+    }
+
+    /// Ship the app's earlier `schemas` and the `lenses` between them (see
+    /// [`DbConfig::migrations`]).
+    pub fn with_migrations(
+        mut self,
+        schemas: Vec<JazzSchema>,
+        lenses: Vec<crate::protocol::MigrationLens>,
+    ) -> Self {
+        self.migrations = Migrations { schemas, lenses };
         self
     }
 }
@@ -128,6 +205,10 @@ pub struct ReadOpts {
     /// absent serde field is [`FirstLoad::Deliver`].
     #[serde(default)]
     pub first_load: FirstLoad,
+    /// Large-capable columns whose changes a subscription's updated rows
+    /// also carry as splices from the row's previous result (SPEC 19.12).
+    #[serde(default)]
+    pub splices: Vec<String>,
 }
 
 impl Default for ReadOpts {
@@ -136,6 +217,7 @@ impl Default for ReadOpts {
             tier: ReadTier::LocalFirst,
             read_view: ReadViewSpec::default(),
             first_load: FirstLoad::Deliver,
+            splices: Vec::new(),
         }
     }
 }
@@ -147,6 +229,12 @@ impl ReadOpts {
             tier,
             ..Self::default()
         }
+    }
+
+    /// Deliver `columns`' changes in updated rows as splices too.
+    pub fn with_splices(mut self, columns: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.splices = columns.into_iter().map(Into::into).collect();
+        self
     }
 
     /// Evaluate the query as a live head branch composed over an optional base.
@@ -207,6 +295,26 @@ impl RemoteLinkHint {
             _ => None,
         }
     }
+}
+
+/// How urgently a runtime should service pending sync work.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TickUrgency {
+    /// Run as soon as the runtime can.
+    Immediate,
+    /// Coalesce bursty local work before ticking.
+    Deferred,
+    /// Service work in a later host turn.
+    AfterCurrentTurn,
+}
+
+/// Runtime-neutral wake hook for thread-affine sync work.
+pub trait TickScheduler {
+    /// Schedule a future tick for pending sync work.
+    fn schedule_tick(&self, urgency: TickUrgency);
+
+    /// Schedule one future tick no earlier than the supplied delay.
+    fn schedule_tick_after(&self, delay_ms: u64);
 }
 
 /// Identity used to author and authorize a standalone write.
@@ -412,11 +520,18 @@ pub enum Reason {
     /// The write was built on an unsettled write the authority rejected,
     /// so it is rejected too (code `WriteRejected`, SPEC 4 §4.6).
     PredecessorRejected,
+    /// The write was made through a schema version the server has not
+    /// deployed: the app was released ahead of its schema (code
+    /// `WriteRejected`, SPEC 8.9).
+    SchemaVersionNotDeployed,
+    /// A store configured as one user was asked to serve a session of
+    /// another identity (code `Protocol`): relays serve one identity.
+    IdentityMismatch,
 }
 
 impl Reason {
     /// Every reason, in declaration order.
-    pub const ALL: [Reason; 11] = [
+    pub const ALL: [Reason; 13] = [
         Reason::AuthorizationDenied,
         Reason::ClientClockTooFarAhead,
         Reason::SerializationConflict,
@@ -428,6 +543,8 @@ impl Reason {
         Reason::MissingChunks,
         Reason::PermissionsHeadMissing,
         Reason::PredecessorRejected,
+        Reason::SchemaVersionNotDeployed,
+        Reason::IdentityMismatch,
     ];
 
     /// The stable, snake_case name of this reason.
@@ -449,6 +566,8 @@ impl Reason {
             Reason::MissingChunks => "missing_chunks",
             Reason::PermissionsHeadMissing => "permissions_head_missing",
             Reason::PredecessorRejected => "predecessor_rejected",
+            Reason::SchemaVersionNotDeployed => "schema_version_not_deployed",
+            Reason::IdentityMismatch => "identity_mismatch",
         }
     }
 

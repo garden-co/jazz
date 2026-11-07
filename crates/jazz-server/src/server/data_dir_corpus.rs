@@ -1,7 +1,8 @@
 //! The pinned server data directory: a `jazz.sqlite` a catalogue-driven
-//! server wrote, holding the rows, the runtime catalogue and the server's
-//! host tables (`_jazz_host_catalogue`, `_jazz_host_accounts`,
-//! `_jazz_host_runtime_catalogue`; see `dev/proofs/server-host-tables.md`).
+//! server wrote, holding the rows, the catalogue tables (`_jazz_schemas`,
+//! `_jazz_lenses`, `_jazz_permissions`) and the account host tables
+//! (`_jazz_host_account_identities`, `_jazz_host_account_links`; see
+//! `dev/proofs/server-host-tables.md`).
 //!
 //! `fixtures/server-data-dir-v1/` was written once by
 //! `produce_server_data_dir_corpus_v1` and is never regenerated after
@@ -41,9 +42,9 @@ const FIXTURE: &str = concat!(
     "/fixtures/server-data-dir-v1/jazz.sqlite.gz.base64"
 );
 /// SHA-256 of the decoded file.
-const SHA256: &str = "4ecff0458673c7bee316304dc5ca594bd7ddd36ed521b77607af95443e82756b";
+const SHA256: &str = "b7dcf22da6dbecae944aad9468ebacd2bce4a354a82f22845545dba96d07ffeb";
 /// The account the producer registered for Alice.
-const ALICE_ACCOUNT: &str = "81a787c1-761f-4d56-a625-da95e1fbc306";
+const ALICE_ACCOUNT: &str = "8529ad07-3725-4289-bea2-6ce32779b1ac";
 const ADMIN_SECRET: &str = "corpus-admin";
 
 fn app_id() -> AppId {
@@ -239,9 +240,9 @@ async fn produce_server_data_dir_corpus_v1() {
     let dir = tempfile::tempdir().unwrap();
     {
         let server = open(dir.path()).await;
-        admin(&server, "POST", "/deploy", deploy_v1()).await;
+        admin(&server, "POST", "/bundles", deploy_v1()).await;
         insert_note(&server, "before the migration", None).await;
-        admin(&server, "POST", "/deploy", deploy_v2()).await;
+        admin(&server, "POST", "/bundles", deploy_v2()).await;
         insert_note(&server, "after the migration", Some("written with v2")).await;
         let alice = login(&server, alice()).await;
         println!("ALICE_ACCOUNT: {}", alice.account.0);
@@ -295,9 +296,16 @@ async fn pinned_server_data_dir_reopens_and_accepts_current_writes() {
         assert_eq!(login(&server, alice()).await.account, pinned);
         assert_eq!(notes(&server).await, before);
 
-        // Unchanged deployments stay unchanged; current writes are accepted.
+        // The pinned store activated v2; publishing it now adds only its
+        // bundle, and again changes nothing. Current writes are accepted.
+        let published = admin(&server, "POST", "/bundles", deploy_v2()).await;
         assert_eq!(
-            admin(&server, "POST", "/deploy", deploy_v2()).await["changed"],
+            published["published"],
+            json!({"schemas": [], "migrations": []}),
+            "{published}"
+        );
+        assert_eq!(
+            admin(&server, "POST", "/bundles", deploy_v2()).await["changed"],
             false
         );
         insert_note(&server, "after reopening", Some("current")).await;

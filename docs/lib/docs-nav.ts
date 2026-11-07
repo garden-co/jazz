@@ -15,12 +15,20 @@ function entryOf(node: Node): NavEntry | undefined {
   switch (node.type) {
     case "page":
       return { label: textOf(node.name), url: node.url };
-    case "folder":
-      return {
-        label: textOf(node.name),
-        url: node.index?.url,
-        children: node.children.map(entryOf).filter((e): e is NavEntry => e != null),
-      };
+    case "folder": {
+      let url = node.index?.url;
+      let children = node.children
+        .map(entryOf)
+        .filter((e): e is NavEntry => e != null && !(url && e.url === url));
+      // A folder whose meta lists only `index` holds that page as a child, not as its index.
+      if (!url && children.length === 1 && !children[0].children) {
+        url = children[0].url;
+        children = [];
+      }
+      // A folder that holds only its index page is just a page in the nav.
+      if (children.length === 0) return { label: textOf(node.name), url };
+      return { label: textOf(node.name), url, defaultOpen: node.defaultOpen, children };
+    }
     default:
       return undefined;
   }

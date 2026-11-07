@@ -150,6 +150,9 @@ pub struct ArraySubquery {
     /// Nested correlated relation arrays rooted at child rows.
     #[serde(default)]
     pub nested_arrays: Vec<ArraySubquery>,
+    /// Child-local columns read only in part (SPEC 19.12).
+    #[serde(default)]
+    pub partial: Vec<PartialSelect>,
 }
 
 impl ArraySubquery {
@@ -179,6 +182,7 @@ impl ArraySubquery {
             offset: 0,
             requirement: ArraySubqueryRequirement::Optional,
             nested_arrays: Vec::new(),
+            partial: Vec::new(),
         }
     }
 
@@ -191,6 +195,19 @@ impl ArraySubquery {
     /// Select child application columns. The row id is always included.
     pub fn select(mut self, columns: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.select = Some(columns.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Select child `column` read only in `part` (SPEC 19.12).
+    pub fn select_part(mut self, column: impl Into<String>, part: Part) -> Self {
+        let column = column.into();
+        if let Some(select) = &mut self.select
+            && !select.contains(&column)
+        {
+            select.push(column.clone());
+        }
+        self.partial.retain(|selected| selected.column != column);
+        self.partial.push(PartialSelect { column, part });
         self
     }
 

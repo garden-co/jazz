@@ -1,6 +1,8 @@
+import { clientScope } from "../runtime/client-scope.js";
 import { installNativeRuntimeEntropy } from "../runtime/runtime-entropy.js";
 import type { RuntimeClientContext } from "../runtime/runtime-source.js";
 import { RuntimeSource } from "../runtime/runtime-source.js";
+import type { TextAnchors } from "../runtime/text-anchors.js";
 import type { JazzClient } from "../runtime/client.js";
 import { JazzClient as JazzRuntimeClient } from "../runtime/client.js";
 import type { Session } from "../runtime/context.js";
@@ -18,7 +20,7 @@ import {
   setTrustedReservedSession,
 } from "../runtime/db-internal-session.js";
 import { authorBytesForSession } from "../runtime/author-id.js";
-import { assertAccountConfig } from "../accounts/config-capability.js";
+import { accountConfigBearer, assertAccountConfig } from "../accounts/config-capability.js";
 import {
   beginNativeAccountSession,
   attachNativeAccountSchema,
@@ -68,6 +70,20 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
   private ownsAdmission = false;
   private explicitlyOffline = false;
 
+  override textAnchors(): TextAnchors {
+    const call = this.foregroundFactory?.textAnchors;
+    if (!call) throw new Error("This React Native runtime does not support text anchors");
+    const run = (request: Record<string, unknown>) => JSON.parse(call(JSON.stringify(request)));
+    return {
+      captureAnchor: (text, position, side, version) =>
+        run({ op: "captureAnchor", text, position, side, version }),
+      resolveAnchor: (anchor, text, version) => run({ op: "resolveAnchor", anchor, text, version }),
+      captureRange: (text, start, end, version) =>
+        run({ op: "captureRange", text, start, end, version }),
+      resolveRange: (range, text, version) => run({ op: "resolveRange", range, text, version }),
+    };
+  }
+
   override async load(config: ReactNativeDbConfig): Promise<void> {
     if (shouldRequireSqliteDriver(config)) {
       if (!config.nativeRelay && config.accountId && config.accountRegistryAuthority) {
@@ -77,7 +93,10 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
         const module = await import("jazz-rn/relay");
         const factory = module.installNativeForegroundRuntime();
         if (factory.accountSecret) installNativeRuntimeEntropy(factory.accountSecret);
-        this.pendingCapability = beginNativeAccountSession(factory, config, session);
+        const bearer = config.cookieSession
+          ? ((await accountConfigBearer(config)?.()) ?? undefined)
+          : undefined;
+        this.pendingCapability = beginNativeAccountSession(factory, config, session, bearer);
         this.foregroundFactory = factory;
         this.foregroundModule = module;
         this.ownsAdmission = true;
@@ -244,7 +263,7 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
           },
         );
         const appContext: AppContext = {
-          appId: context.config.appId,
+          appId: clientScope(context.config),
           accountId: context.config.accountId,
           schema: context.schema,
           driver: context.config.driver,

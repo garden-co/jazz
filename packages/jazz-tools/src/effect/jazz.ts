@@ -1,6 +1,7 @@
 import { Cause, Context, Effect, Exit, Layer, Option, Queue, Stream } from "effect";
 import type { AccountDbConfig } from "../accounts/context.js";
 import type { AuthState } from "../runtime/auth-state.js";
+import type { SyncStatus } from "../runtime/sync-status.js";
 import type {
   DurabilityTier,
   MutationErrorEvent,
@@ -139,6 +140,13 @@ export interface JazzDb extends JazzReads {
    * rejection as a {@link JazzWriteRejected} failure instead.
    */
   readonly mutationErrors: Stream.Stream<MutationErrorEvent>;
+  /** The current sync status, then every change to it. See {@link Db.getSyncStatus}. */
+  readonly syncStatus: Stream.Stream<SyncStatus>;
+  /**
+   * Succeed once every write committed before the call is accepted by the
+   * server. See {@link Db.waitForSync}.
+   */
+  waitForSync(options?: { timeoutMs?: number }): Effect.Effect<void, JazzError>;
 }
 
 /** Operations available inside {@link JazzDb.transaction}. */
@@ -393,6 +401,15 @@ function makeJazzDb(db: Db): JazzDb {
     // `onAuthChanged` reports the current state as soon as it is attached.
     authState: callbackStream<AuthState>((emit) => db.onAuthChanged(emit)),
     mutationErrors: callbackStream<MutationErrorEvent>((emit) => db.onMutationError(emit)),
+    syncStatus: callbackStream<SyncStatus>((emit) => {
+      emit(db.getSyncStatus());
+      return db.onSyncStatusChange(emit);
+    }),
+    waitForSync: (options) =>
+      Effect.tryPromise({
+        try: (signal) => db.waitForSync({ ...options, signal }),
+        catch: toJazzError("waitForSync"),
+      }),
   };
 }
 

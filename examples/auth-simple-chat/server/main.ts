@@ -1,12 +1,8 @@
-import { AUTH_JWT_KID } from "../constants.ts";
 import { startAuthServer } from "./auth-server.ts";
 
-const server = await startAuthServer({
-  port: 3001,
-  jwtKid: AUTH_JWT_KID,
-});
+const server = await startAuthServer({ port: 3001, dataDir: ".jazz" });
 
-console.log(`Auth server ready at ${server.url}`);
+console.log(`Auth server and Jazz ready at ${server.url}`);
 
 let stopping = false;
 

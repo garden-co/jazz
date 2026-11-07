@@ -9,13 +9,14 @@
 //!
 //! One app's state is one SQLite file: the owner thread is also the only
 //! connection to it. It starts before the runtime does (an [`AppStore`]),
-//! serving the server's host tables (catalogue, account journal), and the
+//! serving the server's host tables (catalogue, account registry), and the
 //! runtime's [`Db`] opens on the same connection once a schema is known.
 
 pub mod auth_admission;
+mod thin;
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -24,21 +25,21 @@ use std::sync::{Arc, Mutex, Weak, mpsc as std_mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
 use crate::kv::HostKv;
+use crate::kv::HostSql;
+use jazz::catalogue::{CatalogueChange, CatalogueRows};
 use jazz::db::{
-    Db, DbConfig, DbIdentity, FileOptions, LensEffects, Reason, SubscriberId, SyncMessage,
+    Db, DbConfig, DbIdentity, FileOptions, LensEffects, Outcome, Reason, SubscriberId, SyncMessage,
     Transport, TransportError, WireError, block_on,
 };
 use jazz::host::{HostReader, HostTable, HostTables, StoreFile};
 use jazz::ids::{AuthorSubject, MigrationLensId, NodeUuid, SchemaVersionId};
-use jazz::protocol::{
-    CatalogueSnapshot, CurrentWriteSchema, MigrationLens, PhysicalIdentityManifest,
-    SchemaLineagePublication, SchemaVersion,
-};
+use jazz::protocol::MigrationLens;
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::public_schema::{TableName, TablePolicies};
-use jazz::wire::{WireAuthorityEndpoint, WireFeatures};
+use jazz::wire::{WireAuthorityEndpoint, WireErrorCode, WireFeatures, WireRetry};
 use tokio::sync::{mpsc as tokio_mpsc, oneshot, watch};
 
 /// Encoded frames exchanged with a host transport.
@@ -53,14 +54,68 @@ pub enum StorageConfig {
     SQLite {
         /// The database file.
         path: PathBuf,
+        /// Where settled large-value bytes live.
+        blobs: Blobs,
     },
 }
+
+/// Where a SQLite store keeps settled large-value bytes.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum Blobs {
+    /// In the database file itself.
+    #[default]
+    InFile,
+    /// As files in this directory ([`jazz::chunk_store::FileChunkStore`]).
+    Files(PathBuf),
+    /// In a store reached over the network, such as an S3 bucket
+    /// ([`crate::s3::S3ChunkStore`]). Its I/O runs beside the store thread,
+    /// so a slow bucket never stalls sync.
+    Network(NetworkChunkStore),
+}
+
+/// A chunk store reached over the network, for [`Blobs::Network`].
+#[derive(Clone)]
+pub struct NetworkChunkStore {
+    pub store: Arc<dyn jazz::chunk_store::ChunkStore>,
+    /// What it is, for logs.
+    pub name: String,
+}
+
+impl std::fmt::Debug for NetworkChunkStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "NetworkChunkStore({})", self.name)
+    }
+}
+
+impl PartialEq for NetworkChunkStore {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.store, &other.store)
+    }
+}
+
+impl Eq for NetworkChunkStore {}
 
 impl StorageConfig {
     /// The durable store inside a server data directory.
     pub fn data_dir(path: impl Into<PathBuf>) -> Self {
         Self::SQLite {
             path: path.into().join("jazz.sqlite"),
+            blobs: Blobs::InFile,
+        }
+    }
+
+    /// The same store, with settled large-value bytes kept as files in
+    /// `dir` instead of in the database file. In memory it changes nothing.
+    pub fn with_blob_dir(self, dir: impl Into<PathBuf>) -> Self {
+        self.with_blobs(Blobs::Files(dir.into()))
+    }
+
+    /// The same store, with settled large-value bytes in `blobs`. In memory
+    /// it changes nothing.
+    pub fn with_blobs(self, blobs: Blobs) -> Self {
+        match self {
+            Self::SQLite { path, .. } => Self::SQLite { path, blobs },
+            Self::InMemory => Self::InMemory,
         }
     }
 }
@@ -126,7 +181,7 @@ pub struct ServerSession(u64);
 /// Bytes a session may have queued in each direction. Inbound frames past
 /// it are refused (the peer ignored flow control); outbound messages past it
 /// wait in the engine until the socket catches up.
-const SESSION_QUEUE_BUDGET: usize = 8 * 1024 * 1024;
+pub(crate) const SESSION_QUEUE_BUDGET: usize = 8 * 1024 * 1024;
 /// The slow-query threshold: `JAZZ_SLOW_QUERY_MS` (0 turns the log off),
 /// else jazz-db's default.
 fn slow_query_threshold() -> Option<Duration> {
@@ -142,7 +197,7 @@ fn slow_query_threshold() -> Option<Duration> {
 
 /// How often the owner ticks with no traffic, for time-based engine work
 /// such as expiring staged large-value chunks.
-const IDLE_TICK: Duration = Duration::from_secs(1);
+pub(crate) const IDLE_TICK: Duration = Duration::from_secs(1);
 
 /// Inbound messages one session may have applied per round of ticks.
 const INBOUND_MESSAGES_PER_TICK: usize = 16;
@@ -157,10 +212,6 @@ const INBOUND_MESSAGES_PER_TICK: usize = 16;
 /// read sent just before their writes being answered after them. Smaller
 /// ticks cost no throughput: each message commits on its own either way.
 const TICK_SLICE: Duration = Duration::from_millis(4);
-
-/// The runtime catalogue's host table, and its one key.
-const RUNTIME_CATALOGUE: HostTable = HostTable::new("runtime_catalogue");
-const CATALOGUE_KEY: &[u8] = b"runtime-catalogue:v1";
 
 type Job = Box<dyn FnOnce(&mut Owner) + Send>;
 /// Work on the store's host tables, before or after the runtime opened.
@@ -225,7 +276,8 @@ struct StoreThread {
 /// The file a store lives in.
 #[derive(Clone)]
 enum Source {
-    File(PathBuf),
+    /// The database file, and where its large-value bytes live.
+    File(PathBuf, Blobs),
     /// An in-memory store shared by name within this process.
     Memory(String),
 }
@@ -239,19 +291,19 @@ impl Source {
                 std::process::id(),
                 NEXT_MEMORY_STORE.fetch_add(1, Ordering::Relaxed)
             )),
-            StorageConfig::SQLite { path } => Self::File(path.clone()),
+            StorageConfig::SQLite { path, blobs } => Self::File(path.clone(), blobs.clone()),
         }
     }
 
     fn open(&self) -> Result<StoreFile, String> {
         match self {
             Self::Memory(name) => StoreFile::shared_memory(name),
-            Self::File(path) => {
+            Self::File(path, _) => {
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent)
                         .map_err(|error| format!("create {}: {error}", parent.display()))?;
                 }
-                // Every commit (rows, catalogue, account journal) is durable
+                // Every commit (rows, catalogue, account registry) is durable
                 // when it returns.
                 StoreFile::open(
                     path,
@@ -265,12 +317,160 @@ impl Source {
         .map_err(|error| format!("open server store: {error}"))
     }
 
+    /// The chunk store the runtime's large-value bytes go to, if not the
+    /// database file.
+    fn chunk_store(&self) -> Result<Option<ChunkStoreChoice>, String> {
+        match self {
+            Self::File(_, Blobs::Files(dir)) => jazz::chunk_store::FileChunkStore::new(dir)
+                .map(|store| {
+                    Some(ChunkStoreChoice {
+                        store: Arc::new(store),
+                        network: false,
+                    })
+                })
+                .map_err(|error| format!("open large-value directory {}: {error}", dir.display())),
+            Self::File(_, Blobs::Network(network)) => Ok(Some(ChunkStoreChoice {
+                store: Arc::clone(&network.store),
+                network: true,
+            })),
+            _ => Ok(None),
+        }
+    }
+
     fn reader(&self) -> Result<HostReader, String> {
         match self {
             Self::Memory(name) => HostReader::shared_memory(name),
-            Self::File(path) => HostReader::open(path, None),
+            Self::File(path, _) => HostReader::open(path, None),
         }
         .map_err(|error| format!("open server store reader: {error}"))
+    }
+}
+
+/// The chunk store a runtime opens with, and whether its I/O runs beside
+/// the store thread ([`ChunkIoRunner`]).
+#[derive(Clone)]
+struct ChunkStoreChoice {
+    store: Arc<dyn jazz::chunk_store::ChunkStore>,
+    network: bool,
+}
+
+/// Runs a network chunk store's batches ([`jazz::db::Db::take_chunk_io`])
+/// on a thread of its own and hands each outcome back to the store thread
+/// as runtime work, which applies it and ticks. One batch is out at a time.
+/// After a batch fails, the next waits (1 s, doubling up to a minute), so
+/// a bucket that refuses every request is not asked again on every tick.
+struct ChunkIoRunner {
+    batches: std_mpsc::Sender<jazz::chunk_store::ChunkIo>,
+    out: std::cell::Cell<bool>,
+    /// Consecutive failed batches, and when the next may start.
+    failures: std::cell::Cell<u32>,
+    not_before: std::cell::Cell<Option<std::time::Instant>>,
+    /// Dropped to cancel the batch in flight.
+    cancel: Option<futures::channel::oneshot::Sender<()>>,
+    /// Disconnects once the thread has ended.
+    ended: std_mpsc::Receiver<()>,
+}
+
+/// The first wait after a failed batch, and the longest.
+const CHUNK_IO_BACKOFF: (Duration, Duration) = (Duration::from_secs(1), Duration::from_secs(60));
+/// How long dropping a runner waits for its cancelled batch to stop.
+const CHUNK_IO_STOP: Duration = Duration::from_secs(5);
+
+impl ChunkIoRunner {
+    fn start(
+        store: Arc<dyn jazz::chunk_store::ChunkStore>,
+        work: std_mpsc::Sender<Work>,
+    ) -> Result<Self, String> {
+        let (batches, receiver) = std_mpsc::channel::<jazz::chunk_store::ChunkIo>();
+        let (cancel, mut cancelled) = futures::channel::oneshot::channel::<()>();
+        let (ended_tx, ended) = std_mpsc::channel::<()>();
+        thread::Builder::new()
+            .name("jazz-chunk-io".to_owned())
+            .spawn(move || {
+                let _ended = ended_tx;
+                for io in receiver {
+                    // A cancelled batch is dropped mid-flight: its requests
+                    // are aborted and its work goes to the store's next one.
+                    let run = io.run(&*store);
+                    let done =
+                        match block_on(futures::future::select(Box::pin(run), &mut cancelled)) {
+                            futures::future::Either::Left((done, _)) => done,
+                            futures::future::Either::Right(_) => return,
+                        };
+                    let finish: Job =
+                        Box::new(move |owner: &mut Owner| owner.finish_chunk_io(done));
+                    if work.send(Work::Owner(finish)).is_err() {
+                        return;
+                    }
+                }
+            })
+            .map_err(|error| format!("start chunk I/O thread: {error}"))?;
+        Ok(Self {
+            batches,
+            out: std::cell::Cell::new(false),
+            failures: std::cell::Cell::new(0),
+            not_before: std::cell::Cell::new(None),
+            cancel: Some(cancel),
+            ended,
+        })
+    }
+
+    /// Hand the runtime's next batch over, unless one is out or the last
+    /// failed too recently.
+    fn pump(&self, owner: &Owner) {
+        if self.out.get()
+            || self
+                .not_before
+                .get()
+                .is_some_and(|at| std::time::Instant::now() < at)
+        {
+            return;
+        }
+        match owner.db.take_chunk_io() {
+            // Nothing to do: dropping an empty batch ends it.
+            Ok(Some(io)) if io.is_empty() => {}
+            Ok(Some(io)) => {
+                self.out.set(true);
+                if self.batches.send(io).is_err() {
+                    tracing::error!("the chunk I/O thread is gone");
+                }
+            }
+            Ok(None) => {}
+            Err(error) => tracing::warn!(%error, "take large-value store I/O"),
+        }
+    }
+
+    /// A batch came back; `failed` delays the next. Returns whether to log
+    /// the failure: the first of a run, then once the wait is at its longest.
+    fn returned(&self, failed: bool) -> bool {
+        self.out.set(false);
+        if !failed {
+            self.failures.set(0);
+            self.not_before.set(None);
+            return false;
+        }
+        let failures = self.failures.get().saturating_add(1);
+        self.failures.set(failures);
+        let (first, longest) = CHUNK_IO_BACKOFF;
+        let wait = first
+            .checked_mul(1 << (failures - 1).min(16))
+            .unwrap_or(longest)
+            .min(longest);
+        self.not_before.set(Some(std::time::Instant::now() + wait));
+        failures == 1 || wait == longest
+    }
+}
+
+impl Drop for ChunkIoRunner {
+    fn drop(&mut self) {
+        // Cancel the batch in flight and close the channel; wait a little
+        // for the thread to stop, and never for the bucket.
+        drop(self.cancel.take());
+        let (closed, _) = std_mpsc::channel();
+        drop(std::mem::replace(&mut self.batches, closed));
+        if let Err(std_mpsc::RecvTimeoutError::Timeout) = self.ended.recv_timeout(CHUNK_IO_STOP) {
+            tracing::warn!("the large-value store I/O thread did not stop in time; leaving it");
+        }
     }
 }
 
@@ -279,6 +479,7 @@ impl AppStore {
     pub fn open(storage: &StorageConfig) -> Result<Self, String> {
         let source = Source::new(storage);
         let (work, receiver) = std_mpsc::channel::<Work>();
+        let thread_wake = work.clone();
         let (host, host_jobs) = std_mpsc::channel::<HostJob>();
         let (opened_tx, opened_rx) = std_mpsc::channel();
         let tick_queued = Arc::new(AtomicBool::new(false));
@@ -310,6 +511,7 @@ impl AppStore {
                 StoreLoop {
                     source: thread_source,
                     work: receiver,
+                    wake: thread_wake,
                     host: host_jobs,
                     backlog: VecDeque::new(),
                     tick_queued: thread_ticks,
@@ -366,9 +568,32 @@ impl AppStore {
     }
 
     /// Key-value access to one host table.
+    #[cfg(test)]
     pub(crate) fn kv(&self, table: HostTable) -> Result<HostKv, String> {
         Ok(HostKv::new(
             table,
+            Arc::clone(&self.inner.reader),
+            HostSender {
+                host: self.inner.host.clone(),
+                wake: self.sender()?,
+            },
+        ))
+    }
+
+    /// The store's catalogue tables.
+    pub(crate) fn catalogue(&self) -> Result<crate::server::CatalogueStorage, String> {
+        Ok(crate::server::CatalogueStorage::new(
+            Arc::clone(&self.inner.reader),
+            HostSender {
+                host: self.inner.host.clone(),
+                wake: self.sender()?,
+            },
+        ))
+    }
+
+    /// SQL access to the host tables a server shapes itself.
+    pub(crate) fn sql(&self) -> Result<HostSql, String> {
+        Ok(HostSql::new(
             Arc::clone(&self.inner.reader),
             HostSender {
                 host: self.inner.host.clone(),
@@ -514,6 +739,14 @@ impl HostSender {
 struct Unavailable(String);
 
 impl HostTables for Unavailable {
+    fn catalogue(&self) -> Result<CatalogueRows, jazz::db::Error> {
+        Err(self.error())
+    }
+
+    fn catalogue_put(&self, _: &jazz::catalogue::CataloguePut) -> Result<(), jazz::db::Error> {
+        Err(self.error())
+    }
+
     fn host_get(&self, _: HostTable, _: &[u8]) -> Result<Option<Vec<u8>>, jazz::db::Error> {
         Err(self.error())
     }
@@ -542,6 +775,12 @@ impl HostTables for Unavailable {
     fn host_delete(&self, _: HostTable, _: &[u8]) -> Result<(), jazz::db::Error> {
         Err(self.error())
     }
+    fn host_sql(
+        &self,
+        _: &mut dyn FnMut(&rusqlite::Connection) -> Result<(), jazz::db::Error>,
+    ) -> Result<(), jazz::db::Error> {
+        Err(self.error())
+    }
 }
 
 impl Unavailable {
@@ -554,6 +793,9 @@ impl Unavailable {
 struct StoreLoop {
     source: Source,
     work: std_mpsc::Receiver<Work>,
+    /// Hands runtime work back to this loop (a network chunk store's
+    /// finished batches).
+    wake: std_mpsc::Sender<Work>,
     host: std_mpsc::Receiver<HostJob>,
     /// Host work taken off the queue but not run yet (a tick slice ended).
     backlog: VecDeque<HostJob>,
@@ -709,6 +951,8 @@ impl StoreLoop {
                 Owner::open(
                     runtime.schema.clone(),
                     file,
+                    self.source.chunk_store()?,
+                    self.wake.clone(),
                     runtime.any_stored_catalogue,
                     runtime.awaiting_permissions,
                     self.app.lock().ok().and_then(|app| app.clone()),
@@ -812,10 +1056,6 @@ fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
-/// One activation: a schema and the migration lenses into it (its new
-/// columns' defaults, and the tables and columns it renames).
-type Step = (JazzSchema, Vec<MigrationLens>);
-
 /// Sendable handle for the thread that owns the runtime's store.
 #[derive(Clone)]
 pub struct ServerRuntimeHandle {
@@ -839,7 +1079,8 @@ struct Edge {
     egress: Arc<AtomicUsize>,
 }
 
-type Outbound = (Result<Vec<AbiBytes>, String>, usize);
+/// A session's next frame batch, or the error frame that ends it.
+type Outbound = (Result<Vec<AbiBytes>, jazz::wire::WireError>, usize);
 
 /// Activity subscription for a server runtime.
 pub struct ServerRuntimeActivity {
@@ -856,6 +1097,32 @@ impl ServerRuntimeActivity {
     }
 }
 
+/// The error frame for a session the engine closed over a message it sent.
+/// Overload and storage failures are the server's state and can pass, so the
+/// client reconnects with backoff. Anything else fails the same way when the
+/// client reconnects and resends, so asking for that would loop.
+fn session_closed_error(error: &jazz::db::Error) -> jazz::wire::WireError {
+    let (code, retry) = match error.code {
+        jazz::db::ErrorCode::Backpressure | jazz::db::ErrorCode::Storage => {
+            (WireErrorCode::Backpressure, WireRetry::Later)
+        }
+        _ => (WireErrorCode::Internal, WireRetry::Never),
+    };
+    jazz::wire::WireError::new(code, retry, format!("sync session closed: {error}"))
+}
+
+/// Take `bytes` the client read off `egress`. Crossing back under the
+/// budget queues a tick: output the owner held back can move again.
+fn release_egress(egress: &AtomicUsize, bytes: usize, runtime: &Weak<Inner>) {
+    let before = egress.fetch_sub(bytes, Ordering::AcqRel);
+    if before >= SESSION_QUEUE_BUDGET
+        && before - bytes < SESSION_QUEUE_BUDGET
+        && let Some(inner) = runtime.upgrade()
+    {
+        let _ = ServerRuntimeHandle { inner }.queue_tick();
+    }
+}
+
 /// One session's ordered outbound frame batches.
 pub struct ServerRuntimeFrameStream {
     receiver: tokio_mpsc::UnboundedReceiver<Outbound>,
@@ -865,16 +1132,9 @@ pub struct ServerRuntimeFrameStream {
 
 impl ServerRuntimeFrameStream {
     /// Receive the next batch of outbound frames.
-    pub async fn recv(&mut self) -> Option<Result<Vec<AbiBytes>, String>> {
+    pub async fn recv(&mut self) -> Option<Result<Vec<AbiBytes>, jazz::wire::WireError>> {
         let (result, bytes) = self.receiver.recv().await?;
-        let before = self.egress.fetch_sub(bytes, Ordering::AcqRel);
-        if before >= SESSION_QUEUE_BUDGET
-            && before - bytes < SESSION_QUEUE_BUDGET
-            && let Some(inner) = self.runtime.upgrade()
-        {
-            // Output the owner held back for this session can move again.
-            let _ = ServerRuntimeHandle { inner }.queue_tick();
-        }
+        release_egress(&self.egress, bytes, &self.runtime);
         Some(result)
     }
 }
@@ -946,16 +1206,19 @@ impl ServerRuntimeHandle {
         self.inner.activity.send_modify(|n| *n = n.wrapping_add(1));
     }
 
-    /// Admit an authenticated session.
+    /// Admit an authenticated session, pinned to `bundle` when its backend
+    /// pinned it (see [`jazz::catalogue`]).
+    #[allow(clippy::too_many_arguments)]
     pub async fn open_with_session_context(
         &self,
         identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
+        bundle: Option<jazz::catalogue::BundleId>,
         trust: CommitUnitTrust,
         _negotiated_features: WireFeatures,
         _session_context: Option<ConnectionSessionContext>,
         link_admission: ServerLinkAdmission,
-    ) -> Result<ServerSession, String> {
+    ) -> Result<ServerSession, SessionOpenError> {
         // The SQLite sync protocol has no per-query delegated scope yet, so
         // an authority link is served as the trusted SYSTEM link it is. A
         // client relay (a browser worker relaying for its tabs) is served as
@@ -978,24 +1241,47 @@ impl ServerRuntimeHandle {
         let session = ServerSession(self.inner.next_session.fetch_add(1, Ordering::Relaxed));
         let (output, receiver) = tokio_mpsc::unbounded_channel();
         let egress = Arc::new(AtomicUsize::new(0));
-        self.edges()?.insert(
+        self.insert_edge(session, receiver, Arc::clone(&egress))?;
+        let opened = self
+            .run(move |owner| {
+                Ok(owner.open_session(session, served_as, claims, bundle, output, egress))
+            })
+            .await;
+        self.settle_open(session, opened)
+    }
+
+    fn insert_edge(
+        &self,
+        session: ServerSession,
+        receiver: tokio_mpsc::UnboundedReceiver<Outbound>,
+        egress: Arc<AtomicUsize>,
+    ) -> Result<(), SessionOpenError> {
+        self.edges().map_err(SessionOpenError::Runtime)?.insert(
             session,
             Edge {
                 output: Some(receiver),
                 ingress: Arc::new(AtomicUsize::new(0)),
-                egress: Arc::clone(&egress),
+                egress,
             },
         );
-        let opened = self
-            .run(move |owner| {
-                owner.open_session(session, served_as, claims, output, egress);
-                Ok(())
-            })
-            .await;
-        if opened.is_err() {
-            self.edges()?.remove(&session);
-        }
-        opened.map(|()| session)
+        Ok(())
+    }
+
+    /// The opened `session`, or why not (its edge then goes).
+    fn settle_open(
+        &self,
+        session: ServerSession,
+        opened: Result<Result<(), jazz::db::Error>, String>,
+    ) -> Result<ServerSession, SessionOpenError> {
+        let opened = match opened {
+            Ok(Ok(())) => return Ok(session),
+            Ok(Err(error)) => SessionOpenError::Refused(error),
+            Err(message) => SessionOpenError::Runtime(message),
+        };
+        self.edges()
+            .map_err(SessionOpenError::Runtime)?
+            .remove(&session);
+        Err(opened)
     }
 
     /// Take the session's ordered output stream. Output produced before
@@ -1043,6 +1329,94 @@ impl ServerRuntimeHandle {
             owner.receive(session, frames);
             ingress.fetch_sub(bytes, Ordering::AcqRel);
         }))
+    }
+
+    /// Admit an authenticated thin client connection (SPEC 8.14). It is
+    /// served as its session, or as SYSTEM for a trusted link, like a sync
+    /// session, pinned to `bundle` when its backend pinned it, and takes
+    /// its output from [`Self::open_wire_stream`].
+    pub async fn open_thin_session(
+        &self,
+        identity: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+        bundle: Option<jazz::catalogue::BundleId>,
+        trust: CommitUnitTrust,
+    ) -> Result<ServerSession, SessionOpenError> {
+        let served_as = match trust {
+            CommitUnitTrust::Session => identity,
+            CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAuthority => {
+                AuthorSubject::SYSTEM
+            }
+        };
+        let session = ServerSession(self.inner.next_session.fetch_add(1, Ordering::Relaxed));
+        let (output, receiver) = tokio_mpsc::unbounded_channel();
+        let egress = Arc::new(AtomicUsize::new(0));
+        self.insert_edge(session, receiver, Arc::clone(&egress))?;
+        let opened = self
+            .run(move |owner| {
+                Ok(owner.open_thin_session(session, served_as, claims, bundle, output, egress))
+            })
+            .await;
+        self.settle_open(session, opened)
+    }
+
+    /// Queue a thin client's request, `bytes` long on the wire, for the
+    /// owner. Refused when the session already has its budget queued, as
+    /// [`Self::receive_wire_frames`] refuses sync frames.
+    pub fn receive_thin_request(
+        &self,
+        session: ServerSession,
+        request: jazz::thin::ThinRequest,
+        bytes: usize,
+    ) -> Result<(), String> {
+        let ingress = self
+            .edges()?
+            .get(&session)
+            .map(|edge| Arc::clone(&edge.ingress))
+            .ok_or_else(|| "unknown server session".to_owned())?;
+        if ingress.fetch_add(bytes, Ordering::AcqRel) + bytes > SESSION_QUEUE_BUDGET {
+            ingress.fetch_sub(bytes, Ordering::AcqRel);
+            return Err("session ingress budget exceeded".to_owned());
+        }
+        self.send(Box::new(move |owner| {
+            owner.thin_request(session, request);
+            ingress.fetch_sub(bytes, Ordering::AcqRel);
+        }))
+    }
+
+    /// Count `bytes` against `session`'s egress budget as if they were
+    /// queued and never drained, to test output near the budget.
+    #[cfg(test)]
+    pub(crate) fn hold_egress_for_test(&self, session: ServerSession, bytes: usize) {
+        let edges = self.edges().expect("edges");
+        edges[&session].egress.fetch_add(bytes, Ordering::AcqRel);
+    }
+
+    /// Release `bytes` held by [`Self::hold_egress_for_test`], as the
+    /// client reading them would.
+    #[cfg(test)]
+    pub(crate) fn release_egress_for_test(&self, session: ServerSession, bytes: usize) {
+        let egress = Arc::clone(&self.edges().expect("edges")[&session].egress);
+        release_egress(&egress, bytes, &Arc::downgrade(&self.inner));
+    }
+
+    /// Make the owner wait for a published permissions head again, as a
+    /// store reopened over bundles published earlier does until its next
+    /// catalogue change.
+    #[cfg(test)]
+    pub(crate) async fn await_permissions_for_test(&self) {
+        self.run(|owner| {
+            owner.awaiting_permissions = true;
+            Ok(())
+        })
+        .await
+        .expect("owner");
+    }
+
+    /// Wait until the owner has run everything queued before this call.
+    #[cfg(test)]
+    pub(crate) async fn settle_for_test(&self) {
+        self.run(|_| Ok(())).await.expect("owner");
     }
 
     /// Ask the owner for a tick; requests coalesce. Output reaches every
@@ -1101,22 +1475,23 @@ impl ServerRuntimeHandle {
         &self,
         schema: JazzSchema,
         lens: MigrationLens,
-        new_tables: Vec<String>,
-        dropped_tables: Vec<String>,
     ) -> Result<SchemaVersionId, String> {
         self.run(move |owner| {
-            let id = owner
-                .catalogue
-                .publish(schema.clone(), lens, new_tables, dropped_tables)?;
+            LensEffects::of(&lens).map_err(|error| error.to_string())?;
+            if !owner.catalogue.schemas.contains_key(&lens.source) {
+                return Err("lens source schema is not admitted".to_owned());
+            }
+            let id = schema.version_id();
+            let mut lenses = owner.catalogue.lenses_for(id);
+            if !lenses.iter().any(|admitted| admitted.id == lens.id) {
+                lenses.push(lens.clone());
+            }
             // Clients on the published version read and write by it before
             // (and without) it becoming current.
-            block_on(
-                owner
-                    .db
-                    .admit_schema_with_lenses(schema, &owner.catalogue.lenses_for(id)),
-            )
-            .map_err(|error| error.to_string())?;
-            owner.catalogue.persist(&owner.db)?;
+            block_on(owner.db.admit_schema_with_lenses(schema, &lenses))
+                .map_err(|error| error.to_string())?;
+            owner.reload_catalogue()?;
+            owner.catalogue.admit_lens(id, lens);
             Ok(id)
         })
         .await
@@ -1141,26 +1516,13 @@ impl ServerRuntimeHandle {
         self.run(move |owner| {
             Ok((
                 owner.catalogue.schemas.contains_key(&schema),
-                owner.catalogue.lenses.contains(&lens),
+                owner
+                    .catalogue
+                    .incoming
+                    .values()
+                    .flatten()
+                    .any(|admitted| admitted.id == lens),
             ))
-        })
-        .await
-    }
-
-    /// Check that activating `schema` would succeed, without changing the
-    /// store: it is replayed on a scratch store after everything activated
-    /// so far.
-    #[doc(hidden)]
-    pub async fn validate_schema_activation(
-        &self,
-        revision: u64,
-        schema: JazzSchema,
-    ) -> Result<(), String> {
-        self.run(move |owner| {
-            owner.check_revision(revision)?;
-            let mut steps = owner.catalogue.activated.clone();
-            steps.push(schema);
-            owner.catalogue.replay(&steps)
         })
         .await
     }
@@ -1181,43 +1543,48 @@ impl ServerRuntimeHandle {
         result
     }
 
-    /// The installed deployment catalogue.
-    pub async fn trusted_catalogue_snapshot(&self) -> Result<CatalogueSnapshot, String> {
-        self.run(|owner| Ok(owner.catalogue.snapshot.clone())).await
+    /// The store's catalogue: every schema, lens and permissions revision.
+    pub async fn catalogue(&self) -> Result<CatalogueRows, String> {
+        self.run(|owner| owner.db.catalogue().map_err(|error| error.to_string()))
+            .await
     }
 
+    /// The current schema, with its policies.
     #[doc(hidden)]
-    pub async fn trusted_catalogue_snapshot_for_test(&self) -> Result<CatalogueSnapshot, String> {
-        self.trusted_catalogue_snapshot().await
+    pub async fn current_schema(&self) -> Result<JazzSchema, String> {
+        self.run(|owner| Ok(owner.db.current_schema())).await
     }
 
-    /// Check a deployment by replaying it on a scratch store.
-    #[doc(hidden)]
-    pub async fn validate_deployment_snapshot(
+    /// Apply `change` to the store's catalogue in one transaction (see
+    /// [`Db::apply_catalogue`]): a change that fails leaves nothing behind.
+    pub async fn apply_catalogue(
         &self,
-        snapshot: CatalogueSnapshot,
-    ) -> Result<(), String> {
-        self.run(move |owner| {
-            let steps = deployment_steps(&snapshot)?;
-            owner.catalogue.replay_with_lenses(&steps)
-        })
-        .await
-    }
-
-    /// Install a complete deployment: every lineage step not yet activated,
-    /// then its current write schema.
-    #[doc(hidden)]
-    pub async fn apply_deployment_snapshot(
-        &self,
-        snapshot: CatalogueSnapshot,
-    ) -> Result<(), String> {
+        change: CatalogueChange,
+    ) -> Result<(), CatalogueApplyError> {
         let result = self
             .run(move |owner| {
-                owner.apply_snapshot(snapshot)?;
-                owner.release_held_reads();
-                Ok(())
+                Ok((|| {
+                    if let Some((revision, ..)) = &change.activate {
+                        owner
+                            .check_revision(*revision)
+                            .map_err(CatalogueApplyError::Rejected)?;
+                    }
+                    block_on(owner.db.apply_catalogue(change)).map_err(|error| {
+                        if error.code == jazz::db::ErrorCode::Storage {
+                            CatalogueApplyError::Failed(error.to_string())
+                        } else {
+                            CatalogueApplyError::Rejected(error.to_string())
+                        }
+                    })?;
+                    owner
+                        .reload_catalogue()
+                        .map_err(CatalogueApplyError::Failed)?;
+                    owner.release_held_reads();
+                    Ok(())
+                })())
             })
-            .await;
+            .await
+            .unwrap_or_else(|error| Err(CatalogueApplyError::Failed(error)));
         if result.is_ok() {
             self.notify_activity();
         }
@@ -1258,37 +1625,55 @@ impl ServerRuntimeHandle {
     }
 }
 
-/// A deployment as ordered activation steps: each lineage schema with the
-/// incoming lenses, then the write schema.
-fn deployment_steps(snapshot: &CatalogueSnapshot) -> Result<Vec<Step>, String> {
-    let genesis = snapshot
-        .schemas
-        .iter()
-        .find(|schema| {
-            !snapshot
-                .lineages
-                .iter()
-                .any(|(_, publication)| publication.schema.id == schema.id)
-        })
-        .ok_or("deployment has no genesis schema")?;
-    let mut steps = vec![(genesis.schema.clone(), Vec::new())];
-    let mut lenses = Vec::new();
-    let mut lineages = snapshot.lineages.iter().collect::<Vec<_>>();
-    lineages.sort_by_key(|(seq, _)| *seq);
-    for (_, publication) in lineages {
-        for predecessor in &publication.predecessors {
-            LensEffects::of(&predecessor.lens).map_err(|e| e.to_string())?;
-            lenses.push(predecessor.lens.clone());
+/// Why a session was not opened.
+#[derive(Debug, Clone)]
+pub enum SessionOpenError {
+    /// The store refused to serve the session (see
+    /// [`jazz::db::Db::check_session_pin`]), with its typed error.
+    Refused(jazz::db::Error),
+    /// The runtime could not open it (its thread is gone, its state is
+    /// poisoned).
+    Runtime(String),
+}
+
+impl std::fmt::Display for SessionOpenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused(error) => write!(f, "{error}"),
+            Self::Runtime(message) => f.write_str(message),
         }
-        steps.push((publication.schema.schema.clone(), lenses.clone()));
     }
-    let current = snapshot
-        .schemas
-        .iter()
-        .find(|schema| schema.id == snapshot.current_write_schema.schema)
-        .ok_or("deployment write schema is missing from its schemas")?;
-    steps.push((current.schema.clone(), lenses));
-    Ok(steps)
+}
+
+impl SessionOpenError {
+    /// Whether `self` contains `needle` (as its message shows it).
+    pub fn contains(&self, needle: &str) -> bool {
+        self.to_string().contains(needle)
+    }
+}
+
+/// Why a catalogue change was not applied. Either way nothing of it was.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CatalogueApplyError {
+    /// The change does not fit this catalogue: a stale revision, or a
+    /// schema or lens the store refuses to admit.
+    Rejected(String),
+    /// Storage or the runtime failed.
+    Failed(String),
+}
+
+impl std::fmt::Display for CatalogueApplyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rejected(message) | Self::Failed(message) => f.write_str(message),
+        }
+    }
+}
+
+impl From<CatalogueApplyError> for String {
+    fn from(error: CatalogueApplyError) -> Self {
+        error.to_string()
+    }
 }
 
 // ---- owner thread -------------------------------------------------------------
@@ -1296,6 +1681,8 @@ fn deployment_steps(snapshot: &CatalogueSnapshot) -> Result<Vec<Step>, String> {
 struct Owner {
     db: Db,
     sessions: HashMap<ServerSession, OwnerSession>,
+    /// Thin client connections (SPEC 8.14), which are not sync sessions.
+    thin: HashMap<ServerSession, thin::ThinSession>,
     /// The tick in progress's time slice, shared with every session's queues.
     slice: Rc<TickSlice>,
     catalogue: Catalogue,
@@ -1304,15 +1691,20 @@ struct Owner {
     awaiting_permissions: bool,
     /// The app this store serves, named in slow-query reports.
     app: Option<String>,
+    /// Runs a network chunk store's I/O beside this thread.
+    chunk_io: Option<ChunkIoRunner>,
 }
 
 struct OwnerSession {
     subscriber: SubscriberId,
     /// A session under its own identity (not a trusted backend or
-    /// authority link).
-    untrusted: bool,
+    /// authority link) and not pinned to a bundle: its reads wait for the
+    /// permissions head.
+    awaits_permissions: bool,
     /// Reads held until the permissions head is published, in order.
     held: VecDeque<SyncMessage>,
+    /// The parts of a message split across frames, until its last part.
+    joiner: jazz::db::FrameJoiner,
     queues: Rc<SessionQueues>,
     output: tokio_mpsc::UnboundedSender<Outbound>,
     egress: Arc<AtomicUsize>,
@@ -1426,111 +1818,56 @@ impl Transport for SessionTransport {
     }
 }
 
-/// What the runtime admitted, in the order it was activated.
+/// What the store's catalogue admitted, read from its rows (see
+/// [`jazz::catalogue`]) after every change.
+#[derive(Default)]
 struct Catalogue {
     schemas: BTreeMap<SchemaVersionId, JazzSchema>,
-    lenses: BTreeSet<MigrationLensId>,
     /// Every admitted lens, keyed by target schema.
     incoming: BTreeMap<SchemaVersionId, Vec<MigrationLens>>,
-    activated: Vec<JazzSchema>,
-    snapshot: CatalogueSnapshot,
+    /// The current permissions revision (0 before the first).
+    revision: u64,
 }
 
 impl Catalogue {
-    fn new(genesis: &JazzSchema) -> Self {
-        let version = SchemaVersion::new(genesis.clone());
-        Self {
-            schemas: BTreeMap::from([(version.id, genesis.clone())]),
-            lenses: BTreeSet::new(),
-            incoming: BTreeMap::new(),
-            activated: vec![genesis.clone()],
-            snapshot: CatalogueSnapshot {
-                genesis_physical_identities: PhysicalIdentityManifest::allocate(genesis),
-                schemas: vec![version.clone()],
-                lineages: Vec::new(),
-                current_write_schema: CurrentWriteSchema {
-                    revision: 0,
-                    schema: version.id,
-                },
-            },
-        }
-    }
-
-    fn publish(
-        &mut self,
-        schema: JazzSchema,
-        lens: MigrationLens,
-        new_tables: Vec<String>,
-        dropped_tables: Vec<String>,
-    ) -> Result<SchemaVersionId, String> {
-        LensEffects::of(&lens).map_err(|error| error.to_string())?;
-        let Some(source) = self.schemas.get(&lens.source).cloned() else {
-            return Err("lens source schema is not admitted".to_owned());
+    fn load(rows: &CatalogueRows) -> Result<Self, String> {
+        let compile = |schema: &jazz::tools::public_schema::Schema| {
+            JazzSchema::new(schema).map_err(|error| format!("catalogue schema: {error}"))
         };
-        let id = schema.version_id();
-        if !self.snapshot.schemas.iter().any(|version| version.id == id) {
-            let publication = SchemaLineagePublication::author_from_prior_with_history(
-                &source,
-                &self.identities(lens.source)?,
-                self.history(),
-                SchemaVersion::new(schema.clone()),
-                lens.clone(),
-                new_tables,
-                dropped_tables,
+        let mut catalogue = Self {
+            revision: rows.head().map_or(0, |head| head.revision),
+            ..Self::default()
+        };
+        for schema in &rows.schemas {
+            if let Some(version) = schema.version {
+                catalogue.schemas.insert(version, compile(&schema.schema)?);
+            }
+        }
+        for lens in &rows.lenses {
+            let (Some(source), Some(target)) =
+                (rows.schema(&lens.source), rows.schema(&lens.target))
+            else {
+                continue;
+            };
+            let target_version = compile(&target.schema)?.version_id();
+            if compile(&source.schema)?.version_id() == target_version
+                || !catalogue.schemas.contains_key(&target_version)
+            {
+                continue;
+            }
+            let lens = jazz::tools::schema_lens::runtime::compile_lens(
+                &jazz::tools::schema_lens::Lens::new(
+                    lens.source,
+                    lens.target,
+                    lens.forward.clone(),
+                ),
+                &source.schema,
+                &target.schema,
             )
-            .map_err(str::to_owned)?;
-            let sequence = self
-                .snapshot
-                .lineages
-                .iter()
-                .map(|(seq, _)| *seq)
-                .max()
-                .unwrap_or(0)
-                + 1;
-            self.snapshot.lineages.push((sequence, publication));
-            self.snapshot
-                .schemas
-                .push(SchemaVersion::new(schema.clone()));
+            .map_err(|error| format!("catalogue lens: {error}"))?;
+            catalogue.admit_lens(target_version, lens);
         }
-        self.admit_lens(id, lens.clone());
-        self.lenses.insert(lens.id);
-        self.schemas.entry(id).or_insert(schema);
-        Ok(id)
-    }
-
-    /// The physical identities `schema` was published with.
-    fn identities(&self, schema: SchemaVersionId) -> Result<PhysicalIdentityManifest, String> {
-        if let Some((_, publication)) = self
-            .snapshot
-            .lineages
-            .iter()
-            .find(|(_, publication)| publication.schema.id == schema)
-        {
-            return Ok(publication.physical_identities.clone());
-        }
-        if self.snapshot.schemas.first().map(|version| version.id) == Some(schema) {
-            return Ok(self.snapshot.genesis_physical_identities.clone());
-        }
-        Err("lens source schema has no published identities".to_owned())
-    }
-
-    fn history(&self) -> Vec<PhysicalIdentityManifest> {
-        std::iter::once(self.snapshot.genesis_physical_identities.clone())
-            .chain(
-                self.snapshot
-                    .lineages
-                    .iter()
-                    .map(|(_, publication)| publication.physical_identities.clone()),
-            )
-            .collect()
-    }
-
-    /// Keep the snapshot in the store's file for the next run.
-    fn persist(&self, db: &Db) -> Result<(), String> {
-        let bytes = postcard::to_allocvec(&self.snapshot)
-            .map_err(|error| format!("encode runtime catalogue: {error}"))?;
-        db.host_put_many(RUNTIME_CATALOGUE, &[(CATALOGUE_KEY.to_vec(), bytes)])
-            .map_err(|error| format!("persist runtime catalogue: {error}"))
+        Ok(catalogue)
     }
 
     fn admit_lens(&mut self, target: SchemaVersionId, lens: MigrationLens) {
@@ -1542,27 +1879,6 @@ impl Catalogue {
 
     fn lenses_for(&self, schema: SchemaVersionId) -> Vec<MigrationLens> {
         self.incoming.get(&schema).cloned().unwrap_or_default()
-    }
-
-    fn replay(&self, steps: &[JazzSchema]) -> Result<(), String> {
-        let steps = steps
-            .iter()
-            .map(|schema| (schema.clone(), self.lenses_for(schema.version_id())))
-            .collect::<Vec<_>>();
-        self.replay_with_lenses(&steps)
-    }
-
-    /// Activate `steps` in order on an empty scratch store.
-    fn replay_with_lenses(&self, steps: &[Step]) -> Result<(), String> {
-        let Some(((first, _), rest)) = steps.split_first() else {
-            return Ok(());
-        };
-        let scratch = block_on(Db::open(config(first.clone()))).map_err(|e| e.to_string())?;
-        for (schema, lenses) in rest {
-            block_on(scratch.activate_schema_with_lenses(schema.clone(), lenses))
-                .map_err(|error| error.to_string())?;
-        }
-        Ok(())
     }
 }
 
@@ -1593,58 +1909,79 @@ fn with_permissions(
 }
 
 impl Owner {
-    /// Open the runtime on `file`. A reopened store also reopens the
-    /// catalogue it admitted before: its genesis schema opens the store and
-    /// every later schema is activated again (each a no-op on the stored
-    /// tables), so the catalogue and its lineage survive restarts. `schema`
-    /// starts a fresh catalogue only when the store has none, or (unless
-    /// `any_stored_catalogue`) none that admits it.
+    /// Open the runtime on `file`. A reopened store admits every version
+    /// it admitted before (the engine reads them from its catalogue) and
+    /// makes its current permissions revision current again. `schema` is
+    /// current instead when the store has no revision yet, or (unless
+    /// `any_stored_catalogue`) none whose catalogue admits `schema`.
     fn open(
         schema: JazzSchema,
         file: StoreFile,
+        chunk_store: Option<ChunkStoreChoice>,
+        wake: std_mpsc::Sender<Work>,
         any_stored_catalogue: bool,
         awaiting_permissions: bool,
         app: Option<String>,
     ) -> Result<Self, String> {
-        let stored = match file
-            .host_get(RUNTIME_CATALOGUE, CATALOGUE_KEY)
-            .map_err(|error| format!("read runtime catalogue: {error}"))?
-        {
-            Some(bytes) => Some(
-                postcard::from_bytes::<CatalogueSnapshot>(&bytes)
-                    .map_err(|error| format!("decode runtime catalogue: {error}"))?,
-            ),
-            None => None,
-        }
-        .filter(|snapshot| {
-            any_stored_catalogue
-                || snapshot
-                    .schemas
-                    .iter()
-                    .any(|version| version.id == schema.version_id())
-        });
-        let genesis = match &stored {
-            Some(snapshot) => deployment_steps(snapshot)?.remove(0).0,
-            None => schema.clone(),
+        let rows = file
+            .catalogue()
+            .map_err(|error| format!("read catalogue: {error}"))?;
+        let stored = any_stored_catalogue
+            || rows
+                .schemas
+                .iter()
+                .any(|stored| stored.version == Some(schema.version_id()));
+        let head = rows.head().filter(|_| stored);
+        let compile = |hash: &jazz::tools::public_schema::SchemaHash| {
+            let structural = rows
+                .schema(hash)
+                .ok_or("the current permissions revision's schema is missing")?;
+            JazzSchema::new(&structural.schema)
+                .map_err(|error| format!("catalogue schema: {error}"))
         };
-        let db = block_on(Db::open_file(config(genesis), file))
+        // Every activation records a revision: without one, the store's
+        // genesis is current.
+        let current = match (head, rows.genesis().filter(|_| any_stored_catalogue)) {
+            (Some(head), _) => with_permissions(
+                &compile(&head.schema)?,
+                &head.permissions.clone().into_iter().collect(),
+            )?,
+            (None, Some(genesis)) => compile(&genesis.hash)?,
+            (None, None) => schema,
+        };
+        let config = match &chunk_store {
+            Some(choice) if choice.network => config(current)
+                .with_chunk_store(Arc::clone(&choice.store))
+                .with_host_chunk_io(),
+            Some(choice) => config(current).with_chunk_store(Arc::clone(&choice.store)),
+            None => config(current),
+        };
+        let chunk_io = match chunk_store {
+            Some(choice) if choice.network => Some(ChunkIoRunner::start(choice.store, wake)?),
+            _ => None,
+        };
+        let db = block_on(Db::open_file(config, file))
             .map_err(|error| format!("open server store: {error}"))?;
         db.set_authority();
+        db.require_session_pins();
+        db.track_closed_subscribers();
         db.set_slow_query_threshold(slow_query_threshold());
-        let mut owner = Self {
+        let catalogue = Catalogue::load(&db.catalogue().map_err(|error| error.to_string())?)?;
+        Ok(Self {
             db,
             sessions: HashMap::new(),
+            thin: HashMap::new(),
             slice: Rc::default(),
-            catalogue: Catalogue::new(&schema),
-            awaiting_permissions,
+            catalogue,
+            awaiting_permissions: awaiting_permissions && head.is_none(),
             app,
-        };
-        if let Some(snapshot) = stored {
-            owner.catalogue = Catalogue::new(&deployment_steps(&snapshot)?.remove(0).0);
-            owner.apply_snapshot(snapshot)?;
-        }
-        owner.catalogue.persist(&owner.db)?;
-        Ok(owner)
+            chunk_io,
+        })
+    }
+
+    fn reload_catalogue(&mut self) -> Result<(), String> {
+        self.catalogue = Catalogue::load(&self.db.catalogue().map_err(|error| error.to_string())?)?;
+        Ok(())
     }
 
     /// Log the query shapes that ran slow since the last report, when one
@@ -1683,6 +2020,7 @@ impl Owner {
         for (_, session) in self.sessions.drain() {
             self.db.disconnect_subscriber(session.subscriber);
         }
+        self.thin.clear();
     }
 
     fn open_session(
@@ -1690,9 +2028,10 @@ impl Owner {
         session: ServerSession,
         identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
+        bundle: Option<jazz::catalogue::BundleId>,
         output: tokio_mpsc::UnboundedSender<Outbound>,
         egress: Arc<AtomicUsize>,
-    ) {
+    ) -> Result<(), jazz::db::Error> {
         let claims = (identity != AuthorSubject::SYSTEM).then(|| {
             self.db.set_identity_claims(identity, claims.clone());
             claims
@@ -1705,64 +2044,86 @@ impl Owner {
             done: std::cell::Cell::new(false),
             slice: Rc::clone(&self.slice),
         });
-        let subscriber = self.db.accept_subscriber_with_claims(
+        let subscriber = self.db.accept_pinned_subscriber(
             Box::new(SessionTransport(Rc::clone(&queues))),
             identity,
             claims,
-        );
+            bundle,
+        )?;
         self.sessions.insert(
             session,
             OwnerSession {
                 subscriber,
-                untrusted: identity != AuthorSubject::SYSTEM,
+                // A pinned session's bundle is published already: it does
+                // not wait for the current permissions.
+                awaits_permissions: identity != AuthorSubject::SYSTEM && bundle.is_none(),
                 held: VecDeque::new(),
+                // An untrusted peer's split message must fit the budget
+                // its frames are admitted against (SPEC 8.1).
+                joiner: if identity != AuthorSubject::SYSTEM {
+                    jazz::db::FrameJoiner::with_ceiling(
+                        jazz::protocol_limits::MAX_UNTRUSTED_MESSAGE_BYTES,
+                    )
+                } else {
+                    jazz::db::FrameJoiner::default()
+                },
                 queues,
                 output,
                 egress,
             },
         );
+        Ok(())
     }
 
     fn receive(&mut self, session: ServerSession, frames: Vec<AbiBytes>) {
         let Some(owner_session) = self.sessions.get(&session) else {
             return;
         };
-        let gated = self.awaiting_permissions && owner_session.untrusted;
+        let gated = self.awaiting_permissions && owner_session.awaits_permissions;
         let Some(owner_session) = self.sessions.get_mut(&session) else {
             return;
         };
         let mut inbound = owner_session.queues.inbound.borrow_mut();
         for frame in frames {
-            match jazz::db::decode_message(&frame) {
-                Ok(SyncMessage::Commit { tx, .. }) if gated => {
+            match owner_session.joiner.push(&frame) {
+                Ok(None) => {}
+                Ok(Some(SyncMessage::Commit { id, .. })) if gated => {
                     owner_session
                         .queues
                         .outbound
                         .borrow_mut()
                         .push_back(SyncMessage::Fate {
-                            tx,
-                            through: self.db.seq_high_water(),
-                            result: Err(WireError::Rejected {
-                                reason: Some(Reason::PermissionsHeadMissing.as_str().to_owned()),
-                                message: "permissions_head_missing: no published permissions head"
-                                    .to_owned(),
-                            }),
-                            held: Vec::new(),
+                            id,
+                            outcome: Outcome::Refused {
+                                through: self.db.seq_high_water(),
+                                error: WireError::Rejected {
+                                    reason: Some(
+                                        Reason::PermissionsHeadMissing.as_str().to_owned(),
+                                    ),
+                                    message:
+                                        "permissions_head_missing: no published permissions head"
+                                            .to_owned(),
+                                },
+                            },
                             global: true,
                         });
                 }
-                Ok(
-                    message @ (SyncMessage::Subscribe { .. }
+                Ok(Some(
+                    message @ (SyncMessage::Read { .. }
                     | SyncMessage::Unsubscribe { .. }
-                    | SyncMessage::Fetch { .. }
-                    | SyncMessage::Hold { .. }),
-                ) if gated => owner_session.held.push_back(message),
-                Ok(message) => inbound.push_back(message),
+                    | SyncMessage::ResendWhole { .. }),
+                )) if gated => owner_session.held.push_back(message),
+                Ok(Some(message)) => inbound.push_back(message),
                 Err(error) => {
                     drop(inbound);
-                    let _ = owner_session
-                        .output
-                        .send((Err(format!("malformed sync frame: {error}")), 0));
+                    let _ = owner_session.output.send((
+                        Err(jazz::wire::WireError::new(
+                            WireErrorCode::MalformedFrame,
+                            WireRetry::Never,
+                            error.to_string(),
+                        )),
+                        0,
+                    ));
                     self.close_session(session);
                     return;
                 }
@@ -1786,6 +2147,7 @@ impl Owner {
         if let Some(session) = self.sessions.remove(&session) {
             self.db.disconnect_subscriber(session.subscriber);
         }
+        self.close_thin_session(session);
     }
 
     fn inbound_pending(&self) -> bool {
@@ -1798,6 +2160,21 @@ impl Owner {
     /// session's inbound messages are taken a bounded number per tick, so a
     /// large batch gets its first answers out early and other sessions are
     /// served between its parts.
+    /// A network chunk store's batch came back: apply it (the tick that
+    /// follows this job hands the next one over).
+    fn finish_chunk_io(&mut self, done: jazz::chunk_store::ChunkIoDone) {
+        let finished = self.db.finish_chunk_io(done);
+        let log = match &self.chunk_io {
+            Some(runner) => runner.returned(finished.is_err()),
+            None => finished.is_err(),
+        };
+        if let Err(error) = finished
+            && log
+        {
+            tracing::warn!(%error, app = self.app.as_deref().unwrap_or("?"), "large-value store I/O failed; retrying with backoff");
+        }
+    }
+
     fn tick(&mut self) {
         start_tick(self.sessions.values().map(|session| &*session.queues));
         let started = std::time::Instant::now();
@@ -1805,6 +2182,9 @@ impl Owner {
         self.slice.ticked(started.elapsed());
         if let Err(error) = ticked {
             tracing::error!(%error, "server runtime tick failed");
+        }
+        if let Some(runner) = &self.chunk_io {
+            runner.pump(self);
         }
         self.report_slow_queries();
         for (subscriber, error) in self.db.take_closed_subscribers() {
@@ -1815,10 +2195,10 @@ impl Owner {
             else {
                 continue;
             };
-            tracing::warn!(%error, "closing sync session for a message it sent");
+            tracing::warn!(%error, "closing sync session");
             let _ = self.sessions[&id]
                 .output
-                .send((Err(format!("sync session closed: {error}")), 0));
+                .send((Err(session_closed_error(&error)), 0));
             self.close_session(id);
         }
         let mut gone = Vec::new();
@@ -1826,6 +2206,7 @@ impl Owner {
             let mut outbound = session.queues.outbound.borrow_mut();
             let mut frames = Vec::new();
             let mut bytes = 0;
+            let mut failed = None;
             while session.egress.load(Ordering::Acquire) + bytes < SESSION_QUEUE_BUDGET
                 && let Some(message) = outbound.pop_front()
             {
@@ -1834,10 +2215,27 @@ impl Owner {
                         bytes += encoded.iter().map(Vec::len).sum::<usize>();
                         frames.extend(encoded);
                     }
+                    // Dropped, the message would leave the client waiting
+                    // on it: the session ends with why instead.
                     Err(error) => {
                         tracing::error!(%error, "encode outbound sync message");
+                        failed = Some(error.to_string());
+                        break;
                     }
                 }
+            }
+            if let Some(error) = failed {
+                drop(outbound);
+                let _ = session.output.send((
+                    Err(jazz::wire::WireError::new(
+                        WireErrorCode::Internal,
+                        WireRetry::Never,
+                        format!("sync session closed: {error}"),
+                    )),
+                    0,
+                ));
+                gone.push(*id);
+                continue;
             }
             if frames.is_empty() {
                 continue;
@@ -1850,12 +2248,13 @@ impl Owner {
         for id in gone {
             self.close_session(id);
         }
+        self.pump_thin();
     }
 
     /// An activation at a revision older than the current one is stale: the
     /// runtime is ahead of whoever proposed it.
     fn check_revision(&self, revision: u64) -> Result<(), String> {
-        let current = self.catalogue.snapshot.current_write_schema.revision;
+        let current = self.catalogue.revision;
         if revision < current {
             return Err(format!(
                 "stale active schema revision {revision}: the runtime is at revision {current}"
@@ -1874,69 +2273,14 @@ impl Owner {
         let id = schema.version_id();
         let lenses = self.catalogue.lenses_for(id);
         let selected = with_permissions(&schema, permissions)?;
-        block_on(
-            self.db
-                .activate_schema_with_lenses(selected.clone(), &lenses),
-        )
+        block_on(self.db.apply_catalogue(CatalogueChange {
+            activate: Some((revision, selected, lenses)),
+            ..CatalogueChange::default()
+        }))
         .map_err(|error| error.to_string())?;
-        self.catalogue
-            .schemas
-            .entry(id)
-            .or_insert_with(|| schema.clone());
-        self.catalogue.activated.push(schema);
-        // The snapshot carries the write schema with its installed policies.
-        let snapshot = &mut self.catalogue.snapshot;
-        let selected = SchemaVersion::new(selected);
-        match snapshot.schemas.iter_mut().find(|version| version.id == id) {
-            Some(version) => *version = selected,
-            None => snapshot.schemas.push(selected),
-        }
-        snapshot.current_write_schema = CurrentWriteSchema {
-            revision,
-            schema: id,
-        };
-        self.catalogue.persist(&self.db)?;
+        self.reload_catalogue()?;
         self.release_held_reads();
         Ok(id)
-    }
-
-    fn apply_snapshot(&mut self, snapshot: CatalogueSnapshot) -> Result<(), String> {
-        let steps = deployment_steps(&snapshot)?;
-        for (schema, lenses) in &steps {
-            block_on(self.db.activate_schema_with_lenses(schema.clone(), lenses))
-                .map_err(|error| error.to_string())?;
-            self.catalogue
-                .schemas
-                .entry(schema.version_id())
-                .or_insert_with(|| schema.clone());
-            self.catalogue.activated.push(schema.clone());
-        }
-        for (_, publication) in &snapshot.lineages {
-            for predecessor in &publication.predecessors {
-                self.catalogue.lenses.insert(predecessor.lens.id);
-                self.catalogue
-                    .admit_lens(publication.schema.id, predecessor.lens.clone());
-            }
-        }
-        // Published versions that were never made current stay readable by
-        // the clients that declare them.
-        let mut lineages = snapshot.lineages.iter().collect::<Vec<_>>();
-        lineages.sort_by_key(|(sequence, _)| *sequence);
-        for (_, publication) in lineages {
-            let id = publication.schema.id;
-            if self.catalogue.schemas.contains_key(&id) {
-                continue;
-            }
-            let schema = publication.schema.schema.clone();
-            block_on(
-                self.db
-                    .admit_schema_with_lenses(schema.clone(), &self.catalogue.lenses_for(id)),
-            )
-            .map_err(|error| error.to_string())?;
-            self.catalogue.schemas.insert(id, schema);
-        }
-        self.catalogue.snapshot = snapshot;
-        self.catalogue.persist(&self.db)
     }
 }
 
@@ -1944,6 +2288,23 @@ impl Owner {
 mod tests {
     use super::*;
     use jazz::tools::public_schema::{ColumnType, SchemaBuilder, TableSchema};
+
+    #[test]
+    fn only_server_side_failures_ask_the_client_to_reconnect() {
+        let closed = |code| session_closed_error(&jazz::db::Error::new(code, "closed"));
+        assert!(closed(jazz::db::ErrorCode::Backpressure).asks_reconnect_later());
+        assert!(closed(jazz::db::ErrorCode::Storage).asks_reconnect_later());
+        for code in [
+            jazz::db::ErrorCode::Protocol,
+            jazz::db::ErrorCode::Schema,
+            jazz::db::ErrorCode::Query,
+            jazz::db::ErrorCode::WriteRejected,
+        ] {
+            let error = closed(code);
+            assert_eq!(error.retry, WireRetry::Never, "{code:?}");
+            assert!(!error.asks_reconnect_later(), "{code:?}");
+        }
+    }
 
     fn schema() -> JazzSchema {
         JazzSchema::new(
@@ -2042,13 +2403,16 @@ mod tests {
         // A session with more inbound messages than the window's ticks take.
         block_on(runtime.run(|owner| {
             let (output, _) = tokio_mpsc::unbounded_channel();
-            owner.open_session(
-                ServerSession(1),
-                AuthorSubject::SYSTEM,
-                BTreeMap::new(),
-                output,
-                Arc::default(),
-            );
+            owner
+                .open_session(
+                    ServerSession(1),
+                    AuthorSubject::SYSTEM,
+                    BTreeMap::new(),
+                    None,
+                    output,
+                    Arc::default(),
+                )
+                .map_err(|error| error.to_string())?;
             let mut inbound = owner.sessions[&ServerSession(1)]
                 .queues
                 .inbound
@@ -2185,16 +2549,31 @@ mod tests {
         let store = AppStore::memory().unwrap();
         let kv = store.kv(PROBE).unwrap();
         kv.write_many(&[(b"a".to_vec(), b"1".to_vec())]).unwrap();
+        let error = store
+            .start_runtime(schema(), NodeRole::Relay, false, false)
+            .err()
+            .expect("a relay cannot start");
+        assert!(error.contains("relay"), "{error}");
+        let corrupt = SchemaBuilder::new().build();
         store
-            .kv(RUNTIME_CATALOGUE)
+            .catalogue()
             .unwrap()
-            .write_many(&[(CATALOGUE_KEY.to_vec(), b"not a catalogue".to_vec())])
+            .put(jazz::catalogue::CataloguePut {
+                schemas: vec![(corrupt, 1)],
+                permissions: vec![(
+                    1,
+                    jazz::tools::public_schema::SchemaHash::from_bytes([7; 32]),
+                    Default::default(),
+                    1,
+                )],
+                ..Default::default()
+            })
             .unwrap();
         let error = store
-            .start_runtime(schema(), NodeRole::Core, false, false)
+            .start_runtime(schema(), NodeRole::Core, true, false)
             .err()
-            .expect("an undecodable catalogue fails the start");
-        assert!(error.contains("decode runtime catalogue"), "{error}");
+            .expect("a revision of a missing schema fails the start");
+        assert!(error.contains("schema is missing"), "{error}");
         assert_eq!(kv.get(b"a").unwrap(), Some(b"1".to_vec()));
         kv.write_many(&[(b"b".to_vec(), b"2".to_vec())]).unwrap();
         assert_eq!(kv.get(b"b").unwrap(), Some(b"2".to_vec()));
@@ -2278,5 +2657,238 @@ mod tests {
             slice.ticked(TICK_SLICE * 3);
         }
         assert_eq!(slice.cap.get(), 1, "a tick always takes at least one");
+    }
+
+    /// A network blob store on the mock bucket, under `prefix`.
+    fn bucket_blobs(bucket: &crate::s3::mock::MockS3, prefix: &str, owner: &str) -> Blobs {
+        let store = crate::s3::S3ChunkStore::new(bucket.options(prefix), owner.to_owned()).unwrap();
+        Blobs::Network(NetworkChunkStore {
+            store: Arc::new(store),
+            name: "mock bucket".to_owned(),
+        })
+    }
+
+    fn docs() -> JazzSchema {
+        JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(TableSchema::builder("docs").column("body", ColumnType::Bytea))
+                .build(),
+        )
+        .unwrap()
+    }
+
+    fn read_body(db: &Db) -> Option<Vec<u8>> {
+        use jazz::query::Query;
+        let rows = block_on(db.all(
+            &db.prepare_query(&Query::from("docs")).unwrap(),
+            jazz::db::ReadOpts {
+                tier: jazz::db::ReadTier::LocalOnly,
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        rows.first().and_then(|row| {
+            row.cells()
+                .find(|(name, _)| *name == "body")
+                .and_then(|(_, value)| match value {
+                    Some(jazz::records::Value::Bytes(bytes)) => Some(bytes.clone()),
+                    _ => None,
+                })
+        })
+    }
+
+    /// A store whose large values live in a bucket: settled leaves move
+    /// there off the store thread (the bucket checks each one's checksum),
+    /// and a reopened store reads them back from it.
+    #[test]
+    fn large_values_move_to_an_s3_bucket_and_read_back() {
+        let bucket = crate::s3::mock::MockS3::start();
+        let dir = tempfile::tempdir().unwrap();
+        let storage =
+            || StorageConfig::data_dir(dir.path()).with_blobs(bucket_blobs(&bucket, "app/", "me"));
+        let value: Vec<u8> = (0..400 * 1024u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+            .collect();
+        {
+            let store = AppStore::open(&storage()).unwrap();
+            let runtime = store
+                .start_runtime(docs(), NodeRole::Core, false, false)
+                .unwrap();
+            let written = value.clone();
+            block_on(runtime.run(move |owner| {
+                block_on(owner.db.insert(
+                    "docs",
+                    BTreeMap::from([("body".to_owned(), jazz::records::Value::Bytes(written))]),
+                    Default::default(),
+                ))
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+            }))
+            .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(20);
+            // 400 KiB of bytes is at least two leaves.
+            while bucket.names("app/").len() < 2 {
+                assert!(Instant::now() < deadline, "leaves never reached the bucket");
+                // Each job is followed by a tick, which hands the next batch over.
+                block_on(runtime.run(|_| Ok(()))).unwrap();
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert!(
+                bucket
+                    .state
+                    .objects
+                    .lock()
+                    .unwrap()
+                    .keys()
+                    .all(|key| key.starts_with("bucket/app/")),
+                "objects live under the bucket and prefix"
+            );
+            store.close().unwrap();
+        }
+        let store = AppStore::open(&storage()).unwrap();
+        let runtime = store
+            .start_runtime(docs(), NodeRole::Core, false, false)
+            .unwrap();
+        let read = block_on(runtime.run(|owner| Ok(read_body(&owner.db)))).unwrap();
+        assert_eq!(read.as_deref(), Some(value.as_slice()));
+        assert!(
+            bucket.state.calls.gets.load(Ordering::Relaxed) > 0,
+            "read from the bucket"
+        );
+        store.close().unwrap();
+    }
+
+    /// A bucket that refuses everything is asked again with backoff, not
+    /// on every tick; once it answers, the leaves move.
+    #[test]
+    fn a_failing_bucket_is_retried_with_backoff() {
+        let bucket = crate::s3::mock::MockS3::start();
+        bucket.state.failing.store(true, Ordering::Relaxed);
+        let dir = tempfile::tempdir().unwrap();
+        let store = AppStore::open(
+            &StorageConfig::data_dir(dir.path()).with_blobs(bucket_blobs(&bucket, "app/", "me")),
+        )
+        .unwrap();
+        let runtime = store
+            .start_runtime(docs(), NodeRole::Core, false, false)
+            .unwrap();
+        let value: Vec<u8> = (0..400 * 1024u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+            .collect();
+        block_on(runtime.run(move |owner| {
+            block_on(owner.db.insert(
+                "docs",
+                BTreeMap::from([("body".to_owned(), jazz::records::Value::Bytes(value))]),
+                Default::default(),
+            ))
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+        }))
+        .unwrap();
+        let tick_for = |how_long: Duration| {
+            let until = Instant::now() + how_long;
+            while Instant::now() < until {
+                block_on(runtime.run(|_| Ok(()))).unwrap();
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        tick_for(Duration::from_millis(2_500));
+        // Batches at 0 s, 1 s and 3 s at most, each failing at its claim.
+        let asked = bucket.state.calls.requests.load(Ordering::Relaxed);
+        assert!((1..=3).contains(&asked), "{asked} requests in 2.5 s");
+        bucket.state.failing.store(false, Ordering::Relaxed);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while bucket.names("app/").len() < 2 {
+            assert!(Instant::now() < deadline, "leaves never reached the bucket");
+            tick_for(Duration::from_millis(50));
+        }
+        store.close().unwrap();
+    }
+
+    /// The same through a Vercel Blob store: the core writes every leaf
+    /// itself, and a reopened store reads them back (each checked against
+    /// its hash, since Blob keeps no checksum).
+    #[test]
+    fn large_values_move_to_a_vercel_blob_store_and_read_back() {
+        let blob = crate::vercel_blob::mock::MockBlob::start();
+        let dir = tempfile::tempdir().unwrap();
+        let storage = || {
+            let store = crate::vercel_blob::VercelBlobChunkStore::new(
+                blob.options("jazz/app/"),
+                "me".to_owned(),
+            )
+            .unwrap();
+            StorageConfig::data_dir(dir.path()).with_blobs(Blobs::Network(NetworkChunkStore {
+                store: Arc::new(store),
+                name: "mock blob".to_owned(),
+            }))
+        };
+        let value: Vec<u8> = (0..400 * 1024u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+            .collect();
+        {
+            let store = AppStore::open(&storage()).unwrap();
+            let runtime = store
+                .start_runtime(docs(), NodeRole::Core, false, false)
+                .unwrap();
+            let written = value.clone();
+            block_on(runtime.run(move |owner| {
+                block_on(owner.db.insert(
+                    "docs",
+                    BTreeMap::from([("body".to_owned(), jazz::records::Value::Bytes(written))]),
+                    Default::default(),
+                ))
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+            }))
+            .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while blob.names("jazz/app/").len() < 2 {
+                assert!(Instant::now() < deadline, "leaves never reached the store");
+                block_on(runtime.run(|_| Ok(()))).unwrap();
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            store.close().unwrap();
+        }
+        let store = AppStore::open(&storage()).unwrap();
+        let runtime = store
+            .start_runtime(docs(), NodeRole::Core, false, false)
+            .unwrap();
+        let read = block_on(runtime.run(|owner| Ok(read_body(&owner.db)))).unwrap();
+        assert_eq!(read.as_deref(), Some(value.as_slice()));
+        assert!(
+            blob.state.calls.gets.load(Ordering::Relaxed) > 0,
+            "read from the store"
+        );
+        store.close().unwrap();
+    }
+
+    #[test]
+    fn chunk_io_backoff_doubles_to_a_minute_and_resets() {
+        let (work, _work) = std_mpsc::channel();
+        let store: Arc<dyn jazz::chunk_store::ChunkStore> = Arc::new(
+            jazz::chunk_store::FileChunkStore::new(tempfile::tempdir().unwrap().keep()).unwrap(),
+        );
+        let runner = ChunkIoRunner::start(store, work).unwrap();
+        let wait = |runner: &ChunkIoRunner| {
+            runner.not_before.get().map(|at| {
+                at.saturating_duration_since(Instant::now())
+                    .as_secs_f64()
+                    .round() as u64
+            })
+        };
+        let mut logged = Vec::new();
+        let mut waits = Vec::new();
+        for _ in 0..9 {
+            logged.push(runner.returned(true));
+            waits.push(wait(&runner).unwrap());
+        }
+        assert_eq!(waits, [1, 2, 4, 8, 16, 32, 60, 60, 60]);
+        assert_eq!(
+            logged,
+            [true, false, false, false, false, false, true, true, true]
+        );
+        assert!(!runner.returned(false));
+        assert_eq!(wait(&runner), None);
     }
 }

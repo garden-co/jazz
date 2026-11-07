@@ -11,7 +11,7 @@
 //! accepted seq, or where the named commit landed. A write built on a
 //! rejected commit, or on one it never received, is rejected too. It keeps,
 //! in the version the write made (the row table and history alike), `_base`
-//! (what it was built on, [`Built::stored`]) and `_cols`, the columns it
+//! (what it was built on, [`Built::stored`]) and `_touched`, the columns it
 //! authored (a bitmask over the columns' positions in the row table, which
 //! only ever grows by `ADD COLUMN`). From those and the row's history it
 //! derives on demand whether the write overrode a version its writer never
@@ -82,7 +82,7 @@ struct Version {
     seq: u64,
     built: Option<Built>,
     /// Bitmask over the table's column codes; `None` authors every
-    /// column, `_del` included.
+    /// column, `_state` included.
     cols: Option<Vec<u8>>,
 }
 
@@ -124,10 +124,10 @@ impl Knowledge {
 }
 
 /// The authored-column name a deletion or restore writes.
-const DELETION: &str = "_del";
+const DELETION: &str = "_state";
 
 /// Whether two writes' authored-column bitmasks overlap; `None` authors
-/// every column, `_del` included.
+/// every column, `_state` included.
 fn authored_overlap(left: Option<&[u8]>, right: Option<&[u8]>) -> bool {
     match (left, right) {
         (Some(left), Some(right)) => left.iter().zip(right).any(|(l, r)| l & r != 0),
@@ -164,7 +164,7 @@ fn unknown_base(what: &str) -> Error {
 /// A commit's predecessor as the receiver recorded it: accepted (at a
 /// seq), rejected, or never received, which a sender only names after its
 /// predecessor was lost, so the write is rejected as over a rejected one.
-fn predecessor(commit: Option<Option<u64>>) -> Result<u64, Error> {
+fn predecessor(commit: Option<Option<Pos>>) -> Result<Pos, Error> {
     commit.flatten().ok_or_else(predecessor_rejected)
 }
 
@@ -177,9 +177,10 @@ impl Inner {
     pub(super) fn row_ops(&self, ops: &[StagedOp]) -> RowOps {
         let mut by_row = RowOps::new();
         for (index, op) in ops.iter().enumerate() {
-            if let (Some(row), Ok(table)) = (op.row(), self.schema.stored_table(op.table())) {
+            // Replicated ops name their tables by stored names.
+            if let Some(row) = op.row() {
                 by_row
-                    .entry((table.to_owned(), row))
+                    .entry((op.table().to_owned(), row))
                     .or_default()
                     .push(index);
             }
@@ -238,7 +239,7 @@ impl Inner {
             };
             match op {
                 StagedOp::Insert(..) | StagedOp::Move(..) => return Ok(None),
-                StagedOp::Update(_, _, cells, _) | StagedOp::Upsert(_, _, cells, _) => {
+                StagedOp::Update(_, _, cells, _) | StagedOp::Upsert(_, _, cells, _, _) => {
                     authored.extend(stored(cells));
                 }
                 StagedOp::Delete(..) => {
@@ -263,77 +264,120 @@ impl Inner {
         Ok(Some(mask))
     }
 
-    /// A session's bases, renamed into this relay's terms for its upstream
-    /// (SPEC 4 §4.6): an accepted upstream seq stays; a commit of this
-    /// relay's (one of its own unsettled versions it shipped the session, or
-    /// the commit carrying one of the session's) is named as this relay's.
-    /// A base on a commit this relay rejected, or never received, rejects
-    /// the write. A version in this relay's local range that is not one of
-    /// its own commits (one from before a reset)
-    /// cannot be named upstream: the write counts as built on the newest
-    /// version of the row this relay holds accepted, so it may be flagged
-    /// over a version its writer saw, never the other way round.
+    /// A session's bases, renamed for this relay's upstream (SPEC 4 §4.6),
+    /// which knows the session's commits by their ids, as this relay
+    /// uploads them: an accepted upstream seq and a base on one of the
+    /// session's own commits stay; one of this relay's unsettled versions
+    /// it shipped the session is named by the id of the commit that wrote
+    /// it (this relay's own, or another session's it carries). A base on a
+    /// commit this relay rejected, or never received, rejects the write. An
+    /// unsettled version of this relay's node that is not one of its
+    /// commits (one from before a reset) cannot be named upstream: the
+    /// write counts as built on the newest version of the row this relay
+    /// holds accepted, so it may be flagged over a version its writer saw,
+    /// never the other way round.
     pub(super) fn relay_bases(
         &self,
         sender: ([u8; 16], u64),
         ops: &[StagedOp],
-        bases: Vec<WireBase>,
-    ) -> Result<Vec<WireBase>, Error> {
+        bases: Vec<(usize, WireBase)>,
+    ) -> Result<Vec<(usize, WireBase)>, Error> {
         let me = *self.identity.node.as_bytes();
         let pending = &self.client.as_ref().expect("a relay is a client").pending;
-        // Where a commit this relay carries landed: still in its own local
-        // range (named as its commit), or already accepted upstream.
-        let carried = |seq: u64| {
-            if seq >= LOCAL_BASE {
-                BuiltOn::Commit { node: me, tx: seq }
-            } else {
-                BuiltOn::Seq(seq)
-            }
-        };
         bases
             .into_iter()
-            .map(|base| {
+            .map(|(op, base)| {
+                // A version this relay shipped the session: one of the
+                // commits it carries, by the writer's id, is its own here.
                 let on = match base.on {
-                    BuiltOn::Seq(seq) if seq < LOCAL_BASE => BuiltOn::Seq(seq),
-                    BuiltOn::Seq(seq) if seq < NON_DURABLE_BASE => {
-                        let (table, row) = self.based_row(ops, &base)?;
+                    BuiltOn::Commit { node, tx } if node != sender.0 && node != me => match pending
+                        .commits
+                        .iter()
+                        .find(|p| p.id == super::tx_id(node, tx))
+                    {
+                        Some(p) => BuiltOn::Commit { node: me, tx: p.tx },
+                        None => match self.settled(node, tx)? {
+                            Some(Some(at)) if at.accepted() => BuiltOn::Seq(at.seq),
+                            Some(None) => return Err(predecessor_rejected()),
+                            _ => return Err(unknown_base("another node's commit")),
+                        },
+                    },
+                    on => on,
+                };
+                let on = match on {
+                    BuiltOn::Seq(seq) => BuiltOn::Seq(seq),
+                    BuiltOn::Commit { node, tx } if node == me => {
+                        let (table, row) = self.based_row(ops, op)?;
                         let row_key = (table.to_owned(), row, base.key.clone());
                         let own_pending = pending
                             .by_row
                             .get(&row_key)
-                            .is_some_and(|txs| txs.contains(&seq));
-                        match self.settled(me, seq)? {
-                            _ if own_pending => BuiltOn::Commit { node: me, tx: seq },
-                            Some(Some(_)) => BuiltOn::Commit { node: me, tx: seq },
-                            Some(None) => return Err(predecessor_rejected()),
-                            None => BuiltOn::Seq(
+                            .is_some_and(|txs| txs.contains(&tx));
+                        match (own_pending, self.settled(me, tx)?) {
+                            (true, _) => {
+                                let id = pending.upload_id(tx).expect("a pending commit");
+                                BuiltOn::Commit {
+                                    node: *id.node.as_bytes(),
+                                    tx: id.time.0,
+                                }
+                            }
+                            (false, Some(Some(at))) if at.accepted() => BuiltOn::Seq(at.seq),
+                            (false, Some(Some(_))) => BuiltOn::Commit { node: me, tx },
+                            (false, Some(None)) => return Err(predecessor_rejected()),
+                            (false, None) => BuiltOn::Seq(
                                 self.newest_accepted(table, row, &base.key)?.unwrap_or(0),
                             ),
                         }
                     }
-                    BuiltOn::Seq(_) => return Err(unknown_base("a version")),
                     BuiltOn::Own { back } => {
                         let tx = sender
                             .1
                             .checked_sub(back)
                             .ok_or_else(|| unknown_base("a commit"))?;
-                        carried(predecessor(self.settled(sender.0, tx)?)?)
+                        predecessor(self.settled(sender.0, tx)?)?;
+                        BuiltOn::Own { back }
                     }
                     BuiltOn::Commit { node, tx } if node == sender.0 => {
-                        carried(predecessor(self.settled(node, tx)?)?)
+                        predecessor(self.settled(node, tx)?)?;
+                        BuiltOn::Commit { node, tx }
                     }
                     BuiltOn::Commit { .. } => return Err(unknown_base("another node's commit")),
                 };
-                Ok(WireBase { on, ..base })
+                Ok((op, WireBase { on, ..base }))
             })
             .collect()
     }
 
-    /// The stored table and row a base names, by its op.
-    fn based_row(&self, ops: &[StagedOp], base: &WireBase) -> Result<(&str, RowUuid), Error> {
-        let op = ops
-            .get(base.op as usize)
-            .ok_or_else(|| unknown_base("an op"))?;
+    /// Refuse bases SPEC 8.2 does not allow: each travels on the commit's
+    /// first op that writes its row, and names a row and branch key no
+    /// other base names.
+    pub(super) fn check_bases(
+        &self,
+        ops: &[StagedOp],
+        by_row: &RowOps,
+        bases: &[(usize, WireBase)],
+    ) -> Result<(), Error> {
+        let misplaced =
+            |what: &str| Error::new(ErrorCode::Protocol, format!("a write's base {what}"));
+        let mut named = HashSet::new();
+        for (op, base) in bases {
+            let (table, row) = self.based_row(ops, *op)?;
+            let first = by_row
+                .get(&(table.to_owned(), row))
+                .and_then(|ops| ops.first());
+            if first != Some(op) {
+                return Err(misplaced("is not on the first op that writes its row"));
+            }
+            if !named.insert((table, row, base.key.as_slice())) {
+                return Err(misplaced("names a row another base of its commit names"));
+            }
+        }
+        Ok(())
+    }
+
+    /// The stored table and row a base names, by the op it travels on.
+    fn based_row(&self, ops: &[StagedOp], op: usize) -> Result<(&str, RowUuid), Error> {
+        let op = ops.get(op).ok_or_else(|| unknown_base("an op"))?;
         match (op.row(), self.schema.stored_table(op.table())) {
             (Some(row), Ok(table)) => Ok((table, row)),
             _ => Err(unknown_base("an op")),
@@ -347,40 +391,102 @@ impl Inner {
             .iter()
             .rev()
             .map(|v| v.seq)
-            .find(|&seq| seq < LOCAL_BASE))
+            .next())
     }
 
     /// What each based row of an upload was built on, in this authority's
     /// history, keyed by the row: an accepted seq, or where the commit it
-    /// names landed. A base on a commit rejected or never received rejects
-    /// the upload.
+    /// names landed (the sender's own, or another's a relay shipped it). A
+    /// base on a commit rejected, or one of the sender's never received,
+    /// rejects the upload. Over a session link (`identity`), a base on
+    /// another node's commit counts only for a node that identity writes as:
+    /// any other, and one never received, rejects the upload alike, so a
+    /// base cannot probe for another identity's commits.
     pub(super) fn resolve_bases(
         &self,
         sender: ([u8; 16], u64),
+        identity: Option<&AuthorSubject>,
         ops: &[StagedOp],
-        bases: &[WireBase],
+        bases: &[(usize, WireBase)],
     ) -> Result<HashMap<RowKey, Built>, Error> {
         let mut built = HashMap::new();
-        for base in bases {
-            let (table, row) = self.based_row(ops, base)?;
+        for (op, base) in bases {
+            let (table, row) = self.based_row(ops, *op)?;
             let on = match base.on {
-                BuiltOn::Seq(seq) if seq < LOCAL_BASE => Built::Seq(seq),
-                BuiltOn::Seq(_) => return Err(unknown_base("a version")),
+                BuiltOn::Seq(seq) => Built::Seq(seq),
                 BuiltOn::Own { back } => {
                     let tx = sender
                         .1
                         .checked_sub(back)
                         .ok_or_else(|| unknown_base("a commit"))?;
-                    Built::On(predecessor(self.settled(sender.0, tx)?)?)
+                    Built::On(predecessor(self.settled(sender.0, tx)?)?.seq)
                 }
                 BuiltOn::Commit { node, tx } if node == sender.0 => {
-                    Built::On(predecessor(self.settled(node, tx)?)?)
+                    Built::On(predecessor(self.settled(node, tx)?)?.seq)
                 }
-                BuiltOn::Commit { .. } => return Err(unknown_base("another node's commit")),
+                BuiltOn::Commit { node, tx } => match identity {
+                    Some(identity) if !self.writes_as(node, identity)? => {
+                        return Err(predecessor_rejected());
+                    }
+                    Some(_) => Built::On(predecessor(self.settled(node, tx)?)?.seq),
+                    None => match self.settled(node, tx)? {
+                        None => return Err(unknown_base("another node's commit")),
+                        landed => Built::On(predecessor(landed)?.seq),
+                    },
+                },
             };
             built.insert((table.to_owned(), row, base.key.clone()), on);
         }
         Ok(built)
+    }
+
+    /// Where each based row of an upload this relay carries was built on,
+    /// in its own history, for the echo inference alone (see `Echoable`):
+    /// its sessions also build on its unsettled versions, named as its
+    /// commits.
+    pub(super) fn relay_landed(
+        &self,
+        sender: ([u8; 16], u64),
+        ops: &[StagedOp],
+        bases: &[(usize, WireBase)],
+    ) -> Result<HashMap<RowKey, Pos>, Error> {
+        let me = *self.identity.node.as_bytes();
+        // A session commit this relay carries, by its writer's id: its
+        // local tx here.
+        let carried = |node: [u8; 16], tx: u64| {
+            self.client.as_ref().and_then(|client| {
+                client
+                    .pending
+                    .commits
+                    .iter()
+                    .find(|p| p.id == super::tx_id(node, tx))
+                    .map(|p| p.tx)
+            })
+        };
+        let mut landed = HashMap::new();
+        for (op, base) in bases {
+            let (table, row) = self.based_row(ops, *op)?;
+            let at = match base.on {
+                BuiltOn::Seq(seq) => Pos::at(seq),
+                BuiltOn::Commit { node, tx } if node == me => self.own_pos(tx),
+                BuiltOn::Commit { node, tx } if node != sender.0 && carried(node, tx).is_some() => {
+                    self.own_pos(carried(node, tx).expect("carried"))
+                }
+                BuiltOn::Own { back } => {
+                    let tx = sender
+                        .1
+                        .checked_sub(back)
+                        .ok_or_else(|| unknown_base("a commit"))?;
+                    predecessor(self.settled(sender.0, tx)?)?
+                }
+                BuiltOn::Commit { node, tx } if node == sender.0 => {
+                    predecessor(self.settled(node, tx)?)?
+                }
+                BuiltOn::Commit { .. } => return Err(unknown_base("another node's commit")),
+            };
+            landed.insert((table.to_owned(), row, base.key.clone()), at);
+        }
+        Ok(landed)
     }
 
     /// Keep, in each row version an accepted upload wrote at `seq`, what it
@@ -399,20 +505,38 @@ impl Inner {
                 .map_or(&[][..], Vec::as_slice);
             self.exec(
                 &format!(
-                    "UPDATE {} SET _base = ?1, _cols = ?2 WHERE id = ?3 AND _b = ?4 AND _seq = ?5",
-                    quote(table)
+                    "UPDATE {} SET _base = ?1, _touched = ?2 WHERE id = ?3 AND _branch = ?4 AND _clock = ?5",
+                    quote(table),
                 ),
                 rusqlite::params![
                     built.get(row_key).map(|built| built.stored()),
                     self.authored(ops, indexes, table)?,
                     row.0.as_bytes().to_vec(),
                     key,
-                    seq as i64
+                    self.own_pos(seq).t()
                 ],
             )
             .map_err(storage)?;
         }
         Ok(())
+    }
+
+    /// The current version of each branch of a row, as (key, seq).
+    pub(super) fn current_versions(
+        &self,
+        table: &str,
+        row: RowUuid,
+    ) -> Result<Vec<(Vec<u8>, Pos)>, Error> {
+        let sql = format!("SELECT _branch, _clock FROM {} WHERE id = ?1", quote(table));
+        let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
+        let versions = statement
+            .query_map([row.0.as_bytes().to_vec()], |r| {
+                Ok((r.get::<_, Vec<u8>>(0)?, Pos::from_t(r.get(1)?)))
+            })
+            .map_err(storage)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(storage)?;
+        Ok(versions)
     }
 
     /// The accepted versions of a row, in seq order.
@@ -423,11 +547,12 @@ impl Inner {
         key: &[u8],
     ) -> Result<Vec<Version>, Error> {
         let sql = format!(
-            "SELECT _seq, _base, _cols FROM {} WHERE id = ?1 AND _b = ?2 \
-             UNION ALL SELECT _seq, _base, _cols FROM {} WHERE id = ?1 AND _b = ?2 \
-             ORDER BY 1",
+            "SELECT _clock, _base, _touched FROM {} WHERE id = ?1 AND _branch = ?2 AND _clock >= 0 AND _clock < {upstream} \
+             UNION ALL SELECT _clock, _base, _touched FROM {} WHERE id = ?1 AND _branch = ?2 AND _clock >= 0 \
+             AND _clock < {upstream} AND (_state & {STATE_AS_SENT}) = 0 ORDER BY 1",
             quote(table),
-            quote(&format!("{table}__h"))
+            quote(&format!("{table}__h")),
+            upstream = super::band_start(super::PENDING),
         );
         let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
         let versions = statement
@@ -456,9 +581,9 @@ impl Inner {
     ) -> Result<Vec<WriteConflict>, Error> {
         let history = self.accepted_versions(table, row, key)?;
         let writers: BTreeMap<u64, ([u8; 16], u64)> = self
-            .origins(&history.iter().map(|v| v.seq).collect())?
+            .tx_ids(&history.iter().map(|v| v.seq).collect())?
             .into_iter()
-            .map(|(seq, node, tx)| (seq, (node, tx)))
+            .map(|(at, node, tx)| (at.seq, (node, tx)))
             .collect();
         let writer = |seq: u64| writers.get(&seq).copied().unwrap_or(([0; 16], seq));
         let mut conflicts = Vec::with_capacity(history.len());
@@ -500,22 +625,22 @@ impl Inner {
     /// landing after `before` was built on, when merging the write needs it
     /// (SPEC 4 §4.6): a version before `before` the writer never saw
     /// authored the column. `None` takes the fast path: nothing to merge
-    /// with, so the write's value stands as sent. Only `_base` and `_cols`
+    /// with, so the write's value stands as sent. Only `_base` and `_touched`
     /// are read to decide; the value is read only when a merge is needed.
     ///
     /// The value is the newest one the writer's chain gave the column: an
-    /// unsettled link that authored it (its version as accepted, with the
-    /// link's seq, so the caller can take it back to the value as sent),
-    /// or else the version the chain's floor names. A link that left the
-    /// column alone holds whatever the authority held, which its writer
-    /// never saw, so the walk passes it by.
+    /// unsettled link that authored it, as the link sent it (its as-sent
+    /// version when a text merge changed it, [`STATE_AS_SENT`], else its
+    /// version as accepted), or else the version the chain's floor names.
+    /// A link that left the column alone holds whatever the authority held,
+    /// which its writer never saw, so the walk passes it by.
     pub(crate) fn merge_base(
         &self,
         (table, row, key): (&str, RowUuid, &[u8]),
         built: Built,
         before: u64,
         column: &str,
-    ) -> Result<Option<(Sql, Option<u64>)>, Error> {
+    ) -> Result<Option<Sql>, Error> {
         let history = self.accepted_versions(table, row, key)?;
         let knew = Knowledge::of(built, &history);
         let code = self.column_code(table, column)?;
@@ -553,23 +678,39 @@ impl Inner {
         let Some(at) = at else {
             return Ok(None);
         };
+        let id = row.0.as_bytes().to_vec();
+        if let Some(on) = sent {
+            let sql = format!(
+                "SELECT {} FROM {} WHERE id = ?1 AND _branch = ?2 AND _clock = ?3",
+                quote(column),
+                quote(&format!("{table}__h")),
+            );
+            let cell = self
+                .conn
+                .cached_row(&sql, rusqlite::params![id, key, -(on as i64)], |r| {
+                    r.get::<_, Sql>(0)
+                })
+                .optional()
+                .map_err(storage)?;
+            if cell.is_some() {
+                return Ok(cell);
+            }
+        }
         let sql = format!(
-            "SELECT {column} FROM {} WHERE id = ?1 AND _b = ?2 AND _seq = ?3 \
-             UNION ALL SELECT {column} FROM {} WHERE id = ?1 AND _b = ?2 AND _seq = ?3",
+            "SELECT {column} FROM {} WHERE id = ?1 AND _branch = ?2 AND _clock = ?3 \
+             UNION ALL SELECT {column} FROM {} WHERE id = ?1 AND _branch = ?2 AND _clock = ?3",
             quote(table),
             quote(&format!("{table}__h")),
             column = quote(column),
         );
         let cell = self
             .conn
-            .cached_row(
-                &sql,
-                rusqlite::params![row.0.as_bytes().to_vec(), key, at as i64],
-                |r| r.get::<_, Sql>(0),
-            )
+            .cached_row(&sql, rusqlite::params![id, key, at as i64], |r| {
+                r.get::<_, Sql>(0)
+            })
             .optional()
             .map_err(storage)?;
-        Ok(cell.map(|cell| (cell, sent)))
+        Ok(cell)
     }
 }
 
@@ -615,21 +756,45 @@ impl Db {
         let Some(built) = built else {
             return Ok(None);
         };
-        let Some((cell, _)) = inner.merge_base((&stored, row, &[]), built, seq, &stored_column)?
-        else {
+        let Some(cell) = inner.merge_base((&stored, row, &[]), built, seq, &stored_column)? else {
             return Ok(None);
         };
-        let ty = &schema_table
+        let column = schema_table
             .column(column)
-            .ok_or_else(|| unknown_base("a column"))?
-            .ty;
-        crate::values::from_sql(ty, cell.as_ref(), &inner.chunks)
+            .ok_or_else(|| unknown_base("a column"))?;
+        crate::values::column_from_sql(column, cell.as_ref(), &inner.chunks)
     }
 
-    /// How many `_jazz_text_in` entries this store keeps.
+    /// How many as-sent versions of merged text writes this store keeps
+    /// (SPEC 4 §4.3).
     #[cfg(feature = "testing")]
-    pub fn text_in_entries_for_test(&self) -> Result<u64, Error> {
-        self.inner().text_in_entries()
+    pub fn as_sent_versions_for_test(&self) -> Result<u64, Error> {
+        self.inner().as_sent_versions()
+    }
+
+    /// The `(_clock, _writer)` of every history version of `table`'s unbranched row
+    /// `row`, in key order.
+    #[cfg(feature = "testing")]
+    pub fn history_keys_for_test(
+        &self,
+        table: &str,
+        row: RowUuid,
+    ) -> Result<Vec<(i64, Vec<u8>)>, Error> {
+        let inner = self.inner();
+        let schema_table = inner.schema.table(table)?;
+        let sql = format!(
+            "SELECT _clock, _writer FROM {} WHERE id = ?1 AND _branch = ?2 ORDER BY _clock, _writer",
+            quote(&format!("{}__h", schema_table.stored)),
+        );
+        let mut statement = inner.conn.prepare_cached(&sql).map_err(storage)?;
+        statement
+            .query_map(
+                rusqlite::params![row.0.as_bytes().to_vec(), Vec::<u8>::new()],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)),
+            )
+            .map_err(storage)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(storage)
     }
 
     /// How many bytes column `column` of `table`'s unbranched row `row`
@@ -644,7 +809,7 @@ impl Db {
         let inner = self.inner();
         let schema_table = inner.schema.table(table)?;
         let sql = format!(
-            "SELECT length(CAST({} AS BLOB)) FROM {} WHERE id = ?1 AND _b = ?2",
+            "SELECT length(CAST({} AS BLOB)) FROM {} WHERE id = ?1 AND _branch = ?2",
             quote(schema_table.stored_name(column)),
             quote(&schema_table.stored),
         );

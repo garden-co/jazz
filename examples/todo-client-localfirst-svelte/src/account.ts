@@ -1,17 +1,15 @@
-import { createAccountManager, accountRegistryUrl, type DbConfig } from "jazz-tools";
+import { createAccountManager, type DbConfig } from "jazz-tools";
 
 // This application owns its managers. A shared browser scope also survives
 // framework development remounts without founding a second account.
 const managers = new Map<string, ReturnType<typeof createAccountManager>>();
 
 export async function prepareAccountConfig(overrides: Partial<DbConfig> = {}): Promise<DbConfig> {
-  const env = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env;
-  const appId = overrides.appId ?? env?.PUBLIC_JAZZ_APP_ID;
-  const serverUrl = overrides.serverUrl ?? env?.PUBLIC_JAZZ_SERVER_URL;
-  if (!appId) throw new Error("Missing Jazz appId");
+  // The app's backend serves Jazz on this origin (`/jazz`); tests may name an app.
+  const appId = overrides.appId;
+  const serverUrl = overrides.serverUrl ?? `${location.origin}/jazz`;
   if (overrides.account) return { appId, env: "dev", ...overrides, account: overrides.account };
-  if (!serverUrl) throw new Error("Missing Jazz core serverUrl for account preparation");
-  const scope = JSON.stringify([accountRegistryUrl(serverUrl, appId), overrides.env ?? "dev"]);
+  const scope = JSON.stringify([serverUrl, appId ?? null, overrides.env ?? "dev"]);
   let prepared = managers.get(scope);
   if (!prepared) {
     prepared = createAccountManager({ appId, serverUrl, env: overrides.env });

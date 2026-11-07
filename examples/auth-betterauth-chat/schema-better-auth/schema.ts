@@ -78,7 +78,8 @@ export const schema = {
 };
 
 type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema);
+// Never deployed on its own: the app that spreads `schema` ships the migrations.
+export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
 export const wasmSchema = app.wasmSchema;
 
 export const permissions = s.definePermissions(app, ({ policy }) => {

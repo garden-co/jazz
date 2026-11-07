@@ -7,16 +7,17 @@ import TodoList from "./TodoList.vue";
 
 const props = defineProps<{ config?: Partial<DbConfig> }>();
 // #region context-setup-vue
-const env = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env;
+// The app's backend serves Jazz on this origin (`/jazz`), so the client needs no URL.
 const config = computed(() => ({
-  appId: env?.VITE_JAZZ_APP_ID ?? env?.JAZZ_APP_ID,
-  serverUrl: env?.VITE_JAZZ_SERVER_URL ?? env?.JAZZ_SERVER_URL,
   env: "dev" as const,
   ...props.config,
 }));
-// Explicit account overrides retain the caller-owned account path used by tests.
+// Explicit account overrides retain the caller-owned account path used by tests;
+// otherwise the app starts with a local-first guest account.
 const providerProps = computed(() =>
-  config.value.account ? { config: config.value as DbConfig } : config.value,
+  config.value.account
+    ? { config: config.value as DbConfig }
+    : { ...config.value, initial: "local-first" as const },
 );
 // #endregion context-setup-vue
 </script>

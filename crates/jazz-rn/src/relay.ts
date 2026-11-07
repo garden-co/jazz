@@ -45,6 +45,8 @@ export type NativeForegroundRuntimeFactory = {
     ttlSeconds: number,
     nowSeconds: number,
   ): string;
+  /** Stateless text anchors and ranges: a JSON request in, JSON out. */
+  textAnchors?(requestJson: string): string;
   /**
    * Create one memory-only foreground runtime for an already admitted scope.
    * The returned JSI HostObject is consumed only by Jazz's internal native
@@ -170,6 +172,8 @@ export type NativeForegroundCommand =
   | { type: "takeSlowQueryReport"; app?: string }
   /** Report query runs of at least `ms` milliseconds; 0 turns the log off. */
   | { type: "setSlowQueryThresholdMs"; ms: number }
+  /** Commits still waiting for the server's verdict (append-only command). */
+  | { type: "pendingUploadCount" }
   | {
       type: "beginStreamingMutation";
       mutation: "insert" | "update" | "upsert";
@@ -256,7 +260,8 @@ export type NativeForegroundResponse =
   | { type: "permissionAdvice"; advice: "allowed" | "denied" | "unknown" }
   /** One line per slow query shape; empty between reports. */
   | { type: "slowQueryReport"; lines: string[] }
-  | { type: "slowQueryThresholdSet" };
+  | { type: "slowQueryThresholdSet" }
+  | { type: "pendingUploadCount"; count: number };
 
 export type NativeForegroundSubscriptionEvent =
   | {
@@ -331,6 +336,10 @@ export function installNativeForegroundRuntime(): NativeForegroundRuntimeFactory
       typeof installed.mintLocalFirstToken === "function"
         ? installed.mintLocalFirstToken.bind(installed)
         : undefined,
+    textAnchors:
+      typeof installed.textAnchors === "function"
+        ? installed.textAnchors.bind(installed)
+        : undefined,
     openAttached(capability: Uint8Array): NativeForegroundRuntime {
       // This is not the authorization check--the native host still validates
       // capability admission and copies its bytes before queuing work. It does
@@ -403,6 +412,7 @@ export function encodeNativeForegroundCommand(command: NativeForegroundCommand):
   if (command.type === "drainMutationErrors") return Uint8Array.of(24);
   if (command.type === "captureSnapshot") return Uint8Array.of(34);
   if (command.type === "drainTickEvents") return Uint8Array.of(35);
+  if (command.type === "pendingUploadCount") return Uint8Array.of(38);
   if (command.type === "takeSlowQueryReport") {
     return concatForegroundBytes(
       Uint8Array.of(36),
@@ -786,6 +796,12 @@ export function decodeNativeForegroundResponse(bytes: Uint8Array): NativeForegro
     return { type: "slowQueryReport", lines };
   }
   if (tag === 28 && bytes.length === 1) return { type: "slowQueryThresholdSet" };
+  if (tag === 29) {
+    return {
+      type: "pendingUploadCount",
+      count: decodeForegroundU64(bytes.subarray(1), "pending upload count"),
+    };
+  }
   if (
     tag === 16 &&
     bytes.length >= 5 &&

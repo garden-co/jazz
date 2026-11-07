@@ -10,7 +10,6 @@ import { Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { VStack } from "@astryxdesign/core/VStack";
 import { authClient } from "@/lib/auth-client";
-import { beginSignupIntent, clearSignupIntent } from "@/components/jazz-provider";
 
 export function SignInForm() {
   const [isSignUp, setIsSignUp] = useState(false);
@@ -24,7 +23,6 @@ export function SignInForm() {
     event.preventDefault();
     setError(null);
     setIsPending(true);
-    if (isSignUp) beginSignupIntent(email);
     try {
       const { error } = await (isSignUp
         ? authClient.signUp.email({ name, email, password })
@@ -32,7 +30,6 @@ export function SignInForm() {
       if (error) throw new Error(error.message ?? (isSignUp ? "Sign-up failed" : "Sign-in failed"));
       window.location.assign("/dashboard");
     } catch (cause) {
-      if (isSignUp) clearSignupIntent();
       setError(cause instanceof Error ? cause.message : String(cause));
       setIsPending(false);
     }

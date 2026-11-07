@@ -12,6 +12,7 @@ import {
 } from "./websocket.js";
 import { BrowserWorkerTransportPump } from "./browser-worker-transport.js";
 import { NativeRuntimeAdapter, type Transport } from "./native-runtime-adapter.js";
+import { createUpstreamLink } from "../testing/napi-runtime-test-utils.js";
 import {
   JazzClient,
   PersistedWriteRejectedError,
@@ -48,6 +49,127 @@ function deferred<T>() {
 describe("NativeRuntimeAdapter server transport", () => {
   afterEach(() => {
     globalThis.WebSocket = previousWebSocket;
+  });
+
+  it("lets a tab reach Local through its healthy worker after a remote server failure", async () => {
+    const persisted = deferred<void>();
+    const runtime = NativeRuntimeAdapter.fromDb(
+      fakeDb({
+        setNonDurableClient: () => undefined,
+        insert: () => ({ ...fakeWrite(), wait: () => persisted.promise }),
+        tick: () => undefined,
+      }) as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      false,
+    );
+    runtime.setNonDurableClient();
+    try {
+      const receipt = runtime.insert("todos", { title: { type: "Text", value: "offline" } });
+      const wait = runtime.waitForTransaction(await committedTxId(receipt), "local");
+      runtime.reportRemoteServerTransportError(new Error("cloud disconnected"));
+      persisted.resolve();
+      await expect(wait).resolves.toBeUndefined();
+      await expect(runtime.flushLocalSettlements()).resolves.toBeUndefined();
+    } finally {
+      persisted.resolve();
+      await runtime.close();
+    }
+  });
+
+  it.each([false, true])(
+    "preserves a terminal failure when worker teardown also fails (same error=%s)",
+    async (sameError) => {
+      const persisted = deferred<void>();
+      const runtime = NativeRuntimeAdapter.fromDb(
+        fakeDb({
+          setNonDurableClient: () => undefined,
+          nativeConnectionStatus: () => ({
+            configured: true,
+            connected: false,
+            explicitlyOffline: false,
+            authRejected: false,
+          }),
+          insert: () => ({ ...fakeWrite(), wait: () => persisted.promise }),
+          tick: () => undefined,
+        }) as never,
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        false,
+      );
+      runtime.setNonDurableClient();
+      try {
+        const receipt = runtime.insert("todos", { title: { type: "Text", value: "pending" } });
+        const txId = await committedTxId(receipt);
+        const terminal = new Error("terminal worker transport failure");
+        const relay = sameError ? terminal : new Error("worker teardown failed");
+        const local = expect(runtime.waitForTransaction(txId, "local")).rejects.toBe(relay);
+        const global = expect(runtime.waitForTransaction(txId, "global")).rejects.toBe(terminal);
+        // The follower pump and watchdog report the terminal failure before
+        // fail() also reports that the durable worker is unavailable.
+        runtime.reportRemoteServerTransportError(terminal);
+        runtime.reportLocalRelayError(relay);
+        await Promise.all([local, global]);
+        await expect(runtime.waitForTransaction(txId, "global")).rejects.toBe(terminal);
+        await expect(runtime.waitForTransaction(txId, "local")).rejects.toBe(relay);
+        expect(runtime.upstreamLinkStatus()).toMatchObject({ reason: "stopped" });
+      } finally {
+        persisted.resolve();
+        await runtime.close();
+      }
+    },
+  );
+
+  it("allows new Local waits after a failed worker is replaced", async () => {
+    const persisted = deferred<void>();
+    const runtime = NativeRuntimeAdapter.fromDb(
+      fakeDb({
+        setNonDurableClient: () => undefined,
+        connectUpstream: () => new FakeTransport([]),
+        insert: () => ({ ...fakeWrite(), wait: () => persisted.promise }),
+        tick: () => undefined,
+      }) as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      false,
+    );
+    runtime.setNonDurableClient();
+    try {
+      const receipt = runtime.insert("todos", { title: { type: "Text", value: "replayed" } });
+      const txId = await committedTxId(receipt);
+      const wait = runtime.waitForTransaction(txId, "local");
+      const globalWait = runtime.waitForTransaction(txId, "global");
+      let globalSettled = false;
+      void globalWait.then(
+        () => {
+          globalSettled = true;
+        },
+        () => {
+          globalSettled = true;
+        },
+      );
+      const failure = new Error("worker storage failed");
+      runtime.reportLocalRelayError(failure);
+      await expect(wait).rejects.toBe(failure);
+      await expect(runtime.waitForTransaction(txId, "local")).rejects.toBe(failure);
+      await Promise.resolve();
+      expect(globalSettled).toBe(false);
+      const replacement = await runtime.connectUpstreamPeer();
+      runtime.clearRemoteServerTransportError();
+      persisted.resolve();
+      await expect(globalWait).resolves.toBeUndefined();
+      await expect(runtime.waitForTransaction(txId, "local")).resolves.toBeUndefined();
+      replacement.close();
+    } finally {
+      persisted.resolve();
+      await runtime.close();
+    }
   });
 
   it("coalesces receive deadlines, advances earlier wakes and re-arms later peers", async () => {
@@ -702,7 +824,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       await waitForServerPumpTimer();
 
       expect(polls).toBeGreaterThan(0);
-      expect(terminal).toHaveBeenCalledWith(pumpFailure);
+      expect(terminal).toHaveBeenCalledWith(pumpFailure, { retrying: false });
       expect(unhandled).not.toHaveBeenCalled();
     } finally {
       process.off("unhandledRejection", unhandled);
@@ -805,7 +927,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     },
   );
 
-  it("keeps reconnecting through an outage longer than ten seconds after reporting it", async () => {
+  it("keeps a Global wait pending through an outage longer than ten seconds (#3923)", async () => {
     vi.useFakeTimers();
     const sockets: FakeWebSocket[] = [];
     let serverDown = false;
@@ -845,6 +967,14 @@ describe("NativeRuntimeAdapter server transport", () => {
       1,
       true,
     );
+    const outcome = (promise: Promise<unknown>) => {
+      const state: { value: unknown } = { value: "pending" };
+      promise.then(
+        () => (state.value = "resolved"),
+        (error: unknown) => (state.value = error),
+      );
+      return state;
+    };
     try {
       const terminal = vi.fn();
       runtime.onServerTransportError(terminal);
@@ -861,8 +991,7 @@ describe("NativeRuntimeAdapter server transport", () => {
           ),
         );
       const txId = await insertTodo();
-      const duringOutage = runtime.waitForTransaction(txId, "global");
-      const rejected = expect(duringOutage).rejects.toThrow("websocket closed");
+      const beforeOutage = outcome(runtime.waitForTransaction(txId, "global"));
       await armed.promise;
 
       serverDown = true;
@@ -871,14 +1000,18 @@ describe("NativeRuntimeAdapter server transport", () => {
       const readRejected = expect(readDuringOutage).rejects.toThrow("websocket closed");
       await vi.advanceTimersByTimeAsync(60_000);
 
-      // The outage is reported once so Global waits do not hang, but the
-      // client keeps retrying well past the former 10-attempt (~7.5 s) cutoff.
-      await rejected;
+      // The outage is reported once and remote reads fail, but the client
+      // keeps retrying well past the former 10-attempt (~7.5 s) cutoff and
+      // write waits stay pending instead of rejecting.
       await readRejected;
       expect(terminal).toHaveBeenCalledTimes(1);
+      expect(terminal).toHaveBeenCalledWith(expect.any(Error), { retrying: true });
       expect(sockets.length).toBeGreaterThan(11);
       expect(runtime.remoteLinkState()).toBe("unavailable");
-      await expect(runtime.waitForTransaction(txId, "global")).rejects.toThrow("websocket closed");
+      expect(beforeOutage.value).toBe("pending");
+      const issuedDuringOutage = outcome(runtime.waitForTransaction(txId, "global"));
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(issuedDuringOutage.value).toBe("pending");
       // Backoff is capped: an idle minute-long outage is not a reconnect storm.
       expect(sockets.length).toBeLessThan(40);
 
@@ -891,17 +1024,323 @@ describe("NativeRuntimeAdapter server transport", () => {
       await expect(
         runtime.query(JSON.stringify({ table: "todos" }), null, "remote"),
       ).resolves.toEqual([]);
+      expect(beforeOutage.value).toBe("pending");
+      expect(issuedDuringOutage.value).toBe("pending");
 
-      // A Global wait armed after recovery settles normally.
-      const afterRecovery = runtime.waitForTransaction(await insertTodo(), "global");
+      // Every wait settles once the server acknowledges the write.
+      const afterRecovery = outcome(runtime.waitForTransaction(await insertTodo(), "global"));
       settlement.resolve();
       await vi.advanceTimersByTimeAsync(100);
-      await expect(afterRecovery).resolves.toBeUndefined();
+      expect(beforeOutage.value).toBe("resolved");
+      expect(issuedDuringOutage.value).toBe("resolved");
+      expect(afterRecovery.value).toBe("resolved");
       expect(terminal).toHaveBeenCalledTimes(1);
     } finally {
       settlement.resolve();
       await runtime.close();
       vi.useRealTimers();
+    }
+  });
+
+  it("rejects a Global wait held through an outage once the reconnect hits a terminal error", async () => {
+    vi.useFakeTimers();
+    const sockets: FakeWebSocket[] = [];
+    let serverDown = false;
+    let refuseNextConnection = false;
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+        if (serverDown) queueMicrotask(() => this.emitServerClose());
+        else if (refuseNextConnection)
+          queueMicrotask(() => this.emitMessage(new Uint8Array([0xff, 0xff, 0xff])));
+      }
+    } as unknown as typeof WebSocket;
+    const settlement = deferred<void>();
+    const write = {
+      ...fakeWrite(),
+      wait: (tier: string) => (tier === "local" ? Promise.resolve() : settlement.promise),
+    };
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            insert: () => write,
+            connectUpstream: () => new FakeTransport([]),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    try {
+      const terminal = vi.fn();
+      runtime.onServerTransportError(terminal);
+      runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+      await runtime.waitForUpstreamServerConnection();
+      const txId = await committedTxId(
+        runtime.insert(
+          "todos",
+          { title: { type: "Text", value: "held through outage" } },
+          null,
+          "00000000-0000-0000-0000-000000000011",
+        ),
+      );
+      let outcome: unknown = "pending";
+      void runtime.waitForTransaction(txId, "global").then(
+        () => (outcome = "resolved"),
+        (error: unknown) => (outcome = error),
+      );
+
+      serverDown = true;
+      sockets[0]!.emitServerClose();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(terminal).toHaveBeenCalledTimes(1);
+      expect(outcome).toBe("pending");
+
+      serverDown = false;
+      refuseNextConnection = true;
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(outcome).toBeInstanceOf(Error);
+      // The retrying outage turned terminal, so the app hears about it again.
+      expect(terminal).toHaveBeenCalledTimes(2);
+      expect(terminal).toHaveBeenLastCalledWith(expect.any(Error), { retrying: false });
+    } finally {
+      settlement.resolve();
+      await runtime.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(["close", "abort"] as const)(
+    "ends a Global wait held through an outage on %s",
+    async (end) => {
+      vi.useFakeTimers();
+      const sockets: FakeWebSocket[] = [];
+      let serverDown = false;
+      globalThis.WebSocket = class extends FakeWebSocket {
+        constructor(url: string) {
+          super(url);
+          sockets.push(this);
+          if (serverDown) queueMicrotask(() => this.emitServerClose());
+        }
+      } as unknown as typeof WebSocket;
+      const settlement = deferred<void>();
+      const write = {
+        ...fakeWrite(),
+        wait: (tier: string) => (tier === "local" ? Promise.resolve() : settlement.promise),
+      };
+      const runtime = new NativeRuntimeAdapter(
+        {
+          openMemory: () =>
+            fakeDb({
+              insert: () => write,
+              connectUpstream: () => new FakeTransport([]),
+              tick: () => undefined,
+            }),
+          openBrowser: async () => {
+            throw new Error("not used");
+          },
+        } as never,
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        true,
+      );
+      try {
+        runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+        await runtime.waitForUpstreamServerConnection();
+        const txId = await committedTxId(
+          runtime.insert(
+            "todos",
+            { title: { type: "Text", value: "held then ended" } },
+            null,
+            "00000000-0000-0000-0000-000000000013",
+          ),
+        );
+        const control = new AbortController();
+        let outcome: unknown = "pending";
+        void runtime.waitForTransaction(txId, "global", { signal: control.signal }).then(
+          () => (outcome = "resolved"),
+          (error: unknown) => (outcome = error),
+        );
+        serverDown = true;
+        sockets[0]!.emitServerClose();
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(outcome).toBe("pending");
+
+        const reason = new Error("caller stopped waiting");
+        if (end === "close") await runtime.close();
+        else control.abort(reason);
+        await vi.advanceTimersByTimeAsync(10);
+        if (end === "close") {
+          expect(outcome).toBeInstanceOf(Error);
+          expect((outcome as Error).message).toMatch(/closed/);
+        } else {
+          expect(outcome).toBe(reason);
+        }
+      } finally {
+        settlement.resolve();
+        await runtime.close();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("keeps a tab's remote subscription open while its worker retries, and fails it once terminal", async () => {
+    const nativeSubscription = {
+      closed: false,
+      readAll: () => [],
+      close() {
+        this.closed = true;
+        return true;
+      },
+    };
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            subscribe: () => nativeSubscription,
+            connectUpstream: () => new FakeTransport([]),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    try {
+      const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "remote");
+      const updates = vi.fn();
+      runtime.executeSubscription(handle, updates);
+      runtime.reportRemoteServerTransportError(new Error("websocket closed (code=1006)"), true);
+      expect(nativeSubscription.closed).toBe(false);
+      expect(updates).not.toHaveBeenCalledWith(expect.any(Error));
+      runtime.reportRemoteServerTransportError(new Error("Protocol: bad frame"), false);
+      expect(nativeSubscription.closed).toBe(true);
+      expect(updates).toHaveBeenCalledWith(expect.any(Error));
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it("ends waits and remote subscriptions held for a credential nothing renews, until auth is updated", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const settlement = deferred<void>();
+    const write = {
+      ...fakeWrite(),
+      wait: (tier: string) => (tier === "local" ? Promise.resolve() : settlement.promise),
+    };
+    const nativeSubscription = {
+      closed: false,
+      readAll: () => [],
+      close() {
+        this.closed = true;
+        return true;
+      },
+    };
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            insert: () => write,
+            subscribe: () => nativeSubscription,
+            connectUpstream: () => new FakeTransport([]),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const authFailures: string[] = [];
+    try {
+      // As JazzClient does when no renewer is registered.
+      runtime.onAuthFailure((reason) => {
+        authFailures.push(reason);
+        runtime.endCredentialWait();
+      });
+      const transportStates: Array<{ message: string; retrying: boolean }> = [];
+      runtime.onServerTransportError((error, state) =>
+        transportStates.push({ message: error.message, retrying: state.retrying }),
+      );
+      runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+      await runtime.waitForUpstreamServerConnection();
+      const insertTodo = async () =>
+        await committedTxId(
+          runtime.insert(
+            "todos",
+            { title: { type: "Text", value: "static token" } },
+            null,
+            "00000000-0000-0000-0000-000000000014",
+          ),
+        );
+      const txId = await insertTodo();
+      let outcome: unknown = "pending";
+      void runtime.waitForTransaction(txId, "global").then(
+        () => (outcome = "resolved"),
+        (error: unknown) => (outcome = error),
+      );
+      const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, "remote");
+      const updates = vi.fn();
+      runtime.executeSubscription(handle, updates);
+
+      const frame = new PostcardWriter();
+      frame.u64(1);
+      frame.u64(3);
+      frame.u64(1);
+      frame.string("authentication expired");
+      sockets[0]!.emitMessage(encodeWebSocketFrameBatch([frame.finish()]));
+      await vi.waitFor(() => expect(authFailures).toEqual(["expired"]));
+      sockets[0]!.emitServerClose();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      // Reported as a renewable refusal, then as terminal once nothing renews it.
+      expect(transportStates.map((state) => state.retrying)).toEqual([true, false]);
+      expect(outcome).toBeInstanceOf(Error);
+      expect(nativeSubscription.closed).toBe(true);
+      expect(updates).toHaveBeenCalledWith(expect.any(Error));
+      await expect(runtime.waitForTransaction(txId, "global")).rejects.toThrow(
+        "authentication expired",
+      );
+
+      // A new credential reconnects, and Global waits hold again.
+      await runtime.updateAuth('{"jwt_token":"next"}');
+      await vi.waitFor(() => expect(sockets).toHaveLength(2));
+      let next: unknown = "pending";
+      void runtime.waitForTransaction(await insertTodo(), "global").then(
+        () => (next = "resolved"),
+        (error: unknown) => (next = error),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(next).toBe("pending");
+      settlement.resolve();
+      await vi.waitFor(() => expect(next).toBe("resolved"));
+    } finally {
+      settlement.resolve();
+      await runtime.close();
     }
   });
 
@@ -1967,6 +2406,81 @@ describe("NativeRuntimeAdapter server transport", () => {
     },
   );
 
+  it.each([
+    ["authentication expired", "pending"],
+    ["account disabled", "rejected"],
+    ["session revoked", "rejected"],
+  ] as const)(
+    "a refused credential (%s) leaves a Global wait %s (#3923)",
+    async (message, expected) => {
+      const sockets: FakeWebSocket[] = [];
+      globalThis.WebSocket = class extends FakeWebSocket {
+        constructor(url: string) {
+          super(url);
+          sockets.push(this);
+        }
+      } as unknown as typeof WebSocket;
+      const settlement = deferred<void>();
+      const write = {
+        ...fakeWrite(),
+        wait: (tier: string) => (tier === "local" ? Promise.resolve() : settlement.promise),
+      };
+      const runtime = new NativeRuntimeAdapter(
+        {
+          openMemory: () =>
+            fakeDb({
+              insert: () => write,
+              connectUpstream: () => new FakeTransport([]),
+              tick: () => undefined,
+            }),
+          openBrowser: async () => {
+            throw new Error("not used");
+          },
+        } as never,
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        true,
+      );
+      try {
+        const terminal = vi.fn();
+        runtime.onServerTransportError(terminal);
+        runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+        await runtime.waitForUpstreamServerConnection();
+        const txId = await committedTxId(
+          runtime.insert(
+            "todos",
+            { title: { type: "Text", value: "written before refusal" } },
+            null,
+            "00000000-0000-0000-0000-000000000012",
+          ),
+        );
+        let outcome: unknown = "pending";
+        void runtime.waitForTransaction(txId, "global").then(
+          () => (outcome = "resolved"),
+          () => (outcome = "rejected"),
+        );
+        const frame = new PostcardWriter();
+        frame.u64(1);
+        frame.u64(3);
+        frame.u64(1);
+        frame.string(message);
+        sockets[0]!.emitMessage(encodeWebSocketFrameBatch([frame.finish()]));
+        await vi.waitFor(() => expect(terminal).toHaveBeenCalledTimes(1));
+        sockets[0]!.emitServerClose();
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        expect(outcome).toBe(expected);
+        expect(terminal).toHaveBeenCalledWith(expect.any(Error), {
+          retrying: expected === "pending",
+        });
+      } finally {
+        settlement.resolve();
+        await runtime.close();
+      }
+    },
+  );
+
   it("identifies a missing wire mask as a generic native-runtime artifact mismatch", () => {
     const runtime = new NativeRuntimeAdapter(
       {
@@ -2204,6 +2718,73 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     expect(transportTicks).toBeGreaterThanOrEqual(2);
     expect(write.wait).toHaveBeenCalledExactlyOnceWith("global");
+  });
+
+  it("does not spin a Global wait on inbound frames the pump cannot route yet", async () => {
+    let settle!: () => void;
+    const settlement = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
+    globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+    const write = {
+      txId: "00000000000070008000000000000008",
+      payload: new Uint8Array(),
+      rowId: new Uint8Array(16),
+      wait: vi.fn(() => settlement),
+      writeState: () => ({}),
+    };
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            insert: () => write,
+            connectUpstream: () => new FakeTransport([]),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await runtime.waitForUpstreamServerConnection();
+
+    const inserted = runtime.insert(
+      "todos",
+      { title: { type: "Text", value: "fate behind a busy pump" } },
+      null,
+      "00000000-0000-0000-0000-000000000008",
+    );
+    // A frame arrived while the pump is suspended elsewhere; only its next,
+    // timer-scheduled pass can route it.
+    const internals = runtime as unknown as {
+      serverPumpRunning: boolean;
+      pendingInboundServerFrames: Uint8Array[];
+      startServerPump(): void;
+    };
+    internals.serverPumpRunning = true;
+    internals.pendingInboundServerFrames.push(Uint8Array.from([2, 42]));
+    let passes = 0;
+    const startServerPump = internals.startServerPump.bind(runtime);
+    internals.startServerPump = () => {
+      passes += 1;
+      // Without a yield to the host, the timer below never runs: end the
+      // spin here so the assertion reports it instead of the heap filling.
+      if (passes > 1_000) settle();
+      startServerPump();
+    };
+
+    const wait = runtime.waitForTransaction(await committedTxId(inserted), "global");
+    await waitForServerPumpTimer();
+    settle();
+    await wait;
+
+    expect(passes).toBeLessThan(10);
   });
 
   it("rejects active concurrent Global waits and subscriptions for a relayed terminal error without inventing a rejection", async () => {
@@ -2481,6 +3062,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () => ({
           connectUpstream: () => transport,
+          createUpstreamLink,
           wireFeatures: () => CLIENT_WIRE_FEATURES,
           setTickScheduler: (callback: (urgency: "immediate" | "deferred") => void) => {
             schedulerCallback = callback;
@@ -2561,6 +3143,35 @@ describe("NativeRuntimeAdapter server transport", () => {
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
     expect(dbTicks).toBe(2);
     runtime.close();
+  });
+
+  it("admits a peer as its own replica's identity, which the engine checks against the store's", async () => {
+    const declared: Uint8Array[] = [];
+    const transport = new FakeTransport([]);
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            acceptSubscriber: (identity: Uint8Array) => {
+              declared.push(identity);
+              return transport;
+            },
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+    const other = new Uint8Array([9]);
+    await runtime.acceptPeer({}, undefined, other);
+    await runtime.acceptPeer();
+    expect(declared).toEqual([other, TEST_RUNTIME_AUTHOR]);
+    await runtime.close();
   });
 
   it("admits a peer only after a suspended owner-wide evaluator pass exits", async () => {
@@ -3342,6 +3953,7 @@ function fakeDb<T extends object>(
   };
   let upstream: Transport | undefined;
   const result: Record<string, unknown> = {
+    createUpstreamLink,
     setTickScheduler: () => undefined,
     onMutationError: () => undefined,
     // The production binding advertises its compiled capability mask. Keep
