@@ -14,6 +14,9 @@ export interface JazzServerBrowserCommands {
   jazzAppUser(frontUrl: string, userId: string, claims?: Record<string, unknown>): Promise<string>;
   /** Optional: only configs whose tests sign users out register it. */
   jazzAppSignOut?(frontUrl: string, userUrl: string): Promise<void>;
+  /** Optional: only configs whose tests sign guests up register these. */
+  jazzAppVisitor?(frontUrl: string): Promise<string>;
+  jazzAppSignUp?(frontUrl: string, originUrl: string, userId: string): Promise<void>;
   /** Optional: only configs whose tests write as the backend register it. */
   jazzAppBackendInsert?(
     frontUrl: string,

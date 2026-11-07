@@ -17,6 +17,7 @@ import {
   type BrowserFollowerPortRequest,
   type BrowserInspectorControlEvent,
   type BrowserWorkerInitOptions,
+  BROWSER_STORE_HELD_BY_ANOTHER_SIGN_IN,
 } from "./browser-worker-protocol.js";
 import type {
   BrowserForegroundNodeLease,
@@ -464,6 +465,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
   private worker: SharedWorker | null = null;
   private readonly readyPromise: Promise<void>;
   private initialConfigurationAdmissionRejected = false;
+  private heldByAnotherSignIn = false;
   private readyError: Error | null = null;
   private connection: MessagePortBrowserFollowerConnection | null = null;
   private closed = false;
@@ -664,8 +666,10 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
           port.close();
           if (this.worker === worker) this.worker = null;
           const error = deserializeBrowserRelayError(event.data.error);
+          this.heldByAnotherSignIn = error.message === BROWSER_STORE_HELD_BY_ANOTHER_SIGN_IN;
           this.initialConfigurationAdmissionRejected =
-            error.message === "incompatible persistent browser configuration";
+            error.message === "incompatible persistent browser configuration" ||
+            this.heldByAnotherSignIn;
           settle({ connected: false, error });
           return;
         }
@@ -784,6 +788,10 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
 
   canRetryInitialConfigurationAdmission(): boolean {
     return this.initialConfigurationAdmissionRejected;
+  }
+
+  waitsForAnotherSignIn(): boolean {
+    return this.heldByAnotherSignIn;
   }
 
   async shutdown(): Promise<void> {

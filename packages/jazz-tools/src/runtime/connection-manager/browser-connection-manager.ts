@@ -60,6 +60,8 @@ export class BrowserConnectionManager extends ConnectionManager {
   private observedConfigurationAdmissionFailure: BrowserWorkerConnection | null = null;
   private configurationAdmissionRetry: Promise<BrowserWorkerConnection | null> | null = null;
   private readonly readinessByConnection = new WeakMap<BrowserWorkerConnection, Promise<void>>();
+  /** Waiting for a refused connection's replacement (see `admissionRefused`). */
+  private readonly replacementWaiters = new Set<() => void>();
   declare protected foregroundNodeLease: BrowserForegroundNodeLease | undefined;
   private shutdownStarted = false;
   private shutdownFailure: {
@@ -134,6 +136,7 @@ export class BrowserConnectionManager extends ConnectionManager {
     };
     this.connectionScope = scope;
     this.connection = connection;
+    this.wakeReplacementWaiters();
     this.setWorkerRemoteLink(connection, "connecting");
     this.observedConfigurationAdmissionFailure = null;
     this.unregisterInspectorControl?.();
@@ -197,7 +200,46 @@ export class BrowserConnectionManager extends ConnectionManager {
     this.recoverableConnectionFailure = true;
     this.rejectReconnectWaiters(error);
     this.notifyWorkerRemoteLink();
-    if (error instanceof BrowserWorkerUnresponsiveError) this.scheduleWorkerRecovery(connection);
+    if (error instanceof BrowserWorkerUnresponsiveError || this.admissionRefused(connection))
+      this.scheduleWorkerRecovery(connection);
+  }
+
+  /**
+   * The worker refused this tab because another tab holds this account's
+   * store under another sign-in: a guest who just signed up here, while
+   * another tab is still the guest. That tab follows the sign-up (or
+   * closes), so this tab tries again on its own, meanwhile connecting rather
+   * than stopped: its writes wait for the worker in this tab, and its
+   * queries and waits go on once it joins. Any other refused configuration
+   * (an older deploy's schema) still fails visibly.
+   */
+  private admissionRefused(connection: BrowserWorkerConnection | null): boolean {
+    return !!connection?.waitsForAnotherSignIn?.();
+  }
+
+  /** Resolves once `failed` is no longer this tab's connection, it shuts down, or `signal` aborts. */
+  private replacementOf(failed: BrowserWorkerConnection, signal?: AbortSignal): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const check = () => {
+        if (
+          this.connection === failed &&
+          !this.shutdownStarted &&
+          !this.host.isShuttingDown &&
+          !signal?.aborted
+        )
+          return;
+        this.replacementWaiters.delete(check);
+        signal?.removeEventListener("abort", check);
+        resolve();
+      };
+      this.replacementWaiters.add(check);
+      signal?.addEventListener("abort", check, { once: true });
+      check();
+    });
+  }
+
+  private wakeReplacementWaiters(): void {
+    for (const check of [...this.replacementWaiters]) check();
   }
 
   private scheduleWorkerRecovery(failed: BrowserWorkerConnection): void {
@@ -216,12 +258,17 @@ export class BrowserConnectionManager extends ConnectionManager {
       void this.enqueueTransportTransition(async () => {
         if (
           this.connection !== failed ||
-          !(this.connectionError instanceof BrowserWorkerUnresponsiveError) ||
           this.shutdownStarted ||
           this.host.isShuttingDown ||
           this.storageReset
         )
           return;
+        if (this.admissionRefused(failed)) {
+          await this.retryConfigurationAdmission(failed);
+          await this.connectionReady;
+          return;
+        }
+        if (!(this.connectionError instanceof BrowserWorkerUnresponsiveError)) return;
         // Preserve the in-memory runtime, its transaction identities, and its
         // pending durability waiters. Native transport replacement replays the
         // retained outbox through the normal sync and permission path.
@@ -253,13 +300,27 @@ export class BrowserConnectionManager extends ConnectionManager {
     connection ??= this.connection;
     if (retry && connection) connection = await this.retryConfigurationAdmission(connection);
     if (this.host.isShuttingDown || signal?.aborted) return;
-    try {
-      await (connection ? this.readinessByConnection.get(connection) : this.connectionReady);
-    } catch (error) {
-      if (connection === this.connection && connection?.canRetryInitialConfigurationAdmission?.()) {
-        this.observedConfigurationAdmissionFailure = connection;
+    for (;;) {
+      try {
+        await (connection ? this.readinessByConnection.get(connection) : this.connectionReady);
+        break;
+      } catch (error) {
+        // A refused tab tries again by itself (see `admissionRefused`): wait
+        // for the attempt that joins, as for a reconnect.
+        if (connection && this.admissionRefused(connection) && !signal?.aborted) {
+          await this.replacementOf(connection, signal);
+          if (this.host.isShuttingDown || this.shutdownStarted || signal?.aborted) return;
+          connection = this.connection;
+          continue;
+        }
+        if (
+          connection === this.connection &&
+          connection?.canRetryInitialConfigurationAdmission?.()
+        ) {
+          this.observedConfigurationAdmissionFailure = connection;
+        }
+        throw error;
       }
-      throw error;
     }
     await this.connectionReady;
     if (this.host.isShuttingDown) return;
@@ -498,6 +559,7 @@ export class BrowserConnectionManager extends ConnectionManager {
     if (this.shutdownStarted) return;
     this.shutdownStarted = true;
     this.clearWorkerRecoveryTimer();
+    this.wakeReplacementWaiters();
     const connection = this.connection;
     const scope = this.connectionScope;
     const admissionError = this.connectionError;
@@ -652,6 +714,7 @@ export class BrowserConnectionManager extends ConnectionManager {
 
   protected override transportLinkState(): RemoteLinkState {
     // A failed follower cannot receive the worker's answer.
+    if (this.connectionError && this.admissionRefused(this.connection)) return "connecting";
     return this.connectionError ? "unavailable" : this.workerRemoteLink;
   }
 
@@ -665,6 +728,7 @@ export class BrowserConnectionManager extends ConnectionManager {
 
   protected override transportLinkStatus(): LinkStatus {
     // A failed follower cannot receive the worker's answer.
+    if (this.connectionError && this.admissionRefused(this.connection)) return CONNECTING;
     if (this.connectionError) return offlineLink("stopped");
     // This Db has a server configured, so a worker that has not dialled yet
     // (it may still wait for a credential) is about to connect, not local-only.

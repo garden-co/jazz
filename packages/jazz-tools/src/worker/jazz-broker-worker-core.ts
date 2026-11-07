@@ -29,6 +29,7 @@ import {
   type BrowserSharedWorkerConnectResponse,
   type BrowserSharedWorkerBootstrapCancelRequest,
   type BrowserWorkerInitOptions,
+  BROWSER_STORE_HELD_BY_ANOTHER_SIGN_IN,
 } from "../runtime/native-runtime/browser-worker-protocol.js";
 // Worker failures cross a MessagePort boundary, so retain enough WASM frames to
 // identify the Rust call site before serializing them for the owning tab.
@@ -990,7 +991,11 @@ async function connectTab(
       throw new Error("incompatible persistent browser telemetry configuration");
     }
     if (context && context.fingerprint !== message.fingerprint) {
-      throw new Error("incompatible persistent browser configuration");
+      throw new Error(
+        differsOnlyInSignIn(context.fingerprint, message.fingerprint)
+          ? BROWSER_STORE_HELD_BY_ANOTHER_SIGN_IN
+          : "incompatible persistent browser configuration",
+      );
     }
     if (!context) {
       context = createContext(key, message.fingerprint, message.options);
@@ -2320,6 +2325,25 @@ function workerTelemetryCompatible(
     }
   }
   return (current.logLevel ?? DEFAULT_WASM_LOG_LEVEL) === (next.logLevel ?? DEFAULT_WASM_LOG_LEVEL);
+}
+
+/**
+ * Whether two worker fingerprints of one store differ only in who is signed
+ * in (`authClass`, see `createBrowserWorkerFingerprint`). The store is the
+ * account's either way (the storage owner already matched), so the tab only
+ * waits for the store's current sign-in to go.
+ */
+function differsOnlyInSignIn(open: string, requested: string): boolean {
+  try {
+    const { authClass: openAuth, ...openRest } = JSON.parse(open) as Record<string, unknown>;
+    const { authClass: requestedAuth, ...requestedRest } = JSON.parse(requested) as Record<
+      string,
+      unknown
+    >;
+    return openAuth !== requestedAuth && JSON.stringify(openRest) === JSON.stringify(requestedRest);
+  } catch {
+    return false;
+  }
 }
 
 function runtimeKey(options: BrowserWorkerInitOptions): string {

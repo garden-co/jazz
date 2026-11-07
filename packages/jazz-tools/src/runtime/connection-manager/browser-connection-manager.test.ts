@@ -2,7 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 import type { JazzClient } from "../client.js";
 import { SharedBrowserForegroundNodeLease } from "../native-runtime/browser-shared-worker-connection.js";
 import { NativeRuntimeAdapter } from "../native-runtime/native-runtime-adapter.js";
-import { BrowserWorkerUnresponsiveError } from "../native-runtime/browser-worker-protocol.js";
+import {
+  BROWSER_STORE_HELD_BY_ANOTHER_SIGN_IN,
+  BrowserWorkerUnresponsiveError,
+} from "../native-runtime/browser-worker-protocol.js";
 import type { BrowserWorkerConnection, BrowserWorkerConnectionContext } from "../runtime-source.js";
 import { BrowserConnectionManager } from "./browser-connection-manager.js";
 import type { DbForConnection } from "./types.js";
@@ -425,9 +428,13 @@ describe("BrowserConnectionManager acknowledged storage reset", () => {
   });
 });
 
-function admissionManager(retryable = true) {
+function admissionManager(retryable = true, heldByAnotherSignIn = false) {
   let pinned = true;
-  const error = new Error("incompatible persistent browser configuration");
+  const error = new Error(
+    heldByAnotherSignIn
+      ? BROWSER_STORE_HELD_BY_ANOTHER_SIGN_IN
+      : "incompatible persistent browser configuration",
+  );
   const connections: Array<BrowserWorkerConnection & { shutdown: ReturnType<typeof vi.fn> }> = [];
   const host = {
     config: {},
@@ -440,6 +447,7 @@ function admissionManager(retryable = true) {
             if (rejected) throw error;
           },
           canRetryInitialConfigurationAdmission: () => rejected && retryable,
+          waitsForAnotherSignIn: () => rejected && heldByAnotherSignIn,
           shutdown: vi.fn(async () => undefined),
         } as unknown as BrowserWorkerConnection & { shutdown: ReturnType<typeof vi.fn> };
         connections.push(connection);
@@ -482,6 +490,56 @@ describe("Browser configuration admission retries", () => {
     await expect(manager.ensureReady("runtime")).resolves.toBeUndefined();
     expect(connections).toHaveLength(3);
     expect(connections[1]!.shutdown).toHaveBeenCalledOnce();
+  });
+
+  it("tries again on its own while another sign-in to the account holds the store", async () => {
+    vi.useFakeTimers();
+    const { manager, host, connections, unpin } = admissionManager(true, true);
+    try {
+      let outcome = "pending";
+      const waiting = manager.ensureReady("runtime").then(
+        () => (outcome = "fulfilled"),
+        (error: unknown) => (outcome = `rejected: ${String(error)}`),
+      );
+      await vi.advanceTimersByTimeAsync(2_000);
+      // Connecting, not stopped, and the wait goes on rather than failing.
+      expect(outcome).toBe("pending");
+      expect(
+        (manager as unknown as { transportLinkStatus(): unknown }).transportLinkStatus(),
+      ).toEqual({ state: "connecting" });
+      expect(connections.length).toBeGreaterThan(2);
+      // The other tab follows the sign-up: the next attempt joins.
+      unpin();
+      await vi.advanceTimersByTimeAsync(5_000);
+      await waiting;
+      expect(outcome).toBe("fulfilled");
+      const attempts = connections.length;
+      for (const connection of connections.slice(0, -1))
+        expect(connection.shutdown).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(connections).toHaveLength(attempts);
+    } finally {
+      host.isShuttingDown = true;
+      await manager.shutdown().catch(() => undefined);
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops trying again on its own once it shuts down", async () => {
+    vi.useFakeTimers();
+    const { manager, host, connections } = admissionManager(true, true);
+    try {
+      const waiting = manager.ensureReady("runtime");
+      await vi.advanceTimersByTimeAsync(1_000);
+      host.isShuttingDown = true;
+      await manager.shutdown().catch(() => undefined);
+      await expect(waiting).resolves.toBeUndefined();
+      const attempts = connections.length;
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(connections).toHaveLength(attempts);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does not retry other initial failures even with matching error text", async () => {
