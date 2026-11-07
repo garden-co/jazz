@@ -47,3 +47,31 @@ denial removes that address, and a local revision prevents an older asynchronous
 online result from restoring it. Borrowed key copies are scoped to the active
 owner, wiped on release and close, and checked again after asynchronous use.
 Other streams and storage formats are unchanged.
+
+## Private online anchor version 1
+
+`jazz-e2ee-private-online-anchor-v1` is a separate private signing-context tag,
+not C provenance. A genuine online accepted transaction captures the device-key
+and space-root rows at one schema/cut, validates both paired origins, and waits
+for Global before publishing owner-private anchors. Actual account/session,
+keys, namespace catalogue IDs, exact row bodies and the live Db owner are bound.
+No complete-history, current offline membership or authority grant follows.
+
+The existing outer retained-content and provisional-key encodings remain v1.
+Their signed anchor now admits this explicitly versioned variant; old C-backed
+records retain identical bytes and remain readable. Older readers fail closed
+on the new provenance tag. New readers require the matching owner-local proof;
+a later owner must obtain its own genuine online validation. The byte fixture
+`private-online-cache-anchor-v1.json` pins the added signing context.
+A later same-content observation may advance its cut without changing the
+immutable origin pair; each newly signed device/root bundle still requires
+matching cuts. No old seal or wire/database encoding is rewritten.
+
+## E10 provisional writes
+
+The separate provisional-key record lets a supported offline operation stage
+encrypted content with a prior-valid bound key. This is local pending work, not
+current membership or Global acceptance. A removed recipient may retain that
+key and read the provisional ciphertext; reconnect authority may reject it.
+The retained-content record itself does not become a write-authority receipt.
+Known denials, exact bindings, revision and owner-lifetime checks still apply.

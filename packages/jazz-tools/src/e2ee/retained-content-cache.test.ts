@@ -1,11 +1,15 @@
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import type { Db } from "../runtime/db.js";
 import { deviceRequestSchema } from "./device-requests.js";
 import { spaceSchema, type SpaceRoot } from "./spaces.js";
 import { createBrowserCrypto } from "./browser.js";
 import { DeviceKeyLifetime, type LocalDevice } from "./local-device.js";
-import { RetainedContentCache, retainedContentRecordBytes } from "./retained-content-cache.js";
+import {
+  RetainedContentCache,
+  retainedContentRecordBytes,
+  provisionalWriteRecordBytes,
+} from "./retained-content-cache.js";
 import fixture from "./fixtures/retained-content-context-v1.json";
 
 // Positive observation fixtures model ONLY the private cache boundary. They do
@@ -125,11 +129,14 @@ async function setup() {
   const secret = new Uint8Array(32).fill(42);
   const tableId = globalThis.crypto.randomUUID(),
     columnId = globalThis.crypto.randomUUID();
-  const retain = async (revision?: number) => {
+  const retain = async (
+    revision?: Awaited<ReturnType<RetainedContentCache["revision"]>>,
+    provisionalWrite = false,
+  ) => {
     revision ??= await cache.revision();
     await cache.retainDevice();
     cache.rememberIdentities(root, "notes", "body", tableId, columnId);
-    await cache.retainSpace("projects", root, secret, revision);
+    await cache.retainSpace("projects", root, secret, revision, provisionalWrite);
   };
   return {
     app,
@@ -154,6 +161,20 @@ async function setup() {
     },
     failObservations(error: unknown) {
       observationFailure = error;
+    },
+    reopen() {
+      return new RetainedContentCache(
+        db,
+        store,
+        scope,
+        app.wasmSchema,
+        app,
+        device,
+        lifetime,
+        crypto.keyEnvelope,
+        crypto.deviceSigner,
+        assertOpen,
+      );
     },
     otherApplication() {
       return new RetainedContentCache(
@@ -334,6 +355,313 @@ it.each(["storage", "protocol"])(
       f.failObservations(failure);
       await expect(f.cache.available()).rejects.toBe(failure);
     } finally {
+      f.close();
+    }
+  },
+);
+
+it("pins the distinct provisional-key v1 signing context without changing content v1", () => {
+  expect(
+    new TextDecoder().decode(
+      provisionalWriteRecordBytes({
+        format: "jazz-e2ee-provisional-key-v1",
+        identifier: "scope",
+      }),
+    ),
+  ).toBe(
+    '["jazz-e2ee-provisional-key-v1",{"format":"jazz-e2ee-provisional-key-v1","identifier":"scope"}]',
+  );
+});
+
+it("requires an online-retained selector and borrows exactly one selected key", async () => {
+  const f = await setup();
+  try {
+    await f.retain();
+    let calls = 0;
+    const use = async (secret: Uint8Array) => {
+      calls++;
+      expect(secret).toEqual(f.secret);
+    };
+    expect(await f.cache.withProvisionalKey(f.app.projects, f.root.identifier, use, "warn")).toBe(
+      "unavailable",
+    );
+    expect(calls).toBe(0);
+    await f.retain(undefined, true);
+    // Appending a historical record must not select it just because it is last.
+    await f.cache.retainSpace(
+      "projects",
+      { ...f.root, epochId: crypto.randomUUID() },
+      f.secret,
+      await f.cache.revision(),
+    );
+    expect(
+      await f.cache.withProvisionalKey(
+        f.app.projects,
+        f.root.identifier,
+        async (secret, root) => {
+          await use(secret);
+          expect(root.epochId).toBe(f.root.epochId);
+          expect(f.cache.identities(root, "notes", "body")).toEqual({
+            table: f.tableId,
+            column: f.columnId,
+          });
+        },
+        "warn",
+      ),
+    ).toBe("used");
+    expect(calls).toBe(1);
+  } finally {
+    f.close();
+  }
+});
+
+it("warns or refuses known-stale provisional keys and refuses known revoked scopes", async () => {
+  const f = await setup();
+  const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    await f.retain(undefined, true);
+    await f.cache.markStale("projects", f.root.identifier);
+    let calls = 0;
+    const use = async () => {
+      calls++;
+    };
+    expect(await f.cache.withProvisionalKey(f.app.projects, f.root.identifier, use, "reject")).toBe(
+      "stale",
+    );
+    expect(calls).toBe(0);
+    expect(warning).not.toHaveBeenCalled();
+    expect(await f.cache.withProvisionalKey(f.app.projects, f.root.identifier, use, "warn")).toBe(
+      "used",
+    );
+    expect(calls).toBe(1);
+    expect(warning).toHaveBeenCalledWith(
+      "E2EE: writing offline with a known-stale encryption epoch; removed recipients may still decrypt this write.",
+    );
+    await f.cache.denySpace("projects", f.root.identifier);
+    expect(await f.cache.withProvisionalKey(f.app.projects, f.root.identifier, use, "warn")).toBe(
+      "unavailable",
+    );
+    expect(calls).toBe(1);
+  } finally {
+    warning.mockRestore();
+    f.close();
+  }
+});
+
+it.each(["selector", "namespace", "account"] as const)(
+  "refuses a mismatched provisional key (%s)",
+  async (change) => {
+    const f = await setup();
+    try {
+      await f.retain(undefined, true);
+      let used = false;
+      const use = async () => {
+        used = true;
+      };
+      if (change === "selector") {
+        await f.store.update((value) => {
+          const state = JSON.parse(value!);
+          state.retainedContentV1.provisionalWritesV1[0].signature[0] ^= 1;
+          return JSON.stringify(state);
+        });
+        await expect(
+          f.cache.withProvisionalKey(f.app.projects, f.root.identifier, use, "warn"),
+        ).rejects.toThrow("Invalid provisional-key record");
+      } else if (change === "namespace") {
+        f.changeNamespace();
+        expect(
+          await f.cache.withProvisionalKey(f.app.projects, f.root.identifier, use, "warn"),
+        ).toBe("unavailable");
+      } else {
+        expect(
+          await f
+            .otherApplication()
+            .withProvisionalKey(f.app.projects, f.root.identifier, use, "warn"),
+        ).toBe("unavailable");
+      }
+      expect(used).toBe(false);
+    } finally {
+      f.close();
+    }
+  },
+);
+
+it("keeps optional retention failures owner-local without promising durable reopen", async () => {
+  const f = await setup();
+  try {
+    f.store.update = async (change) => {
+      change(await f.store.read());
+      throw new Error("Cache persistence unavailable");
+    };
+    await f.retain(undefined, true);
+    let calls = 0;
+    expect(
+      await f.cache.withProvisionalKey(
+        f.app.projects,
+        f.root.identifier,
+        async () => {
+          calls++;
+        },
+        "warn",
+      ),
+    ).toBe("used");
+    expect(calls).toBe(1);
+    expect(await f.reopen().available()).toBe(false);
+  } finally {
+    f.close();
+  }
+});
+
+it.each(["device", "scope"] as const)(
+  "revokes an in-flight provisional borrow even if %s denial cannot persist",
+  async (target) => {
+    const f = await setup();
+    let borrowed: Uint8Array | undefined;
+    try {
+      await f.retain(undefined, true);
+      f.store.update = async () => {
+        throw new Error("Denial persistence unavailable");
+      };
+      await expect(
+        f.cache.withProvisionalKey(
+          f.app.projects,
+          f.root.identifier,
+          async (secret) => {
+            borrowed = secret;
+            await expect(
+              target === "device"
+                ? f.cache.denyDevice()
+                : f.cache.denySpace("projects", f.root.identifier),
+            ).rejects.toThrow("Denial persistence unavailable");
+          },
+          "warn",
+        ),
+      ).rejects.toThrow("invalidated during use");
+      expect(borrowed).toEqual(new Uint8Array(32));
+    } finally {
+      f.close();
+    }
+  },
+);
+
+it("refuses a reject-policy provisional borrow if newly known staleness cannot persist", async () => {
+  const f = await setup();
+  try {
+    await f.retain(undefined, true);
+    f.store.update = async () => {
+      throw new Error("Stale-state persistence unavailable");
+    };
+    await expect(
+      f.cache.withProvisionalKey(
+        f.app.projects,
+        f.root.identifier,
+        async () => {
+          await expect(f.cache.markStale("projects", f.root.identifier)).rejects.toThrow(
+            "Stale-state persistence unavailable",
+          );
+        },
+        "reject",
+      ),
+    ).rejects.toThrow("known-stale during use");
+  } finally {
+    f.close();
+  }
+});
+
+it("exposes retained structural identities only inside the verified owner borrow", async () => {
+  const f = await setup();
+  let borrowedRoot: Readonly<typeof f.root> | undefined;
+  try {
+    await f.retain();
+    expect(f.cache.isBorrowing(f.root)).toBe(false);
+    await expect(
+      f.cache.withKeys(f.app.projects, f.root.identifier, async (_secret, root) => {
+        borrowedRoot = root;
+        expect(f.cache.isBorrowing(root)).toBe(true);
+        expect(f.cache.identities(root, "notes", "body")).toEqual({
+          table: f.tableId,
+          column: f.columnId,
+        });
+      }),
+    ).resolves.toBe(true);
+    expect(f.cache.isBorrowing(borrowedRoot!)).toBe(false);
+    expect(() => f.cache.identities(borrowedRoot!, "notes", "body")).toThrow(/catalogue binding/);
+  } finally {
+    f.close();
+  }
+});
+
+it.each([
+  { invalidation: "denial", persistence: "durable" },
+  { invalidation: "denial", persistence: "volatile" },
+  { invalidation: "stale", persistence: "durable" },
+  { invalidation: "stale", persistence: "volatile" },
+] as const)(
+  "fences delayed $persistence retention after failed $invalidation persistence until fresh validation",
+  async ({ invalidation, persistence }) => {
+    const f = await setup();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const originalUpdate = f.store.update.bind(f.store);
+    let delayed: Promise<void> | undefined;
+    try {
+      await f.retain(undefined, true);
+      // This receipt precedes the older result's already-completed validation.
+      const before = await f.cache.revision();
+      let updates = 0;
+      const update = vi.spyOn(f.store, "update").mockImplementation(async (change) => {
+        if (++updates === 1) {
+          entered();
+          await gate;
+          if (persistence === "durable") return originalUpdate(change);
+          change(await f.store.read());
+          throw new Error("optional retention persistence unavailable");
+        }
+        // Transform ran, but the backing store did not publish the denial.
+        change(await f.store.read());
+        throw new Error("denial persistence unavailable");
+      });
+      delayed = f.cache.retainSpace("projects", f.root, f.secret, before, true);
+      await waiting;
+      await expect(
+        invalidation === "denial"
+          ? f.cache.denySpace("projects", f.root.identifier)
+          : f.cache.markStale("projects", f.root.identifier),
+      ).rejects.toThrow("denial persistence unavailable");
+      release();
+      await delayed;
+      const use = vi.fn(async () => {});
+      if (invalidation === "denial") {
+        expect(await f.cache.withKeys(f.app.projects, f.root.identifier, use)).toBe(false);
+        expect(
+          await f.cache.withProvisionalKey(f.app.projects, f.root.identifier, use, "reject"),
+        ).toBe("unavailable");
+      } else {
+        expect(f.cache.isKnownStale("projects", f.root.identifier)).toBe(true);
+        expect(
+          await f.cache.withProvisionalKey(f.app.projects, f.root.identifier, use, "reject"),
+        ).toBe("stale");
+      }
+      expect(use).not.toHaveBeenCalled();
+      update.mockRestore();
+      // Only a fresh validation receipt may restore this same-owner binding.
+      // This fixture models that private boundary; it is not authority proof.
+      await f.retain(undefined, true);
+      expect(await f.cache.withKeys(f.app.projects, f.root.identifier, use)).toBe(true);
+      expect(
+        await f.cache.withProvisionalKey(f.app.projects, f.root.identifier, use, "reject"),
+      ).toBe("used");
+      expect(use).toHaveBeenCalledTimes(2);
+    } finally {
+      release();
+      await delayed?.catch(() => {});
+      vi.restoreAllMocks();
       f.close();
     }
   },

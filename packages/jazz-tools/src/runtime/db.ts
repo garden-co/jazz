@@ -14,6 +14,7 @@ import { runtimeRandomBytes } from "./runtime-entropy.js";
 import { initialRecipientIds } from "../e2ee/space-lifecycle.js";
 import {
   e2eeForDb,
+  observeRemoteE2eeRevocation,
   e2eeSchemaForDb,
   prepareInitialSpaceForTransaction,
   prepareRegisteredInitialSpaceRows,
@@ -2407,7 +2408,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       };
       if (initial) await stage(initial.secret, initial.root);
       else {
-        await withSpaceKeys(db, scope, identifier.value, stage, false);
+        await withSpaceKeys(db, scope, identifier.value, stage, false, true);
       }
     };
     if (operation === "restore") {
@@ -2448,9 +2449,9 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
           if (initial) {
             await stage(initial.secret, initial.root);
           } else {
-            // Borrow a key only while this bounded batch runs. Reobserve accepted
-            // authority after encryption, before preparation can permit commit.
-            await withSpaceKeys(db, scope, identifier.value, stage, false);
+            // Online, reobserve genuine authority; offline, recheck only the
+            // same prior-valid provisional key. Global is still the core's decision.
+            await withSpaceKeys(db, scope, identifier.value, stage, false, true);
             await withSpaceKeys(
               db,
               scope,
@@ -2460,6 +2461,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
                   throw new Error("Encryption space changed during transaction preparation");
               },
               false,
+              true,
             );
           }
         });
@@ -2975,7 +2977,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
         withKey: (use) =>
           initial
             ? use(initial.secret, initial.root)
-            : withSpaceKeys(db, scope, identifier, use, false),
+            : withSpaceKeys(db, scope, identifier, use, false, true),
       };
     };
     // Explicit branch writes retain their independent preparation path.
@@ -4282,13 +4284,19 @@ export class Db {
     await this.connection.reconnect();
   }
 
-  /** @internal Explicit reconnection, not an inference from a network outage. */
+  /** @internal Reconcile known spaces when the configured server becomes reachable. */
   onE2eeReconnect(listener: () => void): void {
-    let wasOffline = this.connection.isExplicitlyOffline();
-    this.connection.onExplicitOfflineChange((offline) => {
-      const reconnected = wasOffline && !offline;
-      wasOffline = offline;
-      if (reconnected) listener();
+    let connected = this.connection.remoteLinkState() === "connected";
+    let interrupted = this.connection.remoteLinkState() === "unavailable";
+    this.connection.onRemoteLinkStateChange((state) => {
+      if (state === "connected") {
+        const recovered = interrupted;
+        connected = true;
+        interrupted = false;
+        if (recovered) listener();
+      } else if (connected || state === "unavailable") {
+        interrupted = true;
+      }
     }, this.shutdownAbort.signal);
   }
 
@@ -4298,6 +4306,22 @@ export class Db {
     if (initial) await initial;
     this.assertOpen();
     return this.connection.isExplicitlyOffline();
+  }
+
+  /** @internal A transport hint, never membership, coverage or acceptance evidence. */
+  e2eeHasConnectedTransportForKeys(): boolean {
+    this.assertOpen();
+    return this.connection.remoteLinkState() === "connected";
+  }
+
+  /** @internal Only explicit disconnect or a reported transport outage enables cached key use. */
+  async e2eeIsOfflineForKeys(): Promise<boolean> {
+    const initial = this.connection.initialExplicitOfflineState();
+    if (initial) await initial;
+    this.assertOpen();
+    return (
+      this.connection.isExplicitlyOffline() || this.connection.remoteLinkState() === "unavailable"
+    );
   }
 
   /**
@@ -5057,8 +5081,14 @@ export class Db {
     const outputSchema = requireSchemaWithTable(query._schema, outputTable);
     const prepared = prepareTransformRead(query, builtQuery, outputTable);
     const queryOptions = normalizeQueryOptions(query._schema, builtQuery.table, options);
+    // This direct local-content plan makes no claim about accepted key-history
+    // completeness. All other callers retain the authority-backed token plan.
+    const retainedEquality =
+      encryptedSchemas.has(query._schema) &&
+      resolveEffectiveQueryExecutionOptions(this.config, queryOptions).tier === "local-first" &&
+      ((await this.e2eeIsOfflineForKeys()) || !this.e2eeHasConnectedTransportForKeys());
     const equality = encryptedSchemas.has(query._schema)
-      ? await prepareEqualityQuery(this, query, builderJson)
+      ? await prepareEqualityQuery(this, query, builderJson, undefined, retainedEquality)
       : undefined;
     try {
       if (!equality) {
@@ -5071,7 +5101,7 @@ export class Db {
           context || usesRelationTraversal
             ? await client.queryInternal(wasmQuery, queryOptions, context?.readSession)
             : await client.queryInternal(wasmQuery, queryOptions);
-        return finishComputedRead(
+        const result = await finishComputedRead(
           query,
           builtQuery,
           outputTable,
@@ -5085,6 +5115,8 @@ export class Db {
             ),
           (table, encryptedRows) => decryptCellRows(this, query._schema, table, encryptedRows),
         );
+        if (effectiveTier === "remote") await observeRemoteE2eeRevocation(this, outputTable);
+        return result;
       }
       if (prepared.computedState)
         throw new Error(
@@ -5101,6 +5133,10 @@ export class Db {
         context || usesRelationTraversal
           ? await client.queryInternal(wasmQuery, queryOptions, context?.readSession)
           : await client.queryInternal(wasmQuery, queryOptions);
+      // Overflow rejects the complete operation before decryption/filtering.
+      // Native cells are already materialised: this is a JS work/byte ceiling,
+      // not a SQLite scan or preallocation budget.
+      equality.checkCandidates(rows);
       const outputIncludes =
         outputTable !== builtQuery.table
           ? {}
@@ -5132,7 +5168,7 @@ export class Db {
             table,
             encryptedRows,
             undefined,
-            equality
+            equality && !equality.retainedContent
               ? (identifier, epochs) => {
                   if (table === builtQuery.table && identifier === equality.space.identifier)
                     candidateEpochs = epochs;
@@ -5142,6 +5178,7 @@ export class Db {
       );
       if (
         equality &&
+        !equality.retainedContent &&
         !(candidateEpochs ? equality.matchesEpochs(candidateEpochs) : await equality.isCurrent())
       ) {
         if (equalityRetries >= 2) throw new E2eeDataError("key-unavailable");

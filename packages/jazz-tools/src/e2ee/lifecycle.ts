@@ -53,6 +53,8 @@ export type E2eeConfig = {
   /** Dedicated local key storage. Do not reuse the account-selection store value. */
   store: AccountStore;
   crypto?: JazzCrypto;
+  /** Known-stale provisional offline encryption warns by default; it never grants authority. */
+  staleWrites?: "warn" | "reject";
 };
 export type DeviceInfo = Readonly<{
   id: string;
@@ -108,9 +110,13 @@ type BorrowSpaceKeys = <T, Init>(
   use: Parameters<Spaces["withKeys"]>[2],
   includeHistory?: boolean,
   contentRead?: boolean,
+  provisionalWrite?: boolean,
 ) => ReturnType<Spaces["withKeys"]>;
 const currentSpaceKeys = new WeakMap<Db, BorrowSpaceKeys>();
-const retainedCaches = new WeakMap<Db, () => Promise<RetainedContentCache | undefined>>();
+const retainedCaches = new WeakMap<
+  Db,
+  (root: Readonly<SpaceRoot>) => Promise<RetainedContentCache | undefined>
+>();
 
 const initialSpacePreparers = new WeakMap<Db, Spaces["prepareInitial"]>();
 const initialSpaceAuthorityPreparers = new WeakMap<Db, Spaces["prepareInitialAuthority"]>();
@@ -131,8 +137,9 @@ export async function withSpaceKeys<T, Init>(
   identifier: string,
   use: Parameters<Spaces["withKeys"]>[2],
   includeHistory = false,
+  provisionalWrite = false,
 ): Promise<void> {
-  return borrowSpaceKeys(db, scope, identifier, use, includeHistory, false);
+  return borrowSpaceKeys(db, scope, identifier, use, includeHistory, false, provisionalWrite);
 }
 
 /** @internal Only decryption may use a prior online-validated private key offline. */
@@ -153,6 +160,7 @@ async function borrowSpaceKeys<T, Init>(
   use: Parameters<Spaces["withKeys"]>[2],
   includeHistory: boolean,
   contentRead: boolean,
+  provisionalWrite = false,
 ): Promise<void> {
   e2eeForDb(db);
   let callbackFailure: { error: unknown } | undefined;
@@ -170,6 +178,7 @@ async function borrowSpaceKeys<T, Init>(
     operation,
     includeHistory,
     contentRead,
+    provisionalWrite,
   ).catch((error: unknown) => {
     // Key adapters can include secret material in their exceptions.
     // The operation owns its own crypto diagnostics and ordinary runtime errors.
@@ -196,8 +205,8 @@ export async function contentIdentitiesForDb(
   root: Readonly<SpaceRoot>,
 ): Promise<{ table: string; column: string }> {
   e2eeForDb(db);
-  const cache = await retainedCaches.get(db)!();
-  if (await db.e2eeIsExplicitlyOffline()) {
+  const cache = await retainedCaches.get(db)!(root);
+  if (cache?.isBorrowing(root) || (await db.e2eeIsOfflineForKeys())) {
     try {
       if (!cache) throw new E2eeHistoryUnavailable("Missing private content cache");
       return cache.identities(root, table._table, column);
@@ -413,6 +422,20 @@ export function attachE2ee(db: Db, account: AccountHandle, config: E2eeConfig, e
 }
 
 /** @internal Schema objects never own account keys or lifecycle state. */
+/** @internal A completed explicit Remote history read may remember denial only. */
+export async function observeRemoteE2eeRevocation(db: Db, table: string): Promise<void> {
+  if (table === "__e2ee_account_successors" || table === "__e2ee_public_account_successors")
+    await contexts.get(db)?.rememberRemoteRevocation();
+  else if (
+    table === "__e2ee_group_membership" ||
+    table === "__e2ee_group_successors" ||
+    table === "__e2ee_group_repairs" ||
+    table === "__e2ee_space_grants" ||
+    table === "__e2ee_space_successors"
+  )
+    await contexts.get(db)?.rememberRemoteSpaceAccessLoss();
+}
+
 export function e2eeForDb(db: Db): E2ee {
   const e2ee = contexts.get(db);
   if (!e2ee) throw new Error("E2EE requires an authenticated Db with dedicated local key storage");
@@ -432,6 +455,42 @@ export class E2ee {
   private preparation: Promise<boolean> | undefined;
   private locallyPrepared = false;
   private contentCache: RetainedContentCache | undefined;
+  private readonly knownSpaces = new Map<
+    string,
+    { scope: TableProxy<unknown, unknown>; identifier: string }
+  >();
+  private readonly reconcilingSpaces = new Set<string>();
+  private readonly spaceFailures = new Map<string, unknown>();
+
+  private rememberSpace<T, Init>(scope: TableProxy<T, Init>, identifier: string): string {
+    const key = JSON.stringify([scope._table, identifier]);
+    this.knownSpaces.set(key, { scope: scope as TableProxy<unknown, unknown>, identifier });
+    return key;
+  }
+  private reconcileKnownSpaces(): void {
+    for (const [key, { scope, identifier }] of this.knownSpaces) {
+      if (this.reconcilingSpaces.has(key)) continue;
+      this.reconcilingSpaces.add(key);
+      void currentSpaceKeys.get(this.db)!(scope, identifier, async () => {}, true)
+        .catch((error) => {
+          this.spaceFailures.set(key, error);
+        })
+        .finally(() => {
+          this.reconcilingSpaces.delete(key);
+        });
+    }
+  }
+  private async recordSpaceState<T, Init>(
+    scope: TableProxy<T, Init>,
+    identifier: string,
+    state: { state: string; reason?: string },
+  ): Promise<void> {
+    if (state.reason === "device-not-active") await this.contentCache?.denyDevice();
+    else if (state.state === "refused")
+      await this.contentCache?.denySpace(scope._table, identifier);
+    else if (state.state === "maintenance-required")
+      await this.contentCache?.markStale(scope._table, identifier);
+  }
   private currentDeviceId: string | undefined;
   private readonly scope: string;
   private readonly app: DeviceTables;
@@ -506,7 +565,11 @@ export class E2ee {
   async explain<T, Init>(
     target: { groupId: string } | { scope: TableProxy<T, Init>; identifier: string },
   ) {
-    if (await this.db.e2eeIsExplicitlyOffline()) {
+    if (await this.db.e2eeIsOfflineForKeys()) {
+      if (this.approval?.isKnownRevoked()) {
+        await this.contentCache?.denyDevice();
+        return { state: "refused" as const, reason: "device-not-active" };
+      }
       if (!("scope" in target))
         throw new E2eeHistoryUnavailable("Offline content does not certify group membership");
       const cache = await this.prepareRetainedContent();
@@ -517,6 +580,7 @@ export class E2ee {
     }
     await this.prepare();
     if ("scope" in target) {
+      this.rememberSpace(target.scope, target.identifier);
       const state = await this.requireSpaces().explain(target.scope, target.identifier);
       if (state.state === "ready" && this.contentCache)
         return currentSpaceKeys.get(this.db)!(
@@ -525,9 +589,7 @@ export class E2ee {
           async () => {},
           true,
         );
-      if (state.reason === "device-not-active") await this.contentCache?.denyDevice();
-      else if (state.state === "refused" || state.state === "maintenance-required")
-        await this.contentCache?.denySpace(target.scope._table, target.identifier);
+      await this.recordSpaceState(target.scope, target.identifier, state);
       return state;
     }
     return this.requireGroups().explain(target.groupId);
@@ -538,7 +600,11 @@ export class E2ee {
     const schema = configuredSchemas.get(this.db);
     if (!schema || !this.contentCache) return;
     const scope = new TypedTableQueryBuilder(scopeTable, schema);
-    await this.explain({ scope, identifier: root.identifier });
+    try {
+      await this.explain({ scope, identifier: root.identifier });
+    } catch (error) {
+      this.spaceFailures.set(JSON.stringify([scopeTable, root.identifier]), error);
+    }
   }
 
   private requireSpaces(): Spaces {
@@ -874,45 +940,99 @@ export class E2ee {
       this.assertOpen();
       return { cipher, application: JSON.stringify([accountRegistry(this.account), this.env]) };
     });
-    retainedCaches.set(db, async () => {
-      if (await db.e2eeIsExplicitlyOffline()) return this.prepareRetainedContent();
+    retainedCaches.set(db, async (root) => {
+      // A verified retained borrow must not re-enter an online preparation
+      // already parked on the server, even if the transport hint changes.
+      if (this.contentCache?.isBorrowing(root)) return this.contentCache;
+      if (await db.e2eeIsOfflineForKeys()) return this.prepareRetainedContent();
       await this.prepare();
       return this.contentCache;
     });
-    currentSpaceKeys.set(db, async (scope, identifier, use, includeHistory, contentRead) => {
-      if (await db.e2eeIsExplicitlyOffline()) {
-        if (!contentRead)
-          throw new E2eeHistoryUnavailable(
-            "Retained content does not authorise an encrypted write",
-          );
-        const cache = await this.prepareRetainedContent();
-        const available = await cache.withKeys(scope, identifier, use);
-        return available
-          ? { state: "ready" }
-          : { state: "unavailable", reason: "retained-content-unavailable" };
-      }
-      await this.prepare();
-      const cache = this.contentCache;
-      const revision = await cache?.revision();
-      const state = await this.requireSpaces().withKeys(
-        scope,
-        identifier,
-        async (secret, root) => {
-          await use(secret, root);
-          if (cache && revision !== undefined) {
-            // Space key access already completed its accepted device/recipient
-            // predicate checks and Global wait. This marker is content-only.
-            await cache.retainDevice();
-            await cache.retainSpace(scope._table, root, secret, revision);
+    currentSpaceKeys.set(
+      db,
+      async (scope, identifier, use, includeHistory, contentRead, provisionalWrite) => {
+        const key = this.rememberSpace(scope, identifier);
+        if (await this.needsRetainedKeyPath(Boolean(contentRead || provisionalWrite))) {
+          if (!contentRead && !provisionalWrite)
+            throw new E2eeHistoryUnavailable(
+              "Retained keys do not establish accepted authority history",
+            );
+          // A genuine prior maintenance observation already settles explicit
+          // rejection. Do not require a usable key merely to refuse its use.
+          if (
+            provisionalWrite &&
+            this.config.staleWrites === "reject" &&
+            this.contentCache?.isKnownStale(scope._table, identifier)
+          )
+            return { state: "maintenance-required", reason: "recipient-removed" };
+          const cache = await this.prepareRetainedContent();
+          if (provisionalWrite) {
+            const result = await cache.withProvisionalKey(
+              scope,
+              identifier,
+              use,
+              this.config.staleWrites ?? "warn",
+            );
+            return result === "used"
+              ? { state: "ready" }
+              : result === "stale"
+                ? { state: "maintenance-required", reason: "recipient-removed" }
+                : { state: "unavailable", reason: "retained-key-unavailable" };
           }
-        },
-        includeHistory,
-      );
-      if (state.reason === "device-not-active") await cache?.denyDevice();
-      else if (state.state === "refused" || state.state === "maintenance-required")
-        await cache?.denySpace(scope._table, identifier);
-      return state;
-    });
+          const available = await cache.withKeys(scope, identifier, use);
+          return available
+            ? { state: "ready" }
+            : { state: "unavailable", reason: "retained-content-unavailable" };
+        }
+        const failure = this.spaceFailures.get(key);
+        this.spaceFailures.delete(key);
+        if (failure) throw failure;
+        await this.prepare();
+        const cache = this.contentCache;
+        const revision = await cache?.revision();
+        const retained: { secret: Uint8Array; root: Readonly<SpaceRoot>; current: boolean }[] = [];
+        let currentKey = true;
+        try {
+          const state = await this.requireSpaces().withKeys(
+            scope,
+            identifier,
+            async (secret, root) => {
+              await use(secret, root);
+              if (cache && revision !== undefined)
+                retained.push({
+                  secret: this.deviceKeys.own(secret.slice()),
+                  root,
+                  current: currentKey,
+                });
+              currentKey = false;
+            },
+            includeHistory,
+          );
+          if (state.state === "ready" && cache && revision !== undefined) {
+            // This is a post-validation retention continuation, never an
+            // authority replacement or an ordinary-query preparation re-entry.
+            // Keys were genuinely validated by Spaces; establish a PRIVATE
+            // same-cut device/root binding, without importing anything into C.
+            if (retained[0]) await cache.captureOnlineBinding(retained[0].root);
+            for (const entry of retained) {
+              await cache.retainDevice();
+              await cache.retainSpace(
+                scope._table,
+                entry.root,
+                entry.secret,
+                revision,
+                entry.current,
+              );
+            }
+          }
+          await this.recordSpaceState(scope, identifier, state);
+          return state;
+        } finally {
+          for (const entry of retained) this.deviceKeys.release(entry.secret);
+        }
+      },
+    );
+    db.onE2eeReconnect(() => this.reconcileKnownSpaces());
     initialSpacePrerequisites.set(db, async (recipientIds) => {
       await this.prepare();
       await this.requireSpaces().warmInitialRecipients(recipientIds);
@@ -937,13 +1057,34 @@ export class E2ee {
     accountRegistry(this.account); // Reject logout, including during asynchronous preparation.
   }
 
+  /** @internal Does not use raw query rows as authority or change cached bindings. */
+  async rememberRemoteRevocation(): Promise<void> {
+    this.assertOpen();
+    // Do not re-enter enrolment/preparation from its own history prefetch.
+    if (!this.locallyPrepared || !this.approval || !this.contentCache) return;
+    await this.approval.rememberAcceptedRevocation();
+    this.assertOpen();
+    if (this.approval.isKnownRevoked()) await this.contentCache.denyDevice();
+  }
+
+  /** Denial only, without re-entering this lifecycle's preparation promise. */
+  async rememberRemoteSpaceAccessLoss(): Promise<void> {
+    this.assertOpen();
+    if (!this.locallyPrepared || !this.spaceLifecycle || !this.contentCache) return;
+    for (const { scope, identifier } of this.knownSpaces.values()) {
+      const loss = await this.spaceLifecycle.acceptedAccessLoss(scope, identifier);
+      this.assertOpen();
+      if (loss) await this.recordSpaceState(scope, identifier, loss);
+    }
+  }
+
   private async prepare(): Promise<void> {
     this.assertOpen();
     if (this.approval?.isKnownRevoked()) {
       await this.contentCache?.denyDevice();
       throw new E2eeHistoryUnavailable("E2EE device is revoked");
     }
-    if (await this.db.e2eeIsExplicitlyOffline()) {
+    if (await this.db.e2eeIsOfflineForKeys()) {
       throw new E2eeHistoryUnavailable(
         "Online authority is required; private offline keys are content-only",
       );
@@ -953,6 +1094,18 @@ export class E2ee {
       throw error;
     }));
     this.assertOpen();
+  }
+
+  private async needsRetainedKeyPath(allowConnecting: boolean): Promise<boolean> {
+    if (await this.db.e2eeIsOfflineForKeys()) return true;
+    // Only content reads and provisional writes may use an already-prepared
+    // private cache while reconnecting. Authority preparation remains pending.
+    return (
+      allowConnecting &&
+      this.locallyPrepared &&
+      this.contentCache !== undefined &&
+      !this.db.e2eeHasConnectedTransportForKeys()
+    );
   }
 
   private async prepareRetainedContent(): Promise<RetainedContentCache> {

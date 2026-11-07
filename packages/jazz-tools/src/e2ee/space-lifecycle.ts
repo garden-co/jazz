@@ -1501,6 +1501,35 @@ export class Spaces {
     };
   }
 
+  /** Denial-only refresh after an ordinary remote metadata observation.
+   * Reads genuine same-batch coverage and waits for Global, but never opens,
+   * delivers or retains keys. Raw query rows themselves confer no authority.
+   */
+  async acceptedAccessLoss<T, Init>(
+    scope: TableProxy<T, Init>,
+    identifier: string,
+  ): Promise<SpaceState | undefined> {
+    this.assertOpen();
+    const address = await this.address(scope, identifier);
+    const device = await this.loadDevice();
+    try {
+      const snapshot = await this.readAcceptedSnapshot(address, spaceRootId(address));
+      this.assertOpen();
+      if (!snapshot.state.active.has(device.id))
+        return { state: "refused", reason: "device-not-active" };
+      if (!snapshot.roots.rows.length) return { state: "refused", reason: "space-not-accepted" };
+      const state = await this.validate(snapshot, address);
+      this.assertOpen();
+      if (state.sealed) return { state: "refused", reason: "space-sealed" };
+      if (!state.members.has(this.accountId))
+        return { state: "refused", reason: "not-a-space-recipient" };
+      // Positive membership is deliberately not published or cached here.
+      return undefined;
+    } finally {
+      this.requireDevice().release(device);
+    }
+  }
+
   async explain<T, Init>(scope: TableProxy<T, Init>, identifier: string): Promise<SpaceState> {
     const address = await this.address(scope, identifier);
     return this.explainAddress(address);

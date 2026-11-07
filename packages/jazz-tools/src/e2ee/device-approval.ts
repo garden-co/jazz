@@ -88,6 +88,25 @@ export class DeviceApproval {
     return this.knownRevoked;
   }
 
+  private revocationRefresh: Promise<void> | undefined;
+
+  /** Remember only a revocation from a genuine covered, Global-confirmed cut.
+   * Raw Remote query rows are merely the trigger; they are never this proof.
+   * This route creates no challenges, deliveries, retained keys or access grant.
+   */
+  async rememberAcceptedRevocation(): Promise<void> {
+    this.assertOpen();
+    if (!this.device || this.knownRevoked) return;
+    await (this.revocationRefresh ??= (async () => {
+      const observed = await acceptedDeviceTransaction(this.db, (tx) => this.currentSnapshot(tx));
+      const snapshot = await observed.wait();
+      this.assertOpen();
+      if (snapshot.revoked.has(this.deviceId)) this.knownRevoked = true;
+    })().finally(() => {
+      this.revocationRefresh = undefined;
+    }));
+  }
+
   constructor(
     private readonly db: Db,
     private readonly accountId: string,
@@ -743,7 +762,9 @@ export class DeviceApproval {
    * Authority transactions require global acceptance; observations prove only retained history.
    */
   async deviceStates(transaction?: AcceptedDeviceTransactionScope) {
-    this.throwBackgroundError();
+    // A genuine caller-owned accepted snapshot is independent of the background
+    // online responder. Preserve its error for the next explicit device operation.
+    if (!transaction) this.throwBackgroundError();
     const snapshot = await this.currentSnapshot(transaction);
     for (const challenge of transaction ? [] : snapshot.challenges) {
       if (
