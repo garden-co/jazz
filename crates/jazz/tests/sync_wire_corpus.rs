@@ -550,6 +550,7 @@ fn schema_with_copy() -> JazzSchema {
                     .column("body", ColumnType::Bytea)
                     .column("kind", kind())
                     .column("first_owner", ColumnType::Text)
+                    .nullable_column("label", ColumnType::Text)
                     .policies(read_and_allow_all_writes(session_eq("owner", &ME))),
             )
             .build(),
@@ -857,8 +858,9 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     block_on(mallory.insert("notes", note(2, vec![7]), InsertOptions::default())).unwrap();
     pump(&[&mallory, &server, &mallory]);
 
-    // Catalogue with versions and cells: the server admits a version whose
-    // lens copies a column while alice is connected.
+    // Catalogue with versions, cells and defaults: the server admits a
+    // version whose lens copies a column and adds one with a default while
+    // alice is connected.
     let copied = schema_with_copy();
     let lens = MigrationLens::new(
         schema(false).version_id(),
@@ -866,10 +868,16 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
         vec![TableLens {
             source_table: "notes".into(),
             target_table: "notes".into(),
-            ops: vec![LensOp::CopyColumn {
-                from: "owner".into(),
-                to: "first_owner".into(),
-            }],
+            ops: vec![
+                LensOp::CopyColumn {
+                    from: "owner".into(),
+                    to: "first_owner".into(),
+                },
+                LensOp::AddColumn {
+                    column: "label".into(),
+                    default: Value::Nullable(Some(Box::new(Value::String("inbox".into())))),
+                },
+            ],
         }],
     )
     .unwrap();

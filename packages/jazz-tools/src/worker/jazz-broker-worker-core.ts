@@ -29,6 +29,7 @@ import {
   type BrowserSharedWorkerConnectResponse,
   type BrowserSharedWorkerBootstrapCancelRequest,
   type BrowserWorkerInitOptions,
+  BROWSER_STORE_HELD_BY_ANOTHER_SIGN_IN,
 } from "../runtime/native-runtime/browser-worker-protocol.js";
 // Worker failures cross a MessagePort boundary, so retain enough WASM frames to
 // identify the Rust call site before serializing them for the owning tab.
@@ -73,6 +74,8 @@ type TabPeer = {
   transportWaitAbort: AbortController;
   /** True only for a port transferred through authenticated Inspector control. */
   inspectorAttachment: boolean;
+  /** The page lock this tab named, once the worker waits on it (`watchTabLiveness`). */
+  watchedLivenessLock: string | null;
   pendingInspectorBootstraps: Set<() => void>;
   inspectorSubscriptions: Map<number, number>;
   inspectorWrites: Set<TxId>;
@@ -971,10 +974,6 @@ async function connectTab(
     assertAdmission();
     const key = runtimeKey(message.options);
     let context = contexts.get(key);
-    if (context?.idleReleaseTimer) {
-      clearTimeout(context.idleReleaseTimer);
-      context.idleReleaseTimer = null;
-    }
     if (context?.closing) {
       await context.closing;
       assertAdmission();
@@ -990,7 +989,17 @@ async function connectTab(
       throw new Error("incompatible persistent browser telemetry configuration");
     }
     if (context && context.fingerprint !== message.fingerprint) {
-      throw new Error("incompatible persistent browser configuration");
+      throw new Error(
+        differsOnlyInSignIn(context.fingerprint, message.fingerprint)
+          ? BROWSER_STORE_HELD_BY_ANOTHER_SIGN_IN
+          : "incompatible persistent browser configuration",
+      );
+    }
+    // Only an admitted tab keeps an idle context: a refused one must not
+    // cancel the release that lets it in next time.
+    if (context?.idleReleaseTimer) {
+      clearTimeout(context.idleReleaseTimer);
+      context.idleReleaseTimer = null;
     }
     if (!context) {
       context = createContext(key, message.fingerprint, message.options);
@@ -1450,6 +1459,7 @@ function attachTab(
     flushObserved: false,
     transportWaitAbort: new AbortController(),
     inspectorAttachment,
+    watchedLivenessLock: null,
     pendingInspectorBootstraps: new Set(),
     inspectorSubscriptions: new Map(),
     inspectorWrites: new Set(),
@@ -1465,10 +1475,37 @@ function attachTab(
   port.start();
 }
 
+/**
+ * Detach the tab once the browser grants `lock`, which the tab holds for as
+ * long as its page lives: it went away (closed, crashed, discarded) without
+ * a `close`. Its context is then released like a closed tab's, so a tab
+ * waiting for this store under another sign-in gets in. A frozen page still
+ * holds its lock, and the waiting tab reports that after a while.
+ */
+function watchTabLiveness(peer: TabPeer, lock: string): void {
+  const { context, tabId } = peer;
+  const locks = (globalThis.navigator as Navigator | undefined)?.locks;
+  if (!locks || peer.watchedLivenessLock !== null) return;
+  peer.watchedLivenessLock = lock;
+  locks
+    .request(lock, { signal: peer.transportWaitAbort.signal }, () => {
+      if (context.peers.get(tabId) !== peer) return;
+      closeTab(context, tabId);
+      if (context.peers.size === 0 && context.pendingAdmissionTasks === 0)
+        scheduleIdleContextRelease(context);
+    })
+    // Aborted once the tab detached any other way.
+    .catch(() => undefined);
+}
+
 async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortRequest): Promise<void> {
   if (peer.context.peers.get(peer.tabId) !== peer) return;
   // Answer outside runtime, storage and transport queues: a healthy worker
   // can legitimately be waiting indefinitely for an upstream acknowledgement.
+  if (message.type === "liveness-lock") {
+    watchTabLiveness(peer, message.name);
+    return;
+  }
   if (message.type === "runtime-probe") {
     post(peer.port, {
       type: "runtime-pong",
@@ -2320,6 +2357,25 @@ function workerTelemetryCompatible(
     }
   }
   return (current.logLevel ?? DEFAULT_WASM_LOG_LEVEL) === (next.logLevel ?? DEFAULT_WASM_LOG_LEVEL);
+}
+
+/**
+ * Whether two worker fingerprints of one store differ only in who is signed
+ * in (`authClass`, see `createBrowserWorkerFingerprint`). The store is the
+ * account's either way (the storage owner already matched), so the tab only
+ * waits for the store's current sign-in to go.
+ */
+function differsOnlyInSignIn(open: string, requested: string): boolean {
+  try {
+    const { authClass: openAuth, ...openRest } = JSON.parse(open) as Record<string, unknown>;
+    const { authClass: requestedAuth, ...requestedRest } = JSON.parse(requested) as Record<
+      string,
+      unknown
+    >;
+    return openAuth !== requestedAuth && JSON.stringify(openRest) === JSON.stringify(requestedRest);
+  } catch {
+    return false;
+  }
 }
 
 function runtimeKey(options: BrowserWorkerInitOptions): string {

@@ -60,7 +60,10 @@ async function listen(jazz: Jazz, port = 0) {
       server.close(() => resolve());
     }));
   cleanups.push(close);
-  return { origin: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, close };
+  return {
+    origin: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+    close,
+  };
 }
 
 /** Every request and socket to `origin` carries `userId`'s session, as a cookie would. */
@@ -90,7 +93,10 @@ function cookies(origin: string, userId: string | null) {
         jar.socketUser && new URL(url).host === new URL(origin).host
           ? { "x-test-user": jar.socketUser }
           : {};
-      super(url, { ...options, headers: { ...options?.headers, ...headers } } as never);
+      super(url, {
+        ...options,
+        headers: { ...options?.headers, ...headers },
+      } as never);
     }
   } as typeof WebSocket;
   cleanups.push(async () => {
@@ -133,7 +139,12 @@ describe("browser session against the app's backend", () => {
   // them. Until it has answered, the session must not say "signed-out", or
   // every app shows its sign-in screen for a moment on each page load.
   it("opens a signed-in user's session without reporting signed-out first", async () => {
-    const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate,
+    }).ready();
     cleanups.push(() => jazz.close());
     const origin = await serve(jazz);
     signInAs(origin, "alice");
@@ -154,7 +165,12 @@ describe("browser session against the app's backend", () => {
   }, 30_000);
 
   it("opens signed out once the backend says no one is signed in", async () => {
-    const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate,
+    }).ready();
     cleanups.push(() => jazz.close());
     const origin = await serve(jazz);
 
@@ -210,7 +226,10 @@ describe("browser session against the app's backend", () => {
     await session.loginWithBackend();
     const thin = session.getSnapshot().client!;
     expect(isThinDb(thin.db)).toBe(true);
-    expect(thin.session?.identity).toEqual({ issuer: "jazz:backend", subject: "alice" });
+    expect(thin.session?.identity).toEqual({
+      issuer: "jazz:backend",
+      subject: "alice",
+    });
     const owner = thin.session!.user!;
 
     await thin.db.insert(app.todos, { title: "thin", owner }).wait({ tier: "global" });
@@ -219,7 +238,9 @@ describe("browser session against the app's backend", () => {
     await loaderCalled;
     release();
     await expect
-      .poll(() => isThinDb(session.getSnapshot().client!.db), { timeout: 15_000 })
+      .poll(() => isThinDb(session.getSnapshot().client!.db), {
+        timeout: 15_000,
+      })
       .toBe(false);
     const local = session.getSnapshot().client!;
     expect(local.session?.user).toBe(owner);
@@ -234,7 +255,12 @@ describe("browser session against the app's backend", () => {
   // core): the sync server refuses the thin client, which must say so for the
   // session to sign the user in again instead of hanging.
   it("signs a user in again after the backend restarts on an empty store", async () => {
-    const first = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    const first = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate,
+    }).ready();
     cleanups.push(() => first.close());
     const served = await listen(first);
     signInAs(served.origin, "alice");
@@ -257,7 +283,12 @@ describe("browser session against the app's backend", () => {
     // The same backend, restarted on an empty store: alice has no account.
     await first.close();
     await served.close();
-    const second = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    const second = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate,
+    }).ready();
     cleanups.push(() => second.close());
     await listen(second, Number(new URL(served.origin).port));
 
@@ -282,7 +313,12 @@ describe("browser session against the app's backend", () => {
   // A socket refused for a stale cookie while the backend still names the
   // user: the same client reconnects with fresh cookies and reports it.
   it("reports connected again when a refused client reconnects", async () => {
-    const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate,
+    }).ready();
     cleanups.push(() => jazz.close());
     const served = await listen(jazz);
     const jar = cookies(served.origin, "alice");
@@ -347,7 +383,10 @@ describe("browser session against the app's backend", () => {
     await expect
       .poll(() => client.db.getSyncStatus().link, { timeout: 15_000 })
       .toMatchObject({ state: "offline", reason: "auth" });
-    const pending = client.db.insert(app.todos, { title: "while expired", owner });
+    const pending = client.db.insert(app.todos, {
+      title: "while expired",
+      owner,
+    });
     let landed = false;
     void pending.wait({ tier: "global" }).then(() => (landed = true));
     await new Promise((resolve) => setTimeout(resolve, 1_500));
@@ -412,7 +451,10 @@ describe("browser session against the app's backend", () => {
       receive(carrier, piece);
     };
     cleanups.push(async () => void (internals.receive = receive));
-    const pending = client.db.insert(app.todos, { title: "as it expired", owner });
+    const pending = client.db.insert(app.todos, {
+      title: "as it expired",
+      owner,
+    });
     const landed = pending.wait({ tier: "global" }).catch((error: unknown) => error);
     const [id] = [...internals.oneShots].find(([, oneShot]) => oneShot.op.type === "insert")!;
     held = id;
@@ -469,7 +511,10 @@ describe("browser session against the app's backend", () => {
     auth.valid.delete("alice:1");
     const revokedAt = Date.now();
     await expect
-      .poll(() => session.getSnapshot().status, { timeout: 70_000, interval: 250 })
+      .poll(() => session.getSnapshot().status, {
+        timeout: 70_000,
+        interval: 250,
+      })
       .toBe("signed-out");
     // The refusal reaches the watch within the re-check; it confirms after
     // its grace for a cookie the app is refreshing (30s), then once more.
@@ -522,7 +567,12 @@ describe("another user signing in on a local-first browser", () => {
   // open (no sign-out first): her socket now carries his cookie, so the
   // server refuses her client, and the session must still switch to him.
   async function aliceLocalFirst() {
-    const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate,
+    }).ready();
     cleanups.push(() => jazz.close());
     const served = await listen(jazz);
     const jar = cookies(served.origin, "alice");
@@ -535,7 +585,9 @@ describe("another user signing in on a local-first browser", () => {
     cleanups.push(() => session.close());
     await session.loginWithBackend();
     await expect
-      .poll(() => isThinDb(session.getSnapshot().client!.db), { timeout: 15_000 })
+      .poll(() => isThinDb(session.getSnapshot().client!.db), {
+        timeout: 15_000,
+      })
       .toBe(false);
     const alice = session.getSnapshot().client!;
     const owner = alice.session!.user!;
@@ -554,7 +606,10 @@ describe("another user signing in on a local-first browser", () => {
     await session.reauthenticate();
     const snapshot = session.getSnapshot();
     expect(snapshot.status).toBe("ready");
-    expect(snapshot.client?.session?.identity).toEqual({ issuer: "jazz:backend", subject: "bob" });
+    expect(snapshot.client?.session?.identity).toEqual({
+      issuer: "jazz:backend",
+      subject: "bob",
+    });
     expect(snapshot.client?.session?.user).not.toBe(alice.session!.user);
     // Nothing of Alice's was left behind, so there is nothing to warn about.
     expect(warned).not.toHaveBeenCalled();
@@ -573,11 +628,81 @@ describe("another user signing in on a local-first browser", () => {
     await session.reauthenticate();
     const snapshot = session.getSnapshot();
     expect(snapshot.status).toBe("ready");
-    expect(snapshot.client?.session?.identity).toEqual({ issuer: "jazz:backend", subject: "bob" });
+    expect(snapshot.client?.session?.identity).toEqual({
+      issuer: "jazz:backend",
+      subject: "bob",
+    });
     expect(warned).toHaveBeenCalledWith(
       expect.stringMatching(/dropped 1 write\(s\) the server refused/),
       expect.anything(),
     );
+  }, 60_000);
+});
+
+describe("a shared device (clearOnSignOut)", () => {
+  // Kim starts as a guest, signs up (the backend links her guest), and signs
+  // out. Nothing left on the device may reopen her account: not her replica,
+  // and not her guest's signing root either.
+  it("leaves no root that reopens a guest who signed up and signed out", async () => {
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate,
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const origin = await serve(jazz);
+    // A browser page, no one signed in at the backend yet.
+    const jar = cookies(origin, null);
+    let stored: string | null = null;
+    const store: AccountStore = {
+      read: async () => stored,
+      update: async (transform) => void (stored = transform(stored)),
+    };
+    const session = await createJazzClient({
+      serverUrl: `${origin}/jazz`,
+      store,
+      driver: { type: "memory" },
+      initial: "local-first",
+      clearOnSignOut: true,
+      client: async () => ({ createClient: createLocalFirstDb }),
+    });
+    cleanups.push(() => session.close());
+    const guest = session.getSnapshot().client!;
+    const account = guest.session!.user!;
+    const [root] = JSON.parse(stored!).roots;
+    expect(root).toEqual(expect.any(String));
+
+    // The app's sign-up created "kim"; the backend now names her.
+    jar.user = jar.socketUser = "kim";
+    await session.linkWithBackend();
+    expect(session.getSnapshot().client!.session!.user).toBe(account);
+    await session
+      .getSnapshot()
+      .client!.db.insert(app.todos, {
+        title: "kim-private-note",
+        owner: account,
+      })
+      .wait({ tier: "global" });
+    jar.user = jar.socketUser = null;
+    await session.logout();
+    expect(session.getSnapshot().status).toBe("signed-out");
+    expect(JSON.parse(stored!)).toMatchObject({ roots: [], selected: null });
+    await session.close();
+
+    // The next person on the device continues as a guest of their own, and
+    // nothing on the device holds Kim's root to reopen her with.
+    const next = await createJazzClient({
+      serverUrl: `${origin}/jazz`,
+      store,
+      driver: { type: "memory" },
+      initial: "local-first",
+      clearOnSignOut: true,
+      client: async () => ({ createClient: createLocalFirstDb }),
+    });
+    cleanups.push(() => next.close());
+    expect(next.getSnapshot().client!.session!.user).not.toBe(account);
+    expect(stored).not.toContain(root);
   }, 60_000);
 });
 
@@ -586,7 +711,12 @@ describe("signing out with writes the server won't take", () => {
   // on this device: the sign-out must go through, or the app is stuck on an
   // error it can't leave, through reloads too.
   it("signs out when the backend does, past a write the server won't take", async () => {
-    const jazz = await createJazz({ app, permissions, store: memory(), authenticate }).ready();
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate,
+    }).ready();
     cleanups.push(() => jazz.close());
     const served = await listen(jazz);
     const { origin } = served;
@@ -600,7 +730,9 @@ describe("signing out with writes the server won't take", () => {
     cleanups.push(() => session.close());
     await session.loginWithBackend();
     await expect
-      .poll(() => isThinDb(session.getSnapshot().client!.db), { timeout: 15_000 })
+      .poll(() => isThinDb(session.getSnapshot().client!.db), {
+        timeout: 15_000,
+      })
       .toBe(false);
     const local = session.getSnapshot().client!;
     const owner = local.session!.user!;

@@ -68,6 +68,19 @@ export interface TestJazz {
    */
   signOut(userUrl: string): boolean;
   /**
+   * A new origin of the app where no one is signed in yet, as a visitor's own
+   * browser: its `/jazz` endpoint. Sign them up there with {@link signUp}.
+   */
+  visitor(): Promise<string>;
+  /**
+   * Sign `userId` in on the origin `originUrl` (from {@link visitor}), as the
+   * app's own sign-up sets their cookie: the app's `authenticate` names them
+   * there from now on. No Jazz account is made for them: a guest who signs
+   * up there keeps theirs with `linkWithBackend()`. Returns false when
+   * `originUrl` is not one of this app's origins.
+   */
+  signUp(originUrl: string, userId: string, claims?: Record<string, unknown>): boolean;
+  /**
    * Deploy a new version of the app, as a real redeploy does: publish it to
    * the core (with its migration), then restart the app's Jazz on it. Every
    * origin keeps its port, so clients reconnect where they were.
@@ -118,6 +131,8 @@ export async function startTestJazz(options: StartTestJazzOptions): Promise<Test
   const users = new Map<string, { userId: string; claims?: Record<string, unknown> }>();
   // Who each bearer from `bearer()` is.
   const bearers = new Map<string, { userId: string; claims?: Record<string, unknown> }>();
+  // Origins from `visitor()`, where no one signed in yet.
+  const visitors = new Set<string>();
   const userFor = (request: Request) => {
     const authorization = request.headers.get("authorization");
     const user = authorization?.startsWith("Bearer ")
@@ -193,6 +208,17 @@ export async function startTestJazz(options: StartTestJazzOptions): Promise<Test
     },
     signOut(userUrl) {
       return users.delete(new URL(userUrl).host);
+    },
+    async visitor() {
+      const host = await serve();
+      visitors.add(host);
+      return `http://${host}${jazz.basePath}`;
+    },
+    signUp(originUrl, userId, claims) {
+      const host = new URL(originUrl).host;
+      if (!visitors.has(host) && !users.has(host)) return false;
+      users.set(host, { userId, claims });
+      return true;
     },
     async as(userId, claims) {
       const host = await serve();
