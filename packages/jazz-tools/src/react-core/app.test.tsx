@@ -1,7 +1,7 @@
 import { StrictMode, Suspense, useEffect, useSyncExternalStore } from "react";
 import { act, cleanup, render, waitFor } from "@testing-library/react";
 import { renderToString } from "react-dom/server";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, expect, it, onTestFinished, vi } from "vitest";
 import { AccountManager } from "../accounts/state.js";
 import { createJazzSessionOwner } from "../session/state.js";
 import { ConfiguredJazzAppProvider, useJazzAuth, type JazzAuthState } from "./app.js";
@@ -134,6 +134,23 @@ it("keeps auth fallback mounted to acknowledge a backend-driven sign-out", async
   });
   await waitFor(() => expect(view.container.textContent).toBe("signed-out"));
   expect(client.shutdown).toHaveBeenCalled();
+});
+it("logs a startup failure even when the app renders no error UI", async () => {
+  const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+  onTestFinished(() => consoleError.mockRestore());
+  const create = vi.fn().mockRejectedValueOnce(new Error("no native relay"));
+  const view = render(
+    <ConfiguredJazzAppProvider config={{}} createJazzClient={create}>
+      <Status />
+    </ConfiguredJazzAppProvider>,
+  );
+  await waitFor(() =>
+    expect(consoleError).toHaveBeenCalledWith(
+      "Jazz could not start:",
+      expect.objectContaining({ message: "no native relay" }),
+    ),
+  );
+  expect(view.container.textContent).toBe("");
 });
 it("exposes safe retry in custom initialization error UI", async () => {
   const { factory } = fixture();
