@@ -4,6 +4,7 @@ import { clientScope } from "../runtime/client-scope.js";
 import { prepareAccountManager, type AccountStore } from "../accounts/persistence.js";
 import type { AppBearer } from "../accounts/enrollment.js";
 import { formatAuthSecret, parseAuthSecret } from "../runtime/auth-secret-codec.js";
+import { importNativeRelay } from "./native-relay.js";
 
 export interface AccountManagerConfig {
   /**
@@ -32,7 +33,7 @@ export interface AccountManagerConfig {
 /** Prepare native crypto and retained selection without opening a Jazz context. */
 export async function createAccountManager(config: AccountManagerConfig) {
   const registry = clientRegistryUrl(config);
-  const native = await import("jazz-rn/relay");
+  const native = await importNativeRelay();
   const crypto = native.installNativeForegroundRuntime();
   const generateSecret = crypto.accountSecret;
   const mintToken = crypto.mintLocalFirstToken;
