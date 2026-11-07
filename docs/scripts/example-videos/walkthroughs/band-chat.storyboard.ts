@@ -5,7 +5,7 @@ const address = "bandchat.example.com";
 export default {
   id: "band-chat",
   summary:
-    "A guest asks to join a room and the creator admits them; the room, its history and an attached stage plot appear in his list, and replies arrive live in both windows.",
+    "A guest asks to join a room and the creator admits them; the room, its history and an attached stage plot appear in his list, replies arrive live, and a message he sends with the Wi-Fi off arrives once it's back.",
   devices: {
     a: { name: "Olive's laptop", address },
     b: { name: "Gus's laptop", address, color: "#ea580c" },
@@ -57,6 +57,17 @@ export default {
     { see: "I'll bring the spare snare", on: "a" },
     { poster: true },
     { wait: 1600 },
+    { caption: "Gus's Wi-Fi drops…" },
+    { wifi: "off", on: "b" },
+    { caption: "…he keeps chatting: the message commits on his laptop" },
+    { do: "send", on: "b", args: ["Running 10 min late, start without me"] },
+    { wait: 1200 },
+    { notSee: "Running 10 min late", on: "a", because: "Gus's Wi-Fi is off" },
+    { caption: "Olive doesn't have it yet", hold: 1800 },
+    { caption: "Wi-Fi back on…" },
+    { wifi: "on", on: "b" },
+    { see: "Running 10 min late", on: "a" },
+    { caption: "…and it arrives in Olive's room", hold: 2400 },
     { caption: "" },
   ],
 } satisfies Storyboard;
