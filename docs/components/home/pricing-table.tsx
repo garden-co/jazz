@@ -101,7 +101,7 @@ const tiers: Tier[] = [
       <Button
         label="Schedule Call"
         variant="primary"
-        size="lg"
+        size="sm"
         className="home-pricing-cta"
         href="https://cal.com/anselm-io/cloud-pro-intro"
       />
@@ -121,7 +121,7 @@ export function PricingTable() {
           <div className="home-pricing-cell">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <p className="home-pricing-price">{tier.price}</p>
-              {tier.action}
+              {tier.action ? <div className="home-pricing-action">{tier.action}</div> : null}
             </div>
             <div>{tier.priceDetail}</div>
           </div>

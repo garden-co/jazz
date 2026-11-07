@@ -1253,11 +1253,15 @@ nav.astryx-side-nav .astryx-side-nav-item {
   letter-spacing: -0.02em;
   margin-bottom: var(--spacing-2);
 }
-/* The call button stands as tall as the price beside it. */
+/* The call button spans the capitals of the price beside it, from the
+   top of its "L" to the baseline: the small button is the price's cap
+   height, and the same bottom margin centers it on the price's line. */
 .home-pricing .home-pricing-cta {
-  min-height: 2.875rem;
-  padding-inline: var(--spacing-5);
-  font-size: 1rem;
+  padding-inline: var(--spacing-4);
+}
+.home-pricing-action {
+  display: flex;
+  margin-bottom: var(--spacing-2);
 }
 .home-pricing-muted {
   color: var(--color-text-secondary);
