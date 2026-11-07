@@ -26,3 +26,8 @@ snapshot consistency; internal retries preserve the original caller context.
 Initial prepared writes and their exclusive retries share the originating
 per-Db access context, including its session and attribution references, without
 restoring the removed ambient operation-context wrappers.
+
+Explicit transactions declare a legacy encrypted scope before their first write
+with `tx.prepareEncryptedScope(scopeTable, { identifier: scopeId })`. The exact
+same-batch absence and recipient predicates remain authoritative; undeclared or
+mismatched scopes refuse rather than reading authority after staged content.

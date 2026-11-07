@@ -1,3 +1,4 @@
+import { appMigrations } from "../testing/client-migrations.js";
 import { frontE2eeCore, redeployE2eeApp } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
@@ -25,12 +26,15 @@ it("reads and searches existing ciphertext after renaming its column", async () 
       .table({ projectId: s.uuid(), body: s.string() }, { project: s.rel("projects", "projectId") })
       .encrypted({ space: "projectId", columns: ["body"], indexes: { body: "equality" } }),
   };
-  const oldApp = s.defineApp(before, { migrations: "none" });
-  const newApp = s.defineApp(after, { migrations: "none" });
+  const oldApp = s.defineApp(before, { migrations: await appMigrations(before) });
+
   const migration = m.defineMigration({
     from: before,
     to: after,
     migrate: { notes: { body: m.renameFrom("title") } },
+  });
+  const newApp = s.defineApp(after, {
+    migrations: await appMigrations(oldApp, { to: after, migration: migration }),
   });
   const permissions = (app: typeof oldApp | typeof newApp) =>
     definePermissions(app, ({ policy, session }) => {
@@ -133,8 +137,8 @@ it.each(["partial", "full"] as const)(
       .encrypted({ space: "projectId", columns: ["title"], indexes: { title: "equality" } });
     const before = { projects, notes: encrypted };
     const after = { ...before, messages: encrypted };
-    const oldApp = s.defineApp(before, { migrations: "none" });
-    const newApp = s.defineApp(after, { migrations: "none" });
+    const oldApp = s.defineApp(before, { migrations: await appMigrations(before) });
+
     const migration =
       witness === "partial"
         ? m.defineMigration({
@@ -147,6 +151,9 @@ it.each(["partial", "full"] as const)(
             to: after,
             createTables: { messages: true },
           });
+    const newApp = s.defineApp(after, {
+      migrations: await appMigrations(oldApp, { to: after, migration: migration }),
+    });
     const permissions = (app: typeof newApp) =>
       definePermissions(app, ({ policy, session }) => {
         policy.projects.allowRead.always();
@@ -285,8 +292,8 @@ it("reads and searches existing ciphertext after renaming its scope and referenc
       )
       .encrypted({ space: "projectId", columns: ["title"], indexes: { title: "equality" } }),
   };
-  const oldApp = s.defineApp(before, { migrations: "none" });
-  const newApp = s.defineApp(after, { migrations: "none" });
+  const oldApp = s.defineApp(before, { migrations: await appMigrations(before) });
+
   const migration = m.defineMigration({
     from: before,
     to: after,
@@ -294,6 +301,9 @@ it("reads and searches existing ciphertext after renaming its scope and referenc
       workspaces: m.renameTableFrom("projects"),
       records: m.renameTableFrom("notes"),
     },
+  });
+  const newApp = s.defineApp(after, {
+    migrations: await appMigrations(oldApp, { to: after, migration: migration }),
   });
   const oldPermissions = definePermissions(oldApp, ({ policy, session }) => {
     policy.projects.allowRead.always();

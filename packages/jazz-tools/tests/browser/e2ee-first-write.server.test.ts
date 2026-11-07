@@ -1,3 +1,4 @@
+import { appMigrations } from "../../src/testing/client-migrations.js";
 import { expect, it } from "vitest";
 import { schema as s } from "../../src/schema-namespace.js";
 import { migration as m } from "../../src/migration-namespace.js";
@@ -16,8 +17,11 @@ it("initialises a legacy space in the browser without replacing a hidden existin
       .table({ projectId: s.uuid(), body: s.string() }, { project: s.rel("projects", "projectId") })
       .encrypted({ space: "projectId", columns: ["body"] }),
   };
-  const oldApp = s.defineApp(before, { migrations: "none" });
-  const app = s.defineApp(after, { migrations: "none" });
+  const migration = m.defineMigration({ from: before, to: after, createTables: { notes: true } });
+  const oldApp = s.defineApp(before, { migrations: await appMigrations(before) });
+  const app = s.defineApp(after, {
+    migrations: await appMigrations(before, { to: after, migration }),
+  });
   const oldPermissions = definePermissions(oldApp, ({ policy }) => {
     policy.projects.allowRead.always();
     policy.projects.allowInsert.always();
@@ -52,7 +56,7 @@ it("initialises a legacy space in the browser without replacing a hidden existin
       ...jazzCore(server),
       schema: app,
       permissions,
-      migration: m.defineMigration({ from: before, to: after, createTables: { notes: true } }),
+      migration,
     });
     server = await startJazzApp(server, { schema: app, permissions });
     for (const key of ["writer", "outsider"]) {

@@ -2245,6 +2245,10 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
    * physical writes. Omit initialRecipients for the creator default; an explicit
    * empty list is rejected. Use the same exact recipients on the later scope insert
    * or upsert. A transaction cannot widen or replace its declared recipient set.
+   * For a legacy scope row, also supply its exact existing `identifier` before
+   * any write: `tx.prepareEncryptedScope(app.projects, { identifier: project.id })`.
+   * This captures that scope's genuine same-cut absence and recipient predicates;
+   * it never treats an omitted identifier as permission to initialise any row.
    * Ordinary transactions without this declaration perform no E2EE preparation.
    *
    * @example
@@ -2257,21 +2261,27 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
    */
   prepareEncryptedScope<T, Init>(
     table: TableProxy<T, Init>,
-    options?: { initialRecipients?: readonly string[] },
+    options?: { initialRecipients?: readonly string[]; identifier?: string },
   ): void {
     if (!encryptedSchemas.get(table._schema)?.scopes.has(table._table))
       throw new Error("prepareEncryptedScope requires an encryption scope table");
-    this.prepareScopeCreation(table, scopeRecipients(table, options));
+    this.prepareScopeCreation(table, scopeRecipients(table, options), options?.identifier);
   }
 
   private prepareScopeCreation<T, Init>(
     table: TableProxy<T, Init>,
     recipients?: readonly string[],
+    legacyIdentifier?: string,
   ): void {
     if (this.kind !== "serializable" || !this.e2ee)
       throw new Error("E2EE scope creation requires an authenticated exclusive transaction");
     this.bindTable(table);
-    registerInitialSpaceAuthority(this.e2ee.db, this as Transaction<"serializable">, recipients);
+    registerInitialSpaceAuthority(
+      this.e2ee.db,
+      this as Transaction<"serializable">,
+      recipients,
+      legacyIdentifier === undefined ? undefined : { scope: table, identifier: legacyIdentifier },
+    );
     // Commit inspects this synchronously, before asynchronous preparation drains.
     initialisingTransactions.add(this);
   }
@@ -2546,6 +2556,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
         if (
           !(await prepareMissingSpaceWrite(
             db,
+            this.kind === "serializable" ? (this as Transaction<"serializable">) : undefined,
             prepared,
             scope,
             identifier,

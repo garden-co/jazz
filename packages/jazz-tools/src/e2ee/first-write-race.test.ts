@@ -1,3 +1,4 @@
+import { appMigrations } from "../testing/client-migrations.js";
 import { frontE2eeCore, redeployE2eeApp } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
@@ -24,8 +25,12 @@ it("accepts only one simultaneous first encrypted writer even when root updates 
       .table({ projectId: s.uuid(), body: s.string() }, { project: s.rel("projects", "projectId") })
       .encrypted({ space: "projectId", columns: ["body"] }),
   };
-  const oldApp = s.defineApp(before, { migrations: "none" });
-  const app = s.defineApp(after, { migrations: "none" });
+  const migration = m.defineMigration({ from: before, to: after, createTables: { notes: true } });
+  const oldApp = s.defineApp(before, { migrations: await appMigrations(before) });
+
+  const app = s.defineApp(after, {
+    migrations: await appMigrations(oldApp, { to: after, migration: migration }),
+  });
   const oldPermissions = definePermissions(oldApp, ({ policy }) => {
     policy.projects.allowRead.always();
     policy.projects.allowInsert.always();
@@ -63,7 +68,7 @@ it("accepts only one simultaneous first encrypted writer even when root updates 
       ...target,
       schema: app,
       permissions,
-      migration: m.defineMigration({ from: before, to: after, createTables: { notes: true } }),
+      migration,
     });
     const keys = await createBrowserKeyEnvelope();
     const accounts = await Promise.all([

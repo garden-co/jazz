@@ -1,3 +1,4 @@
+import { appMigrations } from "../testing/client-migrations.js";
 import { frontE2eeCore, redeployE2eeApp } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
@@ -26,12 +27,15 @@ it("converts encrypted data to a new table and space with an equality index", as
       )
       .encrypted({ space: "projectId", columns: ["title"], indexes: { title: "equality" } }),
   };
-  const oldApp = s.defineApp(before, { migrations: "none" });
-  const newApp = s.defineApp(after, { migrations: "none" });
+  const oldApp = s.defineApp(before, { migrations: await appMigrations(before) });
+
   const migration = m.defineMigration({
     from: before,
     to: after,
     createTables: { indexedNotes: true },
+  });
+  const newApp = s.defineApp(after, {
+    migrations: await appMigrations(oldApp, { to: after, migration: migration }),
   });
   const oldPermissions = definePermissions(oldApp, ({ policy, session }) => {
     policy.projects.allowRead.where({ "$createdBy.account": session.user.account });
@@ -145,19 +149,30 @@ it("converts plaintext to indexed ciphertext, then exports it without changing t
       { project: s.rel("projects", "projectId") },
     ),
   };
-  const exportApp = s.defineApp(exported, { migrations: "none" });
+
   const exportMigration = m.defineMigration({
     from: after,
     to: exported,
     createTables: { exportedNotes: true },
   });
+
+  const oldApp = s.defineApp(before, { migrations: await appMigrations(before) });
+
+  const migration = m.defineMigration({ from: before, to: after, createTables: { notes: true } });
+  const newApp = s.defineApp(after, {
+    migrations: await appMigrations(oldApp, { to: after, migration: migration }),
+  });
+  const exportApp = s.defineApp(exported, {
+    migrations: await appMigrations(
+      oldApp,
+      { to: after, migration: migration },
+      { to: exported, migration: exportMigration },
+    ),
+  });
   const exportPermissions = definePermissions(exportApp, ({ policy, session }) => {
     policy.exportedNotes.allowRead.where({ "$createdBy.account": session.user.account });
     policy.exportedNotes.allowInsert.where({ "$createdBy.account": session.user.account });
   });
-  const oldApp = s.defineApp(before, { migrations: "none" });
-  const newApp = s.defineApp(after, { migrations: "none" });
-  const migration = m.defineMigration({ from: before, to: after, createTables: { notes: true } });
   const oldPermissions = definePermissions(oldApp, ({ policy, session }) => {
     policy.projects.allowRead.always();
     policy.projects.allowInsert.where({ "$createdBy.account": session.user.account });

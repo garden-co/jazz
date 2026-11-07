@@ -8,7 +8,7 @@ import { deploy, startLocalJazzServer } from "../testing/index.js";
 import { createJazzSession } from "./create-jazz-session.js";
 
 it("opens a persistent transaction before its first read, without E2EE", async () => {
-  const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) });
+  const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) }, { migrations: "none" });
   const permissions = definePermissions(app, ({ policy }) => {
     policy.notes.allowRead.always();
   });

@@ -1,3 +1,4 @@
+import { appMigrations } from "../testing/client-migrations.js";
 import { frontE2eeCore, redeployE2eeApp } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
@@ -13,6 +14,8 @@ it.each([
   "insert",
   "upsert",
   "serializable",
+  "serializable-undeclared",
+  "serializable-wrong-id",
   "mergeable",
   "deny-data",
   "deny-root",
@@ -34,12 +37,14 @@ it.each([
         )
         .encrypted({ space: "projectId", columns: ["body"] }),
     };
-    const oldApp = s.defineApp(before, { migrations: "none" });
-    const app = s.defineApp(after, { migrations: "none" });
+    const oldApp = s.defineApp(before, { migrations: await appMigrations(before) });
     const migration = m.defineMigration({
       from: before,
       to: after,
       createTables: { notes: true, events: true },
+    });
+    const app = s.defineApp(after, {
+      migrations: await appMigrations(before, { to: after, migration }),
     });
     const oldPermissions = definePermissions(oldApp, ({ policy }) => {
       policy.projects.allowRead.always();
@@ -112,11 +117,13 @@ it.each([
       const data = { projectId: project.id, body: "Original value" };
       let noteId: string;
       let completed: Promise<unknown>;
-      if (mode === "serializable" || mode === "mergeable") {
+      if (mode.startsWith("serializable") || mode === "mergeable") {
         const tx =
-          mode === "serializable"
-            ? writer.beginSerializableTransaction()
-            : writer.beginTransaction();
+          mode === "mergeable" ? writer.beginTransaction() : writer.beginSerializableTransaction();
+        if (mode === "serializable")
+          tx.prepareEncryptedScope(app.projects, { identifier: project.id });
+        if (mode === "serializable-wrong-id")
+          tx.prepareEncryptedScope(app.projects, { identifier: crypto.randomUUID() });
         tx.insert(app.events, { message: "Same transaction" });
         noteId = tx.insert(app.notes, data).id;
         completed = tx.commit().wait({ tier: "local" });
@@ -130,6 +137,18 @@ it.each([
       }
       // A deferred retry must retain the original values and provisional ID.
       data.body = "Changed after the mutation returned";
+      if (mode === "serializable-undeclared" || mode === "serializable-wrong-id") {
+        await expect(completed).rejects.toMatchObject({ code: "key-unavailable" });
+        await expect(completed).rejects.toThrow(
+          "prepareEncryptedScope(scopeTable, { identifier: scopeId })",
+        );
+        expect(await writer.all(app.notes.select("id"), { tier: "remote" })).toEqual([]);
+        expect(await writer.all(app.events, { tier: "remote" })).toEqual([]);
+        expect(await writer.all(app.__e2ee_spaces, { tier: "remote" })).toEqual([]);
+        expect(await writer.all(app.__e2ee_space_grants, { tier: "remote" })).toEqual([]);
+        expect(await writer.all(app.__e2ee_space_deliveries, { tier: "remote" })).toEqual([]);
+        return;
+      }
       if (mode === "mergeable" || mode.startsWith("deny-") || mode === "crypto-error") {
         if (mode === "mergeable")
           await expect(completed).rejects.toThrow("beginSerializableTransaction()");

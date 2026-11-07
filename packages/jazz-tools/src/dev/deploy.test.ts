@@ -173,11 +173,18 @@ it("preserves bigint and byte defaults in the deployment JSON", async () => {
 it("keeps a single historical migration separate from the deployment head", async () => {
   const old = { notes: s.table({ title: s.string() }, {}) };
   const middle = { notes: s.table({ title: s.string(), a: s.string() }, {}) };
-  const target = s.defineApp({
-    notes: s.table({ title: s.string(), a: s.string(), b: s.string() }, {}),
-  });
+  const target = s.defineApp(
+    {
+      notes: s.table({ title: s.string(), a: s.string(), b: s.string() }, {}),
+    },
+    { migrations: "none" },
+  );
   const hashes = await Promise.all(
-    [s.defineApp(old), s.defineApp(middle), target].map((app) => computeSchemaHash(app.wasmSchema)),
+    [
+      s.defineApp(old, { migrations: "none" }),
+      s.defineApp(middle, { migrations: "none" }),
+      target,
+    ].map((app) => computeSchemaHash(app.wasmSchema)),
   );
   vi.stubGlobal(
     "fetch",
@@ -209,9 +216,12 @@ it.each([false, true])(
   async (explicit) => {
     const common = s.table({ title: s.string() }, {});
     const added = s.table({ value: s.string() }, {});
-    const first = s.defineApp({ common, first: common });
-    const second = s.defineApp({ common, second: common });
-    const target = s.defineApp({ common, first: common, second: common, added });
+    const first = s.defineApp({ common, first: common }, { migrations: "none" });
+    const second = s.defineApp({ common, second: common }, { migrations: "none" });
+    const target = s.defineApp(
+      { common, first: common, second: common, added },
+      { migrations: "none" },
+    );
     const [fromHash, otherHash, toHash] = await Promise.all(
       [first, second, target].map((app) => computeSchemaHash(app.wasmSchema)),
     );
