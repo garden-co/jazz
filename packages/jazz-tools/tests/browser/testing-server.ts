@@ -75,6 +75,33 @@ export function signOutOfJazzApp(app: JazzServerInfo, userUrl: string): Promise<
 }
 
 /**
+ * A new origin of the app backend `app` (from {@link startJazzApp}) where no
+ * one is signed in yet, as a visitor's browser: its `/jazz` URL. A guest
+ * there signs up with {@link signUpAtJazzApp}.
+ */
+export function jazzAppVisitor(app: JazzServerInfo): Promise<string> {
+  const visitor = jazzServerBrowserCommands().jazzAppVisitor;
+  if (!visitor)
+    throw new Error("This browser test config does not register the jazzAppVisitor command");
+  return visitor(app.serverUrl);
+}
+
+/**
+ * Sign `userId` up on `originUrl` (from {@link jazzAppVisitor}), as the app's
+ * own sign-up sets their cookie. No Jazz account is made for them.
+ */
+export function signUpAtJazzApp(
+  app: JazzServerInfo,
+  originUrl: string,
+  userId: string,
+): Promise<void> {
+  const signUp = jazzServerBrowserCommands().jazzAppSignUp;
+  if (!signUp)
+    throw new Error("This browser test config does not register the jazzAppSignUp command");
+  return signUp(app.serverUrl, originUrl, userId);
+}
+
+/**
  * A `fetch` for an account manager's sign-in requests to a test app backend.
  * The page's origin is not the backend's and the backend answers no CORS (an
  * app serves its backend on its own origin), so Node sends them.

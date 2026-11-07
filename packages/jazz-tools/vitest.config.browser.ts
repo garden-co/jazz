@@ -24,6 +24,8 @@ import {
   jazzAppFront,
   jazzAppUser,
   jazzAppSignOut,
+  jazzAppVisitor,
+  jazzAppSignUp,
   jazzAppRequest,
   jazzServerInfo,
   stopJazzServerByUrl,
@@ -34,6 +36,14 @@ import {
   downJazzServerTransport,
   upJazzServerTransport,
 } from "./tests/browser/testing-server-node.js";
+import {
+  closeSessionTab,
+  holdSessionTabBackend,
+  insertInSessionTab,
+  openSessionTab,
+  sessionTabState,
+  crashSessionTab,
+} from "./tests/browser/session-tab-node.js";
 import {
   closeRemoteBrowserDb,
   createRemoteBrowserDb,
@@ -236,6 +246,16 @@ export default defineConfig({
         jazzAppUser: async (_context, frontUrl, userId, claims) =>
           jazzAppUser(frontUrl, userId, claims),
         jazzAppSignOut: async (_context, frontUrl, userUrl) => jazzAppSignOut(frontUrl, userUrl),
+        jazzAppVisitor: async (_context, frontUrl) => jazzAppVisitor(frontUrl),
+        sessionTabOpen: async ({ context, page }, id, serverUrl, options) =>
+          openSessionTab(context, page, id, serverUrl, options),
+        sessionTabState: async (_context, id) => sessionTabState(id),
+        sessionTabInsert: async (_context, id, title) => insertInSessionTab(id, title),
+        sessionTabHoldBackend: async (_context, id, hold) => holdSessionTabBackend(id, hold),
+        sessionTabClose: async (_context, id) => closeSessionTab(id),
+        sessionTabCrash: async (_context, id) => crashSessionTab(id),
+        jazzAppSignUp: async (_context, frontUrl, originUrl, userId) =>
+          jazzAppSignUp(frontUrl, originUrl, userId),
         jazzAppRequest: async (_context, url, init) => jazzAppRequest(url, init),
         jazzServerStop: async (_context, serverUrl) => stopJazzServerByUrl(serverUrl),
         jazzServerTransportControlCreate: async (_context, serverUrl) =>
