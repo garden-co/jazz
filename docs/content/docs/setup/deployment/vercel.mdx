@@ -112,8 +112,8 @@ as for [your own server](/docs/setup/deployment/own-server#large-values).
 Each Blob store or bucket serves one Vercel environment. A store you connect spans every
 environment unless you limit it, so create one store per environment, connect each to its own
 environment only, and enable OIDC for each environment in the project's settings. A store created
-through the API or CLI is connected to production, preview and development alike; limit it in the
-store's settings in the dashboard. A core given another environment's store refuses to start, for
+through the API or CLI is connected to production, preview and development alike, and a second
+one fails with `project_env_var_not_unique`; connect and limit stores in the dashboard instead. A core given another environment's store refuses to start, for
 example "Blob store … serves the production environment, not preview; connect a separate Blob store
 to each environment". Both `vercelBlob()` and `s3()` also take a `prefix`, by default
 `jazz/<store id>/`.
@@ -122,6 +122,12 @@ Where large values go is a one-way choice. A core that started on SQLite can mov
 or S3 later: connect a store and redeploy. Every other change, including disconnecting or swapping
 the Blob store, moving between Vercel Blob and S3, or moving back to SQLite, is not supported yet
 and the core refuses to start.
+
+Upload files from the browser with `db.insertStreaming(..., file.stream())`, which goes through
+`/jazz` (see [Uploading and downloading files](/docs/writing/writing-data#uploading-and-downloading-files)),
+not through a route of your own: Vercel refuses a function request body over 4.5 MB with
+`413 FUNCTION_PAYLOAD_TOO_LARGE`, so an upload route that passes `request.body` to
+`insertStreaming` works locally and fails on Vercel. Downloads through your own route are fine.
 
 History keeps every version of a row, so deleting rows doesn't free their large values, and there
 is no way to erase them yet. Expect blob storage to only grow.
@@ -137,6 +143,8 @@ Only production and preview deployments use the Sandbox: `next dev`, `vercel dev
 environment pulled with `vercel env pull` all run against a SQLite file on your machine. Pass `local` to
 choose a different one, such as `vercel({ local: sqlite({ path: ".jazz/dev" }) })` to keep data you
 already have.
+
+Add `.jazz/` to `.gitignore`.
 
 Use `vercel()` in development too, rather than switching to `sqlite()` yourself: `sqlite()` refuses
 to start on Vercel, which has no lasting disk.
@@ -161,7 +169,8 @@ All options are optional.
 | `local`          | `sqlite({ path: ".jazz/local" })`                                     | The store used outside Vercel                                    |
 
 The default `name` uses Vercel's system environment variables, which are exposed by default. If
-they aren't, `vercel()` throws and asks you to pass `name`. It also throws for a preview with no
+they aren't, `vercel()` throws and asks you to pass `name`. While `vercel()` throws, the browser
+stays on its loading state, so check the function logs when a deployment never finishes loading. It also throws for a preview with no
 Git branch, such as a deploy through the Vercel API or from the CLI outside a Git checkout: pass
 `name` to give such previews a core of their own.
 
@@ -178,7 +187,8 @@ app's core is refused.
   (`jazz-<VERCEL_PROJECT_ID>-preview-<branch>-<hash>`). Nothing cleans up the Sandboxes and Drives
   of merged or deleted branches yet; delete them in the Vercel dashboard.
 - The first request in an environment takes longer: it creates the Sandbox and downloads the Jazz
-  server onto the Drive.
+  server onto the Drive. Vercel's own checks of a new deployment can make that first request,
+  or wake a stopped Sandbox, so the cold start may already be over when you first open the page.
 - The Sandbox stops after 5 minutes with no requests and no connected clients; a connected
   client keeps it awake, even when idle. The next request wakes it, which took 0.6 to 1 s in our
   benchmarks and 4.2 s on a real project; requests after the wake took about 0.45 s.

@@ -224,6 +224,49 @@ await db.transaction(async (tx) => {
 Only the pages a diff touches are rewritten, so streaming many small appends
 into a long value stays cheap however long it grows.
 
+### Uploading and downloading files
+
+Store a file in a `bytes` column next to its metadata:
+
+```ts title="schema.ts"
+files: s.table({
+  name: s.string(),
+  type: s.string(),
+  size: s.int(),
+  content: s.bytes(),
+}),
+```
+
+Upload from the browser with `insertStreaming`, which streams the bytes into the row instead of
+copying the whole file into memory. It works in the thin and the local-first client, and it goes
+through `/jazz`, so the file never passes through a route of your own:
+
+```ts
+async function upload(file: File) {
+  const inserted = await db.insertStreaming(app.files, {
+    name: file.name,
+    type: file.type,
+    size: file.size,
+    content: file.stream(),
+  });
+  await inserted.wait({ tier: "global" });
+  return inserted.value.id;
+}
+```
+
+`updateStreaming` and `upsertStreaming` replace a file in an existing row the same way.
+
+To download, select the column. For a large file, read it a page at a time with a range (see
+[Partial large values](/docs/reading/includes-and-relations#partial-large-values)):
+
+```ts
+const row = await db.one(app.files.where({ id }).select("name", "type", "content"));
+const url = URL.createObjectURL(new Blob([row!.content], { type: row!.type }));
+
+// Or the first megabyte only:
+const head = await db.one(app.files.where({ id }).select({ content: { from: 0, to: 1_048_576 } }));
+```
+
 ## Transactions
 
 Use a transaction when several reads and writes must share one commit. Use a mergeable transaction

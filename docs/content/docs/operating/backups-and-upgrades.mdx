@@ -94,8 +94,9 @@ starts:
   `session.user.identity` with `session.identity`, in permissions and in client code. Permissions
   that still use the old form fail with an error saying so; in client code it is silently
   `undefined`.
-- **Rename removed read tiers.** `"global"` is now `"remote"` (`ReadTier.Remote`), and
-  `"local"` is `"local-first"`; `"edge"` is gone. See
+- **Rename removed read tiers.** In reads, `"global"` is now `"remote"` (`ReadTier.Remote`), and
+  `"local"` is `"local-first"`; `"edge"` is gone. Write waits keep `"local"` and `"global"`:
+  `wait({ tier: "remote" })` throws. See
   [Removed read tiers](/docs/reference/durability-tiers#removed-read-tiers).
 - **Create accounts for users who never open a client.** `forReqUser` and `accountFor` no longer
   create an account. If your API serves users before they sign in from a client, call

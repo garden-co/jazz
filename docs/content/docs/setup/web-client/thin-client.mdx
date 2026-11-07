@@ -121,9 +121,12 @@ Each is an explicit "not supported" error:
 - pending writes live in memory only: a write the server hasn't answered yet is lost if the page
   reloads or closes (see [Pending writes](#pending-writes) below)
 - a single write, and a single answer to a query, can be at most 32 MiB. The client refuses a
-  larger write itself; the server answers a larger result with a `TooLarge` error for that query
-  alone (ending a live query) and keeps the session. So one very large row fails every query that
-  includes it, until paging large answers arrives with streaming reads
+  larger write itself; streamed writes (`insertStreaming` and the like) go in pieces, so a larger
+  file uploads fine. The server answers a larger result with a `TooLarge` error for that query
+  alone (ending a live query) and keeps the session, so one very large row fails every query that
+  includes it. Read such a value a page at a time with a
+  [range select](/docs/reading/includes-and-relations#partial-large-values), such as
+  `select({ content: { from, to } })`, until streaming reads arrive
 - no admin secret in the browser
 
 ## Pending writes
