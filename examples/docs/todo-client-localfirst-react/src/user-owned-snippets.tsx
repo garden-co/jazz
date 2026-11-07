@@ -18,10 +18,10 @@ export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" })
 
 // #region owned-permissions
 s.definePermissions(app, ({ policy, session }) => {
-  policy.todos.allowRead.where({ "$createdBy.account": session.user });
+  policy.todos.allowRead.where({ $createdBy: session.user });
   policy.todos.allowInsert.always();
-  policy.todos.allowUpdate.where({ "$createdBy.account": session.user });
-  policy.todos.allowDelete.where({ "$createdBy.account": session.user });
+  policy.todos.allowUpdate.where({ $createdBy: session.user });
+  policy.todos.allowDelete.where({ $createdBy: session.user });
 });
 // #endregion owned-permissions
 

@@ -44,7 +44,7 @@ s.definePermissions(app, ({ policy, allOf, anyOf, session }) => {
   policy.chatMembers.allowRead.where((member) =>
     anyOf([
       { user_id: session.user },
-      policy.chats.exists.where({ id: member.chatId, "$createdBy.account": session.user }),
+      policy.chats.exists.where({ id: member.chatId, $createdBy: session.user }),
     ]),
   );
 
@@ -54,7 +54,7 @@ s.definePermissions(app, ({ policy, allOf, anyOf, session }) => {
   policy.chatMembers.allowInsert.where((member) =>
     allOf([
       { user_id: session.user },
-      policy.chats.exists.where({ id: member.chatId, "$createdBy.account": session.user }),
+      policy.chats.exists.where({ id: member.chatId, $createdBy: session.user }),
     ]),
   );
 
@@ -62,17 +62,17 @@ s.definePermissions(app, ({ policy, allOf, anyOf, session }) => {
   policy.chatMembers.allowDelete.where((member) =>
     anyOf([
       { user_id: session.user },
-      policy.chats.exists.where({ id: member.chatId, "$createdBy.account": session.user }),
+      policy.chats.exists.where({ id: member.chatId, $createdBy: session.user }),
     ]),
   );
 
   // Invite codes are bearer capabilities. They never sync back down to a client.
   policy.chatInvites.allowRead.never();
   policy.chatInvites.allowInsert.where((invite) =>
-    policy.chats.exists.where({ id: invite.chatId, "$createdBy.account": session.user }),
+    policy.chats.exists.where({ id: invite.chatId, $createdBy: session.user }),
   );
   policy.chatInvites.allowDelete.where((invite) =>
-    policy.chats.exists.where({ id: invite.chatId, "$createdBy.account": session.user }),
+    policy.chats.exists.where({ id: invite.chatId, $createdBy: session.user }),
   );
 });
 // #endregion invite-permissions

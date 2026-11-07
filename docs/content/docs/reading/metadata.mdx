@@ -1,6 +1,6 @@
 ---
 title: Edit Metadata
-description: "Read who created and changed a row, and when, with magic columns like $createdBy and $createdAt."
+description: "Learn how to read who created and changed a row, and when, through magic columns like $createdBy and $createdAt."
 ---
 
 You can select and filter on Jazz's magic columns just like other columns. They are omitted from
@@ -12,6 +12,16 @@ You can select and filter on Jazz's magic columns just like other columns. They 
 - `$createdAt`&hairsp;—&hairsp;when the row was first created
 - `$updatedBy`&hairsp;—&hairsp;the Jazz principal that last updated the row
 - `$updatedAt`&hairsp;—&hairsp;when the row was last updated
+
+`$createdBy` and `$updatedBy` are a `RowAuthor`: `{ account, identity: { issuer, subject } }`.
+`account` is the Jazz account; `identity.subject` is the `userId` your `authenticate` returned for a
+backend sign-in.
+
+Anyone who can read a row can read its `$createdBy` and `$updatedBy`, including
+`identity.subject`, and so can anyone who can read its [history](/docs/reading/history). If your
+`authenticate` returns an email or another personal value as `userId`, every reader of the user's
+rows sees it. Return an opaque id (your auth's user id, not the email) when author identity is
+sensitive.
 
 These are useful for showing authorship, when a row last changed, or building "my created items"
 views without storing duplicate ownership fields.
@@ -29,7 +39,7 @@ views without storing duplicate ownership fields.
   </Tab>
 </Tabs>
 
-See [Permissions](/docs/schemas/policies) for policy examples using `$createdBy` and the other
+See [Declarative Permissions](/docs/schemas/policies) for policy examples using `$createdBy` and the other
 magic columns.
 
 ## Deletion metadata columns
