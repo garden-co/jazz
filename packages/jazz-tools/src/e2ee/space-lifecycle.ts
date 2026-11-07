@@ -108,6 +108,15 @@ function spaceRootId(address: Address): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
+/** @internal Only standalone writes may retry with a fresh exclusive transaction. */
+export class SpaceInitialisationRequired extends Error {
+  constructor() {
+    super(
+      "Initialising an encryption space requires beginSerializableTransaction() or serializableTransaction()",
+    );
+    this.name = "SpaceInitialisationRequired";
+  }
+}
 type Snapshot = {
   roots: Settled<SpaceRoot>;
   grants: Settled<SpaceGrant>;
@@ -666,16 +675,60 @@ export class Spaces {
     await this.groups?.warmMembership({ groupIds: ids });
   }
 
+  /** An unavailable key alone never establishes that a space is absent. */
+  async prepareMissing<T, Init>(
+    tx: AcceptedDeviceTransactionScope | undefined,
+    scope: TableProxy<T, Init>,
+    identifier: string,
+    prepareData: Parameters<Spaces["prepareInitial"]>[3],
+    recipientIds?: readonly string[],
+  ): Promise<boolean> {
+    const address = await this.address(scope, identifier);
+    const roots = this.tables.__e2ee_spaces.where(address);
+    if (tx) {
+      if ((await tx.readAccepted(roots)).rows.length) return false;
+      // Hydrate a pre-existing scope row in this transaction, not in a later snapshot.
+      await tx.one(
+        new TypedTableQueryBuilder(scope._table, scope._schema)
+          .where({ id: identifier })
+          .select("id"),
+        { tier: "remote" },
+      );
+      await this.prepareInitial(tx, scope, identifier, prepareData, recipientIds);
+      return true;
+    }
+    if (await this.db.one(roots, { tier: "remote" })) return false;
+    // This read only chooses a retry. The fresh exclusive transaction must
+    // independently validate absence and accept root, grant and data together.
+    throw new SpaceInitialisationRequired();
+  }
+
   /** Capture membership predicates before the caller stages its new scope row. */
   async prepareInitialAuthority(
     tx: AcceptedDeviceTransactionScope,
     recipientIds: readonly string[] = [this.accountId],
+    legacyScope?: { scope: TableProxy<any, any>; identifier: string },
   ): Promise<void> {
     const ids = initialRecipientIds(recipientIds);
     const state = await this.requireDevice().states(tx);
     await this.groups?.readMembership(tx, { groupIds: ids }, state.publicHistory);
     for (const id of ids)
       if (id !== this.accountId) await readPublicMembershipHistory(tx, id, this.tables);
+    if (legacyScope) {
+      const { scope, identifier } = legacyScope;
+      const address = await this.address(scope, identifier);
+      await tx.readAccepted(this.tables.__e2ee_spaces.where(address));
+      await readSpaceRows(
+        tx,
+        this.tables.__e2ee_spaces.includeDeleted().where({ id: spaceRootId(address) }),
+      );
+      await readSpaceRows(
+        tx,
+        new TypedTableQueryBuilder(scope._table, scope._schema)
+          .where({ id: identifier })
+          .select("id"),
+      );
+    }
   }
 
   /** Internal preparation only: the caller owns the enclosing transaction and acceptance. */

@@ -42,7 +42,7 @@ import {
 import { Groups } from "./group-lifecycle.js";
 import type { GroupRecoveryPath } from "./group-lifecycle.js";
 import { groupSchema, type GroupMember, type GroupTables } from "./groups.js";
-import { Spaces } from "./space-lifecycle.js";
+import { Spaces, SpaceInitialisationRequired } from "./space-lifecycle.js";
 import type { SpaceDataPreparation, SpaceRecoveryPath } from "./space-lifecycle.js";
 import { spaceSchema, type SpaceTables, type SpaceRoot } from "./spaces.js";
 import type { CellCipher, DeviceSigner, EqualityIndex, JazzCrypto, KeyEnvelope } from "./types.js";
@@ -119,11 +119,17 @@ const retainedCaches = new WeakMap<
 >();
 
 const initialSpacePreparers = new WeakMap<Db, Spaces["prepareInitial"]>();
+const missingSpacePreparers = new WeakMap<Db, Spaces["prepareMissing"]>();
 const initialSpaceAuthorityPreparers = new WeakMap<Db, Spaces["prepareInitialAuthority"]>();
 type InitialAuthorityMemo = WeakMap<WasmSchema, Map<string, AcceptedRows<unknown>>>;
 const initialAuthorityMemos = new WeakMap<
   Transaction<"serializable">,
-  { recipients: string; reads: InitialAuthorityMemo }
+  {
+    recipients: string;
+    recipientIds?: readonly string[];
+    reads: InitialAuthorityMemo;
+    legacyScope?: { scope: TableProxy<any, any>; identifier: string };
+  }
 >();
 const initialSpacePrerequisites = new WeakMap<
   Db,
@@ -253,18 +259,32 @@ export function registerInitialSpaceAuthority(
   db: Db,
   transaction: Transaction<"serializable">,
   recipientIds?: readonly string[],
+  legacyScope?: { scope: TableProxy<any, any>; identifier: string },
 ): void {
   const recipients = recipientIds?.slice();
   const previous = initialAuthorityMemos.get(transaction);
   if (previous) {
     if (previous.recipients !== JSON.stringify(recipients ?? null))
       throw new Error("Initial space recipients changed after authority registration");
-    return;
+    if (!legacyScope) return;
+    if (previous.legacyScope) {
+      if (
+        previous.legacyScope.scope._schema !== legacyScope.scope._schema ||
+        previous.legacyScope.scope._table !== legacyScope.scope._table ||
+        previous.legacyScope.identifier !== legacyScope.identifier
+      )
+        throw new Error(
+          "A legacy encrypted scope declaration cannot change its table or identifier",
+        );
+      return;
+    }
   }
-  const memo: InitialAuthorityMemo = new WeakMap();
+  const memo: InitialAuthorityMemo = previous?.reads ?? new WeakMap();
   initialAuthorityMemos.set(transaction, {
     recipients: JSON.stringify(recipients ?? null),
+    recipientIds: recipients,
     reads: memo,
+    legacyScope,
   });
   // Register before returning: even an immediate caller insert remains behind
   // this authority-only prefix in the normal FIFO preparation queue.
@@ -298,6 +318,7 @@ export function registerInitialSpaceAuthority(
         },
       },
       recipients,
+      legacyScope,
     );
   });
   // The registered queue owns this error and poisons commit if the prefix fails.
@@ -353,31 +374,88 @@ export async function prepareRegisteredInitialSpaceRows<T, Init>(
   if (!authority) throw new Error("Initial space authority was not registered before staging");
   if (authority.recipients !== JSON.stringify(recipients ?? null))
     throw new Error("Initial space recipients changed after authority registration");
-  const memo = authority.reads;
   await prepareInitialSpaceRows(
     db,
-    {
-      ...prepared,
-      async readAccepted<T>(query: QueryBuilder<T>): Promise<AcceptedRows<T>> {
-        prepared.assertActive();
-        const result = memo.get(query._schema)?.get(query._build());
-        // A no-write preparation can still request a real same-cut scope
-        // predicate. After any staged operation the existing core guard
-        // rejects an uncaptured read; never synthesize a cached answer.
-        if (!result) return prepared.readAccepted(query);
-        // These are exact responses from this transaction's authority
-        // prefix, not local-cache evidence or a later independent cut.
-        const reply = await Promise.resolve(structuredClone(result) as AcceptedRows<T>);
-        prepared.assertActive();
-        return reply;
-      },
-    },
+    preparedWithInitialAuthorityMemo(transaction, prepared),
     scope,
     identifier,
     prepareData,
     recipients,
     ownScopeInsert,
   );
+}
+
+function preparedWithInitialAuthorityMemo(
+  transaction: Transaction<"serializable">,
+  prepared: PreparedTransactionScope,
+): PreparedTransactionScope {
+  const authority = initialAuthorityMemos.get(transaction);
+  if (!authority) return prepared;
+  const memo = authority.reads;
+  return {
+    ...prepared,
+    async readAccepted<T>(query: QueryBuilder<T>): Promise<AcceptedRows<T>> {
+      prepared.assertActive();
+      const result = memo.get(query._schema)?.get(query._build());
+      // A no-write preparation can still request a real same-cut scope
+      // predicate. After any staged operation the existing core guard
+      // rejects an uncaptured read; never synthesize a cached answer.
+      if (!result) return prepared.readAccepted(query);
+      // These are exact responses from this transaction's authority
+      // prefix, not local-cache evidence or a later independent cut.
+      const reply = await Promise.resolve(structuredClone(result) as AcceptedRows<T>);
+      prepared.assertActive();
+      return reply;
+    },
+  };
+}
+
+/** @internal Reuses an already-prepared transaction; never queues behind itself. */
+export async function prepareMissingSpaceWrite<T, Init>(
+  db: Db,
+  transaction: Transaction<"serializable"> | undefined,
+  tx: PreparedTransactionScope | undefined,
+  scope: TableProxy<T, Init>,
+  identifier: string,
+  prepareData: Parameters<Spaces["prepareMissing"]>[3],
+): Promise<boolean> {
+  e2eeForDb(db);
+  let callbackFailure: { error: unknown } | undefined;
+  try {
+    return await missingSpacePreparers.get(db)!(
+      tx && transaction ? preparedWithInitialAuthorityMemo(transaction, tx) : tx,
+      scope,
+      identifier,
+      async (...values) => {
+        try {
+          await prepareData(...values);
+        } catch (error) {
+          callbackFailure = { error };
+          throw error;
+        }
+      },
+      transaction ? initialAuthorityMemos.get(transaction)?.recipientIds : undefined,
+    );
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message.includes("accepted reads cannot substitute already staged content")
+    ) {
+      const refusal = new E2eeDataError("key-unavailable");
+      refusal.message +=
+        "; declare the exact legacy encrypted scope before the first write with tx.prepareEncryptedScope(scopeTable, { identifier: scopeId })";
+      throw refusal;
+    }
+    // As with ordinary key lookup, adapter exceptions may contain key material.
+    // Preserve the internal retry signal and the caller's own operation errors.
+    if (
+      error instanceof SpaceInitialisationRequired ||
+      error instanceof E2eeDataError ||
+      (callbackFailure && callbackFailure.error === error)
+    )
+      throw error;
+    throw new E2eeDataError("key-unavailable");
+  }
 }
 
 /** @internal Reuses an already-prepared transaction; never queues behind itself. */
@@ -1040,6 +1118,10 @@ export class E2ee {
     initialSpacePreparers.set(db, async (...args) => {
       await this.prepare();
       await this.requireSpaces().prepareInitial(...args);
+    });
+    missingSpacePreparers.set(db, async (...args) => {
+      await this.prepare();
+      return this.requireSpaces().prepareMissing(...args);
     });
     initialSpaceAuthorityPreparers.set(db, async (...args) => {
       await this.prepare();
