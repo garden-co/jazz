@@ -173,7 +173,7 @@ export const heroExamples: HeroExample[] = [
   {
     id: "band-book",
     title: "BandBook",
-    tagline: "A Notion-style workspace with pages and issues, scoped by row-level policies.",
+    tagline: "A Notion-style workspace with pages and issues, scoped by declarative permissions.",
     description:
       "A band's shared notebook: members write pages, track issues, and belong to workspaces. A member may read their own pages plus those of every workspace they were admitted to. Its benchmarks load the newest 50 pages of a 100,000-page notebook under an explicit allow-all policy, an owner-only policy and the own-or-workspace policy, so the difference is the price of authorization.",
     highlights: [

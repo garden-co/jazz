@@ -8,14 +8,14 @@ import { codeLanguage, customTokenizer } from "@/lib/code-tokenizers";
 export type CodeFile = { name: string; language: string; code: string };
 
 /** Several source files in one window, one tab per file. */
-export function CodeWindow({ files }: { files: CodeFile[] }) {
+export function CodeWindow({ files, className }: { files: CodeFile[]; className?: string }) {
   const [selected, setSelected] = useState(files[0]?.name ?? "");
   const file = files.find((candidate) => candidate.name === selected) ?? files[0];
   if (!file) return null;
   const lang = codeLanguage(file.language);
 
   return (
-    <div className="home-code-window">
+    <div className={className ? `home-code-window ${className}` : "home-code-window"}>
       <TabList value={selected} onChange={setSelected} size="sm" hasDivider>
         {files.map((candidate) => (
           <Tab key={candidate.name} value={candidate.name} label={candidate.name} />

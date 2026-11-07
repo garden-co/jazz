@@ -9,7 +9,7 @@ import { Button } from "@astryxdesign/core/Button";
 import { HStack } from "@astryxdesign/core/Stack";
 import { Icon } from "@astryxdesign/core/Icon";
 import { SegmentedControl, SegmentedControlItem } from "@astryxdesign/core/SegmentedControl";
-import { TopNav, TopNavHeading, TopNavItem } from "@astryxdesign/core/TopNav";
+import { TopNav, TopNavHeading, TopNavItem, useTopNavRenderMode } from "@astryxdesign/core/TopNav";
 import { JazzLogo } from "@/components/brand/jazz-logo";
 import { gitConfig } from "@/lib/layout.shared";
 import { SearchField, SearchIconButton, SiteSearch } from "./site-search";
@@ -67,6 +67,7 @@ const SOCIAL = [
 ];
 
 const START_LINKS = [
+  { label: "Pricing", href: "/#pricing" },
   { label: "Examples & Benches", href: "/examples" },
   { label: "Documentation", href: "/docs" },
 ];
@@ -81,6 +82,75 @@ function NavLink({ label, href, pathname }: { label: string; href: string; pathn
       className="whitespace-nowrap"
       isSelected={pathname === href || pathname.startsWith(`${href}/`)}
     />
+  );
+}
+
+/** The start links; in the mobile drawer the end links join them. */
+function StartLinks({ pathname }: { pathname: string }) {
+  const mode = useTopNavRenderMode();
+  const links = mode === "drawer" ? [...START_LINKS, ...END_LINKS] : START_LINKS;
+  return (
+    <>
+      {links.map((link) => (
+        <NavLink key={link.href} {...link} pathname={pathname} />
+      ))}
+    </>
+  );
+}
+
+/** Search in the centre of the full bar. The mobile bar has its own icon, so
+  the drawer leaves it out. */
+function CenterSearch({ onOpen }: { onOpen: () => void }) {
+  if (useTopNavRenderMode() === "drawer") return null;
+  return (
+    <>
+      {/* Below 1360px the centred field would collide with the links,
+        so search collapses to an icon. */}
+      <span className="site-search-field site-search-wide contents">
+        <SearchField onOpen={onOpen} />
+      </span>
+      <span className="site-search-narrow contents">
+        <SearchIconButton onOpen={onOpen} />
+      </span>
+    </>
+  );
+}
+
+function EndContent({ pathname, onOpen }: { pathname: string; onOpen: () => void }) {
+  // The mobile bar keeps only search; the links move into the drawer.
+  if (useTopNavRenderMode() === "mobile-bar") {
+    return (
+      <HStack gap={2} vAlign="center" className="site-nav-end">
+        <SearchIconButton onOpen={onOpen} />
+      </HStack>
+    );
+  }
+  return (
+    <HStack gap={2} vAlign="center" className="site-nav-end">
+      {END_LINKS.map((link) => (
+        <NavLink key={link.href} {...link} pathname={pathname} />
+      ))}
+      <span className="contents">
+        {SOCIAL.map((link) => (
+          <Button
+            key={link.href}
+            label={link.label}
+            href={link.href}
+            target="_blank"
+            rel="noreferrer noopener"
+            variant="ghost"
+            size="md"
+            isIconOnly
+            icon={<BrandIcon path={link.icon} />}
+          />
+        ))}
+      </span>
+      {/* Below 900px the switch would crowd the bar; the chosen theme
+        still applies. */}
+      <span className="contents max-[899px]:hidden">
+        <ThemeSwitch />
+      </span>
+    </HStack>
   );
 }
 
@@ -107,54 +177,9 @@ export function SiteTopNav() {
             headingHref="/"
           />
         }
-        startContent={
-          <>
-            {START_LINKS.map((link) => (
-              <NavLink key={link.href} {...link} pathname={pathname} />
-            ))}
-          </>
-        }
-        centerContent={
-          <>
-            {/* Below 1280px the centred field would collide with the links,
-              so search collapses to an icon. */}
-            <span className="site-search-field contents max-[1279px]:hidden">
-              <SearchField onOpen={openSearch} />
-            </span>
-            <span className="contents min-[1280px]:hidden">
-              <SearchIconButton onOpen={openSearch} />
-            </span>
-          </>
-        }
-        endContent={
-          <HStack gap={2} vAlign="center" className="site-nav-end">
-            {END_LINKS.map((link) => (
-              <NavLink key={link.href} {...link} pathname={pathname} />
-            ))}
-            {/* Below the drawer breakpoint the bar keeps only search and
-              the drawer toggle; the social links would push the toggle off screen. */}
-            <span className="contents max-md:hidden">
-              {SOCIAL.map((link) => (
-                <Button
-                  key={link.href}
-                  label={link.label}
-                  href={link.href}
-                  target="_blank"
-                  rel="noreferrer noopener"
-                  variant="ghost"
-                  size="md"
-                  isIconOnly
-                  icon={<BrandIcon path={link.icon} />}
-                />
-              ))}
-            </span>
-            {/* Below 900px the switch would crowd the bar; the chosen theme
-              still applies. */}
-            <span className="contents max-[899px]:hidden">
-              <ThemeSwitch />
-            </span>
-          </HStack>
-        }
+        startContent={<StartLinks pathname={pathname} />}
+        centerContent={<CenterSearch onOpen={openSearch} />}
+        endContent={<EndContent pathname={pathname} onOpen={openSearch} />}
       />
       <SiteSearch isOpen={isSearchOpen} setOpen={setSearchOpen} />
     </>
