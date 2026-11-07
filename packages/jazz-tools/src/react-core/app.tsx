@@ -12,6 +12,7 @@ import {
 import { createJazzAppOwner, type JazzApp, type JazzAppSnapshot } from "../session/app.js";
 import type { JazzSessionActions, JazzSession } from "../session/state.js";
 import { JazzClientProvider, type CoreJazzClient } from "./provider.js";
+import { reportJazzStartupFailure } from "./session.js";
 
 export type JazzAuthState<Client = CoreJazzClient> = JazzAppSnapshot<Client> & {
   /** Manual account operations reject on failure. */
@@ -56,7 +57,7 @@ export function ConfiguredJazzAppProvider<Config, Client extends CoreJazzClient>
   const disposal = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => {
     clearTimeout(disposal.current);
-    void app.start().catch(() => {});
+    void app.start().catch(reportJazzStartupFailure);
     return () => {
       // A real unmount disposes after descendant consumers release their leases.
       // StrictMode's immediate replay cancels disposal and retains the same owner.

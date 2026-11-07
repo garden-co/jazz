@@ -30,6 +30,7 @@ const nativeForegroundTest = vi.hoisted(() => ({
 // than a hand-maintained copy in jazz-tools. The native development build is
 // responsible for installing this same HostObject factory through JSI.
 vi.mock("react-native", () => ({
+  Platform: { OS: "ios" },
   TurboModuleRegistry: {
     get: () => nativeForegroundTest.turboModule,
   },

@@ -4,6 +4,7 @@ import { clientRegistryUrl } from "../accounts/account-manager-core.js";
 import type { AccountStore } from "../accounts/persistence.js";
 import type { AppBearer } from "../accounts/enrollment.js";
 import { createAccountManager as createNativeAccountManager } from "../react-native/create-account-manager.js";
+import { importNativeRelay } from "../react-native/native-relay.js";
 
 export interface AccountManagerConfig {
   /**
@@ -33,7 +34,7 @@ export interface AccountManagerConfig {
 /** Prepare retained accounts without opening a database or a Jazz context. */
 export async function createAccountManager(config: AccountManagerConfig) {
   const registry = clientRegistryUrl(config);
-  const native = await import("jazz-rn/relay");
+  const native = await importNativeRelay();
   const factory = native.installNativeForegroundRuntime();
   if (typeof factory.withAccountStoreLock !== "function") {
     throw new Error("Expo accounts require a matching native build with atomic account storage");
