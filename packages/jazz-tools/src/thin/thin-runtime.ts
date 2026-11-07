@@ -720,7 +720,7 @@ export class ThinRuntime implements Runtime {
       operation,
       transaction: txIdFromContext(writeContext),
       branchView: branchViewFromWriteContext(writeContext),
-      updatedAtMs: effectiveUpdatedAtMs(writeContext) ?? Date.now(),
+      updatedAtMs: effectiveUpdatedAtMs(writeContext) ?? undefined,
     };
   }
 
@@ -1428,7 +1428,8 @@ type WriteTarget = {
   operation: string;
   transaction?: OpenTransactionId;
   branchView?: EncodedBranchView;
-  updatedAtMs: number;
+  /** An explicit `$updatedAt`; absent for an ordinary write, which the server stamps. */
+  updatedAtMs?: number;
 };
 
 /**
