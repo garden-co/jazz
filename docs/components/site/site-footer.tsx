@@ -42,8 +42,7 @@ export function SiteFooter() {
         <div className="col-span-2 flex flex-col gap-4 md:col-span-6">
           <JazzLogo label="Jazz" className="h-7 self-start" />
           <Text as="p" display="block" color="secondary" className="max-w-[22rem]">
-            The data layer that you own: a relational database in your backend that syncs to every
-            client.
+            The data layer that you own.
           </Text>
         </div>
         {columns.map((column) => (
@@ -68,9 +67,9 @@ export function SiteFooter() {
           <a
             href="https://garden.co"
             className="site-footer-maker"
-            aria-label="Made with love by Garden Computing"
+            aria-label="Made with love and LLMs by Garden Computing"
           >
-            <span>Made with love by</span>
+            <span>Made with love and LLMs by</span>
             <GardenComputingLogo aria-hidden className="h-10" label="" role="presentation" />
           </a>
           <Text as="p" display="block" type="supporting" color="secondary">
