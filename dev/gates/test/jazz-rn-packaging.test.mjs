@@ -3217,7 +3217,7 @@ test("release, preview, and labeled platform gates seal and link the staged rela
   assert.match(alphaPublish, /JAZZ_REUSE_PREVIEW_ARTIFACTS/);
   assert.match(alphaPublish, /release-artifact-source-revision\.mjs/);
   assert.match(alphaPublish, /Verify packed jazz-rn relay payload/);
-  assert.match(alphaPublish, /Publish jazz-rn \(alpha tag\)/);
+  assert.match(alphaPublish, /Publish jazz-rn$/m);
   assert.match(
     alphaPublish,
     /uses: \.\/\.github\/workflows\/build-jazz-packages\.yml[\s\S]*include_rn: true/,
