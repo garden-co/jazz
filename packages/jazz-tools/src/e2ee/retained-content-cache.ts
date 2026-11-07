@@ -195,6 +195,9 @@ function decodeRoot(root: StoredRoot): SpaceRoot {
  * Local anchors bind retained bytes to this store; they never prove membership,
  * latest epoch, absent revocation, SELECT coverage or permission to write.
  */
+/** Owner-local validation receipt; never part of the persisted cache format. */
+type RetentionRevision = Readonly<{ stored: number; generation: symbol }>;
+
 export class RetainedContentCache {
   private readonly schema: string;
   private readonly pendingIdentities = new Map<string, Identities>();
@@ -203,6 +206,7 @@ export class RetainedContentCache {
   private readonly deniedScopes = new Set<string>();
   private readonly staleScopes = new Set<string>();
   private deniedOwner = false;
+  private retentionGeneration = Symbol("retained-content invalidation");
   // Neither these capabilities nor their owner token are exported as C proof.
   private readonly privateOwner = bytesToHex(runtimeRandomBytes(32));
   private readonly privateAnchors = new Map<string, Anchor>();
@@ -453,8 +457,10 @@ export class RetainedContentCache {
     } else if (candidate) this.volatile = candidate;
     this.assertOpen();
   }
-  async revision(): Promise<number> {
-    return (await this.read()).revision;
+  async revision(): Promise<RetentionRevision> {
+    // Capture before the asynchronous store read and before caller validation.
+    const generation = this.retentionGeneration;
+    return Object.freeze({ stored: (await this.read()).revision, generation });
   }
 
   private async anchor(
@@ -605,6 +611,7 @@ export class RetainedContentCache {
     return false;
   }
   async denyDevice(): Promise<void> {
+    this.retentionGeneration = Symbol("retained-content invalidation");
     this.deniedOwner = true;
     await this.update((current) => {
       current.revision++;
@@ -617,6 +624,7 @@ export class RetainedContentCache {
     });
   }
   async denySpace(scopeTable: string, identifier: string): Promise<void> {
+    this.retentionGeneration = Symbol("retained-content invalidation");
     this.deniedScopes.add(this.scopeKey(scopeTable, identifier));
     await this.update((current) => {
       current.revision++;
@@ -635,6 +643,7 @@ export class RetainedContentCache {
     });
   }
   async clearContent(): Promise<void> {
+    this.retentionGeneration = Symbol("retained-content invalidation");
     await this.update((current) => {
       current.revision++;
       current.content = current.content.filter((row) => !this.matches(row.binding));
@@ -678,10 +687,15 @@ export class RetainedContentCache {
     scopeTable: string,
     root: Readonly<SpaceRoot>,
     secret: Uint8Array,
-    revision: number,
+    revision: RetentionRevision,
     provisionalWrite = false,
   ): Promise<void> {
-    if (secret.length !== 32 || !(await this.available())) return;
+    if (
+      revision.generation !== this.retentionGeneration ||
+      secret.length !== 32 ||
+      !(await this.available())
+    )
+      return;
     const anchor = await this.anchor(
       this.tables.__e2ee_spaces.where({ id: root.id }),
       (row) =>
@@ -751,7 +765,13 @@ export class RetainedContentCache {
       : undefined;
     let retained = false;
     await this.update((current) => {
-      if (current.revision !== revision || current.deniedDevices.includes(this.owner())) return;
+      if (
+        revision.generation !== this.retentionGeneration ||
+        current.revision !== revision.stored ||
+        current.deniedDevices.includes(this.owner()) ||
+        this.deniedOwner
+      )
+        return;
       current.content = [
         ...current.content.filter(
           (row) =>
@@ -773,7 +793,8 @@ export class RetainedContentCache {
         ];
       retained = true;
     }, true);
-    if (retained) {
+    // Persistence itself may yield across a newer failed invalidation.
+    if (retained && revision.generation === this.retentionGeneration) {
       this.deniedScopes.delete(this.scopeKey(scopeTable, root.identifier));
       if (write) this.staleScopes.delete(this.scopeKey(scopeTable, root.identifier));
     }
@@ -809,6 +830,7 @@ export class RetainedContentCache {
 
   /** Records a genuinely observed maintenance requirement, not an offline inference. */
   async markStale(scopeTable: string, identifier: string): Promise<void> {
+    this.retentionGeneration = Symbol("retained-content invalidation");
     const wasStale = this.staleScopes.has(this.scopeKey(scopeTable, identifier));
     this.staleScopes.add(this.scopeKey(scopeTable, identifier));
     const before = await this.read();

@@ -129,7 +129,10 @@ async function setup() {
   const secret = new Uint8Array(32).fill(42);
   const tableId = globalThis.crypto.randomUUID(),
     columnId = globalThis.crypto.randomUUID();
-  const retain = async (revision?: number, provisionalWrite = false) => {
+  const retain = async (
+    revision?: Awaited<ReturnType<RetainedContentCache["revision"]>>,
+    provisionalWrite = false,
+  ) => {
     revision ??= await cache.revision();
     await cache.retainDevice();
     cache.rememberIdentities(root, "notes", "body", tableId, columnId);
@@ -587,3 +590,79 @@ it("exposes retained structural identities only inside the verified owner borrow
     f.close();
   }
 });
+
+it.each([
+  { invalidation: "denial", persistence: "durable" },
+  { invalidation: "denial", persistence: "volatile" },
+  { invalidation: "stale", persistence: "durable" },
+  { invalidation: "stale", persistence: "volatile" },
+] as const)(
+  "fences delayed $persistence retention after failed $invalidation persistence until fresh validation",
+  async ({ invalidation, persistence }) => {
+    const f = await setup();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const originalUpdate = f.store.update.bind(f.store);
+    let delayed: Promise<void> | undefined;
+    try {
+      await f.retain(undefined, true);
+      // This receipt precedes the older result's already-completed validation.
+      const before = await f.cache.revision();
+      let updates = 0;
+      const update = vi.spyOn(f.store, "update").mockImplementation(async (change) => {
+        if (++updates === 1) {
+          entered();
+          await gate;
+          if (persistence === "durable") return originalUpdate(change);
+          change(await f.store.read());
+          throw new Error("optional retention persistence unavailable");
+        }
+        // Transform ran, but the backing store did not publish the denial.
+        change(await f.store.read());
+        throw new Error("denial persistence unavailable");
+      });
+      delayed = f.cache.retainSpace("projects", f.root, f.secret, before, true);
+      await waiting;
+      await expect(
+        invalidation === "denial"
+          ? f.cache.denySpace("projects", f.root.identifier)
+          : f.cache.markStale("projects", f.root.identifier),
+      ).rejects.toThrow("denial persistence unavailable");
+      release();
+      await delayed;
+      const use = vi.fn(async () => {});
+      if (invalidation === "denial") {
+        expect(await f.cache.withKeys(f.app.projects, f.root.identifier, use)).toBe(false);
+        expect(
+          await f.cache.withProvisionalKey(f.app.projects, f.root.identifier, use, "reject"),
+        ).toBe("unavailable");
+      } else {
+        expect(f.cache.isKnownStale("projects", f.root.identifier)).toBe(true);
+        expect(
+          await f.cache.withProvisionalKey(f.app.projects, f.root.identifier, use, "reject"),
+        ).toBe("stale");
+      }
+      expect(use).not.toHaveBeenCalled();
+      update.mockRestore();
+      // Only a fresh validation receipt may restore this same-owner binding.
+      // This fixture models that private boundary; it is not authority proof.
+      await f.retain(undefined, true);
+      expect(await f.cache.withKeys(f.app.projects, f.root.identifier, use)).toBe(true);
+      expect(
+        await f.cache.withProvisionalKey(f.app.projects, f.root.identifier, use, "reject"),
+      ).toBe("used");
+      expect(use).toHaveBeenCalledTimes(2);
+    } finally {
+      release();
+      await delayed?.catch(() => {});
+      vi.restoreAllMocks();
+      f.close();
+    }
+  },
+);
