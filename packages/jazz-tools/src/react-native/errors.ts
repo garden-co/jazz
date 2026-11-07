@@ -6,3 +6,5 @@ export const REACT_NATIVE_MEMORY_RUNTIME_UNSUPPORTED_ERROR =
   "React Native requires the installed JazzRelay native runtime; driver.type='memory' is not supported";
 export const REACT_NATIVE_UNSUPPORTED_ERROR =
   "React Native native foreground does not support this operation yet";
+export const REACT_NATIVE_WEB_UNSUPPORTED_ERROR =
+  "Jazz's React Native client (jazz-tools/react-native, jazz-tools/expo) runs only in iOS and Android builds, not on the web target. For web, use the browser client from jazz-tools/react, for example in a .web.tsx platform file.";
