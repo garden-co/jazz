@@ -55,7 +55,7 @@ const tiers: Tier[] = [
     priceDetail:
       "Limited only by what you can fit on any number of shards up to 4 GB RAM in total.",
     features: "All product features",
-    sharding: "Limited sharding (up to 4 GB RAM across shards)",
+    sharding: "Limited sharding (up to 4 GB RAM total)",
     regions: <Muted>Single region</Muted>,
     support: <Muted>Community support</Muted>,
     operated: <Muted>Operated by you</Muted>,
