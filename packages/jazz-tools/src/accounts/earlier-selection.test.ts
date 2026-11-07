@@ -139,3 +139,41 @@ it("a .60 client's own registry for the same scope is not an earlier selection",
   );
   expect(accounts.getLoggedIn()).toBeUndefined();
 });
+
+it("a logout on a device whose own key already exists keeps alpha.59's roots", async () => {
+  // An rc.6 device with scope set: its own guest G, alpha.59's guest K.
+  const ownKey = `jazz-account-selection-v1:${encodeURIComponent(
+    `https://app.example/jazz/apps/${appId}/accounts`,
+  )}:dev`;
+  const g = generateAuthSecret();
+  const k = generateAuthSecret();
+  const items = browser({ [ownKey]: earlierSelection(g), [earlierKey]: earlierSelection(k) });
+  const accounts = await createAccountManagerWithMinter(
+    { serverUrl: "https://app.example/jazz", scope: appId },
+    mintToken,
+  );
+  accounts.logout();
+  await accounts.settleSelection();
+  expect(items.get(earlierKey)).toBe(earlierSelection(k));
+});
+
+it("a guest created in alpha.59 during a rollback survives the next alpha.60 write", async () => {
+  const ownKey = `jazz-account-selection-v1:${encodeURIComponent(
+    `https://app.example/jazz/apps/${appId}/accounts`,
+  )}:dev`;
+  const g = generateAuthSecret();
+  const n = generateAuthSecret();
+  const rolledBack = JSON.stringify({
+    format: "jazz-account-selection-v1",
+    roots: [g, n],
+    selected: 1,
+  });
+  const items = browser({ [ownKey]: earlierSelection(g), [earlierKey]: rolledBack });
+  const accounts = await createAccountManagerWithMinter(
+    { serverUrl: "https://app.example/jazz", scope: appId },
+    mintToken,
+  );
+  accounts.logout();
+  await accounts.settleSelection();
+  expect(items.get(earlierKey)).toBe(rolledBack);
+});

@@ -127,7 +127,8 @@ const SELECTION_PREFIX = "jazz-account-selection-v1:";
  * this origin: alpha.59's, whose browsers reached the Jazz server directly,
  * so its registry is `<server>/apps/<scope>/accounts` with nothing before
  * `/apps`. With no such key, or several (one app reached through more than
- * one server), there is nothing to take over.
+ * one Jazz server on this origin), there is nothing to take over: this client
+ * starts afresh rather than guess which of them its guest was.
  */
 function earlierSelectionKey(scope: string, env: string): string | null {
   const suffix = `:${encodeURIComponent(env)}`;
@@ -156,22 +157,34 @@ function earlierSelection(key: string | null): string | null {
 }
 
 /**
- * Take a root this client let go of (a guest forgotten once linked, so the
+ * Take the roots this write let go of (a guest forgotten once linked, so the
  * device can't reopen it) out of the earlier selection too, so neither a
- * restore from it nor a rollback brings the guest back.
+ * restore from it nor a rollback brings the guest back. Only those: the
+ * earlier selection may hold roots this client never had, such as a guest
+ * created there during a rollback.
  */
-function scrubEarlierSelection(key: string, kept: string): void {
+function scrubEarlierSelection(key: string, previous: string | null, next: string): void {
+  if (previous === null) return;
+  const kept = (JSON.parse(next) as { roots: string[] }).roots;
+  const dropped = (JSON.parse(previous) as { roots: string[] }).roots.filter(
+    (root) => !kept.includes(root),
+  );
+  if (dropped.length === 0) return;
   const earlier = earlierSelection(key);
   if (earlier === null) return;
-  const roots = (JSON.parse(kept) as { roots: string[] }).roots;
   const value = JSON.parse(earlier) as { roots: string[]; selected: number | null };
   const selected = value.selected === null ? undefined : value.roots[value.selected];
-  const remaining = value.roots.filter((root) => roots.includes(root));
+  const remaining = value.roots.filter((root) => !dropped.includes(root));
   if (remaining.length === value.roots.length) return;
   value.roots = remaining;
   value.selected =
     selected === undefined || !remaining.includes(selected) ? null : remaining.indexOf(selected);
-  localStorage.setItem(key, JSON.stringify(value));
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // This client's own write already landed; the earlier entry keeps the
+    // root until a later write that drops it again.
+  }
 }
 
 /**
@@ -196,10 +209,11 @@ function browserAccountStore(registry: string, env: string, scope?: string): Acc
     },
     async update(transform) {
       await navigator.locks.request(key, () => {
-        const next = transform(current());
+        const previous = current();
+        const next = transform(previous);
         localStorage.setItem(key, next);
         const earlier = earlierKey();
-        if (earlier !== null && earlier !== key) scrubEarlierSelection(earlier, next);
+        if (earlier !== null && earlier !== key) scrubEarlierSelection(earlier, previous, next);
       });
     },
   };
