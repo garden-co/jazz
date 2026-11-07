@@ -745,6 +745,134 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     }
   });
 
+  it.each(["fulfilled", "rejected"] as const)(
+    "failed %s replay releases its listener without renewing the unused deadline",
+    async (status) => {
+      vi.useFakeTimers();
+      const harness = createUnitHarness();
+      try {
+        const { entry } = harness.makeEntry();
+        const off = entry.subscribe({});
+        if (status === "fulfilled") harness.emit(0, makeDelta([makeTodo("cached")]));
+        else harness.emitError(0, new Error("source failed"));
+        off();
+        await vi.advanceTimersByTimeAsync(20_000);
+        const failure = { message: "replay failed" };
+        const replay = vi.fn(() => {
+          throw failure;
+        });
+        let caught: unknown;
+        try {
+          entry.subscribe({ onfulfilled: replay, onError: replay });
+        } catch (error) {
+          caught = error;
+        }
+        expect(caught).toBe(failure);
+        expect(replay).toHaveBeenCalledOnce();
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(harness.calls[0]?.unsubscribe).toHaveBeenCalledOnce();
+        expect(replay).toHaveBeenCalledOnce();
+      } finally {
+        await harness.manager.shutdown();
+      }
+    },
+  );
+
+  it("failed replay preserves a previously registered callback and other listeners", async () => {
+    vi.useFakeTimers();
+    const harness = createUnitHarness();
+    try {
+      const { entry } = harness.makeEntry();
+      const callbacks = { onfulfilled: vi.fn(), onDelta: vi.fn() };
+      const off = entry.subscribe(callbacks);
+      const other = { onDelta: vi.fn() };
+      const offOther = entry.subscribe(other);
+      harness.emit(0, makeDelta([makeTodo("cached")]));
+      callbacks.onfulfilled.mockImplementationOnce(() => {
+        throw undefined;
+      });
+      let threw = false;
+      try {
+        entry.subscribe(callbacks);
+      } catch (error) {
+        threw = true;
+        expect(error).toBeUndefined();
+      }
+      expect(threw).toBe(true);
+      harness.emit(0, makeDelta([makeTodo("later")]));
+      expect(callbacks.onDelta).toHaveBeenCalledOnce();
+      expect(other.onDelta).toHaveBeenCalledOnce();
+      off();
+      offOther();
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(harness.calls[0]?.unsubscribe).toHaveBeenCalledOnce();
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
+  it.each([false, true])(
+    "outer replay failure respects a reentrant same-object subscription (nested released: %s)",
+    async (releaseNested) => {
+      vi.useFakeTimers();
+      const harness = createUnitHarness();
+      try {
+        const { entry } = harness.makeEntry();
+        harness.emit(0, makeDelta([makeTodo("cached")]));
+        let inside = false;
+        let offNested: (() => void) | undefined;
+        const callbacks = {
+          onfulfilled: () => {
+            if (inside) return;
+            inside = true;
+            offNested = entry.subscribe(callbacks);
+            if (releaseNested) offNested();
+            throw new Error("outer replay failed");
+          },
+          onDelta: vi.fn(),
+        };
+        expect(() => entry.subscribe(callbacks)).toThrow("outer replay failed");
+        harness.emit(0, makeDelta([makeTodo("later")]));
+        expect(callbacks.onDelta).toHaveBeenCalledTimes(releaseNested ? 0 : 1);
+        if (!releaseNested) {
+          await vi.advanceTimersByTimeAsync(30_000);
+          expect(harness.calls[0]?.unsubscribe).not.toHaveBeenCalled();
+          offNested!();
+        }
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(harness.calls[0]?.unsubscribe).toHaveBeenCalledOnce();
+      } finally {
+        await harness.manager.shutdown();
+      }
+    },
+  );
+
+  it("a caught nested replay failure does not discard the successful outer subscription", async () => {
+    vi.useFakeTimers();
+    const harness = createUnitHarness();
+    try {
+      const { entry } = harness.makeEntry();
+      harness.emit(0, makeDelta([makeTodo("cached")]));
+      let inside = false;
+      const callbacks = {
+        onfulfilled: () => {
+          if (inside) throw new Error("nested replay failed");
+          inside = true;
+          expect(() => entry.subscribe(callbacks)).toThrow("nested replay failed");
+        },
+        onDelta: vi.fn(),
+      };
+      const off = entry.subscribe(callbacks);
+      harness.emit(0, makeDelta([makeTodo("later")]));
+      expect(callbacks.onDelta).toHaveBeenCalledOnce();
+      off();
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(harness.calls[0]?.unsubscribe).toHaveBeenCalledOnce();
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
   it("SO-U15 replacement failure rejects the fulfilled entry and remains terminal", async () => {
     const harness = createUnitHarness();
     try {

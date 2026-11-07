@@ -312,6 +312,12 @@ export class SubscriptionsOrchestrator {
       error: null,
     };
 
+    // A replay can re-enter subscribe with the same callback object. Keep its
+    // pending attempts together until one returns an unsubscribe handle.
+    const registrations = new WeakMap<
+      QueryEntryCallbacks<T>,
+      { pending: number; retained: boolean }
+    >();
     const entry = {
       key,
       query: slot.query,
@@ -328,21 +334,38 @@ export class SubscriptionsOrchestrator {
       listeners: new Set(),
       cleanupTimeoutId: null,
       subscribe: (callbacks) => {
-        this.cancelCleanup(entry);
-        entry.listeners.add(callbacks);
-
-        if (entry.state.status === "rejected") {
-          callbacks.onError?.(entry.state.error);
+        let registration = registrations.get(callbacks);
+        if (!entry.listeners.has(callbacks) || !registration) {
+          registration = { pending: 0, retained: entry.listeners.has(callbacks) };
+          registrations.set(callbacks, registration);
         }
-
-        if (entry.state.status === "fulfilled") {
-          callbacks.onfulfilled?.(entry.state.data);
+        registration.pending += 1;
+        entry.listeners.add(callbacks);
+        try {
+          if (entry.state.status === "rejected") {
+            callbacks.onError?.(entry.state.error);
+          }
+          if (entry.state.status === "fulfilled") {
+            callbacks.onfulfilled?.(entry.state.data);
+          }
+          registration.retained = true;
+          if (entry.listeners.has(callbacks)) this.cancelCleanup(entry);
+        } finally {
+          registration.pending -= 1;
+          if (registration.pending === 0 && registrations.get(callbacks) === registration) {
+            registrations.delete(callbacks);
+            if (!registration.retained) {
+              entry.listeners.delete(callbacks);
+              this.scheduleCleanup(entry);
+            }
+          }
         }
 
         return () => {
           if (!entry.listeners.delete(callbacks)) {
             return;
           }
+          registrations.delete(callbacks);
           if (entry.listeners.size === 0) {
             this.scheduleCleanup(entry);
           }
