@@ -1722,7 +1722,6 @@ fn a_remote_subscription_never_lists_pending_local_versions() {
     assert_eq!(titles(&server), ["changed", "pending"]);
 }
 
-/// Alice observes her genuine accepted write through her own durable handle.
 /// A later native scope withdrawal, even before fresh observer admission, must
 /// not be overwritten by cached host claims; the old proof stays refused.
 #[test]

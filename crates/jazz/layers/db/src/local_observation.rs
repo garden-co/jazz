@@ -720,6 +720,78 @@ pub struct LocalObservation {
 }
 
 impl Db {
+    /// Admit an observation-only local peer of this authenticated durable owner.
+    /// Identity and live claims are inherited from the Store, never supplied
+    /// by the host. No authority, volatile follower or schema-view substitution.
+    pub(crate) fn accept_own_observation_subscriber(
+        &self,
+        transport: Box<dyn crate::db::Transport>,
+    ) -> Result<(crate::db::SubscriberId, AuthorSubject), Error> {
+        self.ensure_storage_owner_active()?;
+        if self.inner.1.get() == u64::MAX {
+            return Err(unobserved("observation owner was retired"));
+        }
+        let author = {
+            let inner = self.inner.borrow();
+            if self.view.is_some()
+                || inner.client.is_none()
+                || inner.non_durable
+                || inner.identity.author == AuthorSubject::SYSTEM
+            {
+                return Err(unobserved(
+                    "own observation requires the durable replica owner",
+                ));
+            }
+            inner.identity.author
+        };
+        let subscriber = self.accept_subscriber(transport, author)?;
+        Ok((subscriber, author))
+    }
+
+    /// The same handle, identity and fixed-claim choice used by normal serving.
+    /// This is crate-private: a host cannot select a bundle or forge a principal.
+    pub(crate) fn admitted_observation_context(
+        &self,
+        subscriber: SubscriberId,
+    ) -> Result<
+        (
+            Db,
+            AuthorSubject,
+            BTreeMap<String, Value>,
+            Option<AuthorSubject>,
+        ),
+        Error,
+    > {
+        self.ensure_storage_owner_active()?;
+        let (identity, claims, policy) = {
+            let inner = self.inner.borrow();
+            let session = inner
+                .sessions
+                .get(subscriber.slot)
+                .filter(|session| session.open && session.generation == subscriber.generation)
+                .ok_or_else(|| unobserved("observation session was retired or replaced"))?;
+            let fixed = session
+                .claims
+                .clone()
+                .filter(|_| session.identity != AuthorSubject::SYSTEM);
+            // Normal serving treats SYSTEM as the store's local read, with
+            // the actual owner's operands rather than a SYSTEM registry entry.
+            let identity = if session.identity == AuthorSubject::SYSTEM {
+                inner.identity.author
+            } else {
+                session.identity
+            };
+            (
+                identity,
+                fixed
+                    .or_else(|| inner.claims.get(&identity).cloned())
+                    .unwrap_or_default(),
+                inner.session_policy(subscriber.slot),
+            )
+        };
+        Ok((self.session_db(subscriber.slot), identity, claims, policy))
+    }
+
     /// Freeze one local cut for several prepared metadata queries. No network,
     /// hidden hydration, transaction admission or freshness promise is made.
     /// An active SQLite transaction refuses capture: its evidence admission

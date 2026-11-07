@@ -1081,6 +1081,7 @@ impl Transport {
         false
     }
 
+    /// Partial accepted local candidates, never SELECT or complete-history proof.
     #[napi(js_name = "observeLocalBatch")]
     pub fn observe_local_batch(
         &self,
@@ -1938,21 +1939,7 @@ impl NapiDb {
         read_or_pending(read)
     }
 
-    /// Bind receipt-correlation claims to this client's own admitted identity.
-    #[napi(js_name = "setSessionClaims")]
-    pub fn set_session_claims(
-        &self,
-        #[napi(ts_arg_type = "Record<string, unknown> | undefined | null")] claims: Option<
-            JsonValue,
-        >,
-    ) -> js::Result<()> {
-        self.binding()?
-            .set_session_claims(json_or_null(claims))
-            .map_err(host_error)?;
-        settle_promises();
-        Ok(())
-    }
-
+    /// Partial accepted local candidates, never SELECT or complete-history proof.
     #[napi(js_name = "observeLocalBatch")]
     pub fn observe_local_batch(
         &self,
@@ -1968,6 +1955,21 @@ impl NapiDb {
                 claims,
             )
             .map_err(host_error)?)
+    }
+
+    /// Bind receipt-correlation claims to this client's own admitted identity.
+    #[napi(js_name = "setSessionClaims")]
+    pub fn set_session_claims(
+        &self,
+        #[napi(ts_arg_type = "Record<string, unknown> | undefined | null")] claims: Option<
+            JsonValue,
+        >,
+    ) -> js::Result<()> {
+        self.binding()?
+            .set_session_claims(json_or_null(claims))
+            .map_err(host_error)?;
+        settle_promises();
+        Ok(())
     }
 
     /// Set the claims reads and writes as `author` are checked with.

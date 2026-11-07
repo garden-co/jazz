@@ -209,3 +209,16 @@ describe("authenticated durable-owner observation admission", () => {
     },
   );
 });
+
+it("refuses a volatile follower without a generic observation fallback", async () => {
+  const { runtime, db } = fixture([empty()]);
+  runtime.setNonDurableClient();
+  try {
+    await expect(runtime.observeLocalBatch([query])).rejects.toThrow(
+      "durable owner is unavailable",
+    );
+    expect(db.observeLocalBatch).not.toHaveBeenCalled();
+  } finally {
+    await runtime.close();
+  }
+});

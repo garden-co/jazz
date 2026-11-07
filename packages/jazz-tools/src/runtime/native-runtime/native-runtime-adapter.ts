@@ -1216,9 +1216,6 @@ export class NativeRuntimeAdapter implements Runtime {
     });
   }
 
-  private ownObservationPeer: Transport | null = null;
-  private ownObservationAdmission: Promise<Transport> | null = null;
-
   private localObservationRelay:
     | ((
         queries: readonly string[],
@@ -1237,6 +1234,8 @@ export class NativeRuntimeAdapter implements Runtime {
       if (owner.localObservationRelay === relay) owner.localObservationRelay = null;
     };
   }
+  private ownObservationPeer: Transport | null = null;
+  private ownObservationAdmission: Promise<Transport> | null = null;
 
   async observeLocalBatch(
     queries: readonly string[],

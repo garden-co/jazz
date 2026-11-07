@@ -1060,7 +1060,6 @@ function buildForwardLenses<
 export function schemaDefinitionToAst(definition: SchemaDefinition | AppSchema<any>): SchemaAst {
   assertUnencryptedMigrationSchema(definition as SchemaDefinition);
   assertUnencryptedMigrationSchema(definition as SchemaDefinition);
-  assertUnencryptedMigrationSchema(definition as SchemaDefinition);
   return compileSchemaDefinition(definition as SchemaDefinition);
 }
 
