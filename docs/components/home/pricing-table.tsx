@@ -68,7 +68,7 @@ const tiers: Tier[] = [
       <>
         1,000 <PasTerm>Peak Active Sessions</PasTerm> included
         <br />
-        <strong>+$50</strong> per additional 1,000 <PasTerm>PAS</PasTerm>
+        <strong>+$50/mo</strong> per additional 1,000 <PasTerm>PAS</PasTerm>
       </>
     ),
     features: "All product features",
