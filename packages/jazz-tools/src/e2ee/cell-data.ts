@@ -12,7 +12,12 @@ import { encodeCryptoContext } from "./context.js";
 import { encodeEnvelope, decodeEnvelope } from "./envelope.js";
 import { encryptedRowSpaces, encryptedSchemas } from "./encrypted-schema.js";
 import { frameCryptoRecord } from "./record-frame.js";
-import { cellCryptoForDb, withSpaceKeys } from "./lifecycle.js";
+import {
+  cellCryptoForDb,
+  withSpaceKeys,
+  withContentSpaceKeys,
+  contentIdentitiesForDb,
+} from "./lifecycle.js";
 import type { SpaceRoot } from "./spaces.js";
 import { equalityValue } from "./equality-data.js";
 
@@ -61,9 +66,12 @@ export async function dataContext(
   policy = "jazz.e2ee.cell-record.v1",
 ): Promise<Uint8Array> {
   if (rowId !== undefined && !UUID.test(rowId)) throw new Error("Invalid encrypted cell row ID");
-  const tableId = await db.tableIdentity(table, true);
-  const columnId = await db.columnIdentity(table, column.name, true);
-  if (!tableId || !columnId) throw new Error("Encrypted column identity is unavailable");
+  const { table: tableId, column: columnId } = await contentIdentitiesForDb(
+    db,
+    table,
+    column.name,
+    root,
+  );
   return frameCryptoRecord([
     encodeCryptoContext({
       application,
@@ -190,10 +198,13 @@ export async function decryptCellRows(
     if (initial) {
       await decrypt(initial.secret, initial.root);
     } else {
-      const requiredEpochs = new Set(
-        entries.flatMap(({ pending }) => [...pending.values()].map((cell) => cell.epoch)),
+      await (onValidatedHistory ? withSpaceKeys : withContentSpaceKeys)(
+        db,
+        scope,
+        identifier,
+        decrypt,
+        true,
       );
-      await withSpaceKeys(db, scope, identifier, decrypt, true, false, requiredEpochs);
       if (group.length > 1) recheck.push(identifier);
       else if (epochs) histories!.set(identifier, epochs);
     }
@@ -214,7 +225,7 @@ export async function decryptCellRows(
       );
       histories.set(identifier, epochs);
     } else {
-      await withSpaceKeys(db, scope, identifier, async () => {}, false);
+      await withContentSpaceKeys(db, scope, identifier, async () => {}, false);
     }
   }
   if (onValidatedHistory && histories)

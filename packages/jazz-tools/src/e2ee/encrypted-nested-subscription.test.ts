@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
@@ -9,21 +10,24 @@ import { spaceSchema } from "./spaces.js";
 import { createBrowserCrypto } from "./browser.js";
 
 async function createFixture() {
-  const app = s.defineApp({
-    ...deviceRequestSchema,
-    ...spaceSchema,
-    projects: s.table({ title: s.string() }, {}),
-    folders: s.table(
-      { title: s.string() },
-      { notesViaFolder: s.reverse("notes", "folderRelation") },
-    ),
-    notes: s
-      .table(
-        { projectId: s.uuid(), folder: s.uuid(), title: s.string() },
-        { project: s.rel("projects", "projectId"), folderRelation: s.rel("folders", "folder") },
-      )
-      .encrypted({ space: "projectId", columns: ["title"] }),
-  });
+  const app = s.defineApp(
+    {
+      ...deviceRequestSchema,
+      ...spaceSchema,
+      projects: s.table({ title: s.string() }, {}),
+      folders: s.table(
+        { title: s.string(), body: s.string(), payload: s.bytes() },
+        { notesViaFolder: s.reverse("notes", "folderRelation") },
+      ),
+      notes: s
+        .table(
+          { projectId: s.uuid(), folder: s.uuid(), title: s.string() },
+          { project: s.rel("projects", "projectId"), folderRelation: s.rel("folders", "folder") },
+        )
+        .encrypted({ space: "projectId", columns: ["title"] }),
+    },
+    { migrations: "none" },
+  );
   const policies = definePermissions(app, ({ policy, session }) => {
     policy.projects.allowRead.always();
     policy.projects.allowInsert.always();
@@ -42,7 +46,7 @@ async function createFixture() {
     policy.__e2ee_space_successors.allowRead.always();
     policy.__e2ee_space_successors.allowInsert.where({ authorAccountId: session.user.account });
   });
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Awaited<ReturnType<typeof createDb>>[] = [];
   const store = () => {
     let value: string | null = null;
@@ -55,6 +59,13 @@ async function createFixture() {
       },
     };
   };
+  let decryptionGate: Promise<void> | undefined;
+  let releaseDecryption = () => {};
+  let decryptionStarted = false;
+  const resumeDecryption = () => {
+    releaseDecryption();
+    decryptionGate = undefined;
+  };
   let validationGate: Promise<void> | undefined;
   let releaseValidation = () => {};
   let validationStarted = false;
@@ -64,6 +75,7 @@ async function createFixture() {
   };
   const close = async () => {
     release();
+    resumeDecryption();
     for (const client of clients) await client.shutdown();
     await server.stop();
   };
@@ -72,6 +84,10 @@ async function createFixture() {
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
+      schema: app,
+      permissions: { ...deviceRequestPermissions, ...policies },
+    });
+    server = await frontE2eeCore(server, {
       schema: app,
       permissions: { ...deviceRequestPermissions, ...policies },
     });
@@ -87,6 +103,16 @@ async function createFixture() {
         store: store(),
         crypto: {
           ...crypto,
+          cellCipher: {
+            ...crypto.cellCipher,
+            async decrypt(...args) {
+              if (decryptionGate) {
+                decryptionStarted = true;
+                await decryptionGate;
+              }
+              return crypto.cellCipher.decrypt(...args);
+            },
+          },
           deviceSigner: {
             ...crypto.deviceSigner,
             async verify(...args) {
@@ -111,6 +137,14 @@ async function createFixture() {
       reader,
       clients,
       close,
+      holdDecryption() {
+        decryptionStarted = false;
+        decryptionGate = new Promise<void>((resolve) => {
+          releaseDecryption = resolve;
+        });
+      },
+      decryptionStarted: () => decryptionStarted,
+      releaseDecryption: resumeDecryption,
       holdValidation() {
         validationStarted = false;
         validationGate = new Promise<void>((resolve) => {
@@ -145,7 +179,11 @@ it.each(["encrypted-space-revocation", "superseded-history-failure"])(
     try {
       const tx = owner.beginSerializableTransaction();
       const project = tx.insert(app.projects, { title: "Private project" });
-      const folder = tx.insert(app.folders, { title: "Shared folder" });
+      const folder = tx.insert(app.folders, {
+        title: "Shared folder",
+        body: "",
+        payload: new Uint8Array(),
+      });
       const note = tx.insert(app.notes, {
         projectId: project.id,
         folder: folder.id,
@@ -246,6 +284,180 @@ it.each(["encrypted-space-revocation", "superseded-history-failure"])(
     } finally {
       fixture.releaseValidation();
       stopPlaintext?.();
+    }
+  },
+  120_000,
+);
+
+it.each(["text", "bytes"] as const)(
+  "keeps public splices relative to the last delivered encrypted include (%s)",
+  async (column) => {
+    const { app, owner, reader, bob } = fixture;
+    const tx = owner.beginSerializableTransaction();
+    const project = tx.insert(app.projects, { title: "Splice project" });
+    const prefix = "a".repeat(70_000);
+    const folder = tx.insert(app.folders, {
+      title: "Splice parent",
+      body: prefix + "end",
+      payload: new Uint8Array([...new Uint8Array(70_000), 1, 2, 3]),
+    });
+    const note = tx.insert(app.notes, {
+      projectId: project.id,
+      folder: folder.id,
+      title: "Secret",
+    });
+    await tx.commit().wait({ tier: "global" });
+    await owner.e2ee.spaces.grant(app.projects, project.id, bob.account.id).wait();
+    const query = app.folders.where({ id: folder.id }).include({ notesViaFolder: true });
+    await reader.all(query, { tier: "remote" });
+    let previous = column === "text" ? folder.body : folder.payload;
+    let latest: typeof previous | undefined;
+    let failure: Error | undefined;
+    let spliceCount = 0;
+    const stop = reader.subscribe(
+      query,
+      {
+        onUpdate(rows, update) {
+          const row = rows[0];
+          if (!row) return;
+          const value = column === "text" ? row.body : row.payload;
+          const patches = update.splices.get(folder.id)?.[column === "text" ? "body" : "payload"];
+          if (patches) {
+            let applied = previous;
+            for (const patch of patches) {
+              if (typeof applied === "string") {
+                applied =
+                  applied.slice(0, patch.at) +
+                  patch.insert +
+                  applied.slice(patch.at + patch.delete);
+              } else {
+                applied = new Uint8Array([
+                  ...applied.slice(0, patch.at),
+                  ...(patch.insert as Uint8Array),
+                  ...applied.slice(patch.at + patch.delete),
+                ]);
+              }
+            }
+            expect(applied).toEqual(value);
+            if (patches.length) spliceCount++;
+          }
+          expect(row.notesViaFolder).toEqual([note]);
+          previous = value;
+          latest = value;
+        },
+        onError(error) {
+          failure = error;
+        },
+      },
+      { tier: "remote", splices: [column === "text" ? "body" : "payload"] },
+    );
+    let plain: typeof previous | undefined;
+    const stopPlain = reader.subscribe(
+      app.folders.where({ id: folder.id }),
+      (rows) => {
+        plain = column === "text" ? rows[0]?.body : rows[0]?.payload;
+      },
+      { tier: "remote" },
+    );
+    try {
+      await expect.poll(() => failure ?? latest, { timeout: 30_000 }).toEqual(previous);
+      // First establish that this same encrypted path actually supplies valid
+      // splices when no frontier is withheld (not just complete-value fallback).
+      const control =
+        column === "text"
+          ? prefix + "control end"
+          : new Uint8Array([...new Uint8Array(70_000), 9, 1, 2, 3]);
+      await owner
+        .update(
+          app.folders,
+          folder.id,
+          {},
+          {
+            applyDiffs:
+              column === "text"
+                ? {
+                    body: {
+                      within: { from: 70_000, to: 70_003 },
+                      splices: [{ at: 0, delete: 0, insert: "control " }],
+                    },
+                  }
+                : {
+                    payload: {
+                      within: { from: 70_000, to: 70_003 },
+                      splices: [{ at: 0, delete: 0, insert: new Uint8Array([9]) }],
+                    },
+                  },
+          },
+        )
+        .wait({ tier: "global" });
+      await expect.poll(() => failure ?? latest, { timeout: 30_000 }).toEqual(control);
+      expect(spliceCount).toBeGreaterThan(0);
+      fixture.holdDecryption();
+      const afterA =
+        column === "text"
+          ? prefix + "first control end"
+          : new Uint8Array([...new Uint8Array(70_000), 4, 5, 1, 2, 3]);
+      await owner
+        .update(
+          app.folders,
+          folder.id,
+          {},
+          {
+            applyDiffs:
+              column === "text"
+                ? {
+                    body: {
+                      within: { from: 70_000, to: 70_011 },
+                      splices: [{ at: 0, delete: 0, insert: "first " }],
+                    },
+                  }
+                : {
+                    payload: {
+                      within: { from: 70_000, to: 70_004 },
+                      splices: [{ at: 0, delete: 1, insert: new Uint8Array([4, 5]) }],
+                    },
+                  },
+          },
+        )
+        .wait({ tier: "global" });
+      await expect.poll(() => fixture.decryptionStarted(), { timeout: 10_000 }).toBe(true);
+      await expect.poll(() => plain, { timeout: 10_000 }).toEqual(afterA);
+      const afterB =
+        column === "text"
+          ? prefix + "first second control end"
+          : new Uint8Array([...new Uint8Array(70_000), 4, 6, 7, 1, 2, 3]);
+      await owner
+        .update(
+          app.folders,
+          folder.id,
+          {},
+          {
+            applyDiffs:
+              column === "text"
+                ? {
+                    body: {
+                      within: { from: 70_000, to: 70_017 },
+                      splices: [{ at: 6, delete: 0, insert: "second " }],
+                    },
+                  }
+                : {
+                    payload: {
+                      within: { from: 70_000, to: 70_005 },
+                      splices: [{ at: 1, delete: 1, insert: new Uint8Array([6, 7]) }],
+                    },
+                  },
+          },
+        )
+        .wait({ tier: "global" });
+      await expect.poll(() => plain, { timeout: 10_000 }).toEqual(afterB);
+      expect(latest).toEqual(control);
+      fixture.releaseDecryption();
+      await expect.poll(() => failure ?? latest, { timeout: 30_000 }).toEqual(afterB);
+      expect(failure).toBeUndefined();
+    } finally {
+      fixture.releaseDecryption();
+      stopPlain();
+      stop();
     }
   },
   120_000,

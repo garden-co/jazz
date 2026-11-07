@@ -9,6 +9,7 @@ import { bytesToHex, formatUuidAt } from "./hex.js";
 import type {
   RuntimeSubscriptionDelta,
   RuntimeTerminalOperation,
+  RuntimeValueSplice,
   Value,
   WasmRow,
 } from "../drivers/types.js";
@@ -22,15 +23,34 @@ export const RowChangeKind = {
 export type RowChangeKind = typeof RowChangeKind;
 export type RowChangeKindValue = (typeof RowChangeKind)[keyof typeof RowChangeKind];
 
+/**
+ * Per column, the sequential splices that turn a row's previous value into its
+ * new one: UTF-16 units and a string for TEXT, bytes for BYTEA.
+ */
+export type ValueSplices = Readonly<Record<string, readonly RuntimeValueSplice[]>>;
+
 export type RowDelta<T> =
   | { kind: RowChangeKind["Added"]; id: string; index: number; item: T }
   | { kind: RowChangeKind["Removed"]; id: string; index: number }
-  | { kind: RowChangeKind["Updated"]; id: string; index: number; item?: T };
+  | {
+      kind: RowChangeKind["Updated"];
+      id: string;
+      index: number;
+      item?: T;
+      /** Opted-in columns' splices, when they could be computed. */
+      splices?: ValueSplices;
+    };
 
 type DecodedRowDelta =
   | { kind: RowChangeKind["Added"]; id: string; index: number; row: WasmRow }
   | { kind: RowChangeKind["Removed"]; id: string; index: number }
-  | { kind: RowChangeKind["Updated"]; id: string; index: number; row?: WasmRow | null };
+  | {
+      kind: RowChangeKind["Updated"];
+      id: string;
+      index: number;
+      row?: WasmRow | null;
+      splices?: ValueSplices;
+    };
 
 export type SubscriptionDelta<T> =
   | {
@@ -338,7 +358,7 @@ export function resultIdentity(item: { id: string }): string {
 export class SubscriptionManager<T extends { id: string }> {
   private currentResults = new JournaledMap<string, T>();
   private terminalRows = new JournaledMap<string, WasmRow>();
-  /** Exact ordered Groove root key -> opaque ResultKey sidecar address. */
+  /** Exact ordered root key -> opaque ResultKey sidecar address. */
   private terminalOccurrenceAddresses = new JournaledMap<string, string>();
   private orderedIds: string[] = [];
   private orderedIdIndex = new JournaledMap<string, number>();
@@ -496,6 +516,7 @@ export class SubscriptionManager<T extends { id: string }> {
           id: updatedKeys[index]!.id,
           index: change.index,
           row: change.row,
+          ...(change.splices ? { splices: change.splices } : {}),
         })),
         ...delta.added.map((change, index) => ({
           kind: RowChangeKind.Added,
@@ -786,6 +807,7 @@ export class SubscriptionManager<T extends { id: string }> {
               id: change.id,
               index: change.index,
               item: updatedItem ? withResultIdentity(updatedItem, change.id) : undefined,
+              ...(change.splices ? { splices: change.splices } : {}),
             };
           }
         }
@@ -946,7 +968,7 @@ export class SubscriptionManager<T extends { id: string }> {
 }
 
 /**
- * Reconstruct the exact Groove ordered root key from a complete ResultKey.
+ * Reconstruct the exact ordered root key from a complete ResultKey.
  * This is metadata-driven: a terminal key is accepted as typed only when it
  * byte-for-byte matches the sidecar's root, joined UUIDs, and union-arm
  * discriminators. It intentionally does not infer meaning from a string in an
@@ -1046,7 +1068,7 @@ function terminalKeyId(encoded: readonly number[]): string {
   if (bytes.length === 17 && bytes[0] === 10) {
     return readUuid(bytes, 1);
   }
-  // Groove terminal operations address roots by an ordered Record key. A
+  // Terminal operations address roots by an ordered Record key. A
   // multi-source row is therefore `Uuid, Uuid, …`, while the packed stream's
   // occurrence sidecar uses the equivalent ResultKey (`2, root UUID,
   // joined count, joined UUIDs, label count, per-source transaction flags`). Normalize only this exact
@@ -1083,7 +1105,7 @@ function isUuidOnlyTerminalKey(encoded: ArrayLike<number>): boolean {
   );
 }
 
-/** Decode the leading UUID key field from Groove's ordered record-key carrier. */
+/** Decode the leading UUID key field from the ordered record-key carrier. */
 function terminalPayloadRowId(encoded: readonly number[]): string {
   const bytes = Uint8Array.from(encoded);
   if (bytes.length < 17 || bytes[0] !== 10) {

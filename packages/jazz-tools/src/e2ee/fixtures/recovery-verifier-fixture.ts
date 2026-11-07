@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./app.js";
 import { expect } from "vitest";
 import type { Db } from "../../runtime/db.js";
 import { createDb } from "../../runtime/default-create-db.js";
@@ -10,7 +11,7 @@ import type { CryptoAdapters } from "../types.js";
 // Prepared history always uses real approval, recovery roots and rotation.
 // Each case opens a fresh client and adapters; callers choose whether to share history.
 export async function createRotatedRecovery() {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Db[] = [];
   const shutdown = async () => {
     try {
@@ -27,6 +28,7 @@ export async function createRotatedRecovery() {
       schema: app,
       permissions: deviceRequestPermissions,
     });
+    server = await frontE2eeCore(server, { schema: app, permissions: deviceRequestPermissions });
     const account = await localAccountConfig(server.appId, server.url);
     const native = await createNativeCrypto();
     const open = async (crypto = native) => {

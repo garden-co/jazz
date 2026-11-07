@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
@@ -8,12 +9,15 @@ import { groupSchema } from "./groups.js";
 import { spaceSchema } from "./spaces.js";
 
 it("native Node keeps a space in maintenance when Jazz denies recipient-group rotation", async () => {
-  const app = s.defineApp({
-    ...deviceRequestSchema,
-    ...groupSchema,
-    ...spaceSchema,
-    projects: s.table({ title: s.string() }, {}),
-  });
+  const app = s.defineApp(
+    {
+      ...deviceRequestSchema,
+      ...groupSchema,
+      ...spaceSchema,
+      projects: s.table({ title: s.string() }, {}),
+    },
+    { migrations: "none" },
+  );
   const policies = definePermissions(app, ({ policy, session }) => {
     policy.projects.allowRead.always();
     policy.projects.allowInsert.always();
@@ -49,7 +53,7 @@ it("native Node keeps a space in maintenance when Jazz denies recipient-group ro
     __e2ee_group_deliveries: policies.__e2ee_group_deliveries!,
     __e2ee_group_repairs: policies.__e2ee_group_repairs!,
   };
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const sessions: Awaited<ReturnType<typeof createJazzSession>>[] = [];
   const store = () => {
     let value: string | null = null;
@@ -70,6 +74,7 @@ it("native Node keeps a space in maintenance when Jazz denies recipient-group ro
       schema: app,
       permissions,
     });
+    server = await frontE2eeCore(server, { schema: app, permissions: permissions });
     const open = async () => {
       const session = await createJazzSession({
         appId: server.appId,

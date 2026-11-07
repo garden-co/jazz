@@ -4,7 +4,7 @@
 // Release builds keep the name section (`wasm-opt -g`) so stack traces and
 // profiles show Rust function names. wasm-bindgen writes those names with the
 // legacy mangling hash still attached, e.g.
-// `jazz_node::node::NodeState<S>::cache_tx_versions::h1f0c…`. The hash is
+// `jazz_db::db::Db::insert::h1f0c…`. The hash is
 // random hex that names nothing a reader can use, and since gzip and Brotli
 // cannot compress it, it costs about 2% of the shipped bundle. This drops only
 // that suffix; every name stays readable. Names may then repeat (one per

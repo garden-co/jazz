@@ -1,5 +1,8 @@
 import { expect, it } from "vitest";
-import { decodeAcceptedHistoryReads, encodeAcceptedHistoryReads } from "./accepted-history.js";
+import {
+  decodeAcceptedHistoryReads,
+  encodeAcceptedHistoryReads,
+} from "./accepted-history-format.js";
 
 // Durable local format corpus: query text is opaque here, never executed.
 const corpus =

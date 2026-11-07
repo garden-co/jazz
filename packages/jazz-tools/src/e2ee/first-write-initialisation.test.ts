@@ -1,3 +1,4 @@
+import { frontE2eeCore, redeployE2eeApp } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { migration as m } from "../migration-namespace.js";
@@ -33,8 +34,8 @@ it.each([
         )
         .encrypted({ space: "projectId", columns: ["body"] }),
     };
-    const oldApp = s.defineApp(before);
-    const app = s.defineApp(after);
+    const oldApp = s.defineApp(before, { migrations: "none" });
+    const app = s.defineApp(after, { migrations: "none" });
     const migration = m.defineMigration({
       from: before,
       to: after,
@@ -62,7 +63,7 @@ it.each([
       policy.__e2ee_space_deliveries.allowRead.always();
       policy.__e2ee_space_deliveries.allowInsert.where({ senderAccountId: session.user.account });
     });
-    const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+    let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
     let creator: Awaited<ReturnType<typeof createDb>> | undefined;
     let writer: Awaited<ReturnType<typeof createDb>> | undefined;
     let outsider: Awaited<ReturnType<typeof createDb>> | undefined;
@@ -81,7 +82,10 @@ it.each([
         appId: server.appId,
         adminSecret: server.adminSecret,
       };
-      await deploy({ ...target, schema: oldApp, permissions: oldPermissions });
+      const initialDeployment = { ...target, schema: oldApp, permissions: oldPermissions };
+      await deploy(initialDeployment);
+      const appBackend = await frontE2eeCore(server, initialDeployment);
+      server = appBackend;
       const creatorAccount = await localAccountConfig(server.appId, server.url);
       creator = await createDb(creatorAccount);
       const project = await creator
@@ -89,7 +93,7 @@ it.each([
         .wait({ tier: "global" });
       await creator.shutdown();
       creator = undefined;
-      await deploy({ ...target, schema: app, permissions, migration });
+      await redeployE2eeApp(appBackend, { ...target, schema: app, permissions, migration });
       const account = await localAccountConfig(server.appId, server.url);
       let failWrapping = false;
       const keys = mode === "crypto-error" ? await createBrowserKeyEnvelope() : undefined;
@@ -156,7 +160,7 @@ it.each([
           tier: "remote",
         });
         expect(roots).toHaveLength(1);
-        expect(roots[0]).toMatchObject({ accountId: account.account.id });
+        expect(roots[0]).toMatchObject({ creatorAccountId: account.account.id });
         const grants = await writer.all(app.__e2ee_space_grants.where({ spaceId: roots[0]!.id }), {
           tier: "remote",
         });

@@ -73,7 +73,7 @@ cleanup are not implemented by this slice. Existing device/account keys are not
 replaced.
 
 Every account-key rotation publishes a new delivery for each currently active
-recovery root in the same exclusive transaction as the accepted successor.
+recovery root in the same serializable transaction as the accepted successor.
 Root retirement is an explicit `retire-recovery-root` successor action: it
 rotates the epoch, leaves exact active-device membership unchanged, and excludes
 the retired root from new-epoch recovery deliveries. Other active roots and all

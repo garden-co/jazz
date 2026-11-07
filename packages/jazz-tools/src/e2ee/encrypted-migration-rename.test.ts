@@ -1,3 +1,4 @@
+import { frontE2eeCore, redeployE2eeApp } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { migration as m } from "../migration-namespace.js";
@@ -24,8 +25,8 @@ it("reads and searches existing ciphertext after renaming its column", async () 
       .table({ projectId: s.uuid(), body: s.string() }, { project: s.rel("projects", "projectId") })
       .encrypted({ space: "projectId", columns: ["body"], indexes: { body: "equality" } }),
   };
-  const oldApp = s.defineApp(before);
-  const newApp = s.defineApp(after);
+  const oldApp = s.defineApp(before, { migrations: "none" });
+  const newApp = s.defineApp(after, { migrations: "none" });
   const migration = m.defineMigration({
     from: before,
     to: after,
@@ -46,7 +47,7 @@ it("reads and searches existing ciphertext after renaming its column", async () 
       policy.__e2ee_space_successors.allowRead.always();
       policy.__e2ee_space_successors.allowInsert.where({ authorAccountId: session.user.account });
     });
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
   let retained: string | null = null;
   const store = {
@@ -59,7 +60,10 @@ it("reads and searches existing ciphertext after renaming its column", async () 
   };
   try {
     const target = { serverUrl: server.url, appId: server.appId, adminSecret: server.adminSecret };
-    await deploy({ ...target, schema: oldApp, permissions: permissions(oldApp) });
+    const initialDeployment = { ...target, schema: oldApp, permissions: permissions(oldApp) };
+    await deploy(initialDeployment);
+    const appBackend = await frontE2eeCore(server, initialDeployment);
+    server = appBackend;
     const account = await localAccountConfig(server.appId, server.url);
     db = await createDb({ ...account, e2ee: { app: oldApp, store } });
     const tx = db.beginSerializableTransaction();
@@ -72,7 +76,12 @@ it("reads and searches existing ciphertext after renaming its column", async () 
     expect(root).not.toBeNull();
     await db.shutdown();
     db = undefined;
-    await deploy({ ...target, schema: newApp, permissions: permissions(newApp), migration });
+    await redeployE2eeApp(appBackend, {
+      ...target,
+      schema: newApp,
+      permissions: permissions(newApp),
+      migration,
+    });
     db = await createDb({ ...account, e2ee: { app: newApp, store } });
     expect(
       await db.one(newApp.__e2ee_spaces.where({ identifier: project.id }), { tier: "remote" }),
@@ -124,8 +133,8 @@ it.each(["partial", "full"] as const)(
       .encrypted({ space: "projectId", columns: ["title"], indexes: { title: "equality" } });
     const before = { projects, notes: encrypted };
     const after = { ...before, messages: encrypted };
-    const oldApp = s.defineApp(before);
-    const newApp = s.defineApp(after);
+    const oldApp = s.defineApp(before, { migrations: "none" });
+    const newApp = s.defineApp(after, { migrations: "none" });
     const migration =
       witness === "partial"
         ? m.defineMigration({
@@ -156,7 +165,7 @@ it.each(["partial", "full"] as const)(
         policy.__e2ee_space_successors.allowInsert.where({ authorAccountId: session.user.account });
       });
     const { messages: _messages, ...oldPermissions } = permissions(newApp);
-    const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+    let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
     let db: Awaited<ReturnType<typeof createDb>> | undefined;
     let retained: string | null = null;
     const store = {
@@ -173,7 +182,10 @@ it.each(["partial", "full"] as const)(
         appId: server.appId,
         adminSecret: server.adminSecret,
       };
-      await deploy({ ...target, schema: oldApp, permissions: oldPermissions });
+      const initialDeployment = { ...target, schema: oldApp, permissions: oldPermissions };
+      await deploy(initialDeployment);
+      const appBackend = await frontE2eeCore(server, initialDeployment);
+      server = appBackend;
       const account = await localAccountConfig(server.appId, server.url);
       db = await createDb({ ...account, e2ee: { app: oldApp, store } });
       const tx = db.beginSerializableTransaction();
@@ -182,8 +194,18 @@ it.each(["partial", "full"] as const)(
       await tx.commit().wait({ tier: "global" });
       await db.shutdown();
       db = undefined;
-      await deploy({ ...target, schema: newApp, permissions: permissions(newApp), migration });
-      await deploy({ ...target, schema: newApp, permissions: permissions(newApp), migration });
+      await redeployE2eeApp(appBackend, {
+        ...target,
+        schema: newApp,
+        permissions: permissions(newApp),
+        migration,
+      });
+      await redeployE2eeApp(appBackend, {
+        ...target,
+        schema: newApp,
+        permissions: permissions(newApp),
+        migration,
+      });
       db = await createDb({ ...account, e2ee: { app: newApp, store } });
       expect(
         await db.all(newApp.notes.where({ projectId: project.id }), { tier: "remote" }),
@@ -212,8 +234,8 @@ it("rejects an explicit added table already present outside the partial source w
   const notes = s
     .table({ projectId: s.uuid(), title: s.string() }, { project: s.rel("projects", "projectId") })
     .encrypted({ space: "projectId", columns: ["title"] });
-  const oldApp = s.defineApp({ projects, notes });
-  const newApp = s.defineApp({ projects, notes, messages: notes });
+  const oldApp = s.defineApp({ projects, notes }, { migrations: "none" });
+  const newApp = s.defineApp({ projects, notes, messages: notes }, { migrations: "none" });
   const migration = m.defineMigration({
     from: { projects },
     to: { projects, notes, messages: notes },
@@ -263,8 +285,8 @@ it("reads and searches existing ciphertext after renaming its scope and referenc
       )
       .encrypted({ space: "projectId", columns: ["title"], indexes: { title: "equality" } }),
   };
-  const oldApp = s.defineApp(before);
-  const newApp = s.defineApp(after);
+  const oldApp = s.defineApp(before, { migrations: "none" });
+  const newApp = s.defineApp(after, { migrations: "none" });
   const migration = m.defineMigration({
     from: before,
     to: after,
@@ -301,7 +323,7 @@ it("reads and searches existing ciphertext after renaming its scope and referenc
     policy.__e2ee_space_successors.allowRead.always();
     policy.__e2ee_space_successors.allowInsert.where({ authorAccountId: session.user.account });
   });
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   let db: Db | undefined;
   let retained: string | null = null;
   const store = {
@@ -314,7 +336,10 @@ it("reads and searches existing ciphertext after renaming its scope and referenc
   };
   try {
     const target = { serverUrl: server.url, appId: server.appId, adminSecret: server.adminSecret };
-    await deploy({ ...target, schema: oldApp, permissions: oldPermissions });
+    const initialDeployment = { ...target, schema: oldApp, permissions: oldPermissions };
+    await deploy(initialDeployment);
+    const appBackend = await frontE2eeCore(server, initialDeployment);
+    server = appBackend;
     const account = await localAccountConfig(server.appId, server.url);
     db = await createDb({ ...account, e2ee: { app: oldApp, store } });
     const tx = db.beginSerializableTransaction();
@@ -323,7 +348,12 @@ it("reads and searches existing ciphertext after renaming its scope and referenc
     await tx.commit().wait({ tier: "global" });
     await db.shutdown();
     db = undefined;
-    await deploy({ ...target, schema: newApp, permissions: newPermissions, migration });
+    await redeployE2eeApp(appBackend, {
+      ...target,
+      schema: newApp,
+      permissions: newPermissions,
+      migration,
+    });
     db = await createDb({ ...account, e2ee: { app: newApp, store } });
     expect(await db.all(newApp.workspaces, { tier: "remote" })).toEqual([
       { id: project.id, title: "Project" },
@@ -377,16 +407,19 @@ it("rejects retargeting encrypted rows to an unrelated scope alongside table ren
 
 it("requires a user migration when adding the first encrypted table", async () => {
   const projects = s.table({ title: s.string() }, {});
-  const oldApp = s.defineApp({ projects });
-  const newApp = s.defineApp({
-    projects,
-    notes: s
-      .table(
-        { projectId: s.uuid(), title: s.string() },
-        { project: s.rel("projects", "projectId") },
-      )
-      .encrypted({ space: "projectId", columns: ["title"] }),
-  });
+  const oldApp = s.defineApp({ projects }, { migrations: "none" });
+  const newApp = s.defineApp(
+    {
+      projects,
+      notes: s
+        .table(
+          { projectId: s.uuid(), title: s.string() },
+          { project: s.rel("projects", "projectId") },
+        )
+        .encrypted({ space: "projectId", columns: ["title"] }),
+    },
+    { migrations: "none" },
+  );
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   try {
     const target = { serverUrl: server.url, appId: server.appId, adminSecret: server.adminSecret };

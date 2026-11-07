@@ -8,6 +8,7 @@ publish = false
 zstd = "0.13.3"
 jazz = { workspace = true, features = ["testing"] }
 jazz-benchmark-guard = { path = "../../../crates/benchmark-guard" }
+jazz-native-relay = { path = "../../../crates/jazz-native-relay" }
 tempfile = "3.27.0"
 
 [dev-dependencies]

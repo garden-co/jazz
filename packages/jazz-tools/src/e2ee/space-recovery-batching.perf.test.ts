@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
@@ -12,11 +13,14 @@ import { createNativeCrypto } from "./native.js";
 it.skipIf(process.env.JAZZ_E2EE_HISTORY_PERF !== "1")(
   "inspects and restores nine spaces across recovery batches after device loss",
   async () => {
-    const app = s.defineApp({
-      ...deviceRequestSchema,
-      ...spaceSchema,
-      projects: s.table({ title: s.string() }, {}),
-    });
+    const app = s.defineApp(
+      {
+        ...deviceRequestSchema,
+        ...spaceSchema,
+        projects: s.table({ title: s.string() }, {}),
+      },
+      { migrations: "none" },
+    );
     const policies = definePermissions(app, ({ policy, session }) => {
       const authenticated = session.where({ authMode: { in: ["local-first", "external"] } });
       policy.projects.allowRead.where(authenticated);
@@ -34,13 +38,17 @@ it.skipIf(process.env.JAZZ_E2EE_HISTORY_PERF !== "1")(
         senderAccountId: session.user.account,
       });
     });
-    const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+    let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
     const clients: Db[] = [];
     try {
       await deploy({
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
+        schema: app,
+        permissions: { ...deviceRequestPermissions, ...policies },
+      });
+      server = await frontE2eeCore(server, {
         schema: app,
         permissions: { ...deviceRequestPermissions, ...policies },
       });

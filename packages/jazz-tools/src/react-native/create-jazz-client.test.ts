@@ -46,9 +46,12 @@ import {
   useLocalFirstAuth,
 } from "./index.js";
 
-const app = s.defineApp({
-  notes: s.table({ title: s.string() }, {}),
-});
+const app = s.defineApp(
+  {
+    notes: s.table({ title: s.string() }, {}),
+  },
+  { migrations: "none" },
+);
 
 const nativeRelayCapability = Uint8Array.from({ length: 32 }, (_, index) => index);
 
@@ -212,11 +215,11 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
           return Uint8Array.from([23, ...new Uint8Array(16).fill(4), ...rowId]);
         }
         case 21:
-          return Uint8Array.of(16, 1, 0, 1);
+          return Uint8Array.of(16, 1, 0, 1, 0);
         case 22:
           return encodeNativeSession("reader");
-        case 24:
-          return Uint8Array.of(19, 2, 91, 93); // mutationErrors: "[]"
+        case 35:
+          return Uint8Array.of(26, 2, 91, 93, 0, 0); // tickEvents: "[]", no failures
         case 17:
           return Uint8Array.from([15, ...command.subarray(1, 17)]);
         default:
@@ -255,7 +258,7 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
       { title: "Native note" },
     ]);
     expect(readOptions).toContainEqual(expect.objectContaining({ tier: "remote" }));
-    expect(commandTags).toEqual(expect.arrayContaining([2, 3, 4, 5, 6, 17, 21, 22, 24, 31]));
+    expect(commandTags).toEqual(expect.arrayContaining([2, 3, 4, 5, 6, 17, 21, 22, 31, 35]));
     // #3273: reads and subscriptions no longer tick (pump) the native relay
     // before their command; unsubscribe still drives its cleanup turn.
     expect(nativeForegroundTest.tick.mock.calls.length).toBeGreaterThanOrEqual(1);
@@ -291,9 +294,9 @@ describe("React Native binding scaffolding in the Node test runtime", () => {
     ]);
     nativeForegroundTest.execute = (command) => {
       if (command[0] === 2) return encodeBytesResponse(2, rows);
-      if (command[0] === 21) return Uint8Array.of(16, 1, 0, 1);
+      if (command[0] === 21) return Uint8Array.of(16, 1, 0, 1, 0);
       if (command[0] === 22) return encodeNativeSession("old-reader");
-      if (command[0] === 24) return Uint8Array.of(19, 2, 91, 93);
+      if (command[0] === 35) return Uint8Array.of(26, 2, 91, 93, 0, 0);
       if (command[0] === 6) return Uint8Array.of(6, 1);
       if (command[0] === 7) return Uint8Array.of(7, 1);
       throw new Error(`unexpected foreground command ${command[0]}`);
@@ -388,6 +391,8 @@ function encodeSubscriptionDelta(delta: { added: EncodedRow[] }): Uint8Array {
   writer.vec(() => undefined, 0);
   writer.vec(() => undefined, 0);
   writer.vec(() => undefined, 0);
+  // No updated rows, so no splices.
+  writer.vec(() => undefined, 0);
   return writer.finish();
 }
 
@@ -413,7 +418,7 @@ function encodeSubscriptionEvents(delta: Uint8Array): Uint8Array {
 
 function encodeNativeSession(userId: string): Uint8Array {
   const identity = new PostcardWriter();
-  identity.string(accountRegistryUrl("https://core.example", selectedConfig.appId));
+  identity.string(accountRegistryUrl("https://core.example", selectedConfig.appId!));
   identity.u64(1);
   const accountBytes = Uint8Array.from(
     selectedConfig.account.id.replaceAll("-", "").match(/../g)!,

@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
@@ -7,12 +8,18 @@ import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
 
 it("does not let a pending root deletion hide accepted offline encryption history", async () => {
-  const app = s.defineApp({
-    projects: s.table({ title: s.string() }, {}),
-    notes: s
-      .table({ projectId: s.uuid(), body: s.string() }, { project: s.rel("projects", "projectId") })
-      .encrypted({ space: "projectId", columns: ["body"] }),
-  });
+  const app = s.defineApp(
+    {
+      projects: s.table({ title: s.string() }, {}),
+      notes: s
+        .table(
+          { projectId: s.uuid(), body: s.string() },
+          { project: s.rel("projects", "projectId") },
+        )
+        .encrypted({ space: "projectId", columns: ["body"] }),
+    },
+    { migrations: "none" },
+  );
   const permissions = definePermissions(app, ({ policy, session }) => {
     policy.projects.allowRead.always();
     policy.projects.allowInsert.always();
@@ -29,7 +36,7 @@ it("does not let a pending root deletion hide accepted offline encryption histor
     policy.__e2ee_space_successors.allowInsert.where({ authorAccountId: session.user.account });
     policy.__e2ee_spaces.allowDelete.never();
   });
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   let db: Db | undefined;
   let saved: string | null = null;
   try {
@@ -40,6 +47,7 @@ it("does not let a pending root deletion hide accepted offline encryption histor
       schema: app,
       permissions,
     });
+    server = await frontE2eeCore(server, { schema: app, permissions: permissions });
     db = await createDb({
       ...(await localAccountConfig(server.appId, server.url)),
       e2ee: {

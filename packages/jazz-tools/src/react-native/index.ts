@@ -47,6 +47,8 @@ export {
 } from "../runtime/unsupported-storage-codecs-error.js";
 
 export { useAccountState } from "../react-core/use-account-state.js";
+export { useSyncStatus } from "../react-core/use-sync-status.js";
+export type { LinkStatus, SyncStatus } from "../runtime/sync-status.js";
 
 export { createAccountManager, type AccountManagerConfig } from "./create-account-manager.js";
 export * from "../accounts/exports.js";
@@ -66,7 +68,7 @@ export {
 export { useJazzSessionOwner, type JazzSessionOwnerResult } from "./session.js";
 
 export { useJazzAuth, type JazzAuthState } from "../react-core/app.js";
-export { betterAuth, jwtAuth, type JazzAuth } from "../session/app.js";
+export type { JazzUser } from "../session/app.js";
 export type { JazzAppProviderProps } from "./provider.js";
 
 export type {

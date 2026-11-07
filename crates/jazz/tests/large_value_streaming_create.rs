@@ -1,11 +1,11 @@
 //! Streamed creates, updates and upserts of large values: resumable
 //! uploads, the staging policy's ingress limit and lease expiry, and the
-//! cleanup every failure path owes (ported from main's Groove suite).
+//! cleanup every failure path owes.
 
 use std::collections::BTreeMap;
 use std::io::{Cursor, Read};
 
-mod common;
+use crate::common;
 
 use common::{allow_all_policies, compile_schema};
 use jazz::db::{

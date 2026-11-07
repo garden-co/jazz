@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./app.js";
 import { expect } from "vitest";
 import { schema as s } from "../../schema-namespace.js";
 import { definePermissions } from "../../permissions/index.js";
@@ -20,72 +21,78 @@ export type EqualityValueScenario =
   | "equality-composite-literals";
 
 export async function createEqualityValuesFixture() {
-  const app = s.defineApp({
-    ...deviceRequestSchema,
-    ...spaceSchema,
-    projects: s.table({ title: s.string() }, {}),
-    counters: s
-      .table(
-        { projectId: s.uuid(), value: s.bigint() },
-        { project: s.rel("projects", "projectId") },
-      )
-      .encrypted({ space: "projectId", columns: ["value"], indexes: { value: "equality" } }),
-    publicDocuments: s.table(
-      { projectId: s.uuid(), label: s.string(), body: s.json() },
-      { project: s.rel("projects", "projectId") },
-    ),
-    privateDocuments: s
-      .table(
+  const app = s.defineApp(
+    {
+      ...deviceRequestSchema,
+      ...spaceSchema,
+      projects: s.table({ title: s.string() }, {}),
+      counters: s
+        .table(
+          { projectId: s.uuid(), value: s.bigint() },
+          { project: s.rel("projects", "projectId") },
+        )
+        .encrypted({ space: "projectId", columns: ["value"], indexes: { value: "equality" } }),
+      publicDocuments: s.table(
         { projectId: s.uuid(), label: s.string(), body: s.json() },
         { project: s.rel("projects", "projectId") },
-      )
-      .encrypted({ space: "projectId", columns: ["body"], indexes: { body: "equality" } }),
-    optionalNotes: s
-      .table(
-        { projectId: s.uuid(), title: s.string().optional() },
-        { project: s.rel("projects", "projectId") },
-      )
-      .encrypted({ space: "projectId", columns: ["title"], indexes: { title: "equality" } }),
-    optionalMeasurements: s
-      .table(
-        { projectId: s.uuid(), value: s.float().optional() },
-        { project: s.rel("projects", "projectId") },
-      )
-      .encrypted({ space: "projectId", columns: ["value"], indexes: { value: "equality" } }),
-    observations: s
-      .table(
-        {
-          projectId: s.uuid(),
-          numbers: s.array(s.bigint()),
-          tagged: s.enum({ count: { value: s.bigint() } }),
-          time: s.timestamp(),
-        },
-        { project: s.rel("projects", "projectId") },
-      )
-      .encrypted({
-        space: "projectId",
-        columns: ["numbers", "tagged", "time"],
-        indexes: { numbers: "equality", tagged: "equality", time: "equality" },
-      }),
-    readings: s
-      .table(
-        {
-          projectId: s.uuid(),
-          reading: s.enum({ measured: { value: s.float() } }),
-        },
-        { project: s.rel("projects", "projectId") },
-      )
-      .encrypted({ space: "projectId", columns: ["reading"], indexes: { reading: "equality" } }),
-    samples: s
-      .table(
-        { projectId: s.uuid(), values: s.array(s.float()) },
-        { project: s.rel("projects", "projectId") },
-      )
-      .encrypted({ space: "projectId", columns: ["values"], indexes: { values: "equality" } }),
-    measurements: s
-      .table({ projectId: s.uuid(), value: s.float() }, { project: s.rel("projects", "projectId") })
-      .encrypted({ space: "projectId", columns: ["value"], indexes: { value: "equality" } }),
-  });
+      ),
+      privateDocuments: s
+        .table(
+          { projectId: s.uuid(), label: s.string(), body: s.json() },
+          { project: s.rel("projects", "projectId") },
+        )
+        .encrypted({ space: "projectId", columns: ["body"], indexes: { body: "equality" } }),
+      optionalNotes: s
+        .table(
+          { projectId: s.uuid(), title: s.string().optional() },
+          { project: s.rel("projects", "projectId") },
+        )
+        .encrypted({ space: "projectId", columns: ["title"], indexes: { title: "equality" } }),
+      optionalMeasurements: s
+        .table(
+          { projectId: s.uuid(), value: s.float().optional() },
+          { project: s.rel("projects", "projectId") },
+        )
+        .encrypted({ space: "projectId", columns: ["value"], indexes: { value: "equality" } }),
+      observations: s
+        .table(
+          {
+            projectId: s.uuid(),
+            numbers: s.array(s.bigint()),
+            tagged: s.enum({ count: { value: s.bigint() } }),
+            time: s.timestamp(),
+          },
+          { project: s.rel("projects", "projectId") },
+        )
+        .encrypted({
+          space: "projectId",
+          columns: ["numbers", "tagged", "time"],
+          indexes: { numbers: "equality", tagged: "equality", time: "equality" },
+        }),
+      readings: s
+        .table(
+          {
+            projectId: s.uuid(),
+            reading: s.enum({ measured: { value: s.float() } }),
+          },
+          { project: s.rel("projects", "projectId") },
+        )
+        .encrypted({ space: "projectId", columns: ["reading"], indexes: { reading: "equality" } }),
+      samples: s
+        .table(
+          { projectId: s.uuid(), values: s.array(s.float()) },
+          { project: s.rel("projects", "projectId") },
+        )
+        .encrypted({ space: "projectId", columns: ["values"], indexes: { values: "equality" } }),
+      measurements: s
+        .table(
+          { projectId: s.uuid(), value: s.float() },
+          { project: s.rel("projects", "projectId") },
+        )
+        .encrypted({ space: "projectId", columns: ["value"], indexes: { value: "equality" } }),
+    },
+    { migrations: "none" },
+  );
   const policies = definePermissions(app, ({ policy, session }) => {
     policy.projects.allowRead.always();
     policy.publicDocuments.allowRead.always();
@@ -117,13 +124,17 @@ export async function createEqualityValuesFixture() {
     policy.__e2ee_space_deliveries.allowRead.always();
     policy.__e2ee_space_deliveries.allowInsert.where({ senderAccountId: session.user.account });
   });
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
   try {
     await deploy({
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
+      schema: app,
+      permissions: { ...deviceRequestPermissions, ...policies },
+    });
+    server = await frontE2eeCore(server, {
       schema: app,
       permissions: { ...deviceRequestPermissions, ...policies },
     });

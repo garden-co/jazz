@@ -34,10 +34,7 @@ async function fixture(fail: false | "unknown" | "graceful" = false) {
   const accounts = new AccountManager(
     {
       createLocalFirst: () => account,
-      registerJWT: async () => account,
-      loginJWT: async () => account,
-      loginOrRegisterJWT: async () => account,
-      linkJWT: async () => account,
+      loginWithBackend: async () => account,
     },
     account,
   );
@@ -64,7 +61,7 @@ describe("Vue ergonomic app", () => {
     expect(await renderToString(app)).toContain("Loading Jazz");
     expect(mocks.factory).not.toHaveBeenCalled();
   });
-  it("retries startup failures with the default error button and defaults to local-first", async () => {
+  it("retries startup failures with the default error button and starts signed out by default", async () => {
     const { session } = await fixture();
     mocks.factory
       .mockReset()
@@ -85,23 +82,21 @@ describe("Vue ergonomic app", () => {
     node.querySelector("button")!.click();
     await flush();
     expect(node.textContent).toBe("active");
-    expect(mocks.factory.mock.calls[0][0].initial).toBe("local-first");
+    expect(mocks.factory.mock.calls[0][0].initial).toBeUndefined();
     app.unmount();
     await flush();
   });
-  it("updates inline auth in place and keeps captured runtime configuration", async () => {
+  it("keeps captured runtime configuration", async () => {
     const { session } = await fixture();
     mocks.factory.mockReset().mockResolvedValue(session);
     const version = shallowRef(0);
-    const getToken = vi.fn(async () => "token");
-    const logout = vi.fn();
     const node = document.createElement("div");
     const app = createApp({
       render: () =>
         h(JazzProvider, {
           appId: `test-${version.value}`,
+          initial: "signed-out",
           autoAttachDevTools: false,
-          auth: { kind: "jwt", key: null, isPending: true, getToken, logout },
         }),
     });
     app.mount(node);
@@ -110,9 +105,7 @@ describe("Vue ergonomic app", () => {
     await flush();
     expect(mocks.factory).toHaveBeenCalledTimes(1);
     expect(mocks.factory.mock.calls[0][0].appId).toBe("test-0");
-    expect(mocks.factory.mock.calls[0][0].initial).toBeUndefined();
-    expect(getToken).not.toHaveBeenCalled();
-    expect(node.textContent).toContain("Loading Jazz");
+    expect(mocks.factory.mock.calls[0][0].initial).toBe("signed-out");
     app.unmount();
     await flush();
   });
@@ -157,42 +150,63 @@ describe("Vue ergonomic app", () => {
   );
 });
 
-it("hides private render before pending prop commits", async () => {
-  const { session } = await fixture();
-  mocks.factory.mockReset().mockResolvedValue(session);
-  const pending = shallowRef(false);
-  const seen: boolean[] = [];
+it("follows the backend on reauthenticate: signed out, signed in, signed out", async () => {
+  mocks.factory.mockReset();
+  // Who the app's backend names (null: no one).
+  let backendUser: string | null = null;
+  const handle = (id: string) =>
+    ({ id, identity: { issuer: "test", subject: id } }) as AccountHandle;
+  const session = await createJazzSessionOwner({
+    accounts: new AccountManager({
+      logout: () => {},
+      loginWithBackend: async () => handle(backendUser!),
+    } as never),
+    openClient: async () =>
+      ({
+        db: { onAuthChanged: () => () => {} } as never,
+        session: null,
+        shutdown: async () => {},
+      }) as JazzClient,
+    // A stand-in for the browser's backend watch.
+    decorate: (owned) => ({
+      async reauthenticate() {
+        if (backendUser === null) await owned.logout();
+        else await owned.loginWithBackend();
+      },
+    }),
+  });
+  mocks.factory.mockResolvedValue(session);
+  let auth!: UseJazzAuth;
+  const SignedOut = defineComponent({
+    setup() {
+      auth = useJazzAuth();
+      return () => h("p", "SIGN IN");
+    },
+  });
   const node = document.createElement("div");
   const app = createApp({
     render: () =>
       h(
         JazzProvider,
+        { initial: "signed-out", autoAttachDevTools: false },
         {
-          appId: "test",
-          autoAttachDevTools: false,
-          auth: {
-            kind: "jwt",
-            key: "a",
-            isPending: pending.value,
-            getToken: async () => "token",
-            logout: () => {},
-          },
-        },
-        {
-          default: () => {
-            seen.push(pending.value);
-            return h("p", "PRIVATE");
-          },
+          default: () => h("p", "PRIVATE"),
+          signedOut: () => h(SignedOut),
+          loading: () => h("p", "WAIT"),
         },
       ),
   });
   app.mount(node);
   await flush();
+  expect(node.textContent).toBe("SIGN IN");
+  backendUser = "a";
+  await auth.reauthenticate();
+  await flush();
   expect(node.textContent).toBe("PRIVATE");
-  pending.value = true;
+  expect(auth.snapshot.value.user).toMatchObject({ id: "a" });
+  backendUser = null;
+  await auth.reauthenticate();
   await flush();
-  expect(node.textContent).toContain("Loading");
-  expect(seen).not.toContain(true);
+  expect(node.textContent).toBe("SIGN IN");
   app.unmount();
-  await flush();
 });

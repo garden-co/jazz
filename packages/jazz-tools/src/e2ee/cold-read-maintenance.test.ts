@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
@@ -9,17 +10,20 @@ import { spaceSchema } from "./spaces.js";
 import { deviceRequestSchema } from "./device-requests.js";
 
 it("delivers a cold encrypted subscription while optional device delivery is pending", async () => {
-  const app = s.defineApp({
-    ...deviceRequestSchema,
-    ...spaceSchema,
-    projects: s.table({ title: s.string() }, {}),
-    notes: s
-      .table(
-        { projectId: s.uuid(), title: s.string() },
-        { project: s.rel("projects", "projectId") },
-      )
-      .encrypted({ space: "projectId", columns: ["title"], indexes: { title: "equality" } }),
-  });
+  const app = s.defineApp(
+    {
+      ...deviceRequestSchema,
+      ...spaceSchema,
+      projects: s.table({ title: s.string() }, {}),
+      notes: s
+        .table(
+          { projectId: s.uuid(), title: s.string() },
+          { project: s.rel("projects", "projectId") },
+        )
+        .encrypted({ space: "projectId", columns: ["title"], indexes: { title: "equality" } }),
+    },
+    { migrations: "none" },
+  );
   const permissions = definePermissions(app, ({ policy, session }) => {
     policy.projects.allowRead.always();
     policy.projects.allowInsert.always();
@@ -45,7 +49,7 @@ it("delivers a cold encrypted subscription while optional device delivery is pen
       },
     };
   };
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Awaited<ReturnType<typeof createDb>>[] = [];
   let release = () => {};
   const delivery = new Promise<void>((resolve) => {
@@ -62,6 +66,7 @@ it("delivers a cold encrypted subscription while optional device delivery is pen
       schema: app,
       permissions,
     });
+    server = await frontE2eeCore(server, { schema: app, permissions: permissions });
     const alice = await localAccountConfig(server.appId, server.url);
     const bob = await localAccountConfig(server.appId, server.url);
     const owner = await createDb({ ...alice, e2ee: { app, store: store() } });

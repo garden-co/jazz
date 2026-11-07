@@ -28,7 +28,7 @@ function fixture() {
     return stop;
   };
   const graph = groupQueryDependencies(
-    s.defineApp({ ...deviceRequestSchema, ...groupSchema }).wasmSchema,
+    s.defineApp({ ...deviceRequestSchema, ...groupSchema }, { migrations: "none" }).wasmSchema,
     watch,
   );
   const members = (

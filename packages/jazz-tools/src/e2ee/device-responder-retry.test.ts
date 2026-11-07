@@ -1,5 +1,7 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it, vi } from "vitest";
-import type { Db, E2eeTransactionScope } from "../runtime/db.js";
+import type { Db } from "../runtime/db.js";
+import type { AcceptedDeviceTransactionScope } from "./accepted-membership.js";
 import { PersistedWriteRejectedError } from "../runtime/client.js";
 import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
@@ -9,7 +11,7 @@ import { deviceRequestApp, deviceRequestPermissions } from "./device-requests.js
 import { createNativeCrypto } from "./native.js";
 
 it("retries a conflicted background response from fresh authority without hiding signer failures", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Db[] = [];
   let first: Db;
   let target: Db | undefined;
@@ -19,7 +21,7 @@ it("retries a conflicted background response from fresh authority without hiding
     reportFailure = resolve;
   });
   const prototype = DeviceApproval.prototype as unknown as {
-    readSnapshot(this: { db: Db }, tx: E2eeTransactionScope): Promise<unknown>;
+    readSnapshot(this: { db: Db }, tx: AcceptedDeviceTransactionScope): Promise<unknown>;
     respond(this: { db: Db }, challengeId: string, snapshot?: unknown): Promise<void>;
   };
   const readSnapshot = prototype.readSnapshot;
@@ -69,6 +71,10 @@ it("retries a conflicted background response from fresh authority without hiding
       schema: deviceRequestApp,
       permissions: deviceRequestPermissions,
     });
+    server = await frontE2eeCore(server, {
+      schema: deviceRequestApp,
+      permissions: deviceRequestPermissions,
+    });
     const account = await localAccountConfig(server.appId, server.url);
     const crypto = await createNativeCrypto();
     const signerFailure = new Error("Device signer is unavailable");
@@ -113,7 +119,7 @@ it("retries a conflicted background response from fresh authority without hiding
     approval.catch(() => {});
     const conflict = await failedResponse;
     expect(conflict).toBeInstanceOf(PersistedWriteRejectedError);
-    expect(conflict).toMatchObject({ code: "exclusive_conflict" });
+    expect(conflict).toMatchObject({ code: "serialization_conflict" });
     expect(invalidate).toBe(0);
     // The background catch runs after the observed rejection.
     await Promise.resolve();

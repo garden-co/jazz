@@ -31,7 +31,7 @@ export const permissionedBenchmarks: BenchmarkMetadata[] = [
     name: "first_sync_direct_27518_file",
     title: "Permissioned first sync",
     description:
-      "Bring an empty client to a fully settled permissioned view straight from Core (workload revision 3). Core authorizes the fixed Member identity, not anonymous. Not comparable with the relay or server-edge topologies, which the SQLite engine does not have.",
+      "Bring an empty client to a fully settled permissioned view straight from Core (workload revision 3). Core authorizes the fixed Member identity, not anonymous. Not comparable with revisions 1 and 2, which measured a relay and a server edge.",
     fixture:
       "39 subscriptions; 27,518 visible resource, permission-input and inherited-access child rows. Shallow-history fixture, scale 1.",
     storage:
@@ -45,6 +45,33 @@ export const permissionedBenchmarks: BenchmarkMetadata[] = [
       "Core seeding",
       "Exact per-table row-ID verification",
       "Runtime teardown and real-network latency",
+    ],
+    work: {
+      count: 27518,
+      unit: "visible rows/s",
+      explanation:
+        "27,518 visible result rows per complete first sync. This is not wire-row throughput or raw database scan speed.",
+    },
+    source: "examples/permissioned-resources/benchmarks/benches/walltime.rs",
+  },
+  {
+    name: "first_sync_local_relay_27518_file",
+    title: "Permissioned first sync via device-local relay",
+    description:
+      "Bring an empty client to a fully settled permissioned view through Core → device-local native relay → Client (workload revision 3). The relay is fresh and empty; the client is its in-memory foreground, as on a device. Core authorizes the fixed Member identity, not anonymous. Not comparable with first_sync_local_relay_27518_rocksdb (revision 2).",
+    fixture:
+      "39 subscriptions; 27,518 visible resource, permission-input and inherited-access child rows. Shallow-history fixture, scale 1.",
+    storage:
+      "File-backed SQLite on Core and the native relay (WAL, synchronous=NORMAL), in-memory client; in-process encoded wire with a zstd roundtrip per frame between Core and the relay",
+    includes: [
+      "Relay opening, client attachment and connection",
+      "Query preparation, subscription and settling until every expected row is present in the client",
+      "Wire encoding, zstd roundtrip and decoding per frame; the relay's owner-thread handoffs",
+    ],
+    excludes: [
+      "Core seeding",
+      "Exact per-table row-ID verification",
+      "Relay shutdown and real-network latency",
     ],
     work: {
       count: 27518,

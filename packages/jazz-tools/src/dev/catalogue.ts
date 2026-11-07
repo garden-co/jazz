@@ -204,6 +204,15 @@ export function resolveCanonicalMigrationForward(
   return forward;
 }
 
+/** Keep the existing validation entrypoint while deployment resolves managed lenses. */
+export function assertMigrationMatchesCanonicalBundle(
+  migration: DefinedMigration,
+  canonical: CanonicalMigrationBundle,
+): void {
+  if (!migration) throw new Error("Migration definition is required");
+  resolveCanonicalMigrationForward(migration, canonical);
+}
+
 export function resolveKnownSchemaHash(
   hash: string,
   label: string,

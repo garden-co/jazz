@@ -37,10 +37,25 @@ Independent Python `hashlib` byte corpus (not a runtime qualification receipt):
 - SHA-256: `73726102dec3e588961444da93affdfa409fc111e3085c4414b0741695cdb505`
 - Root ID: `73726102-dec3-8588-9614-44da93affdfa`
 
-The initialising transaction reads the exact root ID including deleted rows at
-global durability, then uses exclusive upsert to record an exact-row precondition.
-A permission-filtered absent query must not produce a second accepted root; hidden,
-deleted and concurrent roots do not permit a fresh lineage.
+For an existing scope row, the initialising serializable transaction obtains
+accepted coverage for that row and the exact root ID, including deleted roots,
+under the same authority cut as its membership predicates. It then uses upsert
+with the normal exact-row validation. A permission-filtered local empty result
+does not establish absence or permit a second accepted lineage.
+
+For a scope row inserted by the enclosing transaction, the compiler registers a
+read-only authority prefix before returning the transaction to its caller. That
+prefix covers the required account and dynamic group closure before any writes.
+Later preparation can reuse only its exact query, schema and recipient responses
+in that same transaction, with a fresh lifetime check. An uncaptured read after
+staging is refused by the ordinary accepted-read guard.
+
+The new scope row is identified by private registered-insert intent bound to the
+actual transaction, schema, table and row ID. This is not accepted evidence or
+permission to write. Deletion removes that intent; another transaction or a
+rolled-back handle cannot supply it. The scope insert and signed root/grants must
+still obtain one normal atomic Global acceptance. A refused scope insert, hidden
+or deleted root, or competing initialiser cannot be bypassed by this preparation.
 
 ## Initial space lifecycle transcripts
 

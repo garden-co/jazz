@@ -395,3 +395,38 @@ async fn writer_reads_own_nested_writes_remotely_right_after_inserting() {
         })
         .await;
 }
+
+/// A remote read asked behind more writes than the server applies from one
+/// session per tick still sees them all: the read reaches the server after
+/// Alice's earlier commits, so no tick can answer it between them.
+#[tokio::test]
+async fn writer_reads_own_nested_writes_remotely_behind_a_long_write_queue() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let f = Fixture::start().await;
+            // More commits than one session gets applied in a server tick.
+            for _ in 0..40 {
+                f.alice
+                    .insert("assets", row_input!("status" => "filler"))
+                    .unwrap();
+            }
+            let (asset, _, _) = f
+                .alice
+                .insert("assets", row_input!("status" => "pending"))
+                .unwrap();
+            let (message, _, _) = f
+                .alice
+                .insert("messages", row_input!("text" => "photo"))
+                .unwrap();
+            f.alice
+                .insert(
+                    "attachments",
+                    row_input!("message_id" => message, "asset_id" => asset),
+                )
+                .unwrap();
+
+            assert_fresh_read_has_asset(&f.alice, asset).await;
+            f.shutdown().await;
+        })
+        .await;
+}

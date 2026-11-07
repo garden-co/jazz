@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
@@ -7,11 +8,14 @@ import { deviceRequestSchema, deviceRequestPermissions } from "./device-requests
 import { spaceSchema } from "./spaces.js";
 
 it("recovers native Node spaces before and after revoking the original device", async () => {
-  const app = s.defineApp({
-    ...deviceRequestSchema,
-    ...spaceSchema,
-    projects: s.table({ title: s.string() }, {}),
-  });
+  const app = s.defineApp(
+    {
+      ...deviceRequestSchema,
+      ...spaceSchema,
+      projects: s.table({ title: s.string() }, {}),
+    },
+    { migrations: "none" },
+  );
   const policies = definePermissions(app, ({ policy, session }) => {
     const authenticated = session.where({ authMode: { in: ["local-first", "external"] } });
     policy.projects.allowRead.where(authenticated);
@@ -43,7 +47,7 @@ it("recovers native Node spaces before and after revoking the original device", 
   };
   const accountStore = store();
   const sessions: Awaited<ReturnType<typeof createJazzSession>>[] = [];
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   try {
     await deploy({
       serverUrl: server.url,
@@ -52,6 +56,7 @@ it("recovers native Node spaces before and after revoking the original device", 
       schema: app,
       permissions,
     });
+    server = await frontE2eeCore(server, { schema: app, permissions: permissions });
     const open = async (deviceStore: ReturnType<typeof store>) => {
       const session = await createJazzSession({
         appId: server.appId,

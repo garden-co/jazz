@@ -1,3 +1,4 @@
+import { frontE2eeCore, redeployE2eeApp } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { migration as m } from "../migration-namespace.js";
@@ -23,8 +24,8 @@ it("accepts only one simultaneous first encrypted writer even when root updates 
       .table({ projectId: s.uuid(), body: s.string() }, { project: s.rel("projects", "projectId") })
       .encrypted({ space: "projectId", columns: ["body"] }),
   };
-  const oldApp = s.defineApp(before);
-  const app = s.defineApp(after);
+  const oldApp = s.defineApp(before, { migrations: "none" });
+  const app = s.defineApp(after, { migrations: "none" });
   const oldPermissions = definePermissions(oldApp, ({ policy }) => {
     policy.projects.allowRead.always();
     policy.projects.allowInsert.always();
@@ -42,20 +43,23 @@ it("accepts only one simultaneous first encrypted writer even when root updates 
     policy.__e2ee_space_deliveries.allowRead.always();
     policy.__e2ee_space_deliveries.allowInsert.where({ senderAccountId: session.user.account });
   });
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Awaited<ReturnType<typeof createDb>>[] = [];
   const reached = [signal(), signal()];
   const resume = signal();
   let armed = false;
   try {
     const target = { serverUrl: server.url, appId: server.appId, adminSecret: server.adminSecret };
-    await deploy({ ...target, schema: oldApp, permissions: oldPermissions });
+    const initialDeployment = { ...target, schema: oldApp, permissions: oldPermissions };
+    await deploy(initialDeployment);
+    const appBackend = await frontE2eeCore(server, initialDeployment);
+    server = appBackend;
     const creator = await createDb(await localAccountConfig(server.appId, server.url));
     clients.push(creator);
     const project = await creator
       .insert(oldApp.projects, { title: "Legacy scope" })
       .wait({ tier: "global" });
-    await deploy({
+    await redeployE2eeApp(appBackend, {
       ...target,
       schema: app,
       permissions,
@@ -129,7 +133,7 @@ it("accepts only one simultaneous first encrypted writer even when root updates 
     const loser = writers[loserIndex]!;
     const roots = await winner.all(app.__e2ee_spaces, { tier: "remote" });
     expect(roots).toHaveLength(1);
-    expect(roots[0]).toMatchObject({ accountId: accounts[winnerIndex]!.account.id });
+    expect(roots[0]).toMatchObject({ creatorAccountId: accounts[winnerIndex]!.account.id });
     expect(await winner.all(app.__e2ee_space_grants, { tier: "remote" })).toMatchObject([
       { spaceId: roots[0]!.id, recipientId: accounts[winnerIndex]!.account.id },
     ]);

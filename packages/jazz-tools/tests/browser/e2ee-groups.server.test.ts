@@ -7,13 +7,13 @@ import { deviceRequestSchema, deviceRequestPermissions } from "../../src/e2ee/de
 import { groupSchema } from "../../src/e2ee/groups.js";
 import { createBrowserKeyEnvelope } from "../../src/e2ee/browser.js";
 import { acquireBrowserTestAccount } from "./account-fixtures.js";
-import { getJazzServerInfo, stopJazzServer } from "./testing-server.js";
+import { getJazzServerInfo, startJazzApp, stopJazzServer } from "./testing-server.js";
 
 it.each(["ordinary", "repair"])(
   "delivers an accepted group key to approved browser devices and survives reopening (%s)",
   async (scenario) => {
-    const server = await getJazzServerInfo(`e2ee-groups-${crypto.randomUUID()}`);
-    const app = s.defineApp({ ...deviceRequestSchema, ...groupSchema });
+    let server = await getJazzServerInfo(`e2ee-groups-${crypto.randomUUID()}`);
+    const app = s.defineApp({ ...deviceRequestSchema, ...groupSchema }, { migrations: "none" });
     const policies = definePermissions(app, ({ policy, session, allOf }) => {
       policy.__e2ee_group_repairs.allowRead.where(
         session.where({ authMode: { in: ["local-first", "external"] } }),
@@ -40,6 +40,16 @@ it.each(["ordinary", "repair"])(
     try {
       await deploy({
         ...server,
+        schema: app,
+        permissions: {
+          ...deviceRequestPermissions,
+          __e2ee_groups: policies.__e2ee_groups!,
+          __e2ee_group_repairs: policies.__e2ee_group_repairs!,
+          __e2ee_group_successors: policies.__e2ee_group_successors!,
+          __e2ee_group_deliveries: policies.__e2ee_group_deliveries!,
+        },
+      });
+      server = await startJazzApp(server, {
         schema: app,
         permissions: {
           ...deviceRequestPermissions,

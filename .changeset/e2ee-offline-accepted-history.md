@@ -2,23 +2,18 @@
 "jazz-tools": patch
 ---
 
-Reuse authenticated accepted-only encryption history for disconnected operations
-and persistent reopening. Pending metadata cannot hide an accepted change;
-optional cache persistence cannot turn an accepted commit or verified read into
-a rejection. Apply configured stale-write policy and reconcile when transport
-connectivity returns without claiming unseen offline revocations are detectable.
+Support retained encrypted content and provisional offline writes with keys
+previously validated online, including persistent native reopening. Local pending
+state remains distinct from current membership and Global acceptance; genuine
+reconnect validation can reject it. Retained old keys can still expose content
+to removed recipients, so offline operation does not promise unseen revocation
+detection.
 
-Refresh accepted history before decrypting cells whose epochs are absent from
-the retained snapshot. Persistent reopening after rotation reads valid newer
-data and checks refreshed membership instead of reporting false corruption.
+Bind optional private cache records to the actual account, device, namespace,
+scope, exact content and validated origins. Fresh memory owners require their
+own genuine online same-cut validation. Reject changed bindings and closed or
+retired ownership; cache persistence failure cannot undo an accepted commit.
 
-Validate retained membership snapshots independently of background online device
-responder failures, including persisted equality-query reopening without an
-explicit disconnect. Keep responder errors pending for explicit device
-operations; accepted-history, membership and known-revocation checks still apply.
-
-Directly hosted runtimes load accepted-history observations from their own
-storage without a preceding ordinary query for each metadata table. Browser
-foregrounds still hydrate from their durable worker before freezing the shared
-snapshot. Schema validation, accepted-only rows and paired settlement checks
-remain in place, including cold persistent reopening and pending local writes.
+For supported direct local encrypted equality reads, decrypt every scoped
+candidate before filtering or paging, refuse unknown epochs and overflow, and
+keep authority-bearing query modes unchanged.

@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
@@ -26,11 +27,14 @@ it.each(["creation-repair-rotation-retries", "removal-forged-successor"])(
   async (scenario) => {
     const checkTopology = scenario === "removal-forged-successor";
     const repair = scenario === "creation-repair-rotation-retries";
-    const app = s.defineApp({
-      ...deviceRequestSchema,
-      ...groupSchema,
-      notes: s.table({ text: s.string() }, {}),
-    });
+    const app = s.defineApp(
+      {
+        ...deviceRequestSchema,
+        ...groupSchema,
+        notes: s.table({ text: s.string() }, {}),
+      },
+      { migrations: "none" },
+    );
     const policies = definePermissions(app, ({ policy, session, allOf }) => {
       const own = { "$createdBy.account": session.user.account };
       const topologyRead = () =>
@@ -60,13 +64,19 @@ it.each(["creation-repair-rotation-retries", "removal-forged-successor"])(
         ]),
       );
     });
-    const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+    let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
     const clients: Awaited<ReturnType<typeof createDb>>[] = [];
     try {
       await deploy({
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
+        schema: app,
+        permissions: checkTopology
+          ? withGroupTopologyPermissions(app, { ...deviceRequestPermissions, ...policies })
+          : { ...deviceRequestPermissions, ...policies },
+      });
+      server = await frontE2eeCore(server, {
         schema: app,
         permissions: checkTopology
           ? withGroupTopologyPermissions(app, { ...deviceRequestPermissions, ...policies })

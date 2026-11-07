@@ -45,6 +45,11 @@ pub enum WebSocketClientError {
     Send(tokio_tungstenite::tungstenite::Error),
     Receive(tokio_tungstenite::tungstenite::Error),
     ClosedDuringHandshake,
+    /// The peer sent a Close frame before its hello, with this close code.
+    ClosedBeforeHello {
+        code: u16,
+        reason: String,
+    },
     HandshakeTimeout,
     UnexpectedHandshakeMessage,
     EncodePrelude(serde_json::Error),
@@ -64,6 +69,12 @@ impl fmt::Display for WebSocketClientError {
             Self::Receive(error) => write!(f, "failed to receive websocket frame: {error}"),
             Self::ClosedDuringHandshake => {
                 write!(f, "websocket closed during handshake")
+            }
+            Self::ClosedBeforeHello { code, reason } => {
+                write!(
+                    f,
+                    "websocket closed before hello (code={code}, reason={reason})"
+                )
             }
             Self::HandshakeTimeout => write!(f, "websocket handshake timed out"),
             Self::UnexpectedHandshakeMessage => {
@@ -162,6 +173,14 @@ fn native_transport_error(error: WebSocketClientError) -> NativeTransportError {
             )
         }
         WebSocketClientError::HandshakeTimeout => true,
+        // A relay (the app's backend) accepts the upgrade and then closes
+        // when it cannot reach its core. Like the HTTP statuses below, only
+        // close codes that describe transient availability retry: going
+        // away, server error, restart, try again later and bad gateway. A
+        // refused sign-in arrives as an auth-failed wire error first.
+        WebSocketClientError::ClosedBeforeHello { code, .. } => {
+            matches!(code, 1001 | 1011 | 1012 | 1013 | 1014)
+        }
         // Only HTTP statuses that describe transient availability are
         // retryable. This includes request timeout, too early, throttling,
         // and common temporary server failures. Authorization, unsupported
@@ -178,8 +197,21 @@ fn native_transport_error(error: WebSocketClientError) -> NativeTransportError {
         }
         _ => false,
     };
+    // A refused credential stays refused until the caller brings a new one,
+    // whether the upgrade itself was refused or Core said so before hello.
+    let auth_rejected = match &error {
+        WebSocketClientError::Connect(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+            response.status().as_u16() == 401
+        }
+        WebSocketClientError::ServerWireError(error) => {
+            error.code == jazz::wire::WireErrorCode::AuthFailed
+        }
+        _ => false,
+    };
     if retryable {
         NativeTransportError::Retryable(error.to_string())
+    } else if auth_rejected {
+        NativeTransportError::AuthRejected(error.to_string())
     } else {
         NativeTransportError::Terminal(error.to_string())
     }
@@ -209,6 +241,10 @@ impl NativeTransportConnector for NativeWebSocketConnector {
                 request.app_id,
                 request.peer_identity,
                 request.auth,
+                Upgrade {
+                    authorization: request.authorization,
+                    bundle: request.bundle,
+                },
                 request.wake,
                 request.requested_link,
             )
@@ -390,6 +426,7 @@ impl WebSocketTransport {
             app_id,
             peer_identity,
             auth,
+            Upgrade::default(),
             wake,
             NativeTransportLink::OrdinarySession,
         )
@@ -402,18 +439,24 @@ impl WebSocketTransport {
         app_id: AppId,
         peer_identity: AuthorSubject,
         auth: AuthConfig,
+        upgrade: Upgrade,
         wake: Arc<dyn Fn() + Send + Sync>,
         requested_link: NativeTransportLink,
     ) -> Result<Self, NativeConnectFailure> {
+        let Upgrade {
+            authorization,
+            bundle,
+        } = upgrade;
         let deadline = tokio::time::Instant::now() + WS_CLIENT_HANDSHAKE_TIMEOUT;
         let url = ws_url(base_url.as_ref(), app_id);
-        let (mut ws, _) = tokio::time::timeout_at(deadline, open_client_websocket(url))
-            .await
-            .map_err(|_| {
-                NativeConnectFailure::WebSocket(WebSocketClientError::HandshakeTimeout)
-            })??;
+        let (mut ws, _) = tokio::time::timeout_at(
+            deadline,
+            open_client_websocket(url, authorization.as_deref()),
+        )
+        .await
+        .map_err(|_| NativeConnectFailure::WebSocket(WebSocketClientError::HandshakeTimeout))??;
 
-        let prelude = encode_prelude(peer_identity, auth, requested_link)?;
+        let prelude = encode_prelude(peer_identity, auth, bundle, requested_link)?;
         tokio::time::timeout_at(deadline, ws.send(Message::Binary(prelude.into())))
             .await
             .map_err(|_| WebSocketClientError::HandshakeTimeout)?
@@ -542,9 +585,21 @@ impl WireTransport for WebSocketTransport {
 struct WebSocketClientPrelude {
     peer_identity: String,
     auth: AuthConfig,
+    /// The published bundle a stated session is pinned to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bundle: Option<String>,
 
     #[serde(skip_serializing_if = "is_ordinary_link")]
     requested_link: NativeTransportLink,
+}
+
+/// What a socket carries beside its auth: the upgrade's `Authorization`
+/// header (for the app's own backend) and the bundle a stated session is
+/// pinned to.
+#[derive(Default)]
+struct Upgrade {
+    authorization: Option<String>,
+    bundle: Option<String>,
 }
 
 fn is_ordinary_link(value: &NativeTransportLink) -> bool {
@@ -554,12 +609,14 @@ fn is_ordinary_link(value: &NativeTransportLink) -> bool {
 fn encode_prelude(
     peer_identity: AuthorSubject,
     auth: AuthConfig,
+    bundle: Option<String>,
 
     requested_link: NativeTransportLink,
 ) -> Result<Vec<u8>, WebSocketClientError> {
     serde_json::to_vec(&WebSocketClientPrelude {
         peer_identity: peer_identity.canonical().to_owned(),
         auth,
+        bundle,
 
         requested_link,
     })
@@ -583,6 +640,7 @@ fn ws_url(base_url: &str, app_id: AppId) -> String {
 /// `set_nodelay` is applied here rather than via `connect_async`'s flag.
 async fn open_client_websocket(
     url: String,
+    authorization: Option<&str>,
 ) -> Result<
     (
         tokio_tungstenite::WebSocketStream<
@@ -592,9 +650,23 @@ async fn open_client_websocket(
     ),
     NativeConnectFailure,
 > {
-    let request = url
+    let mut request = url
         .into_client_request()
         .map_err(WebSocketClientError::Connect)?;
+    if let Some(authorization) = authorization {
+        let value = authorization.parse().map_err(|_| {
+            WebSocketClientError::Connect(tokio_tungstenite::tungstenite::Error::HttpFormat(
+                tokio_tungstenite::tungstenite::http::Error::from(
+                    tokio_tungstenite::tungstenite::http::header::HeaderValue::from_bytes(b"\n")
+                        .unwrap_err(),
+                ),
+            ))
+        })?;
+        request.headers_mut().insert(
+            tokio_tungstenite::tungstenite::http::header::AUTHORIZATION,
+            value,
+        );
+    }
     let host = request.uri().host().ok_or_else(|| {
         WebSocketClientError::Connect(tokio_tungstenite::tungstenite::Error::Url(
             tokio_tungstenite::tungstenite::error::UrlError::NoHostName,
@@ -675,8 +747,16 @@ async fn receive_server_hello(
         .map_err(|_| WebSocketClientError::HandshakeTimeout)?
         .ok_or(WebSocketClientError::ClosedDuringHandshake)?
         .map_err(WebSocketClientError::Receive)?;
-    let Message::Binary(bytes) = message else {
-        return Err(WebSocketClientError::UnexpectedHandshakeMessage);
+    let bytes = match message {
+        Message::Binary(bytes) => bytes,
+        Message::Close(frame) => {
+            let (code, reason) = frame
+                .map(|frame| (u16::from(frame.code), frame.reason.to_string()))
+                // A Close frame without a status is "no status received".
+                .unwrap_or((1005, String::new()));
+            return Err(WebSocketClientError::ClosedBeforeHello { code, reason });
+        }
+        _ => return Err(WebSocketClientError::UnexpectedHandshakeMessage),
     };
     let encoded = jazz::wire::decode_websocket_frame_batch(&bytes)
         .map_err(WebSocketClientError::DecodeBatch)?;
@@ -859,6 +939,43 @@ fn decode_inbound_batch(bytes: &[u8]) -> Result<Vec<Vec<u8>>, String> {
 
 #[cfg(test)]
 mod tests {
+    /// #4248: Core refusing the bearer (an `AuthFailed` error before hello,
+    /// or a 401 on upgrade) is an auth rejection a fresh credential can
+    /// clear, distinct from other terminal failures and from a retryable
+    /// `NotReady`.
+    #[test]
+    fn a_refused_credential_is_an_auth_rejection() {
+        use jazz::wire::{WireError, WireErrorCode, WireRetry};
+        let wire = |code, retry| {
+            native_transport_error(WebSocketClientError::ServerWireError(WireError::new(
+                code,
+                retry,
+                "token expired",
+            )))
+        };
+        assert!(matches!(
+            wire(WireErrorCode::AuthFailed, WireRetry::Never),
+            NativeTransportError::AuthRejected(_)
+        ));
+        assert!(wire(WireErrorCode::NotReady, WireRetry::Later).is_retryable());
+        assert!(matches!(
+            wire(WireErrorCode::MalformedFrame, WireRetry::Never),
+            NativeTransportError::Terminal(_)
+        ));
+        let http = |status: u16| {
+            let response = tokio_tungstenite::tungstenite::http::Response::builder()
+                .status(status)
+                .body(None)
+                .unwrap();
+            native_transport_error(WebSocketClientError::Connect(
+                tokio_tungstenite::tungstenite::Error::Http(Box::new(response)),
+            ))
+        };
+        assert!(matches!(http(401), NativeTransportError::AuthRejected(_)));
+        assert!(matches!(http(403), NativeTransportError::Terminal(_)));
+        assert!(http(503).is_retryable());
+    }
+
     // A proxy can accept TCP while its upstream is down, then close before
     // completing HTTP upgrade. Observe the real socket error, not its text.
     #[tokio::test]
@@ -898,6 +1015,43 @@ mod tests {
             classified.is_retryable(),
             "incomplete upgrade must reconnect: {classified:?}"
         );
+        server.await.unwrap();
+    }
+
+    // A relay that accepts the upgrade and closes when its core is
+    // unreachable sends a real Close frame before any hello.
+    #[tokio::test]
+    async fn relay_close_before_hello_is_retryable() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            ws.send(Message::Close(Some(
+                tokio_tungstenite::tungstenite::protocol::CloseFrame {
+                    code: 1011.into(),
+                    reason: "admission failed".into(),
+                },
+            )))
+            .await
+            .unwrap();
+        });
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{address}"))
+            .await
+            .unwrap();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let error = receive_server_hello(&mut ws, deadline)
+            .await
+            .expect_err("closed before hello");
+        assert!(
+            matches!(
+                &error,
+                WebSocketClientError::ClosedBeforeHello { code: 1011, reason }
+                    if reason == "admission failed"
+            ),
+            "unexpected close: {error:?}"
+        );
+        assert!(native_transport_error(error).is_retryable());
         server.await.unwrap();
     }
 
@@ -951,7 +1105,7 @@ mod tests {
         });
         let ws = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            open_client_websocket(format!("ws://{address}")),
+            open_client_websocket(format!("ws://{address}"), None),
         )
         .await
         .expect("bounded client connect")
@@ -1065,6 +1219,22 @@ mod tests {
             !native_transport_error(WebSocketClientError::UnexpectedHandshakeMessage)
                 .is_retryable()
         );
+    }
+
+    #[test]
+    fn close_before_hello_retries_only_transient_close_codes() {
+        let closed = |code: u16| {
+            native_transport_error(WebSocketClientError::ClosedBeforeHello {
+                code,
+                reason: "core unavailable".to_owned(),
+            })
+        };
+        for transient in [1001, 1011, 1012, 1013, 1014] {
+            assert!(closed(transient).is_retryable(), "close {transient}");
+        }
+        for terminal in [1000, 1002, 1003, 1005, 1007, 1008, 1009, 1010, 4000] {
+            assert!(!closed(terminal).is_retryable(), "close {terminal}");
+        }
     }
 
     #[test]
@@ -1325,6 +1495,7 @@ mod tests {
                 encode_prelude(
                     identity,
                     auth,
+                    None,
                     if entry["requested_link"] == "scope_isolated_client_relay" {
                         NativeTransportLink::ScopeIsolatedClientRelay
                     } else {
@@ -1380,6 +1551,8 @@ mod tests {
                     app_id: AppId::random(),
                     peer_identity: AuthorSubject::SYSTEM,
                     auth: AuthConfig::default(),
+                    authorization: None,
+                    bundle: None,
                     wake: Arc::new(|| {}),
                 })
                 .await;

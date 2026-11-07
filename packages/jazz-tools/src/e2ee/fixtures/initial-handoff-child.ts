@@ -8,11 +8,14 @@ import { deviceRequestSchema, deviceRequestPermissions } from "../device-request
 import { spaceSchema } from "../spaces.js";
 import { createNativeKeyEnvelope } from "../native.js";
 
-export const app = s.defineApp({
-  ...deviceRequestSchema,
-  ...spaceSchema,
-  projects: s.table({ title: s.string() }, {}),
-});
+export const app = s.defineApp(
+  {
+    ...deviceRequestSchema,
+    ...spaceSchema,
+    projects: s.table({ title: s.string() }, {}),
+  },
+  { migrations: "none" },
+);
 export const permissions = {
   ...deviceRequestPermissions,
   ...definePermissions(app, ({ policy, session }) => {

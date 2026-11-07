@@ -4,7 +4,7 @@ import { createDb } from "../../src/runtime/default-create-db.js";
 import { deploy } from "../../src/dev/catalogue.js";
 import { deviceRequestApp, deviceRequestPermissions } from "../../src/e2ee/device-requests.js";
 import { acquireBrowserTestAccount } from "./account-fixtures.js";
-import { getJazzServerInfo, stopJazzServer } from "./testing-server.js";
+import { getJazzServerInfo, startJazzApp, stopJazzServer } from "./testing-server.js";
 
 it("reopens the creator and approves, reopens and revokes a second device with browser crypto", async () => {
   const started = performance.now();
@@ -15,12 +15,16 @@ it("reopens the creator and approves, reopens and revokes a second device with b
       Math.round(performance.now() - started),
     );
   phase("start server");
-  const server = await getJazzServerInfo(`e2ee-approval-${crypto.randomUUID()}`);
+  let server = await getJazzServerInfo(`e2ee-approval-${crypto.randomUUID()}`);
   const clients: Awaited<ReturnType<typeof createDb>>[] = [];
   const keys = [crypto.randomUUID(), crypto.randomUUID()];
   try {
     phase("deploy schema");
     await deploy({ ...server, schema: deviceRequestApp, permissions: deviceRequestPermissions });
+    server = await startJazzApp(server, {
+      schema: deviceRequestApp,
+      permissions: deviceRequestPermissions,
+    });
     phase("acquire account");
     const account = await acquireBrowserTestAccount(server);
     const open = async (key: string) => {

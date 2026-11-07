@@ -5,15 +5,16 @@
 Add explicitly configured scoped spaces, atomic account/group initial recipients,
 signed grants and rotations, epoch history, independent recovery, permanently sealed
 lineages, and interrupted initial delivery resumption. Deterministic scope-bound root
-IDs and exclusive exact-row preconditions prevent competing or hidden roots. Reads
-require live authority settlement; encrypted ordinary operations and durable offline
+IDs and serializable exact-row preconditions prevent competing or hidden roots. Reads
+require complete paired accepted authority evidence; encrypted ordinary operations and durable offline
 accepted-history persistence are separate layers.
 
 Expose `spaceSchema` through `jazz-tools/e2ee` for application composition, and use
 the consolidated recovery decoder for space status. Replay checks each root's
 deterministic ID. Recovery status and device reads propagate full-history failures
 rather than reporting them as unavailable deliveries.
-Use the current global query tier for space authority observations.
+Use the existing paired accepted-read scope for every space authority predicate,
+including empty results, and retain explicit Global transaction confirmation.
 
 Space operations share session-owned device keys and synchronous private-store
 decoding with the account and group lifecycles. Preserve recovered-key tuples
@@ -37,7 +38,7 @@ wrong-ID proposals during creation and lookup, and exclude covered ineligible
 authors without hiding authority or verifier failures. Reject incomplete managed
 group configuration while preserving account-only spaces.
 
-Index table-qualified settlement positions and capture space replay authority
+Index table-qualified accepted content positions and capture space replay authority
 once per covered snapshot, avoiding repeated delivery-byte comparisons.
 Preserve cutoff-specific validation and live eligibility checks, and prevent
 adapter-mutated space or group replay from contaminating later cached proofs.

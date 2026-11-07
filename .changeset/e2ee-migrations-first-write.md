@@ -21,13 +21,8 @@ authorised client conversion.
 Branch-target first writes to an uninitialised space remain unsupported. Their
 wait handles now reject before preparing provisional keys, grants or ciphertext,
 and caller mutations cannot change a captured branch target. Existing-space
-branch writes are unchanged. Public exclusive transactions still capture their
-snapshot at `begin`; only internal admission helpers may defer opening.
+branch writes are unchanged. Public transactions retain the tested first-successful-read cut and subsequent
+snapshot consistency; internal retries preserve the original caller context.
 Initial prepared writes and their exclusive retries share the originating
 per-Db access context, including its session and attribution references, without
 restoring the removed ambient operation-context wrappers.
-
-For local qualification, preserve canonical temporary-directory environment
-variables through Turbo's strict test boundary. Keep invalid-authority and
-signed-token checks portable across supported Node versions and host loopback
-interfaces without relaxing production URL policy or signature verification.

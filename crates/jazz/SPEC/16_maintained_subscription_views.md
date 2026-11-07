@@ -209,7 +209,7 @@ The concrete v1 byte contracts are:
   Member identity and query binding own omitted version/routing bookkeeping.
 - Aggregate replacement identity: zero outputs retain the scalar `String("empty")`
   envelope; one output retains its exact canonical scalar descriptor/value
-  envelope and existing one-MiB identity limit. Two or more outputs use BLAKE3
+  envelope and existing one-MiB identity limit. Two or more outputs use SHA-256
   over UTF-8 `jazz aggregate replacement v1`, the complete aggregate `JRPD`
   descriptor length as little-endian `U64`, those descriptor bytes, canonical
   row length as little-endian `U64`, then those row bytes. The 32 digest bytes
@@ -220,14 +220,14 @@ The concrete v1 byte contracts are:
   validation MUST precede validation of the digest. Execution and nested runtime
   bindings do not enter it, but logical names, recursive types and enum registry
   identities do. A change to any output changes the replacement token (subject
-  to the BLAKE3 collision assumption); equal complete summaries still cancel
+  to the SHA-256 collision assumption); equal complete summaries still cancel
   their before/after weights. The group-derived row identity and public
   occurrence remain unchanged, including the fixed global group identity.
   The scalar identity limit MUST NOT be applied to a complete multi-output
   summary: previously admitted payloads above one MiB remain admitted, while
   their replacement token has bounded size. This corrects an opaque, volatile
   runtime discriminator; it changes no wire, durable, `JRPD` or binding format.
-- Root publication hash: BLAKE3 over ASCII `jazz terminal root publication v1`,
+- Root publication hash: SHA-256 over ASCII `jazz terminal root publication v1`,
   the persisted role descriptor, root byte-layout position as little-endian
   `U64`, and carrier byte (`0` current-row, `1` logical). In descriptor order,
   each public field then appends its exact UTF-8 name, zero byte, byte-layout
@@ -648,9 +648,9 @@ Maintained-lowering gaps:
   edges, ordering/limit boundaries, and policy visibility must converge with the
   corresponding one-shot relation snapshot, and serving code must not compensate
   by recursively subscribing to coarse child shapes for sync coverage;
-- relation delivery is covered by the active
-  `groove/SPEC/INVARIANTS.md::INV-INC-1` mechanism canary in
-  `crates/jazz/tests/incremental_delivery_canary.rs`. The canary is at the
+- relation delivery is covered by the active `INV-PERF-9` canary
+  `include_live::renaming_a_sender_updates_exactly_their_messages`
+  (`crates/jazz/tests/include_live.rs`). The canary is at the
   `Db` facade level because the current `jazz-tools::JazzClient` subscription
   surface rejects relation/include queries as non-simple table queries;
 - application-column projection is a materialization concern layered over the
@@ -664,7 +664,7 @@ Window limitations:
 - root `limit`/`offset` windows without explicit `order_by` are supported by
   injecting the ch. 6 default ascending row-id order before lowering through
   `TopBy`; this applies to both prepared bindings and policy-routed maintained
-  views. Explicit order keys retain ascending row id as their stable tie-break.
+  views. Explicit order keys break ties by row id in the last key's direction (ch. 6).
 - The same rule applies to every non-recursive relation-local window, including
   an `array_subquery`: without child `order_by`, each parent/correlation group
   is ordered by ascending child row id before its child-local `offset` and

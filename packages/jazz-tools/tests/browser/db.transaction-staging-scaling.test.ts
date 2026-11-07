@@ -4,9 +4,12 @@ import { schema } from "../../src/index.js";
 import { loadWasmModule } from "../../src/runtime/wasm-loader.js";
 import { createBrowserTestDb } from "./account-fixtures.js";
 
-const app = schema.defineApp({
-  todos: schema.table({ title: schema.string(), done: schema.boolean() }, {}),
-});
+const app = schema.defineApp(
+  {
+    todos: schema.table({ title: schema.string(), done: schema.boolean() }, {}),
+  },
+  { migrations: "none" },
+);
 
 describe("exact local transaction write merging", () => {
   it("keeps large content through a transactional update and a caught staging failure", async () => {

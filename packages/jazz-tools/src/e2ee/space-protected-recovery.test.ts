@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { createAccountManager } from "../accounts/create-account-manager.js";
 import { definePermissions } from "../permissions/index.js";
@@ -11,11 +12,14 @@ import { createNativeCrypto } from "./native.js";
 import { spaceSchema } from "./spaces.js";
 import type { JazzCrypto } from "./types.js";
 
-const app = s.defineApp({
-  ...deviceRequestSchema,
-  ...spaceSchema,
-  projects: s.table({ title: s.string() }, {}),
-});
+const app = s.defineApp(
+  {
+    ...deviceRequestSchema,
+    ...spaceSchema,
+    projects: s.table({ title: s.string() }, {}),
+  },
+  { migrations: "none" },
+);
 const decoder = new TextDecoder();
 const exhausted = "No authenticated space recovery delivery for the current epoch";
 type Recovery = { rootId: string; material: string };
@@ -26,7 +30,7 @@ function isSpaceRecovery(bytes: Uint8Array) {
 }
 
 async function fixture() {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients = new Set<Db>();
   const clearStores: (() => void)[] = [];
   const roots: Recovery[] = [];
@@ -89,6 +93,10 @@ async function fixture() {
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
+      schema: app,
+      permissions: { ...deviceRequestPermissions, ...policies },
+    });
+    server = await frontE2eeCore(server, {
       schema: app,
       permissions: { ...deviceRequestPermissions, ...policies },
     });

@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { createBrowserKeyEnvelope, createBrowserDeviceSigner } from "./browser.js";
 import { schema as s } from "../schema-namespace.js";
@@ -10,10 +11,16 @@ import { groupSchema } from "./groups.js";
 import { withGroupTopologyPermissions } from "./group-topology.js";
 
 it("protects every inherited path and restores both groups without ordinary delivery permission", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Awaited<ReturnType<typeof createDb>>[] = [];
   try {
-    const app = s.defineApp({ ...deviceRequestSchema, ...groupSchema });
+    const app = s.defineApp(
+      {
+        ...deviceRequestSchema,
+        ...groupSchema,
+      },
+      { migrations: "none" },
+    );
     const policies = definePermissions(app, ({ policy, session, allOf }) => {
       const authenticated = session.where({ authMode: { in: ["local-first", "external"] } });
       policy.__e2ee_groups.allowInsert.where({ accountId: session.user.account });
@@ -37,6 +44,10 @@ it("protects every inherited path and restores both groups without ordinary deli
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
+      schema: app,
+      permissions: withGroupTopologyPermissions(app, { ...deviceRequestPermissions, ...policies }),
+    });
+    server = await frontE2eeCore(server, {
       schema: app,
       permissions: withGroupTopologyPermissions(app, { ...deviceRequestPermissions, ...policies }),
     });
@@ -189,7 +200,7 @@ it("protects every inherited path and restores both groups without ordinary deli
       removals++;
     };
     await expect(recovered.e2ee.explain({ groupId: child.id })).rejects.toMatchObject({
-      code: "exclusive_conflict",
+      code: "serialization_conflict",
     });
     expect(signedDelivery).toBe(true);
     expect(removals).toBe(1);

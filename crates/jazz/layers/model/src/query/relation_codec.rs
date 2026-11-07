@@ -1357,10 +1357,13 @@ mod relation_postcard_tests {
                 alias: None,
             },
         });
+        // The relation is followed by the empty `partial` vec.
         let mut query_bytes = postcard::to_allocvec(&query).unwrap();
+        assert_eq!(query_bytes.pop(), Some(0));
         assert!(query_bytes.ends_with(&table_scan));
         query_bytes.truncate(query_bytes.len() - table_scan.len());
         query_bytes.extend(&relation);
+        query_bytes.push(0);
         assert!(std::panic::catch_unwind(|| postcard::from_bytes::<Query>(&query_bytes)).is_ok());
         assert!(postcard::from_bytes::<Query>(&query_bytes).is_err());
         let valid_query_bytes = postcard::to_allocvec(&query).unwrap();
@@ -1485,5 +1488,48 @@ mod relation_postcard_tests {
         query.relation = Some(relation.clone());
         let query_bytes = postcard::to_allocvec(&query).unwrap();
         assert_eq!(postcard::from_bytes::<Query>(&query_bytes).unwrap(), query);
+    }
+
+    /// The TypeScript native codec's pinned query bytes
+    /// (`crates/jazz/fixtures/native_query_codec.json`) decode as the Rust
+    /// `Query` and re-encode to the same bytes, so the two layouts agree.
+    #[test]
+    fn typescript_native_query_codec_bytes_decode_and_reencode_exactly() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/native_query_codec.json");
+        let fixture: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let cases = fixture["cases"].as_array().unwrap();
+        assert!(!cases.is_empty());
+        for case in cases {
+            let name = case["name"].as_str().unwrap();
+            let bytes = hex::decode(case["query_hex"].as_str().unwrap()).unwrap();
+            let query = postcard::from_bytes::<Query>(&bytes)
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert_eq!(postcard::to_allocvec(&query).unwrap(), bytes, "{name}");
+            if name == "partial_selects_bytes_text_json" {
+                assert_eq!(
+                    query.partial,
+                    vec![
+                        PartialSelect {
+                            column: "payload".into(),
+                            part: Part::Bytes { from: 70_001, to: 70_005 },
+                        },
+                        PartialSelect {
+                            column: "body".into(),
+                            part: Part::TextUtf16 { from: 300, to: 302 },
+                        },
+                        PartialSelect {
+                            column: "title".into(),
+                            part: Part::TextUtf8 { from: 4, to: 9 },
+                        },
+                        PartialSelect {
+                            column: "metadata".into(),
+                            part: Part::JsonPointer("/nested/answer".into()),
+                        },
+                    ]
+                );
+            }
+        }
     }
 }

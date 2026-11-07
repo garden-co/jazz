@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./app.js";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { schema as s } from "../../schema-namespace.js";
 import { definePermissions } from "../../permissions/index.js";
@@ -25,16 +26,19 @@ function newRows<T extends { id: string }>(
   return rows.filter((row) => !ids.has(row.id));
 }
 async function prepare(runtime: "wasm" | "native") {
-  const app = s.defineApp({
-    ...deviceRequestSchema,
-    ...spaceSchema,
-    ...groupSchema,
-    projects: s.table({ title: s.string() }, {}),
-    notes: s.table(
-      { projectId: s.uuid(), epochId: s.string(), payload: s.bytes() },
-      { project: s.rel("projects", "projectId") },
-    ),
-  });
+  const app = s.defineApp(
+    {
+      ...deviceRequestSchema,
+      ...spaceSchema,
+      ...groupSchema,
+      projects: s.table({ title: s.string() }, {}),
+      notes: s.table(
+        { projectId: s.uuid(), epochId: s.string(), payload: s.bytes() },
+        { project: s.rel("projects", "projectId") },
+      ),
+    },
+    { migrations: "none" },
+  );
   const policies = definePermissions(app, ({ policy, session }) => {
     policy.projects.allowRead.always();
     policy.projects.allowInsert.where({ title: "Allowed" });
@@ -59,7 +63,7 @@ async function prepare(runtime: "wasm" | "native") {
     policy.__e2ee_group_repairs.allowRead.always();
     policy.__e2ee_group_repairs.allowInsert.where({ accountId: session.user.account });
   });
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
   const recipients: { db: Awaited<ReturnType<typeof createDb>>; accountId: string }[] = [];
   let recipientGroupId: string | undefined;
@@ -69,6 +73,10 @@ async function prepare(runtime: "wasm" | "native") {
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
+      schema: app,
+      permissions: { ...deviceRequestPermissions, ...policies },
+    });
+    server = await frontE2eeCore(server, {
       schema: app,
       permissions: { ...deviceRequestPermissions, ...policies },
     });
@@ -528,4 +536,28 @@ export function registerSpaceAtomicPreparation(runtime: "wasm" | "native") {
     },
     60000,
   );
+
+  it(`refuses changed initial recipients before metadata staging (${runtime})`, async () => {
+    const { db, app } = fixture;
+    const tx = beginInitialSpaceTransaction(db);
+    const project = tx.insert(app.projects, { title: "Allowed" });
+    let prepared = false;
+    await expect(
+      prepareInitialSpaceForTransaction(
+        db,
+        tx,
+        app.projects,
+        project.id,
+        async () => {
+          prepared = true;
+        },
+        [globalThis.crypto.randomUUID()],
+      ),
+    ).rejects.toThrow("Initial space recipients changed after authority registration");
+    expect(prepared).toBe(false);
+    expect(await db.all(app.projects.where({ id: project.id }), { tier: "remote" })).toEqual([]);
+    expect(
+      await db.all(app.__e2ee_spaces.where({ identifier: project.id }), { tier: "remote" }),
+    ).toEqual([]);
+  });
 }

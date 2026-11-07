@@ -48,7 +48,7 @@ lane_reset() {
   git -C "$path" clean -qfdx -e target -e node_modules
   git -C "$path" checkout -q -B "$branch" "$base"
   if [ -d "$path/target" ]; then
-    (cd "$path" && cargo clean -q -p jazz -p groove \
+    (cd "$path" && cargo clean -q -p jazz -p jazz-db \
         -p jazz-sim -p jazz-napi -p jazz-wasm 2>/dev/null || true)
   fi
   lane_install_node_modules "$path"

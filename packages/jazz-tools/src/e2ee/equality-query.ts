@@ -3,14 +3,18 @@ import type { ColumnType } from "../drivers/types.js";
 import { normalizeBuiltQuery } from "../runtime/query-builder-shape.js";
 import { resolveSelectedColumns } from "../runtime/select-projection.js";
 import { toWriteRecord } from "../runtime/value-converter.js";
-import { toTimestampMs } from "../runtime/query-adapter.js";
-import { formatUuid, parseUuid } from "../runtime/uuid.js";
+import { toTimestampMs, translateQuery } from "../runtime/query-adapter.js";
+import { formatUuid, parseUuidBytes } from "../runtime/hex.js";
 import { TypedTableQueryBuilder } from "../typed-app.js";
 import { encryptedSchemas, equalityIndexColumn } from "./encrypted-schema.js";
 import { equalityToken, equalityValue } from "./equality-data.js";
 import { decryptedIndexBytes } from "./cell-data.js";
 import { withSpaceKeys } from "./lifecycle.js";
 import { E2eeDataError } from "./data-error.js";
+import {
+  retainedEqualityLimits,
+  checkRetainedEqualityCandidates,
+} from "./retained-equality-limits.js";
 import type { SpaceRoot } from "./spaces.js";
 
 /** Restore typed literals after query JSON serialisation, using the logical schema. */
@@ -71,6 +75,7 @@ export async function prepareEqualityQuery(
     ready: () => Promise<void> | undefined;
     initialSpaceKeys: ReadonlyMap<string, { secret: Uint8Array; root: SpaceRoot }>;
   },
+  retainedContent = false,
 ) {
   const metadata = encryptedSchemas.get(query._schema);
   if (!metadata) return undefined;
@@ -93,12 +98,25 @@ export async function prepareEqualityQuery(
         `Unsupported encrypted query: "${predicate.column}" requires an equality index`,
       );
   }
+  if (
+    retainedContent &&
+    (Object.keys(built.includes).length ||
+      built.requireIncludes ||
+      built.select.length ||
+      built.includeDeleted ||
+      built.orderBy.some(([column]) => declaration.columns.includes(column)))
+  )
+    throw new Error(
+      "Unsupported retained encrypted equality query: use a plain scoped query without includes, projections, deleted history or encrypted ordering",
+    );
   const scopeCondition = built.conditions.find(
     (condition) => condition.column === declaration.space && condition.op === "eq",
   );
   if (typeof scopeCondition?.value !== "string")
     throw new Error("Encrypted equality queries require a plaintext space constraint");
-  const scopeIdentifier = formatUuid(parseUuid(scopeCondition.value));
+  const scopeBytes = parseUuidBytes(scopeCondition.value);
+  if (!scopeBytes) throw new Error(`invalid uuid ${scopeCondition.value}`);
+  const scopeIdentifier = formatUuid(scopeBytes);
   const table = new TypedTableQueryBuilder(built.table, query._schema);
   const scope = new TypedTableQueryBuilder(declaration.scope, query._schema);
   const values = predicates.map((predicate) => {
@@ -128,22 +146,27 @@ export async function prepareEqualityQuery(
         ...(await equalityToken(db, table, predicate.column, values[i]!, secret, root)),
       ]);
   };
-  if (initial) await collect(initial.secret, initial.root);
-  else await withSpaceKeys(db, scope, scopeIdentifier, collect, true);
-  if (tokens.some((values) => !values.length)) throw new E2eeDataError("key-unavailable");
+  if (!retainedContent) {
+    if (initial) await collect(initial.secret, initial.root);
+    else await withSpaceKeys(db, scope, scopeIdentifier, collect, true);
+  }
+  if (!retainedContent && tokens.some((values) => !values.length))
+    throw new E2eeDataError("key-unavailable");
   const wanted = predicates.map((predicate, i) =>
     equalityValue(table, predicate.column, values[i]!),
   );
   const physical = {
     ...JSON.parse(json),
-    conditions: built.conditions.map((condition) => {
-      const i = predicates.indexOf(condition);
-      return i < 0
-        ? condition
-        : { column: equalityIndexColumn(condition.column), op: "in", value: tokens[i] };
-    }),
+    conditions: retainedContent
+      ? built.conditions.filter((condition) => !predicates.includes(condition))
+      : built.conditions.map((condition) => {
+          const i = predicates.indexOf(condition);
+          return i < 0
+            ? condition
+            : { column: equalityIndexColumn(condition.column), op: "in", value: tokens[i] };
+        }),
     select: [],
-    limit: undefined,
+    limit: retainedContent ? retainedEqualityLimits.rows + 1 : undefined,
     offset: undefined,
   };
   const selection = built.select.length
@@ -156,12 +179,16 @@ export async function prepareEqualityQuery(
   const matchesEpochs = (current: ReadonlySet<string>) =>
     current.size === epochs.size && [...current].every((epoch) => epochs.has(epoch));
   return {
+    retainedContent,
+    checkCandidates(rows: readonly unknown[]) {
+      if (retainedContent) checkRetainedEqualityCandidates(rows, declaration.columns.length);
+    },
     matchesEpochs,
-    json: JSON.stringify(physical),
+    json: translateQuery(JSON.stringify(physical), query._schema),
     space: { scope: declaration.scope, identifier: scopeIdentifier },
     async isCurrent() {
       // This key belongs to the atomic transaction, not published history yet.
-      if (initial) return true;
+      if (initial || retainedContent) return true;
       const current = new Set<string>();
       // Re-read accepted history after the candidate read. An epoch absent from
       // the prepared tokens may contain matches the physical predicate omitted.
@@ -180,6 +207,7 @@ export async function prepareEqualityQuery(
       for (const bytes of wanted) bytes.fill(0);
     },
     verify(rows: Record<string, unknown>[]) {
+      if (retainedContent) checkRetainedEqualityCandidates(rows, declaration.columns.length);
       const verified = rows.filter((row) =>
         predicates.every((predicate, i) => {
           const bytes = decryptedIndexBytes.get(row)?.get(predicate.column);

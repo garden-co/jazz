@@ -1,4 +1,4 @@
-import { serializableE2eeTransaction } from "../runtime/db.js";
+import { acceptedDeviceTransaction } from "./accepted-membership.js";
 import type { Db } from "../runtime/db.js";
 import { PersistedWriteRejectedError } from "../runtime/client.js";
 import { runtimeRandomBytes } from "../runtime/runtime-entropy.js";
@@ -66,8 +66,10 @@ export async function firstAccountEpoch(
   for (let attempt = 0; ; attempt++) {
     assertOpen();
     try {
-      const proposal = await serializableE2eeTransaction(db, async (tx) => {
-        const existing = await tx.one(identities.where({ id: accountId }), { tier: "local-first" });
+      const proposal = await acceptedDeviceTransaction(db, async (tx) => {
+        // A fresh replica's empty cache is not an authoritative absence proof.
+        const snapshot = await tx.readAccepted(identities.where({ id: accountId }));
+        const existing = snapshot.rows[0];
         assertOpen();
         if (existing) return existing;
         const epochId = crypto.randomUUID();
@@ -97,8 +99,8 @@ export async function firstAccountEpoch(
         }
       });
       // New identities and their public activation settle atomically. Even an
-      // existing identity is validated by a globally accepted exclusive commit.
-      const accepted = await proposal.wait({ tier: "global" });
+      // existing identity is validated by a globally accepted serializable commit.
+      const accepted = await proposal.wait();
       assertOpen();
       if (accepted.ledgerVersion !== 1)
         throw new Error("E2EE account requires public ledger migration");
@@ -137,6 +139,7 @@ export async function firstAccountEpoch(
         attempt >= 2 ||
         !(error instanceof PersistedWriteRejectedError) ||
         (error.code !== "transaction_conflict" &&
+          error.code !== "serialization_conflict" &&
           error.code !== "permission_denied" &&
           error.code !== "exclusive_conflict")
       )
