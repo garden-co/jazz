@@ -869,9 +869,11 @@ h6 {
   fill: currentColor;
 }
 /* Scrolls sideways on narrow phones rather than widening the page. */
+/* The picker sits top center in the figure, well clear of the diagram. */
 .home-carousel-picker {
-  margin-top: var(--spacing-4);
+  width: fit-content;
   max-width: 100%;
+  margin: var(--spacing-6) auto var(--spacing-10);
   overflow-x: auto;
 }
 .home-carousel-tab-icon {

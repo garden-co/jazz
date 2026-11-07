@@ -368,6 +368,7 @@ export default function HomePage() {
           <DeploymentCarousel>
             <div className="home-overview mt-6">
               <Figure className="home-figure-wide">
+                <DeploymentPicker />
                 <DeploymentSlides />
               </Figure>
               <div className="home-facts">
@@ -377,7 +378,6 @@ export default function HomePage() {
                     Jazz makes use of your platform&apos;s native serverless primitives, sharding
                     and scaling to zero as needed.
                   </Text>
-                  <DeploymentPicker />
                 </div>
                 {principles.map((item) => (
                   <div key={item.title} className="home-fact">
