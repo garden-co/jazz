@@ -8,6 +8,7 @@ import {
 import { createListeners, toError } from "../runtime/util.js";
 import type { Db } from "../runtime/db.js";
 import { isThinDb } from "../runtime/local-first-upgrade.js";
+import { parseAuthSecret } from "../runtime/auth-secret-codec.js";
 import type { DbReplacedReason } from "../runtime/db-replaced-error.js";
 
 export interface SessionClient {
@@ -322,8 +323,16 @@ export async function createJazzSessionOwner<
     getSnapshot: () => snapshot,
     subscribe: listeners.subscribe,
     createLocalFirst: () => run("createLocalFirst", () => accounts.createLocalFirst()),
-    restoreLocalFirst: (secret) =>
-      run("restoreLocalFirst", () => accounts.restoreLocalFirst(secret)),
+    restoreLocalFirst: (secret) => {
+      // A malformed secret is the caller's mistake: refuse it before the
+      // current client is shut down, so the session goes on as it was.
+      try {
+        parseAuthSecret(secret);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      return run("restoreLocalFirst", () => accounts.restoreLocalFirst(secret));
+    },
     loginWithBackend: () => run("loginWithBackend", () => accounts.loginWithBackend()),
     linkWithBackend: () => run("linkWithBackend", () => accounts.linkWithBackend()),
     retry: () => run("retry", () => selected),

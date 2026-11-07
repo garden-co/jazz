@@ -28,7 +28,7 @@ export class StoreHeldByAnotherTabError extends Error {
   readonly code = STORE_HELD_BY_ANOTHER_TAB_ERROR_CODE;
 
   constructor(
-    message = "Another tab holds this account's local store under another sign-in; close or reload it",
+    message = "Another tab holds this account's local store under another sign-in: close or reload that other tab. This tab joins once it lets go; reloading this tab first loses its unsynced writes",
     options?: { cause?: unknown },
   ) {
     super(message, options);
