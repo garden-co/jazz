@@ -525,23 +525,19 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
    * worker: the browser releases it when the page goes away without a word
    * (closed, crashed, discarded), and the worker then detaches this tab, so
    * a tab waiting for this store under another sign-in gets in.
+   *
+   * Requested before the connect message is posted, so the tab is first in
+   * the lock's queue: the worker only asks for it once it has admitted the
+   * tab. Connecting doesn't wait for the grant.
    */
-  private async holdLivenessLock(): Promise<string | undefined> {
+  private holdLivenessLock(): string | undefined {
     const locks = globalThis.navigator?.locks;
     if (!locks) return undefined;
     const name = `jazz-tab-alive:${crypto.randomUUID()}`;
-    try {
-      await new Promise<void>((granted, failed) => {
-        locks
-          .request(name, () => {
-            granted();
-            return new Promise<void>((release) => (this.releaseLivenessLock = release));
-          })
-          .catch(failed);
-      });
-    } catch {
-      return undefined;
-    }
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => (release = resolve));
+    this.releaseLivenessLock = release;
+    void locks.request(name, () => released).catch(() => undefined);
     return name;
   }
 
@@ -552,9 +548,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
     workerName: string,
     createWorker: (name: string) => SharedWorker,
   ): Promise<void> {
-    // Without Web Locks the worker can't watch this tab: connect at once.
-    const livenessLock = globalThis.navigator?.locks ? await this.holdLivenessLock() : undefined;
-    if (this.closed) throw new Error("Shared browser runtime connection is closed");
+    const livenessLock = this.holdLivenessLock();
     let generation = readWorkerGeneration(workerName);
     for (let attempt = 0; attempt < MAX_SHARED_WORKER_GENERATION_ATTEMPTS; attempt += 1) {
       if (this.closed) return;
