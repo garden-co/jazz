@@ -1230,12 +1230,19 @@ nav.astryx-side-nav .astryx-side-nav-item {
 /* Pricing tiers (components/home/pricing-table.tsx): a column per tier, its
    rows aligned across tiers with subgrid; stacked tier by tier on phones. */
 .home-pricing {
-  margin-top: var(--spacing-8);
+  /* Lots of air above and below so the tiers stand out from the heading
+     and the cost calculator. */
+  margin-block: 4rem;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: var(--spacing-10);
   font-size: var(--text-body-size);
   color: var(--color-text-primary);
+}
+@media (min-width: 768px) {
+  .home-pricing {
+    margin-block: 7rem;
+  }
 }
 .home-pricing-tier {
   display: grid;

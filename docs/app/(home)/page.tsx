@@ -513,7 +513,7 @@ export default function HomePage() {
         <div className="home-container">
           <SectionHeader id="pricing" title="Priced for flexible self-hosting & BYOC" />
           <PricingTable />
-          <div className="mt-12 grid gap-8">
+          <div className="grid gap-8">
             <Heading level={3}>What it costs on each platform</Heading>
             {/* Not ported to Astryx yet. A data-astryx-theme attribute ends the
                 theme's @scope, so its element resets (p, h1-h6, code) leave the
