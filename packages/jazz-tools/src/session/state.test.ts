@@ -44,6 +44,18 @@ const tick = async () => {
   for (let i = 0; i < 12; i++) await Promise.resolve();
 };
 describe("Jazz session lifecycle", () => {
+  it("refuses a malformed secret to restore without touching the current client", async () => {
+    const { session, enrollment, clients } = await setup();
+    const before = session.getSnapshot();
+    await expect(session.restoreLocalFirst(undefined as unknown as string)).rejects.toThrow(
+      "jazz-auth-v1:",
+    );
+    await expect(session.restoreLocalFirst("not a secret")).rejects.toThrow();
+    expect(session.getSnapshot()).toBe(before);
+    expect(enrollment.restoreLocalFirst).not.toHaveBeenCalled();
+    expect(clients[0]!.shutdown).not.toHaveBeenCalled();
+  });
+
   it("does not open an unsaved selection and retries its failed synchronous persistence hook", async () => {
     const selected = handle("selected");
     const failure = new Error("cannot queue selection");
