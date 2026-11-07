@@ -37,6 +37,15 @@ export interface BrowserRelayError {
   cause?: unknown;
 }
 
+/**
+ * Why a worker refuses a tab whose configuration differs from the open
+ * store's only in who is signed in to its account: a guest who signed up in
+ * that tab (and kept the account) while another tab is still the guest. The
+ * tab tries again on its own until that tab follows the sign-up or closes.
+ */
+export const BROWSER_STORE_HELD_BY_ANOTHER_SIGN_IN =
+  "this account's store is open under another sign-in in another tab";
+
 /** The relay error envelope is deliberately small enough for a MessagePort. */
 export const BROWSER_RELAY_ERROR_MAX_CAUSE_DEPTH = 32;
 export const BROWSER_RELAY_ERROR_MAX_TOTAL_CHARS = 64 * 1024;
@@ -380,6 +389,12 @@ export interface BrowserWorkerInitOptions {
 export interface BrowserSharedWorkerConnectRequest {
   type: "connect-runtime";
   tabId: string;
+  /**
+   * A Web Lock the tab holds for as long as its page lives. The worker waits
+   * on it and detaches the tab once the browser grants it: the page went
+   * away (closed, crashed, discarded) without saying so.
+   */
+  livenessLock?: string;
   fingerprint: string;
   options: BrowserWorkerInitOptions;
 }
