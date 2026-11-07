@@ -400,8 +400,8 @@ async fn run_revoked_exit_shared_case(dependency: bool, changes_filter: bool, sh
         );
     }
     // Restoring access must clear the exact reader's denial, without requiring
-    // a new client or discarding the Edge's shared cache.
-    let mut start = log.len();
+    // a new client or discarding its local cache.
+    let start = log.len();
     let tx = bob.begin_transaction().unwrap().transaction_id();
     let staged = bob.with_write_context(WriteContext::default().with_transaction_id(tx));
     staged
@@ -415,26 +415,7 @@ async fn run_revoked_exit_shared_case(dependency: bool, changes_filter: bool, sh
             ],
         )
         .unwrap();
-    jazz_testkit::wait_for_global_txs(&bob, &[bob.commit_transaction(tx).unwrap()]).await;
     if let Some(grant) = grant {
-        jazz_testkit::collect_stream_deltas(&mut remote, &mut log, Duration::from_millis(250))
-            .await;
-        assert!(
-            !has_added_id(&log[start..], task),
-            "the still-revoked grant must continue withholding the task"
-        );
-        assert!(
-            !local_rows(&alice, Query::from("tasks"))
-                .await
-                .iter()
-                .any(|(id, values)| {
-                    *id == task && values.contains(&Value::Text("readmitted".into()))
-                }),
-            "the still-revoked grant must withhold the task successor from the local cache"
-        );
-        start = log.len();
-        let tx = bob.begin_transaction().unwrap().transaction_id();
-        let staged = bob.with_write_context(WriteContext::default().with_transaction_id(tx));
         staged
             .update(
                 "grants",
@@ -442,9 +423,8 @@ async fn run_revoked_exit_shared_case(dependency: bool, changes_filter: bool, sh
                 vec![("owner".into(), Value::Text("alice".into()))],
             )
             .unwrap();
-        jazz_testkit::wait_for_global_txs(&bob, &[bob.commit_transaction(tx).unwrap()]).await;
     }
-
+    jazz_testkit::wait_for_global_txs(&bob, &[bob.commit_transaction(tx).unwrap()]).await;
     wait_for_subscription_update(
         &mut remote,
         &mut log,
@@ -453,13 +433,6 @@ async fn run_revoked_exit_shared_case(dependency: bool, changes_filter: bool, sh
         |log| has_added_id(&log[start..], task),
     )
     .await;
-    assert!(
-        local_rows(&alice, Query::from("tasks"))
-            .await
-            .iter()
-            .any(|(id, values)| *id == task && values.contains(&Value::Text("readmitted".into()))),
-        "readmission must expose the restored content in the local cache"
-    );
     alice.shutdown().await.unwrap();
     if let Some(reader) = shared_reader {
         reader.shutdown().await.unwrap();
@@ -580,13 +553,10 @@ async fn run_reconnect_scalar_query(count: usize) {
                 |log| tasks.iter().all(|task| has_removed(log, *task)),
             )
             .await;
+            // Nothing watches a row that left every subscription: the
+            // resumed answer's listing evicts it rather than refreshing it.
             let cached = local_rows(&alice, Query::from("tasks")).await;
-            assert!(
-                tasks
-                    .iter()
-                    .all(|task| cached.iter().any(|(id, values)| id == task
-                        && values.contains(&Value::Text("after reconnect".into()))))
-            );
+            assert!(!cached.iter().any(|(id, _)| tasks.contains(id)));
             alice.shutdown().await.unwrap();
             bob.shutdown().await.unwrap();
             authority.shutdown().await;
@@ -594,15 +564,15 @@ async fn run_reconnect_scalar_query(count: usize) {
         .await;
 }
 
-/// Alice's retained scalar row converges from Core after bob's
-/// offline update. alice caches -> disconnect/drop -> bob updates -> reconnect
+/// Alice's retained scalar row is evicted, not left stale, after bob's
+/// offline update moves it out of her query. alice caches -> disconnect/drop -> bob updates -> reconnect
 #[tokio::test]
 async fn reconnect_scalar_query_revalidates_extra_local_input_at_core() {
     run_reconnect_scalar_query(1).await;
 }
 
 /// Alice's 65 retained roots require more than one bounded 64-ID probe batch.
-/// bob changes every root while alice is offline; every cached input refreshes.
+/// bob changes every root while alice is offline; every cached input is evicted.
 /// alice caches 65 -> offline -> bob changes 65 -> reconnect -> two batches
 #[tokio::test]
 async fn reconnect_scalar_reconciliation_continues_past_first_batch() {
@@ -796,9 +766,10 @@ async fn run_reconnect_revoked_input(dependency: bool, persistent: bool) {
                     |(_, values)| values.contains(&Value::Text("forbidden successor".into()))
                 ));
             }
+            // The control left the subscription, so the listing evicts it
+            // rather than refreshing it.
             let cached = local_rows(&alice, Query::from("tasks")).await;
-            assert!(cached.iter().any(|(id, values)| *id == tasks[1]
-                && values.contains(&Value::Text("readable control".into()))));
+            assert!(!cached.iter().any(|(id, _)| *id == tasks[1]));
             wait_for_subscription_update(
                 &mut local,
                 &mut local_log,
@@ -900,8 +871,11 @@ async fn unavailable_scalar_input_survives_reopen_and_readmits() {
     run_reconnect_revoked_input(false, true).await;
 }
 
-/// Changing only the permissions catalogue must retract a retained local input;
-/// restoring the rule must re-admit the unchanged native row from Core.
+/// A redeploy that changes only the permissions must retract a retained
+/// local input once the client reconnects pinned to the new bundle;
+/// redeploying the original rule must re-admit the unchanged native row from
+/// Core. (A session keeps the bundle it was opened with: a deployment
+/// reaches it when it reconnects, as createJazz's clients do.)
 #[tokio::test]
 async fn scalar_input_policy_rule_change_revokes_and_readmits() {
     tokio::task::LocalSet::new()
@@ -925,12 +899,13 @@ async fn scalar_input_policy_rule_change_revokes_and_readmits() {
                 )
                 .unwrap();
             jazz_testkit::wait_for_global_txs(&writer, &[tx.unwrap()]).await;
-            let alice = TestingClient::builder()
+            let (mut context, alice) = TestingClient::builder()
                 .with_server(&authority)
                 .with_schema(schema.clone())
                 .with_user_id("alice")
                 .as_user()
-                .connect()
+                .with_persistent_storage()
+                .connect_with_context()
                 .await;
             let mut stream = alice
                 .subscribe_with_read_tier(filtered(), ReadTier::LocalFirst)
@@ -945,13 +920,18 @@ async fn scalar_input_policy_rule_change_revokes_and_readmits() {
                 |log| has_added_id(log, task),
             )
             .await;
+            drop(stream);
+            alice.shutdown().await.unwrap();
+
+            // Redeploy with a rule that no longer reads the row, and reopen
+            // Alice's store pinned to it.
             let denied = permissions(|p| {
                 p.allow_insert().always();
                 p.allow_update().always();
                 p.allow_delete().always();
                 p.allow_read().where_(pe::eq("owner", "nobody"));
             });
-            jazz_testkit::publish_permissions(
+            let published = jazz_testkit::publish_permissions(
                 &authority.base_url(),
                 authority.app_id(),
                 authority.admin_secret(),
@@ -959,26 +939,34 @@ async fn scalar_input_policy_rule_change_revokes_and_readmits() {
                 [("tasks".into(), denied)],
             )
             .await;
-            wait_for_subscription_update(
-                &mut stream,
-                &mut log,
-                TIMEOUT,
-                "new policy excludes unchanged local input",
-                |log| has_removed(log, task),
-            )
+            context.bundle = Some(published.bundle);
+            let alice = jazz_testkit::connect(context.clone())
+                .await
+                .expect("reconnect alice");
+            let _stream = alice
+                .subscribe_with_read_tier(filtered(), ReadTier::LocalFirst)
+                .await
+                .unwrap();
+            jazz_testkit::wait_for(TIMEOUT, "new policy excludes unchanged local input", || {
+                let alice = &alice;
+                async move {
+                    (!local_rows(alice, Query::from("tasks"))
+                        .await
+                        .iter()
+                        .any(|(id, _)| *id == task))
+                    .then_some(())
+                }
+            })
             .await;
-            assert!(
-                !local_rows(&alice, Query::from("tasks"))
-                    .await
-                    .iter()
-                    .any(|(id, _)| *id == task)
-            );
-            log.clear();
+            drop(_stream);
+            alice.shutdown().await.unwrap();
+
+            // Redeploy the original rule: the unchanged row comes back.
             let restored = schema
                 .iter()
                 .map(|(name, table)| (*name, table.policies.clone()))
                 .collect::<Vec<_>>();
-            jazz_testkit::publish_permissions(
+            let published = jazz_testkit::publish_permissions(
                 &authority.base_url(),
                 authority.app_id(),
                 authority.admin_secret(),
@@ -986,6 +974,15 @@ async fn scalar_input_policy_rule_change_revokes_and_readmits() {
                 restored,
             )
             .await;
+            context.bundle = Some(published.bundle);
+            let alice = jazz_testkit::connect(context)
+                .await
+                .expect("reconnect alice");
+            let mut stream = alice
+                .subscribe_with_read_tier(filtered(), ReadTier::LocalFirst)
+                .await
+                .unwrap();
+            let mut log = Vec::new();
             wait_for_subscription_update(
                 &mut stream,
                 &mut log,

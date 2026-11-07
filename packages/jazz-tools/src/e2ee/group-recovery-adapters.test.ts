@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createAccountManager } from "../accounts/create-account-manager.js";
 import { definePermissions } from "../permissions/index.js";
@@ -12,12 +13,12 @@ import { createNativeCrypto } from "./native.js";
 import type { JazzCrypto } from "./types.js";
 
 type Recovery = { rootId: string; material: string };
-const app = s.defineApp({ ...deviceRequestSchema, ...groupSchema });
+const app = s.defineApp({ ...deviceRequestSchema, ...groupSchema }, { migrations: "none" });
 const decoder = new TextDecoder();
 const exhausted = "No authenticated group recovery delivery for the current epoch";
 
 async function fixture() {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients = new Set<Db>();
   const clearStores: (() => void)[] = [];
   const recoveries: Recovery[] = [];
@@ -77,6 +78,10 @@ async function fixture() {
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
+      schema: app,
+      permissions: withGroupTopologyPermissions(app, { ...deviceRequestPermissions, ...policies }),
+    });
+    server = await frontE2eeCore(server, {
       schema: app,
       permissions: withGroupTopologyPermissions(app, { ...deviceRequestPermissions, ...policies }),
     });

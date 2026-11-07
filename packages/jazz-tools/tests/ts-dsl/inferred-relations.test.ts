@@ -6,9 +6,13 @@ import { app } from "./fixtures/inferred-relations/app.js";
 import { schema, type AppSchema } from "./fixtures/inferred-relations/schema.js";
 
 const checkedSchema = s.defineSchema(schema);
-const checkedApp: s.App<typeof checkedSchema> = s.defineApp(checkedSchema);
-const rawSliceable: s.SliceableApp<AppSchema> = s.defineSliceableApp(schema);
-const checkedSliceable: s.SliceableApp<typeof checkedSchema> = s.defineSliceableApp(checkedSchema);
+const checkedApp: s.App<typeof checkedSchema> = s.defineApp(checkedSchema, { migrations: "none" });
+const rawSliceable: s.SliceableApp<AppSchema> = s.defineSliceableApp(schema, {
+  migrations: "none",
+});
+const checkedSliceable: s.SliceableApp<typeof checkedSchema> = s.defineSliceableApp(checkedSchema, {
+  migrations: "none",
+});
 const slice = checkedSliceable.slice("records", "categories");
 const arrays = app.records
   .include({ categories: true, people: true, analyses: true, statuses: true })

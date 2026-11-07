@@ -15,14 +15,10 @@ import re
 import sys
 
 WORKSPACE_CRATES = (
-    "groove",
-    "idb_tree",
     "jazz",
     "jazz_compression",
     "jazz_db",
-    "jazz_engine",
     "jazz_model",
-    "jazz_node",
     "jazz_protocol",
     "jazz_types",
     "jazz_wasm",

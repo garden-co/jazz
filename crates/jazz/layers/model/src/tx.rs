@@ -1,9 +1,8 @@
 //! Transaction, fate, durability, snapshot, and read-set vocabulary shared by
-//! the facade, node, and protocol layers. This module owns the semantic data
-//! structures for mergeable/serializable transactions and authority outcomes; the
-//! code that validates, stores, and syncs them lives in `jazz::node::ingest`,
-//! `jazz::node::open_tx`, and `jazz::protocol`. Merge and currency rules
-//! are grounded in `jazz/README.md`.
+//! the facade, database, and protocol layers. This module owns the semantic
+//! data structures for mergeable/serializable transactions and authority
+//! outcomes; the code that validates, stores, and syncs them lives in `jazz-db`
+//! (`jazz::db`). Merge and currency rules are grounded in `jazz/README.md`.
 
 use crate::ids::{AuthorSubject, NodeUuid, PhysicalTableId, RowAuthor, RowUuid, SchemaVersionId};
 use crate::model::branch::{BranchKey, SnapshotRef};
@@ -185,7 +184,7 @@ impl ContributionMergeProvenance {
 
     /// Reject non-canonical or incomplete provenance received from a helper.
     pub fn validate(&self) -> Result<(), &'static str> {
-        // These keys are later encoded into durable Groove records. Validate
+        // These keys are later encoded into durable records. Validate
         // every ordinary contribution coordinate before any caller can reach
         // the infallible `canonical_bytes` encoder through a transaction that
         // also happens to carry branch-write intent metadata.
@@ -444,7 +443,7 @@ pub struct TxId {
 }
 
 impl TxId {
-    /// Groove descriptor for the portable `(time, node UUID)` transaction identity.
+    /// Record descriptor for the portable `(time, node UUID)` transaction identity.
     pub fn value_type() -> jazz_types::records::ValueType {
         use jazz_types::records::ValueType;
         ValueType::Tuple(vec![ValueType::U64, ValueType::Uuid])
@@ -1002,10 +1001,8 @@ pub struct PredicateRead {
 /// Canonical `jazz.aggregate-read-result.v1` bytes: the complete result of
 /// one serializable aggregate read, one entry per output group.
 ///
-/// The bytes are opaque at this layer; the node layer owns the encoder and the
-/// canonical decoder (`jazz::node::aggregate_read_result`). Two results are
-/// equal exactly when their bytes are equal, so the encoder is the only
-/// producer of comparable values.
+/// The bytes are opaque at this layer. Two results are equal exactly when
+/// their bytes are equal, so only the canonical encoder may produce them.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize)]
 pub struct AggregateReadResult(#[serde(with = "serde_bytes")] pub Vec<u8>);
 

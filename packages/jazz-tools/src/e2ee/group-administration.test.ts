@@ -3,14 +3,20 @@ import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
 import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
-import { deploy, startLocalJazzServer } from "../testing/index.js";
+import { deploy, startLocalJazzServer, startTestJazz } from "../testing/index.js";
 import { deviceRequestSchema, deviceRequestPermissions } from "./device-requests.js";
 import { groupSchema } from "./groups.js";
 
 it("supports account-claim checks in group membership administration policies", async () => {
   const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   try {
-    const app = s.defineApp({ ...deviceRequestSchema, ...groupSchema });
+    const app = s.defineApp(
+      {
+        ...deviceRequestSchema,
+        ...groupSchema,
+      },
+      { migrations: "none" },
+    );
     const policies = definePermissions(app, ({ policy, session }) => {
       policy.__e2ee_group_membership.allowInsert.where({ authorAccountId: session.user.account });
     });
@@ -32,13 +38,39 @@ it("supports account-claim checks in group membership administration policies", 
 });
 
 it("separates administration from key possession and self-removal, rejects forged membership and seals empty groups", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Awaited<ReturnType<typeof createDb>>[] = [];
   try {
+    const core = server;
+    const app = s.defineApp(
+      {
+        ...deviceRequestSchema,
+        ...groupSchema,
+      },
+      { migrations: "none" },
+    );
+    await deploy({
+      serverUrl: core.url,
+      appId: core.appId,
+      adminSecret: core.adminSecret,
+      schema: app,
+      permissions: deviceRequestPermissions,
+    });
+    const front = await startTestJazz({ core, app, permissions: deviceRequestPermissions });
+    server = {
+      ...core,
+      url: front.url,
+      async stop() {
+        try {
+          await front.stop();
+        } finally {
+          await core.stop();
+        }
+      },
+    };
     const alice = await localAccountConfig(server.appId, server.url);
     const bob = await localAccountConfig(server.appId, server.url);
     const admin = await localAccountConfig(server.appId, server.url);
-    const app = s.defineApp({ ...deviceRequestSchema, ...groupSchema });
     const policies = definePermissions(app, ({ policy, session, allOf, anyOf }) => {
       policy.__e2ee_group_repairs.allowRead.where(
         session.where({ authMode: { in: ["local-first", "external"] } }),
@@ -69,11 +101,8 @@ it("separates administration from key possession and self-removal, rejects forge
         ]),
       );
     });
-    await deploy({
-      serverUrl: server.url,
-      appId: server.appId,
-      adminSecret: server.adminSecret,
-      schema: app,
+    await front.redeploy({
+      app,
       permissions: {
         ...deviceRequestPermissions,
         __e2ee_groups: policies.__e2ee_groups!,

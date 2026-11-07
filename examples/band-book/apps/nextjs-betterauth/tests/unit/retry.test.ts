@@ -18,7 +18,6 @@ describe("conflict retries", () => {
   it("retries local and authority conflicts, and nothing else", () => {
     expect(isSerializationConflict(rejected("transaction_conflict"))).toBe(true);
     expect(isSerializationConflict(rejected("serialization_conflict"))).toBe(true);
-    expect(isSerializationConflict(rejected("cascade_rejected"))).toBe(true);
     expect(isSerializationConflict(rejected("permission_denied"))).toBe(false);
     expect(isSerializationConflict(new Error("(transaction_conflict): not a rejection"))).toBe(
       false,

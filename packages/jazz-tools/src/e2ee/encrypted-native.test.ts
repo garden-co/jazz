@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
@@ -21,17 +22,20 @@ function store() {
 }
 
 async function createFixture() {
-  const app = s.defineApp({
-    ...deviceRequestSchema,
-    ...spaceSchema,
-    projects: s.table({ title: s.string() }, {}),
-    notes: s
-      .table(
-        { projectId: s.uuid(), title: s.string(), bytes: s.bytes() },
-        { project: s.rel("projects", "projectId") },
-      )
-      .encrypted({ space: "projectId", columns: ["title", "bytes"] }),
-  });
+  const app = s.defineApp(
+    {
+      ...deviceRequestSchema,
+      ...spaceSchema,
+      projects: s.table({ title: s.string() }, {}),
+      notes: s
+        .table(
+          { projectId: s.uuid(), title: s.string(), bytes: s.bytes() },
+          { project: s.rel("projects", "projectId") },
+        )
+        .encrypted({ space: "projectId", columns: ["title", "bytes"] }),
+    },
+    { migrations: "none" },
+  );
   const policies = definePermissions(app, ({ policy, session }) => {
     policy.projects.allowRead.always();
     policy.projects.allowInsert.always();
@@ -46,7 +50,7 @@ async function createFixture() {
     policy.__e2ee_space_deliveries.allowInsert.where({ senderAccountId: session.user.account });
   });
   const permissions = { ...deviceRequestPermissions, ...policies };
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   let owner: Awaited<ReturnType<typeof createJazzSession>> | undefined;
   let wasm: Awaited<ReturnType<typeof createDb>> | undefined;
   try {
@@ -57,6 +61,7 @@ async function createFixture() {
       schema: app,
       permissions,
     });
+    server = await frontE2eeCore(server, { schema: app, permissions: permissions });
     owner = await createJazzSession({
       appId: server.appId,
       serverUrl: server.url,

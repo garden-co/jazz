@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
@@ -10,10 +11,16 @@ import { withGroupTopologyPermissions } from "./group-topology.js";
 import { createNativeCrypto } from "./native.js";
 
 it("inspects inherited recovery coverage without repairing or staging group keys", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Awaited<ReturnType<typeof createDb>>[] = [];
   try {
-    const app = s.defineApp({ ...deviceRequestSchema, ...groupSchema });
+    const app = s.defineApp(
+      {
+        ...deviceRequestSchema,
+        ...groupSchema,
+      },
+      { migrations: "none" },
+    );
     const policies = definePermissions(app, ({ policy, session }) => {
       const authenticated = session.where({ authMode: { in: ["local-first", "external"] } });
       policy.__e2ee_groups.allowInsert.where({ accountId: session.user.account });
@@ -32,6 +39,10 @@ it("inspects inherited recovery coverage without repairing or staging group keys
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
+      schema: app,
+      permissions: withGroupTopologyPermissions(app, { ...deviceRequestPermissions, ...policies }),
+    });
+    server = await frontE2eeCore(server, {
       schema: app,
       permissions: withGroupTopologyPermissions(app, { ...deviceRequestPermissions, ...policies }),
     });

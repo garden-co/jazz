@@ -2,6 +2,7 @@ import { schema as s } from "../index.js";
 import { wasmSchemasEqual } from "./schema-utils.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  fetchPublishedBundles,
   fetchStoredPermissions,
   fetchSchemaHashes,
   fetchStoredWasmSchema,
@@ -230,6 +231,34 @@ describe("catalogue-api", () => {
       headers: {
         "X-Jazz-Admin-Secret": "admin-secret",
       },
+    });
+  });
+
+  it("lists published bundles with admin secret header", async () => {
+    const bundle = {
+      bundle: "b".repeat(64),
+      schemaHash: "a".repeat(64),
+      publishedAt: 1_744_011_200_000,
+      permissions: { users: { select: { using: { type: "True" } } } },
+    };
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      json: async () => ({ bundles: [bundle] }),
+    });
+    (globalThis as { fetch: typeof fetch }).fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await fetchPublishedBundles("http://localhost:1625/", {
+      appId: "app-123",
+      adminSecret: "admin-secret",
+    });
+
+    expect(result).toEqual([bundle]);
+    expect(fetchMock.mock.calls[0]![0]).toBe("http://localhost:1625/apps/app-123/admin/bundles");
+    expect(fetchMock.mock.calls[0]![1]).toMatchObject({
+      method: "GET",
+      headers: { "X-Jazz-Admin-Secret": "admin-secret" },
     });
   });
 

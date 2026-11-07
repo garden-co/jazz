@@ -283,8 +283,7 @@ fn user_context(
     schema: jazz::tools::Schema,
     user_id: &str,
 ) -> jazz::tools::AppContext {
-    let mut context = server.make_client_context_for_user(schema, user_id);
-    context.backend_secret = None;
+    let mut context = server.make_user_context(schema, user_id);
     context
 }
 
@@ -759,8 +758,7 @@ async fn inherited_update_policy_allows_update_through_parent() {
 
             let alice_owner_id = test_author_id("alice");
             let alice_user_id = test_user_id("alice");
-            let mut context = server.make_client_context_for_user(schema.clone(), &alice_user_id);
-            context.backend_secret = None;
+            let mut context = server.make_user_context(schema.clone(), &alice_user_id);
             support::enroll_test_context(&mut context)
                 .await
                 .expect("enroll alice");
@@ -874,8 +872,7 @@ async fn inherited_update_policy_allows_multi_hop_update_chain() {
 
             let alice_owner_id = test_author_id("alice");
             let alice_user_id = test_user_id("alice");
-            let mut context = server.make_client_context_for_user(schema.clone(), &alice_user_id);
-            context.backend_secret = None;
+            let mut context = server.make_user_context(schema.clone(), &alice_user_id);
             support::enroll_test_context(&mut context)
                 .await
                 .expect("enroll alice");
@@ -973,8 +970,7 @@ async fn inherited_update_policy_allows_reparenting_when_old_and_new_parents_gra
 
             let alice_owner_id = test_author_id("alice");
             let alice_user_id = test_user_id("alice");
-            let mut context = server.make_client_context_for_user(schema.clone(), &alice_user_id);
-            context.backend_secret = None;
+            let mut context = server.make_user_context(schema.clone(), &alice_user_id);
             support::enroll_test_context(&mut context)
                 .await
                 .expect("enroll alice");

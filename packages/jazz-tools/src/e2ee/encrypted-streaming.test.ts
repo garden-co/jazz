@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { createDb } from "../runtime/default-create-db.js";
@@ -7,25 +8,31 @@ import { deploy, startLocalJazzServer } from "../testing/index.js";
 import { deviceRequestSchema, groupSchema, spaceSchema } from "./managed-schema.js";
 
 it("streams a plaintext-only update without loading encryption keys", async () => {
-  const physical = s.defineApp({
-    ...deviceRequestSchema,
-    ...groupSchema,
-    ...spaceSchema,
-    projects: s.table({ title: s.string() }, {}),
-    files: s.table(
-      { projectId: s.uuid(), payload: s.bytes(), notes: s.string() },
-      { project: s.rel("projects", "projectId") },
-    ),
-  });
-  const app = s.defineApp({
-    projects: s.table({ title: s.string() }, {}),
-    files: s
-      .table(
+  const physical = s.defineApp(
+    {
+      ...deviceRequestSchema,
+      ...groupSchema,
+      ...spaceSchema,
+      projects: s.table({ title: s.string() }, {}),
+      files: s.table(
         { projectId: s.uuid(), payload: s.bytes(), notes: s.string() },
         { project: s.rel("projects", "projectId") },
-      )
-      .encrypted({ space: "projectId", columns: ["payload"] }),
-  });
+      ),
+    },
+    { migrations: "none" },
+  );
+  const app = s.defineApp(
+    {
+      projects: s.table({ title: s.string() }, {}),
+      files: s
+        .table(
+          { projectId: s.uuid(), payload: s.bytes(), notes: s.string() },
+          { project: s.rel("projects", "projectId") },
+        )
+        .encrypted({ space: "projectId", columns: ["payload"] }),
+    },
+    { migrations: "none" },
+  );
   const permissions = definePermissions(physical, ({ policy }) => {
     policy.projects.allowRead.always();
     policy.projects.allowInsert.always();
@@ -33,7 +40,7 @@ it("streams a plaintext-only update without loading encryption keys", async () =
     policy.files.allowInsert.always();
     policy.files.allowUpdate.always();
   });
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
   try {
     await deploy({
@@ -43,6 +50,7 @@ it("streams a plaintext-only update without loading encryption keys", async () =
       schema: physical,
       permissions,
     });
+    server = await frontE2eeCore(server, { schema: physical, permissions });
     db = await createDb(await localAccountConfig(server.appId, server.url));
     const project = db.insert(physical.projects, { title: "Public" });
     await project.wait({ tier: "global" });
@@ -69,15 +77,18 @@ it("streams a plaintext-only update without loading encryption keys", async () =
 }, 30_000);
 
 it("rejects scope and scalar streaming bypasses before consuming a source", async () => {
-  const app = s.defineApp({
-    projects: s.table({ title: s.string() }, {}),
-    files: s
-      .table(
-        { projectId: s.uuid(), payload: s.bytes(), notes: s.string() },
-        { project: s.rel("projects", "projectId") },
-      )
-      .encrypted({ space: "projectId", columns: ["payload"] }),
-  });
+  const app = s.defineApp(
+    {
+      projects: s.table({ title: s.string() }, {}),
+      files: s
+        .table(
+          { projectId: s.uuid(), payload: s.bytes(), notes: s.string() },
+          { project: s.rel("projects", "projectId") },
+        )
+        .encrypted({ space: "projectId", columns: ["payload"] }),
+    },
+    { migrations: "none" },
+  );
   const db = await createDb(
     await localAccountConfig(`encrypted-stream-bypass-${crypto.randomUUID()}`),
   );
@@ -113,15 +124,18 @@ it("rejects scope and scalar streaming bypasses before consuming a source", asyn
 });
 
 it("rejects encrypted inserts, updates, upserts and partial writes without consuming plaintext", async () => {
-  const app = s.defineApp({
-    projects: s.table({ title: s.string() }, {}),
-    files: s
-      .table(
-        { projectId: s.uuid(), payload: s.bytes() },
-        { project: s.rel("projects", "projectId") },
-      )
-      .encrypted({ space: "projectId", columns: ["payload"] }),
-  });
+  const app = s.defineApp(
+    {
+      projects: s.table({ title: s.string() }, {}),
+      files: s
+        .table(
+          { projectId: s.uuid(), payload: s.bytes() },
+          { project: s.rel("projects", "projectId") },
+        )
+        .encrypted({ space: "projectId", columns: ["payload"] }),
+    },
+    { migrations: "none" },
+  );
   const db = await createDb(await localAccountConfig(`encrypted-stream-${crypto.randomUUID()}`));
   try {
     for (const operation of ["insert", "update", "upsert", "partial"]) {

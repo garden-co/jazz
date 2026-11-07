@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./app.js";
 import { schema as s } from "../../schema-namespace.js";
 import { definePermissions } from "../../permissions/index.js";
 import { createDb } from "../../runtime/default-create-db.js";
@@ -10,15 +11,18 @@ import { groupSchema } from ".././groups.js";
 import { spaceSchema } from ".././spaces.js";
 import { createNativeCrypto } from ".././native.js";
 
-export const app = s.defineApp({
-  ...deviceRequestSchema,
-  ...groupSchema,
-  ...spaceSchema,
-  projects: s.table({ title: s.string() }, {}),
-});
+export const app = s.defineApp(
+  {
+    ...deviceRequestSchema,
+    ...groupSchema,
+    ...spaceSchema,
+    projects: s.table({ title: s.string() }, {}),
+  },
+  { migrations: "none" },
+);
 
 async function ownerFixture(allowGrantDeletion = false) {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients = new Set<Db>();
   const cleanup = async () => {
     try {
@@ -65,6 +69,10 @@ async function ownerFixture(allowGrantDeletion = false) {
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
+      schema: app,
+      permissions: { ...deviceRequestPermissions, ...policies },
+    });
+    server = await frontE2eeCore(server, {
       schema: app,
       permissions: { ...deviceRequestPermissions, ...policies },
     });

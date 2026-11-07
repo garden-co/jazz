@@ -4,17 +4,20 @@ import { definePermissions } from "../../src/permissions/index.js";
 import { createDb } from "../../src/runtime/default-create-db.js";
 import { deploy } from "../../src/dev/catalogue.js";
 import { acquireBrowserTestAccount } from "./account-fixtures.js";
-import { getJazzServerInfo, stopJazzServer } from "./testing-server.js";
+import { getJazzServerInfo, startJazzApp, stopJazzServer } from "./testing-server.js";
 
 it("observes both accepted rows after persistent reopening without encryption", async () => {
-  const server = await getJazzServerInfo(`accepted-observation-${crypto.randomUUID()}`);
-  const app = s.defineApp({
-    __e2ee_snapshot_roots: s.table({ title: s.string() }, {}),
-    __e2ee_snapshot_refs: s.table(
-      { rootId: s.uuid() },
-      { root: s.rel("__e2ee_snapshot_roots", "rootId") },
-    ),
-  });
+  let server = await getJazzServerInfo(`accepted-observation-${crypto.randomUUID()}`);
+  const app = s.defineApp(
+    {
+      __e2ee_snapshot_roots: s.table({ title: s.string() }, {}),
+      __e2ee_snapshot_refs: s.table(
+        { rootId: s.uuid() },
+        { root: s.rel("__e2ee_snapshot_roots", "rootId") },
+      ),
+    },
+    { migrations: "none" },
+  );
   const permissions = definePermissions(app, ({ policy }) => {
     policy.__e2ee_snapshot_roots.allowRead.always();
     policy.__e2ee_snapshot_roots.allowInsert.always();
@@ -25,6 +28,7 @@ it("observes both accepted rows after persistent reopening without encryption", 
   let stopped = false;
   try {
     await deploy({ ...server, schema: app, permissions });
+    server = await startJazzApp(server, { schema: app, permissions });
     const config = {
       appId: server.appId,
       serverUrl: server.serverUrl,
@@ -35,7 +39,8 @@ it("observes both accepted rows after persistent reopening without encryption", 
       },
     };
     db = await createDb(config);
-    await db.all(app.__e2ee_snapshot_roots.where({}), { tier: "local-first" });
+    // Establish the authority namespace before exporting this local submission.
+    await db.all(app.__e2ee_snapshot_roots.where({}), { tier: "remote" });
     const tx = db.beginSerializableTransaction();
     const root = tx.insert(app.__e2ee_snapshot_roots, { title: "Root" });
     const ref = tx.insert(app.__e2ee_snapshot_refs, { rootId: root.id });

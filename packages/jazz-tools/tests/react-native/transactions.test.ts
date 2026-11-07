@@ -2,10 +2,14 @@ import { describe, expect, it, vi } from "vitest";
 import { ReadTier } from "../../src/runtime/client.js";
 import { schema } from "../../src/index.js";
 import { withNativeRelayFixture } from "./fixture.js";
+import type { TestJazz } from "../../src/testing/index.js";
 
-const app = schema.defineApp({
-  todos: schema.table({ title: schema.string(), done: schema.boolean() }, {}),
-});
+const app = schema.defineApp(
+  {
+    todos: schema.table({ title: schema.string(), done: schema.boolean() }, {}),
+  },
+  { migrations: "none" },
+);
 
 // Browser donor: db.transaction-reads.test.ts, snapshot anchoring, staged
 // insert/update/delete isolation, rollback, and mergeable read-own-writes.
@@ -22,12 +26,18 @@ describe("React Native transaction reads through the native C ABI", () => {
           kind === "serializable" ? db.beginSerializableTransaction() : db.beginTransaction();
         first.update(app.todos, base.id, { title: "first draft" });
         second.update(app.todos, base.id, { title: "second draft" });
-        const draft = first.insert(app.todos, { title: "inserted draft", done: true });
+        const draft = first.insert(app.todos, {
+          title: "inserted draft",
+          done: true,
+        });
         expect(await first.all(app.todos.orderBy("title"))).toEqual([
           { ...base, title: "first draft" },
           draft,
         ]);
-        expect(await second.one(app.todos)).toEqual({ ...base, title: "second draft" });
+        expect(await second.one(app.todos)).toEqual({
+          ...base,
+          title: "second draft",
+        });
         expect(await db.one(app.todos)).toEqual(base);
         first.delete(app.todos, base.id);
         expect(await first.all(app.todos)).toEqual([draft]);
@@ -54,13 +64,19 @@ describe("React Native transaction reads through the native C ABI", () => {
     });
   });
 
-  it("anchors a serializable snapshot at begin while ordinary reads advance", async () => {
+  // A replica pins a serializable snapshot at the transaction's first read
+  // (the authority's state then, or its own known cut offline).
+  it("keeps a serializable snapshot pinned while ordinary reads advance", async () => {
     await withNativeRelayFixture(app, {}, async (fixture) => {
       const db = await fixture.createDb();
-      const before = db.insert(app.todos, { title: "before", done: false }).value;
+      const before = db.insert(app.todos, {
+        title: "before",
+        done: false,
+      }).value;
       await db.all(app.todos);
       const tx = db.beginSerializableTransaction();
-      db.insert(app.todos, { title: "after", done: false });
+      expect(await tx.all(app.todos)).toEqual([before]);
+      await db.insert(app.todos, { title: "after", done: false }).wait({ tier: "local" });
       expect(await tx.all(app.todos)).toEqual([before]);
       expect(await db.all(app.todos)).toHaveLength(2);
       await tx.rollback();
@@ -84,15 +100,12 @@ describe("React Native transaction reads through the native C ABI", () => {
 });
 
 it("waits for native upstream authority before accepting a serializable commit", async () => {
-  const { startLocalJazzServer, startTestJwtIssuer, deploy } =
+  const { startLocalJazzServer, startTestJazz, deploy } =
     await import("../../src/testing/index.js");
-  const issuer = await startTestJwtIssuer();
   const server = await startLocalJazzServer({
     inMemory: true,
-    jwksUrl: issuer.jwksUrl,
-    jwtIssuer: issuer.issuer,
-    jwtAudience: issuer.audience,
   });
+  let backend: TestJazz | undefined;
   try {
     const permissions = schema.definePermissions(app, ({ policy }) => [
       policy.todos.allowRead.always(),
@@ -106,6 +119,7 @@ it("waits for native upstream authority before accepting a serializable commit",
       schema: app,
       permissions,
     });
+    backend = await startTestJazz({ core: server, app, permissions });
     await withNativeRelayFixture(
       app,
       permissions,
@@ -148,17 +162,11 @@ it("waits for native upstream authority before accepting a serializable commit",
       },
       {
         appId: server.appId,
-        session: {
-          issuer: issuer.issuer,
-          user_id: "rn-serializable-writer",
-          claims: { role: "user" },
-          authMode: "external",
-        },
-        upstream: { serverUrl: server.url, jwt: issuer.jwtForUser("rn-serializable-writer") },
+        upstream: { backend: backend!, userId: "rn-serializable-writer", claims: { role: "user" } },
       },
     );
   } finally {
+    await backend?.stop();
     await server.stop();
-    await issuer.stop();
   }
 }, 30_000);

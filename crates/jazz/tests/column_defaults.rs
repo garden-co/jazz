@@ -1,7 +1,6 @@
-// Ported verbatim from crates/jazz/tests; only the Db facade imports are swapped.
 use std::collections::BTreeMap;
 
-mod common;
+use crate::common;
 
 use jazz::db::{Db, DbConfig, DbIdentity};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
@@ -70,6 +69,11 @@ fn open_db() -> Db {
             author: AuthorSubject::for_test_bytes([0xa1; 16]),
         },
         id_source: None,
+        chunk_store: None,
+        host_chunk_io: false,
+        clock: None,
+        migrations: Default::default(),
+        system_node: None,
     }))
     .expect("open db")
 }
@@ -104,7 +108,7 @@ fn stored_row_in(db: &Db, table_name: &str, row_id: RowUuid) -> BTreeMap<String,
         .columns
         .iter()
         .filter_map(|column| {
-            row.cell(&table, column.name())
+            row.cell(column.name())
                 .map(|value| (column.name().to_owned(), value))
         })
         .collect()

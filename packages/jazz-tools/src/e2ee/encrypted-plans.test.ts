@@ -11,19 +11,22 @@ const cases = ["hop", "gather", "union", "partial"].flatMap((plan) =>
 it.each(cases)(
   "rejects encrypted $plan plans through the public $boundary boundary",
   async ({ plan, boundary }) => {
-    const app = s.defineApp({
-      projects: s.table({ title: s.string() }, {}),
-      notes: s
-        .table(
-          {
-            projectId: s.uuid(),
-            parent: s.uuid().optional(),
-            title: s.string(),
-          },
-          { project: s.rel("projects", "projectId"), parentRelation: s.rel("notes", "parent") },
-        )
-        .encrypted({ space: "projectId", columns: ["title"], indexes: { title: "equality" } }),
-    });
+    const app = s.defineApp(
+      {
+        projects: s.table({ title: s.string() }, {}),
+        notes: s
+          .table(
+            {
+              projectId: s.uuid(),
+              parent: s.uuid().optional(),
+              title: s.string(),
+            },
+            { project: s.rel("projects", "projectId"), parentRelation: s.rel("notes", "parent") },
+          )
+          .encrypted({ space: "projectId", columns: ["title"], indexes: { title: "equality" } }),
+      },
+      { migrations: "none" },
+    );
     const base = app.notes.where({ projectId: "project", title: "Wanted" });
     let query: QueryBuilder<{ id: string }>;
     if (plan === "hop") {

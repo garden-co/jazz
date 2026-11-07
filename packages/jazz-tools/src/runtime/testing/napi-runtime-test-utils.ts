@@ -34,6 +34,14 @@ function formatNapiLoadError(error: unknown): Error {
   );
 }
 
+/**
+ * The core's upstream link machine, for runtime fixtures that fake the
+ * database but must reconnect exactly as a real runtime does.
+ */
+export function createUpstreamLink(seed: number): InstanceType<NapiModule["UpstreamLink"]> {
+  return new (require("jazz-napi") as NapiModule).UpstreamLink(seed);
+}
+
 export function hasJazzNapiBuild(): boolean {
   try {
     require("jazz-napi");

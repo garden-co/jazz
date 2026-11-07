@@ -6,8 +6,8 @@
 //! sampling off), which shows which code holds memory when a server grows.
 //! Stacks come from frame pointers, so a write-heavy load costs about the
 //! same CPU with sampling as without. It only sees Rust's allocations:
-//! memory that bundled C/C++ such as RocksDB takes from `malloc` directly is
-//! not in the profile.
+//! memory that the bundled SQLite takes from `malloc` directly is not in the
+//! profile.
 //!
 //! Profiles name functions from the executable's symbol table but carry no
 //! file or line: DWARF-based symbolization would keep hundreds of MB of

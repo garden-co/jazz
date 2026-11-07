@@ -7,18 +7,17 @@
 // a human while the command keeps waiting.
 
 import { spawn } from "node:child_process";
-import { readFile } from "node:fs/promises";
 
 import { CloudApiError, createCloudApi, type CloudApi } from "./api.js";
-import { credentialsPath, deleteProfile, readProfile, saveProfile } from "./credentials.js";
+import { credentialsPath, saveProfile } from "./credentials.js";
 import {
   CloudAuthError,
+  logoutStoredSession,
   fetchWorkosClientConfig,
   pollDeviceAuthorization,
   profileFromTokens,
   resolveCloudUrl,
   startDeviceAuthorization,
-  type CloudSessionOptions,
 } from "./session.js";
 
 export const CLOUD_COMMANDS = ["login", "logout", "whoami", "teams", "apps"] as const;
@@ -143,13 +142,9 @@ const HELP = `Jazz Cloud commands (sign in with your dashboard account):
   apps claim <appId> --name <name> [--team <id>] [--admin-secret <secret>]
                                 Move an unclaimed app into a team
   apps delete <appId> --confirm <app name>
-  apps auth get <appId>         Show external JWT / local-first auth settings
-  apps auth set <appId> [--jwks-url <url>] [--jwt-issuer <iss>]
-                        [--jwt-audience <aud>] [--jwt-public-key <jwk|pem>]
-                        [--jwt-public-key-file <path>]
-                        [--allow-local-first-auth true|false]
-                                Change auth settings (omitted fields keep their value;
-                                pass an empty string to clear one)
+  apps auth get <appId>         Show the app's local-first auth setting
+  apps auth set <appId> --allow-local-first-auth true|false
+                                Allow or refuse local-first guests
   apps secrets rotate <appId>   Rotate the admin and backend secrets; prints them once
   apps status <appId> [--wait]  Show rollout status (--wait polls until ready)
   apps upgrade <appId>          List available stable-release upgrades
@@ -191,10 +186,7 @@ export async function runCloudCommand(args: string[], io: CloudCommandIo): Promi
 
       case "logout": {
         allowOnly(parsed, []);
-        const hadSession = (await readProfile(cloudUrl, io.env)) !== undefined;
-        const sessionRevoked = hadSession && (await revokeStoredSession(sessionOptions));
-        // Revoking can itself find the session already dead and forget it.
-        const removed = (await deleteProfile(cloudUrl, io.env)) || hadSession;
+        const { loggedOut: removed, sessionRevoked } = await logoutStoredSession(sessionOptions);
         out(
           { loggedOut: removed, sessionRevoked, cloudUrl },
           removed
@@ -246,25 +238,6 @@ export async function runCloudCommand(args: string[], io: CloudCommandIo): Promi
   }
 }
 
-/**
- * Ends the stored login's WorkOS session server-side, which also kills its
- * refresh token. Best effort: logout always forgets the local session, even
- * when the dashboard is unreachable or predates `/api/v1/logout`.
- */
-async function revokeStoredSession(options: CloudSessionOptions): Promise<boolean> {
-  const env = options.env ?? process.env;
-  // Revoke the stored login's session, not one behind JAZZ_CLOUD_TOKEN.
-  const { JAZZ_CLOUD_TOKEN: _ignored, ...storedOnly } = env;
-  try {
-    const result = await createCloudApi({ ...options, env: storedOnly }).request<{
-      revoked?: unknown;
-    }>("POST", "/logout");
-    return result?.revoked === true;
-  } catch {
-    return false;
-  }
-}
-
 async function login(
   parsed: ParsedArgs,
   io: CloudCommandIo,
@@ -310,25 +283,24 @@ async function login(
 }
 
 interface AppAuth {
-  jwksUrl: string;
-  jwtIssuer: string;
-  jwtAudience: string;
-  jwtPublicKey: string;
   allowLocalFirstAuth: boolean;
 }
 
+/**
+ * The JWT verifier settings a core once had. A core admits only its app's
+ * backend now and verifies no user JWTs: users sign in through the backend
+ * (`createJazz({ authenticate })`).
+ */
+const REMOVED_JWT_FLAGS = [
+  "--jwks-url",
+  "--jwt-issuer",
+  "--jwt-audience",
+  "--jwt-public-key",
+  "--jwt-public-key-file",
+];
+
 function describeAuth(auth: AppAuth): string {
-  const external = auth.jwksUrl
-    ? `JWKS ${auth.jwksUrl}`
-    : auth.jwtPublicKey
-      ? "static public key"
-      : "none";
-  return (
-    `  external JWT:       ${external}\n` +
-    (auth.jwtIssuer ? `  issuer:             ${auth.jwtIssuer}\n` : "") +
-    (auth.jwtAudience ? `  audience:           ${auth.jwtAudience}\n` : "") +
-    `  local-first auth:   ${auth.allowLocalFirstAuth ? "allowed" : "disabled"}\n`
-  );
+  return `  local-first auth:   ${auth.allowLocalFirstAuth ? "allowed" : "disabled"}\n`;
 }
 
 function secretsText(result: {
@@ -583,32 +555,15 @@ async function appAuth(
   if (action !== "set")
     throw new UsageError("Usage: jazz-tools apps auth get|set <appId> [options]");
 
-  allowOnly(parsed, [
-    "--jwks-url",
-    "--jwt-issuer",
-    "--jwt-audience",
-    "--jwt-public-key",
-    "--jwt-public-key-file",
-    "--allow-local-first-auth",
-  ]);
+  const removed = REMOVED_JWT_FLAGS.find((name) => parsed.flags.has(name));
+  if (removed !== undefined) {
+    throw new UsageError(
+      `${removed} is not supported: a Jazz server verifies no user JWTs. ` +
+        "Sign users in through your app's backend (createJazz({ authenticate })).",
+    );
+  }
+  allowOnly(parsed, ["--allow-local-first-auth"]);
   const body: Record<string, unknown> = {};
-  const map: Array<[string, string]> = [
-    ["--jwks-url", "jwksUrl"],
-    ["--jwt-issuer", "jwtIssuer"],
-    ["--jwt-audience", "jwtAudience"],
-    ["--jwt-public-key", "jwtPublicKey"],
-  ];
-  for (const [name, key] of map) {
-    const value = flag(parsed, name);
-    if (value !== undefined) body[key] = value;
-  }
-  const keyFile = flag(parsed, "--jwt-public-key-file");
-  if (keyFile !== undefined) {
-    if (body.jwtPublicKey !== undefined) {
-      throw new UsageError("Use either --jwt-public-key or --jwt-public-key-file.");
-    }
-    body.jwtPublicKey = (await readFile(keyFile, "utf8")).trim();
-  }
   const localFirst = flag(parsed, "--allow-local-first-auth");
   if (localFirst !== undefined) {
     if (localFirst !== "true" && localFirst !== "false") {

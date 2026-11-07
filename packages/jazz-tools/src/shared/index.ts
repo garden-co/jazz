@@ -15,6 +15,6 @@
 
 export { applyDelta, reconcileArray } from "../reconcile-array.js";
 export { RowChangeKind, applySubscriptionDelta } from "../runtime/subscription-manager.js";
-export type { RowDelta, SubscriptionDelta } from "../runtime/subscription-manager.js";
+export type { RowDelta, SubscriptionDelta, ValueSplices } from "../runtime/subscription-manager.js";
 export type { CacheEntryHandle, UseAllState } from "../subscriptions-orchestrator.js";
 export type { QueryBuilder, QueryOptions } from "../runtime/db.js";

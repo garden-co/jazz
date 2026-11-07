@@ -1,13 +1,29 @@
 import type { AuthMode, PublicSession, Session } from "./context.js";
 import { resolveClientSessionStateSync, type ClientSessionInput } from "./client-session.js";
 
-export type AuthFailureReason = "expired" | "missing" | "invalid" | "disabled";
+/**
+ * Why the server refused a session's credential.
+ *
+ * - `expired`, `missing`, `invalid`: a new credential can fix it. An account
+ *   context renews its own token on these.
+ * - `disabled`: the app has that auth mode turned off.
+ * - `revoked`: the account identity was revoked or reassigned.
+ *
+ * A new token cannot fix `disabled` or `revoked`.
+ */
+export type AuthFailureReason = "expired" | "missing" | "invalid" | "disabled" | "revoked";
+
+/** Whether a new token can fix the refusal, so an app renews it. */
+export function isRenewableAuthFailure(reason: AuthFailureReason): boolean {
+  return reason !== "disabled" && reason !== "revoked";
+}
 
 export function mapAuthReason(reason: string): AuthFailureReason {
   const lower = reason.toLowerCase();
   if (lower.includes("expired")) return "expired";
   if (lower.includes("missing")) return "missing";
   if (lower.includes("disabled")) return "disabled";
+  if (lower.includes("revoked")) return "revoked";
   return "invalid";
 }
 
@@ -56,9 +72,21 @@ export function createAuthStateStore(input: ClientSessionInput, options?: AuthSt
   const listeners = new Set<AuthStateListener>();
 
   const emit = () => {
+    let failed = false;
+    let firstError: unknown;
     for (const listener of listeners) {
-      listener(state);
+      try {
+        listener(state);
+      } catch (error) {
+        if (!failed) {
+          failed = true;
+          firstError = error;
+        }
+      }
     }
+    // The state is already committed: finish publication before reporting an
+    // observer failure, since an identical update will not notify again.
+    if (failed) throw firstError;
   };
 
   const assertSamePrincipal = (nextSession: PublicSession | null): void => {

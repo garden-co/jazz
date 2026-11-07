@@ -1,0 +1,29 @@
+---
+title: Monitoring
+description: "Watch a self-hosted Jazz server: heap profiles, diagnostics and alerts."
+---
+
+<Callout type="info">
+  Preview: this page is a rough outline for the server-first docs restructure. The heap profiling
+  section is copied from the old Server Setup page.
+</Callout>
+
+## Heap profiling
+
+On Linux, the server samples its heap, about once per 512 KiB allocated; set
+`JAZZ_HEAP_PROFILE_SAMPLE_BYTES` to change that mean, or to `0` to turn sampling off.
+`GET /debug/pprof/heap` returns the sampled in-use memory as a gzipped pprof profile with function
+names, for `go tool pprof` or a continuous profiler. The profile records the binary's build ID, so
+tools can add source lines from a matching unstripped build. Send the admin secret in
+`X-Jazz-Admin-Secret`, or scrape it from the diagnostics listener with its token. The profile
+covers memory the server allocates from Rust, not memory SQLite allocates internally.
+With sampling off the route answers `404 Not Found`; other platforms answer `501 Not Implemented`.
+
+The `--diagnostics-listen` and `--diagnostics-token` options are listed under [Your Own Server](/docs/setup/deployment/own-server).
+
+## Coming next
+
+- Tracing spans and counters
+- Slow-query logging
+- Memory pressure: how the server degrades instead of crashing, and how to size memory
+- Alerts worth setting up per platform

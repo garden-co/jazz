@@ -478,10 +478,13 @@
     "valid": [0.5, 1, 7]
   },
   {
-    "description": "uniqueItems tells 0 and -0.0 apart only in arrays of more than 15 items",
+    "description": "uniqueItems counts 0 and -0.0 as equal at any array length",
     "schema": { "uniqueItems": true },
-    "valid": [[0, -0.0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]],
-    "invalid": [[0, -0.0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]]
+    "invalid": [
+      [0, -0.0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
+      [0, -0.0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+      [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, { "a": 0 }, { "a": -0.0 }]
+    ]
   },
   {
     "description": "draft 4 does not count -0 as an integer",

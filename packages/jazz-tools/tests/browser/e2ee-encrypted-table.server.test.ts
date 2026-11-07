@@ -6,13 +6,14 @@ import { deploy } from "../../src/dev/catalogue.js";
 import { deviceRequestSchema, deviceRequestPermissions } from "../../src/e2ee/device-requests.js";
 import { spaceSchema } from "../../src/e2ee/spaces.js";
 import { acquireBrowserTestAccount } from "./account-fixtures.js";
-import { getJazzServerInfo, stopJazzServer } from "./testing-server.js";
+import { getJazzServerInfo, startJazzApp, stopJazzServer } from "./testing-server.js";
 
 it.each([
   "full",
   "projected",
   "equality-full",
   "equality-projected",
+  "equality-included",
   "nested-full",
   "nested-projected",
 ])(
@@ -21,22 +22,29 @@ it.each([
     const equality = shape.startsWith("equality-");
     const projected = shape.endsWith("projected");
     const nested = shape.startsWith("nested-");
-    const server = await getJazzServerInfo(`e2ee-encrypted-table-${crypto.randomUUID()}`);
-    const app = s.defineApp({
-      ...deviceRequestSchema,
-      ...spaceSchema,
-      projects: s.table({ title: s.string() }, { notesViaProject: s.reverse("notes", "project") }),
-      notes: s
-        .table(
-          { projectId: s.uuid(), title: s.string(), payload: s.bytes() },
-          { project: s.rel("projects", "projectId") },
-        )
-        .encrypted({
-          space: "projectId",
-          columns: ["title", "payload"],
-          ...(equality ? { indexes: { title: "equality" as const } } : {}),
-        }),
-    });
+    const included = shape === "equality-included";
+    let server = await getJazzServerInfo(`e2ee-encrypted-table-${crypto.randomUUID()}`);
+    const app = s.defineApp(
+      {
+        ...deviceRequestSchema,
+        ...spaceSchema,
+        projects: s.table(
+          { title: s.string() },
+          { notesViaProject: s.reverse("notes", "project") },
+        ),
+        notes: s
+          .table(
+            { projectId: s.uuid(), title: s.string(), payload: s.bytes() },
+            { project: s.rel("projects", "projectId") },
+          )
+          .encrypted({
+            space: "projectId",
+            columns: ["title", "payload"],
+            ...(equality ? { indexes: { title: "equality" as const } } : {}),
+          }),
+      },
+      { migrations: "none" },
+    );
     const permissions = definePermissions(app, ({ policy, session }) => {
       policy.projects.allowRead.always();
       policy.projects.allowInsert.always();
@@ -56,6 +64,10 @@ it.each([
     try {
       await deploy({
         ...server,
+        schema: app,
+        permissions: { ...deviceRequestPermissions, ...permissions },
+      });
+      server = await startJazzApp(server, {
         schema: app,
         permissions: { ...deviceRequestPermissions, ...permissions },
       });
@@ -90,11 +102,19 @@ it.each([
       const baseQuery = equality
         ? app.notes.where({ projectId: project.id, title: note.title })
         : app.notes.where({ id: note.id });
-      const selected = projected ? baseQuery.select("id", "title") : baseQuery;
+      const selected = projected
+        ? baseQuery.select("id", "title")
+        : included
+          ? baseQuery.include({ project: true })
+          : baseQuery;
       const query = nested
         ? app.projects.where({ id: project.id }).include({ notesViaProject: selected })
         : selected;
-      const child = projected ? { id: note.id, title: note.title } : note;
+      const child = projected
+        ? { id: note.id, title: note.title }
+        : included
+          ? { ...note, project }
+          : note;
       const expected = nested ? { ...project, notesViaProject: [child] } : child;
       expect(await tx.one(query, { tier: "local-first" })).toEqual(expected);
       await tx.commit().wait({ tier: "global" });

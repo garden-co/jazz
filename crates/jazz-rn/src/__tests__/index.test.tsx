@@ -12,6 +12,9 @@ type NativeForegroundCommand =
   | "tick"
   | "close"
   | { type: "captureSnapshot" }
+  | { type: "drainTickEvents" }
+  | { type: "takeSlowQueryReport"; app?: string }
+  | { type: "setSlowQueryThresholdMs"; ms: number }
   | {
       type: "all";
       query: Uint8Array;
@@ -175,15 +178,15 @@ it("accepts only the matching capability-only JSI foreground factory", () => {
 });
 
 it.each([undefined, false, true])(
-  "forwards optional native capture support %s without rejecting ABI 2",
+  "forwards optional native capture support %s",
   (supportsSnapshotCapture) => {
     const foreground = { ...foregroundFixture(), supportsSnapshotCapture };
     const nativeRelay: FixtureNativeRelay = {
-      getAbiVersion: () => 2,
+      getAbiVersion: () => NATIVE_RELAY_ABI_V1,
       execute: jest.fn(),
     };
     (globalThis as Record<string, unknown>)[foregroundRuntimeGlobal] = {
-      abiVersion: 2,
+      abiVersion: NATIVE_RELAY_ABI_V1,
       openAttached: jest.fn(() => foreground),
     };
     const runtime = loadRelay(nativeRelay)
@@ -291,6 +294,9 @@ it("uses the compact canonical byte vocabulary for the foreground NativeDb slice
   expect(relay.encodeNativeForegroundCommand("close")).toEqual(Uint8Array.of(6));
   expect(relay.encodeNativeForegroundCommand({ type: "captureSnapshot" })).toEqual(
     Uint8Array.of(34),
+  );
+  expect(relay.encodeNativeForegroundCommand({ type: "drainTickEvents" })).toEqual(
+    Uint8Array.of(35),
   );
   expect(
     relay.encodeNativeForegroundCommand({
@@ -425,16 +431,106 @@ it("uses the compact canonical byte vocabulary for the foreground NativeDb slice
   );
 });
 
-it("decodes a core operation error with its stable code beside the unchanged reason", () => {
+it("decodes the native connection status with a refused credential's reason", () => {
   const relay = loadRelay(null);
-  const code = Array.from("not_observed", (char) => char.charCodeAt(0));
-  const reason = Array.from("NotObserved: oops", (char) => char.charCodeAt(0));
+  expect(relay.decodeNativeForegroundResponse(Uint8Array.of(16, 1, 0, 1, 0))).toEqual({
+    type: "nativeConnectionStatus",
+    configured: true,
+    explicitlyOffline: false,
+    connected: true,
+    authRejected: null,
+  });
+  const reason = Array.from("token expired", (char) => char.charCodeAt(0));
+  expect(
+    relay.decodeNativeForegroundResponse(Uint8Array.of(16, 1, 0, 0, 1, reason.length, ...reason)),
+  ).toEqual({
+    type: "nativeConnectionStatus",
+    configured: true,
+    explicitlyOffline: false,
+    connected: false,
+    authRejected: "token expired",
+  });
+  // A status from before the reason existed, or one cut short, fails closed.
+  expect(() => relay.decodeNativeForegroundResponse(Uint8Array.of(16, 1, 0, 1))).toThrow(
+    "unknown or malformed command response",
+  );
+  expect(() => relay.decodeNativeForegroundResponse(Uint8Array.of(16, 1, 0, 0, 0, 7))).toThrow(
+    "unknown or malformed command response",
+  );
+});
 
+it("decodes tick events with the current credential refusal and upstream failure", () => {
+  const relay = loadRelay(null);
+  // The bytes the Rust relay pins in tick_events_command_and_response_have_pinned_bytes.
   expect(
     relay.decodeNativeForegroundResponse(
-      Uint8Array.of(25, code.length, ...code, reason.length, ...reason),
+      Uint8Array.of(26, 2, 91, 93, 1, 0xac, 0x02, 2, 110, 111, 1, 2, 3, 116, 108, 115, 1),
+    ),
+  ).toEqual({
+    type: "tickEvents",
+    eventsJson: "[]",
+    authRejection: { sequence: 300, reason: "no" },
+    upstreamFailure: { sequence: 2, reason: "tls", retrying: true },
+  });
+  expect(relay.decodeNativeForegroundResponse(Uint8Array.of(26, 2, 91, 93, 0, 0))).toEqual({
+    type: "tickEvents",
+    eventsJson: "[]",
+    authRejection: null,
+    upstreamFailure: null,
+  });
+  expect(
+    relay.decodeNativeForegroundResponse(Uint8Array.of(26, 2, 91, 93, 0, 1, 7, 1, 120, 0)),
+  ).toEqual({
+    type: "tickEvents",
+    eventsJson: "[]",
+    authRejection: null,
+    upstreamFailure: { sequence: 7, reason: "x", retrying: false },
+  });
+  for (const malformed of [
+    Uint8Array.of(26, 2, 91, 93),
+    Uint8Array.of(26, 2, 91, 93, 0),
+    Uint8Array.of(26, 2, 91, 93, 0, 0, 0),
+    Uint8Array.of(26, 2, 91, 93, 2, 0),
+    Uint8Array.of(26, 2, 91, 93, 0, 1, 7, 1, 120),
+    Uint8Array.of(26, 2, 91, 93, 0, 1, 7, 1, 120, 2),
+    Uint8Array.of(26, 2, 91, 93, 1, 7, 2, 110, 111),
+  ])
+    expect(() => relay.decodeNativeForegroundResponse(malformed)).toThrow();
+});
+
+it("decodes a core operation error with its stable code and reason name beside the unchanged reason", () => {
+  const relay = loadRelay(null);
+  const ascii = (text: string) => Array.from(text, (char) => char.charCodeAt(0));
+  const code = ascii("not_observed");
+  const reasonName = ascii("missing_chunks");
+  const reason = ascii("NotObserved: oops");
+
+  // Without a reason name: the option tag is 0.
+  expect(
+    relay.decodeNativeForegroundResponse(
+      Uint8Array.of(25, code.length, ...code, 0, reason.length, ...reason),
     ),
   ).toEqual({ type: "operationError", code: "not_observed", reason: "NotObserved: oops" });
+  // With one (ABI 3): tag 1, then the name.
+  expect(
+    relay.decodeNativeForegroundResponse(
+      Uint8Array.of(
+        25,
+        code.length,
+        ...code,
+        1,
+        reasonName.length,
+        ...reasonName,
+        reason.length,
+        ...reason,
+      ),
+    ),
+  ).toEqual({
+    type: "operationError",
+    code: "not_observed",
+    reasonName: "missing_chunks",
+    reason: "NotObserved: oops",
+  });
   // An uncoded failure keeps response 8 and has no code.
   expect(relay.decodeNativeForegroundResponse(Uint8Array.of(8, 4, 111, 111, 112, 115))).toEqual({
     type: "operationError",
@@ -572,4 +668,34 @@ it("decodes terminal-operation JSON exactly on the ASCII fast path and strictly 
   expect(() => relay.decodeNativeForegroundResponse(deltaEvent(malformed))).toThrow(
     /malformed UTF-8 terminal operations/,
   );
+});
+
+it("encodes and decodes the slow-query log commands with the native relay's pinned bytes", () => {
+  const relay = loadRelay(null);
+  const ascii = (text: string) => Array.from(text, (char) => char.charCodeAt(0));
+  expect(Array.from(relay.encodeNativeForegroundCommand({ type: "takeSlowQueryReport" }))).toEqual([
+    36, 0,
+  ]);
+  expect(
+    Array.from(relay.encodeNativeForegroundCommand({ type: "takeSlowQueryReport", app: "a" })),
+  ).toEqual([36, 1, 1, ...ascii("a")]);
+  expect(
+    Array.from(relay.encodeNativeForegroundCommand({ type: "setSlowQueryThresholdMs", ms: 200 })),
+  ).toEqual([37, 200, 1]);
+
+  expect(relay.decodeNativeForegroundResponse(Uint8Array.of(27, 2, ...ascii("[]")))).toEqual({
+    type: "slowQueryReport",
+    lines: [],
+  });
+  const json = JSON.stringify(["slow query in app a on todos: 1 slow run(s)"]);
+  expect(
+    relay.decodeNativeForegroundResponse(Uint8Array.of(27, json.length, ...ascii(json))),
+  ).toEqual({ type: "slowQueryReport", lines: ["slow query in app a on todos: 1 slow run(s)"] });
+  expect(relay.decodeNativeForegroundResponse(Uint8Array.of(28))).toEqual({
+    type: "slowQueryThresholdSet",
+  });
+  // A report that isn't a JSON array of strings fails closed.
+  expect(() =>
+    relay.decodeNativeForegroundResponse(Uint8Array.of(27, 4, ...ascii("[1 ]"))),
+  ).toThrow();
 });

@@ -6,15 +6,21 @@ import { deploy } from "../../src/dev/catalogue.js";
 import { E2eeHistoryUnavailable } from "../../src/e2ee/history-reader.js";
 import { attachE2ee, prepareE2eeStartup } from "../../src/e2ee/lifecycle.js";
 import { acquireBrowserTestAccount } from "./account-fixtures.js";
-import { getJazzServerInfo, stopJazzServer } from "./testing-server.js";
+import { getJazzServerInfo, startJazzApp, stopJazzServer } from "./testing-server.js";
 
 function defineEncryptedFixture() {
-  const app = s.defineApp({
-    projects: s.table({ title: s.string() }, {}),
-    notes: s
-      .table({ projectId: s.uuid(), body: s.string() }, { project: s.rel("projects", "projectId") })
-      .encrypted({ space: "projectId", columns: ["body"] }),
-  });
+  const app = s.defineApp(
+    {
+      projects: s.table({ title: s.string() }, {}),
+      notes: s
+        .table(
+          { projectId: s.uuid(), body: s.string() },
+          { project: s.rel("projects", "projectId") },
+        )
+        .encrypted({ space: "projectId", columns: ["body"] }),
+    },
+    { migrations: "none" },
+  );
   const permissions = definePermissions(app, ({ policy, session }) => {
     policy.projects.allowRead.always();
     policy.projects.allowInsert.where({ "$createdBy.account": session.user.account });
@@ -33,7 +39,7 @@ function defineEncryptedFixture() {
 }
 
 it("restores offline readiness after persistent reopen and refuses missing keys or accepted history", async () => {
-  const server = await getJazzServerInfo(`e2ee-offline-evidence-${crypto.randomUUID()}`);
+  let server = await getJazzServerInfo(`e2ee-offline-evidence-${crypto.randomUUID()}`);
   const { app, permissions } = defineEncryptedFixture();
   const retainedKey = `e2ee-device-${crypto.randomUUID()}`;
   const absentKey = `e2ee-device-${crypto.randomUUID()}`;
@@ -45,6 +51,7 @@ it("restores offline readiness after persistent reopen and refuses missing keys 
   let stopped = false;
   try {
     await deploy({ ...server, schema: app, permissions });
+    server = await startJazzApp(server, { schema: app, permissions });
     const account = await acquireBrowserTestAccount(server);
     const config = {
       appId: server.appId,
@@ -91,6 +98,18 @@ it("restores offline readiness after persistent reopen and refuses missing keys 
       state: "ready",
     });
     expect(await db.one(app.notes.where({ id: note.id }), { tier: "local-first" })).toEqual(note);
+
+    // Content readiness is not current membership or new write authority.
+    await expect(db.e2ee.devices.list()).rejects.toBeInstanceOf(E2eeHistoryUnavailable);
+    const offlineWrite = db.beginTransaction();
+    const refused = offlineWrite.insert(app.notes, {
+      projectId: project.id,
+      body: "A retained key cannot authorise this write",
+    });
+    await expect(offlineWrite.commit().wait({ tier: "local" })).rejects.toThrow(
+      /key.*unavailable/i,
+    );
+    expect(await db.one(app.notes.where({ id: refused.id }), { tier: "local-first" })).toBeNull();
 
     // Initialize real followers before testing the startup readiness gate.
     // Constructor enrollment without keys may otherwise wait for online authority.

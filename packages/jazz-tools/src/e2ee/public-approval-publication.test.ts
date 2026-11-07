@@ -1,3 +1,5 @@
+import { frontE2eeCore } from "./fixtures/app.js";
+import { acceptedDeviceTransaction } from "./accepted-membership.js";
 import { expect, it } from "vitest";
 import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
@@ -10,7 +12,7 @@ import {
 } from "./device-requests.js";
 
 it("publishes a verifiable key-free approval while keeping the handshake account-private", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Awaited<ReturnType<typeof createDb>>[] = [];
   try {
     await deploy({
@@ -20,6 +22,7 @@ it("publishes a verifiable key-free approval while keeping the handshake account
       schema: app,
       permissions,
     });
+    server = await frontE2eeCore(server, { schema: app, permissions: permissions });
     const account = await localAccountConfig(server.appId, server.url);
     let creatorStore: string | null = null;
     const owner = await createDb({
@@ -62,15 +65,15 @@ it("publishes a verifiable key-free approval while keeping the handshake account
     const rows = await observer.all(app.__e2ee_public_device_approvals, { tier: "remote" });
     expect(rows).toHaveLength(1);
     const approval = rows[0]!;
-    const settled = await owner.serializableTransaction(async (tx) => ({
-      public: await tx.allSettledForE2ee(app.__e2ee_public_device_approvals),
-      private: await tx.allSettledForE2ee(app.__e2ee_device_approvals),
+    const settled = await acceptedDeviceTransaction(owner, async (tx) => ({
+      public: await tx.readAccepted(app.__e2ee_public_device_approvals),
+      private: await tx.readAccepted(app.__e2ee_device_approvals),
     }));
-    const history = await settled.wait({ tier: "global" });
-    expect(history.public.settlements).toHaveLength(1);
-    expect(history.private.settlements).toHaveLength(1);
-    expect(history.public.settlements[0]!.transactionId).toBe(
-      history.private.settlements[0]!.transactionId,
+    const history = await settled.wait();
+    expect(history.public.evidence).toHaveLength(1);
+    expect(history.private.evidence).toHaveLength(1);
+    expect(history.public.evidence[0]!.content.transactionId).toBe(
+      history.private.evidence[0]!.content.transactionId,
     );
     expect(approval).toMatchObject({
       accountId: account.account.id,
@@ -143,15 +146,15 @@ it("publishes a verifiable key-free approval while keeping the handshake account
         successor.signature,
       ),
     ).toBe(true);
-    const rotation = await owner.serializableTransaction(async (tx) => ({
-      public: await tx.allSettledForE2ee(app.__e2ee_public_account_successors),
-      private: await tx.allSettledForE2ee(app.__e2ee_account_successors),
+    const rotation = await acceptedDeviceTransaction(owner, async (tx) => ({
+      public: await tx.readAccepted(app.__e2ee_public_account_successors),
+      private: await tx.readAccepted(app.__e2ee_account_successors),
     }));
-    const rotated = await rotation.wait({ tier: "global" });
-    expect(rotated.public.settlements).toHaveLength(1);
-    expect(rotated.private.settlements).toHaveLength(1);
-    expect(rotated.public.settlements[0]!.transactionId).toBe(
-      rotated.private.settlements[0]!.transactionId,
+    const rotated = await rotation.wait();
+    expect(rotated.public.evidence).toHaveLength(1);
+    expect(rotated.private.evidence).toHaveLength(1);
+    expect(rotated.public.evidence[0]!.content.transactionId).toBe(
+      rotated.private.evidence[0]!.content.transactionId,
     );
     expect(await observer.all(app.__e2ee_account_successors, { tier: "remote" })).toEqual([]);
     const after = await readAccountMembership(observer, account.account.id, scope, signer);

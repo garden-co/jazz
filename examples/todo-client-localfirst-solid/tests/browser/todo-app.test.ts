@@ -10,7 +10,7 @@ import { prepareTestAccount } from "../../../testing/accounts.js";
 import { describe, it, expect, afterEach } from "vitest";
 import { render } from "solid-js/web";
 import { App } from "../../src/App.js";
-import { TEST_PORT, APP_ID } from "./test-constants.js";
+import { APP_ID, SERVER_URL } from "./test-constants.js";
 import type { DbConfig } from "jazz-tools";
 
 async function waitFor(check: () => boolean, timeoutMs: number, message: string): Promise<void> {
@@ -37,7 +37,7 @@ describe("Solid Todo App E2E", () => {
       (await prepareTestAccount(
         createAccountManager,
         config.appId ?? "test-app",
-        config.serverUrl ?? `http://127.0.0.1:${TEST_PORT}`,
+        config.serverUrl ?? SERVER_URL,
       ));
     const resolvedConfig: Partial<DbConfig> = {
       appId: config.appId ?? "test-app",
@@ -98,11 +98,7 @@ describe("Solid Todo App E2E", () => {
 
   it("persists todos across app unmount and remount (IndexedDB)", async () => {
     const dbName = crypto.randomUUID();
-    const account = await prepareTestAccount(
-      createAccountManager,
-      "test-app",
-      `http://127.0.0.1:${TEST_PORT}`,
-    );
+    const account = await prepareTestAccount(createAccountManager, "test-app", SERVER_URL);
 
     const el1 = await mountApp({ account, driver: { type: "persistent", dbName } });
     const input1 = el1.querySelector<HTMLInputElement>("input[type='text']")!;
@@ -132,7 +128,7 @@ describe("Solid Todo App E2E", () => {
   });
 
   it("syncs a todo between two app instances through the server", async () => {
-    const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
+    const serverUrl = SERVER_URL;
 
     const el1 = await mountApp({
       appId: APP_ID,

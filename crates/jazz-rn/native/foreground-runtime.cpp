@@ -1,5 +1,6 @@
 #include "foreground-runtime.h"
 #include "account-store-lock.h"
+#include "foreground-tick-diagnostic.h"
 
 #include <algorithm>
 #include <array>
@@ -372,6 +373,13 @@ class VectorMutableBuffer final : public facebook::jsi::MutableBuffer {
   }
 }
 
+[[noreturn]] void throwTickStatus(Runtime &runtime, jazz_native_relay_status status) {
+  if (const char *message = foregroundTickFailureMessage(status)) {
+    throw JSError(runtime, message);
+  }
+  throwStatus(runtime, status, "tick");
+}
+
 std::array<uint8_t, 32> copyAdmittedCapability(Runtime &runtime,
                                                 const Value &value) {
   // JSI intentionally has no TypedArray wrapper. Verify the observable
@@ -538,7 +546,7 @@ class ForegroundHandle final : public HostObject,
                 self->lease_->nativeLease(), self->handle_);
             lease_lock.unlock();
             if (status != JAZZ_NATIVE_RELAY_OK) {
-              throwStatus(runtime, status, "tick");
+              throwTickStatus(runtime, status);
             }
             return Value::undefined();
           });
@@ -806,6 +814,23 @@ class ForegroundFactory final : public HostObject {
             return Value(facebook::jsi::String::createFromUtf8(runtime, token));
           });
     }
+    if (property == "textAnchors") {
+      return Function::createFromHostFunction(
+          runtime, PropNameID::forAscii(runtime, "textAnchors"), 1,
+          [](Runtime &runtime, const Value &, const Value *args, size_t count) {
+            if (count != 1 || !args[0].isString()) {
+              throw JSError(runtime, "Jazz text anchors require a JSON request");
+            }
+            const auto request = args[0].asString(runtime).utf8(runtime);
+            jazz_native_relay_bytes output{nullptr, 0};
+            const auto status = jazz_native_relay_text_anchors(
+                reinterpret_cast<const uint8_t *>(request.data()), request.size(), &output);
+            if (status != JAZZ_NATIVE_RELAY_OK) throwStatus(runtime, status, "textAnchors");
+            NativeResponseOwner ownership(&output);
+            const std::string result(reinterpret_cast<const char *>(output.data), output.len);
+            return Value(facebook::jsi::String::createFromUtf8(runtime, result));
+          });
+    }
     if (property == "openAttached") {
       return Function::createFromHostFunction(
           runtime, PropNameID::forAscii(runtime, "openAttached"), 1,
@@ -848,6 +873,7 @@ class ForegroundFactory final : public HostObject {
     names.emplace_back(PropNameID::forAscii(runtime, "withAccountStoreLock"));
     names.emplace_back(PropNameID::forAscii(runtime, "accountSecret"));
     names.emplace_back(PropNameID::forAscii(runtime, "mintLocalFirstToken"));
+    names.emplace_back(PropNameID::forAscii(runtime, "textAnchors"));
     names.emplace_back(PropNameID::forAscii(runtime, "abiVersion"));
     names.emplace_back(PropNameID::forAscii(runtime, "openAttached"));
     return names;

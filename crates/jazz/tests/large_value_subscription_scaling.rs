@@ -8,7 +8,7 @@
 //! that selected only file names therefore downloaded each file completely,
 //! and published none of its rows until the last chunk had arrived.
 //!
-//! As in `large_value_read_scaling`, these tests observe Groove's test-only
+//! As in `large_value_read_scaling`, these tests observe the test-only
 //! count of complete large-value rebuilds (`full_materializations_for_test`):
 //! the public rows are the same either way, and the defect is precisely the
 //! work those rows do not show. Each count is compared with the same write
@@ -17,7 +17,7 @@
 
 use std::collections::BTreeMap;
 
-mod common;
+use crate::common;
 
 use common::{allow_all_policies, compile_schema};
 use jazz::block_on;
@@ -31,7 +31,7 @@ use jazz::large_values::{LEAF_MAX_BYTES, full_materializations_for_test};
 use jazz::query::{ArraySubquery, OrderDirection, Query, col, gte, lit};
 use jazz::records::Value;
 use jazz::result_tree::ResultRelation;
-use jazz::schema::{JazzSchema, TableSchema};
+use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 
@@ -64,15 +64,6 @@ fn open_db(schema: JazzSchema, seed: u8) -> Db {
         },
     )))
     .expect("open db")
-}
-
-fn table(schema: &JazzSchema) -> TableSchema {
-    schema
-        .tables()
-        .iter()
-        .find(|table| table.name == FILES)
-        .expect("files table")
-        .clone()
 }
 
 /// Deterministic bytes spanning several chunk leaves.
@@ -178,8 +169,8 @@ fn next_delta(subscription: &mut SubscriptionStream) -> Delta {
     }
 }
 
-fn name(table: &TableSchema, row: &CurrentRow) -> Option<Value> {
-    row.cell(table, "name")
+fn name(row: &CurrentRow) -> Option<Value> {
+    row.cell("name")
 }
 
 /// A listing subscription that projects the large columns away never
@@ -194,7 +185,6 @@ fn name(table: &TableSchema, row: &CurrentRow) -> Option<Value> {
 #[test]
 fn listing_subscription_never_rebuilds_excluded_large_columns() {
     let schema = files_schema();
-    let table = table(&schema);
     let db = open_db(schema, 0x81);
 
     // Baselines: the same writes while no subscription is open.
@@ -219,7 +209,7 @@ fn listing_subscription_never_rebuilds_excluded_large_columns() {
     let mut names = opening
         .added
         .iter()
-        .map(|published| match name(&table, published) {
+        .map(|published| match name(published) {
             Some(Value::String(listed)) => listed,
             other => panic!("expected a listed name, got {other:?}"),
         })
@@ -227,8 +217,8 @@ fn listing_subscription_never_rebuilds_excluded_large_columns() {
     names.sort();
     assert_eq!(names, ["a.bin", "b.bin"]);
     for published in &opening.added {
-        assert_eq!(published.cell(&table, "contents"), None);
-        assert_eq!(published.cell(&table, "notes"), None);
+        assert_eq!(published.cell("contents"), None);
+        assert_eq!(published.cell("notes"), None);
     }
 
     let (added, rebuilds) = counting(|| {
@@ -248,10 +238,10 @@ fn listing_subscription_never_rebuilds_excluded_large_columns() {
         vec![row(0x85)]
     );
     assert_eq!(
-        name(&table, &added.added[0]),
+        name(&added.added[0]),
         Some(Value::String("c.bin".to_owned()))
     );
-    assert_eq!(added.added[0].cell(&table, "contents"), None);
+    assert_eq!(added.added[0].cell("contents"), None);
 
     let (renamed, rebuilds) = counting(|| {
         rename_file(&db, row(0x84), "b2.bin");
@@ -269,7 +259,7 @@ fn listing_subscription_never_rebuilds_excluded_large_columns() {
         .collect::<Vec<_>>();
     assert_eq!(renamed_rows.len(), 1, "the renamed row is republished once");
     assert_eq!(
-        name(&table, renamed_rows[0]),
+        name(renamed_rows[0]),
         Some(Value::String("b2.bin".to_owned()))
     );
 
@@ -278,6 +268,18 @@ fn listing_subscription_never_rebuilds_excluded_large_columns() {
     let deleted = next_delta(&mut listing);
     assert_eq!(deleted.removed, vec![row(0x83)]);
     assert!(deleted.added.is_empty());
+
+    // Positive control: reading the chunked contents does count on this
+    // thread, so the zero and baseline counts above are not vacuous.
+    let with_contents = db
+        .prepare_query(&Query::from(FILES).select(["name", "contents"]))
+        .expect("prepare contents read");
+    let (rows, rebuilds) = counting(|| db.read(&with_contents).expect("contents read"));
+    assert_eq!(rows.len(), 2, "b2.bin and c.bin remain");
+    assert!(
+        rebuilds >= 1,
+        "reading the contents rebuilds them on this thread"
+    );
 }
 
 /// A listing and a subscription that selects the contents may share graph
@@ -293,7 +295,6 @@ fn listing_subscription_never_rebuilds_excluded_large_columns() {
 #[test]
 fn listing_and_content_subscriptions_keep_their_own_representation() {
     let schema = files_schema();
-    let table = table(&schema);
     let db = open_db(schema, 0x91);
     let first = contents(0x92, 3);
     insert_file(&db, row(0x92), "first.bin", &first);
@@ -304,12 +305,9 @@ fn listing_and_content_subscriptions_keep_their_own_representation() {
     let viewed = next_delta(&mut viewer);
     assert!(listed.reset && viewed.reset);
     assert_eq!(listed.added.len(), 1);
-    assert_eq!(listed.added[0].cell(&table, "contents"), None);
+    assert_eq!(listed.added[0].cell("contents"), None);
     assert_eq!(viewed.added.len(), 1);
-    assert_eq!(
-        viewed.added[0].cell(&table, "contents"),
-        Some(Value::Bytes(first))
-    );
+    assert_eq!(viewed.added[0].cell("contents"), Some(Value::Bytes(first)));
 
     let added = contents(0x93, 4);
     insert_file(&db, row(0x93), "d.bin", &added);
@@ -323,7 +321,7 @@ fn listing_and_content_subscriptions_keep_their_own_representation() {
             .collect::<Vec<_>>(),
         vec![row(0x93)]
     );
-    assert_eq!(listed.added[0].cell(&table, "contents"), None);
+    assert_eq!(listed.added[0].cell("contents"), None);
     assert_eq!(
         viewed
             .added
@@ -332,10 +330,7 @@ fn listing_and_content_subscriptions_keep_their_own_representation() {
             .collect::<Vec<_>>(),
         vec![row(0x93)]
     );
-    assert_eq!(
-        viewed.added[0].cell(&table, "contents"),
-        Some(Value::Bytes(added))
-    );
+    assert_eq!(viewed.added[0].cell("contents"), Some(Value::Bytes(added)));
 
     let replaced = contents(0x94, 5);
     replace_contents(&db, row(0x93), &replaced);
@@ -347,7 +342,7 @@ fn listing_and_content_subscriptions_keep_their_own_representation() {
         .find(|published| published.row_uuid() == row(0x93))
         .expect("the viewer republishes the changed file");
     assert_eq!(
-        changed.cell(&table, "contents"),
+        changed.cell("contents"),
         Some(Value::Bytes(replaced.clone()))
     );
 
@@ -360,13 +355,10 @@ fn listing_and_content_subscriptions_keep_their_own_representation() {
         .find(|published| published.row_uuid() == row(0x93))
         .expect("listed");
     assert_eq!(
-        changed.cell(&table, "notes"),
+        changed.cell("notes"),
         Some(Value::String(large_notes("d.bin")))
     );
-    assert_eq!(
-        changed.cell(&table, "contents"),
-        Some(Value::Bytes(replaced))
-    );
+    assert_eq!(changed.cell("contents"), Some(Value::Bytes(replaced)));
 }
 
 // ---------------------------------------------------------------------------
@@ -441,8 +433,10 @@ fn update_cells(db: &Db, table: &str, id: RowUuid, cells: BTreeMap<String, Value
 
 /// Large notes that sort by `prefix`: the prefix leads, and the filler keeps
 /// every value indirect.
+/// Long notes that stay inline: a chunked value sorts by its cell, not its
+/// content (SPEC 19.5), so ordering tests use values under the threshold.
 fn sorting_notes(prefix: &str) -> String {
-    format!("{prefix}{}", "n".repeat(LEAF_MAX_BYTES * 2))
+    format!("{prefix}{}", "n".repeat(8 * 1024))
 }
 
 /// The public event parts these tests fold.
@@ -678,7 +672,6 @@ fn an_include_ordered_by_a_large_column_keeps_its_window() {
 #[test]
 fn a_listing_filtered_and_ordered_by_a_large_column_keeps_its_order() {
     let schema = files_schema();
-    let table = table(&schema);
     let db = open_db(schema, 0xc1);
     for (seed, prefix) in [(0xc2, "a"), (0xc3, "c"), (0xc4, "e"), (0xc5, "d")] {
         let write = block_on(db.insert(
@@ -738,14 +731,85 @@ fn a_listing_filtered_and_ordered_by_a_large_column_keeps_its_order() {
     let names = rows
         .rows
         .iter()
-        .map(|listed| name(&table, listed))
+        .map(|listed| name(listed))
         .collect::<Vec<_>>();
     assert_eq!(
         names,
         ["e.bin", "c.bin", "d2.bin", "a.bin"].map(|listed| Some(Value::String(listed.to_owned())))
     );
     for listed in &rows.rows {
-        assert_eq!(listed.cell(&table, "contents"), None);
-        assert_eq!(listed.cell(&table, "notes"), None);
+        assert_eq!(listed.cell("contents"), None);
+        assert_eq!(listed.cell("notes"), None);
     }
+}
+
+/// A subscription ordered by a large-capable column places chunked values
+/// as a one-shot read does: before every inline value ascending (SPEC 19.5),
+/// and moves a row when its value crosses the threshold either way.
+///
+/// alice ──subscribe order by notes──► [chunked a, b, d]
+/// alice ──set b's notes over 64 KB──► [chunked a and b, d]
+/// alice ──set a's notes to "c…"─────► [chunked b, c, d]
+#[test]
+fn a_subscription_ordered_by_a_large_column_places_chunked_values_first() {
+    let db = open_db(files_schema(), 0xd1);
+    for (seed, notes) in [
+        (0xd2, large_notes("a")),
+        (0xd3, sorting_notes("b")),
+        (0xd4, sorting_notes("d")),
+    ] {
+        let write = block_on(db.insert(
+            FILES,
+            BTreeMap::from([
+                ("name".to_owned(), Value::String(format!("{seed}.bin"))),
+                ("notes".to_owned(), Value::String(notes)),
+                ("contents".to_owned(), Value::Bytes(Vec::new())),
+            ]),
+            InsertOptions {
+                row_id: Some(row(seed)),
+                ..Default::default()
+            },
+        ))
+        .expect("insert file");
+        block_on(write.wait(DurabilityTier::Local)).expect("local durability");
+    }
+    let query = Query::from(FILES)
+        .select(["name"])
+        .order_by("notes", OrderDirection::Asc);
+    let read = |db: &Db| {
+        let prepared = db.prepare_query(&query).expect("prepare read");
+        block_on(db.all(&prepared, opts()))
+            .expect("read")
+            .iter()
+            .map(CurrentRow::row_uuid)
+            .collect::<Vec<_>>()
+    };
+    let mut listing = subscribe(&db, query.clone());
+    let mut rows = OrderedRows::default();
+    rows.apply(next_event(&mut listing));
+    assert_eq!(rows.ids(), vec![row(0xd2), row(0xd3), row(0xd4)]);
+    assert_eq!(rows.ids(), read(&db));
+
+    update_cells(
+        &db,
+        FILES,
+        row(0xd3),
+        BTreeMap::from([("notes".to_owned(), Value::String(large_notes("b")))]),
+    );
+    rows.apply(next_event(&mut listing));
+    let mut chunked = rows.ids()[..2].to_vec();
+    chunked.sort();
+    assert_eq!(chunked, vec![row(0xd2), row(0xd3)]);
+    assert_eq!(rows.ids()[2], row(0xd4));
+    assert_eq!(rows.ids(), read(&db));
+
+    update_cells(
+        &db,
+        FILES,
+        row(0xd2),
+        BTreeMap::from([("notes".to_owned(), Value::String(sorting_notes("c")))]),
+    );
+    rows.apply(next_event(&mut listing));
+    assert_eq!(rows.ids(), vec![row(0xd3), row(0xd2), row(0xd4)]);
+    assert_eq!(rows.ids(), read(&db));
 }

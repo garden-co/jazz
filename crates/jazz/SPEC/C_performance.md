@@ -78,10 +78,9 @@ current-row subscriptions through the global-current tables (receipt:
 `benches/cold_subscription.rs`).
 
 **Implementation status (verified).**
-`denormalized_current_content_witness_projects_history_provenance_to_unix_milliseconds` verifies
-the current-sourced witness bytes, and
-`maintained_relation_include_single_row_changes_are_scale_independent` is the
-canonical scale-independence canary.
+`include_live::renaming_a_sender_updates_exactly_their_messages` is the
+canonical incremental-delivery canary, and `include_live::include_target_change_cost`
+is its timing probe.
 
 Winner metadata needed for sync payload witnesses and known-state dedup is also
 part of the compact current representation: current content/register rows carry

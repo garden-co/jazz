@@ -10,6 +10,20 @@ declare module "jazz-wasm" {
   export function drainTraceEntries(): unknown[];
   export function subscribeTraceEntries(callback: () => void): () => void;
   export function generateId(): string;
+  export function captureTextAnchor(
+    text: string,
+    version: number | undefined,
+    position: number,
+    side: unknown,
+  ): unknown;
+  export function resolveTextAnchor(anchor: unknown, text: string, version?: number): unknown;
+  export function captureTextRange(
+    text: string,
+    version: number | undefined,
+    start: number,
+    end: number,
+  ): unknown;
+  export function resolveTextRange(range: unknown, text: string, version?: number): unknown;
   export function currentTimestamp(): bigint;
   export function deriveUserId(seedB64: string): string;
   export function mintLocalFirstToken(
@@ -33,6 +47,11 @@ declare module "jazz-wasm" {
   export class PendingNativeRead {
     poll(): Uint8Array | null;
     cancel(): void;
+  }
+  /** The core's upstream link machine, stepped with JSON documents. */
+  export class UpstreamLink {
+    constructor(seed: number);
+    handle(nowMs: number, input: string): string;
   }
   export class WasmPermissionAdviceRequest {
     readonly promise: Promise<"allowed" | "denied" | "unknown">;
@@ -102,15 +121,15 @@ declare module "jazz-wasm" {
       claimedAuthor: string,
     ): WasmDb;
     /**
-     * Host-only relay open; `storageOwner` is supplied by broker ownership admission.
-     * `pageStore` may carry `{ backend?: "indexeddb" | "opfs", path?: string }`
-     * to pick the SQLite VFS (IndexedDB, with the file named after `storageOwner`, by default).
+     * Host-only relay open; `database` is the physical database name admitted by broker
+     * ownership admission. `pageStore` may carry `{ backend?: "indexeddb" | "opfs", path?: string }`
+     * to pick the SQLite VFS (IndexedDB, with the file named after `database`, by default).
      */
     static openBrowser(
       pageStore: unknown,
       schema: Uint8Array,
       config: Uint8Array,
-      storageOwner: string,
+      database: string,
     ): Promise<WasmDb>;
     static openBrowserWithSelfSignedProof(
       pageStore: unknown,
@@ -119,7 +138,7 @@ declare module "jazz-wasm" {
       token: string,
       appId: string,
       claimedAuthor: string,
-      storageOwner: string,
+      database: string,
     ): Promise<WasmDb>;
     setLargeValueStagingPolicy(
       incomingBytesPerWindow: number,
@@ -139,28 +158,28 @@ declare module "jazz-wasm" {
       head?: unknown,
       base?: unknown,
     ): StreamingMutation;
-    /** Fresh global catalogue coverage without returned row bodies; empty bytes on completion. */
-    coverCatalogue(
-      table: string,
-      author?: Uint8Array,
-      claims?: unknown,
-    ): Uint8Array | PendingNativeRead;
-    /** Empty bytes mean no accepted table identity; otherwise a 16-byte UUID. */
-    tableIdentity(table: string): Promise<Uint8Array>;
-    /** Empty bytes mean no accepted column identity; otherwise a 16-byte UUID. */
-    columnIdentity(table: string, column: string): Promise<Uint8Array>;
     /** Delete a durable browser store; no database may have it open. */
-    static destroyBrowserStorage(storage: unknown, storageOwner: string): Promise<void>;
+    static destroyBrowserStorage(storage: unknown, database: string): Promise<void>;
     /** Resolves once every commit so far is in the browser store's backing storage. */
     flush(): Promise<void>;
 
-    registerSchema(schema: Uint8Array): WasmDb;
+    /** Authority UUID bytes (empty for an unknown name); throws before catalogue admission. */
+    coverCatalogue(
+      timeoutMs: number,
+      author?: Uint8Array,
+      claims?: unknown,
+    ): Uint8Array | PendingNativeRead;
+    tableIdentity(table: string): Uint8Array;
+    columnIdentity(table: string, column: string): Uint8Array;
+
+    registerSchema(schema: Uint8Array, migrations?: Uint8Array): WasmDb;
     captureSnapshot(): Uint8Array | PendingNativeRead;
     beginTransaction(
       openTransactionId: string,
       kind: string,
       author?: Uint8Array | null,
       attribution?: Uint8Array | null,
+      acceptedEvidence?: boolean | null,
     ): void;
     commitTransaction(openTransactionId: string, kind?: string | null): WasmWrite;
     rollbackTransaction(openTransactionId: string): void;
@@ -172,14 +191,13 @@ declare module "jazz-wasm" {
       author?: Uint8Array,
       claims?: Record<string, unknown>,
     ): Uint8Array | PendingNativeRead;
-    /** Binding-only authority sidecar; still requires separate snapshot acceptance. */
-    allSettlementMetadata(
+    acceptedRead(
       query: Uint8Array,
-      opts: unknown,
       openTransactionId: string,
+      includeDeleted: boolean,
+      timeoutMs: number,
       author?: Uint8Array,
       claims?: Record<string, unknown>,
-      includeRows?: boolean,
     ): Uint8Array | PendingNativeRead;
     subscribe(
       query: Uint8Array,
@@ -261,12 +279,15 @@ declare module "jazz-wasm" {
     onMutationError(callback: (event: any) => void): void;
     tick(): Promise<void>;
     setNonDurableClient(): void;
+    /** How many local commits still wait for the server's verdict. */
+    pendingUploadCount(): number;
     /** @internal Foreground node-lease handoff only. */
     foregroundTxTimeHighWater(): Promise<bigint>;
     /** @internal Foreground node-lease bootstrap only. */
     seedForegroundTxTimeHighWater(highWater: bigint): void;
     /** Exact wire features compiled into this WASM artifact. */
     wireFeatures(): number;
+    createUpstreamLink(seed: number): UpstreamLink;
     close(): Promise<boolean>;
     setSessionClaims(claims: Record<string, unknown> | null): void | Promise<void>;
     connectUpstream(): Promise<WasmTransport>;

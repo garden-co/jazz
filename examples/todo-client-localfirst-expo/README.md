@@ -14,17 +14,12 @@ Account preparation happens outside the database context. The app creates or res
   repository. An adopter copies the same `app.json` shape but installs
   `jazz-rn@alpha` directly, as described in the package README.
 - Install a matching `jazz-rn` native build; account-scoped persistent relay admission is handled by the runtime.
-- Start a Jazz server first (for example: `jazz-tools server <APP_ID> --port 1625`). The embedded managed server is HTTP-only.
-- Server URL defaults for local development:
-  - iOS simulator: `http://127.0.0.1:1625`
-  - Android emulator: `http://10.0.2.2:1625`
-- The managed server started by `withJazz` from `jazz-tools/dev/expo` binds and advertises exactly `server.host`
-  (default `127.0.0.1`). It does not discover your LAN address; `server.host` must be a concrete IP
-  address, and wildcard addresses such as `0.0.0.0` are rejected.
-- Physical devices: either set `server.host` to your machine's LAN IP (plain HTTP; the device must be on
-  the same network and allow cleartext traffic), or provide an externally hosted, device-trusted
-  HTTPS/WSS endpoint. The embedded managed server does not terminate TLS.
-- When not using the managed server, set both `EXPO_PUBLIC_JAZZ_APP_ID` and a device-reachable `EXPO_PUBLIC_JAZZ_SERVER_URL` before starting Metro.
+- Start the app's backend first: `pnpm backend` (`server.ts` runs `createJazz` and serves sync under `/jazz` on port 1625; data stays in `.jazz/`).
+- Set `EXPO_PUBLIC_JAZZ_SERVER_URL` to the backend's `/jazz` URL as the device reaches it before starting Metro:
+  - iOS simulator: `http://127.0.0.1:1625/jazz`
+  - Android emulator: `http://10.0.2.2:1625/jazz`
+- Physical devices: either reach the backend on your machine's LAN IP (plain HTTP; the device must be on
+  the same network and allow cleartext traffic), or deploy the backend behind a device-trusted HTTPS endpoint.
 - `JazzSessionProvider` from `jazz-tools/expo` owns secure account preparation and the native client, with app/server-scoped Expo SecureStore persistence.
 - Todos carry `owner_id`, and mutations are authorized against `session.user.account`; ownership columns use UUIDs.
 

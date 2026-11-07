@@ -46,6 +46,9 @@ pub const FEATURE_AUTHORIZATION_SCOPE_VIEWS: WireFeatures = 1 << 7;
 /// link.  This is a transport-admission capability only: a peer's advertised
 /// role and semantic frames never create the capability.
 pub const FEATURE_SCOPE_ISOLATED_CLIENT_RELAY: WireFeatures = 1 << 9;
+/// The peer is a thin client, or serves thin clients: it exchanges
+/// [`WireFrame::ThinRequest`] and [`WireFrame::ThinResponse`] (SPEC 8.14).
+pub const FEATURE_THIN_RESULTS: WireFeatures = 1 << 10;
 
 /// Bitset of optional protocol features advertised by one peer.
 pub type WireFeatures = u64;
@@ -61,6 +64,12 @@ pub enum WireFrame {
     Channel(WireChannelEnvelope),
     /// Receiver-consumption byte grant. Postcard-v1 enum tag 3 within wire v6.
     ChannelCredit(WireChannelCredit),
+    /// A thin client's request. Postcard-v1 enum tag 4 within wire v6; only
+    /// after both peers negotiated [`FEATURE_THIN_RESULTS`].
+    ThinRequest(crate::thin::ThinRequest),
+    /// The server's answer to a thin request. Postcard-v1 enum tag 5 within
+    /// wire v6; only after both peers negotiated [`FEATURE_THIN_RESULTS`].
+    ThinResponse(crate::thin::ThinResponse),
 }
 
 /// Which independently bounded transport resource this grant releases.
@@ -245,9 +254,9 @@ pub struct WireSession {
 
 impl std::fmt::Debug for WireSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let fingerprint = blake3::hash(self.session_id.as_bytes()).to_hex();
+        let fingerprint = jazz_types::sha256::hash(self.session_id.as_bytes()).to_hex();
         let identity_fingerprint = self.identity.map(|identity| {
-            blake3::hash(identity.canonical().as_bytes()).to_hex()[..12].to_owned()
+            jazz_types::sha256::hash(identity.canonical().as_bytes()).to_hex()[..12].to_owned()
         });
         f.debug_struct("WireSession")
             .field("session_id_len", &self.session_id.len())
@@ -543,6 +552,11 @@ pub fn validate_frames_for_artifact_corpus(
             WireFrame::Error(_) => {}
             WireFrame::ChannelCredit(_) => {
                 return Err("credit frames require a persistent admitted endpoint".to_owned());
+            }
+            WireFrame::ThinRequest(_) | WireFrame::ThinResponse(_) => {
+                if negotiated_features & FEATURE_THIN_RESULTS == 0 {
+                    return Err("thin frames require the thin results feature".to_owned());
+                }
             }
         }
     }
@@ -842,6 +856,15 @@ pub enum TransportError {
     Failed(String),
 }
 
+impl std::fmt::Display for TransportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Backpressure => f.write_str("backpressure"),
+            Self::Failed(why) => f.write_str(why),
+        }
+    }
+}
+
 fn check_wire_protocol_range(min: u16, max: u16) -> Result<(), WireError> {
     if min == WIRE_PROTOCOL_VERSION && max == WIRE_PROTOCOL_VERSION {
         return Ok(());
@@ -1011,8 +1034,8 @@ mod tests {
         assert!(decode_postcard_exact::<PredicateRead>(&padded).is_err());
     }
 
-    const PREDICATE_READ_WITHOUT_RESULT_HEX: &str = "017410444444444444444444444444444444440174000000000000000000000000000010555555555555555555555555555555550000";
-    const PREDICATE_READ_WITH_RESULT_HEX: &str = "0174104444444444444444444444444444444401740000000000000000000000000000105555555555555555555555555555555500010301abcd";
+    const PREDICATE_READ_WITHOUT_RESULT_HEX: &str = "01741044444444444444444444444444444444017400000000000000000000000000000010555555555555555555555555555555550000";
+    const PREDICATE_READ_WITH_RESULT_HEX: &str = "017410444444444444444444444444444444440174000000000000000000000000000000105555555555555555555555555555555500010301abcd";
 
     /// Wire layout is tested internally because enum tags are not a query API.
     #[test]

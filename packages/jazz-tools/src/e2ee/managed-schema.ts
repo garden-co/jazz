@@ -1,5 +1,5 @@
 import { schemaColumns as s } from "../dsl.js";
-import { defineTable } from "../table-definition.js";
+import { defineTable } from "../typed-app.js";
 import { rel, reverse } from "../relationships.js";
 
 export const deviceRequestSchema = {

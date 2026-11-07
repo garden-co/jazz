@@ -1,4 +1,5 @@
 import { expect, it } from "vitest";
+import { frontE2eeCore } from "./fixtures/app.js";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
 import { createDb } from "../runtime/default-create-db.js";
@@ -21,8 +22,10 @@ it.each(["app", "slice"] as const)(
     };
     const app =
       kind === "app"
-        ? s.defineApp(definition)
-        : s.defineSliceableApp(definition).slice("projects", "messages", "notes");
+        ? s.defineApp(definition, { migrations: "none" })
+        : s
+            .defineSliceableApp(definition, { migrations: "none" })
+            .slice("projects", "messages", "notes");
     const permissions = definePermissions(app, ({ policy, session }) => {
       policy.projects.allowInsert.where({ "$createdBy.account": session.user.account });
       policy.projects.allowRead.where({ "$createdBy.account": session.user.account });
@@ -33,7 +36,7 @@ it.each(["app", "slice"] as const)(
     // package-owned policies protecting private enrolment records.
     expect(permissions).toHaveProperty("__e2ee_device_requests");
     expect(permissions).toHaveProperty("__e2ee_recovery_protectors");
-    const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+    let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
     let db: Awaited<ReturnType<typeof createDb>> | undefined;
     let retained: string | null = null;
     try {
@@ -44,6 +47,7 @@ it.each(["app", "slice"] as const)(
         schema: app,
         permissions,
       });
+      server = await frontE2eeCore(server, { schema: app, permissions });
       const account = await localAccountConfig(server.appId, server.url);
       db = await createDb({
         ...account,
@@ -89,13 +93,19 @@ it.each(["app", "slice"] as const)(
 );
 
 it("rejects application overrides of package-owned device permissions", () => {
-  const app = s.defineApp({
-    ...deviceRequestSchema,
-    projects: s.table({ title: s.string() }, {}),
-    notes: s
-      .table({ projectId: s.uuid(), body: s.string() }, { project: s.rel("projects", "projectId") })
-      .encrypted({ space: "projectId", columns: ["body"] }),
-  });
+  const app = s.defineApp(
+    {
+      ...deviceRequestSchema,
+      projects: s.table({ title: s.string() }, {}),
+      notes: s
+        .table(
+          { projectId: s.uuid(), body: s.string() },
+          { project: s.rel("projects", "projectId") },
+        )
+        .encrypted({ space: "projectId", columns: ["body"] }),
+    },
+    { migrations: "none" },
+  );
   expect(() =>
     definePermissions(app, ({ policy }) => {
       policy.__e2ee_device_requests.allowRead.always();
@@ -104,7 +114,7 @@ it("rejects application overrides of package-owned device permissions", () => {
 });
 
 it("does not add managed tables or policies to an ordinary app", () => {
-  const app = s.defineApp({ projects: s.table({ title: s.string() }, {}) });
+  const app = s.defineApp({ projects: s.table({ title: s.string() }, {}) }, { migrations: "none" });
   expect(Object.keys(app.wasmSchema)).toEqual(["projects"]);
   const permissions = definePermissions(app, ({ policy }) => {
     policy.projects.allowRead.always();
@@ -114,15 +124,18 @@ it("does not add managed tables or policies to an ordinary app", () => {
 
 it("rejects application tables that replace a managed E2EE schema", () => {
   expect(() =>
-    s.defineApp({
-      __e2ee_device_requests: s.table({ comment: s.string() }, {}),
-      projects: s.table({ title: s.string() }, {}),
-      notes: s
-        .table(
-          { projectId: s.uuid(), body: s.string() },
-          { project: s.rel("projects", "projectId") },
-        )
-        .encrypted({ space: "projectId", columns: ["body"] }),
-    }),
+    s.defineApp(
+      {
+        __e2ee_device_requests: s.table({ comment: s.string() }, {}),
+        projects: s.table({ title: s.string() }, {}),
+        notes: s
+          .table(
+            { projectId: s.uuid(), body: s.string() },
+            { project: s.rel("projects", "projectId") },
+          )
+          .encrypted({ space: "projectId", columns: ["body"] }),
+      },
+      { migrations: "none" },
+    ),
   ).toThrow(/Cannot replace managed E2EE table/);
 });

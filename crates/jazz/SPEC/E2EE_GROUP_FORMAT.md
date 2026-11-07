@@ -36,7 +36,7 @@ Readers separately require delivery `groupId` and `epochId` to match the root.
 The configured DeviceSigner adds its versioned signature envelope as usual.
 
 The initial implementation grants the creator account only. Root acceptance and
-subsequent delivery each use an exclusive transaction containing paired public
+subsequent delivery each use an serializable transaction containing paired public
 and private device-history validation, followed by an explicit global wait.
 A preflight membership check alone is insufficient. Readers validate the
 creator's eligibility before root acceptance and the sender and recipient's
@@ -49,7 +49,14 @@ the group tables and public topology reads with their own administration policie
 Group roots, membership changes and successors require an accepted author account
 root strictly before the candidate's acceptance position. A covered history with
 no eligible root makes the candidate ineligible; later enrolment cannot give it
-retroactive authority. Missing settlement coverage still rejects graph loading.
+retroactive authority. Missing paired accepted coverage still rejects graph loading.
+
+Each group predicate is read through paired accepted-row evidence in the same
+serializable authority transaction. Empty and chunked incoming/outgoing reads
+remain in its validated read set. Overlapping rows must agree on payload and
+paired state/content origins. Content origins determine signed activation order;
+a later state restoration does not move it. Confirmation requests Global
+explicitly rather than relying on a host’s default wait tier.
 
 `fixtures/e2ee-group.c` independently emits the root and delivery frames used
 by the literal codec test. These fixtures pin framing, not membership validation.

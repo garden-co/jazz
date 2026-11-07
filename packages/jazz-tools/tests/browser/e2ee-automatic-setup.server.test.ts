@@ -4,16 +4,22 @@ import { definePermissions } from "../../src/permissions/index.js";
 import { createDb } from "../../src/runtime/default-create-db.js";
 import { deploy } from "../../src/dev/catalogue.js";
 import { acquireBrowserTestAccount } from "./account-fixtures.js";
-import { getJazzServerInfo, stopJazzServer } from "./testing-server.js";
+import { getJazzServerInfo, startJazzApp, stopJazzServer } from "./testing-server.js";
 
 it("automatically configures an encrypted browser app for atomic creation and reads", async () => {
-  const server = await getJazzServerInfo(`e2ee-automatic-${crypto.randomUUID()}`);
-  const app = s.defineApp({
-    projects: s.table({ title: s.string() }, {}),
-    notes: s
-      .table({ projectId: s.uuid(), body: s.string() }, { project: s.rel("projects", "projectId") })
-      .encrypted({ space: "projectId", columns: ["body"] }),
-  });
+  let server = await getJazzServerInfo(`e2ee-automatic-${crypto.randomUUID()}`);
+  const app = s.defineApp(
+    {
+      projects: s.table({ title: s.string() }, {}),
+      notes: s
+        .table(
+          { projectId: s.uuid(), body: s.string() },
+          { project: s.rel("projects", "projectId") },
+        )
+        .encrypted({ space: "projectId", columns: ["body"] }),
+    },
+    { migrations: "none" },
+  );
   const permissions = definePermissions(app, ({ policy, session }) => {
     policy.projects.allowRead.always();
     policy.projects.allowInsert.where({ "$createdBy.account": session.user.account });
@@ -32,6 +38,7 @@ it("automatically configures an encrypted browser app for atomic creation and re
   let saved: string | null = null;
   try {
     await deploy({ ...server, schema: app, permissions });
+    server = await startJazzApp(server, { schema: app, permissions });
     const account = await acquireBrowserTestAccount(server);
     db = await createDb({
       appId: server.appId,

@@ -31,12 +31,10 @@ function fixture(parent = tmpdir()) {
     "crates/jazz-wasm/pkg",
     "crates/jazz-wasm/src",
     "crates/jazz/src",
-    "crates/groove/src",
     "crates/wasm-tracing/src",
     "crates/jazz-napi/src",
     "crates/jazz-server/src",
     "crates/jazz-native-transport/src",
-    "crates/jazz-storage-rocksdb/src",
     "crates/jazz-otel/src",
     "crates/jazz-compression/src",
     "crates/benchmark-guard/src",
@@ -55,26 +53,18 @@ function fixture(parent = tmpdir()) {
     writeFileSync(join(root, path), content);
   const dependencies = {
     "jazz-wasm": ["jazz", "wasm-tracing", "idb-tree"],
-    "jazz-napi": [
-      "jazz",
-      "jazz-server",
-      "jazz-native-transport",
-      "jazz-storage-rocksdb",
-      "jazz-otel",
-    ],
-    jazz: ["groove", "jazz-compression", "benchmark-guard"],
+    "jazz-napi": ["jazz", "jazz-server", "jazz-native-transport", "jazz-otel"],
+    jazz: ["jazz-compression", "benchmark-guard"],
   };
   for (const name of [
     "jazz-napi",
     "jazz-server",
     "jazz-native-transport",
-    "jazz-storage-rocksdb",
     "jazz-otel",
     "jazz-compression",
     "benchmark-guard",
     "idb-tree",
     "jazz",
-    "groove",
     "wasm-tracing",
   ]) {
     const manifest = join(root, `crates/${name}/Cargo.toml`);
@@ -451,7 +441,6 @@ test("NAPI provenance covers every reachable local Cargo dependency", () => {
   for (const crate of [
     "jazz-server",
     "jazz-native-transport",
-    "jazz-storage-rocksdb",
     "jazz-otel",
     "jazz-compression",
     "benchmark-guard",

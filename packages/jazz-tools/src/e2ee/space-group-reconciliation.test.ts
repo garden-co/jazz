@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { rel } from "../relationships.js";
 import { schema as s } from "../schema-namespace.js";
@@ -10,19 +11,22 @@ import { groupSchema } from "./groups.js";
 import { spaceSchema } from "./spaces.js";
 
 it("keeps denied group repair in maintenance and reconciles after permission is granted", async () => {
-  const app = s.defineApp({
-    ...deviceRequestSchema,
-    ...groupSchema,
-    ...spaceSchema,
-    projects: s.table({ title: s.string() }, {}),
-    rotations: s.table(
-      { groupId: s.uuid(), accountId: s.uuid() },
-      {
-        group: rel("__e2ee_groups", "groupId"),
-        account: rel("__e2ee_account_identities", "accountId"),
-      },
-    ),
-  });
+  const app = s.defineApp(
+    {
+      ...deviceRequestSchema,
+      ...groupSchema,
+      ...spaceSchema,
+      projects: s.table({ title: s.string() }, {}),
+      rotations: s.table(
+        { groupId: s.uuid(), accountId: s.uuid() },
+        {
+          group: rel("__e2ee_groups", "groupId"),
+          account: rel("__e2ee_account_identities", "accountId"),
+        },
+      ),
+    },
+    { migrations: "none" },
+  );
   const policies = definePermissions(app, ({ policy, session, allOf }) => {
     policy.rotations.allowRead.always();
     policy.rotations.allowInsert.where({ accountId: session.user.account });
@@ -52,7 +56,7 @@ it("keeps denied group repair in maintenance and reconciles after permission is 
     policy.__e2ee_group_repairs.allowRead.always();
     policy.__e2ee_group_repairs.allowInsert.where({ accountId: session.user.account });
   });
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Awaited<ReturnType<typeof createDb>>[] = [];
   const store = () => {
     let value: string | null = null;
@@ -70,6 +74,23 @@ it("keeps denied group repair in maintenance and reconciles after permission is 
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
+      schema: app,
+      permissions: {
+        ...deviceRequestPermissions,
+        projects: policies.projects!,
+        rotations: policies.rotations!,
+        __e2ee_spaces: policies.__e2ee_spaces!,
+        __e2ee_space_grants: policies.__e2ee_space_grants!,
+        __e2ee_space_deliveries: policies.__e2ee_space_deliveries!,
+        __e2ee_space_successors: policies.__e2ee_space_successors!,
+        __e2ee_groups: policies.__e2ee_groups!,
+        __e2ee_group_membership: policies.__e2ee_group_membership!,
+        __e2ee_group_successors: policies.__e2ee_group_successors!,
+        __e2ee_group_deliveries: policies.__e2ee_group_deliveries!,
+        __e2ee_group_repairs: policies.__e2ee_group_repairs!,
+      },
+    });
+    server = await frontE2eeCore(server, {
       schema: app,
       permissions: {
         ...deviceRequestPermissions,

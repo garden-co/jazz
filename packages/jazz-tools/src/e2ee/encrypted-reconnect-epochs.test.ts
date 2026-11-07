@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { createServer, connect, type Socket } from "node:net";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -11,15 +12,21 @@ import { deviceRequestSchema, deviceRequestPermissions } from "./device-requests
 import { spaceSchema } from "./spaces.js";
 import { groupSchema } from "./groups.js";
 
-const app = s.defineApp({
-  ...deviceRequestSchema,
-  ...spaceSchema,
-  ...groupSchema,
-  projects: s.table({ title: s.string() }, {}),
-  notes: s
-    .table({ projectId: s.uuid(), title: s.string() }, { project: s.rel("projects", "projectId") })
-    .encrypted({ space: "projectId", columns: ["title"] }),
-});
+const app = s.defineApp(
+  {
+    ...deviceRequestSchema,
+    ...spaceSchema,
+    ...groupSchema,
+    projects: s.table({ title: s.string() }, {}),
+    notes: s
+      .table(
+        { projectId: s.uuid(), title: s.string() },
+        { project: s.rel("projects", "projectId") },
+      )
+      .encrypted({ space: "projectId", columns: ["title"] }),
+  },
+  { migrations: "none" },
+);
 const policies = definePermissions(app, ({ policy, session }) => {
   policy.projects.allowRead.always();
   policy.projects.allowInsert.always();
@@ -68,7 +75,7 @@ async function reconnectGate(target: string) {
   const readerSockets = new Set<Socket>();
   let capture = false;
   let blocked = false;
-  const server = createServer((incoming) => {
+  let server = createServer((incoming) => {
     if (blocked) {
       incoming.destroy();
       return;
@@ -124,7 +131,7 @@ async function reconnectGate(target: string) {
 it.each(["retained account", "removed account", "removed nested member"] as const)(
   "refreshes missing epochs after an offline persistent reopen: %s",
   async (membership) => {
-    const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+    let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
     const gate = await reconnectGate(server.url);
     const directory = await mkdtemp(join(tmpdir(), "jazz-e2ee-reconnect-"));
     let owner: Awaited<ReturnType<typeof createJazzSession>> | undefined;
@@ -151,6 +158,7 @@ it.each(["retained account", "removed account", "removed nested member"] as cons
         schema: app,
         permissions,
       });
+      server = await frontE2eeCore(server, { schema: app, permissions: permissions });
       owner = await createJazzSession({
         ...common,
         driver: { type: "memory" },

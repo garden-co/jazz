@@ -4,15 +4,18 @@ import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 
 it("rejects unindexed encrypted null predicates through reads, transactions and subscriptions", async () => {
-  const app = s.defineApp({
-    projects: s.table({ title: s.string() }, {}),
-    notes: s
-      .table(
-        { projectId: s.uuid(), title: s.string().optional(), done: s.boolean() },
-        { project: s.rel("projects", "projectId") },
-      )
-      .encrypted({ space: "projectId", columns: ["title"] }),
-  });
+  const app = s.defineApp(
+    {
+      projects: s.table({ title: s.string() }, {}),
+      notes: s
+        .table(
+          { projectId: s.uuid(), title: s.string().optional(), done: s.boolean() },
+          { project: s.rel("projects", "projectId") },
+        )
+        .encrypted({ space: "projectId", columns: ["title"] }),
+    },
+    { migrations: "none" },
+  );
   const db = await createDb(await localAccountConfig(`encrypted-filter-${crypto.randomUUID()}`));
   try {
     for (const boundary of ["read", "transaction", "subscription"]) {
@@ -43,15 +46,18 @@ it("rejects unindexed encrypted null predicates through reads, transactions and 
 });
 
 it("rejects ordering by encrypted values through reads, transactions and subscriptions", async () => {
-  const app = s.defineApp({
-    projects: s.table({ title: s.string() }, {}),
-    notes: s
-      .table(
-        { projectId: s.uuid(), title: s.string(), done: s.boolean() },
-        { project: s.rel("projects", "projectId") },
-      )
-      .encrypted({ space: "projectId", columns: ["title"] }),
-  });
+  const app = s.defineApp(
+    {
+      projects: s.table({ title: s.string() }, {}),
+      notes: s
+        .table(
+          { projectId: s.uuid(), title: s.string(), done: s.boolean() },
+          { project: s.rel("projects", "projectId") },
+        )
+        .encrypted({ space: "projectId", columns: ["title"] }),
+    },
+    { migrations: "none" },
+  );
   const db = await createDb(await localAccountConfig(`encrypted-order-${crypto.randomUUID()}`));
   try {
     for (const boundary of ["read", "transaction", "subscription"]) {
@@ -82,25 +88,28 @@ it("rejects ordering by encrypted values through reads, transactions and subscri
 });
 
 it("rejects unsupported encrypted predicates in includes through reads, transactions and subscriptions", async () => {
-  const app = s.defineApp({
-    projects: s.table(
-      { title: s.string() },
-      {
-        notesViaProject: s.reverse("notes", "project"),
-        commentsViaProject: s.reverse("comments", "project"),
-      },
-    ),
-    notes: s
-      .table(
-        { projectId: s.uuid(), title: s.string() },
+  const app = s.defineApp(
+    {
+      projects: s.table(
+        { title: s.string() },
+        {
+          notesViaProject: s.reverse("notes", "project"),
+          commentsViaProject: s.reverse("comments", "project"),
+        },
+      ),
+      notes: s
+        .table(
+          { projectId: s.uuid(), title: s.string() },
+          { project: s.rel("projects", "projectId") },
+        )
+        .encrypted({ space: "projectId", columns: ["title"] }),
+      comments: s.table(
+        { projectId: s.uuid(), text: s.string() },
         { project: s.rel("projects", "projectId") },
-      )
-      .encrypted({ space: "projectId", columns: ["title"] }),
-    comments: s.table(
-      { projectId: s.uuid(), text: s.string() },
-      { project: s.rel("projects", "projectId") },
-    ),
-  });
+      ),
+    },
+    { migrations: "none" },
+  );
   const db = await createDb(await localAccountConfig(`encrypted-query-${crypto.randomUUID()}`));
   try {
     for (const boundary of ["read", "transaction", "subscription"]) {
