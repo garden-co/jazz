@@ -1296,6 +1296,50 @@ nav.astryx-side-nav .astryx-side-nav-item {
   text-underline-offset: 3px;
   cursor: help;
 }
+/* A bracket under each pair of tiers, its hooks pointing up at them and its
+   label set into the bottom line. Two columns wide from 640px; on phones it
+   sits under the stacked pair and names the tiers. */
+.home-pricing-bracket {
+  position: relative;
+  height: 1.5rem;
+  /* Pulled up through the grid gap so it hugs the tiers above it. */
+  margin-top: calc(var(--spacing-2) - var(--spacing-10));
+  margin-bottom: var(--spacing-4);
+  border: 1.5px solid var(--color-text-secondary);
+  border-top: 0;
+  border-radius: 0 0 14px 14px;
+  font-size: 0.875rem;
+  line-height: 1.3;
+  text-align: center;
+}
+.home-pricing-bracket > span {
+  position: absolute;
+  left: 50%;
+  bottom: 0;
+  transform: translate(-50%, 50%);
+  max-width: calc(100% - 4rem);
+  width: max-content;
+  padding-inline: var(--spacing-4);
+  background-color: var(--color-background-body);
+}
+@media (min-width: 640px) {
+  .home-pricing-bracket {
+    grid-column: span 2;
+  }
+  .home-pricing-bracket-tiers {
+    display: none;
+  }
+}
+@media (min-width: 1024px) {
+  .home-pricing-bracket {
+    grid-row: 6;
+    grid-column: 1 / span 2;
+    margin-top: var(--spacing-2);
+  }
+  .home-pricing-bracket:last-child {
+    grid-column: 3 / span 2;
+  }
+}
 @media (min-width: 640px) {
   .home-pricing {
     grid-template-columns: repeat(2, minmax(0, 1fr));

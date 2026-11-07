@@ -1,6 +1,6 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { Fragment, type ReactNode } from "react";
 import { Button } from "@astryxdesign/core/Button";
 import { Tooltip } from "@astryxdesign/core/Tooltip";
 
@@ -111,27 +111,54 @@ const tiers: Tier[] = [
   },
 ];
 
+/** Brackets under pairs of tiers: who each pair is for. */
+const brackets = [
+  { after: 1, tiers: "Jazz and Jazz Pro", label: "typically enough for apps with 1K–10K MAUs" },
+  { after: 3, tiers: "Jazz Scale and Custom", label: "scale to millions of users across regions" },
+];
+
+function TierColumn({ tier }: { tier: Tier }) {
+  return (
+    <div className="home-pricing-tier">
+      <div className="home-pricing-head">
+        <p className="home-pricing-name">{tier.name}</p>
+        <p>{tier.kind}</p>
+      </div>
+      <div className="home-pricing-cell">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <p className="home-pricing-price">{tier.price}</p>
+          {tier.action ? <div className="home-pricing-action">{tier.action}</div> : null}
+        </div>
+        <div>{tier.priceDetail}</div>
+      </div>
+      <p className="home-pricing-cell">{tier.features}</p>
+      <p className="home-pricing-cell">{tier.support}</p>
+      <p className="home-pricing-cell">{tier.operated}</p>
+    </div>
+  );
+}
+
 export function PricingTable() {
   return (
-    <div className="home-pricing" role="list">
-      {tiers.map((tier) => (
-        <div key={tier.name} className="home-pricing-tier" role="listitem">
-          <div className="home-pricing-head">
-            <p className="home-pricing-name">{tier.name}</p>
-            <p>{tier.kind}</p>
-          </div>
-          <div className="home-pricing-cell">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <p className="home-pricing-price">{tier.price}</p>
-              {tier.action ? <div className="home-pricing-action">{tier.action}</div> : null}
-            </div>
-            <div>{tier.priceDetail}</div>
-          </div>
-          <p className="home-pricing-cell">{tier.features}</p>
-          <p className="home-pricing-cell">{tier.support}</p>
-          <p className="home-pricing-cell">{tier.operated}</p>
-        </div>
-      ))}
+    <div className="home-pricing">
+      {tiers.map((tier, i) => {
+        const bracket = brackets.find((b) => b.after === i);
+        return (
+          <Fragment key={tier.name}>
+            <TierColumn tier={tier} />
+            {bracket ? (
+              <p className="home-pricing-bracket">
+                <span>
+                  {/* Stacked on phones, the bracket can't show which tiers it
+                    spans, so it names them. */}
+                  <span className="home-pricing-bracket-tiers">{bracket.tiers}: </span>
+                  {bracket.label}
+                </span>
+              </p>
+            ) : null}
+          </Fragment>
+        );
+      })}
     </div>
   );
 }
