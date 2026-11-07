@@ -395,57 +395,49 @@ export default function HomePage() {
 
       <section className="home-section">
         <div className="home-container">
-          <SectionHeader id="code" title="Install it in your backend, query it from anywhere">
-            <Text as="p" display="block" type="large" color="secondary" weight="normal">
-              Define tables and permissions in TypeScript and mount Jazz in your server. Then query
-              from route handlers, or from any component as simple reactive state. Writes show up at
-              once and sync in the background.{" "}
-              <AppLink href="/examples" className="font-medium">
-                More examples and benchmarks →
-              </AppLink>
-            </Text>
-          </SectionHeader>
-          <div className="home-code-grid mt-6">
-            {/* Phones and tablets: one window with every file. */}
-            <CodeWindow
-              className="home-code-all"
-              files={[
-                { name: "api/todos/route.ts", language: "ts", code: routeCode },
-                { name: "schema.ts", language: "ts", code: schemaCode },
-                { name: "jazz.server.ts", language: "ts", code: serverCode },
-                { name: "jazz/[...path]/route.ts", language: "ts", code: mountCode },
-                { name: "OpenTodos.tsx", language: "tsx", code: componentCode },
-              ]}
-            />
-            {/* Desktop: a 2x2 grid of the reads, the video, the schema and the backend. */}
-            <CodeWindow
-              className="home-code-cell home-code-reads"
-              files={[
-                { name: "api/todos/route.ts", language: "ts", code: routeCode },
-                { name: "OpenTodos.tsx", language: "tsx", code: componentCode },
-              ]}
-            />
-            <Figure className="home-video-figure">
-              <WalkthroughVideo
-                className="home-video"
-                src="/examples/videos/stage-plan-two-devices.mp4"
-                poster="/examples/videos/stage-plan-two-devices.jpg"
-                width={1280}
-                height={926}
-                aria-label="Two laptops running the StagePlan example, a crew chief and a crew member on the same show board. A task added or a card moved on one appears on the other, and a comment shows up live in the task the other has open. Edits made with the laptop's Wi-Fi turned off arrive when it is turned back on."
-              />
-            </Figure>
-            <CodeWindow
-              className="home-code-cell"
-              files={[{ name: "schema.ts", language: "ts", code: schemaCode }]}
-            />
-            <div className="home-code-cell home-code-stack">
+          <SectionHeader id="code" title="Install in your backend and define a schema" />
+          <div className="home-code-pair mt-6">
+            <div className="home-code-stack">
               <CodeWindow files={[{ name: "jazz.server.ts", language: "ts", code: serverCode }]} />
               <CodeWindow
                 files={[{ name: "jazz/[...path]/route.ts", language: "ts", code: mountCode }]}
               />
             </div>
+            <CodeWindow files={[{ name: "schema.ts", language: "ts", code: schemaCode }]} />
           </div>
+        </div>
+      </section>
+
+      <section className="home-section">
+        <div className="home-container">
+          <SectionHeader id="query" title="Query from anywhere" />
+          <div className="home-code-pair mt-6">
+            <CodeWindow files={[{ name: "api/todos/route.ts", language: "ts", code: routeCode }]} />
+            <CodeWindow files={[{ name: "OpenTodos.tsx", language: "tsx", code: componentCode }]} />
+          </div>
+        </div>
+      </section>
+
+      <section className="home-section">
+        <div className="home-container">
+          <SectionHeader id="demo" title="Your app, on your infra. Smooth." />
+          <Figure
+            className="home-video-figure mt-6"
+            after={
+              <AppLink href="/examples" className="home-video-link font-medium">
+                More examples and benchmarks →
+              </AppLink>
+            }
+          >
+            <WalkthroughVideo
+              className="home-video"
+              src="/examples/videos/stage-plan-two-devices.mp4"
+              poster="/examples/videos/stage-plan-two-devices.jpg"
+              width={1280}
+              height={926}
+              aria-label="Two laptops running the StagePlan example, a crew chief and a crew member on the same show board. A task added or a card moved on one appears on the other, and a comment shows up live in the task the other has open. Edits made with the laptop's Wi-Fi turned off arrive when it is turned back on."
+            />
+          </Figure>
         </div>
       </section>
 

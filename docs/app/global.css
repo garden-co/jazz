@@ -578,47 +578,26 @@ h6 {
 .home-statement {
   max-width: 56rem;
 }
-.home-code-grid {
+/* Two code windows side by side on desktop, stretched to the same height;
+   stacked on narrower screens. */
+.home-code-pair {
   display: grid;
   gap: var(--spacing-6);
 }
-.home-code-window.home-code-cell,
-.home-code-stack {
-  display: none;
-}
 @media (min-width: 1024px) {
-  /* Desktop: two by two. The video sets the top row's height; the reads
-     window matches it exactly (height 0 keeps it from growing the row) and
-     longer snippets scroll inside it. The bottom row shows its code in full. */
-  .home-code-grid {
+  .home-code-pair {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     align-items: stretch;
   }
-  .home-code-window.home-code-all {
-    display: none;
-  }
-  .home-code-window.home-code-cell {
-    display: flex;
-  }
-  /* The backend files stack in two panes that together match the schema's
-     height. */
-  .home-code-stack {
-    display: flex;
-    flex-direction: column;
-    gap: var(--spacing-6);
-  }
-  .home-code-stack > .home-code-window {
-    flex: 1 1 auto;
-  }
-  .home-code-grid > .home-code-reads {
-    height: 0;
-    min-height: 100%;
-  }
-  .home-code-grid > .home-code-reads .home-code {
-    flex: 1 1 auto;
-    min-height: 0;
-    overflow: auto;
-  }
+}
+/* Two panes stacked in one column, together as tall as their neighbour. */
+.home-code-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-6);
+}
+.home-code-stack > .home-code-window {
+  flex: 1 1 auto;
 }
 .home-code-window {
   display: flex;
