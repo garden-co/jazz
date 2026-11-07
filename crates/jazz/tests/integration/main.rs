@@ -143,6 +143,8 @@ mod same_version_bundles;
 mod schema_activation;
 #[path = "../schema_renames.rs"]
 mod schema_renames;
+#[path = "../self_table_policy_watches.rs"]
+mod self_table_policy_watches;
 #[path = "../serializable_relay.rs"]
 mod serializable_relay;
 #[path = "../serializable_sqlite.rs"]
