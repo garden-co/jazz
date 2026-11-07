@@ -466,7 +466,7 @@ export default function HomePage() {
 
       <section className="home-section home-section-continued">
         <div className="home-container">
-          <SectionHeader id="demo" step={3} title="Build almost any kind of app, on your infra." />
+          <SectionHeader id="demo" step={3} title="Build any kind of app, on your infra." />
           <div className="mt-6">
             <ExampleReel items={reelItems} moreHref="/examples" />
           </div>
