@@ -69,7 +69,7 @@
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org/",
-    "tag": "alpha"
+    "tag": "latest"
   },
   "scripts": {
     "build": "bob build",

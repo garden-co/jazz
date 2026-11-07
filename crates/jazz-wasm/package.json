@@ -25,7 +25,7 @@
   "types": "pkg/jazz_wasm.d.ts",
   "publishConfig": {
     "access": "public",
-    "tag": "alpha"
+    "tag": "latest"
   },
   "scripts": {
     "build": "node ../../dev/artifacts/build.mjs wasm release",
