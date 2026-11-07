@@ -154,7 +154,7 @@ Messages, with their postcard variant tags:
 | 14  | `SchemaAdmission`    | server → client | That version's admission changed (§8.9)                           |
 | 15  | `Stored`             | relay → session | A relay holds the session's commit and uploads it (§8.3)          |
 | 16  | `Join`               | client → server | Open: the session's version and the catalogue it keeps (§8.9)     |
-| 17  | `Catalogue`          | server → client | Admitted versions, stored names and lens cells (§8.10)            |
+| 17  | `Catalogue`          | server → client | Admitted versions, stored names, lens cells, defaults (§8.10)     |
 | 18  | `Welcome`            | server → client | The answer to `Join`: admission and catalogue (§8.9, §8.10)       |
 | 19  | `ConnectionSettled`  | server → client | The position the whole connection is settled through (§8.4)       |
 | 20  | `Holds`              | server → client | Rows a live read holds: all with its opening, then changes (§8.4) |
@@ -768,6 +768,11 @@ catalogue.
   table, its name and stored name and, per column, its name and stored name.
 - A `CatalogueCell` is a stored column a lens fills: a copy of stored column
   `source`, or a dropped column's backwards default, from version `since` on.
+- A `CatalogueDefault` is the default a stored column was added with
+  (`ADD COLUMN ... DEFAULT`), which rows written before it read. A lens's
+  default for a column it adds is in no schema, so a replica that mirrors the
+  version adds the column with this one and reads old rows as the authority
+  does.
 - `namespace` is the authority's, once the sender knows it. Table and column
   identities are UUIDs derived from it and the stored names, so the authority
   mints them and replicas only mirror them. An authority mints its namespace

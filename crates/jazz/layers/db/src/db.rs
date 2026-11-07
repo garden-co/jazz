@@ -3452,6 +3452,7 @@ impl Inner {
         namespace: Option<[u8; 16]>,
         versions: Vec<sync::CatalogueVersion>,
         cells: Vec<sync::CatalogueCell>,
+        defaults: Vec<sync::CatalogueDefault>,
         confirmed: &[([u8; 16], [u8; 16])],
     ) -> Result<bool, Error> {
         let known = self.namespace()?;
@@ -3462,7 +3463,7 @@ impl Inner {
         }
         let mirrored = !versions.is_empty();
         if mirrored {
-            self.mirror_versions(versions, cells)?;
+            self.mirror_versions(versions, cells, defaults)?;
         }
         let learned = known.is_none() && namespace.is_some();
         if let (true, Some(namespace)) = (learned, namespace) {
@@ -3487,6 +3488,7 @@ impl Inner {
         &mut self,
         versions: Vec<sync::CatalogueVersion>,
         cells: Vec<sync::CatalogueCell>,
+        defaults: Vec<sync::CatalogueDefault>,
     ) -> Result<(), Error> {
         let (physical, names, admitted) = (
             self.physical.clone(),
@@ -3495,7 +3497,7 @@ impl Inner {
         );
         let tags = self.names.tags().snapshot();
         begin_savepoint(&self.conn, "jazz_mirror")?;
-        let mirrored = self.mirror_versions_steps(versions, cells);
+        let mirrored = self.mirror_versions_steps(versions, cells, defaults);
         let ended = end_savepoint(&self.conn, "jazz_mirror", mirrored.is_ok());
         if let Err(error) = mirrored.and(ended) {
             self.physical = physical;
@@ -3516,10 +3518,55 @@ impl Inner {
         Ok(())
     }
 
+    /// Give each column of mirrored `target` this store does not store yet
+    /// the default its upstream added it with: a lens's default for a
+    /// column it adds is in no schema, and rows written before the column
+    /// read it (as on the authority) only if the `ADD COLUMN` gives it.
+    fn add_with_upstream_defaults(
+        &self,
+        target: &mut Schema,
+        defaults: &[sync::CatalogueDefault],
+    ) -> Result<(), Error> {
+        if defaults.is_empty() {
+            return Ok(());
+        }
+        // An enum default arrives as its tag: the variants are tagged first
+        // (as `write_admission` would), so the tag reads as its name.
+        self.names.mint(&self.conn, target)?;
+        for table in target.tables.values_mut() {
+            let stored = self.physical.tables.get(&table.stored);
+            for column in &mut table.columns {
+                if stored.is_some_and(|stored| stored.column(&column.stored).is_some()) {
+                    continue;
+                }
+                let Some(default) = defaults
+                    .iter()
+                    .find(|d| d.table == table.stored && d.column == column.stored)
+                else {
+                    continue;
+                };
+                let cell = Sql::from(&default.default);
+                let value = crate::values::column_from_sql(column, cell.as_ref(), &self.chunks)?
+                    .ok_or_else(|| {
+                        Error::new(
+                            ErrorCode::Schema,
+                            format!(
+                                "the upstream's default for {}.{} is not a {:?}",
+                                table.name, column.name, column.ty
+                            ),
+                        )
+                    })?;
+                column.default = Some(value);
+            }
+        }
+        Ok(())
+    }
+
     fn mirror_versions_steps(
         &mut self,
         versions: Vec<sync::CatalogueVersion>,
         cells: Vec<sync::CatalogueCell>,
+        defaults: Vec<sync::CatalogueDefault>,
     ) -> Result<(), Error> {
         use crate::names::{LensCell, LensCellRule};
         let cells: Vec<LensCell> = cells
@@ -3574,7 +3621,8 @@ impl Inner {
             } else {
                 schema
             };
-            let target = Schema::stored_as(&jazz, &names, self.names.tags());
+            let mut target = Schema::stored_as(&jazz, &names, self.names.tags());
+            self.add_with_upstream_defaults(&mut target, &defaults)?;
             // A copy is filled once, when its version is first admitted.
             let fills = if fresh.contains(&version) {
                 cells

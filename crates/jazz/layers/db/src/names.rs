@@ -34,9 +34,11 @@ use crate::values::{
 ///   storing it is first admitted: its value type (as JSON; a stored column
 ///   never changes type, so a column added again under a name some earlier
 ///   version stored continues that stored column only with this type, see
-///   [`Names::resolve`]), and whether it is a branch column (SPEC 4,
-///   INV-BVIEW-19) with the default a row written without one is keyed as
-///   (`has_dflt` 0: none). A table is listed with `col` '' once admitted.
+///   [`Names::resolve`]), whether it is a branch column (SPEC 4,
+///   INV-BVIEW-19), and the default its `ADD COLUMN` gave (`has_dflt` 0:
+///   none): what rows written before it read, and what a branch column's
+///   rows written without one are keyed as. A table is listed with `col`
+///   '' once admitted.
 ///   Every version admitted to the file, in any session, must key rows the
 ///   same way.
 /// - `_jazz_lens_cells`: stored columns that lenses fill in rows inserted
@@ -257,6 +259,10 @@ pub(crate) struct Names {
     lens_cells: Vec<LensCell>,
     /// By stored table: its stored branch columns and their defaults.
     branches: BTreeMap<String, BTreeMap<String, Option<Sql>>>,
+    /// By stored table, then stored column: the default its `ADD COLUMN`
+    /// gave, which rows written before it read. A replica mirrors it from
+    /// its upstream (see [`Names::stored_defaults`]).
+    defaults: BTreeMap<String, BTreeMap<String, Sql>>,
     /// By stored table, then stored column: its value type. Nested, so a
     /// lookup by borrowed names allocates nothing (images look up every
     /// cell's type).
@@ -375,7 +381,14 @@ impl Names {
                 continue;
             }
             if branch {
-                columns.insert(column.clone(), has_default.then_some(default));
+                columns.insert(column.clone(), has_default.then_some(default.clone()));
+            }
+            if has_default {
+                names
+                    .defaults
+                    .entry(table.clone())
+                    .or_default()
+                    .insert(column.clone(), default);
             }
             let ty = ty.ok_or_else(|| bad("column without a type in _jazz_stored_columns"))?;
             let ty =
@@ -638,8 +651,14 @@ impl Names {
             let Some(ty) = column.ty else {
                 continue;
             };
-            if let Some(default) = column.branch {
-                branches.insert(column.column.clone(), default);
+            if column.branch {
+                branches.insert(column.column.clone(), column.default.clone());
+            }
+            if let Some(default) = column.default {
+                self.defaults
+                    .entry(column.table.clone())
+                    .or_default()
+                    .insert(column.column.clone(), default);
             }
             self.types
                 .entry(column.table)
@@ -650,8 +669,8 @@ impl Names {
     }
 
     /// `schema`'s tables and stored columns not recorded yet: each new
-    /// table (as `col` ''), and each new column with its type and, for a
-    /// branch column, its default.
+    /// table (as `col` ''), and each new column with its type, whether it
+    /// is a branch column, and the default it is added with.
     fn new_stored_columns(&self, schema: &Schema) -> Result<Vec<NewStoredColumn>, Error> {
         let mut new = Vec::new();
         for table in schema.tables.values() {
@@ -660,7 +679,8 @@ impl Names {
                     table: table.stored.clone(),
                     column: String::new(),
                     ty: None,
-                    branch: None,
+                    branch: false,
+                    default: None,
                 });
             }
             let branch = branch_columns(table);
@@ -668,14 +688,20 @@ impl Names {
                 if self.stored_type(&table.stored, &column.stored).is_some() {
                     continue;
                 }
+                let default = match branch.get(column.stored.as_str()) {
+                    Some(column) => branch_default(column)?,
+                    // As `Schema::union` adds it (an enum default is its tag).
+                    None => match &column.default {
+                        Some(value) => Some(column.cell_sql(value)?.unwrap_or(Sql::Null)),
+                        None => None,
+                    },
+                };
                 new.push(NewStoredColumn {
                     table: table.stored.clone(),
                     column: column.stored.clone(),
                     ty: Some(column.stored_type()),
-                    branch: branch
-                        .get(column.stored.as_str())
-                        .map(|column| branch_default(column))
-                        .transpose()?,
+                    branch: branch.contains_key(column.stored.as_str()),
+                    default,
                 });
             }
         }
@@ -699,6 +725,18 @@ impl Names {
             }
         }
         Ok(())
+    }
+
+    /// Every stored column added with a default, as (stored table, stored
+    /// column, default): an upstream sends them with its catalogue, so a
+    /// replica that mirrors a version adds its columns as the upstream did
+    /// (a lens's default for a column it adds travels nowhere else).
+    pub(crate) fn stored_defaults(&self) -> impl Iterator<Item = (&str, &str, &Sql)> {
+        self.defaults.iter().flat_map(|(table, columns)| {
+            columns
+                .iter()
+                .map(move |(column, default)| (table.as_str(), column.as_str(), default))
+        })
     }
 
     /// The value type of stored column `column` of stored table `table`,
@@ -1345,12 +1383,13 @@ fn write_names(conn: &Connection, n: i64, names: &StoredNames) -> Result<(), Err
 }
 
 /// A stored table (`column` '', no type) or column to record (see
-/// [`Names::new_stored_columns`]); `branch` is a branch column's default.
+/// [`Names::new_stored_columns`]), with the default it is added with.
 struct NewStoredColumn {
     table: String,
     column: String,
     ty: Option<ValueType>,
-    branch: Option<Option<Sql>>,
+    branch: bool,
+    default: Option<Sql>,
 }
 
 fn write_stored_columns(conn: &Connection, columns: &[NewStoredColumn]) -> Result<(), Error> {
@@ -1373,15 +1412,14 @@ fn write_stored_columns(conn: &Connection, columns: &[NewStoredColumn]) -> Resul
                 })
             })
             .transpose()?;
-        let default = column.branch.clone().flatten();
         insert
             .execute(rusqlite::params![
                 column.table,
                 column.column,
                 ty,
-                column.branch.is_some(),
-                default.is_some(),
-                default.unwrap_or(Sql::Null)
+                column.branch,
+                column.default.is_some(),
+                column.default.clone().unwrap_or(Sql::Null)
             ])
             .map_err(storage)?;
     }

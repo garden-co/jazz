@@ -1454,12 +1454,15 @@ pub enum SyncMessage {
 /// this upstream. `confirmed`: the versions whose names are the
 /// authority's, each with its names' digest (every version the authority
 /// admitted; on a relay, those its upstream confirmed). Only a confirmed
-/// version's tables and columns have an identity.
+/// version's tables and columns have an identity. `defaults`: each stored
+/// column the sender added with a default, so a version's columns are
+/// added with the defaults its lenses gave them.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CatalogueUpdate {
     pub namespace: Option<[u8; 16]>,
     pub versions: Vec<CatalogueVersion>,
     pub cells: Vec<CatalogueCell>,
+    pub defaults: Vec<CatalogueDefault>,
     pub confirmed: Vec<([u8; 16], [u8; 16])>,
 }
 
@@ -1494,6 +1497,16 @@ pub struct CatalogueCell {
     pub column: String,
     pub since: [u8; 16],
     pub source: Option<String>,
+    pub default: Cell,
+}
+
+/// The default stored column `column` of stored table `table` was added
+/// with (`ADD COLUMN ... DEFAULT`): what rows written before it read. A
+/// lens's default for a column it adds travels only here.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CatalogueDefault {
+    pub table: String,
+    pub column: String,
     pub default: Cell,
 }
 
@@ -6558,6 +6571,15 @@ impl Inner {
                 }
             })
             .collect();
+        let defaults = self
+            .names
+            .stored_defaults()
+            .map(|(table, column, default)| CatalogueDefault {
+                table: table.to_owned(),
+                column: column.to_owned(),
+                default: Cell::from(default.clone()),
+            })
+            .collect();
         let known_catalogue = self.sessions[index]
             .known_catalogue
             .get_or_insert_with(HashMap::new);
@@ -6568,6 +6590,7 @@ impl Inner {
             namespace,
             versions,
             cells,
+            defaults,
             confirmed,
         }))
     }
@@ -8686,9 +8709,12 @@ impl Db {
                         namespace,
                         versions,
                         cells,
+                        defaults,
                         confirmed,
                     }) => {
-                        match inner.mirror_catalogue(namespace, versions, cells, &confirmed) {
+                        match inner
+                            .mirror_catalogue(namespace, versions, cells, defaults, &confirmed)
+                        {
                             // Versions it took rebuilt the store's
                             // schema: its pending commits replay on top.
                             Ok(mirrored) => {
