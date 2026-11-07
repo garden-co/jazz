@@ -342,6 +342,74 @@ it("checks without moving or renaming anything, failing while legacy files remai
   await validateProject({ schemaDir: root, check: true });
 });
 
+it("moves a migration in alpha.59's DSL to legacy/ without loading it", async () => {
+  const { root, migrationsDir, legacyName, hashes } = await legacyFixture();
+  // As the alpha.59 CLI wrote it: \`s.defineMigration\` and \`s.add\` are gone.
+  await writeFile(
+    join(migrationsDir, legacyName),
+    `import { schema as s } from ${JSON.stringify(indexPath)};
+export default s.defineMigration({
+  migrate: { notes: { body: s.add.string({ default: "" }) } },
+  fromHash: "${short(hashes.oldFrom)}",
+  toHash: "${short(hashes.oldTo)}",
+  from: { notes: s.table({ title: s.string() }, {}) },
+  to: { notes: s.table({ body: s.string() }, {}) },
+});
+`,
+  );
+  await validateProject({ schemaDir: root });
+  expect(existsSync(join(migrationsDir, legacyName))).toBe(false);
+  expect(existsSync(join(migrationsDir, "legacy", legacyName))).toBe(true);
+  await validateProject({ schemaDir: root, check: true });
+});
+
+/** An alpha.59 project whose snapshots hold its old schema and the one
+ * schema.ts has now, both named by BLAKE3 hash, with the legacy migration
+ * between them. */
+async function legacyFixtureWithCurrentSnapshot() {
+  const project = await legacyFixture();
+  const after = s.defineApp({ notes: s.table({ body: s.string() }, {}) }, { migrations: "none" });
+  const currentLegacy = `20260925T000001-${short(project.hashes.oldTo)}.json`;
+  await writeFile(join(project.snapshots, currentLegacy), JSON.stringify(after.wasmSchema));
+  return {
+    ...project,
+    currentLegacy,
+    currentSnapshot: `20260925T000001-${short(project.hashes.toHash)}.json`,
+  };
+}
+
+it("moves the snapshots only legacy migrations led from to legacy/snapshots/", async () => {
+  const { root, migrationsDir, snapshots, legacySnapshot, currentSnapshot, legacyName } =
+    await legacyFixtureWithCurrentSnapshot();
+  const { warnings } = await validateProject({ schemaDir: root });
+  expect(existsSync(join(migrationsDir, "legacy", legacyName))).toBe(true);
+  // Only schema.ts's snapshot stays, so the history has one root.
+  expect(await readdir(snapshots)).toEqual([currentSnapshot]);
+  expect(await readdir(join(migrationsDir, "legacy", "snapshots"))).toEqual([legacySnapshot]);
+  expect(warnings.some((warning) => warning.startsWith(`Moved snapshot ${legacySnapshot}`))).toBe(
+    true,
+  );
+  expect((await importMigrations(migrationsDir)).schemas).toHaveLength(1);
+  await validateProject({ schemaDir: root, check: true });
+});
+
+it("lists the snapshots it would move when checking", async () => {
+  const { root, legacySnapshot, currentLegacy, currentSnapshot } =
+    await legacyFixtureWithCurrentSnapshot();
+  await expect(validateProject({ schemaDir: root, check: true })).rejects.toThrow(
+    `move snapshot ${legacySnapshot} to legacy/snapshots/; rename snapshot ${currentLegacy} to ${currentSnapshot}`,
+  );
+});
+
+it("keeps a snapshot a current migration leads from", async () => {
+  const { root, file, snapshots, snapshot, currentSnapshot } =
+    await legacyFixtureWithCurrentSnapshot();
+  const { source } = await fixture();
+  await writeFile(file, source);
+  await validateProject({ schemaDir: root });
+  expect((await readdir(snapshots)).sort()).toEqual([snapshot, currentSnapshot].sort());
+});
+
 it("refuses to publish legacy migrations and points at validate", async () => {
   const { root, legacyName, fetchMock } = await legacyFixture();
   await expect(deploy({ ...options, schemaDir: root })).rejects.toThrow(
