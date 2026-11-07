@@ -1881,9 +1881,7 @@ async function retireLegacyMigrations(
       await mkdir(legacySnapshots, { recursive: true });
       await assertNoSymlinkComponents(legacySnapshots);
     }
-    const runsOn = plan.startFrom
-      ? `Run \`jazz-tools migrations create\` before the app starts: no snapshot is for schema.ts, so the app needs a migration from ${plan.startFrom}, the newest schema its data was written in.`
-      : "The app runs on schema.ts as it is.";
+    const runsOn = plan.startFrom ? "" : " The app runs on schema.ts as it is.";
     const warnings: string[] = [];
     for (const move of moves) {
       if (kept.has(move.fileName)) {
@@ -1894,7 +1892,7 @@ async function retireLegacyMigrations(
       } else {
         await rename(move.from, move.to);
         warnings.push(
-          `Moved ${move.fileName} to ${LEGACY_MIGRATIONS_DIR}/: it ${LEGACY_REASON}, so it no longer applies. ${runsOn} Delete ${LEGACY_MIGRATIONS_DIR}/ once you no longer need it, or exclude it from type checking.`,
+          `Moved ${move.fileName} to ${LEGACY_MIGRATIONS_DIR}/: it ${LEGACY_REASON}, so it no longer applies.${runsOn} Delete ${LEGACY_MIGRATIONS_DIR}/ once you no longer need it, or exclude it from type checking.`,
         );
       }
     }
@@ -1923,6 +1921,11 @@ async function retireLegacyMigrations(
           `Renamed snapshot ${from} to ${to}: snapshots are named by their SHA-256 schema hash since alpha.60.`,
         );
       }
+    }
+    if (plan.startFrom) {
+      warnings.push(
+        `Run \`jazz-tools migrations create\` before the app starts: no snapshot is for schema.ts, so the app needs a migration from ${plan.startFrom}, the newest snapshot.`,
+      );
     }
     return warnings;
   });

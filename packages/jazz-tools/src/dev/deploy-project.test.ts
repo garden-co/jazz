@@ -1,5 +1,6 @@
 import {
   mkdtemp,
+  copyFile,
   mkdir,
   writeFile,
   readFile,
@@ -256,10 +257,14 @@ it("moves migrations written with pre-SHA-256 schema hashes to legacy/", async (
     ),
   ).toBe(true);
   expect((await importMigrations(migrationsDir)).migrations).toEqual([]);
-  // Validating again finds nothing more to move.
+  // Validating again finds nothing more to move (the retirement's
+  // `migrations create` reminder comes with the moves).
   expect((await validateProject({ schemaDir: root })).warnings).toEqual(
     result.warnings.filter(
-      (warning) => !warning.includes("Moved") && !warning.includes("Renamed snapshot"),
+      (warning) =>
+        !warning.includes("Moved") &&
+        !warning.includes("Renamed snapshot") &&
+        !warning.includes("migrations create"),
     ),
   );
 });
@@ -271,10 +276,21 @@ it("says a migration from the newest snapshot is needed when none is for schema.
   );
   const { warnings } = await validateProject({ schemaDir: root });
   const moved = warnings.find((warning) => warning.startsWith(`Moved ${legacyName}`));
-  expect(moved).toContain(
-    `Run \`jazz-tools migrations create\` before the app starts: no snapshot is for schema.ts, so the app needs a migration from ${snapshot}`,
-  );
   expect(moved).not.toContain("The app runs on schema.ts as it is");
+  expect(warnings.filter((warning) => warning.includes("migrations create"))).toEqual([
+    `Run \`jazz-tools migrations create\` before the app starts: no snapshot is for schema.ts, so the app needs a migration from ${snapshot}, the newest snapshot.`,
+  ]);
+});
+
+it("says a migration is needed when the legacy migration is already in legacy/", async () => {
+  const { root, migrationsDir, legacyName, snapshot } = await legacyFixture();
+  await mkdir(join(migrationsDir, "legacy"), { recursive: true });
+  await copyFile(join(migrationsDir, legacyName), join(migrationsDir, "legacy", legacyName));
+  const { warnings } = await validateProject({ schemaDir: root });
+  expect(warnings.some((warning) => warning.startsWith(`Removed ${legacyName}`))).toBe(true);
+  expect(warnings.some((warning) => warning.includes(`needs a migration from ${snapshot}`))).toBe(
+    true,
+  );
 });
 
 it("keeps the newest committed snapshot, not one without a timestamp", async () => {
