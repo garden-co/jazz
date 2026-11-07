@@ -13375,12 +13375,7 @@ impl Db {
         if let Some(tx) = open_tx {
             let rows = self
                 .tx_ref(tx)
-                .all_prepared_at(
-                    &prepared,
-                    opts.read_view.include_deleted,
-                    identity,
-                    opts.tier,
-                )
+                .all_prepared_with_options(&prepared, identity, &opts, coverage)
                 .await?;
             return Ok(result(rows));
         }
