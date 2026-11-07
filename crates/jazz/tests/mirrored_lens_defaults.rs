@@ -201,9 +201,9 @@ fn local_rows(db: &Db) -> Vec<(Option<Value>, Option<Value>, Option<Value>)> {
     rows.into_iter().map(|(_, row)| row).collect()
 }
 
-/// The `ADD COLUMN` default (as SQL) of `currency` in the file at `path`,
-/// in the table and its history table.
-fn currency_defaults(path: &Path) -> Vec<(String, Option<String>)> {
+/// The `ADD COLUMN` default (as SQL) of each column whose name starts with
+/// `column` in the file at `path`, in the table and its history table.
+fn ddl_defaults(path: &Path, column_prefix: &str) -> Vec<(String, Option<String>)> {
     let conn = rusqlite::Connection::open(path).unwrap();
     let tables: Vec<String> = conn
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE '\\_%' ESCAPE '\\'")
@@ -224,7 +224,7 @@ fn currency_defaults(path: &Path) -> Vec<(String, Option<String>)> {
             .unwrap();
         for column in columns {
             let (column, default) = column.unwrap();
-            if column.starts_with("currency") {
+            if column.starts_with(column_prefix) {
                 out.push((table.clone(), default));
             }
         }
@@ -266,9 +266,13 @@ fn a_local_first_store_reloaded_onto_v2_reads_the_lens_default_in_its_v1_rows() 
         drop(tab);
     }
     // The v2 backend: the server admits v2 with its lens, as a published
-    // bundle does, while the v1 tab stays open and writes once more.
+    // bundle does, and restarts (so what it sends comes from its file),
+    // while the v1 tab stays open and writes once more.
+    {
+        let server = authority_at(&core);
+        block_on(server.admit_schema_with_lenses(v2(), &[v1_to_v2()])).unwrap();
+    }
     let server = authority_at(&core);
-    block_on(server.admit_schema_with_lenses(v2(), &[v1_to_v2()])).unwrap();
     {
         let tab = v1_tab(&browser);
         let _link = link(&tab, &server);
@@ -276,14 +280,18 @@ fn a_local_first_store_reloaded_onto_v2_reads_the_lens_default_in_its_v1_rows() 
         insert(&tab, 3, &[("title", "c")]);
         pump(&server, &[&tab]);
     }
-    // It mirrored v2 from the server, adding `currency` as the server did.
-    let eur = Some("'EUR'".to_owned());
-    assert_eq!(
-        currency_defaults(&browser),
+    // It mirrored v2 from the server, adding `currency` as the server did,
+    // and `status` with the tag its own `paid` has.
+    let both = |sql: &str| {
         vec![
-            ("expenses".to_owned(), eur.clone()),
-            ("expenses__h".to_owned(), eur.clone())
+            ("expenses".to_owned(), Some(sql.to_owned())),
+            ("expenses__h".to_owned(), Some(sql.to_owned())),
         ]
+    };
+    assert_eq!(ddl_defaults(&browser, "currency"), both("'EUR'"));
+    assert_eq!(
+        ddl_defaults(&browser, "status"),
+        ddl_defaults(&core, "status")
     );
     let tab = v2_tab(&browser);
     let expected = vec![

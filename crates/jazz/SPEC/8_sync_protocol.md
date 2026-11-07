@@ -758,7 +758,8 @@ keep and retry pending writes but cannot accept them or make them `Global`.
 
 A replica's `Join` lists in `known` the schema versions whose stored names it
 keeps, each with `names_digest` of those names. The server answers in its
-`Welcome` with the catalogue `{ namespace, versions, cells, confirmed }`,
+`Welcome` with the catalogue `{ namespace, versions, cells, defaults,
+confirmed }` (in that order: the wire is positional),
 carrying every admitted version the replica lacks or names otherwise, in
 admission order, ahead of any row; and again, as a `Catalogue` of the same
 fields, whenever its store admits a version or learns more of its authority's
@@ -768,11 +769,14 @@ catalogue.
   table, its name and stored name and, per column, its name and stored name.
 - A `CatalogueCell` is a stored column a lens fills: a copy of stored column
   `source`, or a dropped column's backwards default, from version `since` on.
-- A `CatalogueDefault` is the default a stored column was added with
-  (`ADD COLUMN ... DEFAULT`), which rows written before it read. A lens's
-  default for a column it adds is in no schema, so a replica that mirrors the
-  version adds the column with this one and reads old rows as the authority
-  does.
+- A `CatalogueDefault` is the default a stored column of the versions sent
+  was added with (`ADD COLUMN ... DEFAULT`, read from the sender's DDL), which
+  rows written before it read. A lens's default for a column it adds is in no
+  schema, so a replica that mirrors the version adds a column it lacks with
+  this one and reads old rows as the authority does. It is a value, an enum
+  default by its variant's name (tags are each store's own, §10.8). A default
+  that is not of the column's type, or not one of its variants, is left out:
+  the column is added as it would be without it, and the catalogue applies.
 - `namespace` is the authority's, once the sender knows it. Table and column
   identities are UUIDs derived from it and the stored names, so the authority
   mints them and replicas only mirror them. An authority mints its namespace
