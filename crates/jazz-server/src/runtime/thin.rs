@@ -155,9 +155,13 @@ impl ThinSession {
     }
 }
 
+/// A core error's answer. Its `code` is the stable snake_case
+/// [`ErrorCode::as_str`] name that the native bindings also expose as
+/// `error.code`, so a thin and a local-first client report the same code for
+/// the same error (`transaction_conflict`, `storage`, ...).
 fn error_body(error: &Error) -> ThinBody {
     ThinBody::Error {
-        code: format!("{:?}", error.code),
+        code: error.code.as_str().to_owned(),
         message: error.message.clone(),
     }
 }
@@ -1251,5 +1255,20 @@ mod write_key_tests {
         ] {
             assert!(key(node).is_err(), "{node:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod error_body_tests {
+    use super::*;
+
+    #[test]
+    fn a_core_error_carries_its_stable_snake_case_code() {
+        let body = error_body(&Error::new(ErrorCode::TransactionConflict, "lost a race"));
+        assert!(
+            matches!(&body, ThinBody::Error { code, message }
+                if code == "transaction_conflict" && message == "lost a race"),
+            "{body:?}"
+        );
     }
 }

@@ -74,6 +74,8 @@ type TabPeer = {
   transportWaitAbort: AbortController;
   /** True only for a port transferred through authenticated Inspector control. */
   inspectorAttachment: boolean;
+  /** The page lock this tab named, once the worker waits on it (`watchTabLiveness`). */
+  watchedLivenessLock: string | null;
   pendingInspectorBootstraps: Set<() => void>;
   inspectorSubscriptions: Map<number, number>;
   inspectorWrites: Set<TxId>;
@@ -1016,7 +1018,6 @@ async function connectTab(
     assertAdmission();
     // No await between the final fence, peer publication and listener handoff.
     attachTab(context, message.tabId, port, message.options.author);
-    if (message.livenessLock) watchTabLiveness(context, message.tabId, message.livenessLock);
     releaseClaim();
     finishBootstrap();
     post(port, { type: "runtime-ready" });
@@ -1458,6 +1459,7 @@ function attachTab(
     flushObserved: false,
     transportWaitAbort: new AbortController(),
     inspectorAttachment,
+    watchedLivenessLock: null,
     pendingInspectorBootstraps: new Set(),
     inspectorSubscriptions: new Map(),
     inspectorWrites: new Set(),
@@ -1480,10 +1482,11 @@ function attachTab(
  * waiting for this store under another sign-in gets in. A frozen page still
  * holds its lock, and the waiting tab reports that after a while.
  */
-function watchTabLiveness(context: RuntimeContext, tabId: string, lock: string): void {
-  const peer = context.peers.get(tabId);
+function watchTabLiveness(peer: TabPeer, lock: string): void {
+  const { context, tabId } = peer;
   const locks = (globalThis.navigator as Navigator | undefined)?.locks;
-  if (!peer || !locks) return;
+  if (!locks || peer.watchedLivenessLock !== null) return;
+  peer.watchedLivenessLock = lock;
   locks
     .request(lock, { signal: peer.transportWaitAbort.signal }, () => {
       if (context.peers.get(tabId) !== peer) return;
@@ -1499,6 +1502,10 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
   if (peer.context.peers.get(peer.tabId) !== peer) return;
   // Answer outside runtime, storage and transport queues: a healthy worker
   // can legitimately be waiting indefinitely for an upstream acknowledgement.
+  if (message.type === "liveness-lock") {
+    watchTabLiveness(peer, message.name);
+    return;
+  }
   if (message.type === "runtime-probe") {
     post(peer.port, {
       type: "runtime-pong",
