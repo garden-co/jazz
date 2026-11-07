@@ -4,7 +4,7 @@ import { Fragment, type ReactNode, useState } from "react";
 import { track } from "@vercel/analytics";
 import { Check, Copy } from "lucide-react";
 import { Icon } from "@astryxdesign/core/Icon";
-import { IconButton } from "@astryxdesign/core/IconButton";
+import { Button } from "@astryxdesign/core/Button";
 import { copyEvent } from "@/lib/copy-analytics";
 
 const placeholder = "[describe your project first, or drop into an ongoing chat]";
@@ -96,15 +96,13 @@ export function AgentPrompt({ quickstart, display }: { quickstart: string; displ
 
   return (
     <div className="home-agent-prompt-wrap">
-      <p className="home-agent-prompt-placeholder">{placeholder}</p>
-      <div className="home-agent-prompt">
-        <pre tabIndex={0} aria-label="Agent quickstart" data-agent-quickstart="">
-          {highlightMarkdown(display)}
-        </pre>
+      <div className="home-agent-prompt-bar">
+        <p className="home-agent-prompt-placeholder">{placeholder}</p>
         <div className="home-agent-prompt-copy">
-          <IconButton
-            label={copied ? "Copied" : "Copy quickstart"}
-            variant="ghost"
+          <Button
+            label={copied ? "Copied" : "Copy"}
+            aria-label={copied ? "Copied" : "Copy quickstart"}
+            variant="primary"
             size="sm"
             icon={<Icon icon={copied ? Check : Copy} size="sm" />}
             onClick={() => {
@@ -117,6 +115,11 @@ export function AgentPrompt({ quickstart, display }: { quickstart: string; displ
             }}
           />
         </div>
+      </div>
+      <div className="home-agent-prompt">
+        <pre tabIndex={0} aria-label="Agent quickstart" data-agent-quickstart="">
+          {highlightMarkdown(display)}
+        </pre>
       </div>
     </div>
   );

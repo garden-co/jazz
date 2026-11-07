@@ -1049,7 +1049,7 @@ h6 {
   max-height: 24rem;
   overflow: auto;
   margin: 0;
-  padding: var(--spacing-4) var(--spacing-12) var(--spacing-4) var(--spacing-4);
+  padding: var(--spacing-4);
   font-family: var(--font-family-code);
   font-size: 0.8125rem;
   line-height: 1.6;
@@ -1076,12 +1076,15 @@ h6 {
 .home-agent-prompt .md-url {
   color: var(--color-syntax-comment);
 }
+/* The placeholder line with the copy button beside it, above the prompt. */
+.home-agent-prompt-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-3);
+}
 .home-agent-prompt-copy {
-  position: absolute;
-  top: var(--spacing-2);
-  right: var(--spacing-2);
-  border-radius: var(--radius-element);
-  background-color: var(--color-background-card);
+  flex: none;
 }
 
 /* Blog index and posts (app/(home)/blog). */
