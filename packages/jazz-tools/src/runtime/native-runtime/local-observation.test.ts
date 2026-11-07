@@ -10,6 +10,7 @@ function fixture(result: unknown) {
   const observeLocalBatch = vi.fn((..._args: unknown[]) => result);
   const db = {
     observeLocalBatch,
+    all: vi.fn(() => Uint8Array.of(0)),
     setTickScheduler: vi.fn(),
     setNonDurableClient: vi.fn(),
     setSessionClaims: vi.fn(),
@@ -123,4 +124,101 @@ describe("local observation adapter", () => {
       await runtime.close();
     }
   });
+});
+
+describe("authenticated durable-owner observation admission", () => {
+  const session = (claims = { scope: "actual" }, user_id = "alice", account_id?: string) =>
+    JSON.stringify({ issuer: "urn:jazz:test", user_id, account_id, authMode: "external", claims });
+
+  function ownFixture() {
+    const f = fixture([empty()]);
+    const peer = { observeLocalBatch: vi.fn(() => [empty()]), close: vi.fn() };
+    const admit = vi.fn(() => peer);
+    Object.assign(f.db, { acceptOwnObservationSubscriber: admit });
+    return { ...f, peer, admit };
+  }
+
+  it("reuses one native owner admission without reinstalling observation-call claims", async () => {
+    const f = ownFixture();
+    try {
+      await f.runtime.query(query, session(), "local-only");
+      f.db.setSessionClaims.mockClear();
+      await f.runtime.observeLocalBatch([query], session());
+      await f.runtime.observeLocalBatch([query], session());
+      expect(f.admit).toHaveBeenCalledExactlyOnceWith();
+      expect(f.peer.observeLocalBatch).toHaveBeenCalledTimes(2);
+      expect(f.db.setSessionClaims).not.toHaveBeenCalled();
+      expect(f.db.observeLocalBatch).not.toHaveBeenCalled();
+      await f.runtime.close();
+      expect(f.peer.close).toHaveBeenCalledOnce();
+      await expect(f.runtime.observeLocalBatch([query], session())).rejects.toThrow("closed");
+      expect(f.admit).toHaveBeenCalledOnce();
+    } finally {
+      await f.runtime.close();
+    }
+  });
+
+  it.each(["identity", "account", "claims"])(
+    "refuses a changed %s without updating native registration",
+    async (kind) => {
+      const f = ownFixture();
+      try {
+        await f.runtime.query(query, session(), "local-only");
+        f.db.setSessionClaims.mockClear();
+        const altered =
+          kind === "identity"
+            ? session(undefined, "bob")
+            : kind === "account"
+              ? session(undefined, "alice", "00000000-0000-4000-8000-000000000002")
+              : session({ scope: "unadmitted" });
+        await expect(f.runtime.observeLocalBatch([query], altered)).rejects.toThrow(
+          /owner identity|installed owner claims/,
+        );
+        expect(f.admit).not.toHaveBeenCalled();
+        expect(f.db.setSessionClaims).not.toHaveBeenCalled();
+        expect(f.db.observeLocalBatch).not.toHaveBeenCalled();
+      } finally {
+        await f.runtime.close();
+      }
+    },
+  );
+
+  it.each(["before first observation", "after admission"])(
+    "does not restore withdrawn native scope %s",
+    async (when) => {
+      const f = ownFixture();
+      try {
+        await f.runtime.query(query, session(), "local-only");
+        if (when === "after admission") await f.runtime.observeLocalBatch([query], session());
+        f.db.setSessionClaims.mockClear();
+        f.peer.observeLocalBatch.mockImplementation(() => {
+          throw new Error("local observation admission claims changed");
+        });
+        await expect(f.runtime.observeLocalBatch([query], session())).rejects.toThrow(
+          "claims changed",
+        );
+        await expect(f.runtime.observeLocalBatch([query], session())).rejects.toThrow(
+          "claims changed",
+        );
+        expect(f.admit).toHaveBeenCalledExactlyOnceWith();
+        expect(f.db.setSessionClaims).not.toHaveBeenCalled();
+        expect(f.db.observeLocalBatch).not.toHaveBeenCalled();
+      } finally {
+        await f.runtime.close();
+      }
+    },
+  );
+});
+
+it("refuses a volatile follower without a generic observation fallback", async () => {
+  const { runtime, db } = fixture([empty()]);
+  runtime.setNonDurableClient();
+  try {
+    await expect(runtime.observeLocalBatch([query])).rejects.toThrow(
+      "durable owner is unavailable",
+    );
+    expect(db.observeLocalBatch).not.toHaveBeenCalled();
+  } finally {
+    await runtime.close();
+  }
 });

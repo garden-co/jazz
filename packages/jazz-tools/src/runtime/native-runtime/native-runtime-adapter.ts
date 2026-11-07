@@ -465,6 +465,8 @@ type NativeDb = {
     localNode: Uint8Array,
     localEpoch: bigint,
   ): Transport | Promise<Transport>;
+  /** Inherits native owner identity/live claims; takes no host scope arguments. */
+  acceptOwnObservationSubscriber?(): Transport;
   acceptSubscriber?(
     author: Uint8Array,
     claims: Record<string, unknown>,
@@ -1232,6 +1234,8 @@ export class NativeRuntimeAdapter implements Runtime {
       if (owner.localObservationRelay === relay) owner.localObservationRelay = null;
     };
   }
+  private ownObservationPeer: Transport | null = null;
+  private ownObservationAdmission: Promise<Transport> | null = null;
 
   async observeLocalBatch(
     queries: readonly string[],
@@ -1263,6 +1267,49 @@ export class NativeRuntimeAdapter implements Runtime {
       );
     const session = readSession(sessionJson);
     const context = this.nativeReadContext(session, undefined);
+    if (this === this.ownerRuntime && context.kind === "client-local" && session) {
+      if (session.backendAuthority || !sameBytes(session.identity, this.peerIdentity))
+        throw new Error("Local observation requires the admitted owner identity");
+      // Never restore cached JavaScript claims during observation. The native
+      // binding derives iss/sub from the admitted identity, both when the
+      // handshake installs provider-only claims and when reads include them.
+      // Compare that same projection while retaining every provider claim.
+      if (
+        !this.clientSessionClaimsKey ||
+        canonicalJson(session.claims) !==
+          canonicalJson(sessionClaims(JSON.parse(this.clientSessionClaimsKey), session))
+      )
+        throw new Error("Local observation requires the current installed owner claims");
+      if (!this.db.acceptOwnObservationSubscriber)
+        throw new Error(
+          "Native runtime lacks own observation admission; rebuild matching artifacts",
+        );
+      if (!this.ownObservationPeer) {
+        this.ownObservationAdmission ??= this.runWhenCoreIdle(() => {
+          if (this.closed) throw new Error("Native runtime is closed");
+          return this.db.acceptOwnObservationSubscriber!();
+        })
+          .then((peer) => {
+            if (this.closed) {
+              peer.close();
+              throw new Error("Native runtime is closed");
+            }
+            this.ownObservationPeer = peer;
+            return peer;
+          })
+          .finally(() => {
+            this.ownObservationAdmission = null;
+          });
+        await this.ownObservationAdmission;
+      }
+      if (this.closed || !this.ownObservationPeer) throw new Error("Native runtime is closed");
+      return this.observeLocalBatchForPeer(
+        this.ownObservationPeer,
+        queries,
+        session.claims,
+        this.schemaBytes,
+      );
+    }
     await this.ensureClientSessionClaims(session);
     await this.processPendingPeerActivityBeforeRead();
     return this.runWhenCoreIdle(() => {
@@ -1915,6 +1962,10 @@ export class NativeRuntimeAdapter implements Runtime {
     this.peerTransportWorkListeners.clear();
     this.localSettlementListeners.clear();
     this.pendingInboundServerFrames.length = 0;
+    const ownObservationPeer = this.ownObservationPeer;
+    this.ownObservationPeer = null;
+    if (ownObservationPeer)
+      void this.retirePeerTransport(ownObservationPeer).catch(reportAsyncRuntimeError);
     const serverTransport = this.serverTransport;
     this.serverTransport = null;
     if (serverTransport) {

@@ -1721,3 +1721,63 @@ fn a_remote_subscription_never_lists_pending_local_versions() {
     assert_eq!(rows_in(&drive(&links, read).unwrap()), 2);
     assert_eq!(titles(&server), ["changed", "pending"]);
 }
+
+/// A later native scope withdrawal, even before fresh observer admission, must
+/// not be overwritten by cached host claims; the old proof stays refused.
+#[test]
+fn own_observer_inherits_live_claims_and_refuses_withdrawn_submission_scope() {
+    let server = authority();
+    let alice = open(0x71);
+    alice
+        .set_session_claims(json!({"scope":"original"}))
+        .unwrap();
+    let up = alice.connect_upstream();
+    let down = server
+        .accept_subscriber(alice.author(), Default::default())
+        .unwrap();
+    pump(&[(&up, &down)]);
+    let write = alice
+        .insert("notes", &title("alice accepted"), &none())
+        .unwrap();
+    pump(&[(&up, &down)]);
+    block_on(alice.wait_for_write(&write, "global").unwrap()).unwrap();
+    let query = postcard::to_allocvec(&Query::from("notes")).unwrap();
+    let mut observer = alice.accept_own_observation_subscriber().unwrap();
+    let rows = observer
+        .observe_local_batch(vec![query.clone()], Some(json!({"scope":"original"})))
+        .unwrap();
+    assert_eq!(rows[0]["evidence"].as_array().unwrap().len(), 1);
+    assert_eq!(rows[0]["provenance"], json!(["local-submission"]));
+    observer.close();
+    alice
+        .set_session_claims(json!({"scope":"withdrawn"}))
+        .unwrap();
+    let mut fresh = alice.accept_own_observation_subscriber().unwrap();
+    let stale = fresh.observe_local_batch(vec![query.clone()], Some(json!({"scope":"original"})));
+    assert!(matches!(stale, Err(HostError::Engine(error)) if error.code == ErrorCode::NotObserved));
+    let current =
+        fresh.observe_local_batch(vec![query.clone()], Some(json!({"scope":"withdrawn"})));
+    assert!(
+        matches!(current, Err(HostError::Engine(error)) if error.code == ErrorCode::NotObserved)
+    );
+    fresh.close();
+    assert!(
+        matches!(fresh.observe_local_batch(vec![query], Some(json!({"scope":"withdrawn"}))), Err(HostError::Engine(error)) if error.code == ErrorCode::NotObserved)
+    );
+    block_on(alice.close()).unwrap();
+    assert!(alice.accept_own_observation_subscriber().is_err());
+}
+
+/// Bob cannot turn an authority or a volatile follower into an own-client
+/// observer. Both refusals occur before allocating a subscriber slot.
+#[test]
+fn own_observer_refuses_backend_and_volatile_followers() {
+    assert!(
+        matches!(authority().accept_own_observation_subscriber(), Err(HostError::Engine(error)) if error.code == ErrorCode::NotObserved)
+    );
+    let bob = open(0x72);
+    bob.set_non_durable_client();
+    assert!(
+        matches!(bob.accept_own_observation_subscriber(), Err(HostError::Engine(error)) if error.code == ErrorCode::NotObserved)
+    );
+}

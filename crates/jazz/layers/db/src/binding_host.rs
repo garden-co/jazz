@@ -2002,6 +2002,32 @@ impl Binding {
         }
     }
 
+    /// A local observer admitted by the already-authenticated owner. There is
+    /// deliberately no host identity, claims, bundle or policy-mode argument.
+    pub fn accept_own_observation_subscriber(&self) -> HostResult<Link> {
+        if self.trusted_backend {
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                "backend cannot select own-client observation",
+            )
+            .into());
+        }
+        let queues = WireQueues::default();
+        let transport = Box::new(WireTransportAdapter::current(QueueTransport {
+            queues: queues.clone(),
+        }));
+        let (subscriber, identity) = self.db.accept_own_observation_subscriber(transport)?;
+        Ok(Link {
+            binding: self.clone(),
+            queues,
+            kind: LinkKind::Subscriber {
+                id: Some(subscriber),
+                identity,
+            },
+            local: RefCell::default(),
+        })
+    }
+
     /// Serve a subscriber (another replica) as `identity` with `claims`.
     /// A store configured as a user refuses any other identity (see
     /// [`Db::accept_subscriber`]).

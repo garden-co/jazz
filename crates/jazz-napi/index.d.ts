@@ -145,6 +145,8 @@ export declare class NapiDb {
   all(query: Uint8Array, opts?: { tier?: string; include_deleted?: boolean; sync?: boolean } | undefined | null, openTransactionId?: string | undefined | null, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): Uint8Array | PendingNativeRead
   /** Authority evidence in one explicitly admitted serializable transaction. */
   acceptedRead(query: Uint8Array, openTransactionId: string, includeDeleted: boolean, timeoutMs: number, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): Uint8Array | PendingNativeRead
+  /** Partial accepted local candidates, never SELECT or complete-history proof. */
+  observeLocalBatch(queries: Array<Uint8Array>, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): JsonValue
   /** Bind receipt-correlation claims to this client's own admitted identity. */
   setSessionClaims(claims?: Record<string, unknown> | undefined | null): void
   observeLocalBatch(queries: Array<Uint8Array>, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): JsonValue
@@ -193,6 +195,8 @@ export declare class NapiDb {
    * turns the slow-query log off.
    */
   setSlowQueryThresholdMs(ms: number): void
+  /** Inherit this already-authenticated durable owner's live observation scope. */
+  acceptOwnObservationSubscriber(): Transport
   /**
    * Connect to the server over byte frames the host carries: each frame
    * is one postcard `SyncMessage`.
@@ -281,6 +285,7 @@ export declare class Transport {
   auxiliaryReceiveTimeoutMs(): number | null
   expireAuxiliaryReceive(): void
   auxiliaryOutboundReady(): boolean
+  /** Partial accepted local candidates, never SELECT or complete-history proof. */
   observeLocalBatch(queries: Array<Uint8Array>, claims: JsonValue): JsonValue
   /** Private trusted local-host channel, never enable for a network link. */
   enableLocalSubmissionSource(): void

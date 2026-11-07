@@ -280,50 +280,6 @@ impl Db {
         Ok(true)
     }
 
-    /// The same handle, identity and fixed-claim choice used by normal serving.
-    /// This is crate-private: a host cannot select a bundle or forge a principal.
-    pub(crate) fn admitted_observation_context(
-        &self,
-        subscriber: SubscriberId,
-    ) -> Result<
-        (
-            Db,
-            AuthorSubject,
-            BTreeMap<String, Value>,
-            Option<AuthorSubject>,
-        ),
-        Error,
-    > {
-        self.ensure_storage_owner_active()?;
-        let (identity, claims, policy) = {
-            let inner = self.inner.borrow();
-            let session = inner
-                .sessions
-                .get(subscriber.slot)
-                .filter(|session| session.open && session.generation == subscriber.generation)
-                .ok_or_else(|| unobserved("observation session was retired or replaced"))?;
-            let fixed = session
-                .claims
-                .clone()
-                .filter(|_| session.identity != AuthorSubject::SYSTEM);
-            // Normal serving treats SYSTEM as the store's local read, with
-            // the actual owner's operands rather than a SYSTEM registry entry.
-            let identity = if session.identity == AuthorSubject::SYSTEM {
-                inner.identity.author
-            } else {
-                session.identity
-            };
-            (
-                identity,
-                fixed
-                    .or_else(|| inner.claims.get(&identity).cloned())
-                    .unwrap_or_default(),
-                inner.session_policy(subscriber.slot),
-            )
-        };
-        Ok((self.session_db(subscriber.slot), identity, claims, policy))
-    }
-
     pub(super) fn host_local_submission_for(
         &self,
         index: usize,

@@ -1081,6 +1081,7 @@ impl Transport {
         false
     }
 
+    /// Partial accepted local candidates, never SELECT or complete-history proof.
     #[napi(js_name = "observeLocalBatch")]
     pub fn observe_local_batch(
         &self,
@@ -1938,21 +1939,7 @@ impl NapiDb {
         read_or_pending(read)
     }
 
-    /// Bind receipt-correlation claims to this client's own admitted identity.
-    #[napi(js_name = "setSessionClaims")]
-    pub fn set_session_claims(
-        &self,
-        #[napi(ts_arg_type = "Record<string, unknown> | undefined | null")] claims: Option<
-            JsonValue,
-        >,
-    ) -> js::Result<()> {
-        self.binding()?
-            .set_session_claims(json_or_null(claims))
-            .map_err(host_error)?;
-        settle_promises();
-        Ok(())
-    }
-
+    /// Partial accepted local candidates, never SELECT or complete-history proof.
     #[napi(js_name = "observeLocalBatch")]
     pub fn observe_local_batch(
         &self,
@@ -1968,6 +1955,21 @@ impl NapiDb {
                 claims,
             )
             .map_err(host_error)?)
+    }
+
+    /// Bind receipt-correlation claims to this client's own admitted identity.
+    #[napi(js_name = "setSessionClaims")]
+    pub fn set_session_claims(
+        &self,
+        #[napi(ts_arg_type = "Record<string, unknown> | undefined | null")] claims: Option<
+            JsonValue,
+        >,
+    ) -> js::Result<()> {
+        self.binding()?
+            .set_session_claims(json_or_null(claims))
+            .map_err(host_error)?;
+        settle_promises();
+        Ok(())
     }
 
     /// Set the claims reads and writes as `author` are checked with.
@@ -2096,6 +2098,16 @@ impl NapiDb {
             .set_slow_query_threshold_ms(ms)
             .map_err(host_error)?;
         Ok(())
+    }
+
+    /// Inherit this already-authenticated durable owner's live observation scope.
+    #[napi(js_name = "acceptOwnObservationSubscriber")]
+    pub fn accept_own_observation_subscriber(&self) -> js::Result<Transport> {
+        Ok(self.transport(
+            self.binding()?
+                .accept_own_observation_subscriber()
+                .map_err(host_error)?,
+        ))
     }
 
     /// Connect to the server over byte frames the host carries: each frame

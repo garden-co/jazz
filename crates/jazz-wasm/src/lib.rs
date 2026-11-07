@@ -1454,6 +1454,7 @@ impl WasmDb {
         wasm_read_or_pending(Box::pin(async move { read.await.map_err(host_error) }))
     }
 
+    /// Partial accepted local candidates, never SELECT or complete-history proof.
     #[wasm_bindgen(js_name = observeLocalBatch)]
     pub fn observe_local_batch(
         &self,
@@ -1774,6 +1775,17 @@ impl WasmDb {
         Ok(())
     }
 
+    /// Inherit this already-authenticated durable owner's live observation scope.
+    #[wasm_bindgen(js_name = acceptOwnObservationSubscriber)]
+    pub fn accept_own_observation_subscriber(&self) -> Result<WasmTransport, JsValue> {
+        let inner = self.open_inner()?;
+        let link = inner
+            .binding
+            .accept_own_observation_subscriber()
+            .map_err(host_error)?;
+        Ok(WasmTransport::new(link, Some(inner.host)))
+    }
+
     /// Connect to the server over byte frames the host carries: each frame
     /// is one postcard `SyncMessage`.
     #[wasm_bindgen(js_name = connectUpstream)]
@@ -2027,6 +2039,7 @@ impl WasmTransport {
     #[wasm_bindgen(js_name = setAuxiliaryTraceEnabled)]
     pub fn set_auxiliary_trace_enabled(&self, _enabled: bool) {}
 
+    /// Partial accepted local candidates, never SELECT or complete-history proof.
     #[wasm_bindgen(js_name = observeLocalBatch)]
     pub fn observe_local_batch(
         &self,
