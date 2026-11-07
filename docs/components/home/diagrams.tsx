@@ -344,7 +344,7 @@ export const deploymentScenarioNames: Record<DeploymentScenario, string> = {
   vercel: "Vercel",
   cloudflare: "Cloudflare (coming soon)",
   aws: "AWS",
-  server: "Single server",
+  server: "Server",
 };
 
 /** Lines of text from `y`, `step` apart, in one style. */
