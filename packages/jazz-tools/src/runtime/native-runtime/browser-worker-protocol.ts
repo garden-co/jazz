@@ -389,12 +389,6 @@ export interface BrowserWorkerInitOptions {
 export interface BrowserSharedWorkerConnectRequest {
   type: "connect-runtime";
   tabId: string;
-  /**
-   * A Web Lock the tab holds for as long as its page lives. The worker waits
-   * on it and detaches the tab once the browser grants it: the page went
-   * away (closed, crashed, discarded) without saying so.
-   */
-  livenessLock?: string;
   fingerprint: string;
   options: BrowserWorkerInitOptions;
 }
@@ -512,6 +506,13 @@ export type InspectorStagedEdit = {
 export type BrowserFollowerPortRequest =
   /** Connection liveness only; never acknowledges an operation's outcome. */
   | { type: "runtime-probe"; connectionId: string; nonce: number }
+  /**
+   * A Web Lock the tab now holds for as long as its page lives. The worker
+   * waits on it and detaches the tab once the browser grants it: the page
+   * went away (closed, crashed, discarded) without saying so. Sent only once
+   * the tab holds it, so the worker's request always queues behind the tab.
+   */
+  | { type: "liveness-lock"; name: string }
   | {
       type: "inspect-commit";
       id: number;
