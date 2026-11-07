@@ -1,8 +1,5 @@
 import { expect, it, vi } from "vitest";
-import {
-  ensureAutomaticLocalFirst,
-  prepareAccountManager,
-} from "./persistence.js";
+import { ensureAutomaticLocalFirst, prepareAccountManager } from "./persistence.js";
 import { createJazzSessionOwner } from "../session/state.js";
 import { formatAuthSecret } from "../runtime/auth-secret-codec.js";
 import { generateAuthSecret } from "../runtime/auth-secret-store.js";
@@ -131,14 +128,10 @@ it("restores a retained local root without exposing it in account state", async 
   expect(JSON.parse(value!).roots).toEqual([oldSecret, replacement]);
   expect(() => manager.restoreLocalFirst("malformed recovery root")).toThrow();
   expect(manager.getLoggedIn()).toBe(restored);
-  expect(() => exportLocalFirstSecret({ ...restored } as never)).toThrow(
-    /recovery_unavailable/,
-  );
+  expect(() => exportLocalFirstSecret({ ...restored } as never)).toThrow(/recovery_unavailable/);
   manager.logout();
   expect(() => exportLocalFirstSecret(old)).toThrow(/recovery_unavailable/);
-  expect(() => exportLocalFirstSecret(restored)).toThrow(
-    /recovery_unavailable/,
-  );
+  expect(() => exportLocalFirstSecret(restored)).toThrow(/recovery_unavailable/);
   const recovered = manager.restoreLocalFirst(replacement);
   await accountToken(recovered, registry);
   expect(exportLocalFirstSecret(recovered)).toBe(replacement);
@@ -193,9 +186,7 @@ it("converges automatic sessions on one durable root before opening clients", as
   expect(opened).toEqual([]);
   finish();
   const [a, b] = await Promise.all([firstSession, secondSession]);
-  expect(a.getSnapshot().account?.identity).toEqual(
-    b.getSnapshot().account?.identity,
-  );
+  expect(a.getSnapshot().account?.identity).toEqual(b.getSnapshot().account?.identity);
   expect(exportLocalFirstSecret(a.getSnapshot().account!)).toBe(
     exportLocalFirstSecret(b.getSnapshot().account!),
   );
@@ -230,8 +221,7 @@ it("does not reselect an automatic root after an interleaved selection", async (
     registry,
     store,
     mintToken: mintRootToken,
-    generateSecret: () =>
-      generated++ === 0 ? automaticSecret : explicitSecret,
+    generateSecret: () => (generated++ === 0 ? automaticSecret : explicitSecret),
   });
   const pending = ensureAutomaticLocalFirst(manager);
   await vi.waitFor(() => expect(updates).toBe(1));
@@ -296,8 +286,7 @@ it("returns and persists a re-entrant explicit selection during automatic adopti
     registry,
     store,
     mintToken: mintRootToken,
-    generateSecret: () =>
-      generated++ === 0 ? automaticSecret : explicitSecret,
+    generateSecret: () => (generated++ === 0 ? automaticSecret : explicitSecret),
   });
   manager.subscribe(() => {
     if (!reentered && manager.getLoggedIn()) {
@@ -416,9 +405,7 @@ it("reopens the remembered user from the fixture bytes, and forgets them on logo
   accounts.logout();
   await accounts.settleSelection();
   // The bytes a store without a remembered user always had.
-  expect(store.value()).toBe(
-    '{"format":"jazz-account-selection-v1","roots":[],"selected":null}',
-  );
+  expect(store.value()).toBe('{"format":"jazz-account-selection-v1","roots":[],"selected":null}');
 });
 
 it("a local-first selection replaces the remembered user", async () => {
@@ -435,9 +422,7 @@ it("a local-first selection replaces the remembered user", async () => {
   expect(stored).toMatchObject({ selected: 0 });
   expect(stored.backendUser).toBeUndefined();
   expect(
-    (
-      await prepareAccountManager({ appId: "test", registry, store, mintToken })
-    ).getLoggedIn()?.id,
+    (await prepareAccountManager({ appId: "test", registry, store, mintToken })).getLoggedIn()?.id,
   ).toBe(guest.id);
 });
 
@@ -455,9 +440,7 @@ it("an automatic local-first start keeps a remembered user instead of minting a 
 });
 
 it("reads stores written before backendUser existed, and refuses a malformed one", async () => {
-  const old = storeWith(
-    '{"format":"jazz-account-selection-v1","roots":[],"selected":null}',
-  );
+  const old = storeWith('{"format":"jazz-account-selection-v1","roots":[],"selected":null}');
   expect(
     (
       await prepareAccountManager({
@@ -552,16 +535,10 @@ function linkFetch(account: string) {
         })) as unknown as typeof fetch;
 }
 
-const guestRoot = (n: number) =>
-  formatAuthSecret(new Uint8Array(32).fill(n)) as string;
-const accountOf = (root: string) =>
-  localFirstAccountId("test", root.slice("jazz-auth-v1:".length));
+const guestRoot = (n: number) => formatAuthSecret(new Uint8Array(32).fill(n)) as string;
+const accountOf = (root: string) => localFirstAccountId("test", root.slice("jazz-auth-v1:".length));
 /** A shared-device manager (clearOnSignOut) whose next guest gets `root`. */
-function sharedDevice(
-  store: ReturnType<typeof storeWith>,
-  root: string,
-  linksTo = root,
-) {
+function sharedDevice(store: ReturnType<typeof storeWith>, root: string, linksTo = root) {
   return prepareAccountManager({
     appId: "test",
     registry,
@@ -594,9 +571,7 @@ it("forgets a guest's root once it is linked to a user, with rememberBackendUser
   expect(store.value()).not.toContain(kim);
   const next = await sharedDevice(store, guestRoot(2));
   expect(next.getLoggedIn()).toBeUndefined();
-  expect((await ensureAutomaticLocalFirst(next)).id).toBe(
-    accountOf(guestRoot(2)),
-  );
+  expect((await ensureAutomaticLocalFirst(next)).id).toBe(accountOf(guestRoot(2)));
   expect(store.value()).not.toContain(kim);
 });
 
@@ -643,14 +618,9 @@ it("never reopens a forgotten root that an older bundle wrote back", async () =>
   expect(accounts.getLoggedIn()).toBeUndefined();
   // The automatic start mints a fresh guest instead of adopting Kim's root,
   // and its write drops that root from the store.
-  expect((await ensureAutomaticLocalFirst(accounts)).id).toBe(
-    accountOf(guestRoot(3)),
-  );
+  expect((await ensureAutomaticLocalFirst(accounts)).id).toBe(accountOf(guestRoot(3)));
   await accounts.settleSelection();
-  expect(JSON.parse(store.value()!).roots).toEqual([
-    guestRoot(2),
-    guestRoot(3),
-  ]);
+  expect(JSON.parse(store.value()!).roots).toEqual([guestRoot(2), guestRoot(3)]);
   expect(store.value()).not.toContain(kim);
 });
 
@@ -679,10 +649,7 @@ it("an explicit restore takes a forgotten root back, and a stale tab keeps it", 
 });
 
 it("keeps only the latest forgotten accounts", async () => {
-  const forgottenAccounts = Array.from(
-    { length: 40 },
-    (_, i) => `account-${i}`,
-  );
+  const forgottenAccounts = Array.from({ length: 40 }, (_, i) => `account-${i}`);
   const store = storeWith(
     JSON.stringify({
       format: "jazz-account-selection-v1",
@@ -694,17 +661,12 @@ it("keeps only the latest forgotten accounts", async () => {
   const accounts = await sharedDevice(store, guestRoot(1));
   accounts.createLocalFirst();
   await accounts.settleSelection();
-  expect(JSON.parse(store.value()!).forgottenAccounts).toEqual(
-    forgottenAccounts.slice(-32),
-  );
+  expect(JSON.parse(store.value()!).forgottenAccounts).toEqual(forgottenAccounts.slice(-32));
 });
 
 it("keeps a linked guest's root when the device remembers its user", async () => {
   const store = storeWith(null);
-  const guestAccount = localFirstAccountId(
-    "test",
-    "00000000-0000-4000-8000-000000000001",
-  );
+  const guestAccount = localFirstAccountId("test", "00000000-0000-4000-8000-000000000001");
   const accounts = await prepareAccountManager({
     appId: "test",
     registry,

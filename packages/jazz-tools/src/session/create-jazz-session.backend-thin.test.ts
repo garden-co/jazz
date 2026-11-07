@@ -52,9 +52,7 @@ async function listen(jazz: Jazz, port = 0) {
     socket.on("close", () => sockets.delete(socket));
   });
   await jazz.attach(server);
-  await new Promise<void>((resolve) =>
-    server.listen(port, "127.0.0.1", resolve),
-  );
+  await new Promise<void>((resolve) => server.listen(port, "127.0.0.1", resolve));
   let closing: Promise<void> | undefined;
   const close = () =>
     (closing ??= new Promise<void>((resolve) => {
@@ -90,10 +88,7 @@ function cookies(origin: string, userId: string | null) {
     return realFetch(request);
   }) as typeof fetch;
   globalThis.WebSocket = class extends RealWebSocket {
-    constructor(
-      url: string | URL,
-      options?: { headers?: Record<string, string> },
-    ) {
+    constructor(url: string | URL, options?: { headers?: Record<string, string> }) {
       const headers =
         jar.socketUser && new URL(url).host === new URL(origin).host
           ? { "x-test-user": jar.socketUser }
@@ -122,9 +117,7 @@ function tokenAuth(...initial: string[]) {
     valid,
     authenticate(request: Request) {
       const token = request.headers.get("x-test-user");
-      return token && valid.has(token)
-        ? { userId: token.split(":")[0]! }
-        : null;
+      return token && valid.has(token) ? { userId: token.split(":")[0]! } : null;
     },
   };
 }
@@ -239,12 +232,8 @@ describe("browser session against the app's backend", () => {
     });
     const owner = thin.session!.user!;
 
-    await thin.db
-      .insert(app.todos, { title: "thin", owner })
-      .wait({ tier: "global" });
-    expect((await thin.db.all(app.todos)).map((todo) => todo.title)).toEqual([
-      "thin",
-    ]);
+    await thin.db.insert(app.todos, { title: "thin", owner }).wait({ tier: "global" });
+    expect((await thin.db.all(app.todos)).map((todo) => todo.title)).toEqual(["thin"]);
 
     await loaderCalled;
     release();
@@ -255,12 +244,11 @@ describe("browser session against the app's backend", () => {
       .toBe(false);
     const local = session.getSnapshot().client!;
     expect(local.session?.user).toBe(owner);
-    await local.db
-      .insert(app.todos, { title: "local", owner })
-      .wait({ tier: "global" });
-    expect(
-      (await local.db.all(app.todos)).map((todo) => todo.title).sort(),
-    ).toEqual(["local", "thin"]);
+    await local.db.insert(app.todos, { title: "local", owner }).wait({ tier: "global" });
+    expect((await local.db.all(app.todos)).map((todo) => todo.title).sort()).toEqual([
+      "local",
+      "thin",
+    ]);
   }, 60_000);
 
   // The core no longer holds the user's account (a reset dev store, a new
@@ -285,15 +273,11 @@ describe("browser session against the app's backend", () => {
     await session.loginWithBackend();
     const before = session.getSnapshot().client!;
     const lost = before.session!.user!;
-    await before.db
-      .insert(app.todos, { title: "before", owner: lost })
-      .wait({ tier: "global" });
+    await before.db.insert(app.todos, { title: "before", owner: lost }).wait({ tier: "global" });
     expect(before.db.getSyncStatus().link).toEqual({ state: "connected" });
     const links: string[] = [];
     before.db.onSyncStatusChange(({ link }) =>
-      links.push(
-        link.state === "offline" ? `offline ${link.reason}` : link.state,
-      ),
+      links.push(link.state === "offline" ? `offline ${link.reason}` : link.state),
     );
 
     // The same backend, restarted on an empty store: alice has no account.
@@ -310,9 +294,7 @@ describe("browser session against the app's backend", () => {
 
     const signedInAgain = () => {
       const { status, client } = session.getSnapshot();
-      return status === "ready" && client?.session?.user !== lost
-        ? client
-        : undefined;
+      return status === "ready" && client?.session?.user !== lost ? client : undefined;
     };
     await expect.poll(signedInAgain, { timeout: 30_000 }).toBeDefined();
     // The refusal is what told the session.
@@ -321,11 +303,9 @@ describe("browser session against the app's backend", () => {
     const row = await after.db
       .insert(app.todos, { title: "after", owner: after.session!.user! })
       .wait({ tier: "global" });
-    expect(
-      (await second.db.all(app.todos.where({ id: row.id }))).map(
-        (t) => t.title,
-      ),
-    ).toEqual(["after"]);
+    expect((await second.db.all(app.todos.where({ id: row.id }))).map((t) => t.title)).toEqual([
+      "after",
+    ]);
     // Its sockets close before the server does.
     await session.close();
   }, 60_000);
@@ -351,9 +331,7 @@ describe("browser session against the app's backend", () => {
     await session.loginWithBackend();
     const client = session.getSnapshot().client!;
     const owner = client.session!.user!;
-    await client.db
-      .insert(app.todos, { title: "first", owner })
-      .wait({ tier: "global" });
+    await client.db.insert(app.todos, { title: "first", owner }).wait({ tier: "global" });
 
     // The next socket goes without the cookie and is refused.
     jar.socketUser = null;
@@ -369,9 +347,7 @@ describe("browser session against the app's backend", () => {
       .poll(() => client.db.getSyncStatus().link, { timeout: 30_000 })
       .toEqual({ state: "connected" });
     expect(session.getSnapshot().client).toBe(client);
-    await client.db
-      .insert(app.todos, { title: "second", owner })
-      .wait({ tier: "global" });
+    await client.db.insert(app.todos, { title: "second", owner }).wait({ tier: "global" });
     await session.close();
   }, 60_000);
 
@@ -400,9 +376,7 @@ describe("browser session against the app's backend", () => {
     await session.loginWithBackend();
     const client = session.getSnapshot().client!;
     const owner = client.session!.user!;
-    await client.db
-      .insert(app.todos, { title: "first", owner })
-      .wait({ tier: "global" });
+    await client.db.insert(app.todos, { title: "first", owner }).wait({ tier: "global" });
 
     // Expired: the backend no longer accepts the token the tab holds.
     auth.valid.delete("alice:1");
@@ -426,9 +400,9 @@ describe("browser session against the app's backend", () => {
     const row = await pending.wait({ tier: "global" });
     expect(session.getSnapshot().client).toBe(client);
     expect(client.db.getSyncStatus().link).toEqual({ state: "connected" });
-    expect(
-      (await jazz.db.all(app.todos.where({ id: row.id }))).map((t) => t.title),
-    ).toEqual(["while expired"]);
+    expect((await jazz.db.all(app.todos.where({ id: row.id }))).map((t) => t.title)).toEqual([
+      "while expired",
+    ]);
     await session.close();
   }, 60_000);
 
@@ -458,9 +432,7 @@ describe("browser session against the app's backend", () => {
     await session.loginWithBackend();
     const client = session.getSnapshot().client!;
     const owner = client.session!.user!;
-    await client.db
-      .insert(app.todos, { title: "first", owner })
-      .wait({ tier: "global" });
+    await client.db.insert(app.todos, { title: "first", owner }).wait({ tier: "global" });
 
     // The server's answer to the next write never reaches the client.
     const runtime = client.db.currentRuntime() as ThinRuntime;
@@ -472,11 +444,7 @@ describe("browser session against the app's backend", () => {
     let held: number | undefined;
     let dropped = 0;
     internals.receive = (carrier, piece) => {
-      if (
-        held !== undefined &&
-        isThinResponse(piece) &&
-        decodeThinResponse(piece).id === held
-      ) {
+      if (held !== undefined && isThinResponse(piece) && decodeThinResponse(piece).id === held) {
         dropped++;
         return;
       }
@@ -487,12 +455,8 @@ describe("browser session against the app's backend", () => {
       title: "as it expired",
       owner,
     });
-    const landed = pending
-      .wait({ tier: "global" })
-      .catch((error: unknown) => error);
-    const [id] = [...internals.oneShots].find(
-      ([, oneShot]) => oneShot.op.type === "insert",
-    )!;
+    const landed = pending.wait({ tier: "global" }).catch((error: unknown) => error);
+    const [id] = [...internals.oneShots].find(([, oneShot]) => oneShot.op.type === "insert")!;
     held = id;
     await expect.poll(() => dropped).toBe(1);
     expect(internals.oneShots.has(id)).toBe(true);
@@ -513,9 +477,7 @@ describe("browser session against the app's backend", () => {
       .poll(() => client.db.getSyncStatus().link, { timeout: 15_000 })
       .toEqual({ state: "connected" });
     expect(
-      (await jazz.db.all(app.todos)).filter(
-        (todo) => todo.title === "as it expired",
-      ),
+      (await jazz.db.all(app.todos)).filter((todo) => todo.title === "as it expired"),
     ).toHaveLength(1);
     await session.close();
   }, 60_000);
@@ -544,9 +506,7 @@ describe("browser session against the app's backend", () => {
     await session.loginWithBackend();
     const client = session.getSnapshot().client!;
     const owner = client.session!.user!;
-    await client.db
-      .insert(app.todos, { title: "private", owner })
-      .wait({ tier: "global" });
+    await client.db.insert(app.todos, { title: "private", owner }).wait({ tier: "global" });
 
     auth.valid.delete("alice:1");
     const revokedAt = Date.now();
@@ -577,8 +537,7 @@ describe("browser session against the app's backend", () => {
     });
     cleanups.push(() => session.close());
 
-    const refusal =
-      /need a browser.*jazz-tools\/react-native or jazz-tools\/expo/;
+    const refusal = /need a browser.*jazz-tools\/react-native or jazz-tools\/expo/;
     await expect(session.loginWithBackend()).rejects.toThrow(refusal);
     expect(requests).toEqual([]);
     expect(session.getSnapshot().status).not.toBe("ready");
@@ -632,9 +591,7 @@ describe("another user signing in on a local-first browser", () => {
       .toBe(false);
     const alice = session.getSnapshot().client!;
     const owner = alice.session!.user!;
-    await alice.db
-      .insert(app.todos, { title: "alice's", owner })
-      .wait({ tier: "global" });
+    await alice.db.insert(app.todos, { title: "alice's", owner }).wait({ tier: "global" });
     return { jazz, served, jar, session, alice, owner };
   }
 
@@ -665,9 +622,7 @@ describe("another user signing in on a local-first browser", () => {
 
     // Alice writes while the backend is away; Bob signs in when it is back.
     await served.close();
-    session
-      .getSnapshot()
-      .client!.db.insert(app.todos, { title: "unsynced", owner });
+    session.getSnapshot().client!.db.insert(app.todos, { title: "unsynced", owner });
     jar.user = jar.socketUser = "bob";
     await listen(jazz, Number(new URL(served.origin).port));
     await session.reauthenticate();
@@ -781,9 +736,7 @@ describe("signing out with writes the server won't take", () => {
       .toBe(false);
     const local = session.getSnapshot().client!;
     const owner = local.session!.user!;
-    await local.db
-      .insert(app.todos, { title: "synced", owner })
-      .wait({ tier: "global" });
+    await local.db.insert(app.todos, { title: "synced", owner }).wait({ tier: "global" });
 
     // The backend goes down; a write stays on this device; the cookie goes.
     await served.close();
