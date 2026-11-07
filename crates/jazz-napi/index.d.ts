@@ -149,7 +149,6 @@ export declare class NapiDb {
   observeLocalBatch(queries: Array<Uint8Array>, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): JsonValue
   /** Bind receipt-correlation claims to this client's own admitted identity. */
   setSessionClaims(claims?: Record<string, unknown> | undefined | null): void
-  observeLocalBatch(queries: Array<Uint8Array>, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): JsonValue
   /** Set the claims reads and writes as `author` are checked with. */
   setIdentityClaims(author: Uint8Array, claims?: Record<string, unknown> | undefined | null): void
   /**
