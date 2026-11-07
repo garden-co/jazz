@@ -66,3 +66,12 @@ a later owner must obtain its own genuine online validation. The byte fixture
 A later same-content observation may advance its cut without changing the
 immutable origin pair; each newly signed device/root bundle still requires
 matching cuts. No old seal or wire/database encoding is rewritten.
+
+## E10 provisional writes
+
+The separate provisional-key record lets a supported offline operation stage
+encrypted content with a prior-valid bound key. This is local pending work, not
+current membership or Global acceptance. A removed recipient may retain that
+key and read the provisional ciphertext; reconnect authority may reject it.
+The retained-content record itself does not become a write-authority receipt.
+Known denials, exact bindings, revision and owner-lifetime checks still apply.

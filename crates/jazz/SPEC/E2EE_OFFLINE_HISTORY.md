@@ -1,130 +1,94 @@
-# E2EE accepted-history cache
+# E2EE retained content and provisional offline writes
 
-## Overview
+## Contract
 
-The E2EE client retains coherent, accepted metadata snapshots so an existing
-space can be used without waiting for the network, including after reopening a
-persistent native database. This is an internal cache, not an authority receipt
-or a new public API. Ordinary, non-E2EE queries do not use it.
+A device may decrypt retained content and stage provisional encrypted writes
+using keys genuinely validated online earlier. Offline `ready` describes usable
+retained content, not current membership, absence of revocation, a latest epoch
+or complete accepted history. Local durability and pending state are distinct
+from Global acceptance.
 
-This chapter defines the extracted offline-history layer. It does not establish
-complete transport-recovery coverage or independent security qualification.
-Current-source receipts belong to the owning PR; remaining limits are tracked in
-[release qualification (#3125)](https://github.com/garden-co/jazz/issues/3125).
+A removed recipient can retain an old key. Provisional writes may therefore
+remain readable by that recipient, even if authority later rejects the write.
+The caller's configured known-stale policy can warn or refuse; it cannot detect
+an unseen offline revocation. Reconnection uses genuine policy, read-set and
+accepted-evidence validation. A refusal remains a refusal.
 
-## Details
+Ordinary unencrypted and no-scope operations do not acquire remote authority
+merely because this cache exists. Remote, accepted, transaction and subscription
+query paths retain their own authority and lifetime contracts.
 
-### Storage and format
+## Private storage and binding
 
-The dedicated E2EE account store's existing local-device document can contain
-an `acceptedHistoryV1` array. Each entry contains:
+The account store's existing local-device document may contain signed retained
+content and provisional-key records. The named encodings and byte fixtures are
+specified in `dev/proofs/e2ee-retained-content-cache-v1.md`. They contain sealed
+keys and authenticated bindings, not persisted membership verdicts. Unsupported
+versions or invalid signatures refuse; unrelated device-store fields survive.
 
-- `scope`: the encoded account registry, environment and account ID;
-- `key`: the encoded space scope and identifier;
-- `reads`: a JSON string containing query identities, metadata rows and row
-  settlements;
-- optional `initial`: the root ID, initial row IDs, recipient IDs and accepted
-  transaction ID for a newly created space.
+Existing C-backed records use genuinely evidenced positive device/root rows.
+C observations remain partial candidates, never complete query coverage or
+absence proof. They are not relabelled as accepted history.
 
-The local snapshot encoding reserves the single-key object
-`{ "e2eeBytesV1": [0, 127, 255] }` for byte arrays. Every element must be an
-integer from 0 to 255. Settlement positions are canonical unsigned 64-bit decimal
-strings. Duplicate row or settlement IDs and malformed entries are rejected.
-The encoding has a fixed corpus in `accepted-history-format.test.ts`.
+A separate private online-anchor variant supports a fresh memory owner. A real
+online accepted transaction reads the exact device-key and root rows at the same
+schema/cut, verifies paired state/content origins and waits for Global. The
+binding includes the actual authenticated account/session, device/key identity,
+application namespace, schema, scope/table/row IDs, exact row bodies and owner
+lifetime. An owner-private proof is required in addition to the signed record;
+a different owner cannot inherit it from private-store bytes alone. This does
+not export evidence into C or grant offline authority.
 
-Cached snapshots contain public metadata and encrypted envelopes, not decrypted
-keys or persisted authorisation verdicts. Updates preserve other entries in the
-local-device document. Byte-identical history does not trigger another update.
-The current durable cache has no eviction or total-size bound; this remains a
-qualification concern rather than a promised storage limit.
+Borrowed keys retain revision, revocation, schema, device and lifetime checks
+around asynchronous work and are wiped on release. Changed content, identity,
+claims, origins, scope, closed or retired ownership refuses. Known device denial
+is terminal for that cached owner. Failed or stale online work cannot restore a
+newer denial. Cache persistence failure cannot undo an already accepted commit;
+it can prevent durable offline reopening.
 
-### Reopening and validation
+## Local reads
 
-Restoration reruns the existing metadata verifier. Its freshly built queries
-must match the saved query identities exactly, with no missing or unused reads.
-Saved query text is never executed. Initial recipient IDs reproduce the original
-preparation's dependency reads, including those needed when group tables exist.
+A narrow direct LocalFirst retained-content query may use one scope-indexed
+candidate result while offline or connecting. It keeps the native actual
+identity, governance, branch and plaintext predicates. It removes encrypted
+blind-token pruning, authenticates/decrypts every candidate, then performs
+canonical equality, ordering and pagination. An unknown epoch refuses the whole
+operation, including on nonmatching rows or rows beyond the requested page.
 
-Before reuse, all metadata rows, absences and settlements must match the local
-accepted-only observations. Pending local writes cannot hide an accepted change.
-A mismatch requires reconciliation; a cached bundle alone cannot establish
-current authority or reveal revocations the disconnected client has not received.
+This path supports at most 256 candidate rows, 1,024 encrypted cells, 1 MiB per
+cell and 4 MiB of counted JavaScript values, with value depth 32 and 65,536 value
+nodes. A sentinel row detects row overflow; overflow refuses rather than
+truncating. Includes, hops, gather/union, computed or partial projections,
+encrypted ordering and unsupported compositions refuse explicitly.
 
-Local-only propagation does not wait for a server connection or fail merely
-because that connection failed. The read still uses the globally accepted tier
-of the local snapshot; bypassing transport must not admit pending metadata.
+These limits are not a native scan or allocation budget. SQL LIMIT bounds
+returned rows, not all policy/history/index work; JavaScript checks follow native
+whole-cell materialisation. The path makes no universal resource-bound or
+complete-history claim. Other query modes keep the shared authority helper and
+epoch guards.
 
-Each observation query MUST return rows and their settlement entries from one
-accepted-row evaluation within the shared frozen transaction. Separate sidecar
-and row evaluations can diverge even at the same cut. The client MUST retain
-strict row-to-settlement validation; a coherent pair does not establish complete
-history or current authority.
+## Reopening and reconnection
 
-### Initial creation and failure
+Persistent reopening uses the same device/account store and exact bound content
+identities. Missing keys, invalid bindings and unknown epochs refuse; a warm-up
+read is not an authority substitute. Native mergeable LocalFirst reads may
+hydrate the foreground through the normal local relay while retaining their
+original transaction guard, staged prefix and actual policy context.
 
-Atomic creation retains the coherent preparation before staging the signed root
-and grants. It becomes eligible only after global acceptance, identified by the
-actual transaction ID. Before offline reuse, every initial row must have that
-accepted transaction ID and the other dependencies must still match.
+Offline provisional writes preserve atomic pending state across supported
+persistent reopening. They do not mint membership evidence or silently become
+accepted. When connected, normal authority validation reconciles the pending
+work and can reject it. A transport event is a wake-up, not a write receipt.
 
-Acceptance attempts to save the bundle locally without another remote query.
-A cache failure must not turn an already accepted transaction into a rejected
-commit receipt. The in-memory bundle remains available in that case, but durable
-offline reopening is not guaranteed. Uncommitted preparation is discarded on
-rollback or rejection, including cancellation while preparation is finishing.
+## Compatibility and verification
 
-### Local use and reconciliation
+`accepted-history-format.ts` retains the legacy data codec and its byte corpus
+for compatibility only. It is not consumed as membership or query-coverage
+proof. New private anchor bytes have an explicit versioned tag and fixture;
+older readers fail closed on that variant. No wire format is silently replaced.
 
-After an online read has verified its accepted history, saving the optional
-offline cache is best-effort. A persistence failure must not fail that verified
-read. The verified in-memory bundle may still be retained, but offline reuse
-continues to require matching accepted-only observations. Failure to persist
-does not promise offline availability after reopening.
-
-Key preparation first tries the locally accepted history. A usable bundle lets
-the operation proceed without waiting for online reconciliation. If local
-preparation cannot supply it, an online client falls back to reconciliation;
-an explicitly disconnected client reports the local result. A callback that has
-already started is never replayed through that fallback.
-
-Before decrypting a batch, its cell epoch identifiers must be present in the
-verified local history. A missing epoch triggers online history preparation
-before any cell callback starts. A valid newer ciphertext is not corruption
-merely because a reopened client retained an older epoch. Refreshed history
-must still establish current membership before exposing any historical key.
-
-An online local-cache use schedules background reconciliation. A confirmed
-transition to a connected server, including automatic transport recovery, also
-schedules it for spaces encountered by this client instance. Concurrent
-background attempts for the same space are coalesced. This does not scan every
-persisted space or make an offline write wait for the network.
-Background failure does not fail the completed local operation; a later use or
-explicit reconnect can retry, and explicit explanation exposes maintenance state.
-
-An online refusal is reconciled before returning it: a newer grant may now
-permit access. Local key preparation can use local catalogue IDs as candidates,
-but they establish neither catalogue coverage nor membership. Retained accepted
-space history must validate before use. Without that history, online preparation
-uses the covered catalogue path. Catalogue activation installs the complete
-schema mapping, including the data-table and column identities bound into AEAD.
-
-Local device preparation and online enrolment use separate in-flight promises.
-A stalled online enrolment must not block an otherwise valid local encrypted
-operation. Once online enrolment starts, it must complete or reject; a disconnect
-must not make a skipped enrolment look complete to later reconnecting callers.
-
-## Verification
-
-The format corpus pins canonical bytes and malformed-record rejection. The
-Node and browser offline suites exercise accepted history under pending writes,
-observed revocation, optional persistence failure, reconnect and persistent
-reopening. Their presence is not a passing receipt: executed commands and exact
-source revisions are recorded in the owning PR. Historical stage results are not
-reused as qualification for an extracted tip.
-
-## Open questions
-
-- [#3125](https://github.com/garden-co/jazz/issues/3125): durable cache size and
-  eviction policy. Eviction must make missing history explicit, never infer access.
-- [#3125](https://github.com/garden-co/jazz/issues/3125): automatic transport recovery
-  and controlled reconnect concurrency, including nested membership and revocation.
+The original offline/reopen/reconnect and revocation assertions remain targets.
+Tests also cover fresh-owner persistence, account/device/claim/scope isolation,
+body/origin tampering, lifetime withdrawal, unknown epochs, equality pagination
+and overflow. Actual execution heads, source-equivalence and browser/native
+limits belong to the owning PR receipts; this document is not a passing result.
