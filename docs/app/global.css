@@ -1010,6 +1010,11 @@ h6 {
   grid-area: 1 / 1;
   opacity: 0;
   transition: opacity 600ms ease;
+  /* Keep every slide on its own compositing layer for good. Otherwise
+     Safari promotes a slide only while it fades, snaps that layer to whole
+     pixels and drops it afterwards, so the diagram jumps about 1px at the
+     start and end of each cross-fade. */
+  will-change: opacity;
 }
 .home-carousel-slide[data-active="true"] {
   opacity: 1;
