@@ -500,12 +500,12 @@ function cycleDelay(count: number, turn: number, col: number): string {
  */
 export const DEPLOYMENT_LAYOUT = {
   width: 552,
-  height: 478,
+  height: 458,
 };
 
 /**
  * Fig. 1: where Jazz runs, drawn narrow enough for a phone. Your own platform
- * on top (the shards and the large-value store in one row), your backend with the Jazz core and its /jazz mount behind your
+ * on top (the shards and the large-value store in one row), your backend with the Jazz core beside its normal API route, behind your
  * auth, then three clients, getting simpler to the right: the traditional
  * one, a local-first one (web app, native app in turn) and a thin client (web
  * page, backend worker, agent VM in turn). Sync goes through your auth into
@@ -523,18 +523,18 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
   const shardRow = { x: 16, y: 16, w: 4 * unit + 3 * 10, h: 80 };
   const storeBox = { x: 536 - unit, y: shardRow.y, w: unit, h: shardRow.h };
   const backend = { x: 16, y: 136, w: 484 };
-  const backendBottom = 264;
+  const backendBottom = 244;
   const authH = 24;
-  const api = { x: 32, y: 208, w: 180, h: 44 };
-  // The Jazz core above, its mounted /jazz route below the divider, level
-  // with the normal API route.
-  const jazz = { x: 224, y: 148, w: 264, h: 104, divider: api.y };
+  // The Jazz core level with the normal API route, so the route's wire runs
+  // straight across into it.
+  const jazz = { x: 224, y: 172, w: 264, h: 60 };
+  const api = { x: 32, y: jazz.y + 8, w: 156, h: jazz.h - 16 };
   const cws = [168, 168, 168];
   const colX = [16, 192, 368];
   // The one large-value lane, right of your backend.
   const lane = 512;
   const center = (col: number) => colX[col] + cws[col] / 2;
-  const rowY = 352;
+  const rowY = 332;
   // Shorter to the right, as each kind of client does less itself.
   const clientH = [H - rowY - 6, 98, 76];
   // The traditional client stays; the local-first and thin slots take
@@ -543,11 +543,9 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
   const gap = shard.count > 4 ? 4 : 10;
   const sw = (shardRow.w - gap * (shard.count - 1)) / shard.count;
   const shardXs = Array.from({ length: shard.count }, (_, i) => shardRow.x + i * (sw + gap));
-  const coreMid = (jazz.y + jazz.divider) / 2;
-  // Where the API route's wire leaves it, toward its left, and where the
-  // large-value lane turns off to the local-first client.
-  const apiWireX = 172;
-  const blobBranchY = 332;
+  const coreMid = jazz.y + jazz.h / 2;
+  // Where the large-value lane turns off to the local-first client.
+  const blobBranchY = 312;
   // On a single server there are no platform services: local SQLite and
   // local files sit inside your backend, on top of the core. Everything else
   // stays where it is in the other variants.
@@ -561,7 +559,7 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
       <Lines
         x={backend.x + 16}
         y={backendTop + 24}
-        lines={["your backend", ...runtime]}
+        lines={single ? ["your backend", ...runtime] : [`your backend ${runtime.join(" ")}`]}
         step={18}
         className="dg-title dg-fill-ink"
       />
@@ -653,13 +651,6 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
         </g>
       )}
       <Frame x={jazz.x} y={jazz.y} w={jazz.w} h={jazz.h} tone="blue" />
-      <line
-        x1={jazz.x}
-        x2={jazz.x + jazz.w}
-        y1={jazz.divider}
-        y2={jazz.divider}
-        className="dg-box dg-stroke-blue"
-      />
       <text
         x={jazz.x + jazz.w / 2}
         y={coreMid + 5}
@@ -668,19 +659,10 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
       >
         {single ? "Jazz core" : "Jazz serverless core"}
       </text>
-      <text
-        x={jazz.x + jazz.w / 2}
-        y={(jazz.divider + jazz.y + jazz.h) / 2 + 5}
-        textAnchor="middle"
-        className="dg-title dg-fill-blue"
-      >
-        mounted /jazz route
-      </text>
       <Box {...api} title="normal API route" center />
       <Wire
         points={[
-          [apiWireX, api.y],
-          [apiWireX, coreMid],
+          [api.x + api.w, coreMid],
           [jazz.x, coreMid],
         ]}
         tone="blue"
@@ -704,7 +686,7 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
       />
       <Lines
         x={center(0) + 6}
-        y={304}
+        y={284}
         lines={["manual http", "requests &", "streaming"]}
         step={14}
         className="dg-label dg-fill-ink"
@@ -723,7 +705,7 @@ export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }
       ))}
       <Lines
         x={(center(1) + center(2)) / 2}
-        y={310}
+        y={290}
         lines={
           single
             ? ["efficient realtime sync"]
