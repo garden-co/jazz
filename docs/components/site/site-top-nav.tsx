@@ -67,6 +67,7 @@ const SOCIAL = [
 ];
 
 const START_LINKS = [
+  { label: "Pricing", href: "/#pricing" },
   { label: "Examples & Benches", href: "/examples" },
   { label: "Documentation", href: "/docs" },
 ];
@@ -116,12 +117,12 @@ export function SiteTopNav() {
         }
         centerContent={
           <>
-            {/* Below 1280px the centred field would collide with the links,
+            {/* Below 1360px the centred field would collide with the links,
               so search collapses to an icon. */}
-            <span className="site-search-field contents max-[1279px]:hidden">
+            <span className="site-search-field site-search-wide contents">
               <SearchField onOpen={openSearch} />
             </span>
-            <span className="contents min-[1280px]:hidden">
+            <span className="site-search-narrow contents">
               <SearchIconButton onOpen={openSearch} />
             </span>
           </>
