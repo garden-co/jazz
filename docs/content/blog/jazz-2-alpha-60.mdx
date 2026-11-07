@@ -1,0 +1,69 @@
+---
+title: "Jazz 2.0.0-alpha.60: now based on SQLite, first step of our pivot to serverless and self-hosting"
+description: Why alpha.60 moves Jazz onto SQLite, how it runs inside your own backend, and how to upgrade
+author: Anselm Eickhoff
+date: "2026-11-07"
+---
+
+This is an absolutely massive release that we hope makes the long wait worth it!
+
+## Based on SQLite for orders of magnitude better performance
+
+Over the course of the v2 alpha, Jazz’s internal architecture has become simpler and simpler. Two weeks ago, we realized it had become simple enough that we could base Jazz on the venerable SQLite instead of rolling our own low-level database engine. We were able to ship this in just under a week, passing all tests with about 350k fewer lines of code. Every real alpha.59 app we've tried migrates to alpha.60 and verifies cleanly.
+
+This involves a simpler version of IVM that strikes a much better tradeoff between one-shot reads and live subscriptions and benefits from the decades of optimization that have gone into SQLite.
+
+As a result, alpha.60 needs **10x-35x less server memory under load**. **Reads are 20x-600x faster, everyday writes 4x-30x faster** across our example apps and benchmarks (a median of 27x across 88 benchmarks, none slower). We think you'll feel a big difference in your apps.
+
+In addition to speed, we directly benefit from the correctness and versatility of SQLite that our now much slimmer codebase can rely on.
+
+## Runs inside your serverless backend or your own server
+
+Being based on SQLite also means that Jazz is much easier to run _embedded_ in your backend. This goes beyond a normal SQLite instance on long-running servers: it also works really well on entirely serverless platforms.
+
+With this release, we are targeting Vercel Functions and Sandboxes as our first serverless environment, where all you have to do is install a Jazz handler into your normal Next.js, Hono, etc. backend, that then automatically manages a persistent Sandbox with a Jazz core on SQLite. This includes not just active CPU pricing, but managed hibernation of the Sandbox for apps that see few requests, giving you true scale-to-zero.
+
+Support for Cloudflare as a target, with Jazz running on Durable Objects will come next release, together with support for sharding (more on licensing below).
+
+**This marks the first step of a new strategy where (instead of being a Database-as-a-Service hosted provider) we will focus on making it as easy as possible to self-host Jazz embedded in your backend on your existing preferred cloud**
+
+We'll keep Jazz Cloud running for as long as anyone still needs it, but are excited for people to try the new self-hosted Jazz experience and are happy to help existing adopters move apps completely into their existing cloud.
+
+We'll make this transition over the next couple releases and post more details on our thinking and monetization plans. The gist: free to self-host on a single machine, or a couple microVMs. Sharded Jazz at scale is still self-hosted but requires a license at fair volume-based pricing.
+
+## A new ~160KB "thin" client, now the default
+
+We are introducing **a "thin" client for webapps** that isn't local-first, and it is now what `<JazzProvider>` opens by default. It is designed for pages that need very small bundle sizes. Since it doesn't ship any WASM or SQLite, it's only about 160KB gzipped (compared to the full local-first client, which is now about 3.4MB gzipped, half of alpha.59).
+
+The thin client supports most APIs in exactly the same way. To go local-first, pass `client={() => import("jazz-tools/local-first")}` to the provider. You can mix and match thin and local-first clients in different parts of your app (like landing pages and logged-in views) and can even lazily upgrade the thin client into the local-first client on a page without interruption of the user experience!
+
+See the new [thin client docs](/docs/setup/web-client/thin-client) and [local-first client docs](/docs/setup/web-client/local-first-client) for more details
+
+## Rich text columns with smart merges, collaborative cursors and range selections, plus Prosemirror bindings
+
+Rich text is one of the most important ingredients for many collaborative apps and we have finally landed on a design that is efficient and natural to use across:
+
+- rich text editors like Prosemirror
+- queries and writes directly working on markdown
+- agents being able to make edits and annotate document ranges without complex libraries on their end
+
+See the [rich text docs](/docs/recipes/data-patterns/rich-text-editor) for more details. We'll add more examples and recipes for this soon!
+
+## Upgrading & breaking changes
+
+The biggest change in this new model is that Jazz now always sits _behind_ a normal backend that you host. From there, we have adapters for local SQLite, Vercel Sandboxes (auto-managed) or a remote connector for Jazz Cloud.
+
+Your backend being the proxy for Jazz brings several benefits:
+
+- auth is much simpler now: defined and checked by your backend
+- sync happens via a same-origin /jazz endpoint
+- code is the source of truth for schema and permissions, changes to either are deployed together with your backend (while keeping the migration lens system for easy backcompat to old clients)
+- much less config on both backend and clients
+
+Please see the [full release notes](https://github.com/garden-co/jazz/releases/tag/v2.0.0-alpha.60), [new backend setup docs](/docs/setup/backend) and [new client setup docs](/docs/setup/web-client/thin-client) for details.
+
+**For apps that haven't had a backend at all yet** like some static client apps and React Native apps, this means you need to deploy a very slim backend to proxy Jazz. We're happy to help!
+
+Otherwise, the APIs for queries and writes are unchanged, but setup, auth and deployment change, and the sync protocol breaks, so you’ll have to update your server, backend and clients together.
+
+**The storage format changes, too, but we’re providing migration CLI tools** for self-hosted servers and **a Jazz Cloud dashboard button to trial the migration** and then run it for real, with opportunity to roll back, but no backwards migration. The new [Backups & Upgrades guide](/docs/operating/backups-and-upgrades) walks you through the upgrade step by step, and covers backing up and restoring your backend's data.
