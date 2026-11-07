@@ -28,7 +28,7 @@ export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" })
 s.definePermissions(app, ({ policy, anyOf, session }) => {
   policy.todos.allowRead.where((todo) =>
     anyOf([
-      { "$createdBy.account": session.user },
+      { $createdBy: session.user },
       policy.todoShares.exists.where({
         todoId: todo.id,
         user_id: session.user,
@@ -40,7 +40,7 @@ s.definePermissions(app, ({ policy, anyOf, session }) => {
 
   policy.todos.allowUpdate.where((todo) =>
     anyOf([
-      { "$createdBy.account": session.user },
+      { $createdBy: session.user },
       policy.todoShares.exists.where({
         todoId: todo.id,
         user_id: session.user,
@@ -49,20 +49,20 @@ s.definePermissions(app, ({ policy, anyOf, session }) => {
     ]),
   );
 
-  policy.todos.allowDelete.where({ "$createdBy.account": session.user });
+  policy.todos.allowDelete.where({ $createdBy: session.user });
 
   // Only the todo creator can manage shares
   policy.todoShares.allowInsert.where((share) =>
     policy.todos.exists.where({
       id: share.todoId,
-      "$createdBy.account": session.user,
+      $createdBy: session.user,
     }),
   );
   policy.todoShares.allowRead.where({ user_id: session.user });
   policy.todoShares.allowDelete.where((share) =>
     policy.todos.exists.where({
       id: share.todoId,
-      "$createdBy.account": session.user,
+      $createdBy: session.user,
     }),
   );
 });

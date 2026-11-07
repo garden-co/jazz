@@ -1,6 +1,6 @@
 ---
 title: WorkOS
-description: "Use WorkOS AuthKit on your backend: keep its sealed session in a cookie, and let Jazz's authenticate read it."
+description: "Learn how to sign users in with WorkOS AuthKit and connect its session to Jazz."
 ---
 
 [WorkOS](https://workos.com/) AuthKit hosts the sign-in pages. Run its server-side flow in the
@@ -10,7 +10,9 @@ backend that hosts Jazz: the callback stores a sealed session cookie, and `authe
 import { WorkOS } from "@workos-inc/node";
 import { createJazz, remote } from "jazz-tools/backend";
 
-const workos = new WorkOS(process.env.WORKOS_API_KEY, { clientId: WORKOS_CLIENT_ID });
+const workos = new WorkOS(process.env.WORKOS_API_KEY, {
+  clientId: WORKOS_CLIENT_ID,
+});
 const cookiePassword = process.env.WORKOS_COOKIE_PASSWORD!;
 
 // GET /auth/callback: exchange the code and set the `wos_session` cookie.
@@ -20,11 +22,10 @@ const { sealedSession } = await workos.userManagement.authenticateWithCode({
   session: { sealSession: true, cookiePassword },
 });
 
-export const jazz = await createJazz({
-  appId: "my-app",
+export const jazz = createJazz({
   app,
   permissions,
-  store: remote({ url, secret: adminSecret }),
+  store: remote({ appId, url, secret }),
   authenticate: async (request) => {
     const sessionData = readCookie(request, "wos_session");
     if (!sessionData) return null;

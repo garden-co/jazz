@@ -1,91 +1,289 @@
 ---
-title: Why Jazz
-description: "Why use a higher-level database, how Jazz compares, and what it changes for a team."
+title: Why Jazz / Comparisons
+description: "See what sets Jazz apart, how it compares to the tools you might know, and what it changes for a team."
 ---
-
-<Callout type="info">
-  Preview: this page is a rough outline for the server-first docs restructure. The bullets below are
-  what it will cover.
-</Callout>
 
 ## For developers
 
-Think of Jazz as a modern Supabase that sits right next to your app. You get a relational database, auth integration, permissions and a typed client for backend and frontend, with no API layer of your own to write and maintain. Then it goes further:
+Jazz is your whole data layer: database, sync, streams and files, running inside the backend you
+already have.
 
-- **Your backend in front.** Jazz runs inside your backend, which handles auth and talks to Jazz Cloud or your own Jazz server. Browsers never hold a Jazz credential. Unsharded Jazz is MIT and free.
-- **Live queries, not change feeds.** Every query can be a subscription. The server keeps results up to date as rows change, including rows that start or stop matching.
-- **Permissions as code.** Policies live next to your schema in TypeScript and apply the same way to backend, thin-client and local-first reads and writes. They're verbose, but agents are good at writing and checking them.
-- **Built-in collaboration.** Edit metadata (`$createdBy`, `$updatedAt`, …), history, drafts and branches, mergeable text, and files and streams, without bolting on extra services.
-- **Local-first when it pays off.** Start with server-first reads and writes. Switch a client to local-first for instant UI and offline support, with the same schema, queries and policies.
+Without it, that layer is usually assembled by hand: a traditional database for tables, a blob
+provider for files, a stream or pub/sub service for chat, presence and agent output, and a sync
+layer so screens update live and keep working on a flaky connection. Each piece has its own client,
+its own idea of who the user is and its own permission rules, and your team writes and maintains
+the glue that keeps them consistent.
+
+With Jazz:
+
+- **Your app and its data live together.** Jazz runs inside your backend, so there's one less
+  vendor and one less service to run. Tables, relations and a typed client work the same in backend
+  and frontend. Jazz plugs into whatever auth your backend uses, and clients sync with your backend
+  over a same-origin endpoint (`/jazz` by default) using your app's existing session.
+- **Your API layer mostly disappears.** Permissions are declarative, so browsers and API routes can
+  run Jazz queries and transactions directly, and Jazz checks each one for the user making it.
+  Backend code can act with full trusted access or as a specific user, so you only write endpoints
+  for logic a policy can't express.
+- **Sync built in.** Subscribe to any query and your UI stays current on its own: a feed, a
+  dashboard or a shared list updates the moment someone adds, edits or removes a row. When a screen
+  needs instant writes or offline support, switch that client to local-first, with the same schema,
+  queries and policies.
+- **Streams and files in the same model.** Files, streams and mergeable text live in Jazz too, so
+  they sync and follow your permissions like every other value. Edit metadata
+  (`$createdBy`, `$updatedAt`, …), history, drafts and branches come with every row.
+- **One set of permissions.** Policies live next to your schema in TypeScript and apply the same way
+  to backend code, thin clients, local-first clients, files and streams. They're verbose, but agents
+  are good at writing and checking them.
 
 ## Compared to
 
-Rough plan: each comparison answers the questions developers actually ask (lock-in, SQL access, migrations, scaling, cost, offline), carries a "last checked" date and only makes claims we can link to. The bullets below are what we'd emphasize; claims about other products still need checking and links.
-
 ### Supabase
 
-- Same promise of a database, auth hooks, permissions and a client SDK in one, but you run Jazz next to your app instead of a hosted platform or a multi-service self-host stack
-- Live queries return updated results, not a stream of row changes you re-apply yourself
-- Policies are typed TypeScript next to the schema instead of SQL row-level security
-- Built-in collaboration: history, branches, mergeable text, edit metadata
-- Optional local-first clients for offline and instant UI
-- Scales from zero to shards without picking an instance size
-- Where Supabase is stronger: full Postgres and its extension ecosystem, a mature hosted dashboard
+<Comparison
+  other="Supabase"
+  common={[
+    ["Relational data", "Tables, typed columns, relations and indexes."],
+    [
+      "Database, auth hooks and permissions in one",
+      "One system for data, access rules and a client SDK, with no API layer to hand-write.",
+    ],
+    ["Realtime", "Clients can subscribe to changes."],
+  ]}
+  differences={[
+    [
+      "Where it runs",
+      "Inside your own backend, so your app and its data live together",
+      "A separate hosted platform, or a self-hosted multi-service stack",
+    ],
+    [
+      "Live updates",
+      "Query results stay up to date without manual reconciliation",
+      "A stream of row changes your client reconciles by hand",
+    ],
+    [
+      "Permissions",
+      "Declarative permissions in TypeScript, next to the schema",
+      "Declarative policies in SQL, on Postgres tables",
+    ],
+    ["History, branches and mergeable text", "yes", "no"],
+    ["Offline writes and instant local UI", "yes", "no"],
+    ["Full Postgres and its extensions", "no", "yes"],
+  ]}
+/>
+
+**When to use Jazz.** You want live queries, typed policies and collaboration features without
+running a database platform, and you want the option of offline-capable local-first clients later.
+
+**When to use Supabase.** You need full Postgres and its extension ecosystem, or you want a mature
+hosted dashboard with auth, storage and functions included.
 
 ### Postgres
 
-- Jazz is relational too, but adds live queries, permissions and sync on top, so there's no API layer to write
-- No connection pooling or long-lived server to size and keep warm
-- Schema migrations are typed and generated, not hand-written SQL
-- Where Postgres is stronger: decades of tooling, arbitrary SQL, analytics workloads, extensions
+<Comparison
+  other="Postgres"
+  common={[
+    ["Relational model", "Tables, joins, constraints and transactions."],
+    ["Open source", "Run it yourself, wherever you like."],
+  ]}
+  differences={[
+    ["Live queries", "yes", "no"],
+    [
+      "Permissions for end users",
+      "Built in, as declarative permissions",
+      "Your API layer, or declarative policies in SQL",
+    ],
+    ["Sync to browsers and devices", "yes", "no"],
+    ["Migrations", "Typed and generated from the schema", "SQL you write, or a separate tool"],
+    ["Arbitrary SQL and analytics", "no", "yes"],
+    ["Ecosystem", "Young", "Decades of tools, extensions and hosting options"],
+  ]}
+/>
+
+**When to use Jazz.** Your app needs users to see each other's changes live, with access rules
+enforced in one place, and you want less code to maintain: no API and sync layer of your own on top
+of a database.
+
+**When to use Postgres.** You need arbitrary SQL, heavy analytics or a specific extension, or your
+data already lives there and many systems read it.
 
 ### Plain SQLite
 
-- Jazz runs on SQLite underneath, so you keep its speed and simple storage
-- Adds what you'd otherwise build yourself: sync between clients and server, permissions, live queries, conflict handling
-- Same schema runs on the server, in the browser and on mobile
-- Where plain SQLite is stronger: zero dependencies, full control, no sync model to learn
+<Comparison
+  other="SQLite"
+  common={[
+    [
+      "Storage",
+      "Jazz builds on SQLite under the hood, using its speed, proven reliability and lightweight, portable storage.",
+    ],
+    ["Runs anywhere", "Server, browser and mobile."],
+  ]}
+  differences={[
+    ["Sync between clients and server", "yes", "no"],
+    ["Permissions", "yes", "no"],
+    ["Live queries", "yes", "no"],
+    ["Concurrent edits from many devices", "Merged by Jazz", "Your app's responsibility"],
+    ["Dependencies", "The Jazz library", "None"],
+  ]}
+/>
+
+**When to use Jazz.** You want sync, permissions, live queries or offline support for your data,
+whether one user writes it or many.
+
+**When to use SQLite.** You want an embedded SQL database without sync, collaboration, auth or
+permissions built in.
 
 ### Plain Durable Objects
 
-- Jazz shards across DO-sized units, but you work with tables and queries instead of hand-rolled per-object state and storage
-- Sharding across objects is handled for you, including cross-shard transactions
-- Permissions and live queries come built in rather than as custom code in every DO
-- Where plain DOs are stronger: full control over the actor model, no abstraction overhead
+<Comparison
+  other="Durable Objects"
+  common={[
+    ["Unit of scale", "Small stateful units close to users."],
+    ["SQLite underneath", "Each unit keeps its state in SQLite."],
+  ]}
+  differences={[
+    [
+      "Data model",
+      "Tables and queries across all your data",
+      "Per-object state and storage you design",
+    ],
+    ["Transactions across units", "yes", "no"],
+    ["Permissions and live queries", "Built in", "Custom code in each object"],
+  ]}
+/>
+
+**When to use Jazz.** You want to work with shared data through tables and queries, with permissions
+and live updates built in. Durable Objects work best when your app splits into isolated islands of
+state; Jazz gives you one database across many of them, with transactions across shards.
+
+**When to use plain Durable Objects.** Your app is made of isolated pieces of shared state, such as
+game rooms or rate limiters, and you want to build that behaviour yourself.
 
 ### Convex
 
-- Both give reactive queries and a typed schema; Jazz runs inside your own backend and is MIT when unsharded
-- Jazz queries are declarative relational queries, not server functions you write and deploy
-- Declarative permission policies instead of checks written inside each function
-  - When a rule is too complex for a policy, write it as ordinary code in a backend route that uses the backend client, and close that data off to clients entirely
-- Local-first clients with offline writes
-- Where Convex is stronger: a polished hosted product, server functions co-located with data
+<Comparison
+  other="Convex"
+  common={[
+    ["Reactive queries", "Clients see query results update as data changes."],
+    ["Typed schema", "Schema and types in TypeScript."],
+  ]}
+  differences={[
+    ["Where it runs", "Inside your own backend", "Convex's hosted service, or self-hosted"],
+    ["Queries", "Declarative relational queries", "Server functions you write and deploy"],
+    [
+      "Permissions",
+      "Declarative policies, plus ordinary code in your own backend routes for rules too complex for a policy",
+      "Checks written inside each function",
+    ],
+    ["Offline writes with local-first clients", "yes", "no"],
+    [
+      "Server functions next to the data",
+      "Use trusted backend API endpoints in your main backend",
+      "yes",
+    ],
+  ]}
+/>
+
+**When to use Jazz.** You want to query shared data directly from your app, define permissions once,
+and add offline support where you need it.
+
+**When to use Convex.** You want to build your app around server functions, with a hosted backend
+that clients connect to for updated data.
 
 ### Zero
 
-- Both sync query results to clients; Jazz is the database itself, not a sync layer in front of Postgres
-- Permissions apply to backend, thin-client and local-first access alike
-- Collaboration features (history, branches, mergeable text) are built in
-- Thin client option when you don't want a client-side cache at all
-- Where Zero is stronger: keeps your existing Postgres as the source of truth
+<Comparison
+  other="Zero"
+  common={[
+    [
+      "Synced query results",
+      "Clients get query results synced from the server and kept up to date.",
+    ],
+    ["Client-side cache", "Fast reads from data already on the device."],
+  ]}
+  differences={[
+    ["Source of truth", "Jazz itself", "Your existing Postgres"],
+    ["Thin client with no local cache", "yes", "no"],
+    ["Offline writes", "yes", "no"],
+    ["History, branches and mergeable text", "yes", "no"],
+    [
+      "Permissions",
+      "One set of policies for backend, thin-client and local-first access",
+      "Defined in your Zero app code",
+    ],
+  ]}
+/>
 
-### Neon (sync)
+**When to use Jazz.** You're starting fresh, or you want a database with collaboration features,
+permissions built in and offline writes.
 
-- Neon is serverless Postgres; Jazz is a serverless relational database with sync, permissions and live queries built in
-- No separate sync product or replication setup to wire up
-- Where Neon is stronger: real Postgres, branching for dev databases, a managed service
+**When to use Zero.** Postgres is already your source of truth and you want to add synced queries
+in front of it.
+
+### Neon
+
+<Comparison
+  other="Neon"
+  common={[
+    ["Serverless", "No database server to size or keep warm."],
+    ["Relational", "Tables and queries."],
+    ["Live queries", "Subscribe to a query and see its results update."],
+  ]}
+  differences={[
+    [
+      "Setting up live queries",
+      "Subscribe to any query from the client",
+      "Enable Realtime per branch, then write each query on your server, seal it per user and serve it from an endpoint",
+    ],
+    [
+      "Writes",
+      "Clients write directly, checked by your policies",
+      "Through API routes you write, with optimistic updates wired up in the client",
+    ],
+    [
+      "Permissions",
+      "Policies next to the schema, for reads and writes",
+      "Whatever your sealed queries and API routes enforce",
+    ],
+    ["Offline writes", "yes", "no"],
+    ["Real Postgres", "no", "yes"],
+    ["Branching dev databases", "Drafts and branches on rows", "Branch the whole database"],
+  ]}
+/>
+
+**When to use Jazz.** You want the database, sync, permissions and live queries as one system,
+without the server code that wires them together.
+
+**When to use Neon.** You want managed serverless Postgres, with database branching for development.
 
 ### TanStack DB
 
-- TanStack DB is a client-side reactive store over your own APIs; Jazz also provides the server, storage and permissions
-- No API layer to write to feed the client collections
-- Same live queries on the backend and frontend
-- Where TanStack DB is stronger: plugs into an existing backend with no new database
+<Comparison
+  other="TanStack DB"
+  common={[
+    ["Live queries on the client", "Reactive queries that update the UI as data changes."],
+    ["Optimistic writes", "The UI updates before the server confirms."],
+  ]}
+  differences={[
+    ["Server and storage", "Included", "Your own backend and APIs"],
+    ["Permissions", "yes", "no"],
+    ["Same queries on the backend", "yes", "no"],
+    ["Works with an existing backend unchanged", "no", "yes"],
+  ]}
+/>
+
+**When to use Jazz.** You want a database with sync and permissions built in, using the same queries
+and access rules across both frontend and backend.
+
+**When to use TanStack DB.** You have a backend and APIs you're keeping, and want reactive client
+collections on top of them.
 
 ## For engineering leaders
 
-- Custom code as a liability: less backend code to own
-- Fewer systems and moving parts
-- Your backend owns auth; Jazz Cloud or your own Jazz server stores and syncs
-- Licensing: MIT for unsharded Jazz, a license for sharded Jazz
+- **Less code to maintain:** no glue code for data access, sync or permissions.
+- **Fewer moving parts:** live and collaborative features natively in Jazz, without a separate
+  stack.
+- **Keep your existing auth:** your backend passes each user's identity to Jazz, including roles and
+  claims from your identity provider, and policies check them directly.
+- **Choose where it runs:** run Jazz on your own infrastructure, bring your own cloud, or use Jazz
+  Cloud.
+- **Licensing:** MIT for unsharded Jazz; unlock sharding with an enterprise license.

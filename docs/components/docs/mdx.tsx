@@ -35,6 +35,85 @@ function Paragraph({ children }: { children?: ReactNode }) {
   );
 }
 
+/** Renders `code` spans and yes/no marks inside a comparison cell. */
+function ComparisonText({ text }: { text: string }) {
+  if (text === "yes") return <span aria-label="Yes">✓</span>;
+  if (text === "no") return <span aria-label="No">✗</span>;
+  return (
+    <>
+      {text
+        .split(/(`[^`]+`)/)
+        .map((part, i) =>
+          part.startsWith("`") && part.endsWith("`") && part.length > 1 ? (
+            <InlineCode key={i}>{part.slice(1, -1)}</InlineCode>
+          ) : (
+            part
+          ),
+        )}
+    </>
+  );
+}
+
+/**
+ * A Jazz-vs-other feature table. Shared traits come first, each with one
+ * description spanning both columns; differences follow, one cell per side.
+ * A cell of exactly "yes" or "no" renders as a tick or a cross.
+ */
+function Comparison({
+  other,
+  common,
+  differences,
+}: {
+  other: string;
+  common: [feature: string, description: string][];
+  differences: [feature: string, jazz: string, other: string][];
+}) {
+  return (
+    <div className="docs-block docs-table">
+      <Table density="compact" verticalAlign="top">
+        <TableHeader>
+          <TableRow>
+            <TableHeaderCell> </TableHeaderCell>
+            <TableHeaderCell>Jazz</TableHeaderCell>
+            <TableHeaderCell>{other}</TableHeaderCell>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          <TableRow>
+            <TableCell colSpan={3}>
+              <strong>In common</strong>
+            </TableCell>
+          </TableRow>
+          {common.map(([feature, description]) => (
+            <TableRow key={feature}>
+              <TableCell>{feature}</TableCell>
+              <TableCell colSpan={2}>
+                <ComparisonText text={description} />
+              </TableCell>
+            </TableRow>
+          ))}
+          <TableRow>
+            <TableCell colSpan={3}>
+              <strong>Differences</strong>
+            </TableCell>
+          </TableRow>
+          {differences.map(([feature, jazz, theirs]) => (
+            <TableRow key={feature}>
+              <TableCell>{feature}</TableCell>
+              <TableCell>
+                <ComparisonText text={jazz} />
+              </TableCell>
+              <TableCell>
+                <ComparisonText text={theirs} />
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </div>
+  );
+}
+
 /**
  * MDX components for docs pages, built from Astryx components under the
  * Jazz theme. The slide and diagram components shared with the blog and
@@ -71,6 +150,7 @@ export function getDocsMDXComponents(components?: MDXComponents): MDXComponents 
     th: ({ children }: { children?: ReactNode }) => <TableHeaderCell>{children}</TableHeaderCell>,
     td: ({ children }: { children?: ReactNode }) => <TableCell>{children}</TableCell>,
     Callout,
+    Comparison,
     Accordions,
     Accordion,
     Cards,
