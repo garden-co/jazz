@@ -484,7 +484,7 @@ export default function HomePage() {
       <section className="home-section">
         <div className="home-container">
           <Heading level={2} type="display-3" id="features" className="home-anchor home-statement">
-            Data that is more based.
+            One layer for letting apps and agents deal with all kinds of data.
           </Heading>
           <div className="mt-6">
             {features.map((feature) => (
