@@ -18,6 +18,7 @@ export const server = ({ dir }) =>
     env: { BACKEND_SECRET: secret(), BETTER_AUTH_SECRET: secret() },
   });
 
+const attachment = (page, name) => page.getByAltText(name).or(page.getByText(name)).first();
 const composer = (page) => page.getByRole("textbox", { name: "Message input" });
 const invite = (page) => page.getByRole("button", { name: /^Invite/ }).first();
 
@@ -63,9 +64,16 @@ export const actions = {
       ]);
   },
 
+  /** Sends the picked file: it leaves the draft and lands in the room as a message. */
   async sendAttachment({ page }, name) {
-    await page.keyboard.press("Enter");
-    await page.getByText(name).first().waitFor({ state: "attached" });
+    await click(page, page.getByRole("button", { name: "Send", exact: true }));
+    // The draft's chip (with its Remove button) clears once the message is sent.
+    await page.getByRole("button", { name: /remove/i }).waitFor({ state: "detached" });
+    await attachment(page, name).waitFor();
+  },
+
+  async waitForAttachment({ page }, name) {
+    await attachment(page, name).waitFor({ timeout: 60_000 });
   },
 
   async askToJoin({ stage, on, page, state }) {

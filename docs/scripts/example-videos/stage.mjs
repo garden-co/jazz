@@ -80,6 +80,10 @@ async function startDeviceNetwork({ keepPorts = [], syncPaths = ["/jazz/"] } = {
         path: target.pathname + target.search,
         method: req.method,
         headers: req.headers,
+        // Each device gets its own upstream sockets. Node's shared keep-alive
+        // pool would hand one device's socket to another, so cutting one
+        // device's Wi-Fi could end the other's sync stream.
+        agent: false,
       },
       (response) => {
         res.writeHead(response.statusCode ?? 502, response.headers);
