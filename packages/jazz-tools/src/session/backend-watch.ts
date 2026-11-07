@@ -142,8 +142,11 @@ export function watchBackendUser<Client>(
 ): BackendWatch {
   const confirmMs = options.confirmMs ?? 2000;
   const notFoundRetryMs = options.notFoundRetryMs ?? 5_000;
-  // 404s in a row since the first of them, and the retries scheduled since.
-  let notFound: { count: number; since: number; retries: number } | undefined;
+  // 404s in a row since the first of them, the retries scheduled since, and
+  // how long those retries have waited. Counting the waits rather than
+  // reading the clock keeps "for a while" exact: timers and `Date.now()` can
+  // disagree by a millisecond at the boundary.
+  let notFound: { count: number; waited: number; retries: number } | undefined;
   let notFoundTimer: ReturnType<typeof setTimeout> | undefined;
   const clearNotFound = () => {
     notFound = undefined;
@@ -257,9 +260,9 @@ export function watchBackendUser<Client>(
    */
   function notFoundAnswer(cause: AccountAuthError) {
     if (stopped) return;
-    notFound ??= { count: 0, since: Date.now(), retries: 0 };
+    notFound ??= { count: 0, waited: 0, retries: 0 };
     notFound.count++;
-    if (notFound.count >= 3 && Date.now() - notFound.since >= notFoundRetryMs * 3) {
+    if (notFound.count >= 3 && notFound.waited >= notFoundRetryMs * 3) {
       // No backend to ask: reauthenticates still waiting, and later ones, fail.
       const error = new Error("Jazz found no backend to ask who is signed in", { cause });
       const queued = waiters.splice(0);
@@ -270,8 +273,10 @@ export function watchBackendUser<Client>(
     }
     if (notFoundTimer) return;
     const wait = notFoundRetryMs * 2 ** Math.min(notFound.retries++, 4);
+    const counting = notFound;
     notFoundTimer = setTimeout(() => {
       notFoundTimer = undefined;
+      counting.waited += wait;
       check();
     }, wait);
   }
