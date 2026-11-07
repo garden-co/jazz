@@ -389,6 +389,12 @@ export interface BrowserWorkerInitOptions {
 export interface BrowserSharedWorkerConnectRequest {
   type: "connect-runtime";
   tabId: string;
+  /**
+   * A Web Lock the tab holds for as long as its page lives. The worker waits
+   * on it and detaches the tab once the browser grants it: the page went
+   * away (closed, crashed, discarded) without saying so.
+   */
+  livenessLock?: string;
   fingerprint: string;
   options: BrowserWorkerInitOptions;
 }

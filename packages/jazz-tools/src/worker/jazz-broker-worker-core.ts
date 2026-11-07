@@ -972,10 +972,6 @@ async function connectTab(
     assertAdmission();
     const key = runtimeKey(message.options);
     let context = contexts.get(key);
-    if (context?.idleReleaseTimer) {
-      clearTimeout(context.idleReleaseTimer);
-      context.idleReleaseTimer = null;
-    }
     if (context?.closing) {
       await context.closing;
       assertAdmission();
@@ -997,6 +993,12 @@ async function connectTab(
           : "incompatible persistent browser configuration",
       );
     }
+    // Only an admitted tab keeps an idle context: a refused one must not
+    // cancel the release that lets it in next time.
+    if (context?.idleReleaseTimer) {
+      clearTimeout(context.idleReleaseTimer);
+      context.idleReleaseTimer = null;
+    }
     if (!context) {
       context = createContext(key, message.fingerprint, message.options);
       contexts.set(key, context);
@@ -1014,6 +1016,7 @@ async function connectTab(
     assertAdmission();
     // No await between the final fence, peer publication and listener handoff.
     attachTab(context, message.tabId, port, message.options.author);
+    if (message.livenessLock) watchTabLiveness(context, message.tabId, message.livenessLock);
     releaseClaim();
     finishBootstrap();
     post(port, { type: "runtime-ready" });
@@ -1468,6 +1471,28 @@ function attachTab(
   // peers arrive as freshly transferred MessageChannel ports. Starting is
   // idempotent and required before addEventListener-based delivery can begin.
   port.start();
+}
+
+/**
+ * Detach the tab once the browser grants `lock`, which the tab holds for as
+ * long as its page lives: it went away (closed, crashed, discarded) without
+ * a `close`. Its context is then released like a closed tab's, so a tab
+ * waiting for this store under another sign-in gets in. A frozen page still
+ * holds its lock, and the waiting tab reports that after a while.
+ */
+function watchTabLiveness(context: RuntimeContext, tabId: string, lock: string): void {
+  const peer = context.peers.get(tabId);
+  const locks = (globalThis.navigator as Navigator | undefined)?.locks;
+  if (!peer || !locks) return;
+  locks
+    .request(lock, { signal: peer.transportWaitAbort.signal }, () => {
+      if (context.peers.get(tabId) !== peer) return;
+      closeTab(context, tabId);
+      if (context.peers.size === 0 && context.pendingAdmissionTasks === 0)
+        scheduleIdleContextRelease(context);
+    })
+    // Aborted once the tab detached any other way.
+    .catch(() => undefined);
 }
 
 async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortRequest): Promise<void> {

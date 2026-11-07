@@ -472,6 +472,8 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
   private readonly workerName: string;
   private connectedGeneration: number | null = null;
   private cancelBootstrap: (() => void) | null = null;
+  /** Lets go of this connection's liveness lock (see `holdLivenessLock`). */
+  private releaseLivenessLock: (() => void) | null = null;
 
   constructor(
     runtime: NativeRuntimeAdapter,
@@ -512,9 +514,35 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
       () => undefined,
       (error: unknown) => {
         this.readyError = toError(error);
+        this.releaseLivenessLock?.();
         callbacks.onFailure(this.readyError);
       },
     );
+  }
+
+  /**
+   * Hold a Web Lock for as long as this page lives, and name it to the
+   * worker: the browser releases it when the page goes away without a word
+   * (closed, crashed, discarded), and the worker then detaches this tab, so
+   * a tab waiting for this store under another sign-in gets in.
+   */
+  private async holdLivenessLock(): Promise<string | undefined> {
+    const locks = globalThis.navigator?.locks;
+    if (!locks) return undefined;
+    const name = `jazz-tab-alive:${crypto.randomUUID()}`;
+    try {
+      await new Promise<void>((granted, failed) => {
+        locks
+          .request(name, () => {
+            granted();
+            return new Promise<void>((release) => (this.releaseLivenessLock = release));
+          })
+          .catch(failed);
+      });
+    } catch {
+      return undefined;
+    }
+    return name;
   }
 
   private async connect(
@@ -524,6 +552,9 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
     workerName: string,
     createWorker: (name: string) => SharedWorker,
   ): Promise<void> {
+    // Without Web Locks the worker can't watch this tab: connect at once.
+    const livenessLock = globalThis.navigator?.locks ? await this.holdLivenessLock() : undefined;
+    if (this.closed) throw new Error("Shared browser runtime connection is closed");
     let generation = readWorkerGeneration(workerName);
     for (let attempt = 0; attempt < MAX_SHARED_WORKER_GENERATION_ATTEMPTS; attempt += 1) {
       if (this.closed) return;
@@ -534,6 +565,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
         fingerprint,
         generationName,
         createWorker,
+        livenessLock,
       );
       if (outcome.error) throw outcome.error;
       if (this.closed) return;
@@ -552,6 +584,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
     fingerprint: string,
     workerName: string,
     createWorker: (name: string) => SharedWorker,
+    livenessLock: string | undefined,
   ): Promise<{ connected: boolean; error?: Error }> {
     const worker = createWorker(workerName);
     this.worker = worker;
@@ -738,6 +771,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
         port.postMessage({
           type: "connect-runtime",
           tabId: crypto.randomUUID(),
+          ...(livenessLock ? { livenessLock } : {}),
           fingerprint,
           options,
         } satisfies BrowserSharedWorkerConnectRequest);
@@ -798,10 +832,14 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
     if (this.closed) return;
     this.closed = true;
     this.cancelBootstrap?.();
-    await this.connection?.shutdown(true);
-    this.connection = null;
-    this.worker?.port.close();
-    this.worker = null;
+    try {
+      await this.connection?.shutdown(true);
+    } finally {
+      this.connection = null;
+      this.worker?.port.close();
+      this.worker = null;
+      this.releaseLivenessLock?.();
+    }
   }
 
   async waitForPendingWrites(): Promise<void> {

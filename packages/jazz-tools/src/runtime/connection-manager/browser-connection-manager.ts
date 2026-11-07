@@ -10,6 +10,7 @@ import { CONNECTED, CONNECTING, offlineLink, type LinkStatus } from "../sync-sta
 import { reloadAfterStorageInvalidation } from "../browser-storage-invalidation.js";
 import { runCleanupSteps } from "../run-cleanup-steps.js";
 import { BrowserWorkerUnresponsiveError } from "../native-runtime/browser-worker-protocol.js";
+import { StoreHeldByAnotherTabError } from "../store-held-by-another-tab-error.js";
 import {
   ConnectionManager,
   type ConnectionManagerClientInput,
@@ -62,6 +63,10 @@ export class BrowserConnectionManager extends ConnectionManager {
   private readonly readinessByConnection = new WeakMap<BrowserWorkerConnection, Promise<void>>();
   /** Waiting for a refused connection's replacement (see `admissionRefused`). */
   private readonly replacementWaiters = new Set<() => void>();
+  /** Runs out how long a refused tab waits quietly (see `admissionRefused`). */
+  private heldPatienceTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The other tab has held the store past that patience: report it. */
+  private heldTooLong = false;
   declare protected foregroundNodeLease: BrowserForegroundNodeLease | undefined;
   private shutdownStarted = false;
   private shutdownFailure: {
@@ -170,6 +175,7 @@ export class BrowserConnectionManager extends ConnectionManager {
         this.recoverableConnectionFailure = false;
         this.clearWorkerRecoveryTimer();
         this.workerRecoveryDelayMs = 250;
+        this.clearHeldPatience();
       },
       (error: unknown) => {
         this.observeConnectionFailure(connection, toError(error));
@@ -200,18 +206,52 @@ export class BrowserConnectionManager extends ConnectionManager {
     this.recoverableConnectionFailure = true;
     this.rejectReconnectWaiters(error);
     this.notifyWorkerRemoteLink();
-    if (error instanceof BrowserWorkerUnresponsiveError || this.admissionRefused(connection))
+    const refused = this.admissionRefused(connection);
+    if (refused) this.startHeldPatience();
+    if (error instanceof BrowserWorkerUnresponsiveError || refused)
       this.scheduleWorkerRecovery(connection);
+  }
+
+  /**
+   * Wait quietly for the other tab to let go for this long: following a
+   * sign-up takes it moments, and an abruptly closed tab is noticed by the
+   * worker as soon as the browser drops the page.
+   */
+  static readonly HELD_BY_ANOTHER_TAB_PATIENCE_MS = 30_000;
+
+  private startHeldPatience(): void {
+    if (this.heldPatienceTimer !== null || this.heldTooLong) return;
+    this.heldPatienceTimer = setTimeout(() => {
+      this.heldPatienceTimer = null;
+      if (this.shutdownStarted || this.host.isShuttingDown) return;
+      // Still waiting: the other tab is frozen in the background, or never
+      // follows (another build). Say so, and fail what waits, so the app can
+      // ask the user to close it; the retries go on.
+      this.heldTooLong = true;
+      this.wakeReplacementWaiters();
+      this.notifyWorkerRemoteLink();
+    }, BrowserConnectionManager.HELD_BY_ANOTHER_TAB_PATIENCE_MS);
+  }
+
+  private clearHeldPatience(): void {
+    if (this.heldPatienceTimer !== null) clearTimeout(this.heldPatienceTimer);
+    this.heldPatienceTimer = null;
+    if (!this.heldTooLong) return;
+    this.heldTooLong = false;
+    this.notifyWorkerRemoteLink();
   }
 
   /**
    * The worker refused this tab because another tab holds this account's
    * store under another sign-in: a guest who just signed up here, while
-   * another tab is still the guest. That tab follows the sign-up (or
-   * closes), so this tab tries again on its own, meanwhile connecting rather
-   * than stopped: its writes wait for the worker in this tab, and its
-   * queries and waits go on once it joins. Any other refused configuration
-   * (an older deploy's schema) still fails visibly.
+   * another tab is still the guest. That tab follows the sign-up, or closes
+   * (the worker watches each tab's page lock), so this tab tries again on
+   * its own, meanwhile connecting rather than stopped: its writes wait for
+   * the worker in this tab, and its queries and waits go on once it joins.
+   * Past `HELD_BY_ANOTHER_TAB_PATIENCE_MS` it reports `held-by-another-tab`
+   * and fails those waits with a `StoreHeldByAnotherTabError`, still trying
+   * in the background. Any other refused configuration (an older deploy's
+   * schema) still fails visibly.
    */
   private admissionRefused(connection: BrowserWorkerConnection | null): boolean {
     return !!connection?.waitsForAnotherSignIn?.();
@@ -223,6 +263,7 @@ export class BrowserConnectionManager extends ConnectionManager {
       const check = () => {
         if (
           this.connection === failed &&
+          !this.heldTooLong &&
           !this.shutdownStarted &&
           !this.host.isShuttingDown &&
           !signal?.aborted
@@ -248,7 +289,9 @@ export class BrowserConnectionManager extends ConnectionManager {
       this.shutdownStarted ||
       this.host.isShuttingDown ||
       this.storageReset ||
-      this.connectionScope?.inspectorAttachment
+      // A tab the inspector attached recovers only on an explicit call, but
+      // waiting for another tab's sign-in is no failure of its own.
+      (this.connectionScope?.inspectorAttachment && !this.admissionRefused(failed))
     )
       return;
     const delay = this.workerRecoveryDelayMs;
@@ -297,7 +340,9 @@ export class BrowserConnectionManager extends ConnectionManager {
     await reset;
     if (this.storageResetError) throw this.storageResetError;
     if (this.host.isShuttingDown || signal?.aborted) return;
-    connection ??= this.connection;
+    // Between a retry's shutdown of the refused connection and its
+    // replacement there is none: wait for the replacement.
+    connection ??= this.connection ?? (await this.configurationAdmissionRetry);
     if (retry && connection) connection = await this.retryConfigurationAdmission(connection);
     if (this.host.isShuttingDown || signal?.aborted) return;
     for (;;) {
@@ -308,9 +353,10 @@ export class BrowserConnectionManager extends ConnectionManager {
         // A refused tab tries again by itself (see `admissionRefused`): wait
         // for the attempt that joins, as for a reconnect.
         if (connection && this.admissionRefused(connection) && !signal?.aborted) {
+          if (this.heldTooLong) throw new StoreHeldByAnotherTabError(undefined, { cause: error });
           await this.replacementOf(connection, signal);
           if (this.host.isShuttingDown || this.shutdownStarted || signal?.aborted) return;
-          connection = this.connection;
+          connection = this.connection ?? (await this.configurationAdmissionRetry);
           continue;
         }
         if (
@@ -559,6 +605,8 @@ export class BrowserConnectionManager extends ConnectionManager {
     if (this.shutdownStarted) return;
     this.shutdownStarted = true;
     this.clearWorkerRecoveryTimer();
+    if (this.heldPatienceTimer !== null) clearTimeout(this.heldPatienceTimer);
+    this.heldPatienceTimer = null;
     this.wakeReplacementWaiters();
     const connection = this.connection;
     const scope = this.connectionScope;
@@ -714,6 +762,7 @@ export class BrowserConnectionManager extends ConnectionManager {
 
   protected override transportLinkState(): RemoteLinkState {
     // A failed follower cannot receive the worker's answer.
+    if (this.heldTooLong) return "unavailable";
     if (this.connectionError && this.admissionRefused(this.connection)) return "connecting";
     return this.connectionError ? "unavailable" : this.workerRemoteLink;
   }
@@ -728,6 +777,7 @@ export class BrowserConnectionManager extends ConnectionManager {
 
   protected override transportLinkStatus(): LinkStatus {
     // A failed follower cannot receive the worker's answer.
+    if (this.heldTooLong) return offlineLink("held-by-another-tab", true);
     if (this.connectionError && this.admissionRefused(this.connection)) return CONNECTING;
     if (this.connectionError) return offlineLink("stopped");
     // This Db has a server configured, so a worker that has not dialled yet

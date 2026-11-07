@@ -13,6 +13,7 @@ export async function openSessionTab(
   currentPage: Page,
   id: string,
   serverUrl: string,
+  options: { clearOnSignOut?: boolean } = {},
 ): Promise<void> {
   await closeSessionTab(id);
   const page = await context.newPage();
@@ -21,7 +22,7 @@ export async function openSessionTab(
   await page.goto(new URL("/tests/browser/remote-db-harness.html", currentPage.url()).toString(), {
     waitUntil: "domcontentloaded",
   });
-  await evaluateHarnessOperation(page, harness, "openSessionTab", { serverUrl });
+  await evaluateHarnessOperation(page, harness, "openSessionTab", { serverUrl, ...options });
 }
 
 function tab(id: string): Page {
@@ -40,6 +41,13 @@ export function insertInSessionTab(id: string, title: string): Promise<void> {
 
 export function holdSessionTabBackend(id: string, hold: boolean): Promise<void> {
   return evaluateHarnessOperation(tab(id), harness, "holdSessionTabBackend", { hold });
+}
+
+/** Close the tab as a crash or a discarded tab does: its page just goes away. */
+export async function crashSessionTab(id: string): Promise<void> {
+  const page = tab(id);
+  tabs.delete(id);
+  await page.close({ runBeforeUnload: false });
 }
 
 export async function closeSessionTab(id: string): Promise<void> {

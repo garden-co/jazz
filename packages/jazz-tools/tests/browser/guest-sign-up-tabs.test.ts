@@ -29,12 +29,14 @@ afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup().catch(() => {});
 });
 
-it("keeps both tabs syncing when a local-first guest signs up in one of them", async () => {
-  const {
-    appId,
-    serverUrl: coreUrl,
-    adminSecret,
-  } = await getJazzServerInfo(uniqueDbName("guest-sign-up-tabs"));
+/**
+ * This page is the tab that signs up; another tab of its origin is open too.
+ * Both are the device's local-first guest, local-first once loaded. The guest
+ * writes `guest-1`, then signs up here while the other tab doesn't hear of it
+ * yet (its backend requests are held), so it stays the guest.
+ */
+async function signUpWhileAnotherTabIsTheGuest(name: string, clearOnSignOut: boolean) {
+  const { appId, serverUrl: coreUrl, adminSecret } = await getJazzServerInfo(uniqueDbName(name));
   await deploy({ appId, serverUrl: coreUrl, adminSecret, schema: app.wasmSchema, permissions });
   const backend = await startJazzApp(
     { appId, serverUrl: coreUrl, adminSecret },
@@ -53,12 +55,11 @@ it("keeps both tabs syncing when a local-first guest signs up in one of them", a
     globalThis.fetch = pageFetch;
   });
 
-  // This page is the tab that signs up; another tab of its origin is open
-  // too. Both are the device's local-first guest, local-first once loaded.
   const signingUp = await createJazzClient({
     serverUrl: visitorUrl,
     fetch: jazzAppFetch,
     initial: "local-first",
+    clearOnSignOut,
     client: async () => ({ createClient: createLocalFirstDb }),
   });
   cleanups.push(() => signingUp.close());
@@ -70,18 +71,15 @@ it("keeps both tabs syncing when a local-first guest signs up in one of them", a
     30_000,
     "The tab should upgrade to local-first",
   );
-  const other = await openSessionTab("other", visitorUrl);
+  const other = await openSessionTab("other", visitorUrl, { clearOnSignOut });
   cleanups.push(() => other.close());
   const guest = signingUp.getSnapshot().account!.id;
   expect((await other.state()).account).toBe(guest);
-  const titles = async () =>
-    (await signingUp.getSnapshot().client!.db.all(app.tasks)).map((task) => task.title).sort();
   await signingUp
     .getSnapshot()
     .client!.db.insert(app.tasks, { title: "guest-1" })
     .wait({ tier: "global" });
 
-  // The other tab doesn't hear of the sign-up yet: it stays the guest.
   await other.holdBackend(true);
   // The app's own sign-up, then as its sign-up handler goes on.
   await signUpAtJazzApp(backend, visitorUrl, "erin");
@@ -91,57 +89,103 @@ it("keeps both tabs syncing when a local-first guest signs up in one of them", a
     status: "ready",
     account: { id: guest, identity: { subject: "erin" } },
   });
-
-  // While the other tab is still the guest, the tab that signed up waits for
-  // it to follow: it shows connecting (it once stopped for good), and what
-  // it reads and writes meanwhile goes on once it joins.
   const db = signingUp.getSnapshot().client!.db;
-  const seen: string[][] = [];
-  cleanups.push(async () => unsubscribe());
-  const unsubscribe = db.subscribe(app.tasks, {
-    onUpdate: (rows) => seen.push(rows.map((task) => task.title).sort()),
-    onError: (error) => seen.push([`error: ${error.message}`]),
-  });
+  const titles = async () => (await db.all(app.tasks)).map((task) => task.title).sort();
+  return { signingUp, other, guest, db, titles };
+}
+
+/**
+ * Write while the other tab still holds the store, and show the tab waits for
+ * it: connecting (it once stopped for good), and its write doesn't reach the
+ * server, though nothing else holds it back (the worker refused this tab).
+ */
+async function writeWhileRefused(
+  db: Awaited<ReturnType<typeof signUpWhileAnotherTabIsTheGuest>>["db"],
+): Promise<{ upload: Promise<unknown> }> {
   const written = db.insert(app.tasks, { title: "while-the-other-is-a-guest" });
+  let uploaded = false;
+  const upload = written.wait({ tier: "global" }).then(() => (uploaded = true));
   await new Promise((resolve) => setTimeout(resolve, 3_000));
-  expect(db.getSyncStatus().link.state).not.toBe("offline");
-  await other.holdBackend(false);
-  await written.wait({ tier: "global" });
-  expect(await titles()).toEqual(["guest-1", "while-the-other-is-a-guest"]);
-  await waitForCondition(
-    async () => seen.at(-1)?.length === 2,
-    15_000,
-    "The subscription made while waiting should see the tasks",
+  expect(db.getSyncStatus().link.state).toBe("connecting");
+  expect(uploaded).toBe(false);
+  // Wrapped: an async function returning the promise would wait for it.
+  return { upload };
+}
+
+for (const clearOnSignOut of [false, true]) {
+  it(`keeps both tabs syncing when a local-first guest signs up in one of them${
+    clearOnSignOut ? " (clearOnSignOut)" : ""
+  }`, async () => {
+    const { other, guest, db, titles } = await signUpWhileAnotherTabIsTheGuest(
+      "guest-sign-up-tabs",
+      clearOnSignOut,
+    );
+
+    // What it reads and writes meanwhile goes on once it joins.
+    const seen: string[][] = [];
+    cleanups.push(async () => unsubscribe());
+    const unsubscribe = db.subscribe(app.tasks, {
+      onUpdate: (rows) => seen.push(rows.map((task) => task.title).sort()),
+      onError: (error) => seen.push([`error: ${error.message}`]),
+    });
+    const { upload } = await writeWhileRefused(db);
+    await other.holdBackend(false);
+    await upload;
+    expect(await titles()).toEqual(["guest-1", "while-the-other-is-a-guest"]);
+    await waitForCondition(
+      async () => seen.at(-1)?.length === 2,
+      15_000,
+      "The subscription made while waiting should see the tasks",
+    );
+    expect(seen.flat().filter((title) => title.startsWith("error"))).toEqual([]);
+    await waitForCondition(
+      async () => db.getSyncStatus().link.state === "connected",
+      10_000,
+      "The tab that signed up should connect",
+    );
+    // Its next write reaches the server, and the other tab.
+    await db.insert(app.tasks, { title: "after-sign-up" }).wait({ tier: "global" });
+    await waitForCondition(
+      async () => (await other.state()).titles.length === 3,
+      15_000,
+      "The other tab should see the writes made after the sign-up",
+    );
+
+    // The other tab follows the sign-up to the same account, and syncs too.
+    await waitForCondition(
+      async () => (await other.state()).subject === "erin",
+      15_000,
+      "The other tab should follow the sign-up",
+    );
+    expect(await other.state()).toMatchObject({
+      status: "ready",
+      account: guest,
+      titles: ["after-sign-up", "guest-1", "while-the-other-is-a-guest"],
+    });
+    await other.insert("from-the-other-tab");
+    await waitForCondition(
+      async () => (await titles()).includes("from-the-other-tab"),
+      15_000,
+      "The tab that signed up should see the other tab's write",
+    );
+  }, 120_000);
+}
+
+it("lets the tab that signed up in once the other guest tab crashes", async () => {
+  const { other, db, titles } = await signUpWhileAnotherTabIsTheGuest(
+    "guest-sign-up-tab-crash",
+    false,
   );
-  expect(seen.flat().filter((title) => title.startsWith("error"))).toEqual([]);
+  const { upload } = await writeWhileRefused(db);
+
+  // The other tab never follows: its page goes away without closing its
+  // session (a crash, a discarded tab), so it never tells the worker.
+  await other.crash();
+  await upload;
+  expect(await titles()).toEqual(["guest-1", "while-the-other-is-a-guest"]);
   await waitForCondition(
     async () => db.getSyncStatus().link.state === "connected",
     10_000,
     "The tab that signed up should connect",
-  );
-  // Its next write reaches the server, and the other tab.
-  await db.insert(app.tasks, { title: "after-sign-up" }).wait({ tier: "global" });
-  await waitForCondition(
-    async () => (await other.state()).titles.length === 3,
-    15_000,
-    "The other tab should see the writes made after the sign-up",
-  );
-
-  // The other tab follows the sign-up to the same account, and syncs too.
-  await waitForCondition(
-    async () => (await other.state()).subject === "erin",
-    15_000,
-    "The other tab should follow the sign-up",
-  );
-  expect(await other.state()).toMatchObject({
-    status: "ready",
-    account: guest,
-    titles: ["after-sign-up", "guest-1", "while-the-other-is-a-guest"],
-  });
-  await other.insert("from-the-other-tab");
-  await waitForCondition(
-    async () => (await titles()).includes("from-the-other-tab"),
-    15_000,
-    "The tab that signed up should see the other tab's write",
   );
 }, 120_000);

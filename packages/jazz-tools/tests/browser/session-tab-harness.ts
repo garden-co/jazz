@@ -35,7 +35,10 @@ const nodeFetch: typeof fetch = async (input, init) => {
 };
 
 /** Open a local-first guest's session at `serverUrl`, and wait for its local-first client. */
-export async function openSessionTab(input: { serverUrl: string }): Promise<void> {
+export async function openSessionTab(input: {
+  serverUrl: string;
+  clearOnSignOut?: boolean;
+}): Promise<void> {
   const pageFetch = globalThis.fetch;
   globalThis.fetch = ((request: RequestInfo | URL, init?: RequestInit) => {
     const url = request instanceof Request ? request.url : String(request);
@@ -47,6 +50,7 @@ export async function openSessionTab(input: { serverUrl: string }): Promise<void
     serverUrl: input.serverUrl,
     fetch: nodeFetch,
     initial: "local-first",
+    clearOnSignOut: input.clearOnSignOut,
     client: async () => ({ createClient: createLocalFirstDb }),
   });
   const deadline = Date.now() + 30_000;

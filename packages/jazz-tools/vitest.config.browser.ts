@@ -42,6 +42,7 @@ import {
   insertInSessionTab,
   openSessionTab,
   sessionTabState,
+  crashSessionTab,
 } from "./tests/browser/session-tab-node.js";
 import {
   closeRemoteBrowserDb,
@@ -246,12 +247,13 @@ export default defineConfig({
           jazzAppUser(frontUrl, userId, claims),
         jazzAppSignOut: async (_context, frontUrl, userUrl) => jazzAppSignOut(frontUrl, userUrl),
         jazzAppVisitor: async (_context, frontUrl) => jazzAppVisitor(frontUrl),
-        sessionTabOpen: async ({ context, page }, id, serverUrl) =>
-          openSessionTab(context, page, id, serverUrl),
+        sessionTabOpen: async ({ context, page }, id, serverUrl, options) =>
+          openSessionTab(context, page, id, serverUrl, options),
         sessionTabState: async (_context, id) => sessionTabState(id),
         sessionTabInsert: async (_context, id, title) => insertInSessionTab(id, title),
         sessionTabHoldBackend: async (_context, id, hold) => holdSessionTabBackend(id, hold),
         sessionTabClose: async (_context, id) => closeSessionTab(id),
+        sessionTabCrash: async (_context, id) => crashSessionTab(id),
         jazzAppSignUp: async (_context, frontUrl, originUrl, userId) =>
           jazzAppSignUp(frontUrl, originUrl, userId),
         jazzAppRequest: async (_context, url, init) => jazzAppRequest(url, init),

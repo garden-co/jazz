@@ -8,6 +8,7 @@ import {
 } from "../native-runtime/browser-worker-protocol.js";
 import type { BrowserWorkerConnection, BrowserWorkerConnectionContext } from "../runtime-source.js";
 import { BrowserConnectionManager } from "./browser-connection-manager.js";
+import { isStoreHeldByAnotherTabError } from "../store-held-by-another-tab-error.js";
 import type { DbForConnection } from "./types.js";
 import type { RemoteLinkState } from "../remote-link-state.js";
 import type { LinkStatus } from "../sync-status.js";
@@ -428,7 +429,11 @@ describe("BrowserConnectionManager acknowledged storage reset", () => {
   });
 });
 
-function admissionManager(retryable = true, heldByAnotherSignIn = false) {
+function admissionManager(
+  retryable = true,
+  heldByAnotherSignIn = false,
+  config: Record<string, unknown> = {},
+) {
   let pinned = true;
   const error = new Error(
     heldByAnotherSignIn
@@ -437,7 +442,7 @@ function admissionManager(retryable = true, heldByAnotherSignIn = false) {
   );
   const connections: Array<BrowserWorkerConnection & { shutdown: ReturnType<typeof vi.fn> }> = [];
   const host = {
-    config: {},
+    config,
     isShuttingDown: false,
     runtimeSource: {
       createBrowserWorkerConnection: vi.fn(() => {
@@ -518,6 +523,56 @@ describe("Browser configuration admission retries", () => {
         expect(connection.shutdown).toHaveBeenCalledOnce();
       await vi.advanceTimersByTimeAsync(60_000);
       expect(connections).toHaveLength(attempts);
+    } finally {
+      host.isShuttingDown = true;
+      await manager.shutdown().catch(() => undefined);
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports a store held past its patience and fails what waits, still trying", async () => {
+    vi.useFakeTimers();
+    const { manager, host, connections, unpin } = admissionManager(true, true);
+    const status = () =>
+      (manager as unknown as { transportLinkStatus(): unknown }).transportLinkStatus();
+    try {
+      const waiting = manager.ensureReady("runtime");
+      const failed = expect(waiting).rejects.toSatisfy(isStoreHeldByAnotherTabError);
+      await vi.advanceTimersByTimeAsync(
+        BrowserConnectionManager.HELD_BY_ANOTHER_TAB_PATIENCE_MS - 1_000,
+      );
+      expect(status()).toEqual({ state: "connecting" });
+      await vi.advanceTimersByTimeAsync(2_000);
+      await failed;
+      expect(status()).toEqual({ state: "offline", reason: "held-by-another-tab", retrying: true });
+      // A wait started now fails at once, rather than hanging.
+      await expect(manager.ensureReady("runtime")).rejects.toSatisfy(isStoreHeldByAnotherTabError);
+      // It keeps trying, and joins once the other tab lets go.
+      const attempts = connections.length;
+      unpin();
+      await vi.advanceTimersByTimeAsync(31_000);
+      expect(connections.length).toBeGreaterThan(attempts);
+      expect(status()).not.toMatchObject({ state: "offline" });
+      await expect(manager.ensureReady("runtime")).resolves.toBeUndefined();
+    } finally {
+      host.isShuttingDown = true;
+      await manager.shutdown().catch(() => undefined);
+      vi.useRealTimers();
+    }
+  });
+
+  it("tries again on its own with the inspector attached too", async () => {
+    vi.useFakeTimers();
+    const { manager, host, connections, unpin } = admissionManager(true, true, {
+      runtimeSources: { inspectorBinding: {} },
+    });
+    try {
+      const waiting = manager.ensureReady("runtime");
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(connections.length).toBeGreaterThan(2);
+      unpin();
+      await vi.advanceTimersByTimeAsync(5_000);
+      await expect(waiting).resolves.toBeUndefined();
     } finally {
       host.isShuttingDown = true;
       await manager.shutdown().catch(() => undefined);
