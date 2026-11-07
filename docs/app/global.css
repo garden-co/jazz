@@ -433,26 +433,38 @@ h6 {
   border-top: 0;
   padding-top: 0;
 }
-/* Inverted, circled step number in front of a section heading. */
+/* Inverted, circled step number in front of a section heading. The outer
+   box is one heading line tall, so the circle centers on the first line
+   however the title wraps. */
 .home-anchor.home-step-heading {
   display: flex;
-  align-items: baseline;
-  gap: var(--spacing-4);
+  align-items: flex-start;
+  gap: 0.4em;
 }
 .home-step {
   display: inline-flex;
   flex: none;
   align-items: center;
+  height: 1lh;
+}
+.home-step-dot {
+  display: inline-flex;
+  align-items: center;
   justify-content: center;
-  width: 1.6em;
-  height: 1.6em;
+  width: 1.8em;
+  height: 1.8em;
   border-radius: 9999px;
   background-color: var(--color-text-primary);
   color: var(--color-background-body);
-  font-size: 0.6em;
+  font-size: 0.5em;
   font-weight: 600;
+  letter-spacing: 0;
   line-height: 1;
-  font-variant-numeric: tabular-nums;
+}
+.home-step-number {
+  display: block;
+  font-size: 1.25em;
+  text-box: trim-both cap alphabetic;
 }
 /* Hero pattern (a live stipple canvas, see components/brand/stipple-presets.ts),
    pinned to the hero's top-right corner. Tune these in devtools on
@@ -554,7 +566,16 @@ h6 {
 @media (min-width: 1024px) {
   .home-overview {
     grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
-    align-items: start;
+  }
+  /* The video sets the row height; the list scrolls if it is taller. */
+  .home-reel-side {
+    position: relative;
+  }
+  .home-reel-side > .home-reel-list {
+    position: absolute;
+    inset: 0;
+    overflow-y: auto;
+    align-content: start;
   }
 }
 .home-facts {
@@ -645,28 +666,87 @@ h6 {
   border-radius: 0;
   background-color: var(--color-background-card);
 }
-.home-video-figure .home-figure {
-  display: flex;
-  flex-direction: column;
-  gap: var(--spacing-4);
-  padding: 0;
-  border: 0;
-  background: none;
-  overflow: visible;
+/* Example walkthroughs: the video takes two thirds, the list of examples
+   the last third (stacked below on narrow screens). */
+.home-reel {
+  display: grid;
+  gap: var(--spacing-6);
 }
-.home-video {
-  display: block;
-  width: auto;
-  max-width: 100%;
-  max-height: 70vh;
-  height: auto;
-  margin-inline: auto;
+@media (min-width: 1024px) {
+  .home-reel {
+    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  }
+  /* The video sets the row height; the list scrolls if it is taller. */
+  .home-reel-side {
+    position: relative;
+  }
+  .home-reel-side > .home-reel-list {
+    position: absolute;
+    inset: 0;
+    overflow-y: auto;
+    align-content: start;
+  }
+}
+.home-reel-stage {
+  overflow: hidden;
   border-radius: var(--radius-element);
   background-color: #000;
 }
-.home-video-link {
-  display: table;
-  margin-inline: auto;
+.home-reel-video {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 70vh;
+  aspect-ratio: 1280 / 892;
+  object-fit: contain;
+}
+.home-reel-list {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.home-reel-item {
+  position: relative;
+  display: grid;
+  gap: 2px;
+  width: 100%;
+  overflow: hidden;
+  padding: var(--spacing-1_5, 6px) var(--spacing-3);
+  border: 0;
+  border-radius: var(--radius-element);
+  background: none;
+  color: var(--color-text-primary);
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+}
+.home-reel-item:hover {
+  background-color: var(--color-background-muted);
+}
+.home-reel-item[aria-current="true"] {
+  background-color: var(--color-background-card);
+  box-shadow: inset 0 0 0 1px var(--color-border);
+}
+.home-reel-title {
+  font-weight: 600;
+}
+.home-reel-subtitle {
+  color: var(--color-text-secondary);
+  font-size: 0.8125rem;
+  line-height: 1.3;
+}
+.home-reel-progress {
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 2px;
+  background-color: var(--color-accent);
+  transform-origin: left;
+}
+.home-reel-more .home-reel-title {
+  color: var(--color-accent);
+  font-weight: 500;
 }
 .home-posts {
   display: grid;

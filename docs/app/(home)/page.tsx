@@ -26,7 +26,8 @@ import { PricingCalculator } from "@/components/home/pricing-calculator";
 import { PricingTable } from "@/components/home/pricing-table";
 import { AgentPrompt } from "@/components/home/agent-prompt";
 import { FrameworkLogos } from "@/components/home/framework-logos";
-import { WalkthroughVideo } from "@/components/showcase/walkthrough-video";
+import { ExampleReel, type ReelItem } from "@/components/home/example-reel";
+import { heroExamples } from "@/lib/showcase/catalogue";
 import { adopterQuotes } from "@/lib/home-quotes";
 import { blogSource } from "@/lib/source";
 
@@ -292,6 +293,36 @@ const features: {
   },
 ];
 
+// The homepage leads with the two-device StagePlan walkthrough, then every
+// other example that has one, in catalogue order.
+const reelItems: ReelItem[] = heroExamples
+  .flatMap((example): ReelItem[] => {
+    if (example.id === "stage-plan")
+      return [
+        {
+          id: example.id,
+          title: example.title,
+          subtitle: "Two laptops on one live board, with edits made offline syncing back.",
+          src: "/examples/videos/stage-plan-two-devices.mp4",
+          poster: "/examples/videos/stage-plan-two-devices.jpg",
+          label:
+            "Two laptops running the StagePlan example, a crew chief and a crew member on the same show board. A task added or a card moved on one appears on the other, and a comment shows up live in the task the other has open. Edits made with the laptop's Wi-Fi turned off arrive when it is turned back on.",
+        },
+      ];
+    if (!example.video) return [];
+    return [
+      {
+        id: example.id,
+        title: example.title,
+        subtitle: example.tagline,
+        src: example.video.src,
+        poster: example.video.poster,
+        label: example.video.caption,
+      },
+    ];
+  })
+  .sort((a, b) => Number(b.id === "stage-plan") - Number(a.id === "stage-plan"));
+
 function SectionHeader({
   id,
   title,
@@ -314,7 +345,9 @@ function SectionHeader({
       >
         {step ? (
           <span className="home-step" aria-hidden="true">
-            {step}
+            <span className="home-step-dot">
+              <span className="home-step-number">{step}</span>
+            </span>
           </span>
         ) : null}
         {title}
@@ -434,23 +467,9 @@ export default function HomePage() {
       <section className="home-section home-section-continued">
         <div className="home-container">
           <SectionHeader id="demo" step={3} title="Your app, on your infra. Smooth." />
-          <Figure
-            className="home-video-figure mt-6"
-            after={
-              <AppLink href="/examples" className="home-video-link font-medium">
-                More examples and benchmarks →
-              </AppLink>
-            }
-          >
-            <WalkthroughVideo
-              className="home-video"
-              src="/examples/videos/stage-plan-two-devices.mp4"
-              poster="/examples/videos/stage-plan-two-devices.jpg"
-              width={1280}
-              height={926}
-              aria-label="Two laptops running the StagePlan example, a crew chief and a crew member on the same show board. A task added or a card moved on one appears on the other, and a comment shows up live in the task the other has open. Edits made with the laptop's Wi-Fi turned off arrive when it is turned back on."
-            />
-          </Figure>
+          <div className="mt-6">
+            <ExampleReel items={reelItems} moreHref="/examples" />
+          </div>
         </div>
       </section>
 
