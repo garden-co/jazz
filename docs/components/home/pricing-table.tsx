@@ -29,6 +29,8 @@ type Tier = {
   price: string;
   priceDetail: ReactNode;
   features: ReactNode;
+  sharding: ReactNode;
+  regions: ReactNode;
   support: ReactNode;
   operated: ReactNode;
   action?: ReactNode;
@@ -40,7 +42,9 @@ const tiers: Tier[] = [
     kind: "Open-source (MIT)",
     price: "Free",
     priceDetail: "Limited only by what you can fit on a single server instance of any size.",
-    features: <Muted>All product features. No sharding.</Muted>,
+    features: "All product features",
+    sharding: <Muted>No sharding</Muted>,
+    regions: <Muted>Single region</Muted>,
     support: <Muted>Community support</Muted>,
     operated: <Muted>Operated by you</Muted>,
   },
@@ -50,11 +54,9 @@ const tiers: Tier[] = [
     price: "Free",
     priceDetail:
       "Limited only by what you can fit on any number of shards up to 4 GB RAM in total.",
-    features: (
-      <>
-        <Muted>All product features.</Muted> Limited sharding.
-      </>
-    ),
+    features: "All product features",
+    sharding: "Limited sharding (up to 4 GB RAM across shards)",
+    regions: <Muted>Single region</Muted>,
     support: <Muted>Community support</Muted>,
     operated: <Muted>Operated by you</Muted>,
   },
@@ -69,13 +71,9 @@ const tiers: Tier[] = [
         <strong>+$50</strong> per additional 1,000 <PasTerm>PAS</PasTerm>
       </>
     ),
-    features: (
-      <>
-        All product features. Unlimited sharding.
-        <br />
-        Global data distribution.
-      </>
-    ),
+    features: "All product features",
+    sharding: "Unlimited sharding",
+    regions: "Multi-region",
     support: "Private support channel",
     operated: <Muted>Operated by you</Muted>,
   },
@@ -84,13 +82,9 @@ const tiers: Tier[] = [
     kind: "Bespoke contract",
     price: "Let’s talk",
     priceDetail: "Volume deals and tailored terms for large companies and early-stage startups.",
-    features: (
-      <>
-        All product features. Unlimited sharding.
-        <br />
-        Global data distribution.
-      </>
-    ),
+    features: "All product features",
+    sharding: "Unlimited sharding",
+    regions: "Multi-region",
     support: (
       <>
         Private support channel
@@ -132,6 +126,8 @@ function TierColumn({ tier }: { tier: Tier }) {
         <div>{tier.priceDetail}</div>
       </div>
       <p className="home-pricing-cell">{tier.features}</p>
+      <p className="home-pricing-cell">{tier.sharding}</p>
+      <p className="home-pricing-cell">{tier.regions}</p>
       <p className="home-pricing-cell">{tier.support}</p>
       <p className="home-pricing-cell">{tier.operated}</p>
     </div>

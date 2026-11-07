@@ -1265,7 +1265,7 @@ nav.astryx-side-nav .astryx-side-nav-item {
 .home-pricing-tier {
   display: grid;
   grid-template-rows: subgrid;
-  grid-row: span 5;
+  grid-row: span 7;
   row-gap: 0;
 }
 .home-pricing-head,
@@ -1346,7 +1346,7 @@ nav.astryx-side-nav .astryx-side-nav-item {
 }
 @media (min-width: 1024px) {
   .home-pricing-bracket {
-    grid-row: 6;
+    grid-row: 8;
     grid-column: 1 / span 2;
     margin-top: var(--spacing-2);
   }
