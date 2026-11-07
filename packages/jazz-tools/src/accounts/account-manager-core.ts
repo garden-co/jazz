@@ -123,24 +123,55 @@ export const cookielessFetch: typeof fetch = () =>
 const SELECTION_PREFIX = "jazz-account-selection-v1:";
 
 /**
- * The selection an earlier client of the app `scope` names kept on this
- * origin under another registry URL, such as alpha.59's, whose browsers
- * reached the Jazz server directly rather than the app's `/jazz`. The app id
- * in the key makes the match exact; with no such key, or several (one app
- * reached through more than one server), there is nothing to take over.
+ * The key of the selection an earlier client of the app `scope` names kept on
+ * this origin: alpha.59's, whose browsers reached the Jazz server directly,
+ * so its registry is `<server>/apps/<scope>/accounts` with nothing before
+ * `/apps`. With no such key, or several (one app reached through more than
+ * one server), there is nothing to take over.
  */
-function earlierSelection(scope: string, env: string): string | null {
-  const suffix = `${encodeURIComponent(`/apps/${scope}/accounts`)}:${encodeURIComponent(env)}`;
+function earlierSelectionKey(scope: string, env: string): string | null {
+  const suffix = `:${encodeURIComponent(env)}`;
   const found: string[] = [];
   for (let index = 0; index < localStorage.length; index++) {
     const key = localStorage.key(index);
-    if (key?.startsWith(SELECTION_PREFIX) && key.endsWith(suffix)) found.push(key);
+    if (!key?.startsWith(SELECTION_PREFIX) || !key.endsWith(suffix)) continue;
+    try {
+      const registry = decodeURIComponent(key.slice(SELECTION_PREFIX.length, -suffix.length));
+      if (new URL(registry).pathname === `/apps/${scope}/accounts`) found.push(key);
+    } catch {
+      // Not a registry URL.
+    }
   }
-  if (found.length !== 1) return null;
-  // One this client can't read is left alone: it would refuse every start
-  // of this client, where without it the client starts afresh.
-  const value = localStorage.getItem(found[0]!);
+  return found.length === 1 ? found[0]! : null;
+}
+
+/**
+ * The earlier selection's value, when this client can read it. One it can't
+ * is left alone: it would refuse every start of this client, where without
+ * it the client starts afresh.
+ */
+function earlierSelection(key: string | null): string | null {
+  const value = key === null ? null : localStorage.getItem(key);
   return value !== null && readableSelection(value) ? value : null;
+}
+
+/**
+ * Take a root this client let go of (a guest forgotten once linked, so the
+ * device can't reopen it) out of the earlier selection too, so neither a
+ * restore from it nor a rollback brings the guest back.
+ */
+function scrubEarlierSelection(key: string, kept: string): void {
+  const earlier = earlierSelection(key);
+  if (earlier === null) return;
+  const roots = (JSON.parse(kept) as { roots: string[] }).roots;
+  const value = JSON.parse(earlier) as { roots: string[]; selected: number | null };
+  const selected = value.selected === null ? undefined : value.roots[value.selected];
+  const remaining = value.roots.filter((root) => roots.includes(root));
+  if (remaining.length === value.roots.length) return;
+  value.roots = remaining;
+  value.selected =
+    selected === undefined || !remaining.includes(selected) ? null : remaining.indexOf(selected);
+  localStorage.setItem(key, JSON.stringify(value));
 }
 
 /**
@@ -157,15 +188,18 @@ function browserAccountStore(registry: string, env: string, scope?: string): Acc
     throw new Error("The browser account store requires Web Locks; supply an atomic AccountStore");
   }
   const key = `${SELECTION_PREFIX}${encodeURIComponent(registry)}:${encodeURIComponent(env)}`;
-  const current = () =>
-    localStorage.getItem(key) ?? (scope === undefined ? null : earlierSelection(scope, env));
+  const earlierKey = () => (scope === undefined ? null : earlierSelectionKey(scope, env));
+  const current = () => localStorage.getItem(key) ?? earlierSelection(earlierKey());
   return {
     async read() {
       return current();
     },
     async update(transform) {
       await navigator.locks.request(key, () => {
-        localStorage.setItem(key, transform(current()));
+        const next = transform(current());
+        localStorage.setItem(key, next);
+        const earlier = earlierKey();
+        if (earlier !== null && earlier !== key) scrubEarlierSelection(earlier, next);
       });
     },
   };

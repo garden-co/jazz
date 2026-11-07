@@ -287,8 +287,13 @@ async fn run(args: &Args) -> Result<Json, String> {
         let planned = links::plan(identities.as_ref().map_err(Clone::clone)?)?;
         linked = links::apply(&state, &planned).await?;
     }
-    let guests = identities.as_deref().map_or(0, local_first_guests);
-    if guests > 0 {
+    // Counted for the summary only; with linking off, an identity the
+    // journal can't place leaves the count unknown (null), not zero.
+    let guests = identities.as_deref().ok().map(local_first_guests);
+    if let Err(error) = &identities {
+        eprintln!("could not count local-first guests: {error}");
+    }
+    if let Some(guests) = guests.filter(|guests| *guests > 0) {
         eprintln!(
             "{guests} local-first guests came over. Their devices find their accounts \
              again only with the client scoped to this app: \
