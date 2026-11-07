@@ -542,6 +542,10 @@ h6 {
 .home-anchor {
   scroll-margin-top: 5rem;
 }
+/* Section headings (display-3) set a touch looser than Astryx's -0.04em. */
+.astryx-heading.display-3 {
+  letter-spacing: -0.03em;
+}
 .home-prose {
   display: flex;
   flex-direction: column;
