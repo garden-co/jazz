@@ -409,16 +409,22 @@ export default function HomePage() {
             </Text>
           </SectionHeader>
           <div className="home-code-grid mt-6">
+            {/* Phones and tablets: one window with every file. */}
             <CodeWindow
+              className="home-code-all"
               files={[
                 { name: "api/todos/route.ts", language: "ts", code: routeCode },
                 { name: "schema.ts", language: "ts", code: schemaCode },
                 { name: "jazz.server.ts", language: "ts", code: serverCode },
-                {
-                  name: "jazz/[...path]/route.ts",
-                  language: "ts",
-                  code: mountCode,
-                },
+                { name: "jazz/[...path]/route.ts", language: "ts", code: mountCode },
+                { name: "OpenTodos.tsx", language: "tsx", code: componentCode },
+              ]}
+            />
+            {/* Desktop: a 2x2 grid of the reads, the video, the schema and the backend. */}
+            <CodeWindow
+              className="home-code-cell home-code-reads"
+              files={[
+                { name: "api/todos/route.ts", language: "ts", code: routeCode },
                 { name: "OpenTodos.tsx", language: "tsx", code: componentCode },
               ]}
             />
@@ -439,6 +445,17 @@ export default function HomePage() {
                 aria-label="Two laptops running the StagePlan example, a crew chief and a crew member on the same show board. A task added or a card moved on one appears on the other, and a comment shows up live in the task the other has open. Edits made with the laptop's Wi-Fi turned off arrive when it is turned back on."
               />
             </Figure>
+            <CodeWindow
+              className="home-code-cell"
+              files={[{ name: "schema.ts", language: "ts", code: schemaCode }]}
+            />
+            <CodeWindow
+              className="home-code-cell"
+              files={[
+                { name: "jazz.server.ts", language: "ts", code: serverCode },
+                { name: "jazz/[...path]/route.ts", language: "ts", code: mountCode },
+              ]}
+            />
           </div>
         </div>
       </section>

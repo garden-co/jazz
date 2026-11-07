@@ -573,19 +573,28 @@ h6 {
   display: grid;
   gap: var(--spacing-6);
 }
+.home-code-window.home-code-cell {
+  display: none;
+}
 @media (min-width: 1024px) {
+  /* Desktop: two by two. The video sets the top row's height; the reads
+     window matches it exactly (height 0 keeps it from growing the row) and
+     longer snippets scroll inside it. The bottom row shows its code in full. */
   .home-code-grid {
-    grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     align-items: stretch;
   }
-  /* The video and its link set the row height; the code window matches it
-     exactly (height 0 keeps it from growing the row) and longer snippets
-     scroll inside it. On narrower screens the code shows in full. */
-  .home-code-grid > .home-code-window {
+  .home-code-window.home-code-all {
+    display: none;
+  }
+  .home-code-window.home-code-cell {
+    display: flex;
+  }
+  .home-code-grid > .home-code-reads {
     height: 0;
     min-height: 100%;
   }
-  .home-code-grid > .home-code-window .home-code {
+  .home-code-grid > .home-code-reads .home-code {
     flex: 1 1 auto;
     min-height: 0;
     overflow: auto;
