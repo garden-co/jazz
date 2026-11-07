@@ -264,6 +264,33 @@ it("moves migrations written with pre-SHA-256 schema hashes to legacy/", async (
   );
 });
 
+it("says a migration from the newest snapshot is needed when none is for schema.ts", async () => {
+  const { root, legacyName, snapshot } = await legacyFixture();
+  await expect(validateProject({ schemaDir: root, check: true })).rejects.toThrow(
+    `Then run \`jazz-tools migrations create\`: no snapshot is for schema.ts, so the app needs a migration from ${snapshot}.`,
+  );
+  const { warnings } = await validateProject({ schemaDir: root });
+  const moved = warnings.find((warning) => warning.startsWith(`Moved ${legacyName}`));
+  expect(moved).toContain(
+    `Run \`jazz-tools migrations create\` before the app starts: no snapshot is for schema.ts, so the app needs a migration from ${snapshot}`,
+  );
+  expect(moved).not.toContain("The app runs on schema.ts as it is");
+});
+
+it("keeps the newest committed snapshot, not one without a timestamp", async () => {
+  const { root, migrationsDir, snapshots, snapshot } = await legacyFixture();
+  const other = s.defineApp({ notes: s.table({ other: s.string() }, {}) }, { migrations: "none" });
+  // Listed as a snapshot, but not a committed name: it sorts after the
+  // timestamped ones, so a plain sort would keep it.
+  const handNamed = `${short(await computeSchemaHash(other.wasmSchema))}.json`;
+  expect(handNamed > snapshot).toBe(true);
+  await writeFile(join(snapshots, handNamed), JSON.stringify(other.wasmSchema));
+  const { warnings } = await validateProject({ schemaDir: root });
+  expect(await readdir(snapshots)).toEqual([snapshot]);
+  expect(await readdir(join(migrationsDir, "legacy", "snapshots"))).toEqual([handNamed]);
+  expect(warnings.some((warning) => warning.includes(`migration from ${snapshot}`))).toBe(true);
+});
+
 it("keeps a current migration beside a legacy one", async () => {
   const { root, migrationsDir, file, legacyName } = await legacyFixture({ keepCurrent: true });
   await validateProject({ schemaDir: root });
@@ -390,6 +417,9 @@ it("moves the snapshots only legacy migrations led from to legacy/snapshots/", a
     true,
   );
   expect((await importMigrations(migrationsDir)).schemas).toHaveLength(1);
+  expect(warnings.find((warning) => warning.startsWith(`Moved ${legacyName}`))).toContain(
+    "The app runs on schema.ts as it is",
+  );
   await validateProject({ schemaDir: root, check: true });
 });
 
