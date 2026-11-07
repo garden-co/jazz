@@ -424,8 +424,16 @@ export function attachE2ee(db: Db, account: AccountHandle, config: E2eeConfig, e
 /** @internal Schema objects never own account keys or lifecycle state. */
 /** @internal A completed explicit Remote history read may remember denial only. */
 export async function observeRemoteE2eeRevocation(db: Db, table: string): Promise<void> {
-  if (table !== "__e2ee_account_successors" && table !== "__e2ee_public_account_successors") return;
-  await contexts.get(db)?.rememberRemoteRevocation();
+  if (table === "__e2ee_account_successors" || table === "__e2ee_public_account_successors")
+    await contexts.get(db)?.rememberRemoteRevocation();
+  else if (
+    table === "__e2ee_group_membership" ||
+    table === "__e2ee_group_successors" ||
+    table === "__e2ee_group_repairs" ||
+    table === "__e2ee_space_grants" ||
+    table === "__e2ee_space_successors"
+  )
+    await contexts.get(db)?.rememberRemoteSpaceAccessLoss();
 }
 
 export function e2eeForDb(db: Db): E2ee {
@@ -1057,6 +1065,17 @@ export class E2ee {
     await this.approval.rememberAcceptedRevocation();
     this.assertOpen();
     if (this.approval.isKnownRevoked()) await this.contentCache.denyDevice();
+  }
+
+  /** Denial only, without re-entering this lifecycle's preparation promise. */
+  async rememberRemoteSpaceAccessLoss(): Promise<void> {
+    this.assertOpen();
+    if (!this.locallyPrepared || !this.spaceLifecycle || !this.contentCache) return;
+    for (const { scope, identifier } of this.knownSpaces.values()) {
+      const loss = await this.spaceLifecycle.acceptedAccessLoss(scope, identifier);
+      this.assertOpen();
+      if (loss) await this.recordSpaceState(scope, identifier, loss);
+    }
   }
 
   private async prepare(): Promise<void> {

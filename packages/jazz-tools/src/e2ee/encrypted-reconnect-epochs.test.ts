@@ -132,24 +132,11 @@ it.each(["retained account", "removed account", "removed nested member"] as cons
   "refreshes missing epochs after an offline persistent reopen: %s",
   async (membership) => {
     let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
-    const gate = await reconnectGate(server.url);
+    let gate: Awaited<ReturnType<typeof reconnectGate>> | undefined;
     const directory = await mkdtemp(join(tmpdir(), "jazz-e2ee-reconnect-"));
     let owner: Awaited<ReturnType<typeof createJazzSession>> | undefined;
     let reader: Awaited<ReturnType<typeof createJazzSession>> | undefined;
     let departing: Awaited<ReturnType<typeof createJazzSession>> | undefined;
-    const common = {
-      appId: server.appId,
-      serverUrl: gate.url,
-      app,
-      permissions,
-      initial: "local-first" as const,
-    };
-    const readerConfig = {
-      ...common,
-      driver: { type: "persistent" as const, dataPath: join(directory, "reader") },
-      store: store(),
-      e2ee: { app, store: store() },
-    };
     try {
       await deploy({
         appId: server.appId,
@@ -159,6 +146,21 @@ it.each(["retained account", "removed account", "removed nested member"] as cons
         permissions,
       });
       server = await frontE2eeCore(server, { schema: app, permissions: permissions });
+      gate = await reconnectGate(server.url);
+      const common = {
+        appId: server.appId,
+        serverUrl: gate.url,
+        app,
+        permissions,
+        initial: "local-first" as const,
+      };
+      const readerConfig = {
+        ...common,
+        driver: { type: "persistent" as const, dataPath: join(directory, "reader") },
+        store: store(),
+        e2ee: { app, store: store() },
+      };
+
       owner = await createJazzSession({
         ...common,
         driver: { type: "memory" },
@@ -264,11 +266,11 @@ it.each(["retained account", "removed account", "removed nested member"] as cons
         });
       }
     } finally {
-      gate.unblock();
+      gate?.unblock();
       await reader?.close();
       await departing?.close();
       await owner?.close();
-      await gate.close();
+      await gate?.close();
       await server.stop();
       await rm(directory, { recursive: true, force: true });
     }
