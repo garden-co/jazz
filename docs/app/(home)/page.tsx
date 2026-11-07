@@ -82,9 +82,9 @@ export async function GET(request: Request) {
   return Response.json(todos);
 }`;
 
-const mountCode = `// Sync for browsers, on your own origin
-import { jazz } from "@/jazz.server";
+const mountCode = `import { jazz } from "@/jazz.server";
 
+// Sync for browsers, apps and agents, on your own origin
 export const { GET, POST, DELETE } = jazz.next();`;
 
 const schemaCode = `import { schema as s } from "jazz-tools";
