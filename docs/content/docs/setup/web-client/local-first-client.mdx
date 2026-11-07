@@ -90,6 +90,10 @@ share data. `driver: { type: "memory" }` keeps it in memory only, and it is
 gone when the tab closes. `await db.deleteClientStorage()` clears the current one; see
 [Resetting browser storage](/docs/setup/auth/backend#resetting-browser-storage).
 
+An app upgraded from alpha.59 that had local-first guests passes its old app ID as `scope`
+(`createJazzClient({ scope: "<your alpha.59 app ID>" })`), so those guests keep their accounts. New
+apps leave it out. See [Upgrading from alpha.59](/docs/operating/backups-and-upgrades#self-hosted-alpha59-servers).
+
 What stays on the device:
 
 - Signing out closes the account's client but keeps its local data, synced rows included, for that

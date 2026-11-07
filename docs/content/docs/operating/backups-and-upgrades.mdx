@@ -167,6 +167,14 @@ Then:
    ```
 
 5. **Start your new backend** with `sqlite({ path: "./data-new" })`, then deploy the new client.
+   If your alpha.59 app had local-first guests, pass your old app ID as `scope` to the client, so
+   each guest's device finds its account again:
+
+   ```ts
+   const jazz = await createJazzClient({ scope: "<your alpha.59 app ID>" });
+   ```
+
+   (`<JazzProvider scope="…">` in React.) Without it, those guests can't open their accounts.
    Keep `./data` and the dump until you're happy with the result.
 
 `--app-id` is your app's ID exactly as before, case included: the import uses it to link each
