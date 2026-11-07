@@ -1,0 +1,162 @@
+## Mount it
+
+<Tabs groupId="backend-framework" items={["Next.js", "Hono", "Express / Node", "Bun", "Effect"]} persist updateAnchor>
+  <Tab value="Next.js">
+    ```ts title="app/jazz/[...path]/route.ts"
+    import { jazz } from "@/jazz.server";
+
+    export const { GET, POST, DELETE } = jazz.next();
+    ```
+
+    Install `ws` and `@vercel/functions`, and add `serverExternalPackages: ["jazz-napi"]` to
+    `next.config.ts` so Next doesn't bundle Jazz's native module; `next dev` needs all three. On
+    Vercel, sync uses a WebSocket (through `upgradeWebSocket` from `@vercel/functions`). Under plain
+    `next dev` and `next start`, which can't upgrade sockets, the browser switches to an HTTP stream
+    on its own. With `sqlite()` (not `vercel()`), also install `@vercel/sandbox` for now: Next
+    resolves it while building even though `sqlite()` never loads it.
+
+    A [custom Next server](https://nextjs.org/docs/app/guides/custom-server) can't use
+    `jazz.attach(server)` yet: Next's own upgrade handler closes the `/jazz` sockets. Leave sockets to
+    the HTTP stream there.
+
+    In a server component or server action there is no `Request`. `forReqUser` only hands the
+    request to your `authenticate`, so build one from the incoming headers:
+
+    ```ts
+    import { headers } from "next/headers";
+    import { jazz } from "@/jazz.server";
+
+    const db = await jazz.forReqUser(new Request("http://localhost", { headers: await headers() }));
+    ```
+
+    Self-hosted on `sqlite()`, import `jazz.server.ts` only from the Next app itself. A custom server
+    file or a script that opens the same data directory in another process is refused (the
+    directory is locked to one process).
+
+  </Tab>
+  <Tab value="Hono">
+    ```ts title="server.ts"
+    import type { Server } from "node:http";
+    import { Hono } from "hono";
+    import { serve } from "@hono/node-server";
+    import { jazz } from "./jazz.server";
+
+    const api = new Hono();
+    api.all(`${jazz.basePath}/*`, (c) => jazz.handle(c.req.raw));
+
+    const server = serve({ fetch: api.fetch, port: 3000 });
+    await jazz.attach(server as Server); // WebSocket upgrades on /jazz (needs `ws`)
+    ```
+
+    Install `ws` too: `attach` loads it, and without it the server fails at startup with
+    `ERR_MODULE_NOT_FOUND`. `serve()` is typed as a server that may be HTTP/2, so `attach` needs the
+    `Server` cast.
+
+  </Tab>
+  <Tab value="Express / Node">
+    ```ts title="server.ts"
+    import express from "express";
+    import { jazz } from "./jazz.server";
+
+    const api = express();
+    api.use((req, res, next) => jazz.nodeHandler(req, res, next)); // before any body parser
+    api.use(express.json());
+
+    const server = api.listen(3000);
+    await jazz.attach(server); // WebSocket upgrades on /jazz (needs `ws`)
+    ```
+
+    Mount Jazz before `express.json()` or any other body parser: Jazz reads sign-in bodies itself, and
+    a parser that has already read one makes sign-in fail with a 500. `forReqUser` takes a Fetch
+    `Request`; from Express, build one with the cookies your `authenticate` reads:
+
+    ```ts
+    const request = new Request(new URL(req.originalUrl, `http://${req.headers.host}`), {
+      headers: new Headers(req.headers as Record<string, string>),
+    });
+    const db = await jazz.forReqUser(request);
+    ```
+
+    Express 5 turns an error thrown in a route into a 500 HTML page. Map signed-out requests to a
+    401 with an error handler after your routes:
+
+    ```ts
+    import { isRequestAuthenticationError } from "jazz-tools/backend";
+
+    api.use((err: unknown, req: express.Request, res: express.Response, next: express.NextFunction) => {
+      if (isRequestAuthenticationError(err)) return res.sendStatus(401);
+      next(err);
+    });
+    ```
+
+    On Fastify, mount Jazz in an `onRequest` hook, not a route: a route rejects sign-in's empty JSON
+    body with a 400 before your handler runs. For URLs under `jazz.basePath`, call `reply.hijack()`,
+    then `jazz.nodeHandler(request.raw, reply.raw)`.
+
+  </Tab>
+  <Tab value="Bun">
+    ```ts title="server.ts"
+    import { jazz } from "./jazz.server";
+    import { app } from "./schema";
+
+    Bun.serve({
+      port: 3000,
+      routes: {
+        "/api/todos": async (request) => {
+          const db = await jazz.forReqUser(request);
+          return Response.json(await db.all(app.todos));
+        },
+      },
+      fetch: jazz.handle, // sync and sign-in under /jazz
+    });
+    ```
+
+    This syncs over an HTTP stream: the browser switches to it on its own. Bun closes idle
+    connections after 10 seconds by default; raise `idleTimeout` if streams drop.
+
+    For WebSockets, set `upgradesSockets: true` in `createJazz`, call `server.upgrade(request)` for
+    requests under `jazz.basePath` that ask for an upgrade, and hand each opened socket to
+    `jazz.acceptSocket(request, socket)`. It takes a socket of the `ws` package's shape (`send`,
+    `close`, and `on("message" | "close" | "error")`), so pass a small adapter around Bun's
+    `ServerWebSocket`.
+
+  </Tab>
+  <Tab value="Effect">
+    ```ts title="server.ts"
+    import { serve } from "@hono/node-server";
+    import { Effect, ManagedRuntime } from "effect";
+    import { HttpRouter, HttpServerResponse } from "effect/http";
+    import { Jazz, JazzBackend } from "jazz-tools/effect/backend";
+    import { jazz } from "./jazz.server";
+    import { app } from "./schema";
+
+    const listTodos = HttpRouter.add(
+      "GET",
+      "/api/todos",
+      Effect.gen(function* () {
+        const jazz = yield* Jazz;
+        return yield* HttpServerResponse.json(yield* jazz.all(app.todos));
+      }).pipe(JazzBackend.forCurrentReqUser()), // as the signed-in user
+    );
+
+    await jazz.ready(); // open the store before Effect handlers use it
+    const runtime = ManagedRuntime.make(JazzBackend.layerJazz(jazz));
+    const services = await runtime.context();
+    const { handler } = HttpRouter.toWebHandler(listTodos);
+
+    const server = serve({
+      port: 3000,
+      fetch: (request) =>
+        new URL(request.url).pathname.startsWith("/jazz/")
+          ? jazz.handle(request) // sync and sign-in under /jazz
+          : handler(request, services),
+    });
+    await jazz.attach(server); // WebSocket upgrades on /jazz (needs `ws`)
+    ```
+
+    `JazzBackend.layerJazz` hands your `createJazz` instance to Effect handlers, and `/jazz` is
+    served by Jazz itself next to your routes. See [Effect](/docs/recipes/effect) for the `Jazz`
+    service.
+
+  </Tab>
+</Tabs>
