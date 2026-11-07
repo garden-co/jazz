@@ -174,12 +174,16 @@ Then:
    const jazz = await createJazzClient({ scope: "<your alpha.59 app ID>" });
    ```
 
-   (`<JazzProvider scope="…">` in React.) Without it, those guests can't open their accounts.
+   (`<JazzProvider scope="…">` in React.) With `scope` set, each guest's browser finds its
+   alpha.59 account by itself, on the same origin; there's nothing else to do. Without it, those
+   guests can't open their accounts. The import prints the exact `scope` line when it brings
+   local-first guests over. If the alpha.59 app was reached through more than one Jazz server URL
+   on that origin, guests aren't picked up automatically.
    Keep `./data` and the dump until you're happy with the result.
 
 `--app-id` is your app's ID exactly as before, case included: the import uses it to link each
 returning user's old sign-in to their account, as `jazz:backend` with their old `sub` (as [`fromJWT()`](/docs/setup/auth/custom) returns it), and to keep
-local-first guests on their accounts. It's written to `<data-dir>/app-id`, so your code never needs
+local-first guests on their accounts once the client is scoped to the alpha.59 app ID (step 5). It's written to `<data-dir>/app-id`, so your code never needs
 it: `sqlite({ path })` runs as the old app. Pass
 `--no-backend-identity-links` to skip that. The dump holds all your app's data, so store it like the
 data directory and delete it when you're done.
