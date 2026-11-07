@@ -30,8 +30,9 @@ export interface AccountStore {
 // person on the device reopen that user.
 //
 // `forgottenAccounts` (optional) is the tombstone for those roots: the
-// accounts they founded, never the roots themselves. Every manager drops a
-// root whose account is listed on each write, so another tab that loaded the
+// accounts they founded, never the roots themselves. Every manager honours
+// it, including those that remember their user: each drops a root whose
+// account is listed on load and on each write, so another tab that loaded the
 // root before the link cannot write it back. It holds the last
 // FORGOTTEN_ACCOUNTS_LIMIT entries: one only matters while a snapshot older
 // than the link can still exist. An explicit restore of the root takes its
@@ -49,7 +50,8 @@ interface StoredAccounts {
   backendUser?: StoredBackendUser;
   forgottenAccounts?: string[];
 }
-const FORGOTTEN_ACCOUNTS_LIMIT = 32;
+// About 45 bytes an entry: room for every link a long-open tab may outlive.
+const FORGOTTEN_ACCOUNTS_LIMIT = 1024;
 const BACKEND_USER_FORMAT = "jazz-backend-user-v1";
 type StoredBackendUser = RememberedBackendUser & {
   format: typeof BACKEND_USER_FORMAT;
@@ -173,6 +175,10 @@ export async function prepareAccountManager(options: {
   const unforgetting = new Set<string>();
   let writes = Promise.resolve();
   let adoptingSecret: string | undefined;
+  // The selection restored at construction came from the filtered store, like
+  // an adoption: retaining it must not take its account off the tombstone.
+  const startupSecret = stored.selected === null ? undefined : stored.roots[stored.selected];
+  let restoringStartup = startupSecret !== undefined;
   const save = () => {
     const roots = [...stored.roots];
     const selected = stored.selected === null ? null : stored.roots[stored.selected]!;
@@ -218,7 +224,7 @@ export async function prepareAccountManager(options: {
     fetch: options.fetch,
     bearer: options.bearer,
     backend: options.backend,
-    restoredLocalFirstSecret: stored.selected === null ? undefined : stored.roots[stored.selected],
+    restoredLocalFirstSecret: startupSecret,
     restoredBackendUser: stored.backendUser,
     selectionDurability: {
       selectionChanged(next) {
@@ -259,9 +265,12 @@ export async function prepareAccountManager(options: {
       },
       retainSecret(secret) {
         // Selected again (the app restores it): kept like any other root.
-        // An adopted root came from the filtered store, so it was not
-        // forgotten; only an explicit restore takes an account back out.
-        const account = adoptingSecret === secret ? undefined : rootAccount(secret);
+        // An adopted or startup root came from the filtered store, so it was
+        // not forgotten; only an explicit restore takes an account back out.
+        const fromStore =
+          adoptingSecret === secret || (restoringStartup && startupSecret === secret);
+        restoringStartup = false;
+        const account = fromStore ? undefined : rootAccount(secret);
         if (account !== undefined) {
           forgetting.delete(account);
           unforgetting.add(account);
@@ -277,6 +286,7 @@ export async function prepareAccountManager(options: {
       },
     }),
   });
+  restoringStartup = false;
   const superseded = async (): Promise<never> => {
     stored.selected = null;
     await save();

@@ -604,7 +604,7 @@ it("a tab that loaded the guest before the link cannot write its root back", asy
   expect(store.value()).not.toContain(kim);
 });
 
-it("never reopens a forgotten root that an older bundle wrote back", async () => {
+it("never reopens a forgotten root written back while the tombstone stayed", async () => {
   const kim = guestRoot(1);
   const store = storeWith(
     JSON.stringify({
@@ -649,7 +649,7 @@ it("an explicit restore takes a forgotten root back, and a stale tab keeps it", 
 });
 
 it("keeps only the latest forgotten accounts", async () => {
-  const forgottenAccounts = Array.from({ length: 40 }, (_, i) => `account-${i}`);
+  const forgottenAccounts = Array.from({ length: 1100 }, (_, i) => `account-${i}`);
   const store = storeWith(
     JSON.stringify({
       format: "jazz-account-selection-v1",
@@ -661,7 +661,40 @@ it("keeps only the latest forgotten accounts", async () => {
   const accounts = await sharedDevice(store, guestRoot(1));
   accounts.createLocalFirst();
   await accounts.settleSelection();
-  expect(JSON.parse(store.value()!).forgottenAccounts).toEqual(forgottenAccounts.slice(-32));
+  expect(JSON.parse(store.value()!).forgottenAccounts).toEqual(forgottenAccounts.slice(-1024));
+});
+
+it("a tab starting on a guest root keeps the tombstone a link writes meanwhile", async () => {
+  const kim = guestRoot(1);
+  const before = JSON.stringify({ format: "jazz-account-selection-v1", roots: [kim], selected: 0 });
+  // Another tab's link lands between this tab's read and its first write.
+  const linked = JSON.stringify({
+    format: "jazz-account-selection-v1",
+    roots: [],
+    selected: null,
+    forgottenAccounts: [accountOf(kim)],
+  });
+  let value: string | null = before;
+  const store = {
+    value: () => value,
+    read: async () => {
+      const read = value;
+      value = linked;
+      return read;
+    },
+    update: async (transform: (current: string | null) => string) => {
+      value = transform(value);
+    },
+  };
+  const accounts = await sharedDevice(store, guestRoot(2));
+  expect(accounts.getLoggedIn()?.id).toBe(accountOf(kim));
+  await accounts.settleSelection();
+  expect(JSON.parse(store.value()!)).toMatchObject({
+    roots: [],
+    selected: null,
+    forgottenAccounts: [accountOf(kim)],
+  });
+  expect(store.value()).not.toContain(kim);
 });
 
 it("keeps a linked guest's root when the device remembers its user", async () => {
