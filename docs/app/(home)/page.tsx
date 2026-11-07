@@ -399,7 +399,10 @@ export default function HomePage() {
             <Text as="p" display="block" type="large" color="secondary" weight="normal">
               Define tables and permissions in TypeScript and mount Jazz in your server. Then query
               from route handlers, or from any component as simple reactive state. Writes show up at
-              once and sync in the background.
+              once and sync in the background.{" "}
+              <AppLink href="/examples" className="font-medium">
+                More examples and benchmarks →
+              </AppLink>
             </Text>
           </SectionHeader>
           <div className="home-code-grid mt-6">
@@ -422,14 +425,7 @@ export default function HomePage() {
                 { name: "OpenTodos.tsx", language: "tsx", code: componentCode },
               ]}
             />
-            <Figure
-              className="home-video-figure"
-              after={
-                <AppLink href="/examples" className="home-video-link font-medium">
-                  More examples and benchmarks →
-                </AppLink>
-              }
-            >
+            <Figure className="home-video-figure">
               <WalkthroughVideo
                 className="home-video"
                 src="/examples/videos/stage-plan-two-devices.mp4"
