@@ -443,13 +443,12 @@ export default function HomePage() {
               className="home-code-cell"
               files={[{ name: "schema.ts", language: "ts", code: schemaCode }]}
             />
-            <CodeWindow
-              className="home-code-cell"
-              files={[
-                { name: "jazz.server.ts", language: "ts", code: serverCode },
-                { name: "jazz/[...path]/route.ts", language: "ts", code: mountCode },
-              ]}
-            />
+            <div className="home-code-cell home-code-stack">
+              <CodeWindow files={[{ name: "jazz.server.ts", language: "ts", code: serverCode }]} />
+              <CodeWindow
+                files={[{ name: "jazz/[...path]/route.ts", language: "ts", code: mountCode }]}
+              />
+            </div>
           </div>
         </div>
       </section>

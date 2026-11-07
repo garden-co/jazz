@@ -573,7 +573,8 @@ h6 {
   display: grid;
   gap: var(--spacing-6);
 }
-.home-code-window.home-code-cell {
+.home-code-window.home-code-cell,
+.home-code-stack {
   display: none;
 }
 @media (min-width: 1024px) {
@@ -589,6 +590,16 @@ h6 {
   }
   .home-code-window.home-code-cell {
     display: flex;
+  }
+  /* The backend files stack in two panes that together match the schema's
+     height. */
+  .home-code-stack {
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-6);
+  }
+  .home-code-stack > .home-code-window {
+    flex: 1 1 auto;
   }
   .home-code-grid > .home-code-reads {
     height: 0;
