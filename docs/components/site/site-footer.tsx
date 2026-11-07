@@ -63,16 +63,20 @@ export function SiteFooter() {
         ))}
       </div>
       <div className="site-footer-base">
-        <div className="mx-auto flex w-full max-w-(--fd-layout-width) flex-col gap-4 px-4 py-6 sm:flex-row sm:items-center sm:justify-between">
-          <a
-            href="https://garden.co"
-            className="site-footer-maker"
-            aria-label="Made with love and LLMs by Garden Computing"
-          >
-            <span>Made with love and LLMs by</span>
+        <div className="mx-auto grid w-full max-w-(--fd-layout-width) grid-cols-1 items-center gap-2 px-4 py-6 sm:grid-cols-3 sm:gap-4">
+          <a href="https://garden.co" className="site-footer-maker" aria-label="Garden Computing">
             <GardenComputingLogo aria-hidden className="h-10" label="" role="presentation" />
           </a>
-          <Text as="p" display="block" type="supporting" color="secondary">
+          <Text as="p" display="block" color="secondary" className="sm:text-center">
+            Made with love and LLMs
+          </Text>
+          <Text
+            as="p"
+            display="block"
+            type="supporting"
+            color="secondary"
+            className="mt-4 sm:mt-0 sm:text-right"
+          >
             © {new Date().getFullYear()} Garden Computing
           </Text>
         </div>

@@ -419,9 +419,7 @@ h6 {
 }
 .site-footer-maker {
   display: inline-flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: var(--spacing-2);
+  justify-self: start;
   color: var(--color-text-secondary);
   transition: color 150ms;
 }
