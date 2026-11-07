@@ -374,7 +374,8 @@ function Lines({
   );
 }
 
-/** A platform box: its title, then Jazz's part in blue below it. */
+/** A Jazz storage box (a shard or the large-value store), all in blue so
+ * the pieces of the Jazz system read as one: platform title, then its part. */
 function Nested({
   x,
   y,
@@ -399,13 +400,13 @@ function Nested({
   const titleY = small ? y + 18 : y + 23;
   return (
     <g>
-      <Frame x={x} y={y} w={w} h={h} tone="ink" />
+      <Frame x={x} y={y} w={w} h={h} tone="blue" />
       <Lines
         x={x + pad}
         y={titleY}
         lines={title}
         step={step}
-        className={small ? "dg-detail dg-small dg-fill-ink" : "dg-title dg-fill-ink"}
+        className={small ? "dg-detail dg-small dg-fill-blue" : "dg-title dg-fill-blue"}
       />
       <Lines
         x={x + pad}
