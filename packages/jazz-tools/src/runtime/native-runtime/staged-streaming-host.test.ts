@@ -9,7 +9,7 @@ import { loadWasmModuleForTest } from "../testing/wasm-runtime-test-utils.js";
 import { openConfig } from "./native-codec.js";
 import { encodeSchema } from "./schema-codec.js";
 import {
-  encodeCellsForRow,
+  encodeCellsForStreamingRow,
   NativeRuntimeAdapter,
   type RowState,
 } from "./native-runtime-adapter.js";
@@ -59,7 +59,7 @@ async function open(host: "NAPI" | "WASM") {
     raw.beginStreamingMutation(
       "files",
       new Uint8Array(16).fill(id),
-      encodeCellsForRow(schema.files!, {}),
+      encodeCellsForStreamingRow(schema.files!, {}, "payload"),
       "payload",
       "insert",
       undefined,
