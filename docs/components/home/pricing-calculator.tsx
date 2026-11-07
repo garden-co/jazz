@@ -472,10 +472,11 @@ export function PricingCalculator() {
           Each platform picks the cheapest size and shard count, license included: Jazz OSS for one
           instance, Jazz Pro (${licensePro}/mo) for shards with up to{" "}
           {assumptions["global.proRamGb"]} GB of RAM in total, and Jazz Scale (${licenseScaleBase}
-          /mo plus ${licensePer1k} per 1,000 peak active sessions) beyond that. A session is active
-          in a minute when it writes, subscribes or gets an update. Vercel cold wakes are from our
-          October measurements (0.6 to 1 s) and an alpha.60 test project (4.2 s); Cloudflare&apos;s
-          are estimates until its runtime ships.
+          /mo with 1,000 peak active sessions included, plus ${licensePer1k} per additional 1,000)
+          beyond that. A session is active in a minute when it writes, queries, subscribes or
+          receives an update; peak is the 95th percentile of those per-minute counts. Vercel cold
+          wakes are from our October measurements (0.6 to 1 s) and an alpha.60 test project (4.2 s);
+          Cloudflare&apos;s are estimates until its runtime ships.
         </p>
       ) : null}
       <div className="flex justify-center">

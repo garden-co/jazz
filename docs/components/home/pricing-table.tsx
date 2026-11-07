@@ -9,15 +9,15 @@ const Muted = ({ children }: { children: ReactNode }) => (
   <span className="home-pricing-muted">{children}</span>
 );
 
-function ActiveTerm() {
+const PAS_DEFINITION =
+  "A session is active in a minute when it writes, queries, subscribes or receives an update during that minute. Peak means the 95th percentile of those per-minute counts over the month.";
+
+/** "Peak active sessions", underlined, with its full definition in a popover. */
+function PasTerm({ children }: { children: ReactNode }) {
   return (
-    <Tooltip
-      content="Wrote, subscribed or got an update in that minute"
-      placement="below"
-      touchTrigger="tap"
-    >
+    <Tooltip content={PAS_DEFINITION} placement="below" touchTrigger="tap">
       <button type="button" className="home-pricing-term">
-        active
+        {children}
       </button>
     </Tooltip>
   );
@@ -64,7 +64,9 @@ const tiers: Tier[] = [
     price: "$200/mo",
     priceDetail: (
       <>
-        <strong>+$50/mo</strong> per 1,000 peak <ActiveTerm /> sessions (p95 per minute).
+        1,000 <PasTerm>peak active sessions</PasTerm> included
+        <br />
+        <strong>+$50</strong> per additional 1,000 <PasTerm>PAS</PasTerm>
       </>
     ),
     features: (

@@ -693,7 +693,9 @@ export function licenseTier(size: Size, shards: number, a: Assumptions): TierId 
 export function licenseCost(d: Demand, usage: Usage, tier: TierId) {
   if (tier === "oss") return 0;
   if (tier === "pro") return usage.licensePro;
-  return usage.licenseScaleBase + Math.ceil(d.peakActiveSessions / 1000) * usage.licensePer1k;
+  // The base price includes the first 1,000 peak active sessions.
+  const extraThousands = Math.max(0, Math.ceil(d.peakActiveSessions / 1000) - 1);
+  return usage.licenseScaleBase + extraThousands * usage.licensePer1k;
 }
 
 export type PlatformEstimate = {
