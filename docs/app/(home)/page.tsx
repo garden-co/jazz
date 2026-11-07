@@ -483,17 +483,6 @@ export default function HomePage() {
         <div className="home-container">
           <SectionHeader id="pricing" title="Priced for flexible self-hosting & BYOC" />
           <PricingTable />
-          <Text
-            as="p"
-            display="block"
-            type="supporting"
-            color="secondary"
-            className="mt-6 max-w-3xl"
-          >
-            A paid license is a key your servers check offline: no metering and no phone-home, and
-            going over it only logs a reminder. As Jazz gets faster, your platform bill shrinks
-            while the license stays the same.
-          </Text>
           <div className="mt-12 grid gap-8">
             <Heading level={3}>What it costs on each platform</Heading>
             {/* Not ported to Astryx yet. A data-astryx-theme attribute ends the

@@ -52,7 +52,7 @@ const tiers: Tier[] = [
       "Limited only by what you can fit on any number of shards up to 4 GB RAM in total.",
     features: (
       <>
-        <Muted>All product features.</Muted> Limited sharding (soon).
+        <Muted>All product features.</Muted> Limited sharding.
       </>
     ),
     support: <Muted>Community support</Muted>,
@@ -69,9 +69,9 @@ const tiers: Tier[] = [
     ),
     features: (
       <>
-        All product features. Unlimited sharding (soon).
+        All product features. Unlimited sharding.
         <br />
-        Global data distribution (soon).
+        Global data distribution.
       </>
     ),
     support: "Private support channel",
@@ -84,9 +84,9 @@ const tiers: Tier[] = [
     priceDetail: "Volume deals and tailored terms for large companies and early-stage startups.",
     features: (
       <>
-        All product features. Unlimited sharding (soon).
+        All product features. Unlimited sharding.
         <br />
-        Global data distribution (soon).
+        Global data distribution.
       </>
     ),
     support: (
@@ -99,7 +99,7 @@ const tiers: Tier[] = [
     operated: "Operated by you or us (with SLAs)",
     action: (
       <Button
-        label="Talk to us"
+        label="Schedule Call"
         variant="secondary"
         href="https://cal.com/anselm-io/cloud-pro-intro"
       />
@@ -117,15 +117,15 @@ export function PricingTable() {
             <p>{tier.kind}</p>
           </div>
           <div className="home-pricing-cell">
-            <p className="home-pricing-price">{tier.price}</p>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <p className="home-pricing-price">{tier.price}</p>
+              {tier.action}
+            </div>
             <div>{tier.priceDetail}</div>
           </div>
           <p className="home-pricing-cell">{tier.features}</p>
           <p className="home-pricing-cell">{tier.support}</p>
-          <div className="home-pricing-cell">
-            <p>{tier.operated}</p>
-            {tier.action ? <div className="mt-4">{tier.action}</div> : null}
-          </div>
+          <p className="home-pricing-cell">{tier.operated}</p>
         </div>
       ))}
     </div>
