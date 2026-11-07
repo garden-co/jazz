@@ -295,15 +295,28 @@ const features: {
 function SectionHeader({
   id,
   title,
+  step,
   children,
 }: {
   id?: string;
   title: ReactNode;
+  /** Shows a numbered step badge before the title. */
+  step?: number;
   children?: ReactNode;
 }) {
   return (
     <div className="grid gap-4">
-      <Heading level={2} type="display-3" id={id} className="home-anchor max-w-3xl">
+      <Heading
+        level={2}
+        type="display-3"
+        id={id}
+        className={`home-anchor max-w-3xl${step ? " home-step-heading" : ""}`}
+      >
+        {step ? (
+          <span className="home-step" aria-hidden="true">
+            {step}
+          </span>
+        ) : null}
         {title}
       </Heading>
       {children ? <div className="home-prose max-w-2xl">{children}</div> : null}
@@ -395,7 +408,7 @@ export default function HomePage() {
 
       <section className="home-section">
         <div className="home-container">
-          <SectionHeader id="code" title="Install in your backend and define a schema" />
+          <SectionHeader id="code" step={1} title="Install in your backend and define a schema" />
           <div className="home-code-pair mt-6">
             <div className="home-code-stack">
               <CodeWindow files={[{ name: "jazz.server.ts", language: "ts", code: serverCode }]} />
@@ -408,9 +421,9 @@ export default function HomePage() {
         </div>
       </section>
 
-      <section className="home-section">
+      <section className="home-section home-section-continued">
         <div className="home-container">
-          <SectionHeader id="query" title="Query from anywhere" />
+          <SectionHeader id="query" step={2} title="Query from anywhere" />
           <div className="home-code-pair mt-6">
             <CodeWindow files={[{ name: "api/todos/route.ts", language: "ts", code: routeCode }]} />
             <CodeWindow files={[{ name: "OpenTodos.tsx", language: "tsx", code: componentCode }]} />
@@ -418,9 +431,9 @@ export default function HomePage() {
         </div>
       </section>
 
-      <section className="home-section">
+      <section className="home-section home-section-continued">
         <div className="home-container">
-          <SectionHeader id="demo" title="Your app, on your infra. Smooth." />
+          <SectionHeader id="demo" step={3} title="Your app, on your infra. Smooth." />
           <Figure
             className="home-video-figure mt-6"
             after={

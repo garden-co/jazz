@@ -428,6 +428,32 @@ h6 {
   border-top: 1px solid var(--color-border);
   padding-block: var(--spacing-12) calc(var(--spacing-12) * 1.5);
 }
+/* A section that continues the steps of the one above: no rule between them. */
+.home-section.home-section-continued {
+  border-top: 0;
+  padding-top: 0;
+}
+/* Inverted, circled step number in front of a section heading. */
+.home-anchor.home-step-heading {
+  display: flex;
+  align-items: baseline;
+  gap: var(--spacing-4);
+}
+.home-step {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 1.6em;
+  height: 1.6em;
+  border-radius: 9999px;
+  background-color: var(--color-text-primary);
+  color: var(--color-background-body);
+  font-size: 0.6em;
+  font-weight: 600;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
 /* Hero pattern (a live stipple canvas, see components/brand/stipple-presets.ts),
    pinned to the hero's top-right corner. Tune these in devtools on
    `.home-hero`: --pattern-width (the canvas width; its height follows the
@@ -630,10 +656,17 @@ h6 {
 }
 .home-video {
   display: block;
-  width: 100%;
+  width: auto;
+  max-width: 100%;
+  max-height: 70vh;
   height: auto;
+  margin-inline: auto;
   border-radius: var(--radius-element);
   background-color: #000;
+}
+.home-video-link {
+  display: table;
+  margin-inline: auto;
 }
 .home-posts {
   display: grid;
