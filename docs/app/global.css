@@ -641,6 +641,9 @@ h6 {
    stacked on narrower screens. */
 .home-code-pair {
   display: grid;
+  /* One column that never grows past the container, so long lines scroll
+     inside their window instead of widening the page. */
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--spacing-6);
 }
 @media (min-width: 1024px) {
@@ -653,6 +656,7 @@ h6 {
 .home-code-stack {
   display: flex;
   flex-direction: column;
+  min-width: 0;
   gap: var(--spacing-6);
 }
 .home-code-stack > .home-code-window {
