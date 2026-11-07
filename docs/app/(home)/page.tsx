@@ -120,22 +120,16 @@ const componentCode = `import { useAll } from "jazz-tools/react";
 import { app } from "./schema";
 
 export function OpenTodos() {
-  // As an alternative to traditional querying via api/todos
-  // you can query and write to Jazz directly from the client
-  // which will do real-time sync through the /jazz route
-  // either through a thin client or fully local-first with offline support
-  const { data: todos = [], db } = useAll(
-    app.todos.where({ done: false }),
-  );
+  // As an alternative to traditional querying via api/todos you can query
+  // and write to Jazz directly from the client, which will do real-time sync
+  // through the /jazz route, either through a thin client or fully
+  // local-first with offline support
+  const { data: todos = [], db } = useAll(app.todos.where({ done: false }));
 
   return todos.map((todo) => (
     <label key={todo.id}>
-      <input
-        type="checkbox"
-        onChange={() =>
-          db.update(app.todos, todo.id, { done: true })
-        }
-      />
+      <input type="checkbox"
+        onChange={() => db.update(app.todos, todo.id, { done: true })} />
       {todo.title}
     </label>
   ));
