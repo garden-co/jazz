@@ -132,7 +132,7 @@ it("accepts only one simultaneous first encrypted writer even when root updates 
     const loserIndex = 1 - winnerIndex;
     expect(outcomes[loserIndex]).toMatchObject({
       status: "rejected",
-      reason: { code: "exclusive_conflict" },
+      reason: { code: "serialization_conflict" },
     });
     const winner = writers[winnerIndex]!;
     const loser = writers[loserIndex]!;

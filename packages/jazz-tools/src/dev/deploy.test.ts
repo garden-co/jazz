@@ -191,7 +191,7 @@ it("keeps a single historical migration separate from the deployment head", asyn
     vi.fn(async (input: string, init?: RequestInit) => {
       if (input.endsWith("/migrations/graph"))
         return reply({ activeSchemaHash: hashes[2], schemas: hashes, migrations: [] });
-      expect(input.endsWith("/admin/deploy")).toBe(true);
+      expect(input.endsWith("/admin/bundles")).toBe(true);
       const body = JSON.parse(String(init?.body)) as DeploymentRequest;
       expect(body.migrations.map(({ fromHash, toHash }) => [fromHash, toHash])).toEqual([
         [hashes[0], hashes[1]],
@@ -237,7 +237,7 @@ it.each([false, true])(
         });
       if (input.endsWith(`/schema/${fromHash}`))
         return reply({ schema: { tables: first.wasmSchema } });
-      expect(input.endsWith("/admin/deploy")).toBe(true);
+      expect(input.endsWith("/admin/bundles")).toBe(true);
       expect(JSON.parse(String(init?.body)).migrations).toEqual([]);
       return reply({ changed: false, published: { schemas: [], migrations: [] } });
     });

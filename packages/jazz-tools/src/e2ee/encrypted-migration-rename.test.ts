@@ -436,7 +436,7 @@ it("requires a user migration when adding the first encrypted table", async () =
     await deploy({ ...target, schema: oldApp, permissions: definePermissions(oldApp, () => {}) });
     await expect(
       deploy({ ...target, schema: newApp, permissions: definePermissions(newApp, () => {}) }),
-    ).rejects.toMatchObject({ code: "unreachable_deployment_target" });
+    ).rejects.toMatchObject({ code: "disconnected_migration_graph" });
     const unchanged = await deploy({
       ...target,
       schema: oldApp,
