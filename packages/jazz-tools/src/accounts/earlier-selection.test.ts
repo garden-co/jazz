@@ -85,3 +85,13 @@ it("one app reached through two earlier servers is ambiguous, so nothing is take
   );
   expect(accounts.getLoggedIn()).toBeUndefined();
 });
+
+it("an earlier selection this client can't read is left alone, and the client starts afresh", async () => {
+  const items = browser({ [earlierKey]: "{not a selection" });
+  const accounts = await createAccountManagerWithMinter(
+    { serverUrl: "https://app.example/jazz", scope: appId },
+    mintToken,
+  );
+  expect(accounts.getLoggedIn()).toBeUndefined();
+  expect(items.get(earlierKey)).toBe("{not a selection");
+});

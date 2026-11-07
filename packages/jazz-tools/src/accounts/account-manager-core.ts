@@ -1,7 +1,7 @@
 import { accountRegistryUrl } from "./context.js";
 import { accountAppId } from "./local-first.js";
 import { clientScope, DEFAULT_SERVER_URL } from "../runtime/client-scope.js";
-import { prepareAccountManager, type AccountStore } from "./persistence.js";
+import { prepareAccountManager, readableSelection, type AccountStore } from "./persistence.js";
 import type { AccountManagerConfig } from "./create-account-manager.js";
 
 /** Signs a local-first account's token for `audience` (see `prepareAccountManager`). */
@@ -137,7 +137,10 @@ function earlierSelection(scope: string, env: string): string | null {
     if (key?.startsWith(SELECTION_PREFIX) && key.endsWith(suffix)) found.push(key);
   }
   if (found.length !== 1) return null;
-  return localStorage.getItem(found[0]!);
+  // One this client can't read is left alone: it would refuse every start
+  // of this client, where without it the client starts afresh.
+  const value = localStorage.getItem(found[0]!);
+  return value !== null && readableSelection(value) ? value : null;
 }
 
 /**

@@ -60,6 +60,16 @@ function decodeBackendUser(value: unknown): StoredBackendUser | undefined {
     claims: { ...user.claims },
   };
 }
+/** @internal Whether `value` is a selection this client can read. */
+export function readableSelection(value: string): boolean {
+  try {
+    decode(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function decode(value: string | null): StoredAccounts {
   if (value === null) return { format: "jazz-account-selection-v1", roots: [], selected: null };
   const parsed = JSON.parse(value) as StoredAccounts;
