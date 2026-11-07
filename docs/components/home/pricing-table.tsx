@@ -100,7 +100,9 @@ const tiers: Tier[] = [
     action: (
       <Button
         label="Schedule Call"
-        variant="secondary"
+        variant="primary"
+        size="lg"
+        className="home-pricing-cta"
         href="https://cal.com/anselm-io/cloud-pro-intro"
       />
     ),

@@ -1150,6 +1150,12 @@ nav.astryx-side-nav .astryx-side-nav-item {
   letter-spacing: -0.02em;
   margin-bottom: var(--spacing-2);
 }
+/* The call button stands as tall as the price beside it. */
+.home-pricing .home-pricing-cta {
+  min-height: 2.875rem;
+  padding-inline: var(--spacing-5);
+  font-size: 1rem;
+}
 .home-pricing-muted {
   color: var(--color-text-secondary);
 }
