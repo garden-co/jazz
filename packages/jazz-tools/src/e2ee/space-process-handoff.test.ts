@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { build } from "esbuild";
 import { execFile as rawExecFile } from "node:child_process";
@@ -17,7 +18,7 @@ it("resumes an excluded author's initial handoff in a fresh Node process", async
   const cache = join(process.cwd(), "node_modules", ".cache");
   await mkdir(cache, { recursive: true });
   const directory = await mkdtemp(join(cache, "e2ee-process-handoff-"));
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   let recipient: Awaited<ReturnType<typeof createDb>> | undefined;
   try {
     const entry = join(directory, "child.mjs");
@@ -37,6 +38,7 @@ it("resumes an excluded author's initial handoff in a fresh Node process", async
       schema: app,
       permissions,
     });
+    server = await frontE2eeCore(server, { schema: app, permissions: permissions });
     const account = await localAccountConfig(server.appId, server.url);
     let saved: string | null = null;
     recipient = await createDb({

@@ -7,23 +7,26 @@ import { deviceRequestSchema, deviceRequestPermissions } from "../../src/e2ee/de
 import { spaceSchema } from "../../src/e2ee/spaces.js";
 import { acquireBrowserTestAccount } from "./account-fixtures.js";
 import { withTimeout } from "./support.js";
-import { getJazzServerInfo, stopJazzServer } from "./testing-server.js";
+import { getJazzServerInfo, startJazzApp, stopJazzServer } from "./testing-server.js";
 
 it.each(["read", "write"] as const)(
   "refuses an encrypted %s after observing revocation and reopening IndexedDB offline",
   async (access) => {
-    const server = await getJazzServerInfo(`e2ee-offline-revocation-${crypto.randomUUID()}`);
-    const app = s.defineApp({
-      ...deviceRequestSchema,
-      ...spaceSchema,
-      projects: s.table({ title: s.string() }, {}),
-      notes: s
-        .table(
-          { projectId: s.uuid(), title: s.string() },
-          { project: s.rel("projects", "projectId") },
-        )
-        .encrypted({ space: "projectId", columns: ["title"] }),
-    });
+    let server = await getJazzServerInfo(`e2ee-offline-revocation-${crypto.randomUUID()}`);
+    const app = s.defineApp(
+      {
+        ...deviceRequestSchema,
+        ...spaceSchema,
+        projects: s.table({ title: s.string() }, {}),
+        notes: s
+          .table(
+            { projectId: s.uuid(), title: s.string() },
+            { project: s.rel("projects", "projectId") },
+          )
+          .encrypted({ space: "projectId", columns: ["title"] }),
+      },
+      { migrations: "none" },
+    );
     const permissions = definePermissions(app, ({ policy, session }) => {
       policy.projects.allowRead.always();
       policy.projects.allowInsert.always();
@@ -54,6 +57,10 @@ it.each(["read", "write"] as const)(
     try {
       await deploy({
         ...server,
+        schema: app,
+        permissions: { ...deviceRequestPermissions, ...permissions },
+      });
+      server = await startJazzApp(server, {
         schema: app,
         permissions: { ...deviceRequestPermissions, ...permissions },
       });

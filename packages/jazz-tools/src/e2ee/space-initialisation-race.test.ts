@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
@@ -25,15 +26,18 @@ function newRows<T extends { id: string }>(rows: T[], before: T[]): T[] {
 }
 
 async function prepare() {
-  const app = s.defineApp({
-    ...deviceRequestSchema,
-    ...spaceSchema,
-    projects: s.table({ title: s.string() }, {}),
-    notes: s.table(
-      { projectId: s.uuid(), epochId: s.uuid(), payload: s.bytes() },
-      { project: s.rel("projects", "projectId") },
-    ),
-  });
+  const app = s.defineApp(
+    {
+      ...deviceRequestSchema,
+      ...spaceSchema,
+      projects: s.table({ title: s.string() }, {}),
+      notes: s.table(
+        { projectId: s.uuid(), epochId: s.uuid(), payload: s.bytes() },
+        { project: s.rel("projects", "projectId") },
+      ),
+    },
+    { migrations: "none" },
+  );
   const policies = definePermissions(app, ({ policy, session }) => {
     const authenticated = session.where({ authMode: { in: ["local-first", "external"] } });
     policy.projects.allowRead.where(authenticated);
@@ -49,7 +53,7 @@ async function prepare() {
     policy.__e2ee_space_successors.allowRead.where(authenticated);
     policy.__e2ee_space_recovery_deliveries.allowRead.where(authenticated);
   });
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Awaited<ReturnType<typeof createDb>>[] = [];
   let gate: { reached: ReturnType<typeof signal>[]; resume: ReturnType<typeof signal> } | undefined;
   const cleanup = async () => {
@@ -62,6 +66,10 @@ async function prepare() {
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
+      schema: app,
+      permissions: { ...deviceRequestPermissions, ...policies },
+    });
+    server = await frontE2eeCore(server, {
       schema: app,
       permissions: { ...deviceRequestPermissions, ...policies },
     });
@@ -195,7 +203,7 @@ it.each([false, true])(
       if (rejected.status !== "rejected") throw new Error("Missing rejected initialisation");
       // Authority checks permissions before conflicts. A competing stable root
       // may therefore fail the update policy before its absence precondition.
-      expect(["exclusive_conflict", "permission_denied"]).toContain(rejected.reason.code);
+      expect(["serialization_conflict", "permission_denied"]).toContain(rejected.reason.code);
       const winner = clients[winnerIndex]!;
       const loser = clients[loserIndex]!;
       const target = { scope: app.projects, identifier: project.id };

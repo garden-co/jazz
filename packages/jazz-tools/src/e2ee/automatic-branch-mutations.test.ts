@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
@@ -7,17 +8,20 @@ import type { Db } from "../runtime/db.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
 
 it("upserts and restores encrypted heads using their exact branch scopes", async () => {
-  const app = s.defineApp({
-    projects: s.table({ title: s.string() }, {}),
-    notes: s
-      .table(
-        { projectId: s.uuid(), body: s.string(), branch: s.string() },
-        { project: s.rel("projects", "projectId") },
-      )
-      .encrypted({ space: "projectId", columns: ["body"] })
-      .indexOnly(["projectId"])
-      .branchBy("branch"),
-  });
+  const app = s.defineApp(
+    {
+      projects: s.table({ title: s.string() }, {}),
+      notes: s
+        .table(
+          { projectId: s.uuid(), body: s.string(), branch: s.string() },
+          { project: s.rel("projects", "projectId") },
+        )
+        .encrypted({ space: "projectId", columns: ["body"] })
+        .indexOnly(["projectId"])
+        .branchBy("branch"),
+    },
+    { migrations: "none" },
+  );
   const permissions = definePermissions(app, ({ policy, session }) => {
     policy.projects.allowRead.always();
     policy.projects.allowInsert.where({ "$createdBy.account": session.user.account });
@@ -34,7 +38,7 @@ it("upserts and restores encrypted heads using their exact branch scopes", async
     policy.__e2ee_space_successors.allowRead.always();
     policy.__e2ee_space_successors.allowInsert.where({ authorAccountId: session.user.account });
   });
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   let db: Db | undefined;
   let retained: string | null = null;
   try {
@@ -45,6 +49,7 @@ it("upserts and restores encrypted heads using their exact branch scopes", async
       schema: app,
       permissions,
     });
+    server = await frontE2eeCore(server, { schema: app, permissions: permissions });
     const account = await localAccountConfig(server.appId, server.url);
     db = await createDb({
       ...account,

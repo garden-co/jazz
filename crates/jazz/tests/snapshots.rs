@@ -3,7 +3,7 @@
 //! not. Reads of a snapshot are answered from the replica's own store, and a
 //! write under a frozen base reaches the authority as a frozen view.
 
-mod common;
+use crate::common;
 
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;
@@ -78,7 +78,9 @@ fn connect(client: &Db, server: &Db) {
     let (client_side, server_side) = duplex();
     block_on(client.connect_upstream(client_side));
     client.set_remote_link_hint(RemoteLinkHint::Live);
-    server.accept_subscriber(server_side, alice_subject());
+    server
+        .accept_subscriber(server_side, alice_subject())
+        .unwrap();
 }
 
 fn settle(dbs: &[&Db]) {

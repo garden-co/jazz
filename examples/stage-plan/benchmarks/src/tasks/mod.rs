@@ -188,7 +188,9 @@ impl Fixture {
             let db = block_on(Db::open(DbConfig::new(self.schema.clone(), identity(2)))).unwrap();
             let (client_side, server_side) = duplex();
             let upstream = block_on(db.connect_upstream(client_side));
-            worker.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+            worker
+                .accept_subscriber(server_side, AuthorSubject::SYSTEM)
+                .unwrap();
             let all = db.prepare_query(&Query::from("tasks")).unwrap();
             let stream = block_on(db.subscribe(&all, ReadOpts::default())).unwrap();
             pump(&worker, &db);
@@ -245,12 +247,6 @@ impl Fixture {
     }
     pub fn verify(&mut self) {
         assert_eq!(self.read_result.len(), self.count);
-        let table = self
-            .schema
-            .tables
-            .iter()
-            .find(|table| table.name == "tasks")
-            .unwrap();
         let actual = self
             .read_result
             .iter()
@@ -262,13 +258,10 @@ impl Fixture {
                 .get(&row(i))
                 .expect("expected task present in timed read");
             assert_eq!(
-                value.cell(table, "title"),
+                value.cell("title"),
                 Some(Value::String(format!("Task {i}")))
             );
-            assert_eq!(
-                value.cell(table, "done"),
-                Some(Value::Bool(i < self.changed))
-            );
+            assert_eq!(value.cell("done"), Some(Value::Bool(i < self.changed)));
         }
         if REPORT.get() {
             // The worker holds exactly the done tasks the foreground shows.

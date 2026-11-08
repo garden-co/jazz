@@ -11,7 +11,7 @@ import { applyDeviceRequestPermissions } from "./device-policy.js";
 export { deviceRequestSchema } from "./managed-schema.js";
 import { deviceRequestSchema } from "./managed-schema.js";
 
-export const deviceRequestApp = s.defineApp(deviceRequestSchema);
+export const deviceRequestApp = s.defineApp(deviceRequestSchema, { migrations: "none" });
 export type DeviceTables = Pick<typeof deviceRequestApp, keyof typeof deviceRequestSchema>;
 
 export const deviceRequestPermissions = definePermissions(

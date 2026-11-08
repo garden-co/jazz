@@ -1,3 +1,5 @@
+import { appMigrations } from "../testing/client-migrations.js";
+import { frontE2eeCore, redeployE2eeApp } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { migration as m } from "../migration-namespace.js";
@@ -25,12 +27,15 @@ it("converts encrypted data to a new table and space with an equality index", as
       )
       .encrypted({ space: "projectId", columns: ["title"], indexes: { title: "equality" } }),
   };
-  const oldApp = s.defineApp(before);
-  const newApp = s.defineApp(after);
+  const oldApp = s.defineApp(before, { migrations: await appMigrations(before) });
+
   const migration = m.defineMigration({
     from: before,
     to: after,
     createTables: { indexedNotes: true },
+  });
+  const newApp = s.defineApp(after, {
+    migrations: await appMigrations(oldApp, { to: after, migration: migration }),
   });
   const oldPermissions = definePermissions(oldApp, ({ policy, session }) => {
     policy.projects.allowRead.where({ "$createdBy.account": session.user.account });
@@ -50,7 +55,7 @@ it("converts encrypted data to a new table and space with an equality index", as
     policy.indexedNotes.allowRead.where({ "$createdBy.account": session.user.account });
     policy.indexedNotes.allowInsert.where({ "$createdBy.account": session.user.account });
   });
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
   let retained: string | null = null;
   const store = {
@@ -63,7 +68,10 @@ it("converts encrypted data to a new table and space with an equality index", as
   };
   try {
     const target = { serverUrl: server.url, appId: server.appId, adminSecret: server.adminSecret };
-    await deploy({ ...target, schema: oldApp, permissions: oldPermissions });
+    const initialDeployment = { ...target, schema: oldApp, permissions: oldPermissions };
+    await deploy(initialDeployment);
+    const appBackend = await frontE2eeCore(server, initialDeployment);
+    server = appBackend;
     const account = await localAccountConfig(server.appId, server.url);
     db = await createDb({ ...account, e2ee: { app: oldApp, store } });
     const project = await db
@@ -75,7 +83,7 @@ it("converts encrypted data to a new table and space with an equality index", as
     await db.shutdown();
     db = undefined;
 
-    await deploy({
+    await redeployE2eeApp(appBackend, {
       ...target,
       schema: newApp,
       permissions: { ...oldPermissions, ...destinationPermissions },
@@ -141,19 +149,30 @@ it("converts plaintext to indexed ciphertext, then exports it without changing t
       { project: s.rel("projects", "projectId") },
     ),
   };
-  const exportApp = s.defineApp(exported);
+
   const exportMigration = m.defineMigration({
     from: after,
     to: exported,
     createTables: { exportedNotes: true },
   });
+
+  const oldApp = s.defineApp(before, { migrations: await appMigrations(before) });
+
+  const migration = m.defineMigration({ from: before, to: after, createTables: { notes: true } });
+  const newApp = s.defineApp(after, {
+    migrations: await appMigrations(oldApp, { to: after, migration: migration }),
+  });
+  const exportApp = s.defineApp(exported, {
+    migrations: await appMigrations(
+      oldApp,
+      { to: after, migration: migration },
+      { to: exported, migration: exportMigration },
+    ),
+  });
   const exportPermissions = definePermissions(exportApp, ({ policy, session }) => {
     policy.exportedNotes.allowRead.where({ "$createdBy.account": session.user.account });
     policy.exportedNotes.allowInsert.where({ "$createdBy.account": session.user.account });
   });
-  const oldApp = s.defineApp(before);
-  const newApp = s.defineApp(after);
-  const migration = m.defineMigration({ from: before, to: after, createTables: { notes: true } });
   const oldPermissions = definePermissions(oldApp, ({ policy, session }) => {
     policy.projects.allowRead.always();
     policy.projects.allowInsert.where({ "$createdBy.account": session.user.account });
@@ -176,7 +195,7 @@ it("converts plaintext to indexed ciphertext, then exports it without changing t
     policy.__e2ee_space_successors.allowRead.always();
     policy.__e2ee_space_successors.allowInsert.where({ authorAccountId: session.user.account });
   });
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
   let retained: string | null = null;
   const store = {
@@ -189,7 +208,10 @@ it("converts plaintext to indexed ciphertext, then exports it without changing t
   };
   try {
     const target = { serverUrl: server.url, appId: server.appId, adminSecret: server.adminSecret };
-    await deploy({ ...target, schema: oldApp, permissions: oldPermissions });
+    const initialDeployment = { ...target, schema: oldApp, permissions: oldPermissions };
+    await deploy(initialDeployment);
+    const appBackend = await frontE2eeCore(server, initialDeployment);
+    server = appBackend;
     const account = await localAccountConfig(server.appId, server.url);
     db = await createDb(account);
     const project = await db
@@ -201,7 +223,12 @@ it("converts plaintext to indexed ciphertext, then exports it without changing t
     await db.shutdown();
     db = undefined;
 
-    await deploy({ ...target, schema: newApp, permissions: newPermissions, migration });
+    await redeployE2eeApp(appBackend, {
+      ...target,
+      schema: newApp,
+      permissions: newPermissions,
+      migration,
+    });
     db = await createDb({ ...account, e2ee: { app: newApp, store } });
     // This project predates encryption: its verified creator explicitly grants access.
     await db.e2ee.spaces.grant(newApp.projects, project.id, account.account.id).wait();
@@ -231,7 +258,7 @@ it("converts plaintext to indexed ciphertext, then exports it without changing t
 
     await db.shutdown();
     db = undefined;
-    await deploy({
+    await redeployE2eeApp(appBackend, {
       ...target,
       schema: exportApp,
       permissions: { ...newPermissions, ...exportPermissions },

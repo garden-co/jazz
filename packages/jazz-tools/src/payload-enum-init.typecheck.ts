@@ -9,7 +9,7 @@ const event = s.enum({
   },
   empty: {},
 });
-const app = s.defineApp({ events: s.table({ event }, {}) });
+const app = s.defineApp({ events: s.table({ event }, {}) }, { migrations: "none" });
 const omitted: s.InsertOf<typeof app.events> = {
   event: { type: "message", requiredText: "required" },
 };
@@ -58,17 +58,20 @@ if (nestedRow[0]!.event.type === "message") {
   const nullable: string | null = nestedRow[0]!.event.nullableText;
   void [defaulted, nullable];
 }
-const transformed = s.defineApp({
-  events: s.table(
-    {
-      event: event.transform({
-        from: (value) => value.type,
-        to: () => ({ type: "empty" as const }),
-      }),
-    },
-    {},
-  ),
-});
+const transformed = s.defineApp(
+  {
+    events: s.table(
+      {
+        event: event.transform({
+          from: (value) => value.type,
+          to: () => ({ type: "empty" as const }),
+        }),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+);
 const transformedInit: s.InsertOf<typeof transformed.events> = { event: "message" };
 void [omitted, nullable, missing, invalid, nested, transformedInit];
 
@@ -76,15 +79,18 @@ const sameShape = s.enum({ message: { text: s.string().default("default") } }).t
   from: (value) => value,
   to: (value) => ({ ...value, text: value.text.toUpperCase() }),
 });
-const sameShapeApp = s.defineApp({
-  events: s.table(
-    {
-      event: sameShape,
-      modified: sameShape.optional().default({ type: "message" }).merge("lww"),
-    },
-    {},
-  ),
-});
+const sameShapeApp = s.defineApp(
+  {
+    events: s.table(
+      {
+        event: sameShape,
+        modified: sameShape.optional().default({ type: "message" }).merge("lww"),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+);
 const completeTransformInput: s.InsertOf<typeof sameShapeApp.events> = {
   event: { type: "message", text: "present" },
   modified: { type: "message", text: "present" },

@@ -862,6 +862,28 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     }
   });
 
+  // #3069: a Suspense read abandoned before its first result is not held
+  // until the client closes: its unused deadline starts with that result.
+  it("cleans up an abandoned Suspense read one unused deadline after its first result", async () => {
+    vi.useFakeTimers();
+    const harness = createUnitHarness();
+    try {
+      const { key, entry } = harness.makeEntry();
+      void entry.promise;
+      await vi.advanceTimersByTimeAsync(60_000);
+      harness.emit(0, makeDelta([makeTodo("abandoned")]));
+      for (let index = 0; index < 2; index++) {
+        await vi.advanceTimersByTimeAsync(10_000);
+        harness.emit(0, makeDelta([makeTodo(`update-${index}`)]));
+      }
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(harness.calls[0]?.unsubscribe).toHaveBeenCalledOnce();
+      expect((harness.manager as any).slots.has(key)).toBe(false);
+    } finally {
+      await harness.manager.shutdown();
+    }
+  });
+
   it("SO-U16 resubscribe before timeout cancels cleanup", async () => {
     vi.useFakeTimers();
     const harness = createUnitHarness();

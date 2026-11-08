@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { readFileSync } from "node:fs";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
@@ -21,7 +22,7 @@ it.each([
 ] as const)(
   "authenticates accepted group creation: %s",
   async (variant) => {
-    const app = s.defineApp({ ...deviceRequestSchema, ...groupSchema });
+    const app = s.defineApp({ ...deviceRequestSchema, ...groupSchema }, { migrations: "none" });
     const policies = definePermissions(app, ({ policy, session, allOf }) => {
       policy.__e2ee_group_repairs.allowRead.where(
         session.where({ authMode: { in: ["local-first", "external"] } }),
@@ -43,7 +44,7 @@ it.each([
         ]),
       );
     });
-    const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+    let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
     const clients: Awaited<ReturnType<typeof createDb>>[] = [];
     const store = () => {
       let value: string | null = null;
@@ -61,6 +62,16 @@ it.each([
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
+        schema: app,
+        permissions: {
+          ...deviceRequestPermissions,
+          __e2ee_groups: policies.__e2ee_groups!,
+          __e2ee_group_repairs: policies.__e2ee_group_repairs!,
+          __e2ee_group_successors: policies.__e2ee_group_successors!,
+          __e2ee_group_deliveries: policies.__e2ee_group_deliveries!,
+        },
+      });
+      server = await frontE2eeCore(server, {
         schema: app,
         permissions: {
           ...deviceRequestPermissions,

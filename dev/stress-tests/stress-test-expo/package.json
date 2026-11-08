@@ -5,6 +5,7 @@
   "type": "module",
   "main": "./index.js",
   "scripts": {
+    "backend": "tsx backend.ts",
     "start": "expo start --clear",
     "android": "expo run:android",
     "ios": "expo run:ios",
@@ -27,6 +28,7 @@
     "@babel/plugin-transform-flow-strip-types": "^7.27.1",
     "@types/react": "^19.0.0",
     "babel-preset-expo": "~54.0.10",
+    "tsx": "^4.19.0",
     "typescript": "catalog:default"
   }
 }

@@ -200,6 +200,8 @@ export function RoomView({ summary, author }: { summary: RoomSummary; author: st
         {isCreator ? (
           <Button
             label="Invite"
+            // The badge's count runs into the label's text otherwise.
+            aria-label={requests.length > 0 ? `Invite ${requests.length}` : undefined}
             size="sm"
             onClick={() => setMembersOpen(true)}
             endContent={

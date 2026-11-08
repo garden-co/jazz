@@ -5,7 +5,8 @@ import { definePermissions } from "../permissions/index.js";
 import { PersistedWriteRejectedError } from "./client.js";
 import { createDb } from "./default-create-db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
-import { deploy, startLocalJazzServer } from "../testing/index.js";
+import { appMigrations } from "../testing/client-migrations.js";
+import { startTestJazz } from "../testing/index.js";
 
 it("inserts an ordinary parent and child atomically after adding a table", async () => {
   const before = { projects: s.table({ title: s.string() }, {}) };
@@ -16,8 +17,11 @@ it("inserts an ordinary parent and child atomically after adding a table", async
       { project: s.rel("projects", "projectId") },
     ),
   };
-  const oldApp = s.defineApp(before);
-  const newApp = s.defineApp(after);
+  const migration = m.defineMigration({ from: before, to: after, createTables: { notes: true } });
+  const oldApp = s.defineApp(before, { migrations: await appMigrations(before) });
+  const newApp = s.defineApp(after, {
+    migrations: await appMigrations(before, { to: after, migration }),
+  });
   const oldPermissions = definePermissions(oldApp, ({ policy }) => {
     policy.projects.allowRead.always();
     policy.projects.allowInsert.always();
@@ -28,22 +32,19 @@ it("inserts an ordinary parent and child atomically after adding a table", async
     policy.notes.allowRead.always();
     policy.notes.allowInsert.always();
   });
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  const server = await startTestJazz({
+    app: oldApp,
+    permissions: oldPermissions,
+    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+  });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
   try {
-    const target = { serverUrl: server.url, appId: server.appId, adminSecret: server.adminSecret };
-    await deploy({ ...target, schema: oldApp, permissions: oldPermissions });
     const account = await localAccountConfig(server.appId, server.url);
     db = await createDb(account);
     await db.insert(oldApp.projects, { title: "Existing project" }).wait({ tier: "global" });
     await db.shutdown();
     db = undefined;
-    await deploy({
-      ...target,
-      schema: newApp,
-      permissions: newPermissions,
-      migration: m.defineMigration({ from: before, to: after, createTables: { notes: true } }),
-    });
+    await server.redeploy({ app: newApp, permissions: newPermissions, migration });
     db = await createDb(account);
     await db.all(newApp.projects, { tier: "remote" });
     const tx = db.beginSerializableTransaction();
@@ -62,21 +63,21 @@ it("inserts an ordinary parent and child atomically after adding a table", async
 it.each(["local", "global"] as const)(
   "rejects a matching phantom at %s durability",
   async (tier) => {
-    const app = s.defineApp({ notes: s.table({ bucket: s.string(), title: s.string() }, {}) });
+    const app = s.defineApp(
+      { notes: s.table({ bucket: s.string(), title: s.string() }, {}) },
+      { migrations: "none" },
+    );
     const permissions = definePermissions(app, ({ policy }) => {
       policy.notes.allowRead.always();
       policy.notes.allowInsert.always();
     });
-    const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+    const server = await startTestJazz({
+      app: app,
+      permissions: permissions,
+      coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+    });
     let db: Awaited<ReturnType<typeof createDb>> | undefined;
     try {
-      await deploy({
-        serverUrl: server.url,
-        appId: server.appId,
-        adminSecret: server.adminSecret,
-        schema: app,
-        permissions,
-      });
       db = await createDb(await localAccountConfig(server.appId, server.url));
       await db.all(app.notes, { tier: "remote" });
       if (tier === "local") await db.disconnect();
@@ -109,21 +110,21 @@ it.each(["local", "global"] as const)(
 );
 
 it("does not reject a filtered transaction read when an unrelated row is inserted", async () => {
-  const app = s.defineApp({ notes: s.table({ bucket: s.string(), title: s.string() }, {}) });
+  const app = s.defineApp(
+    { notes: s.table({ bucket: s.string(), title: s.string() }, {}) },
+    { migrations: "none" },
+  );
   const permissions = definePermissions(app, ({ policy }) => {
     policy.notes.allowRead.always();
     policy.notes.allowInsert.always();
   });
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  const server = await startTestJazz({
+    app: app,
+    permissions: permissions,
+    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+  });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
   try {
-    await deploy({
-      serverUrl: server.url,
-      appId: server.appId,
-      adminSecret: server.adminSecret,
-      schema: app,
-      permissions,
-    });
     db = await createDb(await localAccountConfig(server.appId, server.url));
     await db.all(app.notes, { tier: "remote" });
     const tx = db.beginSerializableTransaction();
@@ -145,7 +146,7 @@ it("does not reject a filtered transaction read when an unrelated row is inserte
 it.each(["offline", "synced"] as const)(
   "rejects the losing serializable write on the same row without failing the core tick (%s)",
   async (mode) => {
-    const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) });
+    const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) }, { migrations: "none" });
     const permissions = definePermissions(app, ({ policy }) => {
       policy.notes.allowRead.always();
       policy.notes.allowInsert.always();
@@ -153,7 +154,11 @@ it.each(["offline", "synced"] as const)(
     });
     const server =
       mode === "synced"
-        ? await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true })
+        ? await startTestJazz({
+            app,
+            permissions,
+            coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+          })
         : undefined;
     const uncaught: unknown[] = [];
     const onUncaught = (error: unknown) => uncaught.push(error);
@@ -162,13 +167,6 @@ it.each(["offline", "synced"] as const)(
     let db: Awaited<ReturnType<typeof createDb>> | undefined;
     try {
       if (server) {
-        await deploy({
-          serverUrl: server.url,
-          appId: server.appId,
-          adminSecret: server.adminSecret,
-          schema: app,
-          permissions,
-        });
         db = await createDb(await localAccountConfig(server.appId, server.url));
       } else {
         db = await createDb({

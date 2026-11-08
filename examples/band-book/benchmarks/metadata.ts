@@ -3,7 +3,8 @@ import type { BenchmarkMetadata } from "../../../dev/benchmarks/metadata/types.t
 const source = "examples/band-book/benchmarks/benches/walltime.rs";
 const fixture =
   "100,000 pages, 100 members, 25 workspaces of four members (1,000 pages per member); the reader is admitted to workspace 0, whose newest pages belong to another member. Ordered (owner, updated) and (workspace, updated) indexes.";
-const storage = "RocksDB WalNoSync; fresh runtime over seeded store, OS cache not flushed";
+const storage =
+  "SQLite file, WAL with synchronous=NORMAL; fresh runtime over seeded store, OS cache not flushed";
 const excludes = [
   "Seed, database reopen, public query preparation, teardown, counter extraction",
   "Network and subscription delivery",

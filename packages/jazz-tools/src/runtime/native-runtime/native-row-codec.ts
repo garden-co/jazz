@@ -1,9 +1,6 @@
 import { Utf8Decoder } from "../utf8.js";
 import { bytesToHex, formatUuidAt } from "../hex.js";
-import { parseUuid } from "../uuid.js";
 import type { ColumnDescriptor, ColumnType, Value, WasmRow } from "../../drivers/types.js";
-import { isProvenanceMagicColumn } from "../../magic-columns.js";
-import { validateStructuredAuthorValue } from "../author-id.js";
 import { exactSignedI64 } from "./exact-integer.js";
 import { concatBytes, isValidUtf8 } from "../util.js";
 
@@ -72,6 +69,16 @@ export type NativeSubscriptionDelta = {
   updatedPreviousIndices: number[];
   updatedIndices: number[];
   removedIndices: number[];
+  /** Per updated row: each opted-in column's splices from its previous result. */
+  updatedSplices: Array<Array<{ column: string; splices: NativeSplice[] }>>;
+};
+/** One edit of a large value: bytes, and for text the same edit in UTF-16 units. */
+export type NativeSplice = {
+  at: number;
+  delete: number;
+  insert: Uint8Array;
+  atUtf16: number;
+  deleteUtf16: number;
 };
 export type NativeRelationSubscriptionSnapshot = {
   rootCount: number;
@@ -173,6 +180,18 @@ export function readNativeSubscriptionDelta(reader: PostcardReaderLike): NativeS
     updatedPreviousIndices: reader.readVec((indexReader) => indexReader.u64()),
     updatedIndices: reader.readVec((indexReader) => indexReader.u64()),
     removedIndices: reader.readVec((indexReader) => indexReader.u64()),
+    updatedSplices: reader.readVec((rowReader) =>
+      rowReader.readVec((columnReader) => ({
+        column: columnReader.string(),
+        splices: columnReader.readVec((spliceReader) => ({
+          at: spliceReader.u64(),
+          delete: spliceReader.u64(),
+          insert: spliceReader.bytes(),
+          atUtf16: spliceReader.u64(),
+          deleteUtf16: spliceReader.u64(),
+        })),
+      })),
+    ),
   };
   const rowCount = (batches: NativeRowBatch[]) =>
     batches.reduce((count, batch) => count + batch.rows.length, 0);
@@ -183,7 +202,8 @@ export function readNativeSubscriptionDelta(reader: PostcardReaderLike): NativeS
     delta.addedIndices.length !== rowCount(delta.added) ||
     delta.updatedPreviousIndices.length !== rowCount(delta.updated) ||
     delta.updatedIndices.length !== rowCount(delta.updated) ||
-    delta.removedIndices.length !== delta.removed.length
+    delta.removedIndices.length !== delta.removed.length ||
+    delta.updatedSplices.length !== rowCount(delta.updated)
   ) {
     throw new Error("subscription occurrence sidecar length mismatch");
   }
@@ -459,7 +479,7 @@ const terminalRowKeyColumn: ColumnDescriptor = {
   nullable: false,
 };
 
-/** Decode a Groove terminal record, whose first physical field is its row key. */
+/** Decode a terminal record, whose first physical field is its row key. */
 export function decodeNativeTerminalRow(
   id: string,
   columns: readonly ColumnDescriptor[],
@@ -478,7 +498,7 @@ export function decodeNativeTerminalRow(
 }
 
 /**
- * Groove terminal payloads retain `Record` values for nested relation rows.
+ * Terminal payloads retain `Record` values for nested relation rows.
  * Ordinary packed transport deliberately represents those rows as byte arrays
  * with an id/length envelope instead. Both outer records have the same layout,
  * but decoding a terminal tree through the ordinary path makes the first UUID
@@ -810,6 +830,14 @@ export function encodeU32Le(value: number): Uint8Array {
   return bytes;
 }
 
+function parseUuid(value: string): Uint8Array {
+  const hex = value.replaceAll("-", "");
+  if (!/^[0-9a-fA-F]{32}$/.test(hex)) {
+    throw new Error(`invalid UUID value ${value}`);
+  }
+  return Uint8Array.from(hex.match(/../g)!.map((byte) => Number.parseInt(byte, 16)));
+}
+
 export function storageColumnValueType(column: ColumnDescriptor): ValueType {
   let valueType = storageColumnTypeToValueType(column.column_type, column.name);
   if (column.nullable) valueType = { tag: 15, inner: valueType };
@@ -1013,6 +1041,7 @@ function formatUuid(bytes: Uint8Array): string {
     20,
   )}-${hex.slice(20)}`;
 }
+
 export function nativeFixedValueSize(valueType: ValueType): number | undefined {
   switch (valueType.tag) {
     case 0:

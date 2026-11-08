@@ -57,7 +57,7 @@ class RuntimeSourceAdapter extends RuntimeSource<DbConfig> {
     return JazzClient.connectWithRuntime(
       this.runtime,
       {
-        appId: config.appId,
+        appId: config.appId!,
         schema,
       },
       { onAuthFailure },

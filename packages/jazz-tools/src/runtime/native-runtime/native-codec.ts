@@ -1,12 +1,10 @@
 import { Utf8Decoder } from "../utf8.js";
-import { parseUuid } from "../uuid.js";
+import { parseUuidBytes } from "../hex.js";
 import {
   type NativeRowBatch,
   type NativeRelationSubscriptionSnapshot,
   type NativeRemovedRow,
   type DescriptorField,
-  createRecord,
-  writeDescriptor,
   readNativeRowBatch,
   readNativeRelationSubscriptionSnapshot,
   readNativeRemovedRow,
@@ -15,7 +13,9 @@ import {
 } from "./native-row-codec.js";
 import { parseCanonicalAuthorSubject } from "../author-id.js";
 import { exactSignedI64 } from "./exact-integer.js";
+import { runtimeSchemaJsonReplacer } from "../../drivers/schema-wire.js";
 import { encodeRelationQueryPostcard, type RelExpr } from "../../ir.js";
+import type { ClientMigrations } from "../client-migrations.js";
 
 const fatalUtf8Decoder = new Utf8Decoder({ fatal: true });
 
@@ -41,6 +41,7 @@ export type {
   NativeRow,
   NativeRowBatch,
   NativeRowDescriptorField,
+  NativeSplice,
   NativeSubscriptionDelta,
   DescriptorField,
   ValueType,
@@ -102,6 +103,8 @@ export function openConfig(
   historyComplete = false,
   initialSyncFlushEvery?: number,
   selfSignedClientProof?: NativeSelfSignedClientProof,
+  migrations?: ClientMigrations,
+  systemNode?: Uint8Array,
 ): Uint8Array {
   const writer = new PostcardWriter();
   writer.bytes(node);
@@ -117,9 +120,20 @@ export function openConfig(
   } else {
     writer.some((value) => value.u64(initialSyncFlushEvery));
   }
-  // The native binding keeps a trailing `backend_credential` slot solely to
-  // reject legacy raw ingress. New configs must never serialize one.
-  writer.none();
+  // The app's versions and migrations, as JSON the binding lowers into the
+  // lenses its store opens along (SPEC 10.7).
+  if (migrations == null) {
+    writer.none();
+  } else {
+    writer.some((value) => value.bytes(clientMigrationsBytes(migrations)));
+  }
+  // The node SYSTEM provenance names, when a backend's runtime node is drawn
+  // fresh per open but its subject stays stable.
+  if (systemNode == null) {
+    writer.none();
+  } else {
+    writer.some((value) => value.bytes(systemNode));
+  }
   return writer.finish();
 }
 
@@ -213,6 +227,16 @@ export type QueryArraySubquery = {
   nestedArrays?: QueryArraySubquery[];
 };
 
+/** A selected column read only in part (Rust `PartialSelect`, SPEC 19.12). */
+export type QueryPartialSelect =
+  | {
+      column: string;
+      kind: "bytes" | "text_utf16" | "text_utf8";
+      from: number;
+      to: number;
+    }
+  | { column: string; kind: "json_pointer"; at: string };
+
 export type QueryOptions = {
   limit?: number;
   offset?: number;
@@ -221,6 +245,8 @@ export type QueryOptions = {
   arraySubqueries?: QueryArraySubquery[];
   /** Relation expression carried in Query.relation by the public IR adapter. */
   relation?: unknown;
+  /** Selected columns the engine reads only in part. */
+  partial?: QueryPartialSelect[];
 };
 
 export function queryWithPredicates(
@@ -229,7 +255,15 @@ export function queryWithPredicates(
   options: number | QueryOptions = {},
 ): Uint8Array {
   const queryOptions = typeof options === "number" ? { limit: options } : options;
-  const { limit, offset = 0, orderBy = [], select, arraySubqueries = [], relation } = queryOptions;
+  const {
+    limit,
+    offset = 0,
+    orderBy = [],
+    select,
+    arraySubqueries = [],
+    relation,
+    partial = [],
+  } = queryOptions;
   if (limit != null) validateQueryBound("query limit", limit);
   validateQueryBound("query offset", offset);
   const writer = new PostcardWriter();
@@ -276,7 +310,25 @@ export function queryWithPredicates(
     writer.some((relationWriter) =>
       relationWriter.bytes(encodeRelationQueryPostcard(relation as RelExpr), false),
     );
+  writePartialSelects(writer, partial);
   return writer.finish();
+}
+
+function writePartialSelects(writer: PostcardWriter, partial: QueryPartialSelect[]): void {
+  writer.vec((entry, index) => {
+    const selected = partial[index]!;
+    entry.string(selected.column);
+    if (selected.kind === "json_pointer") {
+      entry.u64(3);
+      entry.string(selected.at);
+      return;
+    }
+    validateQueryBound(`partial selection ${selected.column} start`, selected.from);
+    validateQueryBound(`partial selection ${selected.column} end`, selected.to);
+    entry.u64(selected.kind === "bytes" ? 0 : selected.kind === "text_utf16" ? 1 : 2);
+    entry.u64(selected.from);
+    entry.u64(selected.to);
+  }, partial.length);
 }
 
 function writeArraySubquery(writer: PostcardWriter, subquery: QueryArraySubquery): void {
@@ -322,6 +374,8 @@ function writeArraySubquery(writer: PostcardWriter, subquery: QueryArraySubquery
   writer.vec((nested, index) => {
     writeArraySubquery(nested, nestedArrays[index]!);
   }, nestedArrays.length);
+  // Include builders take no partial selections yet.
+  writePartialSelects(writer, []);
 }
 
 function validateQueryBound(label: string, value: number): void {
@@ -360,7 +414,7 @@ function writePredicate(writer: PostcardWriter, predicate: QueryPredicate): void
     writeColumnOperand(writer, predicate.column);
     writer.vec((valueWriter, index) => {
       valueWriter.u64(3); // Operand::Literal
-      writeGrooveValue(valueWriter, predicate.values[index]!);
+      writeRecordValue(valueWriter, predicate.values[index]!);
     }, predicate.values.length);
     return;
   }
@@ -423,7 +477,7 @@ function writeColumnOperand(writer: PostcardWriter, column: string): void {
 
 function writeLiteralOperand(writer: PostcardWriter, value: QueryLiteral): void {
   writer.u64(3); // Operand::Literal
-  writeGrooveValue(writer, value);
+  writeRecordValue(writer, value);
 }
 
 function predicateOpTag(op: QueryPredicateOp): number {
@@ -443,27 +497,27 @@ function predicateOpTag(op: QueryPredicateOp): number {
   }
 }
 
-function writeGrooveValue(writer: PostcardWriter, value: QueryLiteral): void {
+function writeRecordValue(writer: PostcardWriter, value: QueryLiteral): void {
   if (value.type === "U64") {
     if (value.value < 0n || value.value > (1n << 64n) - 1n) {
       throw new Error("U64 value must be an unsigned 64-bit integer");
     }
-    writer.u64(3); // Existing groove::records::Value::U64 representation.
+    writer.u64(3); // jazz::records::Value::U64
     writer.u64(value.value);
     return;
   }
 
   if (value.type === "Nullable") {
-    writer.u64(13); // groove::records::Value::Nullable
+    writer.u64(13); // jazz::records::Value::Nullable
     if (value.value == null) {
       writer.none();
     } else {
-      writer.some((inner) => writeGrooveValue(inner, value.value!));
+      writer.some((inner) => writeRecordValue(inner, value.value!));
     }
     return;
   }
   if (value.type === "Boolean") {
-    writer.u64(5); // groove::records::Value::Bool
+    writer.u64(5); // jazz::records::Value::Bool
     writer.bool(value.value);
     return;
   }
@@ -475,7 +529,7 @@ function writeGrooveValue(writer: PostcardWriter, value: QueryLiteral): void {
     ) {
       throw new Error("Integer value must be a signed 32-bit integer");
     }
-    writer.u64(15); // groove::records::Value::I32
+    writer.u64(15); // jazz::records::Value::I32
     writer.i64(value.value);
     return;
   }
@@ -483,7 +537,7 @@ function writeGrooveValue(writer: PostcardWriter, value: QueryLiteral): void {
     if (value.value < -(1n << 63n) || value.value > (1n << 63n) - 1n) {
       throw new Error("BigInt value must be a signed 64-bit integer");
     }
-    writer.u64(14); // groove::records::Value::I64
+    writer.u64(14); // jazz::records::Value::I64
     writer.i64(value.value);
     return;
   }
@@ -491,7 +545,7 @@ function writeGrooveValue(writer: PostcardWriter, value: QueryLiteral): void {
     if (!Number.isSafeInteger(value.value) || value.value < 0) {
       throw new Error(`${value.type} value must be a non-negative safe integer`);
     }
-    writer.u64(3); // groove::records::Value::U64
+    writer.u64(3); // jazz::records::Value::U64
     writer.u64(value.value);
     return;
   }
@@ -499,34 +553,29 @@ function writeGrooveValue(writer: PostcardWriter, value: QueryLiteral): void {
     if (!Number.isFinite(value.value)) {
       throw new Error("Double value must be finite");
     }
-    writer.u64(4); // groove::records::Value::F64
+    writer.u64(4); // jazz::records::Value::F64
     writer.f64Le(value.value);
     return;
   }
   if (value.type === "Uuid") {
-    writer.u64(9); // groove::records::Value::Uuid
-    writer.bytes(parseUuid(value.value));
+    writer.u64(9); // jazz::records::Value::Uuid
+    const bytes = parseUuidBytes(value.value);
+    if (!bytes) throw new Error(`invalid uuid ${value.value}`);
+    writer.bytes(bytes);
     return;
   }
   if (value.type === "Bytea") {
-    writer.u64(7); // groove::records::Value::Bytes
+    writer.u64(7); // jazz::records::Value::Bytes
     writer.bytes(value.value);
     return;
   }
   if (value.type === "Array") {
-    writer.u64(12); // groove::records::Value::Array
-    writer.vec((item, index) => writeGrooveValue(item, value.value[index]!), value.value.length);
+    writer.u64(12); // jazz::records::Value::Array
+    writer.vec((item, index) => writeRecordValue(item, value.value[index]!), value.value.length);
     return;
   }
-  writer.u64(6); // groove::records::Value::String
+  writer.u64(6); // jazz::records::Value::String
   writer.string(value.value);
-}
-
-export function encodedCells(descriptor: DescriptorField[], values: Uint8Array[]): Uint8Array {
-  const writer = new PostcardWriter();
-  writeDescriptor(writer, descriptor);
-  writer.bytes(createRecord(descriptor, values));
-  return writer.finish();
 }
 
 export function rowCount(batches: NativeRowBatch[]): number {
@@ -763,6 +812,11 @@ export function assertBytes(value: unknown, label: string): Uint8Array {
     return Uint8Array.from(value);
   }
   throw new Error(`expected ${label} to be bytes`);
+}
+
+/** An app's migrations as the bindings take them (JSON). */
+export function clientMigrationsBytes(migrations: ClientMigrations): Uint8Array {
+  return utf8(JSON.stringify(migrations, runtimeSchemaJsonReplacer));
 }
 
 export function utf8(value: string): Uint8Array {

@@ -1205,9 +1205,8 @@ fn u32_to_usize(value: u32) -> Result<usize, Error> {
 pub enum FieldIdentity {
     /// Logical or derived field keyed by an explicit semantic name.
     Name(String),
-    /// Opaque stable slot identity. Jazz uses this for physical column ids,
-    /// while Groove keeps the carrier generic and independent from display
-    /// names.
+    /// Opaque stable slot identity. Jazz uses this for physical column ids;
+    /// the carrier stays generic and independent from display names.
     Slot(u64),
     /// Stable slot identity paired with a distinct logical/public field name.
     NamedSlot { name: String, slot: u64 },
@@ -1268,8 +1267,8 @@ pub struct OwnedRecord {
 /// An encoded row bound to the table-local variant case that describes it.
 ///
 /// The tag travels with the row through batching and is written as a canonical
-/// bounded varint prefix. Its meaning belongs to the table registry. Groove
-/// does not distinguish user-declared enum cases from storage-layout cases;
+/// bounded varint prefix. Its meaning belongs to the table registry. The
+/// encoding does not distinguish user-declared enum cases from storage-layout cases;
 /// a lowering layer may allocate one tag for every `(layout, user_case)` pair.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VariantRecord {

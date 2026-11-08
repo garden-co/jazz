@@ -204,6 +204,15 @@ export function resolveCanonicalMigrationForward(
   return forward;
 }
 
+/** Keep the existing validation entrypoint while deployment resolves managed lenses. */
+export function assertMigrationMatchesCanonicalBundle(
+  migration: DefinedMigration,
+  canonical: CanonicalMigrationBundle,
+): void {
+  if (!migration) throw new Error("Migration definition is required");
+  resolveCanonicalMigrationForward(migration, canonical);
+}
+
 export function resolveKnownSchemaHash(
   hash: string,
   label: string,
@@ -464,6 +473,11 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
       direct ? targetSchemaHash : null,
     );
     let sourceHash = direct && to.hash === targetSchemaHash ? graph.activeSchemaHash : null;
+    if (direct && to.hash === targetSchemaHash && !sourceHash && !migration.fromHash) {
+      const outgoing = new Set(graph.migrations.map((edge) => edge.fromHash));
+      const tips = graph.schemas.filter((hash) => !outgoing.has(hash));
+      if (tips.length === 1) sourceHash = tips[0]!;
+    }
     if (sourceHash === targetSchemaHash && !migration.fromHash) {
       // Re-deploying a direct migration must still validate against its original
       // source. Only an unambiguous incoming edge can supply an omitted hash.
@@ -477,6 +491,19 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
           throw new Error("Partial migration source is ambiguous; supply fromHash.");
         }
       }
+    }
+    if (
+      direct &&
+      to.hash === targetSchemaHash &&
+      !sourceHash &&
+      !migration.fromHash &&
+      graph.schemas.length
+    ) {
+      const witnessHash = await computeSchemaHash(
+        mergePermissionsIntoWasmSchema(resolveMigrationDefinitionWasmSchema(migration.from), {}),
+      );
+      if (!schemas.has(witnessHash) && !graph.schemas.includes(witnessHash))
+        throw new Error("Partial migration source is ambiguous; supply fromHash.");
     }
     const from = await resolveEndpoint(migration.from, migration.fromHash, sourceHash);
     const forward = resolveCanonicalMigrationForward(migration, {

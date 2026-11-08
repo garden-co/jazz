@@ -26,24 +26,12 @@ import {
   verifyArtifactBuildLease,
 } from "../gates/build-test-artifacts.mjs";
 import { stripSymbolHashesInFile } from "./wasm-names.mjs";
+import { wasmBuildEnvironment } from "./wasm-toolchain.mjs";
 
 const root = resolve(fileURLToPath(new URL(".", import.meta.url)), "../..");
 const commands = {
   wasm: {
-    // The correctness suite exercises substantial engine work. Optimisation
-    // retains dev invariant checks and checked arithmetic throughout the runtime.
-    fast: [
-      "wasm-pack",
-      ["build", "crates/jazz-wasm", "--target", "web", "--dev"],
-      [
-        "--config",
-        "profile.dev.opt-level=2",
-        "--config",
-        "profile.dev.debug-assertions=true",
-        "--config",
-        "profile.dev.overflow-checks=true",
-      ],
-    ],
+    fast: ["wasm-pack", ["build", "crates/jazz-wasm", "--target", "web", "--dev"]],
     // Browser releases link the whole engine with fat LTO in one codegen unit.
     // That removes duplicate generic instantiations across crates: about 28%
     // smaller raw and 22% smaller gzip, with no measured read/write slowdown.
@@ -513,6 +501,8 @@ export function buildArtifact(kind, profile = "release", extraArgs = []) {
   const expectedNapiBinding = kind === "napi" && napiBindingForTarget[resolvedNapiTarget];
   if (kind === "napi" && !expectedNapiBinding)
     throw new Error(`unsupported NAPI target ${resolvedNapiTarget ?? "unknown"}`);
+  // Resolve prerequisites before taking the lease or staging any output.
+  const buildEnv = kind === "wasm" ? wasmBuildEnvironment() : process.env;
   // No reader-facing generated file is touched before holding the clone-wide
   // lease. The fingerprint is pure source/tool metadata at this point.
   const artifactLock = acquireArtifactLease();
@@ -542,7 +532,7 @@ export function buildArtifact(kind, profile = "release", extraArgs = []) {
       cwd: root,
       stdio: "inherit",
       shell: process.platform === "win32",
-      env: { ...process.env, JAZZ_NATIVE_ARTIFACT_FINGERPRINT: fingerprint },
+      env: { ...buildEnv, JAZZ_NATIVE_ARTIFACT_FINGERPRINT: fingerprint },
     });
     if (result.error) throw result.error;
     if (result.status !== 0) {

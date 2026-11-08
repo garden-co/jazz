@@ -16,44 +16,50 @@ import {
   waitForQuery,
   withTimeout,
 } from "./support.js";
-import { getJazzServerInfo } from "./testing-server.js";
+import { getJazzServerInfo, startJazzApp } from "./testing-server.js";
 import {
   closeRemoteBrowserDb,
   createRemoteBrowserDb,
   waitForRemoteBrowserDbTitle,
 } from "./remote-browser-db.js";
 
-const app = schema.defineApp({
-  todos: schema.table(
-    {
-      title: schema.string(),
-      done: schema.boolean(),
-      list: schema.string(),
-    },
-    {},
-  ),
-});
+const app = schema.defineApp(
+  {
+    todos: schema.table(
+      {
+        title: schema.string(),
+        done: schema.boolean(),
+        list: schema.string(),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+);
 
-const richApp = schema.defineApp({
-  users: schema.table(
-    {
-      name: schema.string(),
-    },
-    { todosViaOwner: schema.reverse("todos", "owner") },
-  ),
-  todos: schema.table(
-    {
-      title: schema.string(),
-      done: schema.boolean(),
-      list: schema.string(),
-      priority: schema.int(),
-      tags: schema.array(schema.string()),
-      payload: schema.bytes().optional(),
-      ownerId: schema.uuid().optional(),
-    },
-    { owner: schema.rel("users", "ownerId") },
-  ),
-});
+const richApp = schema.defineApp(
+  {
+    users: schema.table(
+      {
+        name: schema.string(),
+      },
+      { todosViaOwner: schema.reverse("todos", "owner") },
+    ),
+    todos: schema.table(
+      {
+        title: schema.string(),
+        done: schema.boolean(),
+        list: schema.string(),
+        priority: schema.int(),
+        tags: schema.array(schema.string()),
+        payload: schema.bytes().optional(),
+        ownerId: schema.uuid().optional(),
+      },
+      { owner: schema.rel("users", "ownerId") },
+    ),
+  },
+  { migrations: "none" },
+);
 
 const permissions = schema.definePermissions(app, ({ policy }) => [
   policy.todos.allowRead.always(),
@@ -331,8 +337,8 @@ describe("alpha public package flow", () => {
 
   it("opens public createDb with websocket server config and converges between clients", async () => {
     const requestedAppId = uniqueDbName("alpha-public-websocket-flow");
-    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
-    await publishSchemaAndPermissions(appId, serverUrl, adminSecret, permissions);
+    const { appId, serverUrl: coreUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
+    const serverUrl = await publishSchemaAndPermissions(appId, coreUrl, adminSecret, permissions);
 
     const sharedSecret = generateAuthSecret();
     const dbA = await openAlphaMemoryDb(appId, serverUrl, adminSecret, sharedSecret);
@@ -401,8 +407,14 @@ describe("alpha public package flow", () => {
 
   it("publishes richer public row shapes over websocket and converges arrays, bytes, nullable refs, and integer predicates", async () => {
     const requestedAppId = uniqueDbName("alpha-public-rich-websocket-flow");
-    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
-    await publishSchemaAndPermissions(appId, serverUrl, adminSecret, richPermissions, richApp);
+    const { appId, serverUrl: coreUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
+    const serverUrl = await publishSchemaAndPermissions(
+      appId,
+      coreUrl,
+      adminSecret,
+      richPermissions,
+      richApp,
+    );
 
     const sharedSecret = generateAuthSecret();
     const dbA = await openAlphaMemoryDb(appId, serverUrl, adminSecret, sharedSecret);
@@ -493,8 +505,14 @@ describe("alpha public package flow", () => {
     "converges memory writer to persistent IndexedDB reader over websocket and reopens locally",
     async () => {
       const requestedAppId = uniqueDbName("alpha-public-mixed-websocket-flow");
-      const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
-      await publishSchemaAndPermissions(appId, serverUrl, adminSecret, richPermissions, richApp);
+      const { appId, serverUrl: coreUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
+      const serverUrl = await publishSchemaAndPermissions(
+        appId,
+        coreUrl,
+        adminSecret,
+        richPermissions,
+        richApp,
+      );
 
       const sharedSecret = generateAuthSecret();
       const readerDbName = uniqueDbName("alpha-public-mixed-reader-indexeddb");
@@ -585,8 +603,8 @@ describe("alpha public package flow", () => {
     "reopens a public persistent websocket client and catches up writes made while offline",
     async () => {
       const requestedAppId = uniqueDbName("alpha-public-reconnect-canary");
-      const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
-      await publishSchemaAndPermissions(appId, serverUrl, adminSecret, permissions);
+      const { appId, serverUrl: coreUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
+      const serverUrl = await publishSchemaAndPermissions(appId, coreUrl, adminSecret, permissions);
 
       const sharedSecret = generateAuthSecret();
       const readerDbName = uniqueDbName("alpha-public-reconnect-reader-indexeddb");
@@ -656,8 +674,8 @@ describe("alpha public package flow", () => {
 
   it("opens public createDb with persistent IndexedDB and websocket server config, then converges todo CRUD", async () => {
     const requestedAppId = uniqueDbName("alpha-public-flow");
-    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
-    await publishSchemaAndPermissions(appId, serverUrl, adminSecret, permissions);
+    const { appId, serverUrl: coreUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
+    const serverUrl = await publishSchemaAndPermissions(appId, coreUrl, adminSecret, permissions);
 
     const sharedSecret = generateAuthSecret();
     const persistentDbName = uniqueDbName("alpha-public-indexeddb");
@@ -769,8 +787,8 @@ describe("alpha public package flow", () => {
 
   it("keeps deleted rows hidden by default and restores them over websocket", async () => {
     const requestedAppId = uniqueDbName("alpha-public-delete-restore");
-    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
-    await publishSchemaAndPermissions(appId, serverUrl, adminSecret, permissions);
+    const { appId, serverUrl: coreUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
+    const serverUrl = await publishSchemaAndPermissions(appId, coreUrl, adminSecret, permissions);
 
     const sharedSecret = generateAuthSecret();
     const db = await openAlphaDb(
@@ -837,8 +855,8 @@ describe("alpha public package flow", () => {
 
   it("exposes globally confirmed browser deletes through includeDeleted over websocket", async () => {
     const requestedAppId = uniqueDbName("alpha-public-include-deleted");
-    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
-    await publishSchemaAndPermissions(appId, serverUrl, adminSecret, permissions);
+    const { appId, serverUrl: coreUrl, adminSecret } = await getJazzServerInfo(requestedAppId);
+    const serverUrl = await publishSchemaAndPermissions(appId, coreUrl, adminSecret, permissions);
 
     const db = await openAlphaDb(
       appId,
@@ -912,14 +930,11 @@ async function publishSchemaAndPermissions(
   adminSecret: string,
   permissions: CompiledPermissions,
   schemaApp: { wasmSchema: typeof app.wasmSchema } = app,
-): Promise<void> {
-  await deploy({
-    appId,
-    serverUrl,
-    adminSecret,
-    schema: schemaApp.wasmSchema,
-    permissions,
-  });
+): Promise<string> {
+  const core = { appId, serverUrl, adminSecret };
+  await deploy({ ...core, schema: schemaApp.wasmSchema, permissions });
+  // Clients sync through the app's backend; return its URL.
+  return (await startJazzApp(core, { schema: schemaApp.wasmSchema, permissions })).serverUrl;
 }
 
 async function expectTodoTitles(db: Db, snapshots: Todo[][], titles: string[]): Promise<void> {

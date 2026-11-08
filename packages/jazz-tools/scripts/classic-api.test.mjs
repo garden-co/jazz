@@ -12,8 +12,8 @@ import { compile, compileModule } from "svelte/compiler";
 const packageDir =
   process.env.JAZZ_CLASSIC_CONSUMER_DIR ?? fileURLToPath(new URL("..", import.meta.url));
 
-// Match the enrolled-account fixture used by runtime tests. Only the external
-// registration response is substituted; provider configs receive opaque handles.
+// Match the enrolled-account fixture used by runtime tests. Only the backend
+// sign-in response is substituted; provider configs receive opaque handles.
 const accountFixture = `
   import { createAccountManagerWithRuntime } from ${JSON.stringify(
     pathToFileURL(join(packageDir, "dist/accounts/enrollment.js")).href,
@@ -29,8 +29,7 @@ const accountFixture = `
         account: crypto.randomUUID(), identity: { issuer, subject },
       }), { status: 200 }),
     });
-    const token = "header." + btoa(JSON.stringify({ iss: issuer, sub: subject })) + ".signature";
-    return { appId, serverUrl, account: await manager.registerJWT(token) };
+    return { appId, serverUrl, account: await manager.loginWithBackend() };
   }
 `;
 
@@ -195,6 +194,7 @@ for (const [entrypoint, provider] of [
         const unavailable = () => { throw new Error("Unexpected native host call"); };
         export const CryptoDigestAlgorithm = { SHA256: "SHA-256" };
         export const TurboModuleRegistry = { get: unavailable, getEnforcing: unavailable };
+        export const AppState = { addEventListener: () => ({ remove() {} }) };
         export {
           unavailable as View, unavailable as Text, unavailable as Pressable,
           unavailable as getRandomBytes, unavailable as digestStringAsync,

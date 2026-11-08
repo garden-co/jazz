@@ -28,14 +28,13 @@ appendix as authoritative.
 
 For ordinary Rust/core work, the full gate set is:
 
-1. `cargo test -p jazz`
-2. `cargo test -p groove`
-3. `cargo test -p jazz --no-default-features --features testing,transport-compression-zstd`
-4. `cargo check -p jazz-sim --benches` in the nightly `benchmark-api` job
-5. `dev/gates/ts-wire-codec.sh`
-6. `JAZZ_SEED_COUNT=300 cargo test -p jazz m3_maintained_one_shot_differential_oracle`
-7. `cargo test -p jazz --test incremental_delivery_canary maintained_relation_include_single_row_changes_are_scale_independent -- --exact`
-8. the sensitive-data guard from `jazz-private/dev/gates/`, normally reached
+1. `cargo test -p jazz -p jazz-types -p jazz-model -p jazz-protocol -p jazz-db`
+2. `cargo test -p jazz --no-default-features --features testing,transport-compression-zstd`
+3. `cargo check -p jazz-sim --benches` in the nightly `benchmark-api` job
+4. `dev/gates/ts-wire-codec.sh`
+5. `dev/t --test maintained_differential --exact maintained_one_shot_differential_oracle -- --ignored`
+6. `dev/t --test integration --exact include_live::renaming_a_sender_updates_exactly_their_messages`
+7. the sensitive-data guard from `jazz-private/dev/gates/`, normally reached
    through the optional lefthook hook
 
 For a benchmark edit, locally run
@@ -61,7 +60,8 @@ replacing the former fixed `-j 2` guidance.
 
 ### D.2 The tiers
 
-- **Crate tests** — integration and crate tests for `jazz` and `groove`.
+- **Crate tests** — integration and crate tests for `jazz` and its layer
+  crates (`jazz-types`, `jazz-model`, `jazz-protocol`, `jazz-db`).
 - **Bench API compilation** — `cargo check -p jazz-sim --benches` runs in the
   nightly `benchmark-api` job (default branch, nightly and manual runs), where
   it catches benchmark API rot without extending every ordinary PR's critical
@@ -70,22 +70,18 @@ replacing the former fixed `-j 2` guidance.
   TypeScript/native-runtime wire-codec gate. `dev/gates/` currently contains
   this gate and no legacy JS ABI decoder or WASM binding script.
 - **Maintained-vs-one-shot oracle** —
-  `JAZZ_SEED_COUNT=300 cargo test -p jazz m3_maintained_one_shot_differential_oracle`
-  is the canonical randomized equivalence gate; `JAZZ_SEED_COUNT=2000` is the
-  wide soak form. The test is currently Rust-ignored because canonical seed 47
-  fails at fuzz-step-1 and seed 4,372,288 at fuzz-step-2; both are tracked in
-  source ignore annotation. Replay either bounded failure with `JAZZ_SEED=<seed>
-  JAZZ_DIFFERENTIAL_CHURN_DEPTHS=10,1000 JAZZ_DIFFERENTIAL_STEP_COUNT=3` and
-  the fully qualified command below with `--exact --ignored`. CI compiles only
-  the `--lib` test binary before separately bounding its semantic execution,
-  then executes the bounded, real seed-11 smoke
-  `JAZZ_SEED=11 JAZZ_DIFFERENTIAL_CHURN_DEPTHS=10,1000 JAZZ_DIFFERENTIAL_STEP_COUNT=3
-cargo test -p jazz-node --lib node::tests::harness::m3_maintained_one_shot_differential_oracle -- --exact --ignored`.
-  That smoke preserves the oracle assertions but is not a substitute for the
-  quarantined multi-seed gate.
+  `dev/t --test maintained_differential --exact maintained_one_shot_differential_oracle -- --ignored`
+  is the canonical randomized equivalence gate. The test is Rust-ignored as a
+  manual soak (#1787); `JAZZ_SEED`, `JAZZ_DIFFERENTIAL_STEP_COUNT` and
+  `JAZZ_DIFFERENTIAL_CHURN_DEPTHS` choose the seeds, rounds and churn depths.
+  CI compiles the `maintained_differential` test binary, then runs the bounded
+  seed-11 smoke (the `rust-differential` partition in
+  `dev/gates/local-ci-equivalent.mjs`). That smoke keeps the oracle assertions
+  but does not replace the multi-seed soak.
 - **Incremental delivery canary** —
-  `cargo test -p jazz --test incremental_delivery_canary maintained_relation_include_single_row_changes_are_scale_independent -- --exact`
-  enforces `groove/SPEC/INVARIANTS.md::INV-INC-1` for relation/include delivery.
+  `dev/t --test integration --exact include_live::renaming_a_sender_updates_exactly_their_messages`
+  checks that a single-row change to an included row updates exactly the
+  dependent results.
 - **Sensitive-data guard** — the guard in `jazz-private/dev/gates/` keeps
   customer-specific fixture names, domains, and ids out of the public
   repository.
@@ -113,13 +109,11 @@ spawns inside node logic. A failure to replay bit-for-bit is itself a bug
 (`INV-TEST-2`). The three driver modes provide complementary evidence:
 **deterministic** runs use a stable order, **fuzz** runs inject seeded
 duplication/reordering/redelivery, and **threaded** runs exercise load realism.
-Wide soaks use the maintained-vs-one-shot oracle form named above, alongside the
-existing M3 soak conventions.
+Wide soaks use the maintained-vs-one-shot oracle named above.
 
 **Implementation status (verified).**
-`m3_seeded_run_is_deterministic_for_fixed_seed` and
-`m3_maintained_one_shot_differential_oracle` exercise deterministic replay and
-randomized maintained-vs-one-shot equivalence.
+`maintained_one_shot_differential_oracle` exercises randomized
+maintained-vs-one-shot equivalence.
 
 ### D.4 Oracle norm and public-surface preference
 
@@ -128,10 +122,10 @@ domination, merge convergence, serializable validation, and sync convergence
 (`INV-TEST-3`).
 
 **Implementation status (verified).**
-`m3_seeded_sync_interleavings_converge_against_oracle` is the seeded sync
-oracle test.
+`sync_differential::clients_converge_on_the_servers_truth_under_concurrent_writes`
+is the seeded sync oracle test.
 
-Tests prefer the public surfaces: the jazz `Db` facade and groove `Database`.
+Tests prefer the public surfaces: the jazz `Db` facade.
 The SaaS `Db` smoke test is the model: subscribe via `db.subscribe`, mutate
 through `insert_with_id`/`update`, wait on `DurabilityTier::Local`, and compare
 query/subscription results against a local oracle. Internal hooks are reserved for
@@ -141,11 +135,9 @@ lower-level tests that best pin an invariant.
 ### D.4.1 Structured-result oracle boundary
 
 **Current coverage limit (verified 2026-08-04).**
-`m3_maintained_one_shot_differential_oracle` compares only
-`BTreeSet<(table, RowUuid)>` (`crates/jazz/layers/node/src/node/tests/m3_differential.rs:896-936`).
-It discards cells, content versions, relation edges, position/order, and
-duplicates. It therefore proves root-membership convergence only; it does not
-prove output content, ordering, nested association, or delivery shape. The
+`maintained_one_shot_differential_oracle` compares each result as its ordered
+rows and their cells (`snapshot` in `crates/jazz/tests/maintained_differential.rs`).
+It does not compare content versions, relation edges, or delivery shape. The
 current differential also reduces in-process updates rather than exercising
 receiver application or chunk assembly.
 
@@ -171,17 +163,17 @@ The target test ladder for ch. 8 §8.4.1 is intentionally staged. Each rung must
 prove local derivation from canonical input closure; asserting that a receiver
 was handed the expected projected row is not evidence for this design.
 
-| Rung                                         | Required black-box proof                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | Current quarantine / migration mapping                                                                                                                                                                                                          |
-| -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1. Authored fact codec and manifest identity | A `v1` version is rejected if its bytes are decoded as `v2`, accepted when decoded as `v1`, and produces the same canonical identity after receive/restart. A changed class inventory, digest, epoch, or residual-program id parks the closure.                                                                                                                                                                                                                                                                                                                                                      | New focused protocol/codec and manifest test; no existing quarantine isolates raw-byte relabeling.                                                                                                                                              |
-| 2. Full/reset install crash ladder           | Fault each point after staging every class member, after IVM precomputation, after durable manifest/fact/terminal/fast-receipt swap, after local-publication enqueue, and before local consumer observation. Recovery exposes only the old or new complete closure and never a partial terminal, settlement, fast receipt, or publication.                                                                                                                                                                                                                                                           | New focused durable-install/recovery tests.                                                                                                                                                                                                     |
-| 3. Incremental manifest transition           | A successor names an exact active predecessor and per-class authenticated sparse-Merkle old/new roots/counts plus canonical add/remove proofs. Invalid membership/non-membership proof, predecessor, count, root, duplicate, or removal never changes the active closure and requests repair/reset. A valid transition changes only affected IVM inputs.                                                                                                                                                                                                                                             | New focused transition tests, including a planted full-rebuild detector for `INV-INC-1` and an independently recomputed proof/root oracle.                                                                                                      |
-| 4. Simple root lineage                       | `v1.users { id, name, email }` received by a `v2.people { id, name, email_address }` subscriber selects the `v1` winner before projection and reaches the same selected root result as one-shot after ordered lens projection and restart, without a projected-row carrier or local-history supplement.                                                                                                                                                                                                                                                                                              | `multi_hop_column_additions_new_client_can_read_old_rows` and `multi_hop_column_renames_new_client_can_read_old_rows` are active regression coverage; `column_addition_new_client_can_read_old_rows` remains quarantined.                       |
-| 5. Source identity, joins, and branch views  | Replacements/deletions retain authored branch-key identity through table rename and projected join lowering; the selected head and live/frozen base are isolated from unrelated branch keys and post-cut base rows; local IVM retracts/replaces the same output as the authority.                                                                                                                                                                                                                                                                                                                    | Target branch-view reconstruction coverage from ch. 11.                                                                                                                                                                                         |
-| 6. Opaque admission isolation                | Nested array/join updates and policy revocation converge from safe facts; unreadable evidence is never serialized. An opaque admission fact is rejected when replayed under any different authority lineage, authority epoch, shape/binding/read view, reader/policy revision, branch sources/SnapshotRef, residual-program identity, protected output/source occurrence, or concrete content/deletion/witness version/layer. In particular, a test swaps an allowed admission onto a denied row/output and applies a stale admission after its protected winner is replaced; both must fail closed. | Target branch-view reconstruction coverage from ch. 11.                                                                                                                                                                                         |
-| 7. Reconnect, repair, and reset              | After durable restart, eviction, a known-state declaration, and exact repair of each closure class, no terminal cache is needed to regain a settled local result; a missing catalogue/version/branch-source/correlation/admission/replacement/settlement fact blocks settlement, and an epoch mismatch resets.                                                                                                                                                                                                                                                                                       | The former edge-topology prerequisites were removed with the server edge; a Core-only catalogue-replay-before-client-work test is tracked in #3298. `core_permission_retightening_reaches_all_subscribed_clients` covers multi-client delivery. |
-| 8. Aggregate boundary                        | Count/sum/min/max and ordered/windowed aggregates converge only from their complete admitted input multiset and deterministic witnesses; removing any input proves the terminal was locally recomputed. A privacy-preserving or otherwise non-reconstructible aggregate is rejected rather than carried as an authority summary.                                                                                                                                                                                                                                                                     | New focused maintained-subscription tests; existing aggregate terminal coverage is not reconstruction coverage.                                                                                                                                 |
-| 9. Differential and fault injection          | Seeded multi-node runs vary manifest/epoch changes, lens arrival, duplicate/reordered closure facts, reconnect, policy changes, branch views, joins, arrays, and aggregate inputs; receiver `ResultTree` equals authority one-shot at each settled frontier.                                                                                                                                                                                                                                                                                                                                         | Extends `m3_maintained_one_shot_differential_oracle`; its present shared-source-only comparison is insufficient under §D.4.1.                                                                                                                   |
+| Rung                                         | Required black-box proof                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             | Current quarantine / migration mapping                                                                                                                                                                                                                                         |
+| -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 1. Authored fact codec and manifest identity | A `v1` version is rejected if its bytes are decoded as `v2`, accepted when decoded as `v1`, and produces the same canonical identity after receive/restart. A changed class inventory, digest, epoch, or residual-program id parks the closure.                                                                                                                                                                                                                                                                                                                                                      | New focused protocol/codec and manifest test; no existing quarantine isolates raw-byte relabeling.                                                                                                                                                                             |
+| 2. Full/reset install crash ladder           | Fault each point after staging every class member, after IVM precomputation, after durable manifest/fact/terminal/fast-receipt swap, after local-publication enqueue, and before local consumer observation. Recovery exposes only the old or new complete closure and never a partial terminal, settlement, fast receipt, or publication.                                                                                                                                                                                                                                                           | New focused durable-install/recovery tests.                                                                                                                                                                                                                                    |
+| 3. Incremental manifest transition           | A successor names an exact active predecessor and per-class authenticated sparse-Merkle old/new roots/counts plus canonical add/remove proofs. Invalid membership/non-membership proof, predecessor, count, root, duplicate, or removal never changes the active closure and requests repair/reset. A valid transition changes only affected IVM inputs.                                                                                                                                                                                                                                             | New focused transition tests, including a planted full-rebuild detector for `INV-INC-1` and an independently recomputed proof/root oracle.                                                                                                                                     |
+| 4. Simple root lineage                       | `v1.users { id, name, email }` received by a `v2.people { id, name, email_address }` subscriber selects the `v1` winner before projection and reaches the same selected root result as one-shot after ordered lens projection and restart, without a projected-row carrier or local-history supplement.                                                                                                                                                                                                                                                                                              | `multi_hop_column_additions_new_client_can_read_old_rows` and `multi_hop_column_renames_new_client_can_read_old_rows` are active regression coverage; `column_addition_new_client_can_read_old_rows` remains quarantined.                                                      |
+| 5. Source identity, joins, and branch views  | Replacements/deletions retain authored branch-key identity through table rename and projected join lowering; the selected head and live/frozen base are isolated from unrelated branch keys and post-cut base rows; local IVM retracts/replaces the same output as the authority.                                                                                                                                                                                                                                                                                                                    | Target branch-view reconstruction coverage from ch. 11.                                                                                                                                                                                                                        |
+| 6. Opaque admission isolation                | Nested array/join updates and policy revocation converge from safe facts; unreadable evidence is never serialized. An opaque admission fact is rejected when replayed under any different authority lineage, authority epoch, shape/binding/read view, reader/policy revision, branch sources/SnapshotRef, residual-program identity, protected output/source occurrence, or concrete content/deletion/witness version/layer. In particular, a test swaps an allowed admission onto a denied row/output and applies a stale admission after its protected winner is replaced; both must fail closed. | Target branch-view reconstruction coverage from ch. 11.                                                                                                                                                                                                                        |
+| 7. Reconnect, repair, and reset              | After durable restart, eviction, a known-state declaration, and exact repair of each closure class, no terminal cache is needed to regain a settled local result; a missing catalogue/version/branch-source/correlation/admission/replacement/settlement fact blocks settlement, and an epoch mismatch resets.                                                                                                                                                                                                                                                                                       | The former edge-topology prerequisites were removed with the server edge; a Core-only catalogue-replay-before-client-work test is tracked in #3298. `retightened_bundle_reaches_a_client_reconnecting_pinned_to_it` covers a permission change reaching a reconnecting client. |
+| 8. Aggregate boundary                        | Count/sum/min/max and ordered/windowed aggregates converge only from their complete admitted input multiset and deterministic witnesses; removing any input proves the terminal was locally recomputed. A privacy-preserving or otherwise non-reconstructible aggregate is rejected rather than carried as an authority summary.                                                                                                                                                                                                                                                                     | New focused maintained-subscription tests; existing aggregate terminal coverage is not reconstruction coverage.                                                                                                                                                                |
+| 9. Differential and fault injection          | Seeded multi-node runs vary manifest/epoch changes, lens arrival, duplicate/reordered closure facts, reconnect, policy changes, branch views, joins, arrays, and aggregate inputs; receiver `ResultTree` equals authority one-shot at each settled frontier.                                                                                                                                                                                                                                                                                                                                         | Extends `maintained_one_shot_differential_oracle`; its present rows-and-cells comparison is insufficient under §D.4.1.                                                                                                                                                         |
 
 The named source ignore annotations above remain failures to be burned down, not
 coverage claims. Rungs 1–8 should become focused deterministic tests first;

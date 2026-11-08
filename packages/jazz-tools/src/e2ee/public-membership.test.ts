@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import type { RowSettlement } from "../runtime/client.js";
+import type { AcceptedRowEvidence } from "../runtime/accepted-read.js";
 import {
   encodeEpochIds,
   encodePublicApprovalRevision,
@@ -17,11 +17,13 @@ import type { DeviceKeyPair } from "./types.js";
 function accepted<T extends { id: string }>(...entries: [T, number][]) {
   return {
     rows: entries.map(([row]) => row),
-    settlements: entries.map(
-      ([row, position]): RowSettlement => ({
+    through: String(Math.max(0, ...entries.map(([, position]) => position))),
+    schema: "fixture",
+    evidence: entries.map(
+      ([row, position]): AcceptedRowEvidence => ({
         rowId: row.id,
-        transactionId: `authority-${position}`,
-        position: String(position),
+        state: { transactionId: `authority-${position}`, position: String(position) },
+        content: { transactionId: `authority-${position}`, position: String(position) },
       }),
     ),
   };
@@ -265,7 +267,7 @@ it.each([
     if (kind === "conflicting epoch") duplicate.epochId = crypto.randomUUID();
     if (kind === "unsupported version") duplicate.ledgerVersion = 0;
     f.history.roots = accepted([f.root, 10], [duplicate, 20]);
-    if (kind === "missing coverage") f.history.roots.settlements.pop();
+    if (kind === "missing coverage") f.history.roots.evidence.pop();
     await expect(f.replay()).rejects.toThrow(/Conflicting|migration|coverage/);
   } finally {
     f.close();

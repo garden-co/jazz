@@ -218,10 +218,12 @@ fn detaching_the_upstream_keeps_global_wait_pending_until_reconnected_authority_
     .expect("open authority database");
     let (replacement_transport, authority_transport) = duplex();
     let _replacement = block_on(node.connect_upstream(replacement_transport));
-    let _subscriber = authority.accept_subscriber(
-        authority_transport,
-        AuthorSubject::for_test_bytes([0xa9; 16]),
-    );
+    let _subscriber = authority
+        .accept_subscriber(
+            authority_transport,
+            AuthorSubject::for_test_bytes([0xa9; 16]),
+        )
+        .unwrap();
     for _ in 0..3 {
         block_on(node.tick()).expect("queue replay without an authority response");
     }

@@ -1,13 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
-import { runInTransaction, Transaction } from "./db.js";
+import { beginDbTransactionAfter, Db, type DbConfig, runInTransaction, Transaction } from "./db.js";
+import { RuntimeSource } from "./runtime-source.js";
+import { ownerPreparation } from "./write-preparation.js";
 import { SerializableWriteResult } from "./client.js";
 import {
   JazzClient,
   type TxId,
   type OpenTransactionId,
   type Runtime,
-  type TransactionalRuntime,
   type WriteReceipt,
 } from "./client.js";
 import type { AppContext, Session } from "./context.js";
@@ -17,7 +18,7 @@ import {
   internalSessionFromVerifiedReservedJwtPayload,
 } from "./client-session.js";
 
-function makeClient(runtimeOverrides: Partial<TransactionalRuntime> = {}) {
+function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
   const receipt = (
     writeContextJson: string | null | undefined,
     committedId: string,
@@ -38,7 +39,7 @@ function makeClient(runtimeOverrides: Partial<TransactionalRuntime> = {}) {
   const deleteCalls: Array<[string, string, string | undefined]> = [];
   const dryRunCalls: Array<[string, ...unknown[]]> = [];
 
-  const runtimeBase: TransactionalRuntime = {
+  const runtimeBase: Runtime = {
     beginTransaction: (_mode, id) => id,
     insert: (
       table: string,
@@ -117,7 +118,7 @@ function makeClient(runtimeOverrides: Partial<TransactionalRuntime> = {}) {
     commitTransaction: vi.fn(() => "committed-batch" as TxId),
     rollbackTransaction: async () => false,
   };
-  const runtime: TransactionalRuntime = { ...runtimeBase, ...runtimeOverrides };
+  const runtime: Runtime = { ...runtimeBase, ...runtimeOverrides };
 
   const context: AppContext = {
     appId: "test-app",
@@ -143,6 +144,76 @@ function makeClient(runtimeOverrides: Partial<TransactionalRuntime> = {}) {
 }
 
 describe("JazzClient write attribution", () => {
+  it.each(
+    [false, true].flatMap((delayed) =>
+      ["ready", "rejected", "cancelled"].map((outcome) => ({ delayed, outcome })),
+    ),
+  )("owns the opening prerequisite (delayed=$delayed, $outcome)", async ({ delayed, outcome }) => {
+    const opening = vi.fn<Runtime["beginTransaction"]>((_kind, id) => id);
+    const { client } = makeClient({ beginTransaction: opening });
+    const source = new (class extends RuntimeSource<DbConfig> {
+      override createClient(): JazzClient {
+        return client;
+      }
+    })();
+    const db = new (class extends Db {
+      constructor() {
+        super({ appId: "test-app" }, source);
+      }
+      attach(): void {
+        this.getClient({});
+      }
+    })();
+    db.attach();
+    let releaseOwner!: () => void;
+    if (delayed)
+      ownerPreparation(client).run(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseOwner = resolve;
+          }),
+      );
+    let release!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const failure = new Error("prerequisite failed");
+    const prerequisite = vi.fn(async () => {
+      entered();
+      await ready;
+      if (outcome === "rejected") throw failure;
+    });
+    const tx = beginDbTransactionAfter(db, prerequisite);
+    const id = tx.openTransactionId();
+    expect(prerequisite).not.toHaveBeenCalled();
+    expect(opening).not.toHaveBeenCalled();
+    if (delayed) releaseOwner();
+    await started;
+    expect(opening).not.toHaveBeenCalled();
+    // Capture the pending preparation before cancellation removes its state.
+    // A commit after rollback is rejected by the native runtime, not this fake.
+    const committed =
+      outcome === "cancelled" ? client.prepareTransaction(id, async () => {}) : tx.commit().txId;
+    committed.catch(() => {});
+    if (outcome === "cancelled") await tx.rollback();
+    release();
+    if (outcome === "ready") {
+      await committed;
+      expect(opening).toHaveBeenCalledExactlyOnceWith("serializable", id, undefined);
+    } else {
+      await expect(committed).rejects.toThrow(
+        outcome === "rejected" ? failure : "rolled back before admission",
+      );
+      expect(opening).not.toHaveBeenCalled();
+      if (outcome === "rejected") await tx.rollback();
+    }
+    expect(prerequisite).toHaveBeenCalledOnce();
+  });
+
   it.each(["mergeable", "serializable"] as const)(
     "preserves registered %s preparation failure without submitting the transaction",
     async (kind) => {
@@ -237,7 +308,10 @@ describe("JazzClient write attribution", () => {
           return "prepared-transaction" as TxId;
         },
       });
-      const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) });
+      const app = s.defineApp(
+        { todos: s.table({ title: s.string() }, {}) },
+        { migrations: "none" },
+      );
       const tx = new Transaction(kind, () => client, null, client);
       client.prepareTransaction(tx.openTransactionId(), async () => {
         await ready;
@@ -297,7 +371,10 @@ describe("JazzClient write attribution", () => {
           await id;
         },
       });
-      const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) });
+      const app = s.defineApp(
+        { todos: s.table({ title: s.string() }, {}) },
+        { migrations: "none" },
+      );
       const tx = new Transaction(kind, () => client, null, client);
       const first = tx.all(app.todos, { tier: "local-first" });
       const second = tx.all(app.todos, { tier: "local-first" });
@@ -328,7 +405,10 @@ describe("JazzClient write attribution", () => {
         complete = resolve;
       });
       const { client } = makeClient({ commitTransaction: () => pending });
-      const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) });
+      const app = s.defineApp(
+        { todos: s.table({ title: s.string() }, {}) },
+        { migrations: "none" },
+      );
       const tx = new Transaction(kind, () => client, null, client);
       const committed = tx.commit();
       try {
@@ -541,4 +621,219 @@ describe("JazzClient write attribution", () => {
     });
     expect(insertCalls[0]?.[3]).toBeUndefined();
   });
+});
+
+describe("registered accepted preparation", () => {
+  const snapshot = { rows: [], evidence: [], through: "7", schema: "fixture" };
+
+  it.each([undefined, {}, { role: "reader" }])(
+    "drains an immediate commit and preserves the supplied read claims (%j)",
+    async (claims) => {
+      let release!: () => void;
+      let entered!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const started = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const queryAccepted = vi.fn<NonNullable<Runtime["queryAccepted"]>>(async () => {
+        entered();
+        await ready;
+        return snapshot;
+      });
+      const commitTransaction = vi.fn(() => "accepted-preparation" as TxId);
+      const { client } = makeClient({ queryAccepted, commitTransaction });
+      const id = client.beginTransaction("serializable");
+      const session: Session | undefined =
+        claims === undefined
+          ? undefined
+          : {
+              account_id: "00000000-0000-0000-0000-000000000001",
+              issuer: "fixture",
+              user_id: "reader",
+              authMode: "external",
+              claims,
+            };
+      let observed: unknown;
+      const prepared = client.prepareTransaction(id, async (io) => {
+        observed = await io.queryAcceptedInternal("fixture-query", id, 5000, session);
+      });
+      const committed = client.commitTransaction(id).txId;
+      await started;
+      expect(commitTransaction).not.toHaveBeenCalled();
+      const supplied = queryAccepted.mock.calls[0]?.[2];
+      if (session === undefined) expect(supplied).toBeUndefined();
+      else expect(JSON.parse(supplied!)).toEqual(session);
+      release();
+      await Promise.all([prepared, committed]);
+      expect(observed).toBe(snapshot);
+      expect(commitTransaction).toHaveBeenCalledExactlyOnceWith(id);
+    },
+  );
+
+  it.each(["rollback", "shutdown", "discard"] as const)(
+    "refuses accepted evidence returned after %s and rejects retained IO",
+    async (close) => {
+      let release!: () => void;
+      let entered!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const started = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const { client } = makeClient({
+        queryAccepted: async () => {
+          entered();
+          await ready;
+          return snapshot;
+        },
+      });
+      const id = client.beginTransaction("serializable");
+      let retained: Parameters<JazzClient["prepareTransaction"]>[1] extends (io: infer T) => unknown
+        ? T
+        : never;
+      let published = false;
+      const prepared = client.prepareTransaction(id, async (io) => {
+        retained = io;
+        await io.queryAcceptedInternal("fixture-query", id, 5000);
+        published = true;
+      });
+      prepared.catch(() => {});
+      await started;
+      if (close === "rollback") await client.rollbackTransaction(id);
+      else if (close === "shutdown") await client.shutdown();
+      else client.discard();
+      release();
+      await expect(prepared).rejects.toThrow("no longer active");
+      expect(published).toBe(false);
+      expect(() => retained!.insertInternal("notes", {})).toThrow("no longer active");
+    },
+  );
+
+  it("owns a detached accepted read and preserves an earlier callback failure", async () => {
+    let release!: () => void;
+    let entered!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const commitTransaction = vi.fn(() => "must-not-submit" as TxId);
+    const { client } = makeClient({
+      queryAccepted: async () => {
+        entered();
+        await ready;
+        return snapshot;
+      },
+      commitTransaction,
+    });
+    const id = client.beginTransaction("serializable");
+    const first = new Error("first preparation failure");
+    const prepared = client.prepareTransaction(id, async (io) => {
+      void io.queryAcceptedInternal("fixture-query", id, 5000);
+      throw first;
+    });
+    prepared.catch(() => {});
+    const committed = client.commitTransaction(id).txId;
+    committed.catch(() => {});
+    await started;
+    expect(commitTransaction).not.toHaveBeenCalled();
+    release();
+    await expect(prepared).rejects.toBe(first);
+    await expect(committed).rejects.toBe(first);
+    expect(commitTransaction).not.toHaveBeenCalled();
+  });
+});
+
+describe("registered ordinary preflight reads", () => {
+  it.each([undefined, {}, { role: "reader" }])(
+    "drains ordinary reads outside the batch and preserves supplied claims (%j)",
+    async (claims) => {
+      let release!: () => void;
+      let entered!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const started = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const query = vi.fn<Runtime["query"]>(async () => {
+        entered();
+        await ready;
+        return [];
+      });
+      const commitTransaction = vi.fn(() => "ordinary-preflight" as TxId);
+      const { client } = makeClient({ query, commitTransaction });
+      const id = client.beginTransaction("serializable");
+      const session: Session | undefined =
+        claims === undefined
+          ? undefined
+          : {
+              account_id: "00000000-0000-0000-0000-000000000001",
+              issuer: "fixture",
+              user_id: "reader",
+              authMode: "external",
+              claims,
+            };
+      const prepared = client.prepareTransaction(id, async (io) => {
+        await io.queryGlobal(
+          "fixture-query",
+          { tier: "local-first", openTransactionId: id },
+          session,
+        );
+      });
+      const committed = client.commitTransaction(id).txId;
+      await started;
+      expect(commitTransaction).not.toHaveBeenCalled();
+      const supplied = query.mock.calls[0]?.[1];
+      if (session) expect(JSON.parse(supplied!)).toEqual(session);
+      const options = query.mock.calls[0]?.[3];
+      expect(options ? JSON.parse(options) : {}).not.toHaveProperty("openTransactionId");
+      expect(options ? JSON.parse(options) : {}).not.toHaveProperty("transaction_id");
+      release();
+      await prepared;
+      await committed;
+      expect(commitTransaction).toHaveBeenCalledTimes(1);
+      await client.query("ordinary-control", { tier: "local-first" }, session);
+      expect(supplied).toBe(query.mock.calls[1]?.[1]);
+    },
+  );
+
+  it.each(["rollback", "shutdown", "discard"])(
+    "refuses a suspended ordinary preflight after %s",
+    async (close) => {
+      let release!: () => void;
+      let entered!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const started = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const { client } = makeClient({
+        query: async () => {
+          entered();
+          await ready;
+          return [];
+        },
+      });
+      const id = client.beginTransaction("serializable");
+      let published = false;
+      const prepared = client.prepareTransaction(id, async (io) => {
+        await io.queryGlobal("fixture-query");
+        published = true;
+      });
+      prepared.catch(() => {});
+      await started;
+      if (close === "rollback") await client.rollbackTransaction(id);
+      else if (close === "shutdown") await client.shutdown();
+      else client.discard();
+      release();
+      await expect(prepared).rejects.toThrow("no longer active");
+      expect(published).toBe(false);
+    },
+  );
 });

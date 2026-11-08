@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
@@ -21,16 +22,19 @@ it.each([
       { project: s.uuid(), title: s.string() },
       { projectRelation: s.rel("projects", "project") },
     );
-    const app = s.defineApp({
-      ...deviceRequestSchema,
-      ...spaceSchema,
-      projects: s.table(
-        { title: s.string() },
-        { notesViaProject: s.reverse("notes", "projectRelation") },
-      ),
-      notes:
-        mode === "encrypted" ? notes.encrypted({ space: "project", columns: ["title"] }) : notes,
-    });
+    const app = s.defineApp(
+      {
+        ...deviceRequestSchema,
+        ...spaceSchema,
+        projects: s.table(
+          { title: s.string() },
+          { notesViaProject: s.reverse("notes", "projectRelation") },
+        ),
+        notes:
+          mode === "encrypted" ? notes.encrypted({ space: "project", columns: ["title"] }) : notes,
+      },
+      { migrations: "none" },
+    );
     const policies = definePermissions(app, ({ policy, session }) => {
       policy.projects.allowRead.always();
       policy.projects.allowInsert.always();
@@ -45,7 +49,7 @@ it.each([
       policy.__e2ee_space_deliveries.allowRead.always();
       policy.__e2ee_space_deliveries.allowInsert.where({ senderAccountId: session.user.account });
     });
-    const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+    let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
     let db: Awaited<ReturnType<typeof createDb>> | undefined;
     let owner: Awaited<ReturnType<typeof createJazzSession>> | undefined;
     try {
@@ -53,6 +57,10 @@ it.each([
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
+        schema: app,
+        permissions: { ...deviceRequestPermissions, ...policies },
+      });
+      server = await frontE2eeCore(server, {
         schema: app,
         permissions: { ...deviceRequestPermissions, ...policies },
       });

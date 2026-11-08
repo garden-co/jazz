@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
@@ -6,13 +7,17 @@ import { createNativeCrypto } from "./native.js";
 import { deviceRequestApp, deviceRequestPermissions } from "./device-requests.js";
 
 it("rejects descendants when an intermediate delivery cannot be authenticated", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Awaited<ReturnType<typeof createDb>>[] = [];
   try {
     await deploy({
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
+      schema: deviceRequestApp,
+      permissions: deviceRequestPermissions,
+    });
+    server = await frontE2eeCore(server, {
       schema: deviceRequestApp,
       permissions: deviceRequestPermissions,
     });
@@ -79,7 +84,7 @@ it("rejects descendants when an intermediate delivery cannot be authenticated", 
     expect(await third.e2ee.devices.list()).toContainEqual(
       expect.objectContaining({ id: thirdId, state: "active", keyReadiness: "not-verified" }),
     );
-    await expect(third.e2ee.devices.approve(creator!.id).wait()).rejects.toThrow();
+    await expect(third.e2ee.devices.approve(creator!.id).wait()).rejects.toThrow(/active|key/i);
   } finally {
     await Promise.all(clients.map((db) => db.shutdown()));
     await server.stop();

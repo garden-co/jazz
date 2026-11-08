@@ -24,13 +24,14 @@ import {
   isWireHello,
   WIRE_PROTOCOL_VERSION,
 } from "./websocket.js";
-import { formatUuid } from "../uuid.js";
 import {
+  formatUuid,
   NativeRuntimeAdapter,
   decodeSubscriptionDelta,
   type Transport,
 } from "./native-runtime-adapter.js";
 import { encodeSchema } from "./schema-codec.js";
+import { createUpstreamLink } from "../testing/napi-runtime-test-utils.js";
 import { applySubscriptionDelta, SubscriptionManager } from "../subscription-manager.js";
 import { setNamedRowValuesEnumerable } from "./row-values-transport.js";
 import { encodeNativeNullValue, storageColumnValueType } from "./native-row-codec.js";
@@ -784,6 +785,223 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(transport.received).toEqual([]);
   });
 
+  // #4248, #4296: a React Native foreground whose upstream refuses its bearer
+  // reports that as auth state, as the web socket path does. Ticks keep
+  // running, the app renews from the auth failure, and any other tick failure
+  // still surfaces.
+  it("reports a native upstream's refused credential as an auth failure, not a crash", async () => {
+    const thrown: unknown[] = [];
+    const queue = globalThis.queueMicrotask;
+    const spy = vi.spyOn(globalThis, "queueMicrotask").mockImplementation((callback) =>
+      queue(() => {
+        try {
+          callback();
+        } catch (error) {
+          thrown.push(error);
+        }
+      }),
+    );
+    try {
+      let schedule: ((urgency: "immediate" | "deferred") => void) | undefined;
+      let reportAuthRejected: ((reason: string) => void) | undefined;
+      let tickFailure: Error | undefined;
+      const runtime = new NativeRuntimeAdapter(
+        {
+          openMemory: () =>
+            fakeDb({
+              setTickScheduler: (callback: (urgency: "immediate" | "deferred") => void) => {
+                schedule = callback;
+              },
+              tick: () => {
+                if (tickFailure) throw tickFailure;
+              },
+              onAuthRejected: (callback: (reason: string) => void) => {
+                reportAuthRejected = callback;
+              },
+              nativeConnectionStatus: () => ({
+                configured: true,
+                explicitlyOffline: false,
+                connected: false,
+                authRejected: "websocket rejected: AuthFailed: token expired",
+              }),
+              isNativeForegroundClosed: () => false,
+            }),
+          openBrowser: async () => {
+            throw new Error("not used");
+          },
+        } as never,
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        true,
+      );
+      const authFailures: string[] = [];
+      runtime.onAuthFailure((reason) => authFailures.push(reason));
+
+      reportAuthRejected!("websocket rejected: AuthFailed: token expired");
+      schedule!("immediate");
+      for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
+      expect(authFailures).toEqual(["websocket rejected: AuthFailed: token expired"]);
+      expect(thrown).toEqual([]);
+
+      tickFailure = new Error("Jazz native foreground lifecycle failure");
+      schedule!("immediate");
+      for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
+      expect(authFailures).toHaveLength(1);
+      expect(thrown).toEqual([tickFailure]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  // #4337: a native upstream that refuses the connection for another reason
+  // than the credential (TLS behind a captive portal, a proxy refusing the
+  // upgrade) is connection state, as on the web socket path: the remote link
+  // is unavailable and the server-transport-error path hears of it once,
+  // nothing is thrown, and the link recovers with the connection.
+  it("reports a native upstream's refused connection as connection state, not a crash", async () => {
+    const thrown: unknown[] = [];
+    const queue = globalThis.queueMicrotask;
+    const spy = vi.spyOn(globalThis, "queueMicrotask").mockImplementation((callback) =>
+      queue(() => {
+        try {
+          callback();
+        } catch (error) {
+          thrown.push(error);
+        }
+      }),
+    );
+    try {
+      let schedule: ((urgency: "immediate" | "deferred") => void) | undefined;
+      let reportUpstreamFailure:
+        | ((failure: { reason: string; retrying: boolean } | null) => void)
+        | undefined;
+      let connected = false;
+      const runtime = new NativeRuntimeAdapter(
+        {
+          openMemory: () =>
+            fakeDb({
+              setTickScheduler: (callback: (urgency: "immediate" | "deferred") => void) => {
+                schedule = callback;
+              },
+              tick: () => undefined,
+              onUpstreamFailure: (
+                callback: (failure: { reason: string; retrying: boolean } | null) => void,
+              ) => {
+                reportUpstreamFailure = callback;
+              },
+              nativeConnectionStatus: () => ({
+                configured: true,
+                explicitlyOffline: false,
+                connected,
+                authRejected: null,
+              }),
+              isNativeForegroundClosed: () => false,
+            }),
+          openBrowser: async () => {
+            throw new Error("not used");
+          },
+        } as never,
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        true,
+      );
+      const transportErrors: string[] = [];
+      runtime.onServerTransportError((error) => transportErrors.push(error.message));
+      expect(runtime.remoteLinkState()).toBe("connecting");
+
+      const refusal = "native relay socket connect failed: TLS handshake failed";
+      reportUpstreamFailure!({ reason: refusal, retrying: true });
+      schedule!("immediate");
+      for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
+      expect(runtime.remoteLinkState()).toBe("unavailable");
+      expect(transportErrors).toEqual([refusal]);
+      expect(thrown).toEqual([]);
+
+      connected = true;
+      reportUpstreamFailure!(null);
+      expect(runtime.remoteLinkState()).toBe("connected");
+      expect(transportErrors).toEqual([refusal]);
+      expect(thrown).toEqual([]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  // The native host stops its link on a refused credential and reports a
+  // terminal upstream failure. A credential the app can renew restarts it,
+  // so the refusal counts as retrying, as it does on the web socket path
+  // (#3923); one no credential fixes stays terminal.
+  it.each([
+    ["authentication expired", true, true],
+    ["authentication expired", false, false],
+    ["account disabled", true, false],
+  ] as const)(
+    "treats a native refusal (%s, renewed: %s) as retrying: %s",
+    async (reason, renewed, retrying) => {
+      let reportAuthRejected: ((reason: string) => void) | undefined;
+      let reportUpstreamFailure:
+        | ((failure: { reason: string; retrying: boolean } | null) => void)
+        | undefined;
+      const runtime = new NativeRuntimeAdapter(
+        {
+          openMemory: () =>
+            fakeDb({
+              setTickScheduler: () => undefined,
+              tick: () => undefined,
+              onAuthRejected: (callback: (reason: string) => void) => {
+                reportAuthRejected = callback;
+              },
+              onUpstreamFailure: (
+                callback: (failure: { reason: string; retrying: boolean } | null) => void,
+              ) => {
+                reportUpstreamFailure = callback;
+              },
+              nativeConnectionStatus: () => ({
+                configured: true,
+                explicitlyOffline: false,
+                connected: false,
+                authRejected: null,
+              }),
+              isNativeForegroundClosed: () => false,
+            }),
+          openBrowser: async () => {
+            throw new Error("not used");
+          },
+        } as never,
+        testSchema,
+        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
+        1,
+        true,
+      );
+      const authFailures: string[] = [];
+      runtime.onAuthFailure((failure) => {
+        authFailures.push(failure);
+        // As JazzClient does when no renewer is registered.
+        if (!renewed) runtime.endCredentialWait();
+      });
+      const transportErrors: Array<{ message: string; retrying: boolean }> = [];
+      runtime.onServerTransportError((error, state) =>
+        transportErrors.push({ message: error.message, retrying: state.retrying }),
+      );
+
+      reportAuthRejected!(reason);
+      reportUpstreamFailure!({ reason, retrying: false });
+      expect(authFailures).toEqual([reason]);
+      expect(transportErrors).toEqual([{ message: reason, retrying }]);
+
+      // A renewed credential reconnects and clears the refusal.
+      reportUpstreamFailure!(null);
+      reportUpstreamFailure!({ reason: "socket reset", retrying: false });
+      expect(transportErrors.at(-1)).toEqual({ message: "socket reset", retrying: false });
+      await runtime.close();
+    },
+  );
+
   it("reports pre-hello auth failures and reconnects with refreshed auth", async () => {
     const sockets: FakeWebSocket[] = [];
     let allowServerHello = false;
@@ -1481,7 +1699,10 @@ describe("NativeRuntimeAdapter server transport", () => {
   it.each(["query", "subscription"] as const)(
     "installs client correlation claims before opening a %s without preparing a native plan",
     async (kind) => {
-      const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) });
+      const app = s.defineApp(
+        { todos: s.table({ title: s.string() }, {}) },
+        { migrations: "none" },
+      );
       let releaseClaims!: () => void;
       const installed = new Promise<void>((resolve) => {
         releaseClaims = resolve;
@@ -2342,7 +2563,10 @@ describe("NativeRuntimeAdapter server transport", () => {
               close,
             };
       const runtime = runtimeWithSubscriptionSource(source);
-      const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) });
+      const app = s.defineApp(
+        { todos: s.table({ title: s.string() }, {}) },
+        { migrations: "none" },
+      );
       const handle = runtime.createSubscription(app.todos._build());
       const callback = vi.fn();
       runtime.executeSubscription(handle, callback);
@@ -2390,7 +2614,10 @@ describe("NativeRuntimeAdapter server transport", () => {
               },
             });
       const runtime = runtimeWithSubscriptionSource(source);
-      const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) });
+      const app = s.defineApp(
+        { todos: s.table({ title: s.string() }, {}) },
+        { migrations: "none" },
+      );
       const handle = runtime.createSubscription(app.todos._build());
       const replacement = vi.fn();
       const callback = vi.fn(() => {
@@ -2437,7 +2664,10 @@ describe("NativeRuntimeAdapter server transport", () => {
       const runtime = runtimeWithSubscriptionSource({
         getReader: () => ({ read: () => pending, cancel }),
       });
-      const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) });
+      const app = s.defineApp(
+        { todos: s.table({ title: s.string() }, {}) },
+        { migrations: "none" },
+      );
       const handle = runtime.createSubscription(app.todos._build());
       const callback = vi.fn();
       runtime.executeSubscription(handle, callback);
@@ -2610,8 +2840,9 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     expect(queryBytes).toBeDefined();
-    expect(Array.from(queryBytes!.slice(-10))).toEqual([
-      4, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0xf8, 0x3f,
+    // The literal 1.0 (tag 4, LEB128 f64 bits), then the query's empty partial selects.
+    expect(Array.from(queryBytes!.slice(-11))).toEqual([
+      4, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0xf8, 0x3f, 0,
     ]);
   });
 
@@ -2762,7 +2993,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     });
   });
 
-  it("encodes integer query literals with the Groove I32 tag", () => {
+  it("encodes integer query literals with the I32 tag", () => {
     let preparedBytes: Uint8Array | undefined;
     const runtime = new NativeRuntimeAdapter(
       {
@@ -5447,7 +5678,7 @@ describe("NativeRuntimeAdapter server transport", () => {
   });
 });
 describe("NativeRuntimeAdapter read and subscription lifecycle", () => {
-  const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) });
+  const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) }, { migrations: "none" });
   const query = app.todos.where({ title: "lifecycle" })._build();
   const openRuntime = (overrides: Partial<NativeDbForTest>) =>
     new NativeRuntimeAdapter(
@@ -6268,15 +6499,18 @@ const testSchema = {
   },
 } satisfies WasmSchema;
 
-const bigintQuerySchema = s.defineApp({
-  metrics: s.table(
-    {
-      largeCount: s.bigint(),
-      largeCounts: s.array(s.bigint()),
-    },
-    {},
-  ),
-}).wasmSchema;
+const bigintQuerySchema = s.defineApp(
+  {
+    metrics: s.table(
+      {
+        largeCount: s.bigint(),
+        largeCounts: s.array(s.bigint()),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+).wasmSchema;
 
 // Capture native bytes for valid queries through the serialized adapter interface.
 async function captureNativeQuery(schema: WasmSchema, query: object): Promise<Uint8Array> {
@@ -7064,6 +7298,7 @@ function encodeTerminalSubscriptionDelta(schema: WasmSchema): Uint8Array {
   suffix.vec(() => {}, 0); // updated previous indices
   suffix.vec(() => {}, 0); // updated indices
   suffix.vec(() => {}, 0); // removed indices
+  suffix.vec(() => {}, 0); // updated splices
   return concatBytes([rowBatches, suffix.finish()]);
 }
 
@@ -7165,6 +7400,8 @@ function encodeSubscriptionDelta(delta: {
   ]) {
     writer.vec((indexWriter, index) => indexWriter.u64(indices[index]!), indices.length);
   }
+  // No opted-in splices on any updated row.
+  writer.vec((row) => row.vec(() => {}, 0), delta.updated.length);
   return writer.finish();
 }
 
@@ -7444,6 +7681,7 @@ function encodeUserWrappedSubscriptionDelta(row: {
   delta.vec(() => undefined, 0);
   delta.vec(() => undefined, 0);
   delta.vec(() => undefined, 0);
+  delta.vec(() => undefined, 0); // updated splices
   return delta.finish();
 }
 
@@ -7482,6 +7720,7 @@ function encodeTeamGatherSubscriptionDelta(delta: {
   writer.vec((indexWriter, index) => indexWriter.u64(index), updated.length);
   writer.vec((indexWriter, index) => indexWriter.u64(index), updated.length);
   writer.vec(() => undefined, 0);
+  writer.vec((row) => row.vec(() => undefined, 0), updated.length); // updated splices
   return writer.finish();
 }
 
@@ -7592,6 +7831,7 @@ function fakeDb<T extends object>(db: T): T & NativeDbForTest {
   };
   let upstream: Transport | undefined;
   const result: Record<string, unknown> = {
+    createUpstreamLink,
     // A real native binding always advertises the wire features compiled into
     // it. Individual tests can still explicitly set this to `undefined` when
     // exercising the missing-binding diagnostic.
@@ -7878,7 +8118,7 @@ it("isolates throwing callbacks when replaying a deferred subscription failure",
 });
 
 it("passes different claims independently on same-query reads", async () => {
-  const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) });
+  const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) }, { migrations: "none" });
   const rows = [
     { table: "todos", rowId: new Uint8Array(16), title: "Draft proposal", team: "team-a" },
     { table: "todos", rowId: new Uint8Array(16), title: "Review budget", team: "team-b" },
@@ -7945,4 +8185,114 @@ it("passes different claims independently on same-query reads", async () => {
   } finally {
     await runtime.close();
   }
+});
+
+it("surfaces the native slow-query report on console.warn after each core tick, naming the app", async () => {
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  const reports = [["slow query in app app-1 on todos: 1 slow run(s)"], []];
+  const takeSlowQueryReport = vi.fn((_app?: string) => reports.shift() ?? []);
+  const setSlowQueryThresholdMs = vi.fn();
+  const runtime = NativeRuntimeAdapter.fromDb(
+    fakeDb({ tick: () => undefined, takeSlowQueryReport, setSlowQueryThresholdMs }),
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+    { slowQueryLog: { appId: "app-1", thresholdMs: 200 } },
+  );
+  try {
+    expect(setSlowQueryThresholdMs).toHaveBeenCalledExactlyOnceWith(200);
+    await runtime.progressPeerTransport();
+    expect(takeSlowQueryReport).toHaveBeenCalledWith("app-1");
+    expect(warn).toHaveBeenCalledExactlyOnceWith(
+      "[jazz] slow query in app app-1 on todos: 1 slow run(s)",
+    );
+    await runtime.progressPeerTransport();
+    expect(warn).toHaveBeenCalledOnce();
+  } finally {
+    warn.mockRestore();
+    await runtime.close();
+  }
+});
+
+it("rejects a negative slow-query threshold and leaves the native default without one", async () => {
+  const setSlowQueryThresholdMs = vi.fn();
+  expect(() =>
+    NativeRuntimeAdapter.fromDb(
+      fakeDb({ tick: () => undefined, setSlowQueryThresholdMs }),
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+      { slowQueryLog: { thresholdMs: -1 } },
+    ),
+  ).toThrow("slowQueryThresholdMs must be a non-negative number of milliseconds");
+  const runtime = NativeRuntimeAdapter.fromDb(
+    fakeDb({ tick: () => undefined, setSlowQueryThresholdMs }),
+    testSchema,
+    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
+    1,
+    true,
+    { slowQueryLog: { appId: "app-1" } },
+  );
+  try {
+    expect(setSlowQueryThresholdMs).not.toHaveBeenCalled();
+  } finally {
+    await runtime.close();
+  }
+});
+
+describe("NativeRuntimeAdapter waitForPendingWrites cancellation", () => {
+  const open = (db: object) =>
+    new NativeRuntimeAdapter(
+      { openMemory: () => fakeDb(db) },
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+    );
+
+  it("cancels a pollable binding wait when the caller gives up", async () => {
+    const cancel = vi.fn();
+    const runtime = open({
+      tick: () => undefined,
+      waitForPendingWrites: () => ({ poll: () => null, cancel }),
+    });
+    const control = new AbortController();
+    const wait = runtime.waitForPendingWrites("global", {
+      throughOutage: true,
+      signal: control.signal,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(cancel).not.toHaveBeenCalled();
+    control.abort(new Error("gave up"));
+    await expect(wait).rejects.toThrow("gave up");
+    await vi.waitFor(() => expect(cancel).toHaveBeenCalled());
+    await runtime.close();
+  });
+
+  it("settles a promise-shaped binding wait's cancel token when the caller gives up", async () => {
+    let cancelled: Promise<void> | undefined;
+    const runtime = open({
+      tick: () => undefined,
+      waitForPendingWrites: (_tier: string, token?: Promise<void>) => {
+        cancelled = token;
+        return new Promise<never>(() => undefined);
+      },
+    });
+    const control = new AbortController();
+    const wait = runtime.waitForPendingWrites("global", {
+      throughOutage: true,
+      signal: control.signal,
+    });
+    await vi.waitFor(() => expect(cancelled).toBeDefined());
+    control.abort(new Error("gave up"));
+    await expect(wait).rejects.toThrow("gave up");
+    await expect(cancelled).resolves.toBeUndefined();
+    await runtime.close();
+  });
 });

@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import type { AccountStore } from "../accounts/persistence.js";
 import type { Db } from "../runtime/db.js";
@@ -97,7 +98,7 @@ it.each([
 ] as const)(
   "wipes %s initialization keys while %s is suspended",
   async (origin, step) => {
-    const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+    let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
     const clients: Db[] = [];
     const gate = keyGate();
     try {
@@ -105,6 +106,10 @@ it.each([
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
+        schema: deviceRequestApp,
+        permissions: deviceRequestPermissions,
+      });
+      server = await frontE2eeCore(server, {
         schema: deviceRequestApp,
         permissions: deviceRequestPermissions,
       });
@@ -150,7 +155,7 @@ it.each([
 it.each(["recipient-generation", "signing-generation"] as const)(
   "wipes a key returned by late %s without publishing a device",
   async (step) => {
-    const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+    let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
     const clients: Db[] = [];
     const gate = keyGate();
     try {
@@ -158,6 +163,10 @@ it.each(["recipient-generation", "signing-generation"] as const)(
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
+        schema: deviceRequestApp,
+        permissions: deviceRequestPermissions,
+      });
+      server = await frontE2eeCore(server, {
         schema: deviceRequestApp,
         permissions: deviceRequestPermissions,
       });
@@ -200,7 +209,7 @@ it.each(["recipient-generation", "signing-generation"] as const)(
 it.each(["listing", "responder", "approval", "revocation"] as const)(
   "wipes the established %s operation's key copy before its adapter resumes",
   async (operation) => {
-    const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+    let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
     const clients: Db[] = [];
     const gate = keyGate();
     try {
@@ -208,6 +217,10 @@ it.each(["listing", "responder", "approval", "revocation"] as const)(
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
+        schema: deviceRequestApp,
+        permissions: deviceRequestPermissions,
+      });
+      server = await frontE2eeCore(server, {
         schema: deviceRequestApp,
         permissions: deviceRequestPermissions,
       });
@@ -277,13 +290,17 @@ it.each(["listing", "responder", "approval", "revocation"] as const)(
 );
 
 it("releases completed approver copies promptly and retains usable session keys", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Db[] = [];
   try {
     await deploy({
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
+      schema: deviceRequestApp,
+      permissions: deviceRequestPermissions,
+    });
+    server = await frontE2eeCore(server, {
       schema: deviceRequestApp,
       permissions: deviceRequestPermissions,
     });
@@ -319,7 +336,7 @@ it("releases completed approver copies promptly and retains usable session keys"
 }, 30_000);
 
 it("preserves a durable winner across retried store callbacks and shutdown before update returns", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Db[] = [];
   let durable: string | null = null;
   let release!: () => void;
@@ -335,6 +352,10 @@ it("preserves a durable winner across retried store callbacks and shutdown befor
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
+      schema: deviceRequestApp,
+      permissions: deviceRequestPermissions,
+    });
+    server = await frontE2eeCore(server, {
       schema: deviceRequestApp,
       permissions: deviceRequestPermissions,
     });

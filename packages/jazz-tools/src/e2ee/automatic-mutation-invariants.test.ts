@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
@@ -6,17 +7,20 @@ import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
 
 async function createFixture() {
-  const app = s.defineApp({
-    events: s.table({ message: s.string() }, {}),
-    projects: s.table({ title: s.string() }, {}),
-    notes: s
-      .table(
-        { projectId: s.uuid(), body: s.string(), bytes: s.bytes() },
-        { project: s.rel("projects", "projectId") },
-      )
-      .encrypted({ space: "projectId", columns: ["body", "bytes"] })
-      .indexOnly(["projectId"]),
-  });
+  const app = s.defineApp(
+    {
+      events: s.table({ message: s.string() }, {}),
+      projects: s.table({ title: s.string() }, {}),
+      notes: s
+        .table(
+          { projectId: s.uuid(), body: s.string(), bytes: s.bytes() },
+          { project: s.rel("projects", "projectId") },
+        )
+        .encrypted({ space: "projectId", columns: ["body", "bytes"] })
+        .indexOnly(["projectId"]),
+    },
+    { migrations: "none" },
+  );
   const permissions = definePermissions(app, ({ policy, session }) => {
     policy.events.allowRead.always();
     policy.events.allowInsert.where({ "$createdBy.account": session.user.account });
@@ -35,7 +39,7 @@ async function createFixture() {
     policy.__e2ee_space_successors.allowRead.always();
     policy.__e2ee_space_successors.allowInsert.where({ authorAccountId: session.user.account });
   });
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
   const additionalClients: Awaited<ReturnType<typeof createDb>>[] = [];
   let retained: string | null = null;
@@ -47,6 +51,7 @@ async function createFixture() {
       schema: app,
       permissions,
     });
+    server = await frontE2eeCore(server, { schema: app, permissions: permissions });
     const account = await localAccountConfig(server.appId, server.url);
     db = await createDb({
       ...account,
@@ -253,14 +258,51 @@ it("preserves encrypted mutation scope, input snapshots and plaintext-only reads
   }
 }, 120_000);
 
-it("anchors encrypted application snapshots at public begin rather than the first operation", async () => {
+it("pins an encrypted application's online snapshot at its first successful read", async () => {
   const fixture = await createFixture();
   const { app, db } = fixture;
   try {
     const before = db.insert(app.events, { message: "Before begin" }).value;
     const tx = db.beginSerializableTransaction();
+    let commitAttempted = false;
     try {
-      db.insert(app.events, { message: "After begin" });
+      // The ordinary client API chooses the authority cut on its first read,
+      // rather than freezing it when this public handle is opened.
+      const afterBegin = db.insert(app.events, { message: "After begin, before first read" });
+      await afterBegin.wait({ tier: "global" });
+      const first = await tx.all(app.events, { tier: "local-first" });
+      expect(first).toHaveLength(2);
+      expect(first).toEqual(expect.arrayContaining([before, afterBegin.value]));
+
+      const later = db.insert(app.events, { message: "After first read" });
+      await later.wait({ tier: "global" });
+      expect(await tx.all(app.events, { tier: "local-first" })).toEqual(first);
+      commitAttempted = true;
+      const conflict: unknown = await tx
+        .commit()
+        .wait({ tier: "global" })
+        .then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+      expect(conflict).toMatchObject({ code: "transaction_conflict" });
+    } finally {
+      if (!commitAttempted) await tx.rollback();
+    }
+  } finally {
+    await fixture.close();
+  }
+}, 120_000);
+
+it("keeps the public begin own-write snapshot when its first read is offline", async () => {
+  const fixture = await createFixture();
+  const { app, db } = fixture;
+  try {
+    await db.disconnect();
+    const before = db.insert(app.events, { message: "Before offline begin" }).value;
+    const tx = db.beginSerializableTransaction();
+    try {
+      db.insert(app.events, { message: "After offline begin" });
       expect(await tx.all(app.events, { tier: "local-first" })).toEqual([before]);
     } finally {
       await tx.rollback();

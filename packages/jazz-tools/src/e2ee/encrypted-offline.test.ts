@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it, vi } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -14,14 +15,20 @@ import { spaceSchema } from "./spaces.js";
 import { groupSchema } from "./groups.js";
 import { createBrowserDeviceSigner } from "./browser.js";
 
-const app = s.defineApp({
-  ...deviceRequestSchema,
-  ...spaceSchema,
-  projects: s.table({ title: s.string() }, {}),
-  notes: s
-    .table({ projectId: s.uuid(), title: s.string() }, { project: s.rel("projects", "projectId") })
-    .encrypted({ space: "projectId", columns: ["title"] }),
-});
+const app = s.defineApp(
+  {
+    ...deviceRequestSchema,
+    ...spaceSchema,
+    projects: s.table({ title: s.string() }, {}),
+    notes: s
+      .table(
+        { projectId: s.uuid(), title: s.string() },
+        { project: s.rel("projects", "projectId") },
+      )
+      .encrypted({ space: "projectId", columns: ["title"] }),
+  },
+  { migrations: "none" },
+);
 const policies = definePermissions(app, ({ policy, session }) => {
   policy.projects.allowRead.always();
   policy.projects.allowInsert.always();
@@ -44,7 +51,7 @@ it.each(["explicit disconnect", "unexpected transport loss"] as const)(
       policy.__e2ee_space_successors.allowRead.always();
       policy.__e2ee_space_successors.allowInsert.never();
     });
-    const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+    let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
     const clients: Awaited<ReturnType<typeof createDb>>[] = [];
     const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
     const store = (initial: string | null = null) => {
@@ -63,6 +70,10 @@ it.each(["explicit disconnect", "unexpected transport loss"] as const)(
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
+        schema: app,
+        permissions: { ...permissions, ...rotationPolicy },
+      });
+      server = await frontE2eeCore(server, {
         schema: app,
         permissions: { ...permissions, ...rotationPolicy },
       });
@@ -135,24 +146,36 @@ it.each(["explicit disconnect", "unexpected transport loss"] as const)(
   60_000,
 );
 
-const indexedApp = s.defineApp({
-  ...deviceRequestSchema,
-  ...spaceSchema,
-  projects: s.table({ title: s.string() }, {}),
-  notes: s
-    .table({ projectId: s.uuid(), title: s.string() }, { project: s.rel("projects", "projectId") })
-    .encrypted({ space: "projectId", columns: ["title"], indexes: { title: "equality" } }),
-});
+const indexedApp = s.defineApp(
+  {
+    ...deviceRequestSchema,
+    ...spaceSchema,
+    projects: s.table({ title: s.string() }, {}),
+    notes: s
+      .table(
+        { projectId: s.uuid(), title: s.string() },
+        { project: s.rel("projects", "projectId") },
+      )
+      .encrypted({ space: "projectId", columns: ["title"], indexes: { title: "equality" } }),
+  },
+  { migrations: "none" },
+);
 
-const groupApp = s.defineApp({
-  ...deviceRequestSchema,
-  ...spaceSchema,
-  ...groupSchema,
-  projects: s.table({ title: s.string() }, {}),
-  notes: s
-    .table({ projectId: s.uuid(), title: s.string() }, { project: s.rel("projects", "projectId") })
-    .encrypted({ space: "projectId", columns: ["title"] }),
-});
+const groupApp = s.defineApp(
+  {
+    ...deviceRequestSchema,
+    ...spaceSchema,
+    ...groupSchema,
+    projects: s.table({ title: s.string() }, {}),
+    notes: s
+      .table(
+        { projectId: s.uuid(), title: s.string() },
+        { project: s.rel("projects", "projectId") },
+      )
+      .encrypted({ space: "projectId", columns: ["title"] }),
+  },
+  { migrations: "none" },
+);
 const groupPolicies = definePermissions(groupApp, ({ policy, session }) => {
   policy.__e2ee_groups.allowRead.always();
   policy.__e2ee_groups.allowInsert.where({ accountId: session.user.account });
@@ -189,7 +212,7 @@ it.each([
 ])(
   "reopens a persisted native database offline $reopenAt and updates its encrypted data",
   async ({ reopenAt, app, permissions }) => {
-    const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+    let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
     const directory = await mkdtemp(join(tmpdir(), "jazz-e2ee-offline-reopen-"));
     const store = () => {
       let value: string | null = null;
@@ -229,6 +252,9 @@ it.each([
         schema: app,
         permissions,
       });
+      server = await frontE2eeCore(server, { schema: app, permissions: permissions });
+      // This config was captured before the core was fronted by the app backend.
+      config.serverUrl = server.url;
       owner = await createJazzSession(config);
       const before = owner.getSnapshot().client!.db;
       const accountId = owner.getSnapshot().account!.id;
@@ -331,7 +357,7 @@ it.each([
 );
 
 it("updates an existing encrypted space offline and accepts the write after reconnect", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
   let stored: string | null = null;
   try {
@@ -342,6 +368,7 @@ it("updates an existing encrypted space offline and accepts the write after reco
       schema: app,
       permissions,
     });
+    server = await frontE2eeCore(server, { schema: app, permissions: permissions });
     db = await createDb({
       ...(await localAccountConfig(server.appId, server.url)),
       e2ee: {
@@ -401,7 +428,7 @@ it("updates an existing encrypted space offline and accepts the write after reco
 it.each([false, true])(
   "writes offline after cold creation and verifies online cache failures (cache failure: %s)",
   async (failHistoryPersistence) => {
-    const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+    let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
     let db: Awaited<ReturnType<typeof createDb>> | undefined;
     let stored: string | null = null;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -414,6 +441,7 @@ it.each([false, true])(
         schema: app,
         permissions,
       });
+      server = await frontE2eeCore(server, { schema: app, permissions: permissions });
       const config = {
         ...(await localAccountConfig(server.appId, server.url)),
         e2ee: {
@@ -424,7 +452,7 @@ it.each([false, true])(
             },
             async update(transform: (current: string | null) => string) {
               const next = transform(stored);
-              if (failHistoryPersistence && JSON.parse(next).acceptedHistoryV1) {
+              if (failHistoryPersistence && JSON.parse(next).retainedContentV1?.content?.length) {
                 cacheFailures++;
                 throw new Error("Offline cache storage unavailable");
               }
@@ -486,7 +514,7 @@ it.each([false, true])(
 );
 
 it("stores an encrypted update locally after unexpected transport loss", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
   let stored: string | null = null;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -498,6 +526,7 @@ it("stores an encrypted update locally after unexpected transport loss", async (
       schema: app,
       permissions,
     });
+    server = await frontE2eeCore(server, { schema: app, permissions: permissions });
     db = await createDb({
       ...(await localAccountConfig(server.appId, server.url)),
       e2ee: {
@@ -544,7 +573,7 @@ it("stores an encrypted update locally after unexpected transport loss", async (
 it.each(["ordinary owner read", "owner reconnect"])(
   "%s delivers a newly created space key to another recipient",
   async (trigger) => {
-    const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+    let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
     const clients: Awaited<ReturnType<typeof createDb>>[] = [];
     const store = () => {
       let value: string | null = null;
@@ -565,6 +594,7 @@ it.each(["ordinary owner read", "owner reconnect"])(
         schema: app,
         permissions,
       });
+      server = await frontE2eeCore(server, { schema: app, permissions: permissions });
       const alice = await localAccountConfig(server.appId, server.url);
       const bob = await localAccountConfig(server.appId, server.url);
       const owner = await createDb({ ...alice, e2ee: { app, store: store() } });
@@ -605,7 +635,7 @@ it.each(["ordinary owner read", "owner reconnect"])(
 );
 
 it("keeps independent offline readers revoked after ordinary-query and device-list observations", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Awaited<ReturnType<typeof createDb>>[] = [];
   const store = (initial: string | null = null) => {
     let value = initial;
@@ -626,6 +656,7 @@ it("keeps independent offline readers revoked after ordinary-query and device-li
       schema: app,
       permissions,
     });
+    server = await frontE2eeCore(server, { schema: app, permissions: permissions });
     const account = await localAccountConfig(server.appId, server.url);
     const firstStore = store();
     const first = await createDb({ ...account, e2ee: { app, store: firstStore } });
@@ -699,7 +730,7 @@ it.each([
 ])(
   "does not reuse offline space keys for $access after a sibling query observes $removal removal",
   async ({ removal, access }) => {
-    const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+    let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
     const clients: Awaited<ReturnType<typeof createDb>>[] = [];
     const store = () => {
       let value: string | null = null;
@@ -720,6 +751,10 @@ it.each([
         schema: groupApp,
         permissions: { ...permissions, ...groupPolicies },
       });
+      server = await frontE2eeCore(server, {
+        schema: groupApp,
+        permissions: { ...permissions, ...groupPolicies },
+      });
       const alice = await localAccountConfig(server.appId, server.url);
       const bob = await localAccountConfig(server.appId, server.url);
       const owner = await createDb({ ...alice, e2ee: { app: groupApp, store: store() } });
@@ -728,17 +763,14 @@ it.each([
       clients.push(reader);
       await owner.e2ee.devices.list();
       await reader.e2ee.devices.list();
-      let groupId: string | undefined;
-      if (removal === "group") {
-        groupId = (await owner.e2ee.groups.create().wait()).id;
-        await owner.e2ee.groups.add(groupId, { kind: "account", id: bob.account.id }).wait();
-      }
+      const group = await owner.e2ee.groups.create().wait();
+      await owner.e2ee.groups.add(group.id, { kind: "account", id: bob.account.id }).wait();
       const tx = owner.beginSerializableTransaction();
       const project = tx.insert(
         groupApp.projects,
         { title: "Group removal" },
         {
-          initialRecipients: removal === "group" ? [groupId!] : [alice.account.id, bob.account.id],
+          initialRecipients: removal === "group" ? [group.id] : [alice.account.id, bob.account.id],
         },
       );
       const note = tx.insert(groupApp.notes, {
@@ -759,7 +791,7 @@ it.each([
           : await reader.all(groupApp.__e2ee_space_grants, { tier: "remote" });
 
       if (removal === "group")
-        await owner.e2ee.groups.remove(groupId!, { kind: "account", id: bob.account.id }).wait();
+        await owner.e2ee.groups.remove(group.id, { kind: "account", id: bob.account.id }).wait();
       else await owner.e2ee.spaces.revoke(groupApp.projects, project.id, bob.account.id).wait();
       // Fetch through an ordinary sibling query, without refreshing the space.
       const after =
@@ -771,7 +803,7 @@ it.each([
         expect.arrayContaining([
           expect.objectContaining(
             removal === "group"
-              ? { operation: "remove", groupId: groupId!, memberId: bob.account.id }
+              ? { operation: "remove", groupId: group.id, memberId: bob.account.id }
               : { operation: "remove", spaceId: space!.id, recipientId: bob.account.id },
           ),
         ]),
@@ -799,7 +831,7 @@ it.each([
 );
 
 it("keeps accepted space access while a removal is pending and after Jazz rejects it", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
   let saved: string | null = null;
   let hold = false;
@@ -823,6 +855,10 @@ it("keeps accepted space access while a removal is pending and after Jazz reject
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
+      schema: app,
+      permissions: { ...permissions, ...restricted },
+    });
+    server = await frontE2eeCore(server, {
       schema: app,
       permissions: { ...permissions, ...restricted },
     });
@@ -916,7 +952,7 @@ it("keeps accepted space access while a removal is pending and after Jazz reject
 }, 60_000);
 
 it("does not grant access while an addition is pending or after Jazz rejects it", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Awaited<ReturnType<typeof createDb>>[] = [];
   const store = () => {
     let value: string | null = null;
@@ -950,6 +986,10 @@ it("does not grant access while an addition is pending or after Jazz rejects it"
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
+      schema: app,
+      permissions: { ...permissions, ...restricted },
+    });
+    server = await frontE2eeCore(server, {
       schema: app,
       permissions: { ...permissions, ...restricted },
     });

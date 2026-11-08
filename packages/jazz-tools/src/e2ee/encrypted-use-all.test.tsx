@@ -1,4 +1,6 @@
-import { expect, it } from "vitest";
+import { frontE2eeCore } from "./fixtures/app.js";
+import { afterEach, expect, it, vi } from "vitest";
+import { WebSocket as NodeWebSocket } from "undici";
 import { act, render, waitFor } from "@testing-library/react";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
@@ -11,25 +13,32 @@ import { createBrowserCrypto } from "./browser.js";
 import { deviceRequestSchema, deviceRequestPermissions } from "./device-requests.js";
 import { spaceSchema } from "./spaces.js";
 
+afterEach(() => vi.unstubAllGlobals());
+
 it.each(["ready", "error", "update", "history"])(
   "useAll keeps encrypted data loading until decryption settles (%s)",
   async (scenario) => {
+    // The app backend runs in Node, even while React renders in happy-dom.
+    vi.stubGlobal("WebSocket", NodeWebSocket);
     const fail = scenario === "error";
-    const app = s.defineApp({
-      ...deviceRequestSchema,
-      ...spaceSchema,
-      projects: s.table({ title: s.string() }, {}),
-      notes: s
-        .table(
-          { projectId: s.uuid(), title: s.string() },
-          { project: s.rel("projects", "projectId") },
-        )
-        .encrypted({
-          space: "projectId",
-          columns: ["title"],
-          ...(scenario === "history" ? { indexes: { title: "equality" as const } } : {}),
-        }),
-    });
+    const app = s.defineApp(
+      {
+        ...deviceRequestSchema,
+        ...spaceSchema,
+        projects: s.table({ title: s.string() }, {}),
+        notes: s
+          .table(
+            { projectId: s.uuid(), title: s.string() },
+            { project: s.rel("projects", "projectId") },
+          )
+          .encrypted({
+            space: "projectId",
+            columns: ["title"],
+            ...(scenario === "history" ? { indexes: { title: "equality" as const } } : {}),
+          }),
+      },
+      { migrations: "none" },
+    );
     const permissions = definePermissions(app, ({ policy, session }) => {
       policy.projects.allowRead.always();
       policy.projects.allowInsert.always();
@@ -45,7 +54,7 @@ it.each(["ready", "error", "update", "history"])(
       policy.__e2ee_space_deliveries.allowRead.always();
       policy.__e2ee_space_deliveries.allowInsert.where({ senderAccountId: session.user.account });
     });
-    const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+    let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
     let client: Awaited<ReturnType<typeof createJazzClient>> | undefined;
     let view: ReturnType<typeof render> | undefined;
     let release!: () => void;
@@ -61,6 +70,10 @@ it.each(["ready", "error", "update", "history"])(
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
+        schema: app,
+        permissions: { ...deviceRequestPermissions, ...permissions },
+      });
+      server = await frontE2eeCore(server, {
         schema: app,
         permissions: { ...deviceRequestPermissions, ...permissions },
       });

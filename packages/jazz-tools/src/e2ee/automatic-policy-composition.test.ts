@@ -1,3 +1,5 @@
+import { frontE2eeCore } from "./fixtures/app.js";
+import { exportLocalFirstSecret } from "../accounts/enrollment.js";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
@@ -7,21 +9,24 @@ import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
 
 it("preserves explicit administration rules and encrypted mutations when composing application policies", async () => {
-  const app = s.defineApp({
-    projects: s.table({ title: s.string() }, {}),
-    notes: s
-      .table(
-        { projectId: s.uuid(), body: s.string(), done: s.boolean(), bytes: s.bytes() },
-        { project: s.rel("projects", "projectId") },
-      )
-      .encrypted({ space: "projectId", columns: ["body", "bytes"] })
-      .indexOnly(["projectId"]),
-  });
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  const app = s.defineApp(
+    {
+      projects: s.table({ title: s.string() }, {}),
+      notes: s
+        .table(
+          { projectId: s.uuid(), body: s.string(), done: s.boolean(), bytes: s.bytes() },
+          { project: s.rel("projects", "projectId") },
+        )
+        .encrypted({ space: "projectId", columns: ["body", "bytes"] })
+        .indexOnly(["projectId"]),
+    },
+    { migrations: "none" },
+  );
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   let db: Db | undefined;
   let retained: string | null = null;
   try {
-    const account = await localAccountConfig(server.appId, server.url);
+    let account = await localAccountConfig(server.appId, server.url);
     const administration = definePermissions(app, ({ policy, session }) => {
       policy.__e2ee_spaces.allowRead.always();
       policy.__e2ee_spaces.allowInsert.where({ creatorAccountId: session.user.account });
@@ -72,6 +77,14 @@ it("preserves explicit administration rules and encrypted mutations when composi
       schema: app,
       permissions,
     });
+    server = await frontE2eeCore(server, { schema: app, permissions: permissions });
+    const registeredAccountId = account.account.id;
+    account = await localAccountConfig(
+      server.appId,
+      server.url,
+      exportLocalFirstSecret(account.account),
+    );
+    expect(account.account.id).toBe(registeredAccountId);
     db = await createDb({
       ...account,
       e2ee: {

@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
@@ -18,12 +19,15 @@ function signal() {
 }
 
 it("accepts one competing group reconciliation and converges the space on its accepted epoch", async () => {
-  const app = s.defineApp({
-    ...deviceRequestSchema,
-    ...spaceSchema,
-    ...groupSchema,
-    projects: s.table({ title: s.string() }, {}),
-  });
+  const app = s.defineApp(
+    {
+      ...deviceRequestSchema,
+      ...spaceSchema,
+      ...groupSchema,
+      projects: s.table({ title: s.string() }, {}),
+    },
+    { migrations: "none" },
+  );
   const policies = definePermissions(app, ({ policy, session }) => {
     const authenticated = session.where({ authMode: { in: ["local-first", "external"] } });
     policy.projects.allowRead.where(authenticated);
@@ -48,7 +52,7 @@ it("accepts one competing group reconciliation and converges the space on its ac
     policy.__e2ee_group_repairs.allowRead.where(authenticated);
     policy.__e2ee_group_repairs.allowInsert.where({ accountId: session.user.account });
   });
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Awaited<ReturnType<typeof createDb>>[] = [];
   const reached = [signal(), signal()];
   const resume = signal();
@@ -58,6 +62,10 @@ it("accepts one competing group reconciliation and converges the space on its ac
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
+      schema: app,
+      permissions: { ...deviceRequestPermissions, ...policies },
+    });
+    server = await frontE2eeCore(server, {
       schema: app,
       permissions: { ...deviceRequestPermissions, ...policies },
     });
@@ -138,7 +146,7 @@ it("accepts one competing group reconciliation and converges the space on its ac
     expect(outcomes.filter((result) => result.status === "rejected")).toHaveLength(1);
     const rejected = outcomes.find((result) => result.status === "rejected");
     if (rejected?.status !== "rejected") throw new Error("Missing rejected rotation");
-    expect(rejected.reason).toMatchObject({ code: "exclusive_conflict" });
+    expect(rejected.reason).toMatchObject({ code: "serialization_conflict" });
     const groupSuccessors = await owner.all(app.__e2ee_group_successors, { tier: "remote" });
     expect(groupSuccessors).toHaveLength(1);
     expect(groupSuccessors[0]!.groupId).toBe(group.id);

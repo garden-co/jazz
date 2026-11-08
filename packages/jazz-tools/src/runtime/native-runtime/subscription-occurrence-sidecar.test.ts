@@ -28,6 +28,7 @@ function encodeSubscriptionDelta(delta: {
   writer.vec((indexWriter, index) => indexWriter.u64(index), updatedKeys.length);
   writer.vec((indexWriter, index) => indexWriter.u64(index), updatedKeys.length);
   writer.vec((indexWriter, index) => indexWriter.u64(index), removedKeys.length);
+  writer.vec((row) => row.vec(() => undefined, 0), updatedKeys.length); // updated splices
   return writer.finish();
 }
 

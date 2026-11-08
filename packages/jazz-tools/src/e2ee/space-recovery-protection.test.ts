@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
@@ -8,11 +9,14 @@ import { spaceSchema } from "./spaces.js";
 import { createNativeCrypto } from "./native.js";
 
 it("rechecks native space recovery creation coverage after root retirement and required-space removal", async () => {
-  const app = s.defineApp({
-    ...deviceRequestSchema,
-    ...spaceSchema,
-    projects: s.table({ title: s.string() }, {}),
-  });
+  const app = s.defineApp(
+    {
+      ...deviceRequestSchema,
+      ...spaceSchema,
+      projects: s.table({ title: s.string() }, {}),
+    },
+    { migrations: "none" },
+  );
   const policies = definePermissions(app, ({ policy, session }) => {
     const authenticated = session.where({ authMode: { in: ["local-first", "external"] } });
     policy.projects.allowRead.where(authenticated);
@@ -44,7 +48,7 @@ it("rechecks native space recovery creation coverage after root retirement and r
   };
   const accountStore = store();
   const sessions: Awaited<ReturnType<typeof createJazzSession>>[] = [];
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   try {
     await deploy({
       serverUrl: server.url,
@@ -53,6 +57,7 @@ it("rechecks native space recovery creation coverage after root retirement and r
       schema: app,
       permissions,
     });
+    server = await frontE2eeCore(server, { schema: app, permissions: permissions });
     const native = await createNativeCrypto();
     const open = async (crypto = native) => {
       const session = await createJazzSession({

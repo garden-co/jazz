@@ -6,7 +6,6 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
-import { createAccountManager } from "jazz-tools";
 import {
   deploy,
   startLocalJazzServer,
@@ -38,28 +37,20 @@ type Identity = {
 
 async function createIdentity(
   jwtIssuer: TestJwtIssuerHandle,
-  upstream: LocalJazzServerHandle,
+  baseUrl: string,
   userId: string,
 ): Promise<Identity> {
-  const token = jwtIssuer.jwtForUser(userId, {}, { issuer: EXTERNAL_ISSUER });
+  const token = await jwtIssuer.jwtForUser(userId, {}, { issuer: EXTERNAL_ISSUER });
   const payload = JSON.parse(Buffer.from(token.split(".")[1]!, "base64url").toString("utf8"));
   expect(payload).toMatchObject({ iss: EXTERNAL_ISSUER, sub: userId });
-  let stored: string | null = null;
-  const accounts = await createAccountManager({
-    appId: upstream.appId,
-    serverUrl: upstream.url,
-    env: `todo-server-integration-${crypto.randomUUID()}`,
-    store: {
-      async read() {
-        return stored;
-      },
-      async update(transform) {
-        stored = transform(stored);
-      },
-    },
+  // The todo server provisions the identity's account on sign-in.
+  const response = await fetch(`${baseUrl}/sign-in`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
   });
-  const account = await accounts.registerJWT(token);
-  return { token, userId, user: account.id };
+  expect(response.status).toBe(200);
+  const { account } = (await response.json()) as { account: string };
+  return { token, userId, user: account };
 }
 let primaryIdentity: Identity;
 let jwtIssuer: TestJwtIssuerHandle;
@@ -94,22 +85,18 @@ describe("Todo Server Integration", () => {
   let server: RunningServer;
   let baseUrl: string;
   let upstream: LocalJazzServerHandle;
+  let bundle: string;
 
   beforeAll(async () => {
     jwtIssuer = await startTestJwtIssuer();
-    upstream = await startLocalJazzServer({
-      jwksUrl: jwtIssuer.jwksUrl,
-      jwtIssuer: EXTERNAL_ISSUER,
-      jwtAudience: jwtIssuer.audience,
-    });
-    await deploy({
+    upstream = await startLocalJazzServer();
+    ({ bundle } = await deploy({
       serverUrl: upstream.url,
       appId: upstream.appId,
       adminSecret: upstream.adminSecret,
       schema: app,
       permissions,
-    });
-    primaryIdentity = await createIdentity(jwtIssuer, upstream, "todo-rest-integration");
+    }));
     // Create an isolated persistent server for the CRUD suite.
     const todoServer = await createServer(
       {
@@ -122,6 +109,7 @@ describe("Todo Server Integration", () => {
     // Start on random available port
     server = await startServer(todoServer, 0);
     baseUrl = server.baseUrl;
+    primaryIdentity = await createIdentity(jwtIssuer, baseUrl, "todo-rest-integration");
   });
 
   afterAll(async () => {
@@ -139,6 +127,7 @@ describe("Todo Server Integration", () => {
       serverUrl: upstream.url,
       backendSecret: upstream.backendSecret,
       adminSecret: upstream.adminSecret,
+      bundle,
     };
   }
 
@@ -259,8 +248,8 @@ describe("Todo Server Integration", () => {
 
   describe("Policy-Aware Requests", () => {
     it("filters rows by the authenticated session owner", async () => {
-      const alice = await createIdentity(jwtIssuer, upstream, "todo-rest-policy-alice");
-      const bob = await createIdentity(jwtIssuer, upstream, "todo-rest-policy-bob");
+      const alice = await createIdentity(jwtIssuer, baseUrl, "todo-rest-policy-alice");
+      const bob = await createIdentity(jwtIssuer, baseUrl, "todo-rest-policy-bob");
       const aliceTitle = `Alice private ${Date.now()}`;
       const bobTitle = `Bob private ${Date.now()}`;
 
@@ -450,8 +439,8 @@ describe("Todo Server Integration", () => {
         // The suite shares one deployed upstream, so use an identity that has
         // no earlier todos rather than assuming a fresh local server implies a
         // fresh remote account view.
-        const sseIdentity = await createIdentity(jwtIssuer, upstream, "todo-rest-sse-primary");
-        const otherIdentity = await createIdentity(jwtIssuer, upstream, "todo-rest-sse-other");
+        const sseIdentity = await createIdentity(jwtIssuer, baseUrl, "todo-rest-sse-primary");
+        const otherIdentity = await createIdentity(jwtIssuer, baseUrl, "todo-rest-sse-other");
         const foreignCreate = await authenticatedFetch(
           `${sseBaseUrl}/todos`,
           {

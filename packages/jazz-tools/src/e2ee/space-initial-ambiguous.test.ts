@@ -2,9 +2,9 @@ import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
 import { createDb } from "../runtime/default-create-db.js";
-import { createAccountManager } from "../accounts/create-account-manager.js";
+import { createJazzSession } from "../backend/create-jazz-session.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
-import { deploy, startLocalJazzServer, startTestJwtIssuer } from "../testing/index.js";
+import { deploy, startLocalJazzServer, startTestJazz } from "../testing/index.js";
 import { deviceRequestSchema, deviceRequestPermissions } from "./device-requests.js";
 import { groupSchema } from "./groups.js";
 import { spaceSchema } from "./spaces.js";
@@ -12,12 +12,15 @@ import { createBrowserKeyEnvelope, createBrowserDeviceSigner } from "./browser.j
 import { groupContext, groupRootBytes } from "./group-format.js";
 
 it("rejects an initial recipient ID that resolves to both an accepted account and group", async () => {
-  const app = s.defineApp({
-    ...deviceRequestSchema,
-    ...groupSchema,
-    ...spaceSchema,
-    projects: s.table({ title: s.string() }, {}),
-  });
+  const app = s.defineApp(
+    {
+      ...deviceRequestSchema,
+      ...groupSchema,
+      ...spaceSchema,
+      projects: s.table({ title: s.string() }, {}),
+    },
+    { migrations: "none" },
+  );
   const policies = definePermissions(app, ({ policy, session }) => {
     policy.projects.allowRead.always();
     policy.projects.allowInsert.always();
@@ -40,15 +43,12 @@ it("rejects an initial recipient ID that resolves to both an accepted account an
     policy.__e2ee_group_repairs.allowRead.always();
     policy.__e2ee_group_repairs.allowInsert.where({ accountId: session.user.account });
   });
-  const issuer = await startTestJwtIssuer();
-  const server = await startLocalJazzServer({
+  let server = await startLocalJazzServer({
     allowLocalFirstAuth: true,
     inMemory: true,
-    jwksUrl: issuer.jwksUrl,
-    jwtIssuer: issuer.issuer,
-    jwtAudience: issuer.audience,
   });
   const clients: Awaited<ReturnType<typeof createDb>>[] = [];
+  let recipientSession: Awaited<ReturnType<typeof createJazzSession>> | undefined;
   const store = () => {
     let value: string | null = null;
     return {
@@ -80,22 +80,53 @@ it("rejects an initial recipient ID that resolves to both an accepted account an
         __e2ee_group_repairs: policies.__e2ee_group_repairs!,
       },
     });
-    const alice = await localAccountConfig(server.appId, server.url);
-    const bobAccounts = await createAccountManager({
-      appId: server.appId,
-      serverUrl: server.url,
-      store: store(),
+    const core = server;
+    const front = await startTestJazz({
+      core,
+      app,
+      permissions: {
+        ...deviceRequestPermissions,
+        projects: policies.projects!,
+        __e2ee_spaces: policies.__e2ee_spaces!,
+        __e2ee_space_grants: policies.__e2ee_space_grants!,
+        __e2ee_space_deliveries: policies.__e2ee_space_deliveries!,
+        __e2ee_space_successors: policies.__e2ee_space_successors!,
+        __e2ee_groups: policies.__e2ee_groups!,
+        __e2ee_group_membership: policies.__e2ee_group_membership!,
+        __e2ee_group_successors: policies.__e2ee_group_successors!,
+        __e2ee_group_deliveries: policies.__e2ee_group_deliveries!,
+        __e2ee_group_repairs: policies.__e2ee_group_repairs!,
+      },
     });
-    const bob = {
-      appId: server.appId,
-      serverUrl: server.url,
-      account: await bobAccounts.registerJWT(issuer.jwtForUser("bob")),
-      driver: { type: "memory" as const },
+    server = {
+      ...core,
+      url: front.url,
+      async stop() {
+        try {
+          await front.stop();
+        } finally {
+          await core.stop();
+        }
+      },
     };
+    const alice = await localAccountConfig(server.appId, server.url);
     const creator = await createDb({ ...alice, e2ee: { app, store: store() } });
     const bobStore = store();
-    const recipient = await createDb({ ...bob, e2ee: { app, store: bobStore } });
-    clients.push(creator, recipient);
+    // A normal backend-assigned account has a v7 ID that can also name a
+    // valid group. Use the app's bearer transport at the SAME registry origin;
+    // a separate test-user origin would change the signed E2EE application scope.
+    recipientSession = await createJazzSession({
+      appId: server.appId,
+      serverUrl: server.url,
+      app,
+      permissions: { ...deviceRequestPermissions, ...policies },
+      credential: front.bearer("bob"),
+      driver: { type: "memory" },
+      e2ee: { app, store: bobStore },
+    });
+    const recipient = recipientSession.getSnapshot().client!.db;
+    const bob = { account: recipientSession.getSnapshot().account! };
+    clients.push(creator);
     await creator.e2ee.devices.list();
     await recipient.e2ee.devices.list();
     const stored = JSON.parse((await bobStore.read())!).devices[0];
@@ -169,8 +200,8 @@ it("rejects an initial recipient ID that resolves to both an accepted account an
     expect(await creator.all(app.__e2ee_space_grants, { tier: "remote" })).toEqual([]);
     expect(await creator.all(app.__e2ee_space_deliveries, { tier: "remote" })).toEqual([]);
   } finally {
+    await recipientSession?.close();
     await Promise.all(clients.map((client) => client.shutdown()));
     await server.stop();
-    await issuer.stop();
   }
 }, 60_000);

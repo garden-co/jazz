@@ -2,15 +2,25 @@ import { canonicalJsonSchema, columnTypeSignature } from "../runtime/schema-meta
 import { structuralValuesEqual } from "../runtime/structural-values.js";
 import type {
   ColumnDescriptor,
+  ColumnMergeStrategy,
   ColumnType as WasmColumnType,
   Value,
   WasmSchema,
 } from "../drivers/types.js";
-import { blake3 } from "@noble/hashes/blake3.js";
+import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { parseUuidBytes } from "../runtime/hex.js";
 
 const SHORT_SCHEMA_HASH_LENGTH = 12;
+
+// Must match the merge-strategy bytes in Rust's schema hash (branch.rs).
+const MERGE_STRATEGY_HASH_BYTES: Record<ColumnMergeStrategy, number> = {
+  Counter: 1,
+  GSet: 2,
+  Text: 3,
+  Markdown: 4,
+  Html: 5,
+};
 
 export function normalizeSchemaHashInput(hash: string, label: string): string {
   const normalized = hash.trim().toLowerCase();
@@ -56,6 +66,11 @@ function compareCodePoints(left: string, right: string): number {
 }
 
 export function structuralSchemaHash(schema: WasmSchema): string {
+  return bytesToHex(sha256(structuralSchemaBytes(schema)));
+}
+
+/** The canonical bytes a schema's structural hash is taken over. */
+export function structuralSchemaBytes(schema: WasmSchema): Uint8Array {
   const writer = new StructuralHashWriter();
 
   for (const tableName of Object.keys(schema).sort()) {
@@ -83,7 +98,7 @@ export function structuralSchemaHash(schema: WasmSchema): string {
     }
   }
 
-  return bytesToHex(blake3(writer.bytes()));
+  return writer.bytes();
 }
 
 export { columnTypeSignature };
@@ -159,7 +174,7 @@ function hashColumns(writer: StructuralHashWriter, columns: ColumnDescriptor[]):
 
     if (column.merge_strategy) {
       writer.byte(1);
-      writer.byte(column.merge_strategy === "Counter" ? 1 : 2);
+      writer.byte(MERGE_STRATEGY_HASH_BYTES[column.merge_strategy]);
     } else {
       writer.byte(0);
     }

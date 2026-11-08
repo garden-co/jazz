@@ -1,6 +1,5 @@
-import { createServer } from "node:http";
 import { accountRegistryUrl } from "../accounts/context.js";
-import { requestAccountRegistry, readAccountAssignment } from "../accounts/registry-client.js";
+import { requestVouchedAccount, readAccountAssignment } from "../accounts/registry-client.js";
 import { createHmac, randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -13,17 +12,20 @@ import { startLocalJazzServer } from "../testing/index.js";
 // ---------------------------------------------------------------------------
 // Inline schema + permissions
 // ---------------------------------------------------------------------------
-const todoApp = s.defineApp({
-  todos: s.table(
-    {
-      title: s.string(),
-      done: s.boolean(),
-      description: s.string().optional(),
-      owner_id: s.uuid(),
-    },
-    {},
-  ),
-});
+const todoApp = s.defineApp(
+  {
+    todos: s.table(
+      {
+        title: s.string(),
+        done: s.boolean(),
+        description: s.string().optional(),
+        owner_id: s.uuid(),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+);
 
 const todoAppPermissions = s.definePermissions(todoApp, ({ policy, session }) => {
   policy.todos.allowRead.where({ owner_id: session.user.account });
@@ -64,7 +66,7 @@ const externalJwtPublicKey = {
  */
 async function createExternalIdentity(
   actorName: string,
-  server: { url: string },
+  server: { url: string; backendSecret?: string },
   appId: string,
 ): Promise<ExternalIdentity> {
   const header = Buffer.from(
@@ -86,34 +88,18 @@ async function createExternalIdentity(
   const token = `${header}.${payload}.${signature}`;
   const userId = actorName;
   const identity = { issuer: EXTERNAL_ISSUER, subject: userId };
-  const response = await requestAccountRegistry(
+  // The app's backend registers the user it verified.
+  const response = await requestVouchedAccount(
     accountRegistryUrl(server.url, appId),
-    "register",
-    token,
+    "login-or-register",
+    identity,
+    server.backendSecret!,
   );
   return { token, userId, user: readAccountAssignment(response, identity) };
 }
 
 async function startRequestTestServer(options: Parameters<typeof startLocalJazzServer>[0]) {
-  const jwks = createServer((_request, response) => {
-    response.setHeader("Content-Type", "application/json");
-    response.end(JSON.stringify({ keys: [externalJwtPublicKey] }));
-  });
-  await new Promise<void>((resolve) => jwks.listen(0, "127.0.0.1", resolve));
-  onTestFinished(
-    () =>
-      new Promise<void>((resolve, reject) =>
-        jwks.close((error) => (error ? reject(error) : resolve())),
-      ),
-  );
-  const address = jwks.address();
-  if (!address || typeof address === "string") throw new Error("No JWKS port");
-  return startLocalJazzServer({
-    ...options,
-    jwksUrl: `http://127.0.0.1:${address.port}`,
-    jwtIssuer: EXTERNAL_ISSUER,
-    jwtAudience: "napi-request-audience",
-  });
+  return startLocalJazzServer(options);
 }
 
 async function createLocalFirstIdentity(
@@ -155,7 +141,7 @@ async function createTestContext(
   backendSecret: string,
   adminSecret: string,
 ) {
-  await deploy({
+  const { bundle } = await deploy({
     appId,
     serverUrl: server.url,
     adminSecret,
@@ -167,6 +153,7 @@ async function createTestContext(
   const dataPath = join(dataRoot, "runtime.db");
   const { createJazzContext } = await import("../backend/create-jazz-context.js");
   const context = createJazzContext({
+    bundle,
     appId,
     app: todoApp,
     permissions: todoAppPermissions,
@@ -224,22 +211,25 @@ describe("forRequest auth and policy", () => {
     const appId = randomUUID();
     const backendSecret = "dependent-transform-backend";
     const adminSecret = "dependent-transform-admin";
-    const app = s.defineApp({
-      products: s.table(
-        {
-          owner_id: s.uuid(),
-          unit: s.string().default("cents"),
-          price: s.float().transform({
-            dependsOn: ["unit"],
-            from: (value, context: Readonly<{ unit: string }>) =>
-              context.unit === "cents" ? value / 100 : value,
-            to: (value: number, context: Readonly<{ unit: string }>) =>
-              context.unit === "cents" ? value * 100 : value,
-          }),
-        },
-        {},
-      ),
-    });
+    const app = s.defineApp(
+      {
+        products: s.table(
+          {
+            owner_id: s.uuid(),
+            unit: s.string().default("cents"),
+            price: s.float().transform({
+              dependsOn: ["unit"],
+              from: (value, context: Readonly<{ unit: string }>) =>
+                context.unit === "cents" ? value / 100 : value,
+              to: (value: number, context: Readonly<{ unit: string }>) =>
+                context.unit === "cents" ? value * 100 : value,
+            }),
+          },
+          {},
+        ),
+      },
+      { migrations: "none" },
+    );
     const permissions = s.definePermissions(app, ({ policy, session }) => {
       policy.products.allowRead.where({ owner_id: session.user.account });
       policy.products.allowInsert.where({});
@@ -247,9 +237,16 @@ describe("forRequest auth and policy", () => {
     });
     const server = await startRequestTestServer({ appId, backendSecret, adminSecret });
     onTestFinished(() => server.stop());
-    await deploy({ appId, serverUrl: server.url, adminSecret, schema: app, permissions });
+    const { bundle } = await deploy({
+      appId,
+      serverUrl: server.url,
+      adminSecret,
+      schema: app,
+      permissions,
+    });
     const { createJazzContext } = await import("../backend/create-jazz-context.js");
     const context = createJazzContext({
+      bundle,
       appId,
       app,
       permissions,
@@ -953,13 +950,16 @@ it.each(["table", "relation"] as const)(
     const appId = randomUUID();
     const backendSecret = "request-scope-backend";
     const adminSecret = "request-scope-admin";
-    const app = s.defineApp({
-      rooms: s.table(
-        { title: s.string(), code: s.string() },
-        { linksViaRoom: s.reverse("links", "roomRelation") },
-      ),
-      links: s.table({ room: s.uuid() }, { roomRelation: s.rel("rooms", "room") }),
-    });
+    const app = s.defineApp(
+      {
+        rooms: s.table(
+          { title: s.string(), code: s.string() },
+          { linksViaRoom: s.reverse("links", "roomRelation") },
+        ),
+        links: s.table({ room: s.uuid() }, { roomRelation: s.rel("rooms", "room") }),
+      },
+      { migrations: "none" },
+    );
     const query = kind === "relation" ? app.links.hopTo("roomRelation") : app.rooms;
     const permissions = s.definePermissions(app, ({ policy, session }) => {
       policy.rooms.allowRead.where({ code: session.claims["join_code"] });
@@ -967,9 +967,16 @@ it.each(["table", "relation"] as const)(
     });
     const server = await startRequestTestServer({ appId, backendSecret, adminSecret });
     onTestFinished(() => server.stop());
-    await deploy({ appId, serverUrl: server.url, adminSecret, schema: app, permissions });
+    const { bundle } = await deploy({
+      appId,
+      serverUrl: server.url,
+      adminSecret,
+      schema: app,
+      permissions,
+    });
     const { createJazzContext } = await import("../backend/create-jazz-context.js");
     const writer = createJazzContext({
+      bundle,
       appId,
       app,
       permissions,
@@ -979,6 +986,7 @@ it.each(["table", "relation"] as const)(
       driver: { type: "memory" },
     });
     const reader = createJazzContext({
+      bundle,
       appId,
       app,
       permissions,
@@ -1136,16 +1144,23 @@ it("shares explicit backend transport state across scoped Db wrappers", async ()
   const appId = randomUUID();
   const backendSecret = "shared-transport-backend";
   const adminSecret = "shared-transport-admin";
-  const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) });
+  const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) }, { migrations: "none" });
   const permissions = s.definePermissions(app, ({ policy }) => {
     policy.notes.allowRead.where({});
   });
   const server = await startRequestTestServer({ appId, backendSecret, adminSecret });
   onTestFinished(() => server.stop());
-  await deploy({ appId, serverUrl: server.url, adminSecret, schema: app, permissions });
+  const { bundle } = await deploy({
+    appId,
+    serverUrl: server.url,
+    adminSecret,
+    schema: app,
+    permissions,
+  });
 
   const { createJazzContext } = await import("../backend/create-jazz-context.js");
   const writer = createJazzContext({
+    bundle,
     appId,
     app,
     permissions,
@@ -1155,6 +1170,7 @@ it("shares explicit backend transport state across scoped Db wrappers", async ()
     driver: { type: "memory" },
   });
   const reader = createJazzContext({
+    bundle,
     appId,
     app,
     permissions,
@@ -1193,15 +1209,22 @@ it("rejects a scoped remote wait when its context shuts down offline", async () 
   const appId = randomUUID();
   const backendSecret = "shutdown-transport-backend";
   const adminSecret = "shutdown-transport-admin";
-  const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) });
+  const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) }, { migrations: "none" });
   const permissions = s.definePermissions(app, ({ policy }) => {
     policy.notes.allowRead.where({});
   });
   const server = await startRequestTestServer({ appId, backendSecret, adminSecret });
   onTestFinished(() => server.stop());
-  await deploy({ appId, serverUrl: server.url, adminSecret, schema: app, permissions });
+  const { bundle } = await deploy({
+    appId,
+    serverUrl: server.url,
+    adminSecret,
+    schema: app,
+    permissions,
+  });
   const { createJazzContext } = await import("../backend/create-jazz-context.js");
   const context = createJazzContext({
+    bundle,
     appId,
     app,
     permissions,

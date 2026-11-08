@@ -1,9 +1,9 @@
 //! Synced aggregates: a remote aggregate read subscribes to its input rows
 //! (the rows the reader may read that match its filters), and the client
 //! aggregates them as it would local rows. AVG stays finite for large
-//! finite inputs. Not ported from Jazz.
+//! finite inputs.
 
-mod common;
+use crate::common;
 
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;
@@ -122,7 +122,7 @@ fn a_synced_aggregate_reads_only_the_rows_its_reader_may_read() {
     let client = open(1, user(1));
     let (client_side, server_side) = duplex();
     let _upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, user(1));
+    server.accept_subscriber(server_side, user(1)).unwrap();
 
     let query = Query::from("metrics")
         .filter(eq(col("kind"), lit("cpu")))

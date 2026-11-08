@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
@@ -16,7 +17,7 @@ it("configures sliced-app space administration without managed schema imports", 
   };
   // Ordinary-app mutations share the composed-policy fixture. This keeps
   // the independently constructed slice on the same public mutation paths.
-  const app = s.defineSliceableApp(definition).slice("projects", "notes");
+  const app = s.defineSliceableApp(definition, { migrations: "none" }).slice("projects", "notes");
   const permissions = definePermissions(app, ({ policy, session }) => {
     policy.projects.allowRead.always();
     policy.projects.allowInsert.where({ "$createdBy.account": session.user.account });
@@ -33,7 +34,7 @@ it("configures sliced-app space administration without managed schema imports", 
     policy.__e2ee_space_successors.allowRead.always();
     policy.__e2ee_space_successors.allowInsert.where({ authorAccountId: session.user.account });
   });
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
   let retained: string | null = null;
   try {
@@ -44,6 +45,7 @@ it("configures sliced-app space administration without managed schema imports", 
       schema: app,
       permissions,
     });
+    server = await frontE2eeCore(server, { schema: app, permissions: permissions });
     const account = await localAccountConfig(server.appId, server.url);
     db = await createDb({
       ...account,
@@ -100,7 +102,7 @@ it("configures sliced-app space administration without managed schema imports", 
 }, 60_000);
 
 it("does not advertise managed policies on ordinary apps", () => {
-  const app = s.defineApp({ projects: s.table({ title: s.string() }, {}) });
+  const app = s.defineApp({ projects: s.table({ title: s.string() }, {}) }, { migrations: "none" });
   definePermissions(app, ({ policy }) => {
     // @ts-expect-error Ordinary apps do not contain managed E2EE tables.
     expect(policy.__e2ee_spaces).toBeUndefined();
@@ -115,7 +117,7 @@ it("slices an automatically registered table from a reusable encrypted schema", 
       .encrypted({ space: "projectId", columns: ["body"] })
       .branchBy("projectId"),
   });
-  const app = s.defineSliceableApp(definition).slice("__e2ee_spaces");
+  const app = s.defineSliceableApp(definition, { migrations: "none" }).slice("__e2ee_spaces");
   const permissions = definePermissions(app, ({ policy }) => {
     policy.__e2ee_spaces.allowRead.always();
   });
@@ -125,7 +127,7 @@ it("slices an automatically registered table from a reusable encrypted schema", 
 it("does not infer encryption from a widened ordinary table type", () => {
   const columns = { title: s.string() };
   const projects: DefinedTable<typeof columns, {}> = s.table(columns, {});
-  const app = s.defineApp({ projects });
+  const app = s.defineApp({ projects }, { migrations: "none" });
   expect(Object.keys(app.wasmSchema)).toEqual(["projects"]);
   definePermissions(app, ({ policy }) => {
     // @ts-expect-error Possible encryption is not an encrypted declaration.

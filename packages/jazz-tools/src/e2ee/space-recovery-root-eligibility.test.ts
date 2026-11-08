@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { createHash } from "node:crypto";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
@@ -50,11 +51,14 @@ it("isolates malformed recovery roots and propagates verifier failures", async (
     "inactive creator",
     "wrong-epoch creator",
   ] as const;
-  const app = s.defineApp({
-    ...deviceRequestSchema,
-    ...spaceSchema,
-    projects: s.table({ title: s.string() }, {}),
-  });
+  const app = s.defineApp(
+    {
+      ...deviceRequestSchema,
+      ...spaceSchema,
+      projects: s.table({ title: s.string() }, {}),
+    },
+    { migrations: "none" },
+  );
   const policies = definePermissions(app, ({ policy, session }) => {
     const authenticated = session.where({ authMode: { in: ["local-first", "external"] } });
     policy.projects.allowRead.where(authenticated);
@@ -78,7 +82,7 @@ it("isolates malformed recovery roots and propagates verifier failures", async (
   const sessions: JazzSession<JazzClient>[] = [];
   const secrets: Uint8Array[] = [];
   const accountStore = store();
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   try {
     await deploy({
       serverUrl: server.url,
@@ -87,6 +91,7 @@ it("isolates malformed recovery roots and propagates verifier failures", async (
       schema: app,
       permissions,
     });
+    server = await frontE2eeCore(server, { schema: app, permissions: permissions });
     const open = async (deviceStore: AccountStore, account = accountStore) => {
       const session = await createJazzSession({
         appId: server.appId,

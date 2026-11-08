@@ -16,7 +16,7 @@ use jazz::db::{
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::records::Value;
-use jazz::schema::{JazzSchema, TableSchema};
+use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 
@@ -27,11 +27,6 @@ type BenchDb = Db;
 
 pub struct Fixture {
     db: BenchDb,
-    session_table: TableSchema,
-    member_table: TableSchema,
-    track_table: TableSchema,
-    step_table: TableSchema,
-    transport_table: TableSchema,
     session_list: PreparedQuery,
     session_tracks: PreparedQuery,
     own_membership: PreparedQuery,
@@ -59,7 +54,7 @@ impl Default for Fixture {
 
 impl Fixture {
     pub fn new() -> Self {
-        let (db, session_table, member_table, track_table, step_table, transport_table) = open_db();
+        let db = open_db();
         let session_id = row_id(1, 0);
         let profile_id = row_id(2, 0);
         insert(
@@ -202,11 +197,6 @@ impl Fixture {
             .collect();
         Self {
             db,
-            session_table,
-            member_table,
-            track_table,
-            step_table,
-            transport_table,
             session_list,
             session_tracks,
             own_membership,
@@ -294,7 +284,7 @@ impl Fixture {
             .read(&self.session_list)
             .expect("read Wequencer session-browser query")
             .into_iter()
-            .map(|row| match row.cell(&self.session_table, "title") {
+            .map(|row| match row.cell("title") {
                 Some(Value::String(title)) => title,
                 value => panic!("unexpected session title: {value:?}"),
             })
@@ -304,7 +294,7 @@ impl Fixture {
             .read(&self.session_tracks)
             .expect("read Wequencer session-track query")
             .into_iter()
-            .map(|row| match row.cell(&self.track_table, "position") {
+            .map(|row| match row.cell("position") {
                 Some(Value::I32(position)) => position as u64,
                 value => panic!("unexpected track position: {value:?}"),
             })
@@ -314,7 +304,7 @@ impl Fixture {
             .read(&self.own_membership)
             .expect("read Wequencer membership query")
             .into_iter()
-            .filter(|row| matches!(row.cell(&self.member_table, "role"), Some(Value::String(_))))
+            .filter(|row| matches!(row.cell("role"), Some(Value::String(_))))
             .count();
         let presence_count = self
             .db
@@ -335,11 +325,11 @@ impl Fixture {
             .expect("read Wequencer track")
             .into_iter()
             .map(|row| {
-                let position = match row.cell(&self.step_table, "position") {
+                let position = match row.cell("position") {
                     Some(Value::I32(position)) => position as u64,
                     value => panic!("unexpected step position: {value:?}"),
                 };
-                let enabled = match row.cell(&self.step_table, "enabled") {
+                let enabled = match row.cell("enabled") {
                     Some(Value::Bool(enabled)) => enabled,
                     value => panic!("unexpected enabled value: {value:?}"),
                 };
@@ -364,11 +354,11 @@ impl Fixture {
             .expect("read bounded Wequencer playhead query")
             .into_iter()
             .map(|row| {
-                let position = match row.cell(&self.step_table, "position") {
+                let position = match row.cell("position") {
                     Some(Value::I32(position)) => position as u64,
                     value => panic!("unexpected step position: {value:?}"),
                 };
-                let enabled = match row.cell(&self.step_table, "enabled") {
+                let enabled = match row.cell("enabled") {
                     Some(Value::Bool(enabled)) => enabled,
                     value => panic!("unexpected enabled value: {value:?}"),
                 };
@@ -387,11 +377,11 @@ impl Fixture {
             .into_iter()
             .next()
             .expect("fixture transport receipt");
-        let playing = match row.cell(&self.transport_table, "playing") {
+        let playing = match row.cell("playing") {
             Some(Value::Bool(playing)) => playing,
             value => panic!("unexpected transport playing state: {value:?}"),
         };
-        let bar = match row.cell(&self.transport_table, "bar") {
+        let bar = match row.cell("bar") {
             Some(Value::I32(bar)) => bar as u64,
             value => panic!("unexpected transport bar: {value:?}"),
         };
@@ -563,28 +553,8 @@ fn schema() -> JazzSchema {
     JazzSchema::new(&source).expect("Wequencer schema compiles")
 }
 
-fn open_db() -> (
-    BenchDb,
-    TableSchema,
-    TableSchema,
-    TableSchema,
-    TableSchema,
-    TableSchema,
-) {
+fn open_db() -> BenchDb {
     let schema = schema();
-    let table = |name| {
-        schema
-            .tables()
-            .iter()
-            .find(|table| table.name == name)
-            .unwrap_or_else(|| panic!("{name} table"))
-            .clone()
-    };
-    let session_table = table("sessions");
-    let member_table = table("session_members");
-    let track_table = table("tracks");
-    let step_table = table("steps");
-    let transport_table = table("transport_observations");
     let db = block_on(Db::open(DbConfig::new(
         schema,
         DbIdentity {
@@ -613,14 +583,7 @@ fn open_db() -> (
             ("loop_steps".into(), Value::I32(STEPS as i32)),
         ]),
     );
-    (
-        db,
-        session_table,
-        member_table,
-        track_table,
-        step_table,
-        transport_table,
-    )
+    db
 }
 
 fn insert(db: &BenchDb, table: &str, id: RowUuid, cells: BTreeMap<String, Value>) {

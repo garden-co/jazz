@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./app.js";
 import { schema as s } from "../../schema-namespace.js";
 import { definePermissions } from "../../permissions/index.js";
 import { createDb } from "../../runtime/default-create-db.js";
@@ -10,29 +11,35 @@ import {
   type JazzClient as NativeJazzClient,
 } from "../../backend/create-jazz-session.js";
 import type { JazzSession } from "../../session/state.js";
-export const uploadApp = s.defineApp({
-  projects: s.table({ title: s.string() }, {}),
-  files: s
-    .table(
-      { projectId: s.uuid(), payload: s.bytes(), name: s.string() },
-      { project: s.rel("projects", "projectId") },
-    )
-    .encrypted({ space: "projectId", columns: ["payload", "name"] }),
-});
+export const uploadApp = s.defineApp(
+  {
+    projects: s.table({ title: s.string() }, {}),
+    files: s
+      .table(
+        { projectId: s.uuid(), payload: s.bytes(), name: s.string() },
+        { project: s.rel("projects", "projectId") },
+      )
+      .encrypted({ space: "projectId", columns: ["payload", "name"] }),
+  },
+  { migrations: "none" },
+);
 // Same deployed physical schema/identities, without automatic scope initialisation.
-export const legacyUploadApp = s.defineApp({
-  ...deviceRequestSchema,
-  ...groupSchema,
-  ...spaceSchema,
-  projects: s.table({ title: s.string() }, {}),
-  files: s.table(
-    { projectId: s.uuid(), payload: s.bytes(), name: s.bytes() },
-    { project: s.rel("projects", "projectId") },
-  ),
-});
+export const legacyUploadApp = s.defineApp(
+  {
+    ...deviceRequestSchema,
+    ...groupSchema,
+    ...spaceSchema,
+    projects: s.table({ title: s.string() }, {}),
+    files: s.table(
+      { projectId: s.uuid(), payload: s.bytes(), name: s.bytes() },
+      { project: s.rel("projects", "projectId") },
+    ),
+  },
+  { migrations: "none" },
+);
 
 export async function uploadFixture(native = false, denied = false, withRecipient = false) {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const permissions = definePermissions(uploadApp, ({ policy, session }) => {
     policy.projects.allowRead.always();
     policy.projects.allowInsert.always();
@@ -67,13 +74,15 @@ export async function uploadFixture(native = false, denied = false, withRecipien
     await server.stop();
   };
   try {
-    await deploy({
+    const deployment = {
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
       schema: uploadApp,
       permissions,
-    });
+    };
+    await deploy(deployment);
+    server = await frontE2eeCore(server, deployment);
     const ownerAccount = await localAccountConfig(server.appId, server.url);
     const recipientAccount = withRecipient
       ? await localAccountConfig(server.appId, server.url)

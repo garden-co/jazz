@@ -2,21 +2,24 @@ import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { encodeCellType } from "./cell-type.js";
 
-const app = s.defineApp({
-  values: s.table(
-    {
-      text: s.string(),
-      renamed: s.string().default("default"),
-      nullable: s.string().optional(),
-      json: s.json(),
-      choice: s.enum("a", "b"),
-      bytes: s.bytes(),
-      array: s.array(s.string()),
-      event: s.enum({ message: { text: s.string() } }),
-    },
-    {},
-  ),
-});
+const app = s.defineApp(
+  {
+    values: s.table(
+      {
+        text: s.string(),
+        renamed: s.string().default("default"),
+        nullable: s.string().optional(),
+        json: s.json(),
+        choice: s.enum("a", "b"),
+        bytes: s.bytes(),
+        array: s.array(s.string()),
+        event: s.enum({ message: { text: s.string() } }),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+);
 
 // Literal UTF-8 fixtures pin the durable authenticated descriptor, separately
 // from the physical Groove carrier (which conflates Text, Json and Enum).
@@ -38,16 +41,19 @@ it.each([
 });
 
 it("canonicalises JSON schema key order without discarding its constraints", () => {
-  const schema = s.defineApp({
-    values: s.table(
-      {
-        first: s.json({ type: "string", minLength: 1 }),
-        reordered: s.json({ minLength: 1, type: "string" }),
-        changed: s.json({ type: "string", minLength: 2 }),
-      },
-      {},
-    ),
-  });
+  const schema = s.defineApp(
+    {
+      values: s.table(
+        {
+          first: s.json({ type: "string", minLength: 1 }),
+          reordered: s.json({ minLength: 1, type: "string" }),
+          changed: s.json({ type: "string", minLength: 2 }),
+        },
+        {},
+      ),
+    },
+    { migrations: "none" },
+  );
   const [first, reordered, changed] = schema.wasmSchema.values.columns;
   expect(encodeCellType(first!)).toEqual(encodeCellType(reordered!));
   expect(encodeCellType(first!)).not.toEqual(encodeCellType(changed!));
@@ -56,14 +62,17 @@ it("canonicalises JSON schema key order without discarding its constraints", () 
 it("rejects sparse arrays in JSON type metadata rather than erasing their holes", () => {
   const required: string[] = [];
   required.length = 1;
-  const schema = s.defineApp({
-    values: s.table(
-      {
-        invalid: s.json({ type: "object", required }),
-      },
-      {},
-    ),
-  });
+  const schema = s.defineApp(
+    {
+      values: s.table(
+        {
+          invalid: s.json({ type: "object", required }),
+        },
+        {},
+      ),
+    },
+    { migrations: "none" },
+  );
   expect(() => encodeCellType(schema.wasmSchema.values.columns[0]!)).toThrow(
     "finite JSON metadata",
   );

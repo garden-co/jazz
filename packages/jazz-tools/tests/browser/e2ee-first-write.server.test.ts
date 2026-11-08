@@ -1,3 +1,4 @@
+import { appMigrations } from "../../src/testing/client-migrations.js";
 import { expect, it } from "vitest";
 import { schema as s } from "../../src/schema-namespace.js";
 import { migration as m } from "../../src/migration-namespace.js";
@@ -5,10 +6,10 @@ import { definePermissions } from "../../src/permissions/index.js";
 import { createDb } from "../../src/runtime/default-create-db.js";
 import { deploy } from "../../src/dev/catalogue.js";
 import { acquireBrowserTestAccount } from "./account-fixtures.js";
-import { getJazzServerInfo, stopJazzServer } from "./testing-server.js";
+import { getJazzServerInfo, stopJazzServer, startJazzApp, jazzCore } from "./testing-server.js";
 
 it("initialises a legacy space in the browser without replacing a hidden existing space", async () => {
-  const server = await getJazzServerInfo(`e2ee-first-write-${crypto.randomUUID()}`);
+  let server = await getJazzServerInfo(`e2ee-first-write-${crypto.randomUUID()}`);
   const before = { projects: s.table({ title: s.string() }, {}) };
   const after = {
     ...before,
@@ -16,8 +17,11 @@ it("initialises a legacy space in the browser without replacing a hidden existin
       .table({ projectId: s.uuid(), body: s.string() }, { project: s.rel("projects", "projectId") })
       .encrypted({ space: "projectId", columns: ["body"] }),
   };
-  const oldApp = s.defineApp(before);
-  const app = s.defineApp(after);
+  const migration = m.defineMigration({ from: before, to: after, createTables: { notes: true } });
+  const oldApp = s.defineApp(before, { migrations: await appMigrations(before) });
+  const app = s.defineApp(after, {
+    migrations: await appMigrations(before, { to: after, migration }),
+  });
   const oldPermissions = definePermissions(oldApp, ({ policy }) => {
     policy.projects.allowRead.always();
     policy.projects.allowInsert.always();
@@ -36,7 +40,8 @@ it("initialises a legacy space in the browser without replacing a hidden existin
   });
   const clients: Awaited<ReturnType<typeof createDb>>[] = [];
   try {
-    await deploy({ ...server, schema: oldApp, permissions: oldPermissions });
+    await deploy({ ...jazzCore(server), schema: oldApp, permissions: oldPermissions });
+    server = await startJazzApp(server, { schema: oldApp, permissions: oldPermissions });
     const creator = await createDb({
       appId: server.appId,
       serverUrl: server.serverUrl,
@@ -48,11 +53,12 @@ it("initialises a legacy space in the browser without replacing a hidden existin
       .insert(oldApp.projects, { title: "Before encryption" })
       .wait({ tier: "global" });
     await deploy({
-      ...server,
+      ...jazzCore(server),
       schema: app,
       permissions,
-      migration: m.defineMigration({ from: before, to: after, createTables: { notes: true } }),
+      migration,
     });
+    server = await startJazzApp(server, { schema: app, permissions });
     for (const key of ["writer", "outsider"]) {
       let saved: string | null = null;
       clients.push(

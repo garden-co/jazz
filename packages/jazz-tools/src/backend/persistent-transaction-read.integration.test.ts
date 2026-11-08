@@ -4,25 +4,22 @@ import { join } from "node:path";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
-import { deploy, startLocalJazzServer } from "../testing/index.js";
+import { startTestJazz } from "../testing/index.js";
 import { createJazzSession } from "./create-jazz-session.js";
 
 it("opens a persistent transaction before its first read, without E2EE", async () => {
-  const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) });
+  const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) }, { migrations: "none" });
   const permissions = definePermissions(app, ({ policy }) => {
     policy.notes.allowRead.always();
   });
   const directory = await mkdtemp(join(tmpdir(), "jazz-persistent-transaction-"));
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  const server = await startTestJazz({
+    app,
+    permissions,
+    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+  });
   let owner: Awaited<ReturnType<typeof createJazzSession>> | undefined;
   try {
-    await deploy({
-      serverUrl: server.url,
-      appId: server.appId,
-      adminSecret: server.adminSecret,
-      schema: app,
-      permissions,
-    });
     owner = await createJazzSession({
       appId: server.appId,
       serverUrl: server.url,

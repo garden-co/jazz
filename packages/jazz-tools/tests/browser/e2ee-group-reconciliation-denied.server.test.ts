@@ -7,16 +7,19 @@ import { deviceRequestSchema, deviceRequestPermissions } from "../../src/e2ee/de
 import { groupSchema } from "../../src/e2ee/groups.js";
 import { spaceSchema } from "../../src/e2ee/spaces.js";
 import { acquireBrowserTestAccount } from "./account-fixtures.js";
-import { getJazzServerInfo, stopJazzServer } from "./testing-server.js";
+import { getJazzServerInfo, startJazzApp, stopJazzServer } from "./testing-server.js";
 
 it("browser keeps a space in maintenance when Jazz denies recipient-group rotation", async () => {
-  const server = await getJazzServerInfo(`e2ee-denied-reconciliation-${crypto.randomUUID()}`);
-  const app = s.defineApp({
-    ...deviceRequestSchema,
-    ...groupSchema,
-    ...spaceSchema,
-    projects: s.table({ title: s.string() }, {}),
-  });
+  let server = await getJazzServerInfo(`e2ee-denied-reconciliation-${crypto.randomUUID()}`);
+  const app = s.defineApp(
+    {
+      ...deviceRequestSchema,
+      ...groupSchema,
+      ...spaceSchema,
+      projects: s.table({ title: s.string() }, {}),
+    },
+    { migrations: "none" },
+  );
   const policies = definePermissions(app, ({ policy, session }) => {
     policy.projects.allowRead.always();
     policy.projects.allowInsert.always();
@@ -54,6 +57,22 @@ it("browser keeps a space in maintenance when Jazz denies recipient-group rotati
   try {
     await deploy({
       ...server,
+      schema: app,
+      permissions: {
+        ...deviceRequestPermissions,
+        projects: policies.projects!,
+        __e2ee_spaces: policies.__e2ee_spaces!,
+        __e2ee_space_grants: policies.__e2ee_space_grants!,
+        __e2ee_space_deliveries: policies.__e2ee_space_deliveries!,
+        __e2ee_space_successors: policies.__e2ee_space_successors!,
+        __e2ee_groups: policies.__e2ee_groups!,
+        __e2ee_group_membership: policies.__e2ee_group_membership!,
+        __e2ee_group_successors: policies.__e2ee_group_successors!,
+        __e2ee_group_deliveries: policies.__e2ee_group_deliveries!,
+        __e2ee_group_repairs: policies.__e2ee_group_repairs!,
+      },
+    });
+    server = await startJazzApp(server, {
       schema: app,
       permissions: {
         ...deviceRequestPermissions,

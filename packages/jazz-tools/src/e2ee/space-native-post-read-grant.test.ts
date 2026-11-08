@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
@@ -8,17 +9,20 @@ import { spaceSchema } from "./spaces.js";
 import { createNativeCrypto } from "./native.js";
 
 it("grants a native space after reading its encrypted rows", async () => {
-  const app = s.defineApp({
-    ...deviceRequestSchema,
-    ...spaceSchema,
-    projects: s.table({ title: s.string() }, {}),
-    notes: s
-      .table(
-        { projectId: s.uuid(), title: s.string(), position: s.float() },
-        { project: s.rel("projects", "projectId") },
-      )
-      .encrypted({ space: "projectId", columns: ["title"], indexes: { title: "equality" } }),
-  });
+  const app = s.defineApp(
+    {
+      ...deviceRequestSchema,
+      ...spaceSchema,
+      projects: s.table({ title: s.string() }, {}),
+      notes: s
+        .table(
+          { projectId: s.uuid(), title: s.string(), position: s.float() },
+          { project: s.rel("projects", "projectId") },
+        )
+        .encrypted({ space: "projectId", columns: ["title"], indexes: { title: "equality" } }),
+    },
+    { migrations: "none" },
+  );
   const policies = definePermissions(app, ({ policy, session }) => {
     policy.projects.allowRead.always();
     policy.projects.allowInsert.always();
@@ -54,7 +58,7 @@ it("grants a native space after reading its encrypted rows", async () => {
       },
     };
   };
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const sessions: Awaited<ReturnType<typeof createJazzSession>>[] = [];
   const crypto = await createNativeCrypto();
   try {
@@ -65,6 +69,7 @@ it("grants a native space after reading its encrypted rows", async () => {
       schema: app,
       permissions,
     });
+    server = await frontE2eeCore(server, { schema: app, permissions: permissions });
     for (let index = 0; index < 2; index++) {
       sessions.push(
         await createJazzSession({
