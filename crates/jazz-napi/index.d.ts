@@ -251,12 +251,19 @@ export declare class PendingNativeRead {
   cancel(): void
 }
 
+/** An owner-bound completed upload for one later serializable attachment. */
+export declare class StagedStreamingMutation {
+  attach(openTransactionId: string): void
+  abort(): boolean
+}
+
 /** A large value uploaded in chunks, then published as one row mutation. */
 export declare class StreamingMutation {
   push(chunk: Uint8Array): void
   finish(): Write
   /** Stage the value's row mutation in the transaction it began in. */
   finishInTransaction(): void
+  stage(): StagedStreamingMutation
   abort(): boolean
 }
 

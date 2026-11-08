@@ -908,17 +908,24 @@ impl Write {
 pub struct StreamingMutation {
     inner: Inner,
     mutation: binding_host::StreamingMutation,
+    owner_closed: Rc<Cell<bool>>,
 }
 
 #[napi]
 impl StreamingMutation {
     #[napi]
     pub fn push(&mut self, chunk: Uint8Array) -> js::Result<()> {
+        if self.owner_closed.get() {
+            return Err(closed().into());
+        }
         Ok(self.mutation.push(&chunk).map_err(host_error)?)
     }
 
     #[napi]
     pub fn finish(&mut self, env: Env) -> js::Result<Write> {
+        if self.owner_closed.get() {
+            return Err(closed().into());
+        }
         let write = self.mutation.finish();
         Ok(self.inner.write(&env, write)?)
     }
@@ -926,12 +933,61 @@ impl StreamingMutation {
     /// Stage the value's row mutation in the transaction it began in.
     #[napi(js_name = "finishInTransaction")]
     pub fn finish_in_transaction(&mut self) -> js::Result<()> {
+        if self.owner_closed.get() {
+            return Err(closed().into());
+        }
         Ok(self.mutation.finish_in_transaction().map_err(host_error)?)
     }
 
     #[napi]
+    pub fn stage(&mut self) -> js::Result<StagedStreamingMutation> {
+        if self.owner_closed.get() {
+            return Err(closed().into());
+        }
+        Ok(StagedStreamingMutation {
+            mutation: Some(self.mutation.stage().map_err(host_error)?),
+            owner_closed: Rc::clone(&self.owner_closed),
+        })
+    }
+
+    #[napi]
     pub fn abort(&mut self) -> js::Result<bool> {
+        if self.owner_closed.get() {
+            return Err(closed().into());
+        }
         Ok(self.mutation.abort().map_err(host_error)?)
+    }
+}
+
+/// An owner-bound completed upload for one later serializable attachment.
+#[napi(js_name = "StagedStreamingMutation")]
+pub struct StagedStreamingMutation {
+    mutation: Option<binding_host::StagedStreamingMutation>,
+    owner_closed: Rc<Cell<bool>>,
+}
+
+#[napi]
+impl StagedStreamingMutation {
+    #[napi]
+    pub fn attach(&mut self, open_transaction_id: String) -> js::Result<()> {
+        // Every attempt consumes the capability, including a closed owner.
+        let mut mutation = self.mutation.take().ok_or_else(closed)?;
+        if self.owner_closed.get() {
+            return Err(closed().into());
+        }
+        Ok(mutation.attach(&open_transaction_id).map_err(host_error)?)
+    }
+
+    #[napi]
+    pub fn abort(&mut self) -> js::Result<bool> {
+        let Some(mut mutation) = self.mutation.take() else {
+            return Ok(false);
+        };
+        // Dropping schedules lease cleanup; never touch SQLite after close.
+        if self.owner_closed.get() {
+            return Ok(true);
+        }
+        Ok(mutation.abort().map_err(host_error)?)
     }
 }
 
@@ -1170,10 +1226,14 @@ pub struct NapiDb {
     // Taken at close: every later call fails before touching the engine.
     inner: Rc<RefCell<Option<Inner>>>,
     owns_runtime: bool,
+    streaming_owner_closed: Rc<Cell<bool>>,
 }
 
 impl Drop for NapiDb {
     fn drop(&mut self) {
+        if self.owns_runtime {
+            self.streaming_owner_closed.set(true);
+        }
         // Release the tick callback so it no longer keeps Node's event loop
         // alive once JavaScript dropped an unclosed database.
         if self.owns_runtime
@@ -1197,6 +1257,7 @@ impl NapiDb {
         Self {
             inner: Rc::new(RefCell::new(Some(Inner::new(binding)))),
             owns_runtime: true,
+            streaming_owner_closed: Rc::new(Cell::new(false)),
         }
     }
 
@@ -1647,7 +1708,11 @@ impl NapiDb {
                 transaction.as_deref(),
             )
             .map_err(host_error)?;
-        Ok(StreamingMutation { inner, mutation })
+        Ok(StreamingMutation {
+            inner,
+            mutation,
+            owner_closed: Rc::clone(&self.streaming_owner_closed),
+        })
     }
 
     #[napi(factory, js_name = "openMemory")]
@@ -1782,6 +1847,7 @@ impl NapiDb {
         Ok(Self {
             inner: Rc::new(RefCell::new(Some(Inner { binding, ..inner }))),
             owns_runtime: false,
+            streaming_owner_closed: Rc::clone(&self.streaming_owner_closed),
         })
     }
 
@@ -2200,6 +2266,9 @@ impl NapiDb {
     /// package's `close()` wraps this pollable form.
     #[napi(js_name = "__closePollable", skip_typescript)]
     pub fn close(&self) -> js::Result<Either<Uint8Array, PendingNativeRead>> {
+        if self.owns_runtime {
+            self.streaming_owner_closed.set(true);
+        }
         // A close failure still consumes the binding: retrying a partially
         // failed close would re-enter an indeterminate runtime.
         let Some(inner) = self.inner.borrow_mut().take() else {

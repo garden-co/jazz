@@ -1338,6 +1338,10 @@ impl Binding {
     /// rejected with the first such refusal. So is a serializable write's
     /// conflict with a row that moved past its snapshot.
     fn staged(&self, id: OpenTransactionId, staged: Result<WriteHandle, Error>) -> HostResult<()> {
+        self.staged_result(id, staged.map(drop))
+    }
+
+    fn staged_result(&self, id: OpenTransactionId, staged: Result<(), Error>) -> HostResult<()> {
         match staged {
             Err(error)
                 if error.is_apply_time_rejection()
@@ -1346,7 +1350,7 @@ impl Binding {
                 self.refused.borrow_mut().entry(id).or_insert(error);
                 Ok(())
             }
-            staged => staged.map(drop).map_err(Into::into),
+            staged => staged.map_err(Into::into),
         }
     }
 
@@ -2278,6 +2282,35 @@ impl StreamingMutation {
         state.binding.staged(id, staged)
     }
 
+    /// Complete an out-of-transaction upload for later atomic attachment.
+    pub fn stage(&mut self) -> HostResult<StagedStreamingMutation> {
+        if self.failed {
+            return Err(closed());
+        }
+        if self.in_transaction() {
+            return Err(HostError::Argument(
+                "a streaming mutation begun in a transaction finishes in it".into(),
+            ));
+        }
+        let state = *self.state.take().ok_or_else(closed)?;
+        let staged = block_on(state.binding.db.stage_streaming_value_upload(
+            state.upload,
+            state.mutation,
+            &state.table,
+            state.row,
+            state.cells,
+            &state.column,
+            state.identity,
+            state.updated_at_ms,
+            state.head,
+            state.base,
+        ))?;
+        Ok(StagedStreamingMutation {
+            binding: state.binding,
+            staged: Some(staged),
+        })
+    }
+
     /// Drop the upload; `false` when already closed.
     pub fn abort(&mut self) -> HostResult<bool> {
         let Some(state) = self.state.take() else {
@@ -2285,6 +2318,37 @@ impl StreamingMutation {
         };
         block_on(state.binding.db.abort_streaming_value_upload(state.upload))?;
         Ok(true)
+    }
+}
+
+/// Single-use completed upload retained by the binding that admitted it.
+pub struct StagedStreamingMutation {
+    binding: Binding,
+    staged: Option<crate::db::StagedStreamingValue>,
+}
+
+impl StagedStreamingMutation {
+    /// Consume even a failed attachment; stored-state refusals poison commit
+    /// exactly like the binding's other staged writes.
+    pub fn attach(&mut self, transaction: &str) -> HostResult<()> {
+        let mut staged = self.staged.take().ok_or_else(closed)?;
+        let id = open_transaction(transaction)?;
+        let result = block_on(
+            self.binding
+                .db
+                .attach_staged_streaming_value(id, &mut staged),
+        );
+        self.binding.staged_result(id, result)
+    }
+
+    /// Release an unattached upload. A consumed capability is already closed.
+    pub fn abort(&mut self) -> HostResult<bool> {
+        let Some(mut staged) = self.staged.take() else {
+            return Ok(false);
+        };
+        Ok(block_on(
+            self.binding.db.abort_staged_streaming_value(&mut staged),
+        )?)
     }
 }
 
