@@ -10,6 +10,8 @@ import { loadWasmModuleForTest } from "../testing/wasm-runtime-test-utils.js";
 import { openConfig } from "./native-codec.js";
 import { encodeSchema } from "./schema-codec.js";
 import { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
+import { startLocalJazzServer } from "../../dev/dev-server.js";
+import { deploy } from "../../dev/catalogue.js";
 
 const app = s.defineApp({ files: s.table({ payload: s.bytes() }, {}) }, { migrations: "none" });
 const session: Session = {
@@ -256,8 +258,25 @@ for (const host of ["NAPI", "WASM"] as const) {
     await expect(staged.attach(tx)).rejects.toThrow(/consumed/);
   });
 
-  it(`${host} SDK staged normal policy refusal still prevents commit`, async () => {
+  it(`${host} SDK staged normal policy refusal prevents Global acceptance`, async () => {
+    const server = await startLocalJazzServer({
+      inMemory: true,
+      schema: app.wasmSchema,
+      permissions: readOnly,
+    });
+    onTestFinished(() => server.stop());
+    const { bundle } = await deploy({
+      appId: server.appId,
+      serverUrl: server.url,
+      adminSecret: server.adminSecret,
+      schema: app,
+      permissions: readOnly,
+    });
     const { client, runtime, rows } = await open(host, true);
+    // The normal host-test transport pins the exact published permission bundle.
+    // The staged operation still carries its explicit user, never SYSTEM.
+    client.connectTransport(server.url, { admin_secret: server.adminSecret, bundle });
+    await runtime.query(JSON.stringify({ table: "files" }), undefined, "remote");
     const staged = await client.stageStreamingMutation(
       "insert",
       "files",
@@ -278,11 +297,13 @@ for (const host of ["NAPI", "WASM"] as const) {
       undefined,
       "accepted-evidence",
     );
-    // Stored-state refusal is retained by the existing binding until commit.
+    // A replica may durably stage a provisional write. Only the real authority
+    // decides whether its policy allows Global acceptance.
     await staged.attach(tx);
     expect(await rows()).toEqual([]);
     const receipt = runtime.commitTransaction(tx);
-    await expect(runtime.waitForTransaction(receipt, "local")).rejects.toThrow(
+    await runtime.waitForTransaction(receipt, "local");
+    await expect(runtime.waitForTransaction(receipt, "global")).rejects.toThrow(
       /forbidden|permission|denied|policy/i,
     );
     expect(await staged.abort()).toBe(false);
