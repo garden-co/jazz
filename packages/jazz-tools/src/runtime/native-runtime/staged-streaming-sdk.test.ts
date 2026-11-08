@@ -255,10 +255,27 @@ for (const host of ["NAPI", "WASM"] as const) {
   });
 
   it(`${host} SDK staged normal policy refusal still prevents commit`, async () => {
-    const { runtime, rows } = await open(host, true);
-    const staged = await runtime.stageStreamingMutation("insert", "files", {}, "payload", bytes());
-    const tx = createOpenTransactionId();
-    runtime.beginTransaction("serializable", tx);
+    const { client, runtime, rows } = await open(host, true);
+    const staged = await client.stageStreamingMutation(
+      "insert",
+      "files",
+      {},
+      "payload",
+      bytes(),
+      undefined,
+      session,
+      undefined,
+      undefined,
+      "accepted-evidence",
+    );
+    const tx = client.openTransaction(
+      "serializable",
+      session,
+      undefined,
+      undefined,
+      undefined,
+      "accepted-evidence",
+    );
     // Stored-state refusal is retained by the existing binding until commit.
     await staged.attach(tx);
     expect(await rows()).toEqual([]);
