@@ -21,6 +21,8 @@ type Upload = {
   finishInTransaction(): void;
 };
 type Raw = {
+  registerSchema(schema: Uint8Array): Raw;
+  close(): unknown;
   beginStreamingMutation(
     table: string,
     row: Uint8Array,
@@ -55,8 +57,8 @@ async function open(host: "NAPI" | "WASM") {
       undefined,
       "local-only",
     )) as RowState[];
-  const begin = (id: number, tx?: string) =>
-    raw.beginStreamingMutation(
+  const begin = (id: number, tx?: string, target: Raw = raw) =>
+    target.beginStreamingMutation(
       "files",
       new Uint8Array(16).fill(id),
       encodeCellsForStreamingRow(schema.files!, {}, "payload"),
@@ -127,5 +129,41 @@ for (const host of ["NAPI", "WASM"] as const) {
     await runtime.close();
     expect(() => staged.attach(tx)).toThrow();
     expect(await staged.abort()).toBe(false);
+  });
+
+  it(`${host} keeps a nonowning view close separate from the stream owner`, async () => {
+    const { raw, rows, begin } = await open(host);
+    const view = raw.registerSchema(encodeSchema(schema));
+    const upload = begin(5, undefined, view);
+    await upload.push(new Uint8Array([4, 5, 6]));
+    const staged = await upload.stage();
+    await view.close();
+    const tx = createOpenTransactionId();
+    raw.beginTransaction(tx, "serializable");
+    staged.attach(tx);
+    raw.commitTransaction(tx, "serializable").close();
+    expect((await rows())[0]?.valuesByColumn?.get("payload")).toEqual({
+      type: "Bytea",
+      value: new Uint8Array([4, 5, 6]),
+    });
+  });
+
+  it(`${host} retires view-held capabilities and unfinished streams with the physical owner`, async () => {
+    const { raw, runtime, begin } = await open(host);
+    const view = raw.registerSchema(encodeSchema(schema));
+    const upload = begin(6, undefined, view);
+    await upload.push(new Uint8Array([1]));
+    const staged = await upload.stage();
+    const unfinished = begin(7, undefined, view);
+    await unfinished.push(new Uint8Array([2]));
+    const tx = createOpenTransactionId();
+    raw.beginTransaction(tx, "serializable");
+    await runtime.close();
+    expect(() => staged.attach(tx)).toThrow();
+    expect(await staged.abort()).toBe(false);
+    await expect(
+      Promise.resolve().then(() => unfinished.push(new Uint8Array([3]))),
+    ).rejects.toThrow();
+    await expect(Promise.resolve().then(() => unfinished.stage())).rejects.toThrow();
   });
 }
