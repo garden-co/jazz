@@ -194,10 +194,13 @@ it.each(["text", "json", "indexed", "implicit-branch"] as const)(
         columns: ["payload"],
         ...(kind === "indexed" ? { indexes: { payload: "equality" as const } } : {}),
       });
-    const app = s.defineApp({
-      projects: s.table({ title: s.string() }, {}),
-      files: kind === "implicit-branch" ? files.branchBy("projectId") : files,
-    });
+    const app = s.defineApp(
+      {
+        projects: s.table({ title: s.string() }, {}),
+        files: kind === "implicit-branch" ? files.branchBy("projectId") : files,
+      },
+      { migrations: "none" },
+    );
     const db = await createDb(
       await localAccountConfig(`encrypted-stream-coordinate-${crypto.randomUUID()}`),
     );
