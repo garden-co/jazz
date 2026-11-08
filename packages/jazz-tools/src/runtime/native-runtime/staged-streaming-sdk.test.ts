@@ -25,7 +25,7 @@ const readOnly = s.definePermissions(app, ({ policy }) => {
   policy.files.allowInsert.never();
 });
 
-async function open(host: "NAPI" | "WASM", denyWrites = false) {
+async function open(host: "NAPI" | "WASM", denyWrites = false, appId = "staged-sdk") {
   const schema = mergePermissionsIntoWasmSchema(
     app.wasmSchema,
     denyWrites ? readOnly : allowAll(app),
@@ -38,7 +38,7 @@ async function open(host: "NAPI" | "WASM", denyWrites = false) {
   const native = ctor.openMemory(encodeSchema(schema), openConfig(node, author, 1, false));
   const runtime = NativeRuntimeAdapter.fromDb(native as never, schema, node, author, 1, false);
   onTestFinished(() => runtime.close());
-  const context = { appId: "staged-sdk", schema, cookieSession: session };
+  const context = { appId, schema, cookieSession: session };
   const client = JazzClient.connectWithRuntime(runtime, context);
   return {
     schema,
@@ -272,7 +272,7 @@ for (const host of ["NAPI", "WASM"] as const) {
       schema: app,
       permissions: readOnly,
     });
-    const { client, runtime, rows } = await open(host, true);
+    const { client, runtime, rows } = await open(host, true, server.appId);
     // The normal host-test transport pins the exact published permission bundle.
     // The staged operation still carries its explicit user, never SYSTEM.
     client.connectTransport(server.url, { admin_secret: server.adminSecret, bundle });
