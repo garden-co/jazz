@@ -59,6 +59,7 @@ import type {
   Runtime,
   RuntimeWriteWaitOptions,
   StreamingInsertResult,
+  StagedStreamingMutation,
   StreamingMutationKind,
   StreamingValueSource,
   TransactionKind,
@@ -484,6 +485,12 @@ type NativeStreamingMutation = {
   finish(): Write | Promise<Write>;
   /** Stage the row mutation in the transaction the mutation began in. */
   finishInTransaction?(): void | Promise<void>;
+  stage?(): NativeStagedStreamingMutation | Promise<NativeStagedStreamingMutation>;
+  abort(): boolean | Promise<boolean>;
+};
+
+type NativeStagedStreamingMutation = {
+  attach(openTransactionId: string): void | Promise<void>;
   abort(): boolean | Promise<boolean>;
 };
 
@@ -1827,7 +1834,7 @@ export class NativeRuntimeAdapter implements Runtime {
     return this.finishInsert(table, suppliedRowId ?? write.rowId, values, write);
   }
 
-  async streamingMutation(
+  streamingMutation(
     mutation: StreamingMutationKind,
     table: string,
     values: InsertValues,
@@ -1836,14 +1843,86 @@ export class NativeRuntimeAdapter implements Runtime {
     writeContext?: string | null,
     objectId?: string | null,
   ): Promise<StreamingInsertResult> {
+    return this.consumeStreamingMutation(
+      mutation,
+      table,
+      values,
+      column,
+      source,
+      writeContext,
+      objectId,
+      false,
+    ) as Promise<StreamingInsertResult>;
+  }
+
+  stageStreamingMutation(
+    mutation: StreamingMutationKind,
+    table: string,
+    values: InsertValues,
+    column: string,
+    source: StreamingValueSource,
+    writeContext?: string | null,
+    objectId?: string | null,
+    publicationReadCapability?: TransactionReadCapability,
+  ): Promise<StagedStreamingMutation> {
+    return this.consumeStreamingMutation(
+      mutation,
+      table,
+      values,
+      column,
+      source,
+      writeContext,
+      objectId,
+      true,
+      publicationReadCapability,
+    ) as Promise<StagedStreamingMutation>;
+  }
+
+  private async consumeStreamingMutation(
+    mutation: StreamingMutationKind,
+    table: string,
+    values: InsertValues,
+    column: string,
+    source: StreamingValueSource,
+    writeContext: string | null | undefined,
+    objectId: string | null | undefined,
+    stageOnly: boolean,
+    publicationReadCapability?: TransactionReadCapability,
+  ): Promise<StreamingInsertResult | StagedStreamingMutation> {
     const begin = this.db.beginStreamingMutation;
     const operation =
       mutation === "insert" ? "Insert" : mutation === "update" ? "Update" : "Upsert";
     this.assertMutationAdmission(operation);
     const tx = this.currentTx(writeContext, operation);
     const writeSession = sessionFromWriteContext(writeContext);
-    const writeIdentity = this.mutationWriteIdentity(writeSession, writeContext);
     const attribution = this.backendAttribution(writeContext);
+    if (
+      publicationReadCapability !== undefined &&
+      (!stageOnly ||
+        tx ||
+        !isAcceptedReadCapability(publicationReadCapability) ||
+        attribution ||
+        !this.db.acceptedRead ||
+        (this.trustedBackend && (!writeSession || writeSession.backendAuthority)))
+    )
+      throw new Error("Staged publication evidence requires a supported authenticated owner");
+    const ownClientEvidence = publicationReadCapability === "client-accepted-evidence";
+    if (
+      ownClientEvidence &&
+      (writeSession ||
+        this.trustedBackend ||
+        this.readAuthorizationHost === "trusted-serving" ||
+        !this.db.beginClientEvidenceTransaction)
+    )
+      throw new Error("Staged own-client publication cannot select another session");
+    // Capture the exact actor used by the future begin. This does not open a
+    // batch, install claims, or confer authority; attachment still checks the
+    // live batch's identity and normal commit policy/read-set validation.
+    const writeIdentity = publicationReadCapability
+      ? ownClientEvidence
+        ? this.peerIdentity.slice()
+        : writeSession?.identity
+      : this.mutationWriteIdentity(writeSession, writeContext);
     const branchView = branchViewFromWriteContext(writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     rejectAttributedBranchWrite(attribution, branchView);
@@ -1851,6 +1930,8 @@ export class NativeRuntimeAdapter implements Runtime {
       this.assertTransactionAttribution(tx, attribution);
       this.assertTransactionWriteIdentity(tx, attribution ? undefined : writeIdentity);
     }
+    if (stageOnly && branchView)
+      throw new Error("Staged streaming mutations require the root view");
     if (!begin) throw new Error("Native runtime does not expose streaming mutations");
 
     const definition = this.table(table);
@@ -1880,6 +1961,10 @@ export class NativeRuntimeAdapter implements Runtime {
       branchView?.base,
       tx?.id,
     );
+    if (stageOnly && !upload.stage) {
+      await upload.abort();
+      throw new Error("Native runtime does not expose staged streaming mutations");
+    }
     if (tx && !upload.finishInTransaction) {
       await upload.abort();
       throw new Error("This native runtime does not support streaming inside a transaction yet");
@@ -1930,6 +2015,44 @@ export class NativeRuntimeAdapter implements Runtime {
       await previousFinalization;
       let receipt: MutationResult;
       try {
+        if (stageOnly) {
+          const staged = await upload.stage!();
+          let available = true;
+          return {
+            id: formatUuid(rowId),
+            attach: async (openTransactionId) => {
+              if (!available) throw new Error("Staged streaming mutation is already consumed");
+              available = false;
+              try {
+                this.assertMutationAdmission(operation);
+                const pending = owner.pendingTxs.get(openTransactionId);
+                if (!pending || pending.kind !== "serializable")
+                  throw new Error(
+                    "Staged streaming mutation requires an open serializable transaction",
+                  );
+                this.assertTransactionWriteIdentity(
+                  pending,
+                  attribution ? undefined : writeIdentity,
+                );
+                this.assertTransactionAttribution(pending, attribution);
+                await staged.attach(openTransactionId);
+                pending.hasStagedMutations = true;
+              } catch (error) {
+                try {
+                  await staged.abort();
+                } catch {
+                  // A retired owner must retain its original attachment refusal.
+                }
+                throw error;
+              }
+            },
+            abort: async () => {
+              if (!available) return false;
+              available = false;
+              return await staged.abort();
+            },
+          };
+        }
         if (tx) {
           await upload.finishInTransaction!();
           tx.hasStagedMutations = true;
