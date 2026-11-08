@@ -542,6 +542,8 @@ export type Transport = {
 type PendingTx = {
   id: OpenTransactionId;
   kind: TransactionKind;
+  /** SDK schema used at opening; checked only by opaque streamed attachment. */
+  streamingSchema: Uint8Array;
   identity?: Uint8Array;
   requestSession?: RuntimeSession;
   readCapability?: TransactionReadCapability;
@@ -1919,9 +1921,7 @@ export class NativeRuntimeAdapter implements Runtime {
     // batch, install claims, or confer authority; attachment still checks the
     // live batch's identity and normal commit policy/read-set validation.
     const writeIdentity = publicationReadCapability
-      ? ownClientEvidence
-        ? this.peerIdentity.slice()
-        : writeSession?.identity
+      ? (writeSession?.identity ?? this.peerIdentity.slice())
       : this.mutationWriteIdentity(writeSession, writeContext);
     const branchView = branchViewFromWriteContext(writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
@@ -1954,7 +1954,9 @@ export class NativeRuntimeAdapter implements Runtime {
       cells,
       column,
       mutation,
-      attribution ? undefined : writeIdentity,
+      // Own-client evidence opens in Database mode; authenticated evidence
+      // opens in Session mode, even when that session is the actual owner.
+      attribution || ownClientEvidence ? undefined : writeIdentity,
       attribution,
       updatedAtMs ?? undefined,
       branchView?.head,
@@ -2030,6 +2032,8 @@ export class NativeRuntimeAdapter implements Runtime {
                   throw new Error(
                     "Staged streaming mutation requires an open serializable transaction",
                   );
+                if (!sameBytes(pending.streamingSchema, this.schemaBytes))
+                  throw new Error("Staged streaming mutation belongs to another schema");
                 this.assertTransactionWriteIdentity(
                   pending,
                   attribution ? undefined : writeIdentity,
@@ -2472,7 +2476,9 @@ export class NativeRuntimeAdapter implements Runtime {
     readCapability?: TransactionReadCapability,
   ): OpenTransactionId {
     if (this !== this.ownerRuntime) {
-      return this.ownerRuntime.beginTransaction(kind, id, sessionJson, readCapability);
+      const opened = this.ownerRuntime.beginTransaction(kind, id, sessionJson, readCapability);
+      this.ownerRuntime.pendingTxs.get(opened)!.streamingSchema = this.schemaBytes;
+      return opened;
     }
     if (this.closed) {
       throw new Error("Begin transaction failed: native runtime is closed");
@@ -2528,6 +2534,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.pendingTxs.set(id, {
       id,
       kind,
+      streamingSchema: this.schemaBytes,
       identity: admission,
       requestSession: admission ? (session ?? undefined) : undefined,
       readCapability,

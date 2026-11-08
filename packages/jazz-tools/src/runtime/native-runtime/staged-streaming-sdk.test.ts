@@ -79,6 +79,34 @@ for (const host of ["NAPI", "WASM"] as const) {
     expect(await staged.abort()).toBe(false);
   });
 
+  it(`${host} SDK staged implicit authenticated evidence matches Session-owner opening`, async () => {
+    const { client, rows } = await open(host);
+    const staged = await client.stageStreamingMutation(
+      "insert",
+      "files",
+      {},
+      "payload",
+      bytes(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      "accepted-evidence",
+    );
+    const tx = client.openTransaction(
+      "serializable",
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      "accepted-evidence",
+    );
+    await client.prepareTransaction(tx, (io) => io.attachStreamingMutation(staged));
+    await client.commitTransaction(tx).txId;
+    expect(await rows()).toHaveLength(1);
+    expect(await staged.abort()).toBe(false);
+  });
+
   it(`${host} SDK staged explicit sessions remain explicit and own-client overrides refuse before input`, async () => {
     const { client, rows } = await open(host);
     let pulls = 0;
@@ -191,6 +219,27 @@ for (const host of ["NAPI", "WASM"] as const) {
     expect(await rows()).toEqual([]);
   });
 
+  it(`${host} SDK staged matching schema view retains its own publication context`, async () => {
+    const { runtime, schema, context, rows } = await open(host);
+    const view = runtime.registerSchemaView({
+      ...schema,
+      files: {
+        ...schema.files!,
+        columns: [
+          ...schema.files!.columns,
+          { name: "note", column_type: { type: "Text" }, nullable: true },
+        ],
+      },
+    });
+    const client = JazzClient.connectWithRuntime(view, context);
+    const staged = await client.stageStreamingMutation("insert", "files", {}, "payload", bytes());
+    const tx = client.beginTransaction("serializable");
+    await client.prepareTransaction(tx, (io) => io.attachStreamingMutation(staged));
+    await client.commitTransaction(tx).txId;
+    expect(await rows()).toHaveLength(1);
+    expect(await staged.abort()).toBe(false);
+  });
+
   it(`${host} SDK staged close and invalid-transaction attempts are terminal`, async () => {
     const { runtime } = await open(host);
     const invalid = await runtime.stageStreamingMutation("insert", "files", {}, "payload", bytes());
@@ -210,7 +259,9 @@ for (const host of ["NAPI", "WASM"] as const) {
     const staged = await runtime.stageStreamingMutation("insert", "files", {}, "payload", bytes());
     const tx = createOpenTransactionId();
     runtime.beginTransaction("serializable", tx);
-    await expect(staged.attach(tx)).rejects.toThrow();
+    // Stored-state refusal is retained by the existing binding until commit.
+    await staged.attach(tx);
+    expect(await rows()).toEqual([]);
     expect(() => runtime.commitTransaction(tx)).toThrow();
     expect(await staged.abort()).toBe(false);
     expect(await rows()).toEqual([]);
