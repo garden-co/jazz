@@ -20,6 +20,7 @@ const session: Session = {
 };
 const readOnly = s.definePermissions(app, ({ policy }) => {
   policy.files.allowRead.always();
+  policy.files.allowInsert.never();
 });
 
 async function open(host: "NAPI" | "WASM", denyWrites = false) {
@@ -27,6 +28,7 @@ async function open(host: "NAPI" | "WASM", denyWrites = false) {
     app.wasmSchema,
     denyWrites ? readOnly : allowAll(app),
   );
+  if (denyWrites) expect(schema.files!.policies?.insert?.with_check).toEqual({ type: "False" });
   const ctor =
     host === "NAPI" ? (await loadNapiModule()).NapiDb : (await loadWasmModuleForTest()).WasmDb;
   const node = new Uint8Array(16).fill(61);
@@ -279,7 +281,10 @@ for (const host of ["NAPI", "WASM"] as const) {
     // Stored-state refusal is retained by the existing binding until commit.
     await staged.attach(tx);
     expect(await rows()).toEqual([]);
-    expect(() => runtime.commitTransaction(tx)).toThrow();
+    const receipt = runtime.commitTransaction(tx);
+    await expect(runtime.waitForTransaction(receipt, "local")).rejects.toThrow(
+      /forbidden|permission|denied|policy/i,
+    );
     expect(await staged.abort()).toBe(false);
     expect(await rows()).toEqual([]);
   });
