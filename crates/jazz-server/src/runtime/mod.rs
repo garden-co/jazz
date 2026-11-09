@@ -8,7 +8,7 @@ pub use core::THIN_INGRESS_SERVER_BUDGET;
 use core::*;
 pub use core::{
     AbiBytes, CatalogueApplyError, Owner as ServerCore, ServerSession, SessionInput, ThinIngress,
-    WireIngress,
+    WireIngress, catalogue_schema,
 };
 
 #[cfg(feature = "native")]

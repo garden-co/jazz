@@ -808,6 +808,7 @@ dependencies = [
  "jazz-server",
  "jazz-wasm",
  "js-sys",
+ "serde_json",
  "tokio",
  "wasm-bindgen",
  "wasm-bindgen-futures",

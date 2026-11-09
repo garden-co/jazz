@@ -40,19 +40,24 @@ export class Authority {
     this.schedules = 0;
   }
 
-  async open(schema, config) {
+  async open(schema, config, reopen = false) {
     if (this.db || this.opening) throw new Error("authority is already open");
     this.opening = true;
     wasm ??= initSync({ module: wasmModule });
     if (this.trace) durableObjectSqlTrace(true);
     const start = performance.now();
     try {
-      this.db = await WasmServerCore.openDurableObject(
-        this.ctx.storage,
-        bytes(schema),
-        bytes(config),
-        () => this.schedule(),
-      );
+      this.db = reopen
+        ? await WasmServerCore.reopenDurableObject(this.ctx.storage, bytes(config), () =>
+            this.schedule(),
+          )
+        : await WasmServerCore.openDurableObject(
+            this.ctx.storage,
+            bytes(schema),
+            bytes(config),
+            () => this.schedule(),
+          );
+      this.startup = reopen ? "catalogue" : "published";
     } finally {
       this.opening = false;
     }
@@ -121,6 +126,7 @@ export class Authority {
     const at = (p) => ticks[Math.min(ticks.length - 1, Math.floor(p * ticks.length))] ?? 0;
     const out = {
       runtime: "ServerCore",
+      startup: this.startup,
       ticks: ticks.length,
       tickMsTotal: ticks.reduce((a, b) => a + b, 0),
       tickMsP50: at(0.5),
@@ -162,9 +168,14 @@ export class Authority {
         const message = JSON.parse(event.data);
         try {
           await this.waitForIdle();
-          if (message.op === "open") {
+          if (message.op === "open" || message.op === "reopen") {
+            if (message.op === "reopen" && "schema" in message)
+              throw new Error("reopen takes no schema");
             server.send(
-              JSON.stringify({ ok: true, openMs: await this.open(message.schema, message.config) }),
+              JSON.stringify({
+                ok: true,
+                openMs: await this.open(message.schema, message.config, message.op === "reopen"),
+              }),
             );
           } else if (message.op === "checkRejected") {
             this.db.checkRejectedRow(new Uint8Array(message.row), message.table);

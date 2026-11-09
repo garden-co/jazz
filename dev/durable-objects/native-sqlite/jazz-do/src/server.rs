@@ -12,7 +12,8 @@ use futures_util::StreamExt;
 use jazz::binding_host::{self, OpenAs};
 use jazz::catalogue::{BundleId, CatalogueChange, CataloguePut, bundle_id};
 use jazz::db::Db;
-use jazz_server::runtime::{ServerCore, ServerSession, SessionInput};
+use jazz::host::{HostTables, StoreFile};
+use jazz_server::runtime::{ServerCore, ServerSession, SessionInput, catalogue_schema};
 use jazz_wasm::{ObjectStorage, durable_object_storage};
 use tokio::sync::mpsc as output;
 use wasm_bindgen::prelude::*;
@@ -103,34 +104,55 @@ impl WasmServerCore {
         }
         let hash = jazz::tools::public_schema::SchemaHash::compute(&source);
         let bundle = bundle_id(&hash, &permissions).map_err(error)?;
-        #[cfg(feature = "scope-tests")]
-        let checks = db
-            .governed_view(db.current_schema().version_id())
-            .ok_or_else(|| error("missing fixture schema view"))?;
-        let wake = scheduler(schedule);
-        let mut core = ServerCore::from_db(db, None, wake.clone()).map_err(error)?;
-        let (_, published) = core
-            .apply_catalogue(
-                CatalogueChange {
-                    put: CataloguePut {
-                        schemas: vec![(source, 0)],
-                        bundles: vec![(hash, permissions, 0)],
-                        ..Default::default()
-                    },
+        Self::host(
+            db,
+            bundle,
+            schedule,
+            Some(CatalogueChange {
+                put: CataloguePut {
+                    schemas: vec![(source, 0)],
+                    bundles: vec![(hash, permissions, 0)],
                     ..Default::default()
                 },
-                None,
-            )
-            .await;
-        published.map_err(error)?;
-        Ok(Self {
-            core: Rc::new(RefCell::new(Some(core))),
-            next_session: Cell::new(1),
-            bundle,
-            wake,
-            #[cfg(feature = "scope-tests")]
-            checks,
-        })
+                ..Default::default()
+            }),
+        )
+        .await
+    }
+
+    /// Reconstruct the fixture authority without accepting or publishing schema
+    /// or permissions from the client. Production hosts select a bundle during
+    /// authenticated admission; this harness requires exactly one stored bundle.
+    #[wasm_bindgen(js_name = reopenDurableObject)]
+    pub async fn reopen(
+        storage: ObjectStorage,
+        config: Vec<u8>,
+        schedule: js_sys::Function,
+    ) -> Result<WasmServerCore, JsValue> {
+        let store = StoreFile::from_storage(durable_object_storage(storage)).map_err(error)?;
+        let rows = store.catalogue().map_err(error)?;
+        let schema = catalogue_schema(&rows)
+            .map_err(error)?
+            .ok_or_else(|| error("cannot reopen: no admitted catalogue schema"))?;
+        let [bundle] = rows.bundles.as_slice() else {
+            return Err(error(
+                "fixture reopen requires exactly one stored permissions bundle",
+            ));
+        };
+        let bundle = bundle.id;
+        let schema = serde_json::to_vec(schema.public_schema()).map_err(error)?;
+        let (schema, mut config) = binding_host::decode_open(&schema, &config).map_err(error)?;
+        if config.migrations.is_some() {
+            return Err(error(
+                "fixture reopen loads migrations from the catalogue, not the client",
+            ));
+        }
+        let (identity, _) =
+            binding_host::open_identity(&mut config, OpenAs::Backend).map_err(error)?;
+        let db = Db::open_file(binding_host::db_config(schema, &config, identity), store)
+            .await
+            .map_err(error)?;
+        Self::host(db, bundle, schedule, None).await
     }
 
     pub async fn tick(&self) -> Result<(), JsValue> {
@@ -263,5 +285,33 @@ impl ServerTransport {
 impl Drop for ServerTransport {
     fn drop(&mut self) {
         self.close();
+    }
+}
+
+impl WasmServerCore {
+    async fn host(
+        db: Db,
+        bundle: BundleId,
+        schedule: js_sys::Function,
+        publish: Option<CatalogueChange>,
+    ) -> Result<Self, JsValue> {
+        #[cfg(feature = "scope-tests")]
+        let checks = db
+            .governed_view(db.current_schema().version_id())
+            .ok_or_else(|| error("missing fixture schema view"))?;
+        let wake = scheduler(schedule);
+        let mut core = ServerCore::from_db(db, None, wake.clone()).map_err(error)?;
+        if let Some(change) = publish {
+            let (_, published) = core.apply_catalogue(change, None).await;
+            published.map_err(error)?;
+        }
+        Ok(Self {
+            core: Rc::new(RefCell::new(Some(core))),
+            next_session: Cell::new(1),
+            bundle,
+            wake,
+            #[cfg(feature = "scope-tests")]
+            checks,
+        })
     }
 }

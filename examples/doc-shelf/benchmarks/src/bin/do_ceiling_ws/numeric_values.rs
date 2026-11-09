@@ -43,10 +43,14 @@ pub(super) fn run(base: &str) {
     };
     control(
         &mut control_socket,
-        json!({
-            "op": "open", "schema": base64(&serde_json::to_vec(&schema).unwrap()),
-            "config": base64(&postcard::to_allocvec(&config).unwrap()),
-        }),
+        if std::env::var_os("REOPEN_CATALOGUE").is_some() {
+            json!({ "op": "reopen", "config": base64(&postcard::to_allocvec(&config).unwrap()) })
+        } else {
+            json!({
+                "op": "open", "schema": base64(&serde_json::to_vec(&schema).unwrap()),
+                "config": base64(&postcard::to_allocvec(&config).unwrap()),
+            })
+        },
     );
     let replica = |id: u16| {
         let db = block_on(Db::open(DbConfig::new(

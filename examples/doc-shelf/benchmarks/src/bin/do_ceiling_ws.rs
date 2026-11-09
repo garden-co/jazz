@@ -376,11 +376,15 @@ fn main() {
     };
     let opened = control(
         &mut control_socket,
-        json!({
-            "op": "open",
-            "schema": base64(&serde_json::to_vec(&schema()).expect("schema json")),
-            "config": base64(&postcard::to_allocvec(&config).expect("config")),
-        }),
+        if std::env::var_os("REOPEN_CATALOGUE").is_some() {
+            json!({ "op": "reopen", "config": base64(&postcard::to_allocvec(&config).unwrap()) })
+        } else {
+            json!({
+                "op": "open",
+                "schema": base64(&serde_json::to_vec(&schema()).expect("schema json")),
+                "config": base64(&postcard::to_allocvec(&config).expect("config")),
+            })
+        },
     );
     eprintln!("opened in {} ms", opened["openMs"]);
     if scope_test {

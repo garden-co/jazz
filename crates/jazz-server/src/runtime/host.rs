@@ -35,7 +35,6 @@ use jazz::ids::{AuthorSubject, MigrationLensId, NodeUuid, SchemaVersionId};
 use jazz::protocol::MigrationLens;
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
-use jazz::tools::public_schema::{TableName, TablePolicies};
 use jazz::wire::{WireAuthorityEndpoint, WireFeatures};
 #[cfg(test)]
 use jazz::{
@@ -1813,22 +1812,6 @@ pub(super) fn config(schema: JazzSchema) -> DbConfig {
             author: AuthorSubject::SYSTEM,
         },
     )
-}
-
-/// `schema` with each table's policies replaced by `permissions` (a table
-/// without an entry denies everything).
-pub(super) fn with_permissions(
-    schema: &JazzSchema,
-    permissions: &HashMap<TableName, TablePolicies>,
-) -> Result<JazzSchema, String> {
-    let mut source = schema.public_schema().clone();
-    if permissions.keys().any(|name| !source.contains_key(name)) {
-        return Err("schema permissions reference an unknown table".to_owned());
-    }
-    for (name, table) in source.iter_mut() {
-        table.policies = permissions.get(name).cloned().unwrap_or_default();
-    }
-    JazzSchema::new(&source).map_err(|error| format!("invalid schema permissions: {error}"))
 }
 
 #[cfg(test)]

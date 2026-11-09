@@ -1389,8 +1389,7 @@ impl Db {
     /// Open an explicitly owned SQL backend. Its execution and transaction
     /// methods remain together for the lifetime of this database.
     pub async fn open_storage(config: DbConfig, conn: Storage) -> Result<Self, Error> {
-        crate::format::admit(&conn)?;
-        Self::open_on(config, conn, None)
+        Self::open_file(config, crate::host::StoreFile::from_storage(conn)?).await
     }
 
     /// A durable store in one SQLite file (WAL unless `options.journal`
@@ -1405,7 +1404,7 @@ impl Db {
         Self::open_file(config, crate::host::StoreFile::open(path, options)?).await
     }
 
-    /// Open on a file [`crate::host::StoreFile::open`] admitted, whose host
+    /// Open on an admitted store (a file or an owned backend), whose host
     /// tables may already have been read or written.
     pub async fn open_file(config: DbConfig, file: crate::host::StoreFile) -> Result<Self, Error> {
         let crate::host::StoreFile { conn, path } = file;

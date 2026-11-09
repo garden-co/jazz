@@ -47,22 +47,10 @@ impl NativeOwner {
                 .iter()
                 .any(|stored| stored.version == Some(schema.version_id()));
         let head = rows.head().filter(|_| stored);
-        let compile = |hash: &jazz::tools::public_schema::SchemaHash| {
-            let structural = rows
-                .schema(hash)
-                .ok_or("the current permissions revision's schema is missing")?;
-            JazzSchema::new(&structural.schema)
-                .map_err(|error| format!("catalogue schema: {error}"))
-        };
-        // Every activation records a revision: without one, the store's
-        // genesis is current.
-        let current = match (head, rows.genesis().filter(|_| any_stored_catalogue)) {
-            (Some(head), _) => with_permissions(
-                &compile(&head.schema)?,
-                &head.permissions.clone().into_iter().collect(),
-            )?,
-            (None, Some(genesis)) => compile(&genesis.hash)?,
-            (None, None) => schema,
+        let current = if head.is_some() || any_stored_catalogue {
+            catalogue_schema(&rows)?.unwrap_or(schema)
+        } else {
+            schema
         };
         let config = match &chunk_store {
             Some(choice) if choice.network => config(current)

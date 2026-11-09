@@ -6,6 +6,7 @@ use jazz::ids::{AuthorSubject, SchemaVersionId};
 use jazz::protocol::MigrationLens;
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
+use jazz::tools::public_schema::{TableName, TablePolicies};
 use jazz::wire::{WireErrorCode, WireRetry};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -940,4 +941,43 @@ pub(super) fn superseded_error(published: &jazz::catalogue::BundleId) -> jazz::w
              app's backend"
         ),
     )
+}
+
+/// The stored current schema: the latest activated permissions revision, or
+/// the admitted genesis before any activation. None means no admitted schema;
+/// a revision naming a missing schema is an error, never a fresh-store fallback.
+pub fn catalogue_schema(rows: &CatalogueRows) -> Result<Option<JazzSchema>, String> {
+    let current = match rows.head() {
+        Some(head) => rows
+            .schema(&head.schema)
+            .ok_or("the current permissions revision's schema is missing")?,
+        None => match rows.genesis() {
+            Some(genesis) => genesis,
+            None => return Ok(None),
+        },
+    };
+    let schema =
+        JazzSchema::new(&current.schema).map_err(|error| format!("catalogue schema: {error}"))?;
+    match rows.head() {
+        Some(head) => {
+            with_permissions(&schema, &head.permissions.clone().into_iter().collect()).map(Some)
+        }
+        None => Ok(Some(schema)),
+    }
+}
+
+/// `schema` with each table's policies replaced by `permissions` (a table
+/// without an entry denies everything).
+pub(super) fn with_permissions(
+    schema: &JazzSchema,
+    permissions: &HashMap<TableName, TablePolicies>,
+) -> Result<JazzSchema, String> {
+    let mut source = schema.public_schema().clone();
+    if permissions.keys().any(|name| !source.contains_key(name)) {
+        return Err("schema permissions reference an unknown table".to_owned());
+    }
+    for (name, table) in source.iter_mut() {
+        table.policies = permissions.get(name).cloned().unwrap_or_default();
+    }
+    JazzSchema::new(&source).map_err(|error| format!("invalid schema permissions: {error}"))
 }

@@ -171,16 +171,25 @@ fixture schema and permissions bundle, and hands ownership to `ServerCore`.
 Socket frames enter session queues; one async tick advances and flushes the
 core before the host sends output. Microtask wakeups avoid re-entering Rust;
 disconnects close session input. `WasmDb` remains only for standalone value probes.
-Reconstruction still requires the test client to supply the fixture schema and
-config; this is not production startup or authentication.
+The `reopen` control operation supplies only fixture identity/configuration,
+not schema or permissions. `StoreFile::from_storage` reads the catalogue before
+handing that same storage to `Db::open_file`; shared `catalogue_schema` selects
+the activated revision or admitted genesis. Reopen publishes nothing and refuses
+an empty catalogue. The harness requires exactly one stored bundle; production
+identity recovery and authenticated bundle selection are still separate work.
 
 ```sh
 # After the scope-tests build and native client build below:
 node dev/durable-objects/native-sqlite/harness/test-server-core.mjs
+# Policy-filtered subscriptions and rejected writes, then catalogue-only restart:
+node dev/durable-objects/native-sqlite/harness/test-scopes.mjs --catalogue
 ```
 
 Validated locally: numeric sync and atomic rejection on two objects, disconnected
-session cleanup, and fresh replicas reading persisted values after workerd restart.
+session cleanup, and fresh replicas reading persisted values after workerd restart
+without republishing schema/permissions. The numeric history probe failed once
+with “history at a snapshot” during validation on 2026-11-09 and passed on rerun;
+its assertion is unchanged and the cause is unresolved.
 `test-scopes.mjs` also passes: Rust callbacks can run without an open SQL scope;
 reads requiring a persistent overlay fail explicitly and clean up their batch.
 It additionally validates nested scopes, rejected writes, and persisted restart.

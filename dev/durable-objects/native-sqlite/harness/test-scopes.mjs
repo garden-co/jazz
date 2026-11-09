@@ -30,7 +30,11 @@ async function run(verify) {
   };
   delete env.NATIVE;
   delete env.VERIFY_ONLY;
-  if (verify) env.VERIFY_ONLY = "1";
+  delete env.REOPEN_CATALOGUE;
+  if (verify) {
+    env.VERIFY_ONLY = "1";
+    if (process.argv.includes("--catalogue")) env.REOPEN_CATALOGUE = "1";
+  }
   // Both objects live in the same workerd process and share the WASM module.
   // Identical fixture row IDs must remain private to each storage owner.
   for (const object of ["", "/isolated"]) {

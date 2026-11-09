@@ -90,14 +90,22 @@ pub trait HostTables {
     fn host_sql(&self, f: &mut dyn FnMut(&Storage) -> Result<(), Error>) -> Result<(), Error>;
 }
 
-/// A store's file opened and admitted, before a [`Db`] is opened on it:
-/// [`StoreFile::open`] then [`Db::open_file`] is [`Db::open_at`].
+/// An admitted store before a [`Db`] is opened on it. A native file uses
+/// [`StoreFile::open`]; a managed backend uses [`StoreFile::from_storage`].
+/// Both expose host tables before transferring ownership to [`Db::open_file`].
 pub struct StoreFile {
     pub(crate) conn: Storage,
     pub(crate) path: Option<(PathBuf, Option<&'static str>)>,
 }
 
 impl StoreFile {
+    /// Admit an owned backend before opening a Db, so its host tables and
+    /// catalogue can be read first. No file path or second connection is needed.
+    pub fn from_storage(conn: Storage) -> Result<Self, Error> {
+        crate::format::admit(&conn)?;
+        Ok(Self { conn, path: None })
+    }
+
     /// Open (creating) the file at `path` with `options`, and admit its
     /// storage format (see [`crate::format`]); a refused file is left as it
     /// was.
