@@ -1,3 +1,4 @@
+import { ThinRuntime } from "../thin/thin-runtime.js";
 import { textAnchorsFrom, type TextAnchors } from "../runtime/text-anchors.js";
 import type { WebSocketConstructor } from "../runtime/native-runtime/websocket.js";
 import { clientScope } from "../runtime/client-scope.js";
@@ -61,6 +62,8 @@ type BackendContextSchemaConfig =
 export type BackendContextConfig = Omit<AppContext, "schema" | "driver"> & {
   /** Server runtime driver mode and storage location. */
   driver: BackendDriver;
+  /** @internal createJazz uses the authority directly instead of opening a replica. */
+  thinBackend?: boolean;
   /** @internal How the runtime opens its server socket (a backend client's credentialed one). */
   webSocket?: WebSocketConstructor;
   /**
@@ -166,10 +169,12 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
     this.assertOpen();
     const proof = verifiedLocalFirstRequestProof(session);
     if (!proof) return;
-    if (proof.appId !== this.config.appId || !(this.runtime instanceof NativeRuntimeAdapter)) {
+    if (proof.appId !== this.config.appId) {
       throw new Error("Local-first request proof does not match the backend runtime");
     }
-    this.runtime.admitLocalFirstSession(session, proof.token, this.config.appId);
+    if (this.runtime instanceof NativeRuntimeAdapter) {
+      this.runtime.admitLocalFirstSession(session, proof.token, this.config.appId);
+    }
   }
 
   override createClient({
@@ -204,30 +209,32 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
       this.nodeIdentity ??
       deterministicBytes(`${this.config.appId}:${env}:${this.nodeIdentityScope}:node`);
     const persistent = this.config.driver.type === "persistent";
-    this.runtime = new NativeRuntimeAdapter(
-      NapiDb,
-      schema,
-      persistent ? systemNode : (this.nodeClock?.node.slice() ?? randomNodeUuidBytes()),
-      authorBytesForSession({ issuer: "https://jazz.invalid", user_id: "backend-open" }),
-      1,
-      true,
-      {
-        ...(this.config.driver.type === "persistent"
-          ? { persistentPath: this.config.driver.dataPath }
-          : {}),
-        readAuthorizationHost: "trusted-serving",
-        backendMode: true,
-        systemNode,
-        webSocket: this.config.webSocket,
-        slowQueryLog: {
-          appId: this.config.appId,
-          thresholdMs: this.config.slowQueryThresholdMs,
-        },
-        migrations,
-      },
-    );
+    this.runtime = this.config.thinBackend
+      ? new ThinRuntime(schema, { backend: true, WebSocket: this.config.webSocket })
+      : new NativeRuntimeAdapter(
+          NapiDb,
+          schema,
+          persistent ? systemNode : (this.nodeClock?.node.slice() ?? randomNodeUuidBytes()),
+          authorBytesForSession({ issuer: "https://jazz.invalid", user_id: "backend-open" }),
+          1,
+          true,
+          {
+            ...(this.config.driver.type === "persistent"
+              ? { persistentPath: this.config.driver.dataPath }
+              : {}),
+            readAuthorizationHost: "trusted-serving",
+            backendMode: true,
+            systemNode,
+            webSocket: this.config.webSocket,
+            slowQueryLog: {
+              appId: this.config.appId,
+              thresholdMs: this.config.slowQueryThresholdMs,
+            },
+            migrations,
+          },
+        );
 
-    if (this.nodeClock?.initialHighWater !== undefined) {
+    if (!this.config.thinBackend && this.nodeClock?.initialHighWater !== undefined) {
       if (!(this.runtime instanceof NativeRuntimeAdapter))
         throw new Error("Backend node clock requires the native runtime");
       this.runtime.seedForegroundTxTimeHighWater(this.nodeClock.initialHighWater);
@@ -304,7 +311,7 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
     signal?.addEventListener("abort", release, { once: true });
     try {
       if (signal?.aborted) throw new Error("Graceful shutdown cancelled");
-      if (this.runtime instanceof NativeRuntimeAdapter) {
+      if (this.runtime instanceof NativeRuntimeAdapter || this.runtime instanceof ThinRuntime) {
         await this.runtime.waitForPendingWrites("global");
       }
       // Success keeps the fence until shutdown; failure restores the live source.

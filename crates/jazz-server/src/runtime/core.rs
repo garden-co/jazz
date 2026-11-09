@@ -728,6 +728,7 @@ impl Owner {
         self.sessions
             .get(&session)
             .map(|session| session.input.clone())
+            .or_else(|| self.thin.get(&session).map(|thin| thin.input.clone()))
     }
 
     pub fn receive(&mut self, session: ServerSession, frames: Vec<AbiBytes>) {
@@ -863,8 +864,9 @@ impl Owner {
     /// The exclusive borrow prevents overlapping ticks; input handles remain
     /// usable during suspension. Complete this future before publishing output.
     pub async fn advance(&mut self) {
-        self.poll_thin();
         self.input_requested.set(false);
+        self.drain_thin_input();
+        self.poll_thin();
         let sessions: Vec<_> = self.sessions.keys().copied().collect();
         for session in sessions {
             self.drain_input(session);

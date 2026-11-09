@@ -83,6 +83,41 @@ try {
   await assert.rejects(() =>
     userDb.insert(app.notes, { title: "forbidden" }).wait({ tier: "global" }),
   );
+  // The backend client is thin; authority and attribution survive that change.
+  assert.equal(jazz.db.currentRuntime().constructor.name, "ThinRuntime");
+  await assert.rejects(async () => {
+    await jazz.db.transaction((tx) => {
+      tx.insert(app.notes, { title: "unsupported transaction" });
+    });
+  }, /Backend thin transactions are not supported yet/);
+  assert.deepEqual(await jazz.db.all(app.notes.where({ title: "unsupported transaction" })), []);
+  const attributed = await jazz.withAttribution(new Request("https://app.example/test"));
+  const deliveries = [];
+  const userDeliveries = [];
+  const stopUser = userDb.subscribe(app.notes, (rows) => userDeliveries.push(rows));
+  const stop = jazz.db.subscribe(app.notes, (rows) => deliveries.push(rows));
+  try {
+    const row = await attributed
+      .insert(app.notes, { title: "attributed" })
+      .wait({ tier: "global" });
+    const [stored] = await jazz.db.all(app.notes.where({ id: row.id }).select("$createdBy"));
+    assert.equal(stored.$createdBy.account, created);
+    // Attribution does not turn a backend read into a user-scoped read.
+    assert.equal((await attributed.all(app.notes.where({ id: row.id }))).length, 1);
+    assert.deepEqual(await userDb.all(app.notes), []);
+    const until = Date.now() + 5000;
+    while (
+      !userDeliveries.length ||
+      !deliveries.some((rows) => rows.some((candidate) => candidate.id === row.id))
+    ) {
+      assert.ok(Date.now() < until, "thin backend subscription did not receive the write");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.ok(userDeliveries.every((rows) => rows.length === 0));
+  } finally {
+    stop();
+    stopUser();
+  }
   const alice = external("alice"),
     bob = external("bob"),
     mallory = external("mallory");
@@ -121,7 +156,14 @@ try {
     "admin",
   );
   const bundle = JSON.parse(new TextDecoder().decode(bundles.body)).bundles[0].bundle;
-  function connect(auth = { jwt_token: token }, identity = peer, access = "session", extra = {}) {
+  function connect(
+    auth = { jwt_token: token },
+    identity = peer,
+    access = "session",
+    extra = {},
+    features,
+  ) {
+    const frames = [];
     let socket, resolveClose, resolveRefusal;
     const refusal = new Promise((resolve) => {
       resolveRefusal = resolve;
@@ -141,6 +183,7 @@ try {
           } else if (event.kind === "message") {
             clearTimeout(timer);
             const frame = wire.decodeWebSocketFrameBatch(event.data)[0];
+            frames.push(frame);
             if (wire.isWireError(frame)) resolveRefusal(wire.decodeWireError(frame));
             resolve(frame);
           } else if (event.kind === "close") {
@@ -156,11 +199,38 @@ try {
           JSON.stringify({ peer_identity: identity, auth, bundle, ...extra }),
         ),
       );
-      socket.send(wire.encodeWebSocketFrameBatch([wire.encodeWireClientHello()]));
+      socket.send(wire.encodeWebSocketFrameBatch([wire.encodeWireClientHello(features)]));
     });
     sockets.push(socket);
-    return { hello, closed, refusal };
+    return {
+      hello,
+      closed,
+      refusal,
+      frames,
+      send: (frame) => socket.send(wire.encodeWebSocketFrameBatch([frame])),
+    };
   }
+  const thinWire = await tsImport(
+    "../../../../packages/jazz-tools/src/thin/wire.ts",
+    import.meta.url,
+  );
+  const publicThin = connect(
+    { jwt_token: token },
+    peer,
+    "session",
+    {},
+    thinWire.FEATURE_THIN_RESULTS,
+  );
+  assert.ok(wire.isWireHello(await publicThin.hello));
+  publicThin.send(thinWire.encodeThinRequest(7, { type: "captureSnapshot", backendContext: "{}" }));
+  const until = Date.now() + 5000;
+  while (publicThin.frames.length < 2) {
+    assert.ok(Date.now() < until, "public thin scope refusal timed out");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  const refusedScope = thinWire.decodeThinResponse(publicThin.frames[1]);
+  assert.equal(refusedScope.body.type, "error");
+  assert.match(refusedScope.body.message, /authenticated SYSTEM/);
   const live = connect();
   const hello = await live.hello;
   assert.ok(

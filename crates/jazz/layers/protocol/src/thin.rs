@@ -227,6 +227,17 @@ pub enum ThinOp {
         /// The `id` of the `BeginStream` request.
         stream: u64,
     },
+    /// thin-backend-scope-v1. Only an authenticated SYSTEM connection may
+    /// supply a per-operation session or attribution. Nested envelopes are
+    /// refused; the inner bytes encode one complete ThinRequest with the same id.
+    BackendScopeV1 {
+        /// JSON binding write context, or a serialized session for reads.
+        #[serde(with = "serde_bytes")]
+        context: Vec<u8>,
+        /// Encoded WireFrame::ThinRequest. Bytes avoid recursive deserialization.
+        #[serde(with = "serde_bytes")]
+        request: Vec<u8>,
+    },
 }
 
 /// The server's answer to request `id`.
@@ -306,6 +317,23 @@ mod tests {
 
     use super::*;
     use crate::wire::{WireFrame, decode_frame, encode_frame};
+
+    /// Pin the additive backend envelope independently of existing thin frames.
+    /// This low-level fixture is shared with TypeScript's wire test because
+    /// interoperability requires byte equality, not just a Rust round trip.
+    #[test]
+    fn backend_scope_v1_bytes() {
+        let frame = WireFrame::ThinRequest(ThinRequest {
+            id: 7,
+            op: ThinOp::BackendScopeV1 {
+                context: b"{}".to_vec(),
+                request: vec![4, 7, 13],
+            },
+        });
+        let bytes = [4, 7, 18, 2, 123, 125, 3, 4, 7, 13];
+        assert_eq!(encode_frame(&frame).unwrap(), bytes);
+        assert_eq!(decode_frame(&bytes).unwrap(), frame);
+    }
 
     const CORPUS: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),

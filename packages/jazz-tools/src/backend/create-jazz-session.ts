@@ -62,6 +62,7 @@ export type JazzClientConfig = Omit<
   | "adminSecret"
   | "serverUrl"
   | "webSocket"
+  | "thinBackend"
   | "appId"
 > & {
   /** Leave out to act as a browser client, scoped by `serverUrl`. */
@@ -386,6 +387,7 @@ function lostOnClose(pending: number, why: unknown): Error {
  */
 export async function openJazzSession(
   input: OpenJazzSessionConfig,
+  options: { thinBackend?: boolean } = {},
 ): Promise<JazzSession<JazzClient>> {
   if (Object.hasOwn(input, "webSocket")) throw new Error("Use credential instead of webSocket");
   if (input.credential !== undefined && input.initial !== undefined) {
@@ -480,7 +482,7 @@ export async function openJazzSession(
         });
       }
       let memoryClock: BackendNodeClock | undefined;
-      if (config.driver.type === "memory") {
+      if (!options.thinBackend && config.driver.type === "memory") {
         const pooled = memoryClocks.get(account);
         if (pooled && pooled.highWater === undefined) {
           throw new Error("Backend memory node cannot reopen without its completed clock handoff");
@@ -499,7 +501,11 @@ export async function openJazzSession(
       // The class remains internal; only a validated opaque account can reach it.
       // Its SYSTEM provenance names the backend's node.
       const context = new JazzContext(
-        { ...config, backendSecret: backend.backendSecret } as BackendContextConfig,
+        {
+          ...config,
+          backendSecret: backend.backendSecret,
+          thinBackend: options.thinBackend,
+        } as BackendContextConfig,
         uuidBytes(backend.nodeId),
         memoryClock,
       );

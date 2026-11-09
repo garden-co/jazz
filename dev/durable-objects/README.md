@@ -277,8 +277,8 @@ verifies the upgrade credential, then uses the normal prelude/Hello handshake.
 Prelude secrets cannot override the upgrade's access. Backend/admin service links
 are trusted as on native hosting, while backend-stated user sessions remain
 policy-scoped. Session-only upgrades do not grant service or stated-user access;
-guest proofs use the account admission described below. Thin sessions and relay
-modes remain explicitly unsupported.
+guest proofs use the account admission described below. Ordinary thin sessions
+are supported as described below; relay modes remain explicitly unsupported.
 
 The adapter serializes admission with catalogue operations and ticks. Established
 socket input uses `SessionInput` directly, even while a tick awaits progress.
@@ -300,7 +300,7 @@ handshakes and access/identity/bundle refusals. The schema denies ordinary users
 service writes exercise native-equivalent trusted-backend authority. Existing
 `test-scopes.mjs` checks policy-filtered user sync and rollback through the shared
 engine. Account routes and guest proofs are covered by `test-accounts.mjs` below;
-packaging/provisioning are documented separately. Thin hosting remains deferred.
+packaging/provisioning and thin hosting are documented separately below.
 
 Validated locally: numeric sync and atomic rejection on two objects, disconnected
 session cleanup, and fresh replicas reading persisted values after workerd restart
@@ -648,8 +648,8 @@ native semantics; they are not reclassified as guest-proof sessions.
 
 Revocation rechecks active proof-authenticated sessions. Revoked sessions stop
 accepting frames and discard queued output immediately, then close. Registry
-storage failures fail these checks closed. Thin sessions and relay modes remain
-explicitly unsupported; the persistent overlay is still deferred.
+storage failures fail these checks closed, including for thin sessions. Relay
+modes remain unsupported; the persistent transaction overlay is still deferred.
 
 Build the production package, then run:
 
@@ -756,3 +756,56 @@ asserts atomicity for whichever outcome occurs, not a required outcome at each
 delay. These timings do **not** establish that the kill landed inside SQLite
 commit. Deterministic interruption within commit and deployed abrupt eviction
 remain unverified; section 9 stays in progress.
+
+## Thin backend client and scoped requests
+
+`createJazz()` now uses `ThinRuntime` for `jazz.db`, including when its core is
+native. It shares one connection across backend and request-scoped facades;
+queries run on the authority instead of an in-memory replica. Standalone native
+`createJazzClient()` memory/persistent clients retain their existing behavior.
+`forReqUser()` carries the user's session and claims; `withAttribution()` retains
+SYSTEM authority while recording the supplied author. The authority enforces
+bundle policies and checks the connection's authenticated identity before
+accepting any backend scope. Subscriptions retain their operation's read scope.
+
+The DO host now admits thin connections through the shared server engine.
+Independently borrowable input handles queue requests while ticks suspend;
+queued request bytes remain charged until completion. Ordinary reads, writes,
+subscriptions and streamed operation messages use this path. Whole requests
+are bounded by the existing wire frame and ingress limits; split thin requests
+are explicitly refused by this host input. Durable chunks remain deferred.
+Backend application transactions report an explicit unsupported error for now.
+Managed storage rejects begin before retaining a batch; ordinary native thin
+transactions are unchanged.
+
+### Wire compatibility: thin-backend-scope-v1
+
+This is an additive wire-v6 capability, feature bit 12. It appends ThinOp tag 18
+without changing tags 0–17 or durable storage bytes. The envelope contains
+length-prefixed JSON context bytes and length-prefixed encoded ThinRequest
+bytes. The inner request must have the same id; nested envelopes and scoped
+schema declarations are rejected. Only authenticated SYSTEM sessions can use
+it. This is an authorization assertion from a trusted backend, never a public
+client capability. Scope is not inferred from the peer's advertised role.
+
+New backend clients require the feature in Hello negotiation and fail explicitly
+against older servers. Ordinary thin clients continue to use the existing
+frames. The Rust `backend_scope_v1_bytes` and TypeScript wire tests pin the same
+bytes: `04 07 12 02 7b 7d 03 04 07 0d` (request 7, empty backend context, inner
+capture-snapshot request). No stored or sync-record encoding changes.
+
+Local packaged-host checks cover backend writes/reads and reconnect/restart;
+the account suite additionally checks thin runtime selection, user-policy
+refusals, attribution, subscriptions and refusal of a public client's forged
+backend scope. Worker-hosted `createJazz()` still needs a separate runtime-safe
+entry point and request-lifetime integration; removing the replica alone does
+not implement that entry point.
+
+Validation on 2026-11-09: 102 native createJazz/thin integration tests passed,
+plus 46 context/wire unit tests and the Rust envelope byte fixture. TypeScript
+checking and native/DO Clippy passed. Packaged workerd createJazz, account and
+lost-request/lost-acknowledgement lifecycle checks passed. One existing native
+remote-core diagnostic test was excluded from the final pass after reproducing
+its missing-URL failure with both the old NAPI client and the thin client; its
+expectations are unchanged. No deployed Cloudflare or Worker-entry-point claim
+is made by these checks.

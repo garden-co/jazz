@@ -7,6 +7,7 @@ import { PostcardReader, PostcardWriter } from "../runtime/native-runtime/native
 
 /** `FEATURE_THIN_RESULTS` in `crates/jazz/layers/protocol/src/wire.rs`. */
 export const FEATURE_THIN_RESULTS = 1 << 10;
+export const FEATURE_THIN_BACKEND_SCOPE_V1 = 1 << 12;
 
 /** `MAX_THIN_MESSAGE_BYTES` in `crates/jazz/layers/protocol/src/thin.rs`:
  * the most one thin request or response may take, split into parts. */
@@ -24,7 +25,12 @@ const WIRE_FRAME_THIN_RESPONSE = 5;
  * Options are the JSON objects the native bindings take; transactions are
  * named by their open transaction id text.
  */
-export type ThinOp =
+export type ThinOp = ThinOperation & {
+  /** @internal thin-backend-scope-v1: authenticated backend operation context. */
+  backendContext?: string;
+};
+
+type ThinOperation =
   | { type: "schema"; schema: Uint8Array }
   | { type: "subscribe"; query: Uint8Array; options: object }
   | { type: "unsubscribe"; subscription: number }
@@ -133,6 +139,13 @@ export function encodeThinRequest(id: number, op: ThinOp): Uint8Array {
   const writer = new PostcardWriter();
   writer.u64(WIRE_FRAME_THIN_REQUEST);
   writer.u64(id);
+  if (op.backendContext !== undefined) {
+    writer.u64(18); // ThinOp::BackendScopeV1, appended without changing existing frames.
+    writer.bytes(encoder.encode(op.backendContext));
+    const { backendContext: _, ...inner } = op;
+    writer.bytes(encodeThinRequest(id, inner));
+    return writer.finish();
+  }
   writer.u64(OP_INDEX[op.type]);
   switch (op.type) {
     case "schema":

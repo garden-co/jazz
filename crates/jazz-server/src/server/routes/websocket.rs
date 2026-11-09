@@ -686,7 +686,10 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     // advertises thin results is answered with results, not sync.
     let negotiated = match negotiate_wire(
         &remote_hello,
-        current_wire_features() | jazz::wire::FEATURE_THIN_RESULTS | jazz::wire::FEATURE_HEARTBEAT,
+        current_wire_features()
+            | jazz::wire::FEATURE_THIN_RESULTS
+            | jazz::wire::FEATURE_THIN_BACKEND_SCOPE_V1
+            | jazz::wire::FEATURE_HEARTBEAT,
     ) {
         Ok(negotiated) => negotiated,
         Err(error) => {

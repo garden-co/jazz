@@ -308,6 +308,17 @@ impl WasmServerCore {
         bundle: Option<BundleId>,
         batched: bool,
     ) -> Result<ServerTransport, String> {
+        self.open_transport(author, claims, bundle, batched, false)
+    }
+
+    fn open_transport(
+        &self,
+        author: jazz::ids::AuthorSubject,
+        claims: BTreeMap<String, jazz::records::Value>,
+        bundle: Option<BundleId>,
+        batched: bool,
+        thin: bool,
+    ) -> Result<ServerTransport, String> {
         let mut slot = self.core.borrow_mut();
         let core = slot
             .as_mut()
@@ -320,8 +331,12 @@ impl WasmServerCore {
         let session = ServerSession::from_host_id(id);
         let (sender, receiver) = output::unbounded_channel();
         let egress = Arc::new(AtomicUsize::new(0));
-        core.open_session(session, author, claims, bundle, sender, Arc::clone(&egress))
-            .map_err(|e| e.to_string())?;
+        if thin {
+            core.open_thin_session(session, author, claims, bundle, sender, Arc::clone(&egress))
+        } else {
+            core.open_session(session, author, claims, bundle, sender, Arc::clone(&egress))
+        }
+        .map_err(|e| e.to_string())?;
         self.wake.wake_by_ref();
         Ok(ServerTransport {
             input: core.input(session),
@@ -539,15 +554,13 @@ impl WasmServerCore {
         let admit = || -> Result<(ServerTransport, Vec<u8>), WireError> {
             let admitted = admission()?;
             let remote = websocket::decode_hello(hello)?;
-            let negotiated =
-                jazz::wire::negotiate_wire(&remote, jazz::wire::current_wire_features())?;
-            if remote.features & jazz::wire::FEATURE_THIN_RESULTS != 0 {
-                return Err(WireError::new(
-                    WireErrorCode::UnsupportedFeature,
-                    WireRetry::Never,
-                    "thin WebSocket hosting is not supported on this host yet",
-                ));
-            }
+            let negotiated = jazz::wire::negotiate_wire(
+                &remote,
+                jazz::wire::current_wire_features()
+                    | jazz::wire::FEATURE_THIN_RESULTS
+                    | jazz::wire::FEATURE_THIN_BACKEND_SCOPE_V1,
+            )?;
+            let thin = remote.features & jazz::wire::FEATURE_THIN_RESULTS != 0;
             let endpoint = jazz::wire::WireAuthorityEndpoint::fresh(
                 jazz::ids::NodeUuid::from_bytes([0x5e; 16]),
             );
@@ -559,7 +572,13 @@ impl WasmServerCore {
                 WireError::new(WireErrorCode::Internal, WireRetry::Never, e.to_string())
             })?;
             let transport = self
-                .open_session(admitted.identity, admitted.claims, admitted.bundle, true)
+                .open_transport(
+                    admitted.identity,
+                    admitted.claims,
+                    admitted.bundle,
+                    true,
+                    thin,
+                )
                 .map_err(|e| WireError::new(WireErrorCode::AuthFailed, WireRetry::Never, e))?;
             Ok((transport, response))
         };

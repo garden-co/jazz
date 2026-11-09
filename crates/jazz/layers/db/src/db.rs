@@ -8905,6 +8905,11 @@ impl Db {
 
     fn begin(&self, id: OpenTransactionId, kind: BatchKind) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
+        if !inner.conn.supports_open_scopes() {
+            return Err(unsupported(
+                "Persistent transaction overlays on managed SQL storage",
+            ));
+        }
         inner.require_mutation_admission()?;
         if inner.batches.contains_key(&id) {
             return Err(rejected(format!("transaction {id:?} is already open")));

@@ -539,14 +539,17 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     published?: string,
   ): Promise<{ session: JazzSession<JazzClient>; client: JazzClient }> {
     pin = published ?? (await publish(next));
-    const session = await openJazzSession({
-      appId,
-      app: next.app,
-      permissions: next.permissions,
-      serverUrl: serverUrl,
-      driver: { type: "memory" },
-      initial: { backendSecret },
-    });
+    const session = await openJazzSession(
+      {
+        appId,
+        app: next.app,
+        permissions: next.permissions,
+        serverUrl: serverUrl,
+        driver: { type: "memory" },
+        initial: { backendSecret },
+      },
+      { thinBackend: true },
+    );
     const opened = session.getSnapshot();
     if (opened.status !== "ready" || !opened.client) {
       await session.close();

@@ -31,6 +31,52 @@ use tokio::sync::mpsc as tokio_mpsc;
 
 use super::{Outbound, Owner, SESSION_QUEUE_BUDGET, ServerSession, ThinIngress};
 
+/// An operation's authority and provenance are separate: attribution
+/// keeps SYSTEM permission checks while crediting the named author.
+#[derive(Clone)]
+struct RequestScope {
+    identity: AuthorSubject,
+    claims: Option<BTreeMap<String, Value>>,
+    write: WriteIdentity,
+}
+
+fn backend_scope(context: &[u8]) -> Result<RequestScope, ThinBody> {
+    let value: serde_json::Value = serde_json::from_slice(context)
+        .map_err(|error| argument(format!("invalid backend context: {error}")))?;
+    let mut scope = RequestScope {
+        identity: AuthorSubject::SYSTEM,
+        claims: None,
+        write: WriteIdentity::Session(AuthorSubject::SYSTEM),
+    };
+    if let Some(attribution) = value.get("attribution").filter(|value| !value.is_null()) {
+        let author = attribution
+            .as_str()
+            .ok_or_else(|| argument("invalid attribution"))?;
+        scope.write = WriteIdentity::Attribution(
+            super::session_admission::peer_identity(author).map_err(argument)?,
+        );
+        return Ok(scope);
+    }
+    let session = value.get("session").unwrap_or(&value);
+    if session.get("user_id").is_none() {
+        return Ok(scope);
+    }
+    if session.get("issuer").and_then(|value| value.as_str()) == Some("urn:jazz:system") {
+        if session.get("user_id").and_then(|value| value.as_str()) != Some("system") {
+            return Err(argument("invalid SYSTEM session"));
+        }
+        return Ok(scope);
+    }
+    let session: jazz::tools::public_schema::Session = serde_json::from_value(session.clone())
+        .map_err(|error| argument(format!("invalid backend session: {error}")))?;
+    scope.identity = session
+        .author_subject()
+        .map_err(|error| argument(error.to_string()))?;
+    scope.write = WriteIdentity::Session(scope.identity);
+    scope.claims = Some(super::session_admission::session_claims(session).map_err(argument)?);
+    Ok(scope)
+}
+
 /// A transaction a thin session began and has not ended.
 struct ThinTransaction {
     serializable: bool,
@@ -41,6 +87,7 @@ struct ThinTransaction {
 
 /// A large value a thin session is uploading in chunks.
 struct ThinStream {
+    scope: RequestScope,
     upload: StreamingValueUpload,
     mutation: StreamingMutationKind,
     table: String,
@@ -140,6 +187,8 @@ impl Wake for RequestWake {
 type RequestFuture = Pin<Box<dyn Future<Output = (ThinState, Option<ThinBody>)>>>;
 
 pub(super) struct ThinSession {
+    pub(super) input: super::SessionInput,
+    ingress: Arc<tokio::sync::Semaphore>,
     // A running request owns the state; cancellation drops it and its resources.
     task: Option<(u64, RequestFuture)>,
     state: Option<ThinState>,
@@ -413,6 +462,11 @@ impl Owner {
         self.thin.insert(
             session,
             ThinSession {
+                input: super::SessionInput {
+                    inbox: Rc::new(RefCell::new(super::core::SessionInbox::default())),
+                    requested: Rc::clone(&self.input_requested),
+                },
+                ingress: Arc::new(tokio::sync::Semaphore::new(SESSION_QUEUE_BUDGET)),
                 held: Rc::clone(&state.held),
                 egress,
                 task: None,
@@ -451,7 +505,9 @@ impl Owner {
 
     pub fn close_thin_session(&mut self, session: ServerSession) {
         // Dropping the streams ends the subscriptions.
-        self.thin.remove(&session);
+        if let Some(thin) = self.thin.remove(&session) {
+            thin.input.close();
+        }
     }
 
     pub fn thin_request(
@@ -463,6 +519,54 @@ impl Owner {
         if let Some(thin) = self.thin.get_mut(&session) {
             thin.queued.push_back((request, ingress));
             thin.poll_requests();
+        }
+    }
+
+    /// Hosts without a socket task enqueue through the same independently
+    /// borrowable input handle as sync sessions. Keep admitted bytes charged
+    /// until the request completes, including while it awaits engine work.
+    pub(super) fn drain_thin_input(&mut self) {
+        let mut closed = Vec::new();
+        for (id, thin) in &mut self.thin {
+            let frames = {
+                let mut inbox = thin.input.inbox.borrow_mut();
+                if inbox.closed {
+                    closed.push(*id);
+                    continue;
+                }
+                inbox.bytes = 0;
+                std::mem::take(&mut inbox.frames)
+            };
+            for bytes in frames {
+                let admitted = (|| {
+                    let room = Arc::clone(&thin.ingress)
+                        .try_acquire_many_owned(bytes.len().max(1) as u32)
+                        .map_err(|_| "thin request ingress budget exceeded")?;
+                    match jazz::wire::decode_frame(&bytes).map_err(|_| "invalid thin frame")? {
+                        jazz::wire::WireFrame::ThinRequest(request) => {
+                            thin.queued
+                                .push_back((request, ThinIngress::from_permits(room, None)));
+                            Ok(())
+                        }
+                        _ => Err("Only whole thin requests are supported by this host input yet"),
+                    }
+                })();
+                if let Err(message) = admitted {
+                    let _ = thin.output.send((
+                        Err(jazz::wire::WireError::new(
+                            jazz::wire::WireErrorCode::UnsupportedFeature,
+                            jazz::wire::WireRetry::Never,
+                            message,
+                        )),
+                        0,
+                    ));
+                    closed.push(*id);
+                    break;
+                }
+            }
+        }
+        for id in closed {
+            self.close_thin_session(id);
         }
     }
 
@@ -527,6 +631,41 @@ impl Owner {
 /// Serve one request; `None` when it has no immediate answer (a live
 /// query answers from [`Owner::pump_thin`]).
 async fn serve_thin(owner: &Db, thin: &mut ThinState, id: u64, op: ThinOp) -> Option<ThinBody> {
+    let mut execution = RequestScope {
+        identity: thin.identity,
+        claims: thin.claims.clone(),
+        write: WriteIdentity::Session(thin.identity),
+    };
+    let op = if let ThinOp::BackendScopeV1 { context, request } = op {
+        if thin.identity != AuthorSubject::SYSTEM {
+            return Some(argument(
+                "backend scope requires an authenticated SYSTEM connection",
+            ));
+        }
+        let request = match jazz::wire::decode_frame(&request) {
+            Ok(WireFrame::ThinRequest(request)) if request.id == id => request,
+            _ => return Some(argument("invalid backend-scoped request")),
+        };
+        if matches!(
+            request.op,
+            ThinOp::BackendScopeV1 { .. } | ThinOp::Schema { .. }
+        ) {
+            return Some(argument("nested or schema backend scope is unsupported"));
+        }
+        if matches!(
+            request.op,
+            ThinOp::Begin { .. } | ThinOp::Commit { .. } | ThinOp::Rollback { .. }
+        ) {
+            return Some(argument("Backend thin transactions are not supported yet"));
+        }
+        execution = match backend_scope(&context) {
+            Ok(scope) => scope,
+            Err(error) => return Some(error),
+        };
+        request.op
+    } else {
+        op
+    };
     if let ThinOp::Schema { schema } = op {
         // The version a replica built against this schema would declare.
         let version = match decode_schema(&schema) {
@@ -572,10 +711,13 @@ async fn serve_thin(owner: &Db, thin: &mut ThinState, id: u64, op: ThinOp) -> Op
         });
     };
     let db = db.deferring_chunk_fetches();
+    if let Some(claims) = &execution.claims {
+        db.set_identity_claims(execution.identity, claims.clone());
+    }
     loop {
         let generation = db.chunk_fetches_answered();
         let mut missing = false;
-        let result = serve_thin_op(&db, thin, id, &op, &mut missing).await;
+        let result = serve_thin_op(&db, thin, id, &op, &execution, &mut missing).await;
         if !missing {
             return match result {
                 Ok(body) => body,
@@ -790,6 +932,7 @@ async fn serve_thin_op(
     thin: &mut ThinState,
     id: u64,
     op: &ThinOp,
+    execution: &RequestScope,
     missing: &mut bool,
 ) -> Result<Option<ThinBody>, ThinBody> {
     let mut noted = |result: Result<WriteHandle, Error>| {
@@ -798,10 +941,12 @@ async fn serve_thin_op(
         }
         result
     };
-    let identity = thin.identity;
-    let scope = thin.claims.clone().map(|claims| (identity, claims));
+    let identity = execution.identity;
+    let scope = execution.claims.clone().map(|claims| (identity, claims));
     let body = match op {
-        ThinOp::Schema { .. } | ThinOp::Unsubscribe { .. } => unreachable!("served by the owner"),
+        ThinOp::Schema { .. } | ThinOp::Unsubscribe { .. } | ThinOp::BackendScopeV1 { .. } => {
+            unreachable!("served by the owner")
+        }
         ThinOp::Subscribe { query, options } => {
             if thin.subscriptions.contains_key(&id) {
                 return Err(argument("a live query with this id is already open"));
@@ -869,6 +1014,7 @@ async fn serve_thin_op(
             let key = write_key(&json)?;
             let mut options = insert_options(&json).map_err(host_error)?;
             as_session(&mut options.identity, identity)?;
+            options.identity = execution.write;
             if key.is_some() && transaction.is_some() {
                 return Err(argument(
                     "a writeKey names a standalone write, not a staged one",
@@ -912,6 +1058,7 @@ async fn serve_thin_op(
             let key = write_key(&json)?;
             let mut options = update_options(&json).map_err(host_error)?;
             as_session(&mut options.identity, identity)?;
+            options.identity = execution.write;
             if key.is_some() && transaction.is_some() {
                 return Err(argument(
                     "a writeKey names a standalone write, not a staged one",
@@ -947,6 +1094,7 @@ async fn serve_thin_op(
             let mut options = upsert_options(&json).map_err(host_error)?;
             let cells = decode_cells(cells).map_err(host_error)?;
             as_session(&mut options.identity, identity)?;
+            options.identity = execution.write;
             if key.is_some() && transaction.is_some() {
                 return Err(argument(
                     "a writeKey names a standalone write, not a staged one",
@@ -980,6 +1128,7 @@ async fn serve_thin_op(
             let key = write_key(&json)?;
             let mut options = delete_options(&json).map_err(host_error)?;
             as_session(&mut options.identity, identity)?;
+            options.identity = execution.write;
             if key.is_some() && transaction.is_some() {
                 return Err(argument(
                     "a writeKey names a standalone write, not a staged one",
@@ -1019,6 +1168,7 @@ async fn serve_thin_op(
             let key = write_key(&json)?;
             let mut options = restore_options(&json).map_err(host_error)?;
             as_session(&mut options.identity, identity)?;
+            options.identity = execution.write;
             if key.is_some() && transaction.is_some() {
                 return Err(argument(
                     "a writeKey names a standalone write, not a staged one",
@@ -1056,7 +1206,7 @@ async fn serve_thin_op(
                     argument(format!("invalid partial-value update descriptor: {error}"))
                 })?;
             let options = UpdateOptions {
-                identity: WriteIdentity::Session(identity),
+                identity: execution.write,
                 updated_at_ms: *updated_at_ms,
                 ..UpdateOptions::default()
             };
@@ -1164,6 +1314,7 @@ async fn serve_thin_op(
                     thin.streams.insert(
                         id,
                         ThinStream {
+                            scope: execution.clone(),
                             upload,
                             mutation,
                             table: table.clone(),
@@ -1202,6 +1353,9 @@ async fn serve_thin_op(
             let Some(open) = thin.streams.remove(stream) else {
                 return Err(argument("no upload with this id is open"));
             };
+            if let Some(claims) = &open.scope.claims {
+                db.set_identity_claims(open.scope.identity, claims.clone());
+            }
             if let Some(transaction) = open.transaction {
                 let Some(state) = thin.transactions.get_mut(&transaction) else {
                     return Err(argument("the upload's transaction is no longer open"));
@@ -1215,7 +1369,7 @@ async fn serve_thin_op(
                         open.row,
                         open.cells,
                         &open.column,
-                        WriteIdentity::Session(identity),
+                        open.scope.write,
                         open.updated_at_ms,
                         open.head,
                         open.base,
@@ -1231,7 +1385,7 @@ async fn serve_thin_op(
                     open.row,
                     open.cells,
                     &open.column,
-                    WriteIdentity::Session(identity),
+                    open.scope.write,
                     open.updated_at_ms,
                     open.head,
                     open.base,
