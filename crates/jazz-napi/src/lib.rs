@@ -1915,10 +1915,13 @@ impl NapiDb {
         Ok(evicted as u32)
     }
 
-    /// How many local commits still wait for the server's verdict.
-    #[napi(js_name = "pendingUploadCount")]
-    pub fn pending_upload_count(&self) -> js::Result<u32> {
-        Ok(self.binding()?.pending_upload_count() as u32)
+    /// This store's uploads: how many still wait for the server's verdict
+    /// and since when, and what the server refused since it opened
+    /// (`{ pending, oldestPendingAt, rejected, lastRejection }`).
+    #[napi(js_name = "uploadStatus")]
+    pub fn upload_status(&self) -> js::Result<JsonValue> {
+        serde_json::to_value(self.binding()?.upload_status())
+            .map_err(|error| napi::Error::from_reason(error.to_string()).into())
     }
 
     /// The optimistic in-memory side of a client/worker pair: its

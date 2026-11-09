@@ -1,6 +1,7 @@
 import type * as Relay from "jazz-rn/relay";
 import type { MutationErrorEvent } from "../runtime/client.js";
 import { UnsupportedSnapshotError } from "../runtime/snapshot-ref.js";
+import { NO_UPLOADS, uploadStatusFromCount, type UploadStatus } from "../runtime/sync-status.js";
 import { REACT_NATIVE_UNSUPPORTED_ERROR } from "./errors.js";
 
 // The foreground command vocabulary is owned by jazz-rn. This module is
@@ -61,6 +62,7 @@ export class NativeForegroundDb {
   /** A native build without the (append-only) slow-query commands. */
   private slowQueryLogUnsupported = false;
   private pendingUploadCountUnsupported = false;
+  private uploadStatusUnsupported = false;
 
   constructor(
     private readonly runtime: NativeForegroundRuntime,
@@ -243,6 +245,30 @@ export class NativeForegroundDb {
       return [];
     }
     return response.lines;
+  }
+
+  /**
+   * This foreground's uploads. An older native build without the command
+   * reports the pending count alone, and one older still reports none.
+   */
+  uploadStatus(): UploadStatus {
+    if (this.closed) return NO_UPLOADS;
+    if (this.uploadStatusUnsupported) return uploadStatusFromCount(this.pendingUploadCount());
+    let response: ForegroundResponse;
+    try {
+      response = this.execute({ type: "uploadStatus" });
+    } catch (error) {
+      // As for the count: only a host that rejects the command lacks it.
+      if (rejectsCommand(error)) this.uploadStatusUnsupported = true;
+      return this.uploadStatusUnsupported
+        ? uploadStatusFromCount(this.pendingUploadCount())
+        : NO_UPLOADS;
+    }
+    if (response.type !== "uploadStatus") {
+      this.uploadStatusUnsupported = true;
+      return uploadStatusFromCount(this.pendingUploadCount());
+    }
+    return JSON.parse(response.statusJson) as UploadStatus;
   }
 
   /**

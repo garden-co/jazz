@@ -10,6 +10,9 @@ class TestStyleSheet {
   replaceSync() {}
 }
 
+type Db = import("../../runtime/db.js").Db;
+const dbAt = (serverUrl?: string) => ({ getConfig: () => ({ serverUrl }) }) as unknown as Db;
+
 interface InspectorOverlayControl {
   detach(route: string): boolean;
   setActiveRoute(route: string): void;
@@ -40,7 +43,7 @@ describe("inspector overlay detached window", () => {
     localStorage.setItem("jazz-inspector-overlay:open", "0");
     vi.mocked(installInspectorHost).mockClear();
     const { startInspectorOverlay } = await import("./loader.js");
-    const db = {} as import("../../runtime/db.js").Db;
+    const db = dbAt();
     startInspectorOverlay(db);
     const overlay = document.querySelector("jazz-inspector-overlay")!;
     const iframe = overlay.shadowRoot!.querySelector<HTMLIFrameElement>("iframe")!;
@@ -54,7 +57,7 @@ describe("inspector overlay detached window", () => {
         new KeyboardEvent("keydown", { altKey: true, shiftKey: true, code: "KeyJ" }),
       );
     shortcut();
-    expect(new URL(iframe.src).pathname).toBe("/__jazz/embedded/embedded.html");
+    expect(new URL(iframe.src).pathname).toBe("/jazz/inspect/embedded.html");
     expect(installInspectorHost).toHaveBeenCalledOnce();
     const dispose = vi.mocked(installInspectorHost).mock.results[0]!.value;
     const control = (window as unknown as { __jazzInspectorOverlay: InspectorOverlayControl })
@@ -87,7 +90,7 @@ describe("inspector overlay detached window", () => {
     const open = vi.spyOn(window, "open").mockReturnValue(popup);
     const { startInspectorOverlay } = await import("./loader.js");
 
-    startInspectorOverlay({} as import("../../runtime/db.js").Db);
+    startInspectorOverlay(dbAt());
     const overlay = document.querySelector("jazz-inspector-overlay");
     const dock = overlay?.shadowRoot?.querySelector<HTMLElement>(".jzov-dock");
     const iframe = overlay?.shadowRoot?.querySelector<HTMLIFrameElement>(".jzov-frame");
@@ -154,5 +157,33 @@ describe("inspector overlay detached window", () => {
     window.dispatchEvent(new PageTransitionEvent("pagehide"));
     expect(replacementPopup.close).toHaveBeenCalledOnce();
     expect(dock?.dataset.open).toBe("true");
+  });
+});
+
+describe("where the overlay loads the Inspector from", () => {
+  it("is the backend's /inspect/embedded.html below the Db's serverUrl", async () => {
+    const { embeddedPageFor } = await import("./loader.js");
+    const here = window.location.origin;
+    expect(embeddedPageFor(dbAt()).href).toBe(`${here}/jazz/inspect/embedded.html`);
+    expect(embeddedPageFor(dbAt("/api/jazz/")).href).toBe(`${here}/api/jazz/inspect/embedded.html`);
+    const ws = `${here.replace(/^http/, "ws")}/sync`;
+    expect(embeddedPageFor(dbAt(ws)).href).toBe(`${here}/sync/inspect/embedded.html`);
+  });
+
+  it("takes an explicit url on this origin", async () => {
+    const { embeddedPageFor } = await import("./loader.js");
+    expect(embeddedPageFor(dbAt(), "/tools/embedded.html").pathname).toBe("/tools/embedded.html");
+  });
+
+  it("refuses another origin, which can't share the page's Db", async () => {
+    const { embeddedPageFor, startInspectorOverlay } = await import("./loader.js");
+    expect(() => embeddedPageFor(dbAt("https://sync.example.com/jazz"))).toThrow(
+      /another origin \(https:\/\/sync\.example\.com\) is not supported yet/,
+    );
+    expect(() => embeddedPageFor(dbAt(), "https://evil.example/embedded.html")).toThrow(
+      /not supported yet/,
+    );
+    expect(() => startInspectorOverlay(dbAt("https://sync.example.com/jazz"))).toThrow();
+    expect(document.querySelector("jazz-inspector-overlay")).toBeNull();
   });
 });
