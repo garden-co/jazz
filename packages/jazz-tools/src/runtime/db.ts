@@ -126,7 +126,6 @@ import { notifyLocalWrite } from "./local-write-observer.js";
 import { analyzeRelations } from "../codegen/relation-analyzer.js";
 import {
   normalizeBuiltQuery,
-  type BuiltRelation,
   type NormalizedBuiltQuery,
   type NormalizedIncludeSpec,
 } from "./query-builder-shape.js";
