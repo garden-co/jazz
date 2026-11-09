@@ -1,7 +1,6 @@
 import {
   createContext,
   createEffect,
-  createRenderEffect,
   createSignal,
   onCleanup,
   onMount,
@@ -21,6 +20,12 @@ import { LegacyJazzProvider, type LegacyJazzProviderProps } from "./provider.js"
 export interface UseJazzAuth {
   snapshot: Accessor<JazzAppSnapshot<JazzClient>>;
   readonly sessionActions: JazzSessionActions;
+  /**
+   * Your auth changed: call this after your own sign-in, sign-out or account
+   * switch. Jazz asks your backend who is signed in now and follows its
+   * answer. Failures are represented in the snapshot.
+   */
+  reauthenticate(): Promise<void>;
   logout(): Promise<void>;
   retry(): Promise<void>;
 }
@@ -58,6 +63,7 @@ function AppProvider(props: JazzAppProviderProps) {
   const value: UseJazzAuth = {
     snapshot,
     retry,
+    reauthenticate: () => app.reauthenticate().catch(() => {}),
     logout: () => app.logout().catch(() => {}),
     sessionActions: app.sessionActions,
   };
@@ -76,9 +82,6 @@ function AppProvider(props: JazzAppProviderProps) {
       lease.release();
       void app.dispose().catch(console.error);
     });
-  });
-  createRenderEffect(() => {
-    app.updateAuth(props.auth);
   });
   createEffect(() => {
     snapshot();

@@ -34,6 +34,7 @@ pub use jazz_db::host;
 pub use jazz_db::link;
 pub use jazz_db::result_tree;
 pub use jazz_db::slow;
+pub use jazz_db::sync_codec;
 pub use jazz_model::model;
 pub use jazz_model::query;
 pub use jazz_model::row_input;
@@ -41,6 +42,7 @@ pub use jazz_model::schema;
 pub use jazz_protocol::authorization_scope;
 pub use jazz_protocol::protocol;
 pub use jazz_protocol::protocol_limits;
+pub use jazz_protocol::thin;
 pub use jazz_types::account_registry;
 pub use jazz_types::app_id;
 pub use jazz_types::column_schema;
@@ -51,6 +53,7 @@ pub use jazz_types::local_executor;
 pub use jazz_types::object;
 pub use jazz_types::postcard_exact;
 pub use jazz_types::records;
+pub use jazz_types::sha256;
 pub use jazz_types::time;
 /// Public runtime and data-model support APIs formerly provided by jazz-tools.
 // The tools API was a separate crate before consolidation and intentionally

@@ -1,3 +1,5 @@
+import { accountAppId } from "../accounts/local-first.js";
+import { fetchFor } from "./in-process-transport.js";
 import { PlatformURL } from "./platform-url.js";
 /**
  * Build an app-scoped URL under `/apps/<appId>`.
@@ -9,7 +11,10 @@ import { PlatformURL } from "./platform-url.js";
 export function appScopedUrl(serverUrl: string, appId: string, path: string): string {
   const base = normalizeServerUrlBase(serverUrl);
   const normalizedPath = path.trim().replace(/^\/+/, "");
-  const appBase = `${base}/apps/${encodeURIComponent(appId)}`;
+  // A browser client scoped by its endpoint (see `clientScope`) names the app
+  // by that scope's id; its backend knows the app by its own.
+  const segment = appId.includes("://") ? accountAppId(appId) : appId;
+  const appBase = `${base}/apps/${encodeURIComponent(segment)}`;
 
   return normalizedPath ? `${appBase}/${normalizedPath}` : appBase;
 }
@@ -24,7 +29,7 @@ export async function fetchAdminJson(
   label: string,
   guidance?: (status: number) => string,
 ): Promise<unknown> {
-  const response = await fetch(url, {
+  const response = await fetchFor(url)(url, {
     method: "GET",
     headers: { "X-Jazz-Admin-Secret": adminSecret },
   });
@@ -73,11 +78,23 @@ function normalizeServerUrlBase(serverUrl: string): string {
   return parsed.toString().replace(/\/+$/, "");
 }
 
+/**
+ * Resolve a path-only server URL such as `/jazz` against the page's origin.
+ * A backend that mounts Jazz serves it on the app's own origin, so browser
+ * clients name it by path. Outside a page, a path stays as given (and is
+ * rejected as an invalid URL).
+ */
+export function resolveServerUrl(serverUrl: string): string {
+  if (!serverUrl.startsWith("/") || serverUrl.startsWith("//")) return serverUrl;
+  const location = (globalThis as { location?: { href?: string } }).location;
+  return location?.href ? new PlatformURL(serverUrl, location.href).href : serverUrl;
+}
+
 function parseServerUrl(serverUrl: string): URL {
   let parsed: URL;
 
   try {
-    parsed = new PlatformURL(serverUrl.trim());
+    parsed = new PlatformURL(resolveServerUrl(serverUrl.trim()));
   } catch {
     throw invalidServerUrl(serverUrl);
   }

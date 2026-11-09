@@ -55,7 +55,7 @@ removed; the authority-scoped known-state field remains active.
 Jazz SPEC 16 specifies the full `JPFK` field order, primitive widths, bounds,
 source role tags, version references, and canonical rejection rules. The only active tags are dense `0` and `1`; the field payloads remain unchanged.
 The direct-store key is the five-field authority prefix followed by the
-32-byte BLAKE3 derived key in domain `jazz.settled-program-fact-key.v1`; the
+32-byte SHA-256 derived key in domain `jazz.settled-program-fact-key.v1`; the
 value is one `Bytes` field holding the exact canonical fact. Retired tags are
 not aliases for the remaining variants.
 

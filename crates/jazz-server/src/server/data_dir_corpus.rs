@@ -42,9 +42,9 @@ const FIXTURE: &str = concat!(
     "/fixtures/server-data-dir-v1/jazz.sqlite.gz.base64"
 );
 /// SHA-256 of the decoded file.
-const SHA256: &str = "9b6829c0aee5674cc3eed099914123f7bf0f7429a4c01639721824afe68ab9d9";
+const SHA256: &str = "b7dcf22da6dbecae944aad9468ebacd2bce4a354a82f22845545dba96d07ffeb";
 /// The account the producer registered for Alice.
-const ALICE_ACCOUNT: &str = "cafd7c1e-d891-47ed-9a45-454ef2cdea13";
+const ALICE_ACCOUNT: &str = "8529ad07-3725-4289-bea2-6ce32779b1ac";
 const ADMIN_SECRET: &str = "corpus-admin";
 
 fn app_id() -> AppId {
@@ -240,9 +240,9 @@ async fn produce_server_data_dir_corpus_v1() {
     let dir = tempfile::tempdir().unwrap();
     {
         let server = open(dir.path()).await;
-        admin(&server, "POST", "/deploy", deploy_v1()).await;
+        admin(&server, "POST", "/bundles", deploy_v1()).await;
         insert_note(&server, "before the migration", None).await;
-        admin(&server, "POST", "/deploy", deploy_v2()).await;
+        admin(&server, "POST", "/bundles", deploy_v2()).await;
         insert_note(&server, "after the migration", Some("written with v2")).await;
         let alice = login(&server, alice()).await;
         println!("ALICE_ACCOUNT: {}", alice.account.0);
@@ -296,9 +296,16 @@ async fn pinned_server_data_dir_reopens_and_accepts_current_writes() {
         assert_eq!(login(&server, alice()).await.account, pinned);
         assert_eq!(notes(&server).await, before);
 
-        // Unchanged deployments stay unchanged; current writes are accepted.
+        // The pinned store activated v2; publishing it now adds only its
+        // bundle, and again changes nothing. Current writes are accepted.
+        let published = admin(&server, "POST", "/bundles", deploy_v2()).await;
         assert_eq!(
-            admin(&server, "POST", "/deploy", deploy_v2()).await["changed"],
+            published["published"],
+            json!({"schemas": [], "migrations": []}),
+            "{published}"
+        );
+        assert_eq!(
+            admin(&server, "POST", "/bundles", deploy_v2()).await["changed"],
             false
         );
         insert_note(&server, "after reopening", Some("current")).await;

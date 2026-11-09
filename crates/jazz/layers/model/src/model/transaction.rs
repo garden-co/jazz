@@ -111,7 +111,7 @@ impl TransactionId {
         let mut input = [0_u8; 24];
         input[..8].copy_from_slice(&tx_id.time.0.to_be_bytes());
         input[8..].copy_from_slice(tx_id.node.0.as_bytes());
-        let digest = blake3::derive_key("jazz committed batch id v1", &input);
+        let digest = jazz_types::sha256::derive_key("jazz committed batch id v1", &input);
         Self(digest[..16].try_into().expect("16-byte digest prefix"))
     }
 }

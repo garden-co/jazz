@@ -127,8 +127,6 @@ pub(super) fn validate_compatible_graph(
     schemas: &BTreeMap<Hash, Schema>,
     migrations: &BTreeMap<Edge, Lens>,
     representatives: &BTreeMap<Hash, Hash>,
-    stored: &DeploymentCatalogue,
-    target: SchemaHash,
 ) -> Result<(), DeploymentError> {
     let nodes = representatives
         .values()
@@ -168,17 +166,6 @@ pub(super) fn validate_compatible_graph(
         }
     }
     let order = topological_order(&nodes, &edges)?;
-    if let Some(active) = stored.active_schema_hash {
-        let from = representatives[&active.0];
-        let to = representatives[&target.0];
-        let previously_published = stored
-            .schemas
-            .iter()
-            .any(|s| SchemaHash::compute(s) == target);
-        if !(connected(from, to, &edges) || previously_published && connected(to, from, &edges)) {
-            return Err(DeploymentError::UnreachableTarget { active, target });
-        }
-    }
     // Keep a single connected history, but allow multiple terminal branches.
     // In a DAG, a unique root reaches every node.
     let roots = nodes

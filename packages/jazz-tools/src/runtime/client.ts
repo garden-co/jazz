@@ -1,3 +1,14 @@
+import {
+  validateAcceptedReadTimeout,
+  isAcceptedReadCapability,
+  type AcceptedRows,
+  type TransactionReadCapability,
+} from "./accepted-read.js";
+import {
+  validateCatalogueTimeout,
+  type CatalogueIdentityRequest,
+  type PreparedCatalogueIdentities,
+} from "./catalogue-identities.js";
 import { runtimeRandomBytes } from "./runtime-entropy.js";
 import { UnsupportedSnapshotError, type SnapshotRef } from "./snapshot-ref.js";
 /**
@@ -32,8 +43,21 @@ import { parseUuidBytes } from "./hex.js";
 /** @internal Runtime operations bound to the currently executing preparation. */
 export type TransactionPreparationIO = Pick<
   JazzClient,
-  "queryInternal" | "insertInternal" | "updateInternal" | "upsertInternal" | "restoreInternal"
->;
+  | "queryInternal"
+  | "queryAcceptedInternal"
+  | "insertInternal"
+  | "updateInternal"
+  | "upsertInternal"
+  | "restoreInternal"
+> & {
+  assertActive(): void;
+  /** @internal Ordinary policy-checked query outside this transaction's overlay. */
+  queryGlobal(
+    query: string,
+    options?: InternalQueryExecutionOptions,
+    session?: Session,
+  ): Promise<Row[]>;
+};
 
 type RuntimeSerializedSession = Pick<
   Session,
@@ -158,11 +182,29 @@ export type AuthUpdate =
  * Common interface for the runtime backing `JazzClient`.
  */
 export interface Runtime {
+  /**
+   * Wait until every write committed so far reaches `tier`. `throughOutage`
+   * keeps the wait pending through outages until a terminal failure.
+   */
+  waitForPendingWrites?(
+    tier?: string,
+    options?: { throughOutage?: boolean; signal?: AbortSignal },
+  ): Promise<void>;
+  /** @internal Close mutation admission and report the foreground TxTime high-water. */
+  quiesceForegroundTxTimeHighWater?(): Promise<bigint>;
   beginTransaction(
     transactionKind: TransactionKind,
     id: OpenTransactionId,
     sessionJson?: string | null,
+    readCapability?: TransactionReadCapability,
   ): OpenTransactionId;
+  /** @internal Authority evidence in an opted-in existing serializable batch. */
+  queryAccepted?(
+    queryJson: string,
+    openTransactionId: OpenTransactionId,
+    sessionJson: string | null | undefined,
+    timeoutMs: number,
+  ): Promise<AcceptedRows<Row>>;
   /** Completion may include asynchronous preparation before physical submission. */
   commitTransaction(id: OpenTransactionId): TxId | Promise<TxId>;
   rollbackTransaction(id: OpenTransactionId): Promise<boolean>;
@@ -268,6 +310,12 @@ export interface Runtime {
     tier?: string | null,
     options_json?: string | null,
   ): Promise<any>;
+  /** @internal One fresh coverage operation followed by same-handle lookups. */
+  prepareCatalogueIdentities?(
+    requests: readonly CatalogueIdentityRequest[],
+    sessionJson?: string,
+    timeoutMs?: number,
+  ): Promise<readonly PreparedCatalogueIdentities[]>;
   createSubscription(
     query_json: string,
     session_json?: string | null,
@@ -298,6 +346,12 @@ export interface Runtime {
   nativeUpstreamConfigured?(): boolean;
   /** Push updated auth credentials into the live Rust transport. */
   updateAuth(auth_json: string): void;
+  /**
+   * The session this client resolved from its credentials, set before it
+   * connects and again whenever its auth changes. A runtime that serves
+   * only its connection's session (thin) compares calls against it.
+   */
+  useSession?(session: Session | null): void;
   /** End waits held for a refused credential that nothing will renew. */
   endCredentialWait?(): void;
   /** Register a callback invoked when the Rust transport rejects the JWT. */
@@ -350,6 +404,8 @@ export interface AuthConfig {
   admin_secret?: string;
   /** Opaque session payload forwarded by a backend proxy. */
   backend_session?: unknown;
+  /** The published permissions bundle the session is pinned to. */
+  bundle?: string;
 }
 
 /**
@@ -1005,15 +1061,17 @@ export class WriteResult<T> extends WriteHandle<T, T> {
  */
 export class SerializableWriteHandle extends WriteHandle<void> {
   /**
-   * Wait for the serializable transaction to be accepted or rejected by the authority.
+   * Wait for the selected durability tier. Without options, use global with an
+   * upstream or local otherwise. Explicit global waits never fall back to local.
    *
    * Rejects with a {@link PersistedWriteRejectedError} if the transaction is rejected,
    * or a {@link WriteWaitTimeoutError} once `timeoutMs` passes. Without
    * `timeoutMs`, the wait lasts through network outages and reconnects.
    */
-  override async wait(options: { timeoutMs?: number } = {}): Promise<void> {
+  override async wait(options: Partial<WriteWaitOptions> = {}): Promise<void> {
+    const tier = options.tier === undefined ? undefined : resolveWriteWaitTier(options.tier);
     validateWriteWaitTimeout(options.timeoutMs);
-    await this.client().waitForSerializableTransaction(this.txId, options.timeoutMs);
+    await this.client().waitForSerializableTransaction(this.txId, options.timeoutMs, tier);
   }
 }
 
@@ -1022,15 +1080,17 @@ export class SerializableWriteHandle extends WriteHandle<void> {
  */
 export class SerializableWriteResult<T> extends WriteResult<T> {
   /**
-   * Wait for the serializable transaction to be accepted or rejected by the authority.
+   * Wait for the selected durability tier. Without options, use global with an
+   * upstream or local otherwise. Explicit global waits never fall back to local.
    *
    * Rejects with a {@link PersistedWriteRejectedError} if the transaction is rejected,
    * or a {@link WriteWaitTimeoutError} once `timeoutMs` passes.
    * @returns the callback result.
    */
-  override async wait(options: { timeoutMs?: number } = {}): Promise<T> {
+  override async wait(options: Partial<WriteWaitOptions> = {}): Promise<T> {
+    const tier = options.tier === undefined ? undefined : resolveWriteWaitTier(options.tier);
     validateWriteWaitTimeout(options.timeoutMs);
-    await this.client().waitForSerializableTransaction(this.txId, options.timeoutMs);
+    await this.client().waitForSerializableTransaction(this.txId, options.timeoutMs, tier);
     return this.value;
   }
 
@@ -1071,8 +1131,16 @@ export function beginClientTransactionAfter(
   attribution: string | undefined,
   reservedId: OpenTransactionId | undefined,
   prerequisite: TransactionAdmission | undefined,
+  readCapability?: TransactionReadCapability,
 ): OpenTransactionId {
-  return client.openTransaction(kind, session, attribution, reservedId, prerequisite);
+  return client.openTransaction(
+    kind,
+    session,
+    attribution,
+    reservedId,
+    prerequisite,
+    readCapability,
+  );
 }
 
 /** High-level Jazz client. */
@@ -1087,6 +1155,7 @@ export class JazzClient {
   private resolvedSession: Session | null;
   private shutdownPromise: Promise<void> | null = null;
   private discarded = false;
+  private preparationClosed = false;
   /** Facade-owned subscription releases, fenced against terminal reentrancy. */
   private activeSubscriptionReleases = new Map<number, () => void>();
 
@@ -1149,6 +1218,7 @@ export class JazzClient {
     this.scheduler = getScheduler();
     this.context = context;
     this.resolvedSession = this.resolveSessionFromContext();
+    this.runtime.useSession?.(this.resolvedSession);
 
     const onAuthFailure = runtimeOptions?.onAuthFailure;
     this.runtime.onAuthFailure((rawReason: string) => {
@@ -1200,10 +1270,26 @@ export class JazzClient {
     attribution: string | undefined,
     reservedId: OpenTransactionId | undefined,
     prerequisite?: TransactionAdmission,
+    readCapability?: TransactionReadCapability,
   ): OpenTransactionId {
+    if (
+      readCapability !== undefined &&
+      (!isAcceptedReadCapability(readCapability) ||
+        kind !== "serializable" ||
+        attribution !== undefined ||
+        !this.runtime.queryAccepted)
+    )
+      throw new Error(
+        "Accepted evidence requires a supported session-bound serializable transaction",
+      );
+    if (readCapability === "client-accepted-evidence" && session !== undefined)
+      throw new Error("Own-client evidence cannot select a session");
     const id = reservedId ?? createOpenTransactionId();
     if (prerequisite) {
-      const context = this.writeContext(session, attribution);
+      const context =
+        readCapability && session === undefined
+          ? undefined
+          : this.writeContext(session, attribution);
       const state: { pending?: Promise<void>; committing: boolean; unopened?: boolean } = {
         committing: false,
         unopened: true,
@@ -1220,13 +1306,18 @@ export class JazzClient {
         assertCurrent();
         await prerequisite();
         assertCurrent();
-        this.runtime.beginTransaction(kind, id, context);
+        if (readCapability) this.runtime.beginTransaction(kind, id, context, readCapability);
+        else this.runtime.beginTransaction(kind, id, context);
         state.unopened = false;
       });
       state.pending.catch(() => {});
       return id;
     }
-    const opened = this.runtime.beginTransaction(kind, id, this.writeContext(session, attribution));
+    const context =
+      readCapability && session === undefined ? undefined : this.writeContext(session, attribution);
+    const opened = readCapability
+      ? this.runtime.beginTransaction(kind, id, context, readCapability)
+      : this.runtime.beginTransaction(kind, id, context);
     this.transactionPreparations.set(opened, { committing: false });
     return opened;
   }
@@ -1261,7 +1352,7 @@ export class JazzClient {
     prepare: (io: TransactionPreparationIO) => Promise<void>,
   ): Promise<void> {
     const state = this.transactionPreparations.get(id);
-    if (!state || state.committing) {
+    if (!state || state.committing || this.preparationClosed || this.discarded) {
       throw new Error("Cannot prepare a transaction that is closed or committing");
     }
     state.pending = (state.pending ?? Promise.resolve()).then(async () => {
@@ -1269,12 +1360,21 @@ export class JazzClient {
         throw new Error("Transaction was rolled back before preparation");
       }
       let active = true;
+      const acceptedReads: Promise<unknown>[] = [];
+      let callbackFailed = false;
+      let callbackError: unknown;
       const assertActive = () => {
-        if (!active || this.transactionPreparations.get(id) !== state)
+        if (
+          !active ||
+          this.preparationClosed ||
+          this.discarded ||
+          this.transactionPreparations.get(id) !== state
+        )
           throw new Error("Transaction preparation is no longer active");
       };
       try {
         await prepare({
+          assertActive,
           queryInternal: (query, options, session) => {
             assertActive();
             return this.queryWithoutPreparation(
@@ -1282,6 +1382,38 @@ export class JazzClient {
               { ...options, openTransactionId: id },
               session,
             );
+          },
+          queryGlobal: (query, options, session) => {
+            assertActive();
+            const { openTransactionId: _transaction, ...ordinaryOptions } = options ?? {};
+            const reading = this.queryWithoutPreparation(query, ordinaryOptions, session).then(
+              (rows) => {
+                assertActive();
+                return rows;
+              },
+            );
+            acceptedReads.push(reading);
+            reading.catch(() => {});
+            return reading;
+          },
+          queryAcceptedInternal: (query, transaction, timeoutMs, session) => {
+            assertActive();
+            if (transaction !== id)
+              throw new Error("Accepted preparation read belongs to a different transaction");
+            const reading = this.queryAcceptedWithoutPreparation(
+              query,
+              id,
+              timeoutMs,
+              session,
+            ).then((result) => {
+              // Retirement/rollback while awaiting evidence must not publish it to the callback.
+              assertActive();
+              return result;
+            });
+            acceptedReads.push(reading);
+            // Registration owns errors even if the callback forgets to await a child read.
+            reading.catch(() => {});
+            return reading;
           },
           insertInternal: (table, values, options, session, attribution) => {
             assertActive();
@@ -1315,9 +1447,17 @@ export class JazzClient {
             return { ...row, values: row.values as Value[] };
           },
         });
+      } catch (error) {
+        callbackFailed = true;
+        callbackError = error;
       } finally {
         active = false;
       }
+      // Revoke on callback exit, then drain every started child; never detach a rejection.
+      const results = await Promise.allSettled(acceptedReads);
+      if (callbackFailed) throw callbackError;
+      const failed = results.find((result) => result.status === "rejected");
+      if (failed?.status === "rejected") throw failed.reason;
     });
     // Registration owns failures even if the caller never commits or waits.
     state.pending.catch(() => {});
@@ -1437,6 +1577,7 @@ export class JazzClient {
 
     try {
       this.resolvedSession = this.resolveSessionFromContext();
+      this.runtime.useSession?.(this.resolvedSession);
       if (updateRuntime) {
         this.runtime.updateAuth(JSON.stringify(this.buildTransportAuthPayload()));
       }
@@ -1445,6 +1586,7 @@ export class JazzClient {
       this.context.cookieSession = previousCookieSession;
       setTrustedReservedSession(this.context, previousTrustedReservedSession);
       this.resolvedSession = previousResolvedSession;
+      this.runtime.useSession?.(previousResolvedSession);
       throw error;
     }
   }
@@ -1640,11 +1782,74 @@ export class JazzClient {
     attribution?: string,
     objectId?: string,
   ): Promise<WriteHandle<{ id: string }>> {
+    const result = await this.runStreamingMutation(
+      mutation,
+      table,
+      values,
+      column,
+      source,
+      options,
+      session,
+      attribution,
+      objectId,
+    );
+    if (result.kind !== "committed") {
+      throw new Error("Streaming mutations cannot be staged inside an open transaction");
+    }
+    return new WriteHandle(result.txId, this, { id: result.id });
+  }
+
+  /**
+   * @internal Stage a streamed mutation in open transaction
+   * `openTransactionId`; it commits with the transaction.
+   */
+  async streamingMutationInTransaction(
+    mutation: StreamingMutationKind,
+    table: string,
+    values: InsertValues,
+    column: string,
+    source: StreamingValueSource,
+    openTransactionId: OpenTransactionId,
+    options?: InsertOptions | UpdateOptions,
+    session?: Session,
+    attribution?: string,
+    objectId?: string,
+  ): Promise<{ id: string }> {
+    const result = await this.runStreamingMutation(
+      mutation,
+      table,
+      values,
+      column,
+      source,
+      options,
+      session,
+      attribution,
+      objectId,
+      openTransactionId,
+    );
+    if (result.kind !== "staged") {
+      throw new Error("A streaming mutation in a transaction must be staged in it");
+    }
+    return { id: result.id };
+  }
+
+  private async runStreamingMutation(
+    mutation: StreamingMutationKind,
+    table: string,
+    values: InsertValues,
+    column: string,
+    source: StreamingValueSource,
+    options?: InsertOptions | UpdateOptions,
+    session?: Session,
+    attribution?: string,
+    objectId?: string,
+    openTransactionId?: OpenTransactionId,
+  ): Promise<StreamingInsertResult> {
     if (!this.runtime.streamingMutation) {
       throw new Error("This runtime does not support streaming mutations");
     }
-    const writeContext = this.writeContext(session, attribution, undefined, options);
-    const result = await this.runtime.streamingMutation(
+    const writeContext = this.writeContext(session, attribution, openTransactionId, options);
+    return this.runtime.streamingMutation(
       mutation,
       table,
       values,
@@ -1653,10 +1858,6 @@ export class JazzClient {
       writeContext,
       objectId ?? ("id" in (options ?? {}) ? (options as InsertOptions).id : undefined),
     );
-    if (result.kind !== "committed") {
-      throw new Error("Streaming mutations cannot be staged inside an open transaction");
-    }
-    return new WriteHandle(result.txId, this, { id: result.id });
   }
 
   /**
@@ -1754,6 +1955,22 @@ export class JazzClient {
     );
   }
 
+  /** @internal Resolve all preparation names through this schema runtime once. */
+  prepareCatalogueIdentitiesInternal(
+    requests: readonly CatalogueIdentityRequest[],
+    session?: Session,
+    timeoutMs = 15_000,
+  ): Promise<readonly PreparedCatalogueIdentities[]> {
+    validateCatalogueTimeout(timeoutMs);
+    if (!this.runtime.prepareCatalogueIdentities)
+      throw new Error("Runtime does not expose fresh catalogue identity preparation");
+    return this.runtime.prepareCatalogueIdentities(
+      requests,
+      session ? JSON.stringify(serializeRuntimeSession(session)) : undefined,
+      timeoutMs,
+    );
+  }
+
   /**
    * Execute a query and return all matching rows.
    *
@@ -1796,6 +2013,38 @@ export class JazzClient {
       optionsJson,
     );
     return results as Row[];
+  }
+
+  /** @internal Reuse the existing admission chain before the native read. */
+  async queryAcceptedInternal(
+    query: string,
+    openTransactionId: OpenTransactionId,
+    timeoutMs: number,
+    session?: Session,
+  ): Promise<AcceptedRows<Row>> {
+    validateAcceptedReadTimeout(timeoutMs);
+    if (!this.runtime.queryAccepted) throw new Error("Runtime does not expose accepted reads");
+    const state = this.transactionPreparations.get(openTransactionId);
+    if (!state || state.committing) throw new Error("Accepted read requires an open transaction");
+    if (state.pending) await state.pending;
+    return this.queryAcceptedWithoutPreparation(query, openTransactionId, timeoutMs, session);
+  }
+
+  /** Already registered preparation uses its bound IO, without awaiting itself. */
+  private async queryAcceptedWithoutPreparation(
+    query: string,
+    openTransactionId: OpenTransactionId,
+    timeoutMs: number,
+    session?: Session,
+  ): Promise<AcceptedRows<Row>> {
+    validateAcceptedReadTimeout(timeoutMs);
+    if (!this.runtime.queryAccepted) throw new Error("Runtime does not expose accepted reads");
+    return this.runtime.queryAccepted(
+      query,
+      openTransactionId,
+      session ? JSON.stringify(serializeRuntimeSession(session)) : undefined,
+      timeoutMs,
+    );
   }
 
   /**
@@ -2229,11 +2478,18 @@ export class JazzClient {
   async waitForSerializableTransaction(
     txId: TxId | Promise<TxId>,
     timeoutMs?: number,
+    requiredTier?: DurabilityTier,
   ): Promise<void> {
-    txId = await txId;
     const hasAuthority =
       Boolean(this.context.serverUrl) || this.runtime.nativeUpstreamConfigured?.() === true;
-    await this.waitForTransaction(txId, hasAuthority ? "global" : "local", undefined, timeoutMs);
+    // Keep the unresolved identity inside the runtime wait so one timeout
+    // budget also covers a commit that has not returned its ID yet.
+    await this.waitForTransaction(
+      txId,
+      requiredTier ?? (hasAuthority ? "global" : "local"),
+      undefined,
+      timeoutMs,
+    );
   }
 
   private normalizeTransactionWaitError(error: unknown): Error {
@@ -2248,6 +2504,8 @@ export class JazzClient {
       return await this.shutdownPromise;
     }
 
+    // Revoke scopes before close can synchronously re-enter application code.
+    this.preparationClosed = true;
     this.shutdownPromise = (async () => {
       // Close runtime if it supports explicit shutdown.
       if (this.runtime.close) {

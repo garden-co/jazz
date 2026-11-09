@@ -590,7 +590,7 @@ preimage is `magic "JFRD" | version 1 | field_count:u32be |
 descriptor_len:u32be | Groove-record-descriptor | record_len:u32be |
 Groove-record`. The descriptor has the source-order payload types and the
 engine-owned names `flat_join_payload_0`, `flat_join_payload_1`, …, so user
-projection aliases do not affect it. `row_digest` is BLAKE3's derived-key hash
+projection aliases do not affect it. `row_digest` is the derived-key hash (SHA-256 over the length-prefixed context, then the input)
 of that preimage with context `jazz.flat-join-row-digest.v1`.
 
 For example, declared payload `(u64, string)` and values `(7, "blue")` have

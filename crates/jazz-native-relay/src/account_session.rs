@@ -18,16 +18,28 @@ struct AccountSessionRequest {
     account_id: jazz::account_registry::AccountId,
     issuer: String,
     subject: String,
-    jwt: String,
+    /// A local-first account's own token: it proves the account and is what
+    /// its socket presents.
+    #[serde(default)]
+    jwt: Option<String>,
+    /// For a user signed in through the app's backend: the app's own bearer,
+    /// which that backend authenticates the socket by. Opaque here.
+    #[serde(default)]
+    bearer: Option<String>,
     server_url: Option<String>,
     #[serde(default)]
     claims: BTreeMap<String, serde_json::Value>,
 }
 
+/// A new credential for the same principal: `jwt` for a local-first
+/// account, `bearer` for a user signed in through the app's backend.
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AccountSessionRefresh {
-    jwt: String,
+    #[serde(default)]
+    jwt: Option<String>,
+    #[serde(default)]
+    bearer: Option<String>,
     claims: BTreeMap<String, serde_json::Value>,
 }
 
@@ -103,26 +115,47 @@ impl AccountSessionRequest {
             }
             self.server_url = Some(transport.to_string());
         }
-        let projected = jazz::tools::unverified_jwt_scope_subject(&self.jwt)
-            .ok_or(JazzNativeRelayStatus::LifecycleFailure)?;
-        if projected != (self.issuer.clone(), self.subject.clone()) {
-            return Err(JazzNativeRelayStatus::LifecycleFailure);
-        }
-        let author = if self.issuer == jazz::tools::identity::LOCAL_FIRST_ISSUER {
-            let claimed = serde_json::to_string(&[
-                self.account_id.0.to_string(),
-                self.issuer.clone(),
-                self.subject.clone(),
-            ])
-            .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
-            jazz::tools::identity::verify_client_runtime_author(&self.jwt, &self.app_id, &claimed)
-                .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?
-        } else {
-            // Provider verification and account assignment remain server
-            // authority. This projection cannot admit a forged remote write.
-            AuthorSubject::authenticated(&self.issuer, &self.subject)
-                .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?
-                .with_account(self.account_id)
+        let local_first = self.issuer == jazz::tools::identity::LOCAL_FIRST_ISSUER;
+        // Exactly one credential, of the account's kind: a core admits no
+        // other token, and an app's backend reads only its own bearer.
+        let (author, bearer, backend_session) = match (local_first, self.jwt, self.bearer) {
+            (true, Some(jwt), None) => {
+                let projected = jazz::tools::unverified_jwt_scope_subject(&jwt)
+                    .ok_or(JazzNativeRelayStatus::LifecycleFailure)?;
+                if projected != (self.issuer.clone(), self.subject.clone()) {
+                    return Err(JazzNativeRelayStatus::LifecycleFailure);
+                }
+                let claimed = serde_json::to_string(&[
+                    self.account_id.0.to_string(),
+                    self.issuer.clone(),
+                    self.subject.clone(),
+                ])
+                .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+                let author = jazz::tools::identity::verify_client_runtime_author(
+                    &jwt,
+                    &self.app_id,
+                    &claimed,
+                )
+                .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+                (author, jwt, None)
+            }
+            (false, None, Some(bearer)) if !bearer.is_empty() => {
+                // Signed in through the app's backend: it decides who the
+                // bearer is and vouches for the session the socket states.
+                // This projection cannot admit a forged remote write.
+                let author = AuthorSubject::authenticated(&self.issuer, &self.subject)
+                    .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?
+                    .with_account(self.account_id);
+                let stated = serde_json::json!({
+                    "account_id": self.account_id.0.to_string(),
+                    "issuer": self.issuer.clone(),
+                    "user_id": self.subject.clone(),
+                    "claims": self.claims.clone(),
+                    "authMode": "external",
+                });
+                (author, bearer, Some(stated))
+            }
+            _ => return Err(JazzNativeRelayStatus::LifecycleFailure),
         };
         // Versioned local filename derivation: domain, BE-u32 byte lengths
         // plus UTF-8 registry/app/environment, then the 16 account UUID bytes.
@@ -146,7 +179,7 @@ impl AccountSessionRequest {
         Ok(PendingPrivateSession {
             scope,
             sqlite_path: storage_root
-                .join(format!("{}.sqlite", blake3::hash(&root).to_hex()))
+                .join(format!("{}.sqlite", jazz::sha256::hash(&root).to_hex()))
                 .display()
                 .to_string(),
             identity: fresh_client_identity(author).map_err(relay_status)?,
@@ -154,7 +187,8 @@ impl AccountSessionRequest {
             socket: self.server_url.map(|server_url| PrivateRelaySocketSession {
                 server_url,
                 app_id: self.app_id,
-                bearer: self.jwt,
+                bearer,
+                backend_session,
             }),
         })
     }
@@ -299,7 +333,6 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_refresh_account_session(
             .ok()
             .and_then(|token| serde_json::from_str(token).ok())
             .ok_or(JazzNativeRelayStatus::InvalidCommand)?;
-        let token = refresh.jwt.as_str();
         let mut host = lease.lock()?;
         let owner = match host.account_session_owners.get(&capability) {
             Some(owner) if owner.runtime_token == lease.runtime_token => owner,
@@ -312,19 +345,26 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_refresh_account_session(
         } else {
             return Err(JazzNativeRelayStatus::InvalidHandle);
         };
-        if jazz::tools::unverified_jwt_scope_subject(token) != Some(author.principal_parts()) {
-            return Err(JazzNativeRelayStatus::LifecycleFailure);
-        }
-        if author.principal_parts().0 == jazz::tools::identity::LOCAL_FIRST_ISSUER
-            && jazz::tools::identity::verify_client_runtime_author(
-                token,
-                &owner.app_id,
-                author.canonical(),
-            )
-            .is_err()
-        {
-            return Err(JazzNativeRelayStatus::LifecycleFailure);
-        }
+        let local_first = author.principal_parts().0 == jazz::tools::identity::LOCAL_FIRST_ISSUER;
+        let token = match (local_first, &refresh.jwt, &refresh.bearer) {
+            (true, Some(jwt), None) => {
+                if jazz::tools::unverified_jwt_scope_subject(jwt) != Some(author.principal_parts())
+                    || jazz::tools::identity::verify_client_runtime_author(
+                        jwt,
+                        &owner.app_id,
+                        author.canonical(),
+                    )
+                    .is_err()
+                {
+                    return Err(JazzNativeRelayStatus::LifecycleFailure);
+                }
+                jwt.as_str()
+            }
+            // The app's backend decides who a new bearer is: a different
+            // user is refused there, against the session the socket states.
+            (false, None, Some(bearer)) if !bearer.is_empty() => bearer.as_str(),
+            _ => return Err(JazzNativeRelayStatus::LifecycleFailure),
+        };
         let claims = advisory_claims(author, refresh.claims)?;
         if let Some(pending) = host.pending_private_sessions.get_mut(&capability) {
             pending.claims = claims;
@@ -428,7 +468,6 @@ impl NativeRelayHost {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::Engine;
 
     fn external(subject: &str) -> AccountSessionRequest {
         let app_id = "07070707-0707-0707-0707-070707070707".to_owned();
@@ -441,15 +480,9 @@ mod tests {
             ),
             issuer: "https://issuer.example".into(),
             subject: subject.into(),
-            jwt: format!(
-                "x.{}.x",
-                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
-                    serde_json::to_vec(
-                        &serde_json::json!({"iss":"https://issuer.example", "sub":subject})
-                    )
-                    .unwrap()
-                )
-            ),
+            jwt: None,
+            // The app's own bearer for its backend: opaque to the relay.
+            bearer: Some(format!("x.app-session-{subject}")),
             server_url: None,
             claims: BTreeMap::new(),
         }
@@ -508,7 +541,7 @@ mod tests {
                 .unwrap()
                 .to_str()
                 .unwrap(),
-            "248c40d90d29c2c916e1e96dc490075b2b6b7fe0c4976bab8803929fdddde263.sqlite"
+            "e72c6bbe2a297083794db28b9a713187d28274e4af741f21b705b7944f584eb6.sqlite"
         );
         assert_eq!(alice.sqlite_path, bob.sqlite_path);
         assert_ne!(alice.scope.auth_scope, bob.scope.auth_scope);
@@ -535,9 +568,14 @@ mod tests {
         let mut wrong_transport = external("alice");
         wrong_transport.server_url = Some("https://other.example".into());
         assert!(wrong_transport.prepare(root.path()).is_err());
-        let mut wrong_subject = external("alice");
-        wrong_subject.subject = "bob".into();
-        assert!(wrong_subject.prepare(root.path()).is_err());
+        // A user signed in through the app's backend brings the app's bearer
+        // only: no token of a kind no core or backend admits, and not none.
+        let mut with_token = external("alice");
+        with_token.jwt = Some("x.alice.x".into());
+        assert!(with_token.prepare(root.path()).is_err());
+        let mut without_bearer = external("alice");
+        without_bearer.bearer = Some(String::new());
+        assert!(without_bearer.prepare(root.path()).is_err());
         assert!(
             external("alice")
                 .prepare(std::path::Path::new("relative"))
@@ -680,7 +718,7 @@ mod tests {
             .registry
             .replace("https://edge.example", "http://127.0.0.1:9");
         request.server_url = Some("http://127.0.0.1:9".into());
-        let refresh_jwt = request.jwt.clone();
+        let refresh_bearer = request.bearer.clone();
         let request = serde_json::to_vec(&request).unwrap();
         let schema = JazzSchema::new(&jazz::tools::SchemaBuilder::new().build()).unwrap();
         let schema = serde_json::to_vec(schema.public_schema()).unwrap();
@@ -733,7 +771,7 @@ mod tests {
             let second = attach(false);
             assert_eq!((*host).inner.lock().unwrap().private_scope_workers.len(), 1);
             let refresh = serde_json::to_vec(&serde_json::json!({
-                "jwt": refresh_jwt,
+                "bearer": refresh_bearer,
                 "claims": {"role": "editor"}
             }))
             .unwrap();
@@ -789,14 +827,14 @@ mod tests {
         online(&mut first_request);
         let mut second_request = external("alice");
         online(&mut second_request);
-        second_request.jwt = second_request.jwt.replacen("x.", "y.", 1);
-        let rotated_bearer = second_request.jwt.clone();
+        second_request.bearer = second_request.bearer.map(|b| b.replacen("x.", "y.", 1));
+        let rotated_bearer = second_request.bearer.clone().unwrap();
         second_request
             .claims
             .insert("role".into(), serde_json::Value::String("editor".into()));
         let mut malformed_request = external("alice");
         online(&mut malformed_request);
-        malformed_request.jwt = malformed_request.jwt.replacen("x.", "z.", 1);
+        malformed_request.bearer = malformed_request.bearer.map(|b| b.replacen("x.", "z.", 1));
         malformed_request
             .claims
             .insert("role".into(), serde_json::Value::String("admin".into()));
@@ -954,14 +992,18 @@ mod tests {
     fn local_first_setup_verifies_proof_and_founding_account() {
         let root = tempfile::tempdir().unwrap();
         let mut request = external("unused");
-        request.jwt = jazz::tools::identity::mint_jazz_self_signed_token(
-            &[9; 32],
-            jazz::tools::identity::LOCAL_FIRST_ISSUER,
-            &request.app_id,
-            3600,
-        )
-        .unwrap();
-        let (issuer, subject) = jazz::tools::unverified_jwt_scope_subject(&request.jwt).unwrap();
+        request.bearer = None;
+        request.jwt = Some(
+            jazz::tools::identity::mint_jazz_self_signed_token(
+                &[9; 32],
+                jazz::tools::identity::LOCAL_FIRST_ISSUER,
+                &request.app_id,
+                3600,
+            )
+            .unwrap(),
+        );
+        let (issuer, subject) =
+            jazz::tools::unverified_jwt_scope_subject(request.jwt.as_deref().unwrap()).unwrap();
         request.issuer = issuer;
         request.subject = subject.clone();
         request.account_id = jazz::account_registry::local_first_account_id(
@@ -973,6 +1015,7 @@ mod tests {
         let prepared = request.prepare(root.path()).unwrap();
         assert_eq!(prepared.identity.author.account_id(), Some(account));
         let mut forged = external("unused");
+        forged.bearer = None;
         forged.jwt = token;
         forged.issuer = jazz::tools::identity::LOCAL_FIRST_ISSUER.into();
         forged.subject = subject;
@@ -1017,10 +1060,11 @@ mod tests {
             jazz_native_relay_bytes_free(&mut out);
             assert_eq!(capability.len(), 32);
             let same_identity =
-                serde_json::json!({"jwt": external("alice").jwt, "claims": {"role": "editor"}})
+                serde_json::json!({"bearer": external("alice").bearer, "claims": {"role": "editor"}})
                     .to_string();
-            let other_identity =
-                serde_json::json!({"jwt": external("bob").jwt, "claims": {}}).to_string();
+            // A user signed in through the app's backend refreshes with the
+            // app's bearer only (the backend decides who it is), never a token.
+            let other_identity = serde_json::json!({"jwt": "x.bob.x", "claims": {}}).to_string();
             assert_eq!(
                 jazz_native_relay_host_lease_refresh_account_session(
                     first,

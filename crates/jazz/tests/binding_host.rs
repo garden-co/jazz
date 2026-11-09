@@ -105,8 +105,8 @@ fn argument(result: Result<impl std::fmt::Debug, HostError>) -> String {
 fn pump(links: &[(&Link, &Link)]) {
     for _ in 0..8 {
         for (client, server) in links {
-            server.receive(client.take_outbound());
-            client.receive(server.take_outbound());
+            server.receive_checked(client.take_outbound()).unwrap();
+            client.receive_checked(server.take_outbound()).unwrap();
             block_on(client.binding().tick()).unwrap();
             block_on(server.binding().tick()).unwrap();
         }
@@ -425,6 +425,7 @@ fn a_streamed_value_publishes_as_one_write() {
             &row,
             &empty_cells(),
             "title".to_owned(),
+            None,
             None,
             None,
             None,
@@ -1557,4 +1558,66 @@ fn a_remote_subscription_never_lists_pending_local_versions() {
         .unwrap();
     assert_eq!(rows_in(&drive(&links, read).unwrap()), 2);
     assert_eq!(titles(&server), ["changed", "pending"]);
+}
+
+/// Alice's valid write before Mallory's malformed frame is rejected with the
+/// entire host batch. Retrying the valid frames admits the write exactly once.
+#[test]
+fn checked_host_batch_rejects_the_valid_prefix_atomically() {
+    let server = authority();
+    let alice = open(0xa2);
+    let upstream = alice.connect_upstream();
+    let subscriber = server
+        .accept_subscriber(alice.author(), Default::default())
+        .unwrap();
+    pump(&[(&upstream, &subscriber)]);
+    alice.insert("notes", &title("alice"), &none()).unwrap();
+    block_on(alice.tick()).unwrap();
+    let frames = upstream.take_outbound();
+    assert!(!frames.is_empty());
+    let mut malformed = frames.clone();
+    malformed.push(MALFORMED.to_vec());
+    assert_eq!(
+        subscriber.receive_checked(malformed).unwrap_err().code,
+        ErrorCode::Protocol
+    );
+    block_on(server.tick()).unwrap();
+    assert!(titles(&server).is_empty());
+    subscriber.receive_checked(frames).unwrap();
+    block_on(server.tick()).unwrap();
+    assert_eq!(titles(&server), ["alice"]);
+}
+
+/// Alice's split write spans host batches. Mallory's bad suffix must neither
+/// apply the write nor consume its saved prefix; retrying the tail applies it.
+/// The byte split exercises reassembly through the public binding boundary.
+#[test]
+fn checked_host_batch_preserves_a_split_prefix_after_rejection() {
+    let server = authority();
+    let alice = open(0xa3);
+    let upstream = alice.connect_upstream();
+    let subscriber = server
+        .accept_subscriber(alice.author(), Default::default())
+        .unwrap();
+    pump(&[(&upstream, &subscriber)]);
+    alice.insert("notes", &title("alice"), &none()).unwrap();
+    block_on(alice.tick()).unwrap();
+    let frames = upstream.take_outbound();
+    let (head, tail) = frames[0].split_at(1);
+    subscriber
+        .receive_checked([[&[0xff], head].concat()])
+        .unwrap();
+    let mut suffix = vec![[&[0xfe], tail].concat()];
+    suffix.extend_from_slice(&frames[1..]);
+    let mut malformed = suffix.clone();
+    malformed.push(MALFORMED.to_vec());
+    assert_eq!(
+        subscriber.receive_checked(malformed).unwrap_err().code,
+        ErrorCode::Protocol
+    );
+    block_on(server.tick()).unwrap();
+    assert!(titles(&server).is_empty());
+    subscriber.receive_checked(suffix).unwrap();
+    block_on(server.tick()).unwrap();
+    assert_eq!(titles(&server), ["alice"]);
 }

@@ -110,6 +110,21 @@ pub(super) struct StoredPermissionsResponse {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct PublishedBundleView {
+    bundle: String,
+    schema_hash: String,
+    published_at: u64,
+    permissions: std::collections::HashMap<String, TablePolicies>,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct PublishedBundlesResponse {
+    /// Oldest first; the last is what a backend booting now pins to.
+    bundles: Vec<PublishedBundleView>,
+}
+
+#[derive(Debug, Serialize)]
 pub(super) struct ShutdownResponse {
     status: &'static str,
 }
@@ -213,6 +228,31 @@ pub(super) async fn permissions_handler(
             permissions: None,
         },
     }))
+}
+
+/// Every bundle the core has published, with its permissions: what an
+/// admin reads to see what a session pinned to a bundle may do.
+pub(super) async fn published_bundles_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+) -> Result<Json<PublishedBundlesResponse>, Response> {
+    require_admin(&state, &headers)?;
+    let bundles = state
+        .catalogue_store
+        .published_bundles()
+        .into_iter()
+        .map(|bundle| PublishedBundleView {
+            bundle: bundle.id.to_string(),
+            schema_hash: bundle.schema.to_string(),
+            published_at: bundle.published_at,
+            permissions: bundle
+                .permissions
+                .into_iter()
+                .map(|(table, policies)| (table.to_string(), policies))
+                .collect(),
+        })
+        .collect();
+    Ok(Json(PublishedBundlesResponse { bundles }))
 }
 
 pub(super) async fn admin_subscription_introspection_handler(
@@ -388,9 +428,11 @@ mod tests {
         assert!(reason.contains("injected runtime failure"), "{reason}");
     }
 }
-/// Commit a complete, validated deployment. Detached execution makes request
-/// cancellation independent of the durable commit/activation boundary.
-pub(super) async fn deploy_handler(
+
+/// `/bundles`: publish a complete, validated deployment as a permissions
+/// bundle that sessions are pinned to. Nothing becomes current. Detached
+/// execution makes request cancellation independent of the durable commit.
+pub(super) async fn publish_bundle_handler(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
     body: Result<

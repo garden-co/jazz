@@ -606,7 +606,7 @@ export const app = s.defineApp({
                 typeof value === "bigint" ? value.toString() : value,
               ),
             );
-          if (input.endsWith("/admin/deploy")) {
+          if (input.endsWith("/admin/bundles")) {
             body = JSON.parse(String(init?.body));
             return Response.json({
               changed: true,
