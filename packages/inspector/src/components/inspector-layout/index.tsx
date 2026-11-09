@@ -2,6 +2,8 @@ import { useEffect } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router";
 import { useDevtoolsContext } from "../../contexts/devtools-context.js";
 import { useStandaloneContext } from "../../contexts/standalone-context.js";
+import { useBackendContext } from "../../backend/backend-context.js";
+import { BackendIdentity } from "../../backend/pages.js";
 import {
   formatSchemaHashOptionLabel,
   type SchemaHashInfo,
@@ -90,6 +92,7 @@ export function InspectorLayout() {
   const isOverlay = runtime === "overlay";
   const isDetached = isOverlay && isDetachedInspector();
   const standaloneContext = useStandaloneContext();
+  const backendContext = useBackendContext();
   const location = useLocation();
   const navigate = useNavigate();
   const [isTablesPanelOpen, setIsTablesPanelOpen] = useLocalStorageState(
@@ -170,8 +173,18 @@ export function InspectorLayout() {
               `${styles.tabLink} ${isActive ? styles.tabLinkActive : ""}`
             }
           >
-            Subscriptions
+            {backendContext ? "Sessions" : "Subscriptions"}
           </NavLink>
+          {backendContext?.link?.query ? (
+            <NavLink
+              to="/linked"
+              className={({ isActive }) =>
+                `${styles.tabLink} ${isActive ? styles.tabLinkActive : ""}`
+              }
+            >
+              Linked query
+            </NavLink>
+          ) : null}
           {isOverlay ? (
             <NavLink
               to="/settings"
@@ -184,6 +197,7 @@ export function InspectorLayout() {
           ) : null}
         </nav>
         <div className={styles.topBarActions}>
+          {backendContext ? <BackendIdentity /> : null}
           {standaloneContext ? (
             <>
               <SchemaHashesSelect

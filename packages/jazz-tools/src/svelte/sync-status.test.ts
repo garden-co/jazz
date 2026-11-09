@@ -24,8 +24,22 @@ function fakeDb(initial: SyncStatus) {
   };
 }
 
-const connecting: SyncStatus = { link: { state: "connecting" }, pendingUploads: 1, synced: false };
-const connected: SyncStatus = { link: { state: "connected" }, pendingUploads: 0, synced: true };
+const connecting: SyncStatus = {
+  link: { state: "connecting" },
+  pendingUploads: 1,
+  oldestPendingAt: 1,
+  rejected: 0,
+  lastError: null,
+  synced: false,
+};
+const connected: SyncStatus = {
+  link: { state: "connected" },
+  pendingUploads: 0,
+  oldestPendingAt: null,
+  rejected: 0,
+  lastError: null,
+  synced: true,
+};
 
 describe("syncStatus", () => {
   it("follows the Db's status only while subscribed", () => {

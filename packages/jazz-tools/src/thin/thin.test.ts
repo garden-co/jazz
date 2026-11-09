@@ -588,9 +588,23 @@ describe("thin client", () => {
       db.update(app.notes, theirs.id, { done: true }).wait({ tier: "global" }),
     ).rejects.toThrow();
     await expect(db.waitForSync({ timeoutMs: 5_000 })).resolves.toBeUndefined();
+    // The sync status counts it and names it as the last error.
+    expect(db.getSyncStatus()).toMatchObject({
+      pendingUploads: 0,
+      oldestPendingAt: null,
+      rejected: 1,
+      lastError: { kind: "rejected", at: expect.any(Number) },
+    });
 
-    await db.insert(app.notes, { text: "mine", done: false }).wait({ tier: "global" });
+    // A write waiting for its answer says since when.
+    const before = Date.now();
+    const mine = db.insert(app.notes, { text: "mine", done: false });
+    const waiting = db.getSyncStatus();
+    expect(waiting.pendingUploads).toBe(1);
+    expect(waiting.oldestPendingAt).toBeGreaterThanOrEqual(before);
+    await mine.wait({ tier: "global" });
     await expect(db.waitForSync({ timeoutMs: 5_000 })).resolves.toBeUndefined();
+    expect(db.getSyncStatus()).toMatchObject({ oldestPendingAt: null, rejected: 1 });
   }, 60_000);
 
   it("fails reads and writes once the server can't serve its schema, instead of hanging", async () => {

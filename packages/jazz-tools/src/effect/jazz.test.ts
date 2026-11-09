@@ -310,7 +310,14 @@ describe("Jazz Effect service", { timeout: 30_000 }, () => {
     );
 
     expect([...result]).toEqual([
-      { link: { state: "local-only" }, pendingUploads: 0, synced: true },
+      {
+        link: { state: "local-only" },
+        pendingUploads: 0,
+        oldestPendingAt: null,
+        rejected: 0,
+        lastError: null,
+        synced: true,
+      },
     ]);
   });
 });

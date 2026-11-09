@@ -65,6 +65,16 @@ import {
 export type { VercelStoreOptions } from "./vercel-store.js";
 
 import { files, type BlobStore } from "./blobs.js";
+import {
+  createInspector,
+  inspectorSettings,
+  newTokenSecret,
+  type InspectHook,
+  type InspectorOptions,
+} from "./inspect.js";
+import { createInspectorUi } from "./inspect-ui.js";
+import type { InspectSessionInfo } from "../inspect/protocol.js";
+export type { InspectEvent, InspectGrant, InspectHook, InspectorOptions } from "./inspect.js";
 export {
   files,
   s3,
@@ -94,6 +104,8 @@ export type JazzStore =
       readonly appId: string;
       /** This backend's credential for the core, asked for each request and socket. */
       readonly backendCredential: BackendCredential;
+      /** The app's secret, when `remote()` was given one: agent tokens are signed with a key derived from it. */
+      readonly secret?: string;
     }
   | {
       readonly kind: "vercel";
@@ -174,10 +186,11 @@ export function remote(
     throw new Error("remote(): appId must name the app the core serves (it is empty)");
   }
   let backendCredential: BackendCredential;
+  let secret: string | undefined;
   if ("backendCredential" in options) {
     backendCredential = options.backendCredential;
   } else {
-    const secret = options.secret;
+    secret = options.secret;
     if (secret === undefined && "adminSecret" in options) {
       throw new Error(
         "remote(): `adminSecret` and `backendSecret` were replaced by one `secret`, the app's admin secret",
@@ -186,9 +199,16 @@ export function remote(
     if (typeof secret !== "string" || !secret.trim()) {
       throw new Error("remote(): secret must be the app's admin secret (it is empty)");
     }
-    backendCredential = () => secret;
+    const given = secret;
+    backendCredential = () => given;
   }
-  return { kind: "remote", url: options.url.replace(/\/+$/, ""), appId, backendCredential };
+  return {
+    kind: "remote",
+    url: options.url.replace(/\/+$/, ""),
+    appId,
+    backendCredential,
+    ...(secret === undefined ? {} : { secret }),
+  };
 }
 
 /**
@@ -401,6 +421,35 @@ export interface CreateJazzOptions {
    * the deployment is out.
    */
   allowDroppingHistory?: boolean;
+  /**
+   * Who may use the Inspector and agent debug access at `<basePath>/inspect`:
+   * return `{ by, write? }` for a request that may, null for one that may
+   * not.
+   *
+   * **This grants unlimited access.** Whoever it lets in reads every row of
+   * every table, with your permissions not checked, and with `write: true`
+   * changes any of them. They can also let agents in, with tokens that last
+   * up to a day. Grant it only to people who may see all of your users'
+   * data, and where you can, gate it with infrastructure that is separate
+   * from your users' sign-in (Vercel deployment protection, Cloudflare
+   * Access, a VPN or SSO proxy) rather than a flag on a user account, which
+   * one compromised account or one bug in your auth would hand out.
+   *
+   * Without it, only local development is let in: a request whose socket
+   * comes from this machine while NODE_ENV is "development". Only hosts that
+   * hand Jazz their Node request (`attach()`, `nodeHandler`) know the socket's
+   * address; on others (Next.js route handlers, Hono, Bun, Deno) the default
+   * is off, since a Host header proves nothing. A browser is let in only from
+   * a page on this machine (by its Origin). A dev proxy that forwards other
+   * machines' requests without `X-Forwarded-For` (Vite's `server.proxy`
+   * without `xfwd`, on a dev server started with `--host`) makes non-browser
+   * clients on those machines look local: pass an `inspect` hook when your
+   * dev server is reachable from other machines. Pass `() => null` to turn
+   * even the default off.
+   */
+  inspect?: InspectHook;
+  /** Redaction, auditing and agent token settings for {@link inspect}. */
+  inspector?: InspectorOptions;
 }
 
 /** A WebSocket as the `ws` package (and Vercel's `upgradeWebSocket`) hands it over. */
@@ -610,6 +659,12 @@ interface Core {
   ): CoreSocket;
   close(): Promise<void>;
 }
+
+/** What `inspector` is when createJazz isn't given one: one object, so the Inspector reads it once. */
+const NO_INSPECTOR_OPTIONS: InspectorOptions = Object.freeze({});
+
+/** The peer address of requests that came through a Node handler, where Jazz can know it. */
+const remoteAddresses = new WeakMap<Request, string>();
 
 function headerPairs(headers: Headers): string[][] {
   const pairs: string[][] = [];
@@ -927,6 +982,29 @@ async function keptAppId(dir: string): Promise<string> {
 }
 
 /**
+ * The secret an in-process SQLite core's agent tokens are signed with, kept
+ * beside its data in `<path>/inspect-token-secret` (mode 0600) so tokens
+ * survive restarts. Deleting the file revokes every token.
+ */
+async function keptTokenSecret(dir: string): Promise<string> {
+  const file = join(dir, "inspect-token-secret");
+  try {
+    const kept = (await readFile(file, "utf8")).trim();
+    if (kept) return kept;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  const secret = newTokenSecret();
+  try {
+    await writeFile(file, `${secret}\n`, { flag: "wx", mode: 0o600 });
+    return secret;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    return (await readFile(file, "utf8")).trim();
+  }
+}
+
+/**
  * Serverless functions have no disk that outlives an instance (or none
  * writable at all), so a sqlite store there loses data silently.
  */
@@ -1215,6 +1293,8 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         : await openInProcessCore(store, bundle);
   const appId = core.appId;
   const issuer = BACKEND_USER_ISSUER;
+  // An in-memory store's agent tokens last as long as its data: this process.
+  const memoryTokenSecret = newTokenSecret();
 
   /** Publish `next`'s bundle: what it is pinned by. Publishing one already published changes nothing. */
   const publish = (next: CreateJazzOptions) =>
@@ -1261,6 +1341,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
    */
   async function reload(next: CreateJazzOptions): Promise<void> {
     const settings = jazzSettings(next);
+    inspectorSettings(next.inspector ?? NO_INSPECTOR_OPTIONS);
     // The same app and permissions (a reload of a module that imports them
     // unchanged, or a hot reload that rebuilt equal ones): the bundle, and
     // the backend's session with its writes and `forReqUser` dbs, stay.
@@ -1672,9 +1753,17 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     readonly trusted: boolean;
   }
 
+  /** The sessions this instance serves, for the Inspector's `sessions`. */
+  const liveSessions = new Set<{
+    session: ClientSession;
+    transport: "socket" | "stream";
+    openedAt: number;
+  }>();
+
   function openClientSession(
     request: Request,
     onEvent: (error: Error | null, event: JazzCoreSocketEvent) => void,
+    transport: "socket" | "stream",
   ): ClientSession {
     // The core socket opens once the prelude is admitted, with the access
     // that admission needs: a vouched user's session is the backend's, and
@@ -1694,6 +1783,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     const end = () => {
       if (ended) return;
       ended = true;
+      liveSessions.delete(live);
       if (expiry) clearTimeout(expiry);
       recheck?.();
       socket?.close();
@@ -1808,7 +1898,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
             .then(taken);
       return chain;
     };
-    return {
+    const clientSession: ClientSession = {
       send(data) {
         if (ended) return false;
         void deliver(data);
@@ -1823,6 +1913,9 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         return trusted;
       },
     };
+    const live = { session: clientSession, transport, openedAt: Date.now() };
+    liveSessions.add(live);
+    return clientSession;
   }
 
   /**
@@ -1986,14 +2079,18 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     });
     let socket: ClientSession;
     try {
-      socket = openClientSession(request, (error, event) => {
-        if (error) return end(1011, error.message);
-        if (event.kind === "message" && event.data) {
-          if (!closed) controller.enqueue(encodeStreamRecord(STREAM_RECORD_MESSAGE, event.data));
-        } else if (event.kind === "close") {
-          end(event.code ?? 1000, event.reason ?? "");
-        }
-      });
+      socket = openClientSession(
+        request,
+        (error, event) => {
+          if (error) return end(1011, error.message);
+          if (event.kind === "message" && event.data) {
+            if (!closed) controller.enqueue(encodeStreamRecord(STREAM_RECORD_MESSAGE, event.data));
+          } else if (event.kind === "close") {
+            end(event.code ?? 1000, event.reason ?? "");
+          }
+        },
+        "stream",
+      );
     } catch (error) {
       return new Response(error instanceof Error ? error.message : String(error), { status: 503 });
     }
@@ -2121,13 +2218,17 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     };
     let socket: ClientSession;
     try {
-      socket = openClientSession(request, (error, event) => {
-        if (error) return close(1011, error.message);
-        if (event.kind === "message" && event.data) ws.send(event.data);
-        else if (event.kind === "close") {
-          close(sendableCloseCode(event.code), event.reason ?? "");
-        }
-      });
+      socket = openClientSession(
+        request,
+        (error, event) => {
+          if (error) return close(1011, error.message);
+          if (event.kind === "message" && event.data) ws.send(event.data);
+          else if (event.kind === "close") {
+            close(sendableCloseCode(event.code), event.reason ?? "");
+          }
+        },
+        "socket",
+      );
     } catch (error) {
       close(1013, error instanceof Error ? error.message : String(error));
       return;
@@ -2383,6 +2484,9 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     if (request.method !== "GET" && request.method !== "HEAD" && !originAllowed(request)) {
       return new Response("origin not allowed", { status: 403 });
     }
+    if (path === "/inspect" || path.startsWith("/inspect/")) {
+      return inspector.handle(request, path);
+    }
     if (/^\/apps\/[^/]+\/accounts\/backend-sign-in$/.test(path)) {
       return backendSignIn(request);
     }
@@ -2529,11 +2633,14 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     } else if (hasBody) {
       body = req as unknown as BodyInit;
     }
-    return new Request(`http://${host}${req.url ?? "/"}`, {
+    const request = new Request(`http://${host}${req.url ?? "/"}`, {
       method: req.method,
       headers,
       ...(body === undefined ? {} : { body, duplex: "half" }),
     } as RequestInit);
+    const address = req.socket?.remoteAddress;
+    if (address) remoteAddresses.set(request, address);
+    return request;
   }
 
   function nodeHandler(req: IncomingMessage, res: ServerResponse, next?: () => void): void {
@@ -2602,6 +2709,67 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     upgradesSockets = true;
     attached = true;
   }
+
+  // The Inspector follows `reload`: it reads the current options each time.
+  let keptSecret: Promise<string> | undefined;
+  let schemaOf: {
+    app: CreateJazzOptions["app"];
+    schema: ReturnType<typeof resolveSchemaSource>;
+  } | null = null;
+  const inspector = createInspector({
+    appId,
+    get basePath() {
+      return basePath;
+    },
+    get publicUrls() {
+      return publicUrls;
+    },
+    schema: () => {
+      if (schemaOf?.app !== options.app) {
+        schemaOf = { app: options.app, schema: resolveSchemaSource(options.app) };
+      }
+      return schemaOf.schema;
+    },
+    get permissions() {
+      return options.permissions;
+    },
+    db: () => backend.db,
+    dbAs: async (user) => backendDbForSession(backend, await sessionFor(user, "inspect `as`")),
+    sessions: () =>
+      [...liveSessions].map(
+        ({ session: live, transport, openedAt }): InspectSessionInfo => ({
+          userId: live.userId ?? null,
+          kind: live.trusted ? "backend-client" : live.userId === undefined ? "guest" : "user",
+          transport,
+          openedAt,
+        }),
+      ),
+    get hook() {
+      return options.inspect;
+    },
+    get options() {
+      return options.inspector ?? NO_INSPECTOR_OPTIONS;
+    },
+    tokenSecret: async () => {
+      const configured = options.inspector?.tokenSecret;
+      if (configured !== undefined) return configured;
+      if (store.kind === "remote") return store.secret ?? null;
+      if (store.kind === "sqlite") {
+        // Read once; a failed read is tried again on the next call.
+        keptSecret ??= keptTokenSecret(store.path).catch((error: unknown) => {
+          keptSecret = undefined;
+          throw error;
+        });
+        return keptSecret;
+      }
+      if (store.kind === "memory") return memoryTokenSecret;
+      // A Vercel core's only credential is the function's OIDC token: there
+      // is no shared secret to sign with.
+      return null;
+    },
+    remoteAddress: (request) => remoteAddresses.get(request),
+    serveUi: createInspectorUi(),
+  });
 
   let closing: Promise<void> | undefined;
   return {
