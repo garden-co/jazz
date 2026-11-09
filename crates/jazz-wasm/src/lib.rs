@@ -882,6 +882,38 @@ impl WasmStreamingMutation {
             .map_err(host_error)
     }
 
+    pub fn stage(&self) -> js_sys::Promise {
+        match self.mutation.borrow_mut().stage() {
+            Ok(mutation) => js_sys::Promise::resolve(&JsValue::from(WasmStagedStreamingMutation {
+                mutation: RefCell::new(mutation),
+            })),
+            Err(error) => js_sys::Promise::reject(&host_error(error)),
+        }
+    }
+
+    pub fn abort(&self) -> js_sys::Promise {
+        match self.mutation.borrow_mut().abort() {
+            Ok(aborted) => js_sys::Promise::resolve(&JsValue::from_bool(aborted)),
+            Err(error) => js_sys::Promise::reject(&host_error(error)),
+        }
+    }
+}
+
+/// An owner-bound completed upload for one later serializable attachment.
+#[wasm_bindgen(js_name = StagedStreamingMutation)]
+pub struct WasmStagedStreamingMutation {
+    mutation: RefCell<binding_host::StagedStreamingMutation>,
+}
+
+#[wasm_bindgen]
+impl WasmStagedStreamingMutation {
+    pub fn attach(&self, transaction: String) -> Result<(), JsValue> {
+        self.mutation
+            .borrow_mut()
+            .attach(&transaction)
+            .map_err(host_error)
+    }
+
     pub fn abort(&self) -> js_sys::Promise {
         match self.mutation.borrow_mut().abort() {
             Ok(aborted) => js_sys::Promise::resolve(&JsValue::from_bool(aborted)),

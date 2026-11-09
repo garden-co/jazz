@@ -1221,6 +1221,143 @@ impl Db {
         Ok(large)
     }
 
+    /// Complete an upload without publishing a row. The opaque capability
+    /// retains its exact mutation, owner, schema and identity until attachment.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn stage_streaming_value_upload(
+        &self,
+        mut upload: StreamingValueUpload,
+        mutation: StreamingMutationKind,
+        table: &str,
+        row: RowUuid,
+        mut cells: BTreeMap<String, Value>,
+        column: &str,
+        identity: WriteIdentity,
+        now_ms: Option<u64>,
+        head: Option<BranchSelector>,
+        base: Option<BranchViewBase>,
+    ) -> Result<StagedStreamingValue, Error> {
+        self.inner().require_mutation_admission()?;
+        self.check_streaming_upload(&mut upload)?;
+        if head.is_some()
+            || base.is_some()
+            || !self.inner().schema.table(table)?.branch_by.is_empty()
+        {
+            return Err(schema_error("staged streaming requires a root-view target"));
+        }
+        if matches!(identity, WriteIdentity::Attribution(_)) {
+            self.inner().require_attribution_backend()?;
+        }
+        let large = self.seal_streaming_upload(&mut upload, table, &mut cells, column)?;
+        let op = match mutation {
+            StreamingMutationKind::Insert => StagedOp::Insert(
+                table.to_owned(),
+                cells,
+                InsertOptions {
+                    row_id: Some(row),
+                    identity,
+                    updated_at_ms: now_ms,
+                    ..Default::default()
+                },
+            ),
+            StreamingMutationKind::Update => StagedOp::Update(
+                table.to_owned(),
+                row,
+                cells,
+                UpdateOptions {
+                    identity,
+                    updated_at_ms: now_ms,
+                    ..Default::default()
+                },
+            ),
+            StreamingMutationKind::Upsert => StagedOp::Upsert(
+                table.to_owned(),
+                row,
+                cells,
+                BTreeMap::new(),
+                UpsertOptions {
+                    identity,
+                    updated_at_ms: now_ms,
+                    ..Default::default()
+                },
+            ),
+        };
+        Ok(StagedStreamingValue {
+            owner: upload.owner.clone(),
+            schema: upload.schema,
+            pending: Some(StagedStreamingMutation {
+                op,
+                lease: upload._lease,
+                edits: LargeEdits {
+                    derived: large.into_iter().collect(),
+                    pending_nodes: Vec::new(),
+                },
+            }),
+        })
+    }
+
+    /// Attach once to a serializable batch through its ordinary policy and
+    /// overlay validation. Every attempt consumes the capability, even refusal.
+    pub async fn attach_staged_streaming_value(
+        &self,
+        tx: OpenTransactionId,
+        staged: &mut StagedStreamingValue,
+    ) -> Result<(), Error> {
+        let pending = staged
+            .pending
+            .take()
+            .ok_or_else(|| schema_error("staged streaming upload is closed"))?;
+        self.inner().require_mutation_admission()?;
+        self.check_staged_streaming_owner(staged)?;
+        {
+            let inner = self.inner();
+            let batch = inner
+                .batches
+                .get(&tx)
+                .ok_or_else(|| rejected(format!("transaction {tx:?} is not open")))?;
+            if !matches!(batch.kind, BatchKind::Serializable { .. }) {
+                return Err(unsupported(
+                    "staged streaming attachment to a mergeable transaction",
+                ));
+            }
+            if Some(batch.identity.unwrap_or_default()) != pending.op.identity() {
+                return Err(rejected(
+                    "staged upload identity differs from its transaction",
+                ));
+            }
+            if !crate::large::touch_upload(&inner.conn, &pending.lease.id, streaming_now_ms())? {
+                return Err(expired());
+            }
+        }
+        self.stage_with_edits(tx, pending.op, pending.edits)?;
+        self.hold_upload(tx, pending.lease)
+    }
+
+    fn check_staged_streaming_owner(&self, staged: &StagedStreamingValue) -> Result<(), Error> {
+        if !staged.owner.ptr_eq(&Rc::downgrade(&self.inner))
+            || staged.schema != self.schema_view_id()
+        {
+            return Err(schema_error(
+                "staged upload belongs to another database or schema",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Abandon an unattached capability without affecting committed references
+    /// or leases already transferred to a batch. Repeated abort is harmless.
+    pub async fn abort_staged_streaming_value(
+        &self,
+        staged: &mut StagedStreamingValue,
+    ) -> Result<bool, Error> {
+        self.check_staged_streaming_owner(staged)?;
+        let Some(pending) = staged.pending.take() else {
+            return Ok(false);
+        };
+        crate::large::end_upload(&self.inner().conn, &pending.lease.id)?;
+        Ok(true)
+    }
+
     /// Replace the limits on local streaming uploads.
     pub fn set_large_value_staging_policy(&self, policy: LargeValueStagingPolicy) {
         self.inner().staging = policy;
@@ -1235,7 +1372,12 @@ impl Db {
         let max_age = i64::try_from(inner.staging.max_age_ms).unwrap_or(i64::MAX);
         inner.release_dropped_uploads()?;
         crate::large::expire_receipts(&inner.conn, now)?;
-        crate::large::expire_uploads(&inner.conn, now.saturating_sub(max_age))
+        let pinned = inner
+            .batches
+            .values()
+            .flat_map(|batch| batch.uploads.iter().map(|lease| lease.id))
+            .collect();
+        crate::large::expire_uploads_except(&inner.conn, now.saturating_sub(max_age), &pinned)
     }
 }
 
@@ -1298,6 +1440,20 @@ pub struct StreamingValueUpload {
     initialized: bool,
     preparation: Option<lv::PushStreamingPreparation<Stage>>,
     emitted: Rc<RefCell<Vec<lv::StagedChunk>>>,
+}
+
+/// An opaque, single-use completed upload, bound to its original owner and
+/// schema. Dropping it schedules cleanup through the original upload lease.
+pub struct StagedStreamingValue {
+    owner: std::rc::Weak<Store>,
+    schema: SchemaViewId,
+    pending: Option<StagedStreamingMutation>,
+}
+
+struct StagedStreamingMutation {
+    op: StagedOp,
+    lease: UploadLease,
+    edits: LargeEdits,
 }
 
 /// Drop schedules cleanup on the next maintenance tick without borrowing the

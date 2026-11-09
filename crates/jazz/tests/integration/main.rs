@@ -256,3 +256,6 @@ mod governance_ordinary_composition;
 
 #[path = "../local_observation_submission.rs"]
 mod local_observation_submission;
+
+#[path = "../staged_streaming.rs"]
+mod staged_streaming;

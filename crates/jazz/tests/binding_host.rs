@@ -1559,3 +1559,113 @@ fn a_remote_subscription_never_lists_pending_local_versions() {
     assert_eq!(rows_in(&drive(&links, read).unwrap()), 2);
     assert_eq!(titles(&server), ["changed", "pending"]);
 }
+
+fn completed_text_stream(
+    db: &Binding,
+    row: [u8; 16],
+    text: &str,
+    tx: Option<&str>,
+) -> binding_host::StreamingMutation {
+    let mut upload = db
+        .begin_streaming_mutation(
+            "notes".to_owned(),
+            &row,
+            &empty_cells(),
+            "title".to_owned(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            tx,
+        )
+        .unwrap();
+    upload.push(text.as_bytes()).unwrap();
+    upload
+}
+
+/// Alice completes an upload before opening her batch; neither the file nor
+/// companion is visible until one commit. Invalid attach consumes its handle.
+#[test]
+fn a_completed_binding_stream_attaches_once_after_opening() {
+    let db = open(0xa1);
+    let mut invalid = completed_text_stream(&db, [0x31; 16], "invalid", None)
+        .stage()
+        .unwrap();
+    assert!(invalid.attach("not a transaction").is_err());
+    assert!(!invalid.abort().unwrap());
+    let mut upload = completed_text_stream(&db, [0x32; 16], "streamed", None);
+    let mut staged = upload.stage().unwrap();
+    assert!(titles(&db).is_empty());
+    assert!(upload.push(b"late").is_err());
+    let tx = OpenTransactionId::new().to_string();
+    db.begin_transaction(&tx, "serializable", None, None)
+        .unwrap();
+    staged.attach(&tx).unwrap();
+    db.insert_in_transaction(&tx, "notes", &title("companion"), &none())
+        .unwrap();
+    assert!(titles(&db).is_empty());
+    db.commit_transaction(&tx, Some("serializable")).unwrap();
+    assert_eq!(titles(&db), ["companion", "streamed"]);
+    assert!(staged.attach(&tx).is_err());
+    assert!(!staged.abort().unwrap());
+}
+
+/// Alice cannot detach a stream admitted to one transaction. A refused stage
+/// keeps the original finish-in-that-transaction route intact.
+#[test]
+fn a_transaction_bound_stream_cannot_escape_as_a_capability() {
+    let db = open(0xa1);
+    let tx = OpenTransactionId::new().to_string();
+    db.begin_transaction(&tx, "serializable", None, None)
+        .unwrap();
+    let mut upload = completed_text_stream(&db, [0x33; 16], "bound", Some(&tx));
+    assert!(upload.stage().is_err());
+    upload.finish_in_transaction().unwrap();
+    assert!(titles(&db).is_empty());
+    db.commit_transaction(&tx, Some("serializable")).unwrap();
+    assert_eq!(titles(&db), ["bound"]);
+}
+
+/// Alice's duplicate-row attachment poisons the whole batch like an ordinary
+/// staged write. The streamed row and companion cannot partially publish.
+#[test]
+fn a_refused_stream_attachment_rejects_the_companion_commit() {
+    let db = open(0xa1);
+    let id = [0x34; 16];
+    db.insert("notes", &title("original"), &json!({"rowId": id}))
+        .unwrap();
+    let mut staged = completed_text_stream(&db, id, "duplicate", None)
+        .stage()
+        .unwrap();
+    let tx = OpenTransactionId::new().to_string();
+    db.begin_transaction(&tx, "serializable", None, None)
+        .unwrap();
+    staged.attach(&tx).unwrap();
+    db.insert_in_transaction(&tx, "notes", &title("must not escape"), &none())
+        .unwrap();
+    let commit = db.commit_transaction(&tx, Some("serializable")).unwrap();
+    assert!(commit.rejected.is_some());
+    assert_eq!(titles(&db), ["original"]);
+}
+
+/// Retiring Alice's owning binding prevents a retained capability from staging
+/// into any later batch; consuming that refusal does not resurrect the owner.
+#[test]
+fn a_retained_stream_capability_cannot_outlive_its_binding_owner() {
+    let db = open(0xa1);
+    let mut staged = completed_text_stream(&db, [0x35; 16], "retired", None)
+        .stage()
+        .unwrap();
+    let tx = OpenTransactionId::new().to_string();
+    db.begin_transaction(&tx, "serializable", None, None)
+        .unwrap();
+    // The owning host performs admission stop, final drain, then permanent
+    // storage retirement. Binding.close alone is the drain phase.
+    db.db.stop_mutation_admission();
+    block_on(db.close()).unwrap();
+    db.db.retire_storage_owner().unwrap();
+    assert!(staged.attach(&tx).is_err());
+    assert!(!staged.abort().unwrap());
+}
