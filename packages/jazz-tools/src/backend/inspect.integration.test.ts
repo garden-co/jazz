@@ -33,8 +33,8 @@ const app = s.defineApp(
   { migrations: "none" },
 );
 const permissions = s.definePermissions(app, ({ policy, session }) => {
-  policy.todos.allowRead.where({ owner: session.user.account });
-  policy.todos.allowInsert.where({ owner: session.user.account });
+  policy.todos.allowRead.where({ owner: session.user });
+  policy.todos.allowInsert.where({ owner: session.user });
   policy.todos.allowUpdate.never();
   policy.todos.allowDelete.never();
   policy.notes.allowRead.never();
@@ -148,9 +148,7 @@ async function refused(
 }
 
 async function accountOf(jazz: Jazz, userId: string): Promise<string> {
-  return (await jazz.accountFor(
-    new Request("http://app/x", { headers: { "x-test-user": userId } }),
-  ))!;
+  return jazz.createAccountFor(userId);
 }
 
 /** Rows for alice and bob, written with the backend's authority. */
@@ -278,6 +276,10 @@ describe("Inspector reads", () => {
     expect(
       (await ok(api(jazz, { op: "query", query: { table: "notes" }, as: "alice" }, STAFF))).rows,
     ).toEqual([]);
+    // Someone who never signed in has no account to view as.
+    expect(
+      await refused(api(jazz, { op: "query", query: { table: "todos" }, as: "carol" }, STAFF)),
+    ).toMatchObject({ status: 404, error: "not_found", message: expect.stringContaining("carol") });
 
     // The deep link opens the Inspector on exactly this query, as alice.
     const link = new URL(asAlice.inspectorUrl);

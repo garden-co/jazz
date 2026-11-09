@@ -165,6 +165,8 @@ describe("the Inspector a backend serves", () => {
 
   it("views as a user, under their permissions", async () => {
     const jazz = await backend();
+    // Only a user with an account can be viewed as.
+    await jazz.createAccountFor("alice");
     const { call, calls } = callAs(jazz, { "x-staff": "ops@example.com" });
     render(<BackendApp pageUrl={`${PAGE}#table=todos&as=alice`} call={call} />);
 
