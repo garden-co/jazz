@@ -67,6 +67,7 @@ export type { VercelStoreOptions } from "./vercel-store.js";
 import { files, type BlobStore } from "./blobs.js";
 import {
   createInspector,
+  inspectorSettings,
   newTokenSecret,
   type InspectHook,
   type InspectorOptions,
@@ -438,8 +439,13 @@ export interface CreateJazzOptions {
    * comes from this machine while NODE_ENV is "development". Only hosts that
    * hand Jazz their Node request (`attach()`, `nodeHandler`) know the socket's
    * address; on others (Next.js route handlers, Hono, Bun, Deno) the default
-   * is off, since a Host header proves nothing. Pass `() => null` to turn even
-   * that off.
+   * is off, since a Host header proves nothing. A browser is let in only from
+   * a page on this machine (by its Origin). A dev proxy that forwards other
+   * machines' requests without `X-Forwarded-For` (Vite's `server.proxy`
+   * without `xfwd`, on a dev server started with `--host`) makes non-browser
+   * clients on those machines look local: pass an `inspect` hook when your
+   * dev server is reachable from other machines. Pass `() => null` to turn
+   * even the default off.
    */
   inspect?: InspectHook;
   /** Redaction, auditing and agent token settings for {@link inspect}. */
@@ -653,6 +659,9 @@ interface Core {
   ): CoreSocket;
   close(): Promise<void>;
 }
+
+/** What `inspector` is when createJazz isn't given one: one object, so the Inspector reads it once. */
+const NO_INSPECTOR_OPTIONS: InspectorOptions = Object.freeze({});
 
 /** The peer address of requests that came through a Node handler, where Jazz can know it. */
 const remoteAddresses = new WeakMap<Request, string>();
@@ -1332,6 +1341,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
    */
   async function reload(next: CreateJazzOptions): Promise<void> {
     const settings = jazzSettings(next);
+    inspectorSettings(next.inspector ?? NO_INSPECTOR_OPTIONS);
     // The same app and permissions (a reload of a module that imports them
     // unchanged, or a hot reload that rebuilt equal ones): the bundle, and
     // the backend's session with its writes and `forReqUser` dbs, stay.
@@ -2701,6 +2711,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
   }
 
   // The Inspector follows `reload`: it reads the current options each time.
+  let keptSecret: Promise<string> | undefined;
   let schemaOf: {
     app: CreateJazzOptions["app"];
     schema: ReturnType<typeof resolveSchemaSource>;
@@ -2737,16 +2748,20 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       return options.inspect;
     },
     get options() {
-      return options.inspector ?? {};
+      return options.inspector ?? NO_INSPECTOR_OPTIONS;
     },
     tokenSecret: async () => {
       const configured = options.inspector?.tokenSecret;
-      if (configured !== undefined) {
-        if (!configured.trim()) throw new Error("createJazz: inspector.tokenSecret is empty");
-        return configured;
-      }
+      if (configured !== undefined) return configured;
       if (store.kind === "remote") return store.secret ?? null;
-      if (store.kind === "sqlite") return keptTokenSecret(store.path);
+      if (store.kind === "sqlite") {
+        // Read once; a failed read is tried again on the next call.
+        keptSecret ??= keptTokenSecret(store.path).catch((error: unknown) => {
+          keptSecret = undefined;
+          throw error;
+        });
+        return keptSecret;
+      }
       if (store.kind === "memory") return memoryTokenSecret;
       // A Vercel core's only credential is the function's OIDC token: there
       // is no shared secret to sign with.

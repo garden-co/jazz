@@ -428,6 +428,16 @@ export function decodeGrant(text: string): InspectGrantRequest | null {
   }
 }
 
+/** Whether `hostname` (as a URL has it) names this machine. */
+export function isLoopbackHost(hostname: string): boolean {
+  return (
+    hostname === "localhost" ||
+    hostname.endsWith(".localhost") ||
+    hostname === "[::1]" ||
+    /^127\.\d+\.\d+\.\d+$/.test(hostname)
+  );
+}
+
 /**
  * Whether the Inspector may hand a token to `callback` by itself: only a
  * plain-http loopback URL ending in `/callback`, which reaches nothing but

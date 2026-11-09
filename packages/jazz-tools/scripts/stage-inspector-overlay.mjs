@@ -1,7 +1,7 @@
 // Copy the inspector overlay's embedded build into jazz-tools' own dist so the
-// published package is self-contained (no jazz-inspector dependency). The dev
-// server's resolveEmbeddedDir() reads it from this exact spot at runtime —
-// keeping the destination here, next to that module, means the two agree.
+// published package is self-contained (no jazz-inspector dependency).
+// createJazz serves the Inspector from this exact spot at runtime (see
+// resolveInspectorUiDir() in src/backend/inspect-ui.ts), so the two must agree.
 // Run from the workspace (`pnpm --filter jazz-tools run stage:inspector-overlay`)
 // after the inspector's embedded build to reproduce the published layout locally.
 import { cp, lstat, mkdir, mkdtemp, readdir, rename, rm } from "node:fs/promises";

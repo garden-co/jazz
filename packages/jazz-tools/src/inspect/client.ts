@@ -21,6 +21,7 @@ import {
   INSPECT_PATH,
   INSPECT_TOKEN_PREFIX,
   InspectError,
+  isLoopbackHost,
   type InspectErrorAnswer,
   type InspectGrantRequest,
   type InspectRequest,
@@ -134,6 +135,16 @@ export async function callInspector<T = unknown>(
   options: { token?: string | null; fetch?: typeof fetch } = {},
 ): Promise<T> {
   const doFetch = options.fetch ?? fetch;
+  // A token reads every row it's scoped to: it never crosses a network in the clear.
+  if (options.token) {
+    const url = new URL(endpoint);
+    if (url.protocol !== "https:" && !isLoopbackHost(url.hostname)) {
+      throw new InspectError(
+        "bad_request",
+        `won't send an agent token to ${endpoint} over plain http: use the app's https URL, or a loopback address in local development`,
+      );
+    }
+  }
   let response: Response;
   try {
     response = await doFetch(`${endpoint}${INSPECT_API_PATH}`, {

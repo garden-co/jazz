@@ -33,6 +33,7 @@ import {
   buildQueryJson,
   fromJsonForColumn,
   inspectorLink,
+  isLoopbackHost,
   rowLimit,
   toJsonValue,
   type InspectAs,
@@ -161,44 +162,88 @@ const MAX_REQUEST_BYTES = 1024 * 1024;
 const REDACTED = "[redacted]";
 const PROVENANCE = ["$createdBy", "$createdAt", "$updatedBy", "$updatedAt"];
 
-export function createInspector(deps: InspectorDeps) {
-  const now = deps.now ?? Date.now;
-  const env = deps.env ?? process.env;
-  const redact = new Map(
-    Object.entries(deps.options.redact ?? {}).map(([table, columns]) => [table, new Set(columns)]),
-  );
-  const audit =
-    deps.options.audit ??
-    ((event: InspectEvent) => {
-      const parts = [
-        `jazz inspect: ${event.by} (${event.via})`,
-        event.op,
-        event.table,
-        event.as && `as ${event.as}`,
-        event.rows !== undefined && `${event.rows} row(s)`,
-        event.error && `refused: ${event.error}`,
-      ].filter(Boolean);
-      console.info(parts.join(" "));
-    });
-  const issuedAfter =
-    deps.options.tokensIssuedAfter === undefined
-      ? undefined
-      : Math.floor(new Date(deps.options.tokensIssuedAfter).getTime() / 1000);
-  const maxTtl = deps.options.maxTokenTtlSeconds ?? DEFAULT_MAX_TOKEN_TTL_SECONDS;
+function defaultAudit(event: InspectEvent): void {
+  const parts = [
+    `jazz inspect: ${event.by} (${event.via})`,
+    event.op,
+    event.table,
+    event.as && `as ${event.as}`,
+    event.rows !== undefined && `${event.rows} row(s)`,
+    event.error && `refused: ${event.error}`,
+  ].filter(Boolean);
+  console.info(parts.join(" "));
+}
+
+/** {@link InspectorOptions} as the Inspector applies them. */
+interface InspectorSettings {
+  redact: Map<string, Set<string>>;
+  audit: (event: InspectEvent) => void;
+  /** Tokens issued before this (Unix seconds) are refused. */
+  issuedAfter: number | undefined;
+  maxTtl: number;
+}
+
+/**
+ * Check `options` and read them as the Inspector applies them. createJazz
+ * calls it when it starts and on each reload, so bad options fail there,
+ * not on the next Inspector call.
+ */
+export function inspectorSettings(options: InspectorOptions): InspectorSettings {
+  const maxTtl = options.maxTokenTtlSeconds ?? DEFAULT_MAX_TOKEN_TTL_SECONDS;
   if (!Number.isSafeInteger(maxTtl) || maxTtl < 60) {
     throw new Error("createJazz: inspector.maxTokenTtlSeconds must be at least 60");
   }
+  let issuedAfter: number | undefined;
+  if (options.tokensIssuedAfter !== undefined) {
+    const at = new Date(options.tokensIssuedAfter).getTime();
+    if (Number.isNaN(at)) {
+      throw new Error("createJazz: inspector.tokensIssuedAfter must be a date");
+    }
+    issuedAfter = Math.floor(at / 1000);
+  }
+  if (options.tokenSecret !== undefined && !options.tokenSecret.trim()) {
+    throw new Error("createJazz: inspector.tokenSecret is empty");
+  }
+  return {
+    redact: new Map(
+      Object.entries(options.redact ?? {}).map(([table, columns]) => [table, new Set(columns)]),
+    ),
+    audit: options.audit ?? defaultAudit,
+    issuedAfter,
+    maxTtl,
+  };
+}
 
-  let signingKey: Promise<Buffer | null> | undefined;
-  function tokenKey(): Promise<Buffer | null> {
-    signingKey ??= deps
-      .tokenSecret()
-      .then((secret) =>
-        secret === null
-          ? null
-          : createHmac("sha256", secret).update(`jazz-inspect-token-v1\0${deps.appId}`).digest(),
-      );
-    return signingKey;
+export function createInspector(deps: InspectorDeps) {
+  const now = deps.now ?? (() => Date.now());
+  const env = deps.env ?? process.env;
+
+  // The options follow a reload of createJazz: they are read again whenever
+  // the options object changes.
+  let settingsOf: { options: InspectorOptions; settings: InspectorSettings } | undefined;
+  function settings(): InspectorSettings {
+    const options = deps.options;
+    if (settingsOf?.options !== options) {
+      settingsOf = { options, settings: inspectorSettings(options) };
+    }
+    return settingsOf.settings;
+  }
+  settings();
+  const audit = (event: InspectEvent) => settings().audit(event);
+
+  // The signing key follows the secret: a reload that rotates it revokes
+  // every token signed with the old one.
+  let keyOf: { secret: string; key: Buffer } | undefined;
+  async function tokenKey(): Promise<Buffer | null> {
+    const secret = await deps.tokenSecret();
+    if (secret === null) return null;
+    if (keyOf?.secret !== secret) {
+      keyOf = {
+        secret,
+        key: createHmac("sha256", secret).update(`jazz-inspect-token-v1\0${deps.appId}`).digest(),
+      };
+    }
+    return keyOf.key;
   }
 
   // ---------------------------------------------------------------- admission
@@ -217,6 +262,22 @@ export function createInspector(deps: InspectorDeps) {
     for (const header of ["x-forwarded-for", "x-forwarded-host", "x-real-ip", "forwarded"]) {
       if (request.headers.has(header)) return false;
     }
+    // A browser names the page a request comes from. A dev proxy that adds
+    // no forwarding headers (Vite's `server.proxy` with `changeOrigin`, on a
+    // dev server started with `--host`) passes another machine's request on
+    // from 127.0.0.1 with a loopback Host, but keeps the browser's Origin
+    // and Sec-Fetch-Site: only a page on this machine is let in.
+    const origin = request.headers.get("origin");
+    if (origin !== null) {
+      let originHost: string;
+      try {
+        originHost = new URL(origin).hostname;
+      } catch {
+        return false;
+      }
+      if (!isLoopbackHost(originHost)) return false;
+    }
+    if (request.headers.get("sec-fetch-site") === "cross-site") return false;
     const remote = deps.remoteAddress(request);
     if (remote === undefined) return "no_peer";
     if (!isLoopbackAddress(remote)) return false;
@@ -236,7 +297,18 @@ export function createInspector(deps: InspectorDeps) {
       return verifyToken(authorization.slice("Bearer ".length));
     }
     if (deps.hook) {
-      const grant = await deps.hook(request);
+      let grant: InspectGrant | null | undefined;
+      try {
+        grant = await deps.hook(request);
+      } catch (error) {
+        // Its reason is the app's (a sign-in service's error, a stack), and
+        // this caller isn't let in: it goes to the log, not the answer.
+        console.error("jazz inspect: the app's inspect hook threw", error);
+        throw new InspectError(
+          "failed",
+          "the app's inspect hook failed; the backend's log has the error",
+        );
+      }
       if (!grant)
         throw new InspectError("unauthorized", "the app's inspect hook refused this request");
       if (typeof grant.by !== "string" || !grant.by.trim()) {
@@ -273,6 +345,7 @@ export function createInspector(deps: InspectorDeps) {
       throw new InspectError("forbidden", "you may not write, so you can't grant writes");
     }
     const ttl = request.ttlSeconds ?? DEFAULT_TOKEN_TTL_SECONDS;
+    const { maxTtl } = settings();
     if (!Number.isSafeInteger(ttl) || ttl < 60 || ttl > maxTtl) {
       throw new InspectError("bad_request", `ttlSeconds must be between 60 and ${maxTtl}`);
     }
@@ -338,6 +411,7 @@ export function createInspector(deps: InspectorDeps) {
     const at = Math.floor(now() / 1000);
     if (claims.v !== 1 || claims.app !== deps.appId) throw refused("for another app");
     if (typeof claims.exp !== "number" || claims.exp <= at) throw refused("expired");
+    const { issuedAfter } = settings();
     if (issuedAfter !== undefined && claims.iat < issuedAfter) throw refused("revoked");
     return {
       by: claims.by,
@@ -361,6 +435,7 @@ export function createInspector(deps: InspectorDeps) {
     columns: Map<string, ColumnType>;
     source: string;
   } {
+    if (typeof name !== "string" || !name) throw new InspectError("bad_request", "name a table");
     const schema = deps.schema();
     const source = historySourceTable(name) ?? name;
     const table = Object.hasOwn(schema, source) ? schema[source] : undefined;
@@ -380,7 +455,7 @@ export function createInspector(deps: InspectorDeps) {
 
   function redactedFor(admitted: Admitted, table: string): Set<string> | undefined {
     if (admitted.via !== "token") return undefined;
-    return redact.get(historySourceTable(table) ?? table);
+    return settings().redact.get(historySourceTable(table) ?? table);
   }
 
   function queryBuilder(table: string, json: string): QueryBuilder<Record<string, unknown>> {
@@ -425,7 +500,10 @@ export function createInspector(deps: InspectorDeps) {
     truncated: boolean;
     as?: string;
   }> {
-    checkTable(admitted, query?.table);
+    if (!query || typeof query !== "object") {
+      throw new InspectError("bad_request", "query needs { table, ... }");
+    }
+    checkTable(admitted, query.table);
     const hidden = redactedFor(admitted, query.table);
     if (hidden) {
       const named = [
@@ -482,8 +560,11 @@ export function createInspector(deps: InspectorDeps) {
       throw new InspectError("bad_request", "ops must list between 1 and 1000 writes");
     }
     const prepared = ops.map((op) => {
-      if (!op || !["insert", "update", "delete"].includes(op.kind)) {
+      if (!op || typeof op !== "object" || !["insert", "update", "delete"].includes(op.kind)) {
         throw new InspectError("bad_request", "each op is an insert, update or delete");
+      }
+      if (typeof op.table !== "string" || !op.table) {
+        throw new InspectError("bad_request", `${op.kind} needs a table`);
       }
       if (historySourceTable(op.table) !== undefined) {
         throw new InspectError("bad_request", `${op.table} is a history table and is read-only`);
@@ -626,6 +707,9 @@ export function createInspector(deps: InspectorDeps) {
         };
       }
       case "history": {
+        if (typeof body.table !== "string" || !body.table) {
+          throw new InspectError("bad_request", "history needs a table");
+        }
         if (typeof body.id !== "string") {
           throw new InspectError("bad_request", "history needs an id");
         }
@@ -659,6 +743,13 @@ export function createInspector(deps: InspectorDeps) {
         };
       }
       case "sessions":
+        // Who is connected is about the whole app, not one table.
+        if (admitted.tables) {
+          throw new InspectError(
+            "forbidden",
+            `this token is limited to ${admitted.tables.join(", ")}; listing sessions needs one for the whole app`,
+          );
+        }
         return {
           answer: {
             // Each backend instance knows only the sessions it serves.
@@ -729,7 +820,11 @@ export function createInspector(deps: InspectorDeps) {
       audit({
         at: now(),
         by: "?",
-        via: "hook",
+        via: request.headers.get("authorization")?.startsWith(`Bearer ${INSPECT_TOKEN_PREFIX}`)
+          ? "token"
+          : deps.hook
+            ? "hook"
+            : "dev",
         op: "whoami",
         write: false,
         error: refused.code,
@@ -825,15 +920,6 @@ function clean(event: InspectEvent): InspectEvent {
   return Object.fromEntries(
     Object.entries(event).filter(([, value]) => value !== undefined && value !== ""),
   ) as unknown as InspectEvent;
-}
-
-function isLoopbackHost(hostname: string): boolean {
-  return (
-    hostname === "localhost" ||
-    hostname.endsWith(".localhost") ||
-    hostname === "[::1]" ||
-    /^127\.\d+\.\d+\.\d+$/.test(hostname)
-  );
 }
 
 function isLoopbackAddress(address: string): boolean {

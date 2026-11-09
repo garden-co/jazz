@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
 import {
   createJazz,
@@ -44,6 +44,7 @@ const cleanups: Array<() => Promise<unknown>> = [];
 const savedNodeEnv = process.env.NODE_ENV;
 afterEach(async () => {
   process.env.NODE_ENV = savedNodeEnv;
+  vi.restoreAllMocks();
   while (cleanups.length) await cleanups.pop()!().catch(() => undefined);
 });
 
@@ -202,6 +203,48 @@ describe("Inspector admission", () => {
     // Production never gets the default.
     process.env.NODE_ENV = "production";
     expect((await refused(local())).status).toBe(401);
+  });
+
+  it("keeps browsers on other machines out of the dev default, also through a dev proxy", async () => {
+    // A dev proxy without forwarding headers (Vite's `server.proxy` with
+    // `changeOrigin`, on `vite --host`) hands Jazz another machine's request
+    // from 127.0.0.1 with a loopback Host. The browser's Origin still says
+    // where the page is.
+    const { jazz } = await start({ inspect: undefined });
+    const origin = await serveNode(jazz);
+    const local = (headers: Record<string, string>) =>
+      fetch(`${origin}/jazz/inspect/api`, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...headers },
+        body: JSON.stringify({ op: "whoami" }),
+      });
+    process.env.NODE_ENV = "development";
+    // (A page on another origin is also refused before the Inspector, 403,
+    // unless allowedOrigins lists it; the dev default refuses it either way.)
+    expect([401, 403]).toContain((await local({ origin: "http://192.168.1.20:5173" })).status);
+    expect([401, 403]).toContain((await local({ origin: "null" })).status);
+    expect([401, 403]).toContain((await local({ "sec-fetch-site": "cross-site" })).status);
+    // The Inspector page on this machine, and this machine's CLI (no Origin), get in.
+    expect(await ok(local({ origin }))).toMatchObject({ via: "dev" });
+    expect(await ok(local({ "sec-fetch-site": "same-origin" }))).toMatchObject({ via: "dev" });
+  });
+
+  it("doesn't tell a caller it hasn't let in what the hook threw", async () => {
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { jazz, events } = await start({
+      inspect: () => {
+        throw new Error("sso: upstream secret s3cr3t rejected");
+      },
+    });
+    const answer = await refused(api(jazz, { op: "whoami" }, STAFF));
+    expect(answer).toMatchObject({ status: 500, error: "failed" });
+    expect(answer.message).not.toMatch(/s3cr3t/);
+    expect(answer.message).toMatch(/log/);
+    expect(logged).toHaveBeenCalledWith(
+      expect.stringMatching(/inspect hook threw/),
+      expect.objectContaining({ message: expect.stringMatching(/s3cr3t/) }),
+    );
+    expect(events).toContainEqual(expect.objectContaining({ via: "hook", error: "failed" }));
   });
 
   it("refuses the dev default where the host can't say who the peer is, whatever Host claims", async () => {
@@ -409,6 +452,30 @@ describe("Inspector reads", () => {
       scope: "this backend instance",
       sessions: [],
     });
+  });
+
+  it("answers a malformed request as one, not as a failure", async () => {
+    const { jazz } = await start();
+    const malformed = [
+      { op: "query" },
+      { op: "query", query: {} },
+      { op: "query", query: { table: 7 } },
+      { op: "get", id: "x" },
+      { op: "history", id: "x" },
+      { op: "link", query: {} },
+    ];
+    for (const body of malformed) {
+      expect(await refused(api(jazz, body, STAFF)), JSON.stringify(body)).toMatchObject({
+        status: 400,
+        error: "bad_request",
+      });
+    }
+    for (const ops of [[null], [{ kind: "insert", values: { body: "x" } }]]) {
+      expect(
+        await refused(api(jazz, { op: "write", ops }, STAFF_WRITER)),
+        JSON.stringify(ops),
+      ).toMatchObject({ status: 400 });
+    }
   });
 });
 
@@ -763,6 +830,85 @@ describe("agent tokens", () => {
     });
   });
 
+  it("expire", async () => {
+    const { jazz } = await start();
+    const { token, expiresAt } = await mint(jazz, { ttlSeconds: 60 });
+    expect((await ok(api(jazz, { op: "whoami" }, bearer(token)))).expiresAt).toBe(expiresAt);
+    vi.spyOn(Date, "now").mockReturnValue(expiresAt * 1000);
+    expect(await refused(api(jazz, { op: "whoami" }, bearer(token)))).toMatchObject({
+      status: 401,
+      message: expect.stringMatching(/expired/),
+    });
+  });
+
+  it("limited to tables keep their limit when viewing as a user, and can't list sessions", async () => {
+    const { jazz } = await start();
+    const { aliceTodo } = await seed(jazz);
+    const { token } = await mint(jazz, { tables: ["todos"] });
+    const asAlice = await ok(
+      api(jazz, { op: "query", query: { table: "todos" }, as: "alice" }, bearer(token)),
+    );
+    expect(asAlice.rows.map((row: any) => row.id)).toEqual([aliceTodo]);
+    expect(
+      await refused(
+        api(jazz, { op: "query", query: { table: "notes" }, as: "alice" }, bearer(token)),
+      ),
+    ).toMatchObject({ status: 403 });
+    // Who is connected is about the whole app.
+    expect(await refused(api(jazz, { op: "sessions" }, bearer(token)))).toMatchObject({
+      status: 403,
+      message: expect.stringMatching(/whole app/),
+    });
+  });
+
+  it("follow a reload: redaction, revocation and a rotated secret apply at once", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "jazz-inspect-reload-"));
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    const options = (inspector: Parameters<typeof createJazz>[0]["inspector"] = {}) => ({
+      app,
+      permissions,
+      store: sqlite({ path: dir }),
+      authenticate,
+      inspect: staffOnly,
+      inspector: { audit: () => {}, ...inspector },
+    });
+    const jazz = createJazz(options());
+    cleanups.push(() => jazz.close());
+    await seed(jazz);
+    const { token } = await mint(jazz);
+    const notes = async () =>
+      (await ok(api(jazz, { op: "query", query: { table: "todos" } }, bearer(token)))).rows.map(
+        (row: any) => row.secretNote,
+      );
+    expect((await notes()).sort()).toEqual(["a-secret", "b-secret"]);
+
+    createJazz(options({ redact: { todos: ["secretNote"] } }));
+    await jazz.ready();
+    expect(await notes()).toEqual(["[redacted]", "[redacted]"]);
+
+    createJazz(options({ tokensIssuedAfter: Date.now() + 60_000 }));
+    await jazz.ready();
+    expect(await refused(api(jazz, { op: "whoami" }, bearer(token)))).toMatchObject({
+      status: 401,
+      message: expect.stringMatching(/revoked/),
+    });
+
+    createJazz(options());
+    await jazz.ready();
+    expect((await ok(api(jazz, { op: "whoami" }, bearer(token)))).via).toBe("token");
+    createJazz(options({ tokenSecret: "a-rotated-secret-shared-by-every-instance" }));
+    await jazz.ready();
+    expect(await refused(api(jazz, { op: "whoami" }, bearer(token)))).toMatchObject({
+      status: 401,
+      message: expect.stringMatching(/not signed by this backend/),
+    });
+
+    // Bad options fail the reload, not the next Inspector call.
+    await expect(createJazz(options({ maxTokenTtlSeconds: 1 })).ready()).rejects.toThrow(
+      /maxTokenTtlSeconds/,
+    );
+  }, 60_000);
+
   it("never see redacted columns, nor filter, sort or write by them", async () => {
     const { jazz } = await start({
       inspector: { redact: { todos: ["secretNote"] } },
@@ -848,6 +994,10 @@ describe("agent tokens", () => {
       status: 401,
       message: expect.stringMatching(/not signed by this backend/),
     });
+    // The refusal is audited as a token's.
+    expect(first.events).toContainEqual(
+      expect.objectContaining({ by: "?", via: "token", error: "unauthorized" }),
+    );
     // Another backend (another in-memory app) has another key.
     const second = await start();
     expect((await refused(api(second.jazz, { op: "whoami" }, bearer(token)))).status).toBe(401);
