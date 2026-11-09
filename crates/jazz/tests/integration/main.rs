@@ -111,6 +111,8 @@ mod prepared_claim_routing;
 mod provenance;
 #[path = "../read_deadline_scheduling.rs"]
 mod read_deadline_scheduling;
+#[path = "../read_request_lifecycle.rs"]
+mod read_request_lifecycle;
 #[path = "../recheck_policies.rs"]
 mod recheck_policies;
 #[path = "../recheck_queries.rs"]
@@ -236,3 +238,12 @@ mod governance_ordinary_composition;
 
 #[path = "../local_observation_submission.rs"]
 mod local_observation_submission;
+
+#[path = "../accepted_rpc_reads.rs"]
+mod accepted_rpc_reads;
+
+#[path = "../accepted_evidence_wire.rs"]
+mod accepted_evidence_wire;
+
+#[path = "../accepted_bundle_reads.rs"]
+mod accepted_bundle_reads;
