@@ -1,46 +1,37 @@
 ---
 "jazz-tools": patch
-"jazz-napi": patch
-"jazz-rn": patch
 ---
 
-Wire encrypted Bytea uploads and whole-value replacements through the ordinary
-large-value substrate. Stage bounded ciphertext outside a database transaction,
-then attach it in one exclusive publication with fresh epoch, device and
-membership checks. Reject stale uploads without replaying their sources.
+Publish encrypted Bytea uploads and whole-value replacements together with their
+metadata. Declare exact scopes and recipients, consume each source once before
+opening the publication transaction, then attach the opaque staged values using
+the separately owned native/SDK capability. Real same-transaction authority
+validation precedes publication; changed epochs, devices or membership refuse
+without replaying sources.
 
-Add `Db.streamingTransaction` for mutation declarations that publish a new scope,
-its exact initial recipients and first encrypted files together. Complete initial
-recipient device delivery after authoritative acceptance; a denied later delivery
-does not roll back accepted data and requires explicit reconciliation.
-Capture the declaring Db's access context once for staging and publication,
-preserving backend write-session and attribution boundaries.
-Refresh the retained accepted-history snapshot after successful initial delivery
-so an immediate offline write does not compare against pre-delivery metadata.
+`Db.streamingTransaction` can publish a new scope and its first encrypted files
+atomically. Ordinary streamed fields stay ordinary, including plaintext fields
+inside encrypted tables and updates to existing scope rows. Scope creation from
+streamed fields, branch targets, encrypted Text/JSON, equality-indexed streams and
+incremental encrypted-file edits remain unsupported.
 
-Version stream records independently from ordinary encrypted cells, including the
-cipher adapter mechanism and authenticated context. Ordinary queries return
-complete authenticated byte values and still materialise the whole file.
+Metadata creation preserves schema defaults and stable row IDs. Stored dependency
+preparation is provisional until the same indexed predicate and typed cells are
+validated under the real publication transaction's policy, snapshot and read set.
+Policy-filtered emptiness is not absence. Implicit stored dependencies after an
+earlier declaration for the same row, encrypted stored dependencies and a
+metadata dependency on its streamed field refuse before source consumption;
+callers can supply the supported dependency columns explicitly. User transforms
+are not replayed after consuming a source.
 
-Uploads are root-view only. Branch targets, encrypted Text/JSON streams,
-equality-indexed stream columns, scope-row streams and partial file edits remain
-unsupported. Rejected transactions retain ciphertext for normal retry/discard;
-proofless durable exclusive retries fail closed. Revocation does not erase
-previously uploaded ciphertext or previously held keys.
+Encrypted stream records have the named `jazz.e2ee.stream-record` v1 contract and
+byte fixtures, separately from ordinary encrypted cells. Typed queries still
+materialise and authenticate the whole value before returning it. No migration
+or compatibility claim is made for unreleased intermediate E2EE encodings.
 
-Extend native, WASM and foreground stage/attach capabilities and codec contracts.
-Keep the Next workspace native-runtime alias's staged-upload capability available
-through the same real native constructor, including atomic attachment and commit.
-Dropped or rejected raw streaming uploads queue exact cleanup on their live
-originating runtime, including foreign-runtime or schema rejection. Cleanup
-resolves the original upload's pending journal or promoted receipt, including
-an ambiguous promotion acknowledgement or cancellation before publication.
-Successful publication or staged-capability transfer hands off ownership once.
-Resident publications defer cleanup without a retry loop; owner ticks service
-the retained claim, and close stays retryable without retiring storage until
-admitted cleanup completes. Native and WASM bindings retain tick and close-retry
-routes for that deferred result while keeping mutation admission closed and
-preserving the primary core error code alongside secondary cleanup diagnostics.
-Physical storage-close errors remain terminal. Uploads do not keep their runtime
-alive or promise cleanup after it is closed or unavailable.
-Foreground codec coverage is not a claim of React Native E2EE qualification.
+Existing prior-online-bound keys may support the approved provisional offline
+path. Local durability does not establish current membership, absence of
+revocation, complete history or Global acceptance; reconnect validation can
+reject the pending write. Previously disclosed ciphertext and keys cannot be
+clawed back. Native staging, binding lifecycle and Inspector protection remain
+owned by their separate prerequisite changes.

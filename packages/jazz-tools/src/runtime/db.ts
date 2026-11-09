@@ -12,6 +12,7 @@ import { Utf8Decoder } from "./utf8.js";
 import { parseSnapshotRef, type SnapshotRef } from "./snapshot-ref.js";
 import { runtimeRandomBytes } from "./runtime-entropy.js";
 import { streamingBytes } from "./streaming-source.js";
+import { structuralValuesEqual } from "./structural-values.js";
 import { parseUuidBytes, formatUuid } from "./hex.js";
 import { assertRequiredRowColumnsPresent } from "./row-validation.js";
 import { initialRecipientIds, SpaceInitialisationRequired } from "../e2ee/space-lifecycle.js";
@@ -4664,6 +4665,12 @@ export class Db {
       columnId?: string;
       contentRoot?: Readonly<SpaceRoot>;
       staged?: StagedStreamingMutation;
+      missingDependencies?: readonly string[];
+      dependencyRead?: {
+        query: string;
+        columns: readonly string[];
+        cells: Record<string, Value> | null;
+      };
     };
     const declarations: Declaration[] = [];
     let declaring = true;
@@ -4676,6 +4683,7 @@ export class Db {
       id?: string,
     ): { id: string } => {
       if (!declaring) throw new Error("Streaming write plan declaration is closed");
+      assertWritableTable(table);
       if (
         options.branch !== undefined ||
         options.base !== undefined ||
@@ -4695,7 +4703,7 @@ export class Db {
       );
       const metadata = encryptedSchemas.get(table._schema);
       const encryption = metadata?.tables.get(table._table);
-      if (split && encryption) {
+      if (split && encryption?.columns.includes(split.column)) {
         try {
           e2eeForDb(this);
         } catch (cause) {
@@ -4705,13 +4713,37 @@ export class Db {
           );
         }
       }
-      const values = structuredClone(
-        toWriteRecord(
-          transformInputColumns(table, copied),
-          metadata?.logical ?? table._schema,
-          table._table,
-        ),
-      );
+      if (split) rejectIncompleteDependencies(table, copied, [split.column]);
+      // ID-dependent creation transforms use the same stable ID that will be
+      // staged and published. Other inserts retain native ID allocation.
+      const reservedId =
+        id ??
+        snapshot.id ??
+        (missingWriteDependencies(table, copied).includes("id") ? reserveRowId() : undefined);
+      const parsedReservedId = reservedId === undefined ? undefined : parseUuidBytes(reservedId);
+      if (reservedId !== undefined && !parsedReservedId)
+        throw new Error(`invalid uuid ${reservedId}`);
+      const preparedId = parsedReservedId ? formatUuid(parsedReservedId) : undefined;
+      const missing = missingWriteDependencies(table, copied, preparedId);
+      const deferred = operation !== "insert" && missing.length > 0;
+      if (deferred && missing.some((name) => encryption?.columns.includes(name)))
+        throw new Error(
+          "Streaming plan stored transform dependencies on encrypted columns are not supported; supply those columns explicitly",
+        );
+      const values: Record<string, Value> = deferred
+        ? {}
+        : structuredClone(
+            toWriteRecord(
+              transformInputColumns(
+                table,
+                copied,
+                preparedId ? { id: preparedId } : {},
+                operation === "insert",
+              ),
+              metadata?.logical ?? table._schema,
+              table._table,
+            ),
+          );
       if (operation === "insert")
         assertRequiredRowColumnsPresent(
           (metadata?.logical ?? table._schema)[table._table]!.columns.filter(
@@ -4748,8 +4780,7 @@ export class Db {
         }
       }
       const client = this.getClient(table._schema);
-      const requestedId =
-        id ?? snapshot.id ?? client.previewInsertInternal(table._table, physical).id;
+      const requestedId = preparedId ?? client.previewInsertInternal(table._table, physical).id;
       const parsedId = parseUuidBytes(requestedId);
       if (!parsedId) throw new Error(`invalid uuid ${requestedId}`);
       const rowId = formatUuid(parsedId);
@@ -4763,6 +4794,7 @@ export class Db {
         values,
         options: { ...snapshot, id: rowId },
         ...(split && { stream: { column: split.column, source: split.source } }),
+        ...(deferred && { missingDependencies: missing }),
       });
       return { id: rowId };
     };
@@ -4807,22 +4839,109 @@ export class Db {
         if (!scopes.has(key)) scopes.set(key, entry);
       }
     }
+    // Implicit stored context after earlier declarations could describe an
+    // overlay rather than the base row. Refuse before pulling any source;
+    // callers can explicitly declare all dependency columns in the later write.
+    for (const entry of streams) {
+      if (entry.missingDependencies?.length && priorDeclarations.has(entry))
+        throw new Error(
+          "Streaming plan stored transform dependencies after an earlier declaration for the same row are not supported; supply all dependency columns explicitly",
+        );
+    }
+    const dependencyRecord = (
+      entry: Declaration,
+      row: Awaited<ReturnType<JazzClient["queryInternal"]>>[number],
+      columns: readonly string[],
+    ) => {
+      const stored = transformRow<Record<string, unknown>>(
+        row,
+        entry.table._schema,
+        entry.table._table,
+        {},
+        [...columns],
+      );
+      const cells: Record<string, Value> = {};
+      for (const name of columns) {
+        const descriptor = entry.table._schema[entry.table._table]!.columns.find(
+          (column) => column.name === name,
+        );
+        if (!descriptor) throw new Error(`Unknown stored transform dependency "${name}"`);
+        if (Object.hasOwn(stored, name))
+          cells[name] = toValue(stored[name], descriptor.column_type);
+      }
+      return { stored: { id: entry.id, ...stored }, cells };
+    };
     const staged: StagedStreamingMutation[] = [];
     try {
       for (const entry of streams) {
         const { table, stream } = entry;
-        const encryption = encryptedSchemas.get(table._schema)?.tables.get(table._table);
+        const declaredEncryption = encryptedSchemas.get(table._schema)?.tables.get(table._table);
+        const encryption = declaredEncryption?.columns.includes(stream!.column)
+          ? declaredEncryption
+          : undefined;
         const prior = priorDeclarations.get(entry);
+        if (entry.missingDependencies?.length) {
+          const client = this.getClient(table._schema);
+          const columns = entry.missingDependencies.filter((name) => name !== "id");
+          const query = translateQuery(
+            JSON.stringify({
+              table: table._table,
+              conditions: [{ column: "id", op: "eq", value: entry.id }],
+              select: columns,
+              limit: 1,
+              includeDeleted: entry.operation === "upsert",
+            }),
+            table._schema,
+          );
+          // Candidate preparation is NOT authority evidence. The exact
+          // dependency predicate/cells are re-read in the real publication
+          // batch below, under its captured policy/session/read set.
+          const rows = await client.queryInternal(query, undefined, context?.readSession);
+          const row = rows[0];
+          if (!row && entry.operation !== "upsert")
+            throw new Error("Transform dependency row is unavailable.");
+          if (!row && !client.readCanEstablishAbsence(context?.readSession))
+            throw new Error(
+              "Transform dependencies are unavailable: a scoped read cannot establish that the upsert row is absent.",
+            );
+          const candidate = row
+            ? dependencyRecord(entry, row, columns)
+            : { stored: { id: entry.id }, cells: null };
+          entry.values = structuredClone(
+            toWriteRecord(
+              transformInputColumns(
+                table,
+                entry.data,
+                candidate.stored,
+                !row && entry.operation === "upsert",
+              ),
+              encryptedSchemas.get(table._schema)?.logical ?? table._schema,
+              table._table,
+            ),
+          );
+          entry.dependencyRead = { query, columns, cells: candidate.cells };
+        }
         if (entry.operation !== "insert") {
-          const row = (await this.one(
-            new TypedTableQueryBuilder<
-              AnyTableMeta & { row: { id: string } & Record<string, unknown> }
-            >(table._table, table._schema)
-              .includeDeleted()
-              .where({ id: entry.id })
-              .select(encryption?.space ?? "id"),
-            { tier: "local-first" },
-          )) as Record<string, unknown> | null;
+          const selected = encryption?.space ?? "id";
+          const raw = await this.getClient(table._schema).queryInternal(
+            translateQuery(
+              JSON.stringify({
+                table: table._table,
+                conditions: [{ column: "id", op: "eq", value: entry.id }],
+                select: [selected],
+                includeDeleted: true,
+                limit: 1,
+              }),
+              table._schema,
+            ),
+            undefined,
+            context?.readSession,
+          );
+          const row = raw[0]
+            ? transformRow<Record<string, unknown>>(raw[0], table._schema, table._table, {}, [
+                selected,
+              ])
+            : null;
           entry.existing = row !== null;
           if (row && encryption) {
             if (typeof row[encryption.space] !== "string")
@@ -5023,7 +5142,7 @@ export class Db {
                   : { identifier: group.identifier },
               );
           }
-          await prepareDbTransaction(transaction, async (tx) => {
+          await prepareDbTransaction(transaction, async (tx, io) => {
             for (const group of groups) {
               await group.plan!.validate(tx);
               tx.assertActive();
@@ -5043,7 +5162,11 @@ export class Db {
               const encryption = encryptedSchemas
                 .get(entry.table._schema)
                 ?.tables.get(entry.table._table);
-              if (!encryption || entry.operation === "insert") continue;
+              if (
+                !encryption?.columns.includes(entry.stream!.column) ||
+                entry.operation === "insert"
+              )
+                continue;
               const row = (await tx.one(
                 new TypedTableQueryBuilder<
                   AnyTableMeta & { row: { id: string } & Record<string, unknown> }
@@ -5061,6 +5184,46 @@ export class Db {
               )
                 throw new Error("Streaming upload target changed");
             }
+            const binding = getDbTxHandleBinding(transaction, "streamingTransaction");
+            for (const entry of streams) {
+              const dependency = entry.dependencyRead;
+              if (!dependency) continue;
+              tx.assertActive();
+              if (binding.resolveClient(entry.table._schema) !== binding.ownerClient)
+                throw new Error("Streaming metadata preparation belongs to a different owner");
+              const rows = await io.queryInternal(
+                dependency.query,
+                {
+                  openTransactionId: binding.openTransactionId,
+                },
+                binding.readSession,
+              );
+              // Raw IO checks before awaiting; the typed scope must also
+              // revoke a result whose transaction/owner retired during IO.
+              tx.assertActive();
+              if (
+                !rows[0] &&
+                dependency.cells === null &&
+                entry.operation === "upsert" &&
+                !binding.ownerClient.readCanEstablishAbsence(
+                  binding.readSession,
+                  binding.openTransactionId,
+                )
+              )
+                throw new Error(
+                  "Transform dependencies are unavailable: a scoped read cannot establish that the upsert row is absent.",
+                );
+              const actual = rows[0]
+                ? dependencyRecord(entry, rows[0], dependency.columns).cells
+                : null;
+              if (
+                (actual === null) !== (dependency.cells === null) ||
+                dependency.columns.some(
+                  (name) => !structuralValuesEqual(actual?.[name], dependency.cells?.[name]),
+                )
+              )
+                throw new Error("Streaming metadata dependencies changed before publication");
+            }
           });
           for (const group of groups) {
             if (group.initial || !group.plan!.initialSeed) continue;
@@ -5076,8 +5239,26 @@ export class Db {
             );
           }
           for (const entry of declarations) {
-            if (!entry.stream) transaction.insert(entry.table, entry.data, entry.options);
-            else
+            if (!entry.stream) {
+              // Creation transforms ran once before source consumption. Keep
+              // the exact same schema/owner and normal insert/space machinery,
+              // but publish those prepared values without rerunning user code.
+              const schema =
+                encryptedSchemas.get(entry.table._schema)?.logical ?? entry.table._schema;
+              const prepared: Record<string, unknown> = {};
+              for (const [name, cell] of Object.entries(entry.values)) {
+                const column = schema[entry.table._table]!.columns.find(
+                  (column) => column.name === name,
+                );
+                if (!column) throw new Error(`Unknown prepared column "${name}"`);
+                prepared[name] = unwrapValue(cell, column.column_type);
+              }
+              transaction.insert(
+                new TypedTableQueryBuilder(entry.table._table, entry.table._schema),
+                prepared,
+                entry.options,
+              );
+            } else
               await prepareDbTransaction(transaction, async (_tx, io) => {
                 await io.attachStreamingMutation(entry.staged!);
               });
