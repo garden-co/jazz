@@ -1633,7 +1633,7 @@ function splitStreamingMutation(
   const record = data as Record<string, unknown>;
   const encryption = encryptedSchemas.get(table._schema);
   if (encryption?.scopes.has(table._table)) {
-    throw new Error("Encryption scope streaming values are not supported");
+    throw new Error("Encryption scope streaming creation is not supported");
   }
   const declaration = encryption?.tables.get(table._table);
   const streamableColumns = table._schema[table._table]?.columns.filter((column) =>
@@ -1656,7 +1656,7 @@ function splitStreamingMutation(
       (entry) => entry.name === column,
     );
     if (!declaration.columns.includes(column) || logicalColumn?.column_type.type !== "Bytea")
-      throw new Error("Encrypted streaming requires an encrypted Bytea column");
+      throw new Error("Encrypted streaming is not supported for a non-Bytea encrypted column");
     if (declaration.indexes?.[column])
       throw new Error("Equality-indexed encrypted streaming is not supported");
   }
@@ -4685,7 +4685,16 @@ export class Db {
       );
       const metadata = encryptedSchemas.get(table._schema);
       const encryption = metadata?.tables.get(table._table);
-      if (split && encryption) e2eeForDb(this);
+      if (split && encryption) {
+        try {
+          e2eeForDb(this);
+        } catch (cause) {
+          throw new Error(
+            "Encrypted streaming is not supported: E2EE requires an authenticated Db with dedicated local key storage",
+            { cause },
+          );
+        }
+      }
       const values = structuredClone(
         toWriteRecord(
           transformInputColumns(table, copied),
@@ -4997,9 +5006,12 @@ export class Db {
         async () => {
           for (const group of groups) {
             if (group.initial || group.plan!.initialSeed)
-              transaction.prepareEncryptedScope(group.scope, (group.initial
+              transaction.prepareEncryptedScope(
+                group.scope,
+                group.initial
                   ? { initialRecipients: group.initial.options.initialRecipients }
-                  : { identifier: group.identifier }));
+                  : { identifier: group.identifier },
+              );
           }
           await prepareDbTransaction(transaction, async (tx) => {
             for (const group of groups) {
