@@ -52,6 +52,8 @@ use crate::result_tree::{ResultNode, ResultRelation, ResultTree};
 pub use crate::values::CurrentRow;
 #[path = "accepted_read.rs"]
 mod accepted_read;
+#[path = "accepted_transactions.rs"]
+mod accepted_transactions;
 use crate::values::{
     AuthorKey, STATE_AS_SENT, STATE_DELETED, STATE_NO_CONTENT, Schema, Sql, Table, author_key,
     begin_savepoint, cell_from_sql, column_from_sql, end_savepoint, in_savepoint, quote, storage,
@@ -7482,6 +7484,7 @@ impl Store {
 struct Batch {
     kind: BatchKind,
     reads_state: Rc<RefCell<transaction_reads::ReadState>>,
+    accepted: Option<accepted_transactions::AcceptedScope>,
     /// None retains the ordinary per-operation identity contract.
     identity: Option<WriteIdentity>,
     ops: Vec<(Rc<Schema>, StagedOp)>,
@@ -7553,6 +7556,11 @@ struct ReadRecord {
     prepared: PreparedQuery,
     include_deleted: bool,
     rows: Vec<(RowUuid, sync::Rank)>,
+    // Evaluation provenance for admitting mixed accepted reads. Ordinary
+    // transactions retain their existing validation behaviour.
+    scope: AcceptedReadScope,
+    schema: [u8; 16],
+    accepted_evidence: bool,
 }
 
 /// An upload the authority refused: the node and local seq of the commit
@@ -8077,6 +8085,7 @@ impl Db {
             Batch {
                 kind,
                 reads_state: Rc::new(RefCell::new(transaction_reads::ReadState::default())),
+                accepted: None,
                 identity: None,
                 ops: Vec::new(),
                 observation_provenance: Vec::new(),
@@ -8142,6 +8151,7 @@ impl Db {
     ) -> Result<TxReceipt, Error> {
         let batch = self.take_batch(id)?;
         batch.reads_state.borrow().check_commit()?;
+        self.check_accepted_batch(&batch)?;
         let BatchKind::Serializable {
             snapshot,
             reads,
@@ -8204,6 +8214,11 @@ impl Db {
             {
                 let inner = self.inner();
                 for read in reads {
+                    // A sparse replica cannot certify an authority result.
+                    // Keep this predicate in WireRead for authority validation.
+                    if read.accepted_evidence {
+                        continue;
+                    }
                     let spec = ReadSpec {
                         include_deleted: read.include_deleted,
                         ..ReadSpec::new(self.governance.clone())
@@ -8265,6 +8280,7 @@ impl Db {
             );
         }
         {
+            let policies = self.view_policies();
             let inner = self.inner();
             for (schema, op) in &batch.ops {
                 if let Some(row) = op.row()
@@ -8282,7 +8298,14 @@ impl Db {
                     include_deleted: read.include_deleted,
                     ..ReadSpec::new(self.governance.clone())
                 };
-                if inner.read_versions(&read.prepared, batch.reader(), &spec)? != read.rows {
+                let governed;
+                let prepared = if read.accepted_evidence {
+                    governed = inner.governed_accepted_query(&read.prepared, policies.clone())?;
+                    &governed
+                } else {
+                    &read.prepared
+                };
+                if inner.read_versions(prepared, batch.reader(), &spec)? != read.rows {
                     return Err(conflict(
                         "a row read by the transaction changed since its snapshot",
                     ));
@@ -8662,6 +8685,14 @@ impl Db {
             ..ReadSpec::new(self.governance.clone())
         };
         let rows = inner.read_versions(prepared, identity, &read)?;
+        let scope = inner.accepted_scope_of(prepared, identity.unwrap_or(inner.identity.author));
+        let schema = *prepared
+            .schema
+            .as_ref()
+            .unwrap_or(&inner.owner)
+            .jazz
+            .version_id()
+            .as_bytes();
         if let Some(Batch {
             kind: BatchKind::Serializable { reads, pinned, .. },
             ..
@@ -8674,6 +8705,9 @@ impl Db {
                 prepared: prepared.clone(),
                 include_deleted,
                 rows,
+                scope,
+                schema,
+                accepted_evidence: false,
             });
         }
         Ok(())
@@ -8857,6 +8891,8 @@ impl TxRef<'_> {
                 identity
             }
         };
+        self.db
+            .check_mixed_accepted_read(self.id, prepared, identity)?;
         let guard = self.db.transaction_read_guard(self.id)?;
         // Capture before waiting: later writes must not leak into this read's
         // admitted prefix while an earlier read selects the shared snapshot.
@@ -8979,6 +9015,8 @@ impl TxRef<'_> {
                 *pinned = true;
             }
         }
+        self.db
+            .check_mixed_accepted_read(self.id, prepared, identity)?;
         // Relations nest inside the overlay, so they see staged rows too.
         let rows = self.db.in_overlay_prefix(self.id, prefix, |inner, cut| {
             let read = ReadSpec {

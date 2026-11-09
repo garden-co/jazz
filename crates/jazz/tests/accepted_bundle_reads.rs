@@ -222,3 +222,53 @@ fn accepted_bundle_reads_preserve_retained_names_through_a_rename() {
         }
     }
 }
+
+/// Alice's accepted transaction reads and commits under one authenticated
+/// pin, even when the owner's policy would return the opposite result.
+#[test]
+fn accepted_transactions_validate_under_each_authenticated_pin() {
+    use jazz::tools::OpenTransactionId;
+    use jazz::tx::DurabilityTier;
+    for owner in [false, true] {
+        for (node, allowed) in [(1, false), (2, true)] {
+            let server = open(9, AuthorSubject::SYSTEM, owner, true);
+            seed(&server);
+            let bundle = block_on(server.publish_bundle(&schema(allowed))).unwrap();
+            let client = open(node, alice(), true, false);
+            let (up, down) = duplex();
+            let _link = block_on(client.connect_upstream(up));
+            server
+                .accept_pinned_subscriber(down, alice(), Some(BTreeMap::new()), Some(bundle))
+                .unwrap();
+            let id = OpenTransactionId::new();
+            block_on(client.begin_serializable_for_identity(id, alice())).unwrap();
+            let query = client.prepare_query(&Query::from("notes")).unwrap();
+            let read = drive(
+                &[&client, &server],
+                client
+                    .accepted_transaction_query(id, query, false, 1000)
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(read.evidence.len(), usize::from(allowed));
+            // Publication cannot silently replace either the read pin or
+            // the policy used to validate its (possibly empty) predicate.
+            block_on(server.publish_bundle(&schema(!allowed))).unwrap();
+            drive(
+                &[&client, &server],
+                client.tx_ref(id).insert(
+                    "notes",
+                    BTreeMap::from([("body".into(), Value::String("new note".into()))]),
+                    Default::default(),
+                ),
+            )
+            .unwrap();
+            let receipt = block_on(client.commit_serializable_handle(id)).unwrap();
+            drive(
+                &[&client, &server],
+                client.wait_for_transaction(receipt.0, DurabilityTier::Global),
+            )
+            .unwrap();
+        }
+    }
+}
