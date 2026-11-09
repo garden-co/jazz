@@ -110,7 +110,7 @@ fn spoof(db: &Db, scope: uuid::Uuid) {
 fn connect(client: &Db, server: &Db, author: AuthorSubject) {
     let (a, b) = duplex();
     block_on(client.connect_upstream(a));
-    server.accept_subscriber(b, author);
+    server.accept_subscriber(b, author).unwrap();
 }
 fn turn(dbs: &[&Db]) {
     for db in dbs {
@@ -573,8 +573,28 @@ fn renamed_policy_schema_governs_old_client_views_and_live_subscriptions() {
 /// Alice's policy checks reject until that exact descriptor is published.
 #[test]
 fn registering_an_unpublished_view_cannot_supply_policy_identities() {
-    let db = authority(schema("documents", intrinsic("documents")));
-    let view = block_on(db.register_schema_view(schema("drafts", intrinsic("drafts")))).unwrap();
+    // A current authority confirms every schema it admits, including a view.
+    // The unconfirmed view must therefore belong to its replica: the initial
+    // namespace is genuine, but the authority has never admitted `drafts`.
+    let initial = schema("documents", intrinsic("documents"));
+    let server = authority(initial.clone());
+    let db = open(1, initial);
+    connect(&db, &server, AuthorSubject::SYSTEM);
+    drive(
+        &[&db, &server],
+        db.cover_catalogue_with_timeout(None, 5_000).unwrap(),
+    )
+    .unwrap();
+    // Select the locally admitted policy version too. An unselected extra
+    // table has no governing SELECT policy and correctly denies before it
+    // evaluates any operand; that is a different refusal boundary.
+    let drafts = schema("drafts", intrinsic("drafts"));
+    block_on(db.activate_schema(drafts.clone())).unwrap();
+    let view = block_on(db.register_schema_view(drafts)).unwrap();
+    assert_eq!(
+        view.table_identity("drafts").unwrap_err().code,
+        ErrorCode::NotObserved
+    );
     seed(&view, "drafts", uuid::Uuid::new_v4(), "unpublished");
     let prepared = view.prepare_query(&Query::from("drafts")).unwrap();
     let error =
