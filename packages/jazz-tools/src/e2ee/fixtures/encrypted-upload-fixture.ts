@@ -38,11 +38,17 @@ export const legacyUploadApp = s.defineApp(
   { migrations: "none" },
 );
 
-export async function uploadFixture(native = false, denied = false, withRecipient = false) {
+export async function uploadFixture(
+  native = false,
+  denied = false,
+  withRecipient = false,
+  allowScopeUpdates = false,
+) {
   let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const permissions = definePermissions(uploadApp, ({ policy, session }) => {
     policy.projects.allowRead.always();
     policy.projects.allowInsert.always();
+    if (allowScopeUpdates) policy.projects.allowUpdate.always();
     policy.files.allowRead.always();
     if (!denied) policy.files.allowInsert.always();
     policy.files.allowUpdate.always();

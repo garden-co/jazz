@@ -1622,6 +1622,7 @@ function splitStreamingMutation(
   table: TableProxy<any, any, any, any, any>,
   data: unknown,
   operation: "insert" | "update" | "upsert",
+  allowEncryptedBytea = false,
 ): {
   column: string;
   source: StreamingValueSource;
@@ -1632,10 +1633,19 @@ function splitStreamingMutation(
   }
   const record = data as Record<string, unknown>;
   const encryption = encryptedSchemas.get(table._schema);
-  if (encryption?.scopes.has(table._table)) {
+  if (operation !== "update" && encryption?.scopes.has(table._table)) {
     throw new Error("Encryption scope streaming creation is not supported");
   }
   const declaration = encryption?.tables.get(table._table);
+  if (
+    !allowEncryptedBytea &&
+    declaration &&
+    (operation !== "update" ||
+      Object.hasOwn(record, declaration.space) ||
+      declaration.columns.some((name) => Object.hasOwn(record, name)))
+  ) {
+    throw new Error("Encrypted streaming is not supported");
+  }
   const streamableColumns = table._schema[table._table]?.columns.filter((column) =>
     ["Text", "Json", "Bytea"].includes(column.column_type.type),
   );
@@ -4679,7 +4689,7 @@ export class Db {
         throw new Error("updatedAt must be a non-negative safe integer");
       const snapshot = structuredClone(options);
       scopeRecipients(table, snapshot);
-      const split = streaming ? splitStreamingMutation(table, data, operation) : undefined;
+      const split = streaming ? splitStreamingMutation(table, data, operation, true) : undefined;
       const copied = structuredClone(
         split?.values ?? requireRecord(data, "Insert data must be an object"),
       );
