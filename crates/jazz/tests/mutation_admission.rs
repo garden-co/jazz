@@ -339,7 +339,7 @@ fn admitted_uploads_and_remote_reads_drain_after_the_fence() {
     let bob = open(2);
     let (client, server) = duplex();
     let _upstream = block_on(alice.connect_upstream(client));
-    bob.accept_subscriber(server, author);
+    bob.accept_subscriber(server, author).unwrap();
     let write = block_on(alice.insert("docs", body("committed"), Default::default())).unwrap();
     let mut wait =
         pin!(alice.wait_for_transaction(write.mergeable_tx_id(), DurabilityTier::Global));

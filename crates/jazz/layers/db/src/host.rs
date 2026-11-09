@@ -25,6 +25,7 @@ use std::time::Duration;
 
 use rusqlite::{Connection, OptionalExtension, params};
 
+use crate::catalogue::{CataloguePut, CatalogueRows};
 use crate::db::{Db, FileOptions, Journal};
 use crate::options::{Error, ErrorCode};
 use crate::values::{in_savepoint, storage};
@@ -77,6 +78,16 @@ pub trait HostTables {
     ) -> Result<Option<Vec<u8>>, Error>;
     /// Remove `key`.
     fn host_delete(&self, table: HostTable, key: &[u8]) -> Result<(), Error>;
+    /// The store's catalogue (see [`crate::catalogue`]).
+    fn catalogue(&self) -> Result<CatalogueRows, Error>;
+    /// Publish `put` into the store's catalogue in one commit: all or none.
+    fn catalogue_put(&self, put: &CataloguePut) -> Result<(), Error>;
+    /// Run `f` on the store's connection inside one `host_write` savepoint:
+    /// what it wrote commits when it returns `Ok`, nothing does otherwise.
+    /// For host tables with columns of their own (`_jazz_host_<name>`,
+    /// created by `f` itself), which plain key-value pairs would hide from
+    /// SQL.
+    fn host_sql(&self, f: &mut dyn FnMut(&Connection) -> Result<(), Error>) -> Result<(), Error>;
 }
 
 /// A store's file opened and admitted, before a [`Db`] is opened on it:
@@ -225,6 +236,18 @@ impl HostReader {
         self.read(|conn| prefix_scan(conn, table, prefix))
     }
 
+    /// The store's catalogue as committed (see [`crate::catalogue`]).
+    pub fn catalogue(&self) -> Result<CatalogueRows, Error> {
+        self.read(crate::catalogue::read)
+    }
+
+    /// Run `f` on the read-only connection, for host tables that
+    /// [`HostTables::host_sql`] shaped. A table no write created yet is
+    /// missing here: `f` must not assume it exists.
+    pub fn sql<T>(&self, f: impl FnOnce(&Connection) -> Result<T, Error>) -> Result<T, Error> {
+        self.read(f)
+    }
+
     /// Close the connection; reads fail afterwards. Close readers before
     /// the store's own connection, which then checkpoints the WAL as the
     /// file's last connection.
@@ -270,6 +293,20 @@ impl HostTables for StoreFile {
     fn host_delete(&self, table: HostTable, key: &[u8]) -> Result<(), Error> {
         delete(&self.conn, table, key)
     }
+
+    fn catalogue(&self) -> Result<CatalogueRows, Error> {
+        crate::catalogue::read(&self.conn)
+    }
+
+    fn catalogue_put(&self, put: &CataloguePut) -> Result<(), Error> {
+        in_savepoint(&self.conn, "host_write", || {
+            crate::catalogue::put(&self.conn, put)
+        })
+    }
+
+    fn host_sql(&self, f: &mut dyn FnMut(&Connection) -> Result<(), Error>) -> Result<(), Error> {
+        in_savepoint(&self.conn, "host_write", || f(&self.conn))
+    }
 }
 
 impl HostTables for Db {
@@ -296,6 +333,20 @@ impl HostTables for Db {
 
     fn host_delete(&self, table: HostTable, key: &[u8]) -> Result<(), Error> {
         self.with_host_connection(|conn| delete(conn, table, key))
+    }
+
+    fn catalogue(&self) -> Result<CatalogueRows, Error> {
+        self.with_host_connection(crate::catalogue::read)
+    }
+
+    fn catalogue_put(&self, put: &CataloguePut) -> Result<(), Error> {
+        self.with_host_connection(|conn| {
+            in_savepoint(conn, "host_write", || crate::catalogue::put(conn, put))
+        })
+    }
+
+    fn host_sql(&self, f: &mut dyn FnMut(&Connection) -> Result<(), Error>) -> Result<(), Error> {
+        self.with_host_connection(|conn| in_savepoint(conn, "host_write", || f(conn)))
     }
 }
 

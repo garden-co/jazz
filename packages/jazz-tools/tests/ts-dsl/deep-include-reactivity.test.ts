@@ -36,7 +36,7 @@ const schema = {
   ),
 };
 type AppSchema = s.Schema<typeof schema>;
-const app: s.App<AppSchema> = s.defineApp(schema);
+const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
 
 type Org = s.RowOf<typeof app.orgs>;
 type Todo = s.RowOf<typeof app.todos>;

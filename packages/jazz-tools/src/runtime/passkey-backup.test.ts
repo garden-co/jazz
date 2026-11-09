@@ -28,7 +28,7 @@ describe("PasskeyBackupError", () => {
       "WebAuthn is not supported in this browser",
     );
     expect(new PasskeyBackupError("invalid-secret").message).toBe(
-      "Secret must be a canonical Jazz auth secret",
+      "Secret must be a canonical local-first secret",
     );
     expect(new PasskeyBackupError("create-failed").message).toBe(
       "Failed to create passkey credential",

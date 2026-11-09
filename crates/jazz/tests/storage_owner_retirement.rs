@@ -135,3 +135,62 @@ fn waiting_host_subscription_closes_after_owner_retirement() {
         Poll::Ready(SubscriptionEvent::Closed)
     ));
 }
+
+/// Alice's host retires her in-memory owner: retained views lose old and new local
+/// observation capabilities, while Bob's independent live owner keeps his cuts.
+#[test]
+fn storage_retirement_expires_local_observation_cuts() {
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("text", ColumnType::Text)
+                    .policies(allow_all_policies()),
+            )
+            .build(),
+    );
+    let open = |node| {
+        block_on(Db::open_history_complete(DbConfig::new(
+            schema.clone(),
+            DbIdentity {
+                node: NodeUuid::from_bytes([node; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        )))
+        .unwrap()
+    };
+    let alice = open(92);
+    let bob = open(93);
+    let retained = alice.governed_view(schema.version_id()).unwrap();
+    let query = alice.prepare_query(&Query::from("notes")).unwrap();
+    let bob_query = bob.prepare_query(&Query::from("notes")).unwrap();
+    let cut = alice.local_observation_cut(&query, None).unwrap();
+    let bob_cut = bob.local_observation_cut(&bob_query, None).unwrap();
+    assert!(
+        alice
+            .observe_local(&cut, &query, false)
+            .unwrap()
+            .rows
+            .is_empty()
+    );
+    alice.retire_storage_owner().unwrap();
+    assert_eq!(
+        retained
+            .observe_local(&cut, &query, false)
+            .unwrap_err()
+            .code,
+        ErrorCode::NotObserved,
+        "a retained capability must expire before accessing the retired file"
+    );
+    match retained.local_observation_cut(&query, None) {
+        Err(error) => assert_eq!(error.code, ErrorCode::NotObserved),
+        Ok(_) => panic!("retired owner created another observation capability"),
+    }
+    assert!(
+        bob.observe_local(&bob_cut, &bob_query, false)
+            .unwrap()
+            .rows
+            .is_empty()
+    );
+    assert!(bob.local_observation_cut(&bob_query, None).is_ok());
+}

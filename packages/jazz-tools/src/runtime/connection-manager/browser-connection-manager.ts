@@ -1,13 +1,14 @@
 import { copyAccountConfigAdmission } from "../../accounts/config-capability.js";
 import type { WasmSchema } from "../../drivers/types.js";
+import { reportCredentialRefusal } from "../client.js";
 import type { JazzClient, AuthUpdate } from "../client.js";
 import { resolveClientInternalSessionSync } from "../client-session.js";
 import { getTrustedReservedSession, setTrustedReservedSession } from "../db-internal-session.js";
 import type { BrowserForegroundNodeLease, BrowserWorkerConnection } from "../runtime-source.js";
 import type { RemoteLinkState } from "../remote-link-state.js";
+import { CONNECTED, CONNECTING, offlineLink, type LinkStatus } from "../sync-status.js";
 import { reloadAfterStorageInvalidation } from "../browser-storage-invalidation.js";
 import { runCleanupSteps } from "../run-cleanup-steps.js";
-import { NativeRuntimeAdapter } from "../native-runtime/native-runtime-adapter.js";
 import { BrowserWorkerUnresponsiveError } from "../native-runtime/browser-worker-protocol.js";
 import {
   ConnectionManager,
@@ -42,6 +43,8 @@ export class BrowserConnectionManager extends ConnectionManager {
   private disconnected = false;
   /** Reported by the worker that owns the upstream socket. */
   private workerRemoteLink: RemoteLinkState = "connecting";
+  /** The worker's link status; absent from an older worker. */
+  private workerLinkStatus: LinkStatus | null = null;
   private readonly workerRemoteLinkListeners = new Set<() => void>();
   private readonly reconnectWaiters = new Set<(error?: Error) => void>();
   private transportTransition: Promise<void> = Promise.resolve();
@@ -110,10 +113,14 @@ export class BrowserConnectionManager extends ConnectionManager {
       config: workerConfig,
       schema: input.schema,
       client: input.client,
-      onAuthFailure: (reason) => this.host.markUnauthenticated(reason),
+      onAuthFailure: (reason) => {
+        // A tab hears of a refusal from its worker, not from its own runtime.
+        reportCredentialRefusal(input.client, reason);
+        this.host.markUnauthenticated(reason);
+      },
       onAuthRestored: () => this.host.clearAuthError(),
       onExplicitOfflineChange: (offline) => this.setExplicitOffline(connection, offline),
-      onRemoteLinkChange: (state) => this.setWorkerRemoteLink(connection, state),
+      onRemoteLinkChange: (state, link) => this.setWorkerRemoteLink(connection, state, link),
       onFailure: (error) => this.observeConnectionFailure(connection, toError(error)),
       onStorageReset: (resetId) => this.beginStorageReset(scope, resetId),
       onStorageInvalidated: () => this.reloadAfterStorageInvalidation(connection),
@@ -557,7 +564,7 @@ export class BrowserConnectionManager extends ConnectionManager {
               if (!runtime) {
                 if (flushFailed) await lease.retire();
                 else await lease.returnWithHighWater(lease.confirmedTxTime);
-              } else if (!(runtime instanceof NativeRuntimeAdapter)) {
+              } else if (!runtime.quiesceForegroundTxTimeHighWater) {
                 await lease.retire();
               } else {
                 // Even after an ordinary flush failure, close mutation admission
@@ -646,14 +653,38 @@ export class BrowserConnectionManager extends ConnectionManager {
     });
   }
 
-  private setWorkerRemoteLink(connection: BrowserWorkerConnection, state: RemoteLinkState): void {
+  protected override transportLinkStatus(): LinkStatus {
+    // A failed follower cannot receive the worker's answer.
+    if (this.connectionError) return offlineLink("stopped");
+    // This Db has a server configured, so a worker that has not dialled yet
+    // (it may still wait for a credential) is about to connect, not local-only.
+    if (this.workerLinkStatus) {
+      return this.workerLinkStatus.state === "local-only" ? CONNECTING : this.workerLinkStatus;
+    }
+    switch (this.workerRemoteLink) {
+      case "connected":
+        return CONNECTED;
+      case "unavailable":
+        return offlineLink("network");
+      default:
+        return CONNECTING;
+    }
+  }
+
+  private setWorkerRemoteLink(
+    connection: BrowserWorkerConnection,
+    state: RemoteLinkState,
+    link: LinkStatus | null = null,
+  ): void {
     if (this.connection !== connection) return;
     this.workerRemoteLink = state;
+    this.workerLinkStatus = link;
     this.notifyWorkerRemoteLink();
   }
 
   private notifyWorkerRemoteLink(): void {
     for (const listener of [...this.workerRemoteLinkListeners]) listener();
+    this.notifySyncStatus();
   }
 
   private enqueueTransportTransition(run: () => void | Promise<void>): Promise<void> {

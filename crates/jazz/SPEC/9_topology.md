@@ -206,9 +206,8 @@ worker, or a native relay, ch. 19) that talks to Core directly; the clients
 behind a relay are non-durable foreground sessions. Relays are not chained, a
 durable replica never attaches behind a relay, and no relay serves more than
 one auth scope. Requirements below are stated for this shape only; other
-shapes are not supported (`INV-SYNC-50`), and supporting one would need new
-design (for example versions named by origin rather than by local seq), not
-just new wiring.
+shapes are not supported, and supporting one would need new design, not just
+new wiring.
 
 Relays provide unopinionated transport and caching. A relay link uses
 `PeerRole::Relay` with an explicit relay transport capability and no permission
@@ -237,6 +236,17 @@ where one worker relays for all same-scope tabs. Native/RN client relays have
 the same semantic boundary even when their storage-owner and lifecycle
 mechanism differs from the browser's IndexedDB marker. A relay shared across
 auth scopes (server-deployed or otherwise multiplexed) is not supported.
+
+A relay serves one identity: its own. A store configured as a user uploads
+what its sessions write under its own identity, so a session of another user
+would have its writes attributed to the relay's user. Every accept path (the
+core's, and through it the binding host, the browser worker and the native
+relay) refuses such a session with reason `identity_mismatch`; only a system
+store (a server) serves any identity. Each accept names the session's own
+replica author: the browser worker admits a tab as the author the tab
+connected with, never as the worker's own. A server
+checks a replica's declared identity against the one it authenticated when it
+admits the link (`INV-EDGE-26`).
 
 ### 9.6 The Core/client boundary
 
@@ -272,11 +282,14 @@ If the note is forbidden, none of the otherwise permitted siblings is admitted.
 
 ### 9.7 Server readiness
 
-A dynamically catalogued Core must have a published permissions head selecting
-its write schema and policies before accepting uploads (`INV-EDGE-19`). Missing
-permissions must produce the existing actionable permissions-head error rather
-than silently accepting a write. Schema and permission publication, account
-registry operations, and query authorization all terminate at Core.
+A Core serves a user's session only pinned to a published bundle, which
+selects its write schema and policies (`INV-EDGE-19`): the app's backend
+(`createJazz`) publishes its bundle and pins every session it opens to it,
+including the users a trusted link acts for. An unpinned user session, or an
+unpinned trusted link acting for a user, is refused with an actionable error
+rather than checked by permissions no deployment chose. Schema and bundle
+publication, account registry operations, and query authorization all
+terminate at Core.
 
 The historical `INV-EDGE` identifiers retained above describe client-relay and
 session boundaries; their names do not imply a remaining semantic edge role.

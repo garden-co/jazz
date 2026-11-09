@@ -17,21 +17,22 @@ fn doc_shelf_open_shelf(bencher: divan::Bencher<'_, '_>) {
     bencher.bench_local(|| divan::black_box(fixture.open_shelf()));
 }
 
-/// Searching every body for a phrase.
+/// Searching every body for a phrase; only inline bodies are searched.
 #[divan::bench(sample_count = 20)]
 fn doc_shelf_search_bodies(bencher: divan::Bencher<'_, '_>) {
     let fixture = Fixture::new();
     bencher.bench_local(|| divan::black_box(fixture.search()));
 }
 
-/// Finding the documents whose body equals a pasted 230 KiB document.
+/// Finding the most repeated body (a pasted 230 KiB document) by grouping on
+/// the body cell, then reading that body back.
 #[divan::bench(sample_count = 50)]
 fn doc_shelf_find_duplicates(bencher: divan::Bencher<'_, '_>) {
     let fixture = Fixture::new();
     bencher.bench_local(|| divan::black_box(fixture.find_duplicates()));
 }
 
-/// The first 20 documents ordered by body; many share a 6 KiB template.
+/// The first 20 documents ordered by body: chunked bodies sort first.
 #[divan::bench(sample_count = 50)]
 fn doc_shelf_first_by_body(bencher: divan::Bencher<'_, '_>) {
     let fixture = Fixture::new();

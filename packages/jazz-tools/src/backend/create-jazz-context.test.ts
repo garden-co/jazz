@@ -276,9 +276,13 @@ describe("backend/create-jazz-context", () => {
         persistentPath: "/tmp/jazz.db",
         readAuthorizationHost: "trusted-serving",
         backendMode: true,
+        systemNode: expect.any(Uint8Array),
         slowQueryLog: { appId: "server-app", thresholdMs: undefined },
       },
     );
+    // A persistent store keeps its counter, so it writes as its SYSTEM node.
+    const [, , node, , , , options] = mocks.nativeRuntimeCtor.mock.calls[0]!;
+    expect(node).toEqual(options.systemNode);
   });
 
   it("BC-U01b: rejects configuring both jwksUrl and jwtPublicKey", () => {
@@ -373,6 +377,7 @@ describe("backend/create-jazz-context", () => {
       {
         appId: "server-app",
         accountRegistry: accountRegistryUrl("http://localhost:1625", "server-app"),
+        backendSecret: "secret",
         jwksUrl: undefined,
         allowLocalFirstAuth: true,
         jwtPublicKey: undefined,
@@ -387,6 +392,7 @@ describe("backend/create-jazz-context", () => {
       {
         appId: "server-app",
         accountRegistry: accountRegistryUrl("http://localhost:1625", "server-app"),
+        backendSecret: "secret",
         jwksUrl: undefined,
         allowLocalFirstAuth: true,
         jwtPublicKey: undefined,
@@ -493,6 +499,7 @@ describe("backend/create-jazz-context", () => {
       {
         appId: "server-app",
         accountRegistry: accountRegistryUrl("http://localhost:1625", "server-app"),
+        backendSecret: "secret",
         jwksUrl: "https://issuer.example/.well-known/jwks.json",
         allowLocalFirstAuth: false,
         jwtPublicKey: undefined,
@@ -532,6 +539,7 @@ describe("backend/create-jazz-context", () => {
       {
         appId: "server-app",
         accountRegistry: accountRegistryUrl("http://localhost:1625", "server-app"),
+        backendSecret: "secret",
         jwksUrl: undefined,
         jwtPublicKey: {
           kty: "oct",
@@ -728,9 +736,14 @@ describe("backend/create-jazz-context", () => {
       {
         readAuthorizationHost: "trusted-serving",
         backendMode: true,
+        systemNode: expect.any(Uint8Array),
         slowQueryLog: { appId: "server-app", thresholdMs: undefined },
       },
     );
+    // A memory store starts its counter over, so it draws a node of its own
+    // while its SYSTEM provenance keeps the stable one.
+    const [, , node, , , , options] = mocks.nativeRuntimeCtor.mock.calls[0]!;
+    expect(node).not.toEqual(options.systemNode);
   });
 
   it("BC-U10: routes runtime mutation errors to every backend Db, including ones settled before a listener", () => {

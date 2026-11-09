@@ -14,49 +14,52 @@ import {
   waitForCondition,
   withTimeout,
 } from "./support.js";
-import { getJazzServerInfo } from "./testing-server.js";
+import { getJazzServerInfo, startJazzApp } from "./testing-server.js";
 
-const app = schema.defineApp({
-  orgs: schema.table(
-    {
-      name: schema.string(),
-    },
-    {
-      todosViaOrg: schema.reverse("todos", "org"),
-      user_checksViaOrg: schema.reverse("user_checks", "org"),
-      check_notesViaOrg: schema.reverse("check_notes", "org"),
-    },
-  ),
-  todos: schema.table(
-    {
-      title: schema.string(),
-      org_id: schema.uuid(),
-    },
-    {
-      org: schema.rel("orgs", "org_id"),
-      user_checksViaTodo: schema.reverse("user_checks", "todo"),
-    },
-  ),
-  user_checks: schema.table(
-    {
-      org_id: schema.uuid(),
-      todo_id: schema.uuid(),
-    },
-    {
-      org: schema.rel("orgs", "org_id"),
-      todo: schema.rel("todos", "todo_id"),
-      check_notesViaUser_check: schema.reverse("check_notes", "user_check"),
-    },
-  ),
-  check_notes: schema.table(
-    {
-      body: schema.string(),
-      org_id: schema.uuid(),
-      user_check_id: schema.uuid(),
-    },
-    { org: schema.rel("orgs", "org_id"), user_check: schema.rel("user_checks", "user_check_id") },
-  ),
-});
+const app = schema.defineApp(
+  {
+    orgs: schema.table(
+      {
+        name: schema.string(),
+      },
+      {
+        todosViaOrg: schema.reverse("todos", "org"),
+        user_checksViaOrg: schema.reverse("user_checks", "org"),
+        check_notesViaOrg: schema.reverse("check_notes", "org"),
+      },
+    ),
+    todos: schema.table(
+      {
+        title: schema.string(),
+        org_id: schema.uuid(),
+      },
+      {
+        org: schema.rel("orgs", "org_id"),
+        user_checksViaTodo: schema.reverse("user_checks", "todo"),
+      },
+    ),
+    user_checks: schema.table(
+      {
+        org_id: schema.uuid(),
+        todo_id: schema.uuid(),
+      },
+      {
+        org: schema.rel("orgs", "org_id"),
+        todo: schema.rel("todos", "todo_id"),
+        check_notesViaUser_check: schema.reverse("check_notes", "user_check"),
+      },
+    ),
+    check_notes: schema.table(
+      {
+        body: schema.string(),
+        org_id: schema.uuid(),
+        user_check_id: schema.uuid(),
+      },
+      { org: schema.rel("orgs", "org_id"), user_check: schema.rel("user_checks", "user_check_id") },
+    ),
+  },
+  { migrations: "none" },
+);
 
 const permissions = schema.definePermissions(app, ({ policy }) => [
   policy.orgs.allowRead.always(),
@@ -104,10 +107,12 @@ describe("websocket include subscriptions", () => {
    * observer ──three Global attachments──► server ──current receipts──► observer
    */
   it("covers concurrent global queries attached after a serializable commit", async () => {
-    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
-      uniqueDbName("serializable-then-global-coverage"),
-    );
-    await publishSchemaAndPermissions(appId, serverUrl, adminSecret, permissions);
+    const {
+      appId,
+      serverUrl: coreUrl,
+      adminSecret,
+    } = await getJazzServerInfo(uniqueDbName("serializable-then-global-coverage"));
+    const serverUrl = await publishSchemaAndPermissions(appId, coreUrl, adminSecret, permissions);
 
     const sharedSecret = generateAuthSecret();
     const owner = await openDb(
@@ -192,10 +197,12 @@ describe("websocket include subscriptions", () => {
   }, 45_000);
 
   it("delivers depth-3 reverse include material from client A to client B subscribe", async () => {
-    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
-      uniqueDbName("include-subscriptions"),
-    );
-    await publishSchemaAndPermissions(appId, serverUrl, adminSecret, permissions);
+    const {
+      appId,
+      serverUrl: coreUrl,
+      adminSecret,
+    } = await getJazzServerInfo(uniqueDbName("include-subscriptions"));
+    const serverUrl = await publishSchemaAndPermissions(appId, coreUrl, adminSecret, permissions);
 
     const sharedSecret = generateAuthSecret();
     const dbA = await openDb(
@@ -315,10 +322,12 @@ describe("websocket include subscriptions", () => {
   }, 60_000);
 
   it("keeps overlapping forward-include carriers canonical after a live global insert", async () => {
-    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
-      uniqueDbName("overlapping-forward-include-carriers"),
-    );
-    await publishSchemaAndPermissions(appId, serverUrl, adminSecret, permissions);
+    const {
+      appId,
+      serverUrl: coreUrl,
+      adminSecret,
+    } = await getJazzServerInfo(uniqueDbName("overlapping-forward-include-carriers"));
+    const serverUrl = await publishSchemaAndPermissions(appId, coreUrl, adminSecret, permissions);
 
     const sharedSecret = generateAuthSecret();
     const authority = await openDb(
@@ -435,14 +444,11 @@ async function publishSchemaAndPermissions(
   serverUrl: string,
   adminSecret: string,
   permissions: CompiledPermissions,
-): Promise<void> {
-  await deploy({
-    appId,
-    serverUrl,
-    adminSecret,
-    schema: app.wasmSchema,
-    permissions,
-  });
+): Promise<string> {
+  const core = { appId, serverUrl, adminSecret };
+  await deploy({ ...core, schema: app.wasmSchema, permissions });
+  // Clients sync through the app's backend; return its URL.
+  return (await startJazzApp(core, { schema: app.wasmSchema, permissions })).serverUrl;
 }
 
 function includesNote(

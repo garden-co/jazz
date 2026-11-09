@@ -33,15 +33,83 @@ use serde::{Deserialize, Serialize};
 use crate::binding_args;
 use crate::db::{
     Db, DbConfig, DbIdentity, DeleteOptions, Error, ErrorCode, ExactWriteTarget, FirstLoad,
-    InsertOptions, LargeValueStagingPolicy, LargeValueUpdate, ReadOpts, ReadTier, RemoteLinkHint,
-    RestoreOptions, SeededRowIdSource, SerializedReadResult, StreamingMutationKind,
-    StreamingValueUpload, SubscriberId, SubscriptionEvent, SubscriptionStream, TransportError,
-    UpdateOptions, UpsertOptions, Upstream, WireTransport, WireTransportAdapter, WriteHandle,
-    WriteIdentity, block_on,
+    FrameJoiner, InsertOptions, LargeValueStagingPolicy, LargeValueUpdate, ReadOpts, ReadTier,
+    RemoteLinkHint, RestoreOptions, SeededRowIdSource, SerializedReadResult, StreamingMutationKind,
+    StreamingValueUpload, SubscriberId, SubscriptionEvent, SubscriptionStream, SyncMessage,
+    Transport, TransportError, UpdateOptions, UpsertOptions, Upstream, WriteHandle, WriteIdentity,
+    block_on,
 };
 
 /// Named cells, as the binding codec decodes them.
 pub type Cells = BTreeMap<String, Value>;
+
+/// Maximum JSON header in `jazz.accepted-read.host.v1`. Row bytes use the
+/// existing binding codec and are outside this header bound.
+pub const ACCEPTED_READ_HEADER_LIMIT: usize = 16 * 1024 * 1024;
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AcceptedHostVersion {
+    transaction_id: String,
+    position: String,
+}
+
+impl From<crate::db::AcceptedVersion> for AcceptedHostVersion {
+    fn from(version: crate::db::AcceptedVersion) -> Self {
+        Self {
+            transaction_id: TransactionId::from_committed_tx(version.transaction).to_string(),
+            position: version.sequence.to_string(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AcceptedHostRow {
+    row_id: String,
+    state: AcceptedHostVersion,
+    content: AcceptedHostVersion,
+}
+
+#[derive(Serialize)]
+struct AcceptedHostHeader {
+    format: &'static str,
+    through: String,
+    schema: String,
+    evidence: Vec<AcceptedHostRow>,
+}
+
+fn encode_accepted_read(read: crate::db::EncodedAcceptedRead) -> HostResult<Vec<u8>> {
+    // Every entry needs at least 200 bytes in this named layout. Bound the
+    // header's allocations before constructing the transient JSON values.
+    if read.evidence.len() > ACCEPTED_READ_HEADER_LIMIT / 200 {
+        return Err(not_supported("accepted-read host header above 16 MiB"));
+    }
+    let header = AcceptedHostHeader {
+        format: "jazz.accepted-read.host.v1",
+        through: read.through.to_string(),
+        schema: uuid::Uuid::from_bytes(read.schema).to_string(),
+        evidence: read
+            .evidence
+            .into_iter()
+            .map(|row| AcceptedHostRow {
+                row_id: row.row.0.to_string(),
+                state: row.state.into(),
+                content: row.content.into(),
+            })
+            .collect(),
+    };
+    let header = serde_json::to_vec(&header)
+        .map_err(|error| HostError::Argument(format!("encode accepted-read header: {error}")))?;
+    if header.len() > ACCEPTED_READ_HEADER_LIMIT {
+        return Err(not_supported("accepted-read host header above 16 MiB"));
+    }
+    let mut frame = Vec::with_capacity(4 + header.len() + read.rows.len());
+    frame.extend_from_slice(&(header.len() as u32).to_le_bytes());
+    frame.extend_from_slice(&header);
+    frame.extend_from_slice(&read.rows);
+    Ok(frame)
+}
 
 // ---- errors ---------------------------------------------------------------------
 
@@ -326,7 +394,7 @@ fn restore_options_as<O: HostObject>(
     })
 }
 
-/// `{ read_view? | readView?, tier?, include_deleted?, first_load_remote_wait_ms? }`.
+/// `{ read_view? | readView?, tier?, include_deleted?, first_load_remote_wait_ms?, splices? }`.
 pub fn read_opts<O: HostObject>(options: &O) -> HostResult<ReadOpts> {
     let mut opts = ReadOpts::default();
     for name in ["read_view", "readView"] {
@@ -357,6 +425,10 @@ pub fn read_opts<O: HostObject>(options: &O) -> HostResult<ReadOpts> {
         if opts.tier == ReadTier::LocalFirst {
             opts.first_load = FirstLoad::WaitForRemote { timeout_ms };
         }
+    }
+    if let Some(splices) = options.get("splices")? {
+        opts.splices = O::decode::<Vec<String>>(splices)
+            .map_err(|_| HostError::Argument("splices must be an array of column names".into()))?;
     }
     Ok(opts)
 }
@@ -408,6 +480,13 @@ pub struct OpenConfig {
     /// The public `initialSyncFlushEvery` option. Each applied batch commits
     /// on its own, so there is nothing to tune and any value is accepted.
     pub initial_sync_flush_every: Option<u32>,
+    /// The app's schema versions and migrations as JSON (a deployment's
+    /// `schemas` and `migrations`), which the binding lowers into
+    /// [`DbConfig::with_migrations`] (SPEC 10.7).
+    pub migrations: Option<Vec<u8>>,
+    /// The node SYSTEM provenance names when it is not `identity.node`: a
+    /// backend that draws a fresh node per open keeps one stable subject.
+    pub system_node: Option<NodeUuid>,
 }
 
 /// The identity in an [`OpenConfig`].
@@ -530,7 +609,8 @@ pub fn open_identity(config: &mut OpenConfig, how: OpenAs<'_>) -> HostResult<(Db
 
 /// The [`DbConfig`] for `schema` under `config` and `identity`.
 pub fn db_config(schema: JazzSchema, config: &OpenConfig, identity: DbIdentity) -> DbConfig {
-    let db_config = DbConfig::new(schema, identity);
+    let mut db_config = DbConfig::new(schema, identity);
+    db_config.system_node = config.system_node;
     match config.row_id_seed {
         Some(seed) => db_config.with_id_source(SeededRowIdSource::new(seed)),
         None => db_config,
@@ -617,7 +697,9 @@ impl<F: Future> Future for Parked<F> {
 pub type HostFuture<T> = Pin<Box<dyn Future<Output = HostResult<T>>>>;
 
 /// See [`Hooks::rejected`].
-pub type RejectedHook = Box<dyn Fn(&TransactionId, &Error, bool, Option<Rc<Cell<bool>>>)>;
+/// Told of a refused upload no wait claimed; returns whether the refusal
+/// reached the application (a listener was there to take it).
+pub type RejectedHook = Box<dyn Fn(&TransactionId, &Error, bool, Option<Rc<Cell<bool>>>) -> bool>;
 
 /// Hooks a host gives the database it binds.
 #[derive(Default)]
@@ -669,7 +751,10 @@ impl Hooks {
 
     /// Tell [`Hooks::rejected`] of each refused upload no wait claimed.
     /// A relayed session's refused commit is reported under its own id.
-    fn report(&self, node: NodeUuid, rejections: Vec<crate::db::UpstreamRejection>) {
+    /// Returns the seqs of `node`'s own refusals that reached the
+    /// application, through a wait or the hook.
+    fn report(&self, node: NodeUuid, rejections: Vec<crate::db::UpstreamRejection>) -> Vec<u64> {
+        let mut delivered = Vec::new();
         for rejection in rejections {
             let (seq, error) = (rejection.seq, &rejection.error);
             let writer = NodeUuid::from_bytes(rejection.writer);
@@ -677,14 +762,19 @@ impl Hooks {
                 .then(|| self.claims.borrow_mut().remove(&seq))
                 .flatten()
                 .and_then(|claim| claim.upgrade());
-            if claim.as_ref().is_some_and(|claim| claim.get()) {
-                continue;
-            }
-            if let Some(rejected) = self.rejected.borrow().as_ref() {
+            let reached = if claim.as_ref().is_some_and(|claim| claim.get()) {
+                true
+            } else if let Some(rejected) = self.rejected.borrow().as_ref() {
                 let tx_id = TransactionId::from_committed_tx(TxId::new(TxTime(seq), writer));
-                rejected(&tx_id, error, rejection.serializable, claim);
+                rejected(&tx_id, error, rejection.serializable, claim)
+            } else {
+                false
+            };
+            if reached && writer == node {
+                delivered.push(seq);
             }
         }
+        delivered
     }
 }
 
@@ -758,6 +848,8 @@ pub struct Binding {
     /// Local-first accounts a backend admitted (see
     /// [`Binding::admit_local_first_session`]), by canonical author.
     admitted: Rc<RefCell<BTreeMap<String, SelfSignedProof>>>,
+    /// Whether the next tick reports the retry store's refusals again.
+    requeue: Rc<Cell<bool>>,
 }
 
 /// A Jazz self-signed proof of a local-first account.
@@ -785,6 +877,7 @@ impl Binding {
             refused: Rc::default(),
             bound: Rc::default(),
             admitted: Rc::default(),
+            requeue: Rc::new(Cell::new(true)),
         }
     }
 
@@ -847,9 +940,64 @@ impl Binding {
         self.trusted_backend
     }
 
+    /// The authority's table identity for this schema view. An unknown table
+    /// is None; a catalogue not confirmed by the authority is NotObserved.
+    /// Learning an identity grants no permission to read its rows.
+    pub fn table_identity(&self, table: &str) -> HostResult<Option<[u8; 16]>> {
+        Ok(self.db.table_identity(table)?.map(|id| *id.0.as_bytes()))
+    }
+
+    /// The authority's stored column identity, following rename lenses.
+    pub fn column_identity(&self, table: &str, column: &str) -> HostResult<Option<[u8; 16]>> {
+        Ok(self
+            .db
+            .column_identity(table, column)?
+            .map(|id| *id.0.as_bytes()))
+    }
+
+    /// Fresh schema/session catalogue coverage using the normal pending read
+    /// lifetime. Claims use the ordinary host JSON codec and are never installed.
+    pub fn cover_catalogue(
+        &self,
+        timeout_ms: f64,
+        author: Option<&[u8]>,
+        claims: Option<serde_json::Value>,
+    ) -> HostResult<HostFuture<Vec<u8>>> {
+        let timeout_ms = checked_u64(timeout_ms, "catalogue timeout")?;
+        let scope = match author {
+            Some(bytes) => {
+                let author = self.author_of(bytes)?;
+                Some(crate::db::AcceptedReadScope {
+                    author,
+                    claims: self::claims(author, claims.unwrap_or(serde_json::Value::Null))?,
+                })
+            }
+            None if claims.is_some() => {
+                return Err("catalogue claims require an explicit author".into());
+            }
+            None => None,
+        };
+        let admitted = self.db.cover_catalogue_with_timeout(scope, timeout_ms)?;
+        Ok(Box::pin(self.parked(async move {
+            admitted.await?;
+            Ok(Vec::new())
+        })))
+    }
+
     /// A typed schema view backed by the same runtime.
     pub fn register_schema(&self, schema: &[u8]) -> HostResult<Self> {
+        self.register_schema_shipping(schema, crate::db::Migrations::default())
+    }
+
+    /// A typed schema view of an app that ships `migrations` (see
+    /// [`crate::db::Db::add_migrations`]), backed by the same runtime.
+    pub fn register_schema_shipping(
+        &self,
+        schema: &[u8],
+        migrations: crate::db::Migrations,
+    ) -> HostResult<Self> {
         let schema = decode_schema(schema)?;
+        self.db.add_migrations(migrations);
         let view = block_on(self.db.register_schema_view(schema))?;
         Ok(Self {
             db: Rc::new(view),
@@ -1024,24 +1172,90 @@ impl Binding {
         author: Option<&[u8]>,
         attribution: Option<&[u8]>,
     ) -> HostResult<()> {
+        self.begin_transaction_with_capability(id, kind, author, attribution, false)
+    }
+
+    /// Opt in before opening, using this binding's actual peer when no session
+    /// is named. The flag never upgrades an existing batch or rewrites claims.
+    pub fn begin_transaction_with_capability(
+        &self,
+        id: &str,
+        kind: &str,
+        author: Option<&[u8]>,
+        attribution: Option<&[u8]>,
+        accepted_evidence: bool,
+    ) -> HostResult<()> {
         let id = open_transaction(id)?;
+        let kind = TransactionKind::parse(kind)?;
         if author.is_some() && attribution.is_some() {
             return Err("transaction identity cannot contain both author and attribution".into());
+        }
+        if accepted_evidence {
+            if !matches!(kind, TransactionKind::Serializable) {
+                return Err("accepted evidence requires a serializable transaction".into());
+            }
+            if attribution.is_some() {
+                return Err("accepted evidence cannot use attribution".into());
+            }
+            if author.is_none()
+                && (self.trusted_backend
+                    || matches!(
+                        self.author,
+                        AuthorSubject::System | AuthorSubject::SystemAt(_)
+                    ))
+            {
+                return Err("accepted evidence on a backend requires an explicit session".into());
+            }
         }
         let identity = match (author, attribution) {
             (Some(author), _) => WriteIdentity::Session(self.author_of(author)?),
             (_, Some(attribution)) => {
                 self.checked(WriteIdentity::Attribution(self.author_of(attribution)?))?
             }
+            (None, None) if accepted_evidence => WriteIdentity::Session(self.author),
             (None, None) => WriteIdentity::Database,
         };
-        match TransactionKind::parse(kind)? {
-            TransactionKind::Mergeable => block_on(self.db.begin_mergeable(id))?,
-            TransactionKind::Serializable => block_on(self.db.begin_serializable(id))?,
+        match (kind, identity) {
+            (TransactionKind::Mergeable, WriteIdentity::Database) => {
+                block_on(self.db.begin_mergeable(id))?
+            }
+            (TransactionKind::Serializable, WriteIdentity::Database) => {
+                block_on(self.db.begin_serializable(id))?
+            }
+            (TransactionKind::Mergeable, WriteIdentity::Session(author)) => {
+                block_on(self.db.begin_mergeable_for_identity(id, author))?
+            }
+            (TransactionKind::Serializable, WriteIdentity::Session(author)) => {
+                block_on(self.db.begin_serializable_for_identity(id, author))?
+            }
+            (TransactionKind::Mergeable, WriteIdentity::Attribution(author)) => {
+                block_on(self.db.begin_mergeable_for_attribution(id, author))?
+            }
+            (TransactionKind::Serializable, WriteIdentity::Attribution(author)) => {
+                block_on(self.db.begin_serializable_for_attribution(id, author))?
+            }
         }
         if identity != WriteIdentity::Database {
             self.bound.borrow_mut().insert(id, identity);
         }
+        Ok(())
+    }
+
+    /// Open only this unprivileged replica's actual owner. No caller-selected
+    /// session, attribution or late capability upgrade is accepted here.
+    pub fn begin_client_evidence_transaction(&self, id: &str) -> HostResult<()> {
+        if self.trusted_backend
+            || matches!(
+                self.author,
+                AuthorSubject::System | AuthorSubject::SystemAt(_)
+            )
+        {
+            return Err("own-client evidence is unavailable to a backend".into());
+        }
+        block_on(
+            self.db
+                .begin_client_evidence_transaction(open_transaction(id)?),
+        )?;
         Ok(())
     }
 
@@ -1292,8 +1506,12 @@ impl Binding {
             Some(bound) => Some(bound),
             None => self.read_author(author)?,
         };
-        let admission = match (explicit, author) {
-            (true, Some(author)) => Some((
+        let admission = match (explicit, author, claims) {
+            // A bound batch already supplies its reader. Omitted claims inherit
+            // the current core registration, just like accepted_read; explicit
+            // claims (including an empty map) remain authoritative overrides.
+            (true, Some(_), None) if bound.is_some() => None,
+            (true, Some(author), claims) => Some((
                 author,
                 self::claims(author, claims.unwrap_or(serde_json::Value::Null))?,
             )),
@@ -1335,6 +1553,45 @@ impl Binding {
                 }
             }?)
         })))
+    }
+
+    /// Admit an authority-evidence read synchronously into an identity-bound
+    /// serializable batch. Its future uses the ordinary host read lifetime.
+    pub fn accepted_read(
+        &self,
+        query: Vec<u8>,
+        open_transaction_id: &str,
+        include_deleted: bool,
+        timeout_ms: f64,
+        author: Option<&[u8]>,
+        claims: Option<serde_json::Value>,
+    ) -> HostResult<HostFuture<Vec<u8>>> {
+        let timeout_ms = checked_u64(timeout_ms, "timeoutMs")?;
+        let id = open_transaction(open_transaction_id)?;
+        let bound = if let Some(owner) = self.db.client_evidence_author(id)? {
+            if author.is_some() || claims.is_some() {
+                return Err("own-client evidence cannot select a session or frozen claims".into());
+            }
+            owner
+        } else {
+            self.transaction_reader(id, author)?.ok_or_else(|| {
+                not_supported("accepted evidence without an explicitly bound session")
+            })?
+        };
+        let query: Query = postcard::from_bytes(&query)
+            .map_err(|error| HostError::Argument(format!("undecodable query: {error}")))?;
+        let mut prepared = self.db.prepare_query(&query)?;
+        // Omitted claims mean the registered core claims, including on a
+        // schema view. Do not replace them with an empty JavaScript object.
+        if let Some(claims) = claims {
+            prepared = prepared.with_identity_claims(bound, self::claims(bound, claims)?);
+        }
+        let read = self
+            .db
+            .accepted_transaction_query(id, prepared, include_deleted, timeout_ms)?;
+        Ok(Box::pin(
+            self.parked(async move { encode_accepted_read(read.await?) }),
+        ))
     }
 
     /// Subscribe to a postcard query. A remote attachment goes upstream on
@@ -1478,13 +1735,39 @@ impl Binding {
         }))
     }
 
+    /// How many local commits still wait for the server's verdict.
+    pub fn pending_upload_count(&self) -> usize {
+        self.db.pending_upload_count()
+    }
+
     /// Apply received frames and send what is due; waits wake.
     pub async fn tick(&self) -> HostResult<()> {
         let result = self.db.tick().await;
-        self.hooks
-            .report(self.node, self.db.take_upstream_rejections());
+        // Refusals kept from before (a reopened store's, or ones no
+        // listener took) go out again first.
+        let requeued = if self.requeue.replace(false) {
+            self.db.requeue_rejected_transactions()
+        } else {
+            Ok(())
+        };
+        let rejections = self.db.take_upstream_rejections();
+        let delivered = self.hooks.report(self.node, rejections);
+        // Delivered: the retry store lets go of their payloads. One no
+        // listener took stays, for the next listener or the next open.
+        let discarded = delivered
+            .into_iter()
+            .try_for_each(|seq| self.db.discard_rejected_transaction(seq));
         self.hooks.progress.wake_all();
-        Ok(result?)
+        result?;
+        requeued?;
+        Ok(discarded?)
+    }
+
+    /// Report the refusals the retry store still holds again on the next
+    /// tick: the host now has a listener for them.
+    pub fn redeliver_rejections(&self) {
+        self.requeue.set(true);
+        self.hooks.schedule_tick();
     }
 
     /// The slow-query report due now: one line per slow query shape,
@@ -1568,6 +1851,7 @@ impl Binding {
         updated_at_ms: Option<f64>,
         head: Option<BranchSelector>,
         base: Option<BranchViewBase>,
+        transaction: Option<&str>,
     ) -> HostResult<StreamingMutation> {
         let identity = match (author, attribution) {
             (Some(_), Some(_)) => {
@@ -1601,12 +1885,18 @@ impl Binding {
                 "backend-attributed streaming mutations do not support branch writes".into(),
             );
         }
+        let transaction = transaction.map(open_transaction).transpose()?;
+        let identity = match transaction {
+            Some(id) => self.staged_identity(id, identity)?,
+            None => identity,
+        };
         let upload = self
             .db
             .begin_streaming_value_upload(&table, &cells, &column)?;
         Ok(StreamingMutation {
             state: Some(Box::new(StreamingState {
                 binding: self.clone(),
+                transaction,
                 upload,
                 mutation,
                 table,
@@ -1629,9 +1919,10 @@ impl Binding {
     /// out on the next tick.
     pub fn connect_upstream(&self) -> Link {
         let queues = WireQueues::default();
-        let transport = Box::new(WireTransportAdapter::current(QueueTransport {
+        let transport = Box::new(QueueTransport {
             queues: queues.clone(),
-        }));
+            failed: None,
+        });
         let upstream = block_on(self.db.connect_upstream(transport));
         self.hooks.schedule_tick();
         Link {
@@ -1642,21 +1933,24 @@ impl Binding {
     }
 
     /// Serve a subscriber (another replica) as `identity` with `claims`.
-    pub fn accept_subscriber(&self, identity: AuthorSubject, claims: Cells) -> Link {
-        self.db.set_identity_claims(identity, claims);
+    /// A store configured as a user refuses any other identity (see
+    /// [`Db::accept_subscriber`]).
+    pub fn accept_subscriber(&self, identity: AuthorSubject, claims: Cells) -> HostResult<Link> {
         let queues = WireQueues::default();
-        let transport = Box::new(WireTransportAdapter::current(QueueTransport {
+        let transport = Box::new(QueueTransport {
             queues: queues.clone(),
-        }));
-        let subscriber = self.db.accept_subscriber(transport, identity);
-        Link {
+            failed: None,
+        });
+        let subscriber = self.db.accept_subscriber(transport, identity)?;
+        self.db.set_identity_claims(identity, claims);
+        Ok(Link {
             binding: self.clone(),
             queues,
             kind: LinkKind::Subscriber {
                 id: Some(subscriber),
                 identity,
             },
-        }
+        })
     }
 
     /// Close the database (a schema view leaves its owner open).
@@ -1786,6 +2080,8 @@ struct StreamingState {
     updated_at_ms: Option<u64>,
     head: Option<BranchSelector>,
     base: Option<BranchViewBase>,
+    /// The open transaction the finished value is staged in.
+    transaction: Option<OpenTransactionId>,
 }
 
 /// A large value uploaded in chunks, then published as one row mutation.
@@ -1825,6 +2121,15 @@ impl StreamingMutation {
         if self.failed {
             return Err(closed());
         }
+        if self
+            .state
+            .as_ref()
+            .is_some_and(|state| state.transaction.is_some())
+        {
+            return Err(HostError::Argument(
+                "a streaming mutation begun in a transaction finishes in it".into(),
+            ));
+        }
         let state = *self.state.take().ok_or_else(closed)?;
         let write = block_on(state.binding.db.finish_streaming_value_upload(
             state.upload,
@@ -1839,6 +2144,42 @@ impl StreamingMutation {
             state.base,
         ));
         state.binding.write(write)
+    }
+
+    /// Whether the mutation began in a transaction, and so finishes with
+    /// [`Self::finish_in_transaction`].
+    pub fn in_transaction(&self) -> bool {
+        self.state
+            .as_ref()
+            .is_some_and(|state| state.transaction.is_some())
+    }
+
+    /// Stage the uploaded value's row mutation in the transaction the
+    /// mutation began in. Like any staged write, a refusal decided by the
+    /// row's stored state is reported by the commit.
+    pub fn finish_in_transaction(&mut self) -> HostResult<()> {
+        if self.failed {
+            return Err(closed());
+        }
+        let Some(id) = self.state.as_ref().and_then(|state| state.transaction) else {
+            return Err(HostError::Argument(
+                "a streaming mutation begun outside a transaction finishes with finish".into(),
+            ));
+        };
+        let state = *self.state.take().ok_or_else(closed)?;
+        let staged = block_on(state.binding.db.tx_ref(id).finish_streaming_value_upload(
+            state.upload,
+            state.mutation,
+            &state.table,
+            state.row,
+            state.cells,
+            &state.column,
+            state.identity,
+            state.updated_at_ms,
+            state.head,
+            state.base,
+        ));
+        state.binding.staged(id, staged)
     }
 
     /// Drop the upload; `false` when already closed.
@@ -1856,26 +2197,45 @@ impl StreamingMutation {
 /// The frame queues between a link and its host carrier.
 #[derive(Clone, Default)]
 pub struct WireQueues {
-    inbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
+    inbound: Rc<RefCell<VecDeque<Result<SyncMessage, TransportError>>>>,
+    inbound_joiner: Rc<RefCell<FrameJoiner>>,
     outbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
     outbound_ready: Rc<RefCell<Option<Box<dyn Fn()>>>>,
 }
 
 struct QueueTransport {
     queues: WireQueues,
+    failed: Option<Option<TransportError>>,
 }
 
-impl WireTransport for QueueTransport {
-    fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
-        self.queues.outbound.borrow_mut().push_back(frame);
-        if let Some(ready) = self.queues.outbound_ready.borrow().as_ref() {
-            ready();
+impl Transport for QueueTransport {
+    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        for frame in crate::db::encode_frames(message)
+            .map_err(|error| TransportError::Failed(error.to_string()))?
+        {
+            self.queues.outbound.borrow_mut().push_back(frame);
+            if let Some(ready) = self.queues.outbound_ready.borrow().as_ref() {
+                ready();
+            }
         }
         Ok(())
     }
 
-    fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
-        self.queues.inbound.borrow_mut().pop_front()
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        if self.failed.is_some() {
+            return None;
+        }
+        match self.queues.inbound.borrow_mut().pop_front()? {
+            Ok(message) => Some(message),
+            Err(error) => {
+                self.failed = Some(Some(error));
+                None
+            }
+        }
+    }
+
+    fn take_failure(&mut self) -> Option<TransportError> {
+        self.failed.as_mut().and_then(Option::take)
     }
 }
 
@@ -1903,8 +2263,46 @@ impl Link {
 
     /// Frames received from the peer; applied on the next tick.
     pub fn receive(&self, frames: impl IntoIterator<Item = Vec<u8>>) {
-        self.queues.inbound.borrow_mut().extend(frames);
+        let mut joiner = self.queues.inbound_joiner.borrow_mut();
+        let mut inbound = self.queues.inbound.borrow_mut();
+        for frame in frames {
+            match joiner.push(&frame) {
+                Ok(Some(message)) => inbound.push_back(Ok(message)),
+                Ok(None) => {}
+                Err(error) => {
+                    inbound.push_back(Err(error));
+                    break;
+                }
+            }
+        }
+        drop(inbound);
+        drop(joiner);
         self.binding.hooks.schedule_tick();
+    }
+
+    /// Join and canonically decode the whole host batch before admitting any
+    /// prefix. Stage partial bytes too, so a rejected batch cannot change the
+    /// link's previous reassembly state. Completed messages are decoded once.
+    pub fn receive_checked(
+        &self,
+        frames: impl IntoIterator<Item = impl AsRef<[u8]>>,
+    ) -> Result<(), Error> {
+        let mut staged = self.queues.inbound_joiner.borrow().clone();
+        let mut decoded = Vec::new();
+        for frame in frames {
+            if let Some(message) = staged.push(frame.as_ref()).map_err(|error| {
+                Error::new(
+                    ErrorCode::Protocol,
+                    format!("invalid SQLite sync frame: {error}"),
+                )
+            })? {
+                decoded.push(Ok(message));
+            }
+        }
+        *self.queues.inbound_joiner.borrow_mut() = staged;
+        self.queues.inbound.borrow_mut().extend(decoded);
+        self.binding.hooks.schedule_tick();
+        Ok(())
     }
 
     /// Frames to send to the peer, oldest first.
@@ -1953,6 +2351,57 @@ impl Link {
                 }
                 None => false,
             },
+        }
+    }
+}
+
+#[cfg(test)]
+mod accepted_host_codec_tests {
+    use super::*;
+
+    /// Alice and Bob's independently assembled host frames pin this boundary's
+    /// bytes. This codec unit test needs constructed origins to exercise u64
+    /// limits that ordinary authority clocks cannot reach in a runtime test.
+    #[test]
+    fn accepted_host_empty_and_paired_bytes_match_independent_fixtures() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../fixtures/accepted_read_host_v1.json"))
+                .unwrap();
+        let unhex = |hex: &str| {
+            hex.as_bytes()
+                .chunks_exact(2)
+                .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+                .collect::<Vec<_>>()
+        };
+        for case in fixture["cases"].as_array().unwrap() {
+            let paired = case["name"] == "paired_u64";
+            let evidence = if paired {
+                vec![crate::db::AcceptedRowEvidence {
+                    row: RowUuid::from_bytes([0x11; 16]),
+                    state: crate::db::AcceptedVersion {
+                        transaction: TxId::new(TxTime(2), NodeUuid::from_bytes([2; 16])),
+                        sequence: u64::MAX,
+                    },
+                    content: crate::db::AcceptedVersion {
+                        transaction: TxId::new(TxTime(1), NodeUuid::from_bytes([1; 16])),
+                        sequence: 9_007_199_254_740_993,
+                    },
+                }]
+            } else {
+                vec![]
+            };
+            let frame = encode_accepted_read(crate::db::EncodedAcceptedRead {
+                through: if paired { u64::MAX } else { 0 },
+                schema: [0x22; 16],
+                scope: crate::db::AcceptedReadScope {
+                    author: AuthorSubject::for_test_bytes([7; 16]),
+                    claims: BTreeMap::new(),
+                },
+                evidence,
+                rows: unhex(case["rows_hex"].as_str().unwrap()),
+            })
+            .unwrap();
+            assert_eq!(frame, unhex(case["frame_hex"].as_str().unwrap()));
         }
     }
 }

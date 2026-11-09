@@ -33,6 +33,8 @@ mod tools {
 pub mod binding_args;
 pub mod binding_codec;
 pub mod binding_host;
+pub mod catalogue;
+pub mod chunk_store;
 pub mod compile;
 pub mod db;
 #[cfg(feature = "durable-object-limits")]
@@ -40,6 +42,7 @@ mod durable_object_limits;
 pub mod format;
 pub mod host;
 pub(crate) mod large;
+pub mod link;
 pub(crate) mod merge;
 pub mod names;
 pub mod options;
@@ -47,7 +50,6 @@ pub mod slow;
 #[cfg(feature = "sql-trace")]
 mod sql_trace;
 pub mod sync_codec;
-pub(crate) mod text_merge;
 pub mod values;
 
 #[cfg(feature = "testing")]

@@ -11,6 +11,7 @@ export type {
   RuntimeSubscriptionDelta,
   RuntimeSubscriptionAddedRow,
   RuntimeSubscriptionUpdatedRow,
+  RuntimeValueSplice,
   RuntimeSubscriptionRemovedRow,
   RuntimeTerminalPathSegment,
   RuntimeTerminalEdit,

@@ -13,26 +13,32 @@ mod aggregate_nullable_keys;
 mod aggregate_ordering;
 #[path = "../array_columns.rs"]
 mod array_columns;
-#[path = "../authority_catalogue.rs"]
-mod authority_catalogue;
-#[path = "../authority_catalogue_storage.rs"]
-mod authority_catalogue_storage;
+#[path = "../authority_accepted_content.rs"]
+mod authority_accepted_content;
 #[path = "../authorization_scope_reentry.rs"]
 mod authorization_scope_reentry;
+#[path = "../binding_accepted_reads.rs"]
+mod binding_accepted_reads;
 #[path = "../binding_host.rs"]
 mod binding_host;
+#[path = "../binding_identities.rs"]
+mod binding_identities;
+#[path = "../branch_column_evolution.rs"]
+mod branch_column_evolution;
+#[path = "../branch_view_sync.rs"]
+mod branch_view_sync;
 #[path = "../branch_views.rs"]
 mod branch_views;
-#[path = "../callback_transaction_cancellation.rs"]
-mod callback_transaction_cancellation;
+#[path = "../bundle_permissions.rs"]
+mod bundle_permissions;
 #[path = "../catalogue_identity_operands.rs"]
 mod catalogue_identity_operands;
-#[path = "../catalogue_sync.rs"]
-mod catalogue_sync;
-#[path = "../catalogue_wire_v4.rs"]
-mod catalogue_wire_v4;
+#[path = "../catalogue_rows.rs"]
+mod catalogue_rows;
 #[path = "../claims_change.rs"]
 mod claims_change;
+#[path = "../claims_registry_refresh.rs"]
+mod claims_registry_refresh;
 #[path = "../column_defaults.rs"]
 mod column_defaults;
 #[path = "../commit_atomicity_frames.rs"]
@@ -45,6 +51,8 @@ mod deleted_rows;
 mod deployment_preparation;
 #[path = "../dynamic_schema_views.rs"]
 mod dynamic_schema_views;
+#[path = "../enum_tags.rs"]
+mod enum_tags;
 #[path = "../error_code_strings.rs"]
 mod error_code_strings;
 #[path = "../existential_joins.rs"]
@@ -63,6 +71,8 @@ mod host_tables;
 mod include_live;
 #[path = "../large_value_append.rs"]
 mod large_value_append;
+#[path = "../large_value_chunk_store.rs"]
+mod large_value_chunk_store;
 #[path = "../large_value_read_scaling.rs"]
 mod large_value_read_scaling;
 #[path = "../large_value_streaming_create.rs"]
@@ -75,6 +85,8 @@ mod large_value_sync;
 mod large_value_tx_update;
 #[path = "../large_values.rs"]
 mod large_values;
+#[path = "../link_identities.rs"]
+mod link_identities;
 #[path = "../local_first_first_load_gate.rs"]
 mod local_first_first_load_gate;
 #[path = "../local_first_server_wait.rs"]
@@ -83,14 +95,20 @@ mod local_first_server_wait;
 mod maybe_conflicting;
 #[path = "../mutation_admission.rs"]
 mod mutation_admission;
+#[path = "../nested_policy_dependencies.rs"]
+mod nested_policy_dependencies;
 #[path = "../order_by_unselected_column.rs"]
 mod order_by_unselected_column;
 #[path = "../parameterized_subscription_routing.rs"]
 mod parameterized_subscription_routing;
+#[path = "../pending_commit_reopen.rs"]
+mod pending_commit_reopen;
 #[path = "../permission_advice.rs"]
 mod permission_advice;
 #[path = "../policy_activation.rs"]
 mod policy_activation;
+#[path = "../pre_sync_writes.rs"]
+mod pre_sync_writes;
 #[path = "../prepared_claim_routing.rs"]
 mod prepared_claim_routing;
 #[path = "../provenance.rs"]
@@ -105,6 +123,8 @@ mod recheck_policies;
 mod recheck_queries;
 #[path = "../recheck_sync.rs"]
 mod recheck_sync;
+#[path = "../rejected_retry_store.rs"]
+mod rejected_retry_store;
 #[path = "../relation_policies.rs"]
 mod relation_policies;
 #[path = "../relation_queries.rs"]
@@ -117,10 +137,14 @@ mod relational_delete_retraction;
 mod relay_local_seqs;
 #[path = "../relay_policy_subscriptions.rs"]
 mod relay_policy_subscriptions;
+#[path = "../relay_serves_on_arrival.rs"]
+mod relay_serves_on_arrival;
 #[path = "../schema_activation.rs"]
 mod schema_activation;
 #[path = "../schema_renames.rs"]
 mod schema_renames;
+#[path = "../self_table_policy_watches.rs"]
+mod self_table_policy_watches;
 #[path = "../serializable_relay.rs"]
 mod serializable_relay;
 #[path = "../serializable_sqlite.rs"]
@@ -131,34 +155,46 @@ mod serializable_sync;
 mod session_policy_values;
 #[path = "../session_write_checks.rs"]
 mod session_write_checks;
+#[path = "../shard_role.rs"]
+mod shard_role;
 #[path = "../slow_queries.rs"]
 mod slow_queries;
 #[path = "../snapshots.rs"]
 mod snapshots;
 #[path = "../sqlite_sync_ingress.rs"]
 mod sqlite_sync_ingress;
-#[path = "../staged_streaming.rs"]
-mod staged_streaming;
 #[path = "../storage_corpus.rs"]
 mod storage_corpus;
 #[path = "../storage_errors.rs"]
 mod storage_errors;
+#[path = "../stored_identities.rs"]
+mod stored_identities;
+#[path = "../streaming_transaction.rs"]
+mod streaming_transaction;
 #[path = "../streaming_upload_ownership.rs"]
 mod streaming_upload_ownership;
 #[path = "../structured_result_tree.rs"]
 mod structured_result_tree;
+#[path = "../subscription_refresh_metadata.rs"]
+mod subscription_refresh_metadata;
+#[path = "../subscription_scope_sharing.rs"]
+mod subscription_scope_sharing;
+#[path = "../sync_access_loss.rs"]
+mod sync_access_loss;
 #[path = "../sync_aggregates.rs"]
 mod sync_aggregates;
+#[path = "../sync_connection_settled.rs"]
+mod sync_connection_settled;
 #[path = "../sync_differential.rs"]
 mod sync_differential;
 #[path = "../sync_echo.rs"]
 mod sync_echo;
 #[path = "../sync_frame_bounds.rs"]
 mod sync_frame_bounds;
-#[path = "../sync_frame_retry.rs"]
-mod sync_frame_retry;
 #[path = "../sync_gather.rs"]
 mod sync_gather;
+#[path = "../sync_join.rs"]
+mod sync_join;
 #[path = "../sync_resume.rs"]
 mod sync_resume;
 #[path = "../sync_sessions.rs"]
@@ -190,9 +226,37 @@ mod uuid_page_probe;
 #[path = "../write_check_evidence.rs"]
 mod write_check_evidence;
 
+#[path = "../relay_read_claims.rs"]
+mod relay_read_claims;
 #[path = "../storage_owner_retirement.rs"]
 mod storage_owner_retirement;
-#[path = "../transaction_read_prefix.rs"]
-mod transaction_read_prefix;
 #[path = "../write_receipt_owner.rs"]
 mod write_receipt_owner;
+
+#[path = "../transaction_read_prefix.rs"]
+mod transaction_read_prefix;
+
+#[path = "../accepted_rpc_reads.rs"]
+mod accepted_rpc_reads;
+
+#[path = "../accepted_evidence_wire.rs"]
+mod accepted_evidence_wire;
+
+#[path = "../accepted_transaction_reads.rs"]
+mod accepted_transaction_reads;
+#[path = "../catalogue_coverage.rs"]
+mod catalogue_coverage;
+
+#[path = "../accepted_bundle_reads.rs"]
+mod accepted_bundle_reads;
+
+#[path = "../executing_handle_policy_context.rs"]
+mod executing_handle_policy_context;
+#[path = "../governance_claims_composition.rs"]
+mod governance_claims_composition;
+
+#[path = "../governance_ordinary_composition.rs"]
+mod governance_ordinary_composition;
+
+#[path = "../local_observation_submission.rs"]
+mod local_observation_submission;

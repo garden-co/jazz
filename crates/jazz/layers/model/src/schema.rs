@@ -447,8 +447,8 @@ impl RuntimeSchema {
                     }
                     MergeStrategy::Text | MergeStrategy::Markdown | MergeStrategy::Html => {
                         assert!(
-                            matches!(column.column_type, StorageColumnType::String),
-                            "text merge strategies require a non-nullable string column: {}.{}",
+                            is_text_column_type(&column.column_type),
+                            "text merge strategies require a string column: {}.{}",
                             table.name,
                             column.name
                         );
@@ -494,6 +494,25 @@ impl RuntimeSchema {
             &self.canonical_bytes(),
         ))
     }
+
+    /// An id shared by every version whose rows pass unchanged between
+    /// them: the same tables and columns, whatever their order, merge
+    /// strategies and indexes. Deployment connects such versions with an
+    /// empty lens; stored names derived from this id agree across them,
+    /// whichever of them a store admits first.
+    pub fn compatibility_id(&self) -> SchemaVersionId {
+        let mut schema = Self {
+            tables: self.tables.clone(),
+        };
+        for table in &mut schema.tables {
+            table.columns.sort_by(|a, b| a.name.cmp(&b.name));
+            table.merge_strategies.clear();
+            table.composite_indexes.clear();
+        }
+        let mut bytes = b"jazz-schema-compatibility".to_vec();
+        bytes.extend(canonical_schema_bytes(&schema));
+        SchemaVersionId(uuid::Uuid::new_v5(&SCHEMA_VERSION_NAMESPACE, &bytes))
+    }
 }
 
 /// Per-column strategy used when upstream nodes merge concurrent content heads.
@@ -531,17 +550,7 @@ impl MergeStrategy {
     }
 }
 
-/// How a text-merging column's values are cut into the units a merge never
-/// splits.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TextFormat {
-    /// Words, whitespace and other characters.
-    Plain,
-    /// Plain units, plus delimiter runs, list markers and link targets.
-    Markdown,
-    /// Plain units, plus tags and entities.
-    Html,
-}
+pub use jazz_text::TextFormat;
 
 #[cfg(any(test, feature = "testing"))]
 fn is_counter_column_type(column_type: &StorageColumnType) -> bool {
@@ -554,6 +563,15 @@ fn is_counter_column_type(column_type: &StorageColumnType) -> bool {
             | StorageColumnType::I32
             | StorageColumnType::I64
     )
+}
+
+/// A string column, optional or not: a NULL merges as an empty base.
+#[cfg(any(test, feature = "testing"))]
+fn is_text_column_type(column_type: &StorageColumnType) -> bool {
+    match column_type {
+        StorageColumnType::Nullable(inner) => matches!(**inner, StorageColumnType::String),
+        column_type => matches!(column_type, StorageColumnType::String),
+    }
 }
 
 #[cfg(any(test, feature = "testing"))]
@@ -608,6 +626,12 @@ pub struct ColumnSchema {
     /// Literal value used when an insert omits this column.
     #[serde(default)]
     pub default: Option<Value>,
+    /// An enum column's (or an array of enum values') variants, in declared
+    /// order. Its values are stored as strings; the variants and their order
+    /// are part of the schema's identity, so adding or reordering one makes
+    /// a new schema version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enum_variants: Option<Vec<String>>,
 }
 
 #[derive(serde::Deserialize)]
@@ -618,6 +642,8 @@ struct SerializedColumnSchema {
     large_value_kind: Option<LargeValueSemanticKind>,
     #[serde(default)]
     default: Option<Value>,
+    #[serde(default)]
+    enum_variants: Option<Vec<String>>,
 }
 
 impl<'de> serde::Deserialize<'de> for ColumnSchema {
@@ -646,6 +672,7 @@ impl<'de> serde::Deserialize<'de> for ColumnSchema {
             column_type: serialized.column_type,
             large_value_kind,
             default: serialized.default,
+            enum_variants: serialized.enum_variants,
         })
     }
 }
@@ -672,6 +699,7 @@ impl ColumnSchema {
             large_value_kind: large_value_kind_for_type(&column_type),
             column_type,
             default: None,
+            enum_variants: None,
         }
     }
 
@@ -751,6 +779,7 @@ impl From<jazz_types::column_schema::ColumnSchema> for ColumnSchema {
             large_value_kind: large_value_kind_for_type(&column.column_type),
             column_type: column.column_type,
             default: None,
+            enum_variants: None,
         }
     }
 }
@@ -1527,16 +1556,31 @@ const SCHEMA_ID_DOMAIN_V1: &str = "jazz-schema-v1-large-value-kinds";
 /// length-prefixed column name. A distinct domain tag rather than an optional
 /// trailing section keeps the encoding injective.
 const SCHEMA_ID_DOMAIN_V2_COMPOSITE_INDEXES: &str = "jazz-schema-v2-composite-indexes";
+/// Domain tag used exactly when some column is an enum (or an array of
+/// one). The body is the v2 body (composite indexes included, an empty list
+/// where a table has none) with, after each column's merge strategy, a
+/// `u64` variant count and each length-prefixed variant in declared order
+/// (count 0 for a column that is no enum).
+const SCHEMA_ID_DOMAIN_V3_ENUM_VARIANTS: &str = "jazz-schema-v3-enum-variants";
 
 fn canonical_schema_bytes(schema: &RuntimeSchema) -> Vec<u8> {
-    let with_composite_indexes = schema
-        .tables
-        .iter()
-        .any(|table| !table.composite_indexes.is_empty());
+    let with_enum_variants = schema.tables.iter().any(|table| {
+        table
+            .columns
+            .iter()
+            .any(|column| column.enum_variants.is_some())
+    });
+    let with_composite_indexes = with_enum_variants
+        || schema
+            .tables
+            .iter()
+            .any(|table| !table.composite_indexes.is_empty());
     let mut bytes = Vec::new();
     put_str(
         &mut bytes,
-        if with_composite_indexes {
+        if with_enum_variants {
+            SCHEMA_ID_DOMAIN_V3_ENUM_VARIANTS
+        } else if with_composite_indexes {
             SCHEMA_ID_DOMAIN_V2_COMPOSITE_INDEXES
         } else {
             SCHEMA_ID_DOMAIN_V1
@@ -1558,6 +1602,13 @@ fn canonical_schema_bytes(schema: &RuntimeSchema) -> Vec<u8> {
                 LargeValueSemanticKind::Json => 3,
             });
             put_merge_strategy(&mut bytes, table.merge_strategy(&column.name));
+            if with_enum_variants {
+                let variants = column.enum_variants.as_deref().unwrap_or_default();
+                put_u64(&mut bytes, variants.len() as u64);
+                for variant in variants {
+                    put_str(&mut bytes, variant);
+                }
+            }
         }
         put_u64(&mut bytes, table.references.len() as u64);
         for (column, target) in &table.references {

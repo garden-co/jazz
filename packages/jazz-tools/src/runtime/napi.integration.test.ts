@@ -124,15 +124,18 @@ const TEST_SCHEMA: WasmSchema = {
   },
 };
 
-const publicUnionApp = s.defineApp({
-  todos: s.table(
-    {
-      title: s.string(),
-      done: s.boolean(),
-    },
-    {},
-  ),
-});
+const publicUnionApp = s.defineApp(
+  {
+    todos: s.table(
+      {
+        title: s.string(),
+        done: s.boolean(),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+);
 
 const publicUnionPermissions = s.definePermissions(publicUnionApp, ({ policy }) => {
   policy.todos.allowRead.where({ done: false });
@@ -141,15 +144,18 @@ const publicUnionPermissions = s.definePermissions(publicUnionApp, ({ policy }) 
   policy.todos.allowDelete.always();
 });
 
-const publicUnionBigIntApp = s.defineApp({
-  metrics: s.table(
-    {
-      label: s.string(),
-      value: s.bigint(),
-    },
-    {},
-  ),
-});
+const publicUnionBigIntApp = s.defineApp(
+  {
+    metrics: s.table(
+      {
+        label: s.string(),
+        value: s.bigint(),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+);
 
 const TIMESTAMP_SCHEMA: WasmSchema = {
   projects: {
@@ -762,7 +768,7 @@ describe("NAPI integration", () => {
       const { createJazzContext } = await import("../backend/create-jazz-context.js");
 
       const todoServerProject = await loadTodoServerProject();
-      await deploy({
+      const { bundle } = await deploy({
         serverUrl: server.url,
         appId,
         adminSecret,
@@ -774,6 +780,7 @@ describe("NAPI integration", () => {
 
       runtimeData = await createTempRuntimeData("jazz-napi-session-runtime-");
       context = createJazzContext({
+        bundle,
         appId,
         app: { wasmSchema: todoServerSchema },
         permissions: todoServerProject.permissions ?? {},
@@ -1169,9 +1176,6 @@ describe("NAPI integration", () => {
       adminSecret,
       schema: policyGraphSchema,
       permissions,
-      jwksUrl: jwtIssuer.jwksUrl,
-      jwtIssuer: jwtIssuer.issuer,
-      jwtAudience: jwtIssuer.audience,
     });
     let context: {
       asBackend(): Db;
@@ -1404,9 +1408,6 @@ describe("NAPI integration", () => {
         backendSecret,
         adminSecret,
         dataDir,
-        jwksUrl: jwtIssuer.jwksUrl,
-        jwtIssuer: jwtIssuer.issuer,
-        jwtAudience: jwtIssuer.audience,
       });
       await deployProject({
         serverUrl: server.url,
@@ -1508,9 +1509,6 @@ describe("NAPI integration", () => {
         backendSecret,
         adminSecret,
         dataDir,
-        jwksUrl: jwtIssuer.jwksUrl,
-        jwtIssuer: jwtIssuer.issuer,
-        jwtAudience: jwtIssuer.audience,
       });
       context = createJazzContext({
         appId,
@@ -1605,7 +1603,7 @@ describe("NAPI integration", () => {
           };
 
           type AppSchema = s.Schema<typeof schema>;
-          export const app: s.App<AppSchema> = s.defineApp(schema);
+          export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
         `,
       );
       await writeFile(
@@ -1696,7 +1694,7 @@ describe("NAPI integration", () => {
       const { createJazzContext } = await import("../backend/create-jazz-context.js");
 
       const todoServerProject = await loadTodoServerProject();
-      await deploy({
+      const { bundle } = await deploy({
         serverUrl: server.url,
         appId,
         adminSecret,
@@ -1708,6 +1706,7 @@ describe("NAPI integration", () => {
 
       runtimeData = await createTempRuntimeData("jazz-napi-null-update-runtime-");
       context = createJazzContext({
+        bundle,
         appId,
         app: { wasmSchema: todoServerSchema },
         permissions: todoServerProject.permissions ?? {},
@@ -1785,7 +1784,7 @@ describe("NAPI integration", () => {
     try {
       const { createJazzContext } = await import("../backend/create-jazz-context.js");
 
-      await deploy({
+      const { bundle } = await deploy({
         serverUrl: server.url,
         appId,
         adminSecret,
@@ -1795,6 +1794,7 @@ describe("NAPI integration", () => {
 
       writerRuntimeData = await createTempRuntimeData("jazz-napi-sync-writer-");
       writerContext = createJazzContext({
+        bundle,
         appId,
         app: { wasmSchema: TEST_SCHEMA },
         permissions: {},
@@ -1805,6 +1805,7 @@ describe("NAPI integration", () => {
       });
       readerRuntimeData = await createTempRuntimeData("jazz-napi-sync-reader-");
       readerContext = createJazzContext({
+        bundle,
         appId,
         app: { wasmSchema: TEST_SCHEMA },
         permissions: {},
@@ -1855,6 +1856,7 @@ describe("NAPI integration", () => {
       await cleanupTempRuntimeData(readerRuntimeData);
       readerRuntimeData = await createTempRuntimeData("jazz-napi-sync-reader-reopen-");
       readerContext = createJazzContext({
+        bundle,
         appId,
         app: { wasmSchema: TEST_SCHEMA },
         permissions: {},

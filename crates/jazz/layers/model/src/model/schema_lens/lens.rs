@@ -27,7 +27,7 @@ impl Direction {
 }
 
 /// A single lens operation representing a schema change.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum LensOp {
     /// Rename a table.
     RenameTable { old_name: String, new_name: String },
@@ -115,7 +115,7 @@ impl LensOp {
 }
 
 /// A lens transform containing a sequence of operations.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LensTransform {
     /// Ordered list of operations.
     pub ops: Vec<LensOp>,

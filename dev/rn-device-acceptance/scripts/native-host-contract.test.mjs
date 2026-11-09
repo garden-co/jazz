@@ -640,7 +640,7 @@ test("both platform session wrappers delegate one authenticated socket owner to 
   // worker, then activates the same Rust-owned worker after publication.
   assert.match(relay, /NativeRelaySocketWorker::prepare_with_connector\(/);
   assert.match(relay, /worker\._worker\.activate\(\)/);
-  assert.match(relay, /native relay sockets require an ordinary non-SYSTEM bearer session/);
+  assert.match(relay, /native relay sockets require an ordinary non-SYSTEM user session/);
   assert.match(relay, /private_socket_sessions\.remove/);
 });
 
@@ -809,7 +809,7 @@ test("RN packaging and public docs describe the proven alpha boundary semantical
     fs.readFileSync(path.resolve(root, "../../crates/jazz-rn/README.md"), "utf8"),
   );
   const installGuide = prose(
-    fs.readFileSync(path.resolve(root, "../../docs/content/docs/install/client.mdx"), "utf8"),
+    fs.readFileSync(path.resolve(root, "../../docs/content/docs/setup/react-native.mdx"), "utf8"),
   );
   const spec = prose(
     fs.readFileSync(path.resolve(root, "../../crates/jazz/SPEC/19_native_relays.md"), "utf8"),

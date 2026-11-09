@@ -13,6 +13,11 @@ import { resolveClientSessionStateSync, type ClientSessionInput } from "./client
  */
 export type AuthFailureReason = "expired" | "missing" | "invalid" | "disabled" | "revoked";
 
+/** Whether a new token can fix the refusal, so an app renews it. */
+export function isRenewableAuthFailure(reason: AuthFailureReason): boolean {
+  return reason !== "disabled" && reason !== "revoked";
+}
+
 export function mapAuthReason(reason: string): AuthFailureReason {
   const lower = reason.toLowerCase();
   if (lower.includes("expired")) return "expired";

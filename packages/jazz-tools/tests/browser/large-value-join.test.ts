@@ -23,11 +23,14 @@ import {
   waitForCondition,
   withTimeout,
 } from "./support.js";
-import { getJazzServerInfo } from "./testing-server.js";
+import { getJazzServerInfo, startJazzApp } from "./testing-server.js";
 
-const app = s.defineApp({
-  files: s.table({ name: s.string(), contents: s.bytes() }, {}),
-});
+const app = s.defineApp(
+  {
+    files: s.table({ name: s.string(), contents: s.bytes() }, {}),
+  },
+  { migrations: "none" },
+);
 
 const permissions = s.definePermissions(app, ({ policy }) => [
   policy.files.allowRead.always(),
@@ -53,18 +56,19 @@ describe("browser persistent join next to a large value", () => {
   ///                                                                  │
   /// bob tab ◄─select(id, name)─ bob worker ◄───────────────────────┘
   it("lists names beside a 24 MB value without downloading it", async () => {
-    const server = await withTimeout(
+    const core = await withTimeout(
       getJazzServerInfo(uniqueDbName("large-value-join")),
       10_000,
       "test server did not become available",
     );
     await deploy({
-      appId: server.appId,
-      serverUrl: server.serverUrl,
-      adminSecret: server.adminSecret,
+      appId: core.appId,
+      serverUrl: core.serverUrl,
+      adminSecret: core.adminSecret,
       schema: app.wasmSchema,
       permissions,
     });
+    const server = await startJazzApp(core, { schema: app.wasmSchema, permissions });
 
     const alice = await withTimeout(
       open("large-value-join-alice", server),

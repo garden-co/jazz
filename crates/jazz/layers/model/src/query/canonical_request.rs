@@ -437,6 +437,8 @@ fn canonical_query_bytes_for_schema(
             canonical_array_subquery_key,
         );
     }
+    // `partial` is not part of the identity: a partial selection syncs the
+    // same rows and only reads less of their values (SPEC 19.12).
     if let Some(select) = &query.select {
         bytes.push(b's');
         put_len(&mut bytes, select.len());

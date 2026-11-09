@@ -1,13 +1,38 @@
+import {
+  validateAcceptedReadTimeout,
+  isAcceptedReadCapability,
+  type AcceptedRows,
+  type TransactionReadCapability,
+} from "../accepted-read.js";
+import { decodeAcceptedRead } from "./accepted-read-codec.js";
+import {
+  validateCatalogueTimeout,
+  type CatalogueIdentityRequest,
+  type PreparedCatalogueIdentities,
+} from "../catalogue-identities.js";
+import type { ClientMigrations } from "../client-migrations.js";
 import { streamingChunks } from "../streaming-source.js";
 import { isHistoryTable, resolveQueryTable } from "../history-relation.js";
 import { AuxiliaryReceiveDeadline } from "./auxiliary-receive-deadline.js";
 import { Utf8Decoder } from "../utf8.js";
 import { parseSnapshotRef, UnsupportedSnapshotError, type SnapshotRef } from "../snapshot-ref.js";
-import { formatUuidAt } from "../hex.js";
+import { formatUuid, formatUuidAt } from "../hex.js";
+
+export { formatUuid };
 import { runtimeConnectionIncarnation, runtimeRandomBytes } from "../runtime-entropy.js";
 import { stripColumnQualifier } from "../query-column-name.js";
 import { writeRow } from "../write-row.js";
 import { RemoteLinkStatePublisher, type RemoteLinkState } from "../remote-link-state.js";
+import {
+  CONNECTED,
+  CONNECTING,
+  DerivedStatePublisher,
+  LOCAL_ONLY,
+  linkStatusFromUpstream,
+  offlineLink,
+  sameLinkStatus,
+  type LinkStatus,
+} from "../sync-status.js";
 import type {
   ColumnDescriptor,
   ColumnType,
@@ -16,6 +41,7 @@ import type {
   NativeTerminalOperation,
   RuntimeSubscriptionDelta,
   RuntimeTerminalOperation,
+  RuntimeValueSplice,
   TablePolicies,
   Value,
   WasmRow,
@@ -64,15 +90,18 @@ import {
   readNativeSubscriptionDelta,
   type NativeRelationSubscriptionSnapshot,
   type NativeRowBatch,
+  type NativeSplice,
   type NativeSubscriptionDelta,
   type NativeSelfSignedClientProof,
   type QueryArraySubquery,
   type DescriptorField,
   type QueryLiteral,
   type QueryOrder,
+  type QueryPartialSelect,
   type QueryPredicate,
   type QueryPredicateOp,
   type ValueType,
+  clientMigrationsBytes,
 } from "./native-codec.js";
 import { exactSignedI64 } from "./exact-integer.js";
 import { encodeSchema } from "./schema-codec.js";
@@ -87,14 +116,15 @@ import {
   WebSocketCarrier,
   WIRE_PROTOCOL_VERSION,
   isReconnectLaterWireError,
-  isRetryablePreHelloWireError,
   normalizeBackendWebSocketAuth,
   peerIdentityForWebSocketAuth,
   policyClaimsForAdmittedWebSocket,
+  type WebSocketConstructor,
   type WebSocketNegotiation,
   type WireError,
   wireAuthFailureReason,
 } from "./websocket.js";
+import { isRenewableAuthFailure, mapAuthReason } from "../auth-state.js";
 import {
   createRecord,
   createRecordValueDecoder,
@@ -122,25 +152,6 @@ const MAX_CANONICAL_SIGNED_I64_LENGTH = 20;
 const CANONICAL_SIGNED_I64_DECIMAL = /^(?:0|[1-9][0-9]*|-[1-9][0-9]*)$/;
 
 const SERVER_PUMP_DEBOUNCE_MS = 16;
-// An established upstream is retried until it reconnects or the runtime is
-// explicitly disconnected/closed: a local-first client must survive an outage
-// of any length. Backoff doubles to a cap and is jittered so a fleet of
-// clients does not reconnect in lockstep after a server restart.
-const NETWORK_RETRY_INITIAL_DELAY_MS = 100;
-const NETWORK_RETRY_MAX_DELAY_MS = 5_000;
-// Until an outage is published, retry at least once a second (the pre-#3565
-// cadence). A server that returns within the reporting window is then found
-// before the report fires, so no Global wait inherits a stale outage.
-const NETWORK_RETRY_UNREPORTED_MAX_DELAY_MS = 1_000;
-// Once an established link has been down this long, the next failed reconnect
-// attempt publishes the outage like a transport error so Global reads and
-// waits reject instead of hanging. Publication is failure-triggered, never a
-// timer: a wall-clock report could fire after the server is back but before
-// the pending retry reconnects, rejecting a Global wait whose write then syncs.
-// Retries continue, and a reconnect clears the published outage.
-const NETWORK_OUTAGE_REPORT_MS = 7_500;
-const PRE_HELLO_RETRY_INITIAL_DELAY_MS = 25;
-const PRE_HELLO_RETRY_MAX_DELAY_MS = 1_000;
 const REMOTE_LINK_HINTS: Record<RemoteLinkState, string> = {
   none: "none",
   connecting: "attempting",
@@ -149,11 +160,6 @@ const REMOTE_LINK_HINTS: Record<RemoteLinkState, string> = {
 };
 const NATIVE_LINK_POLL_MS = 250;
 
-/** Capped exponential backoff with equal jitter: [cap/2, cap] of each step. */
-function networkRetryDelay(retry: number, maxDelayMs: number): number {
-  const ceiling = Math.min(NETWORK_RETRY_INITIAL_DELAY_MS * 2 ** Math.min(retry, 16), maxDelayMs);
-  return Math.round(ceiling / 2 + Math.random() * (ceiling / 2));
-}
 // Amortize scheduler overhead without allowing a ready evaluator to monopolize
 // the browser task queue. Transport pumps never add a second inner tick loop.
 const MAX_CORE_TICKS_PER_TURN = 4;
@@ -246,8 +252,19 @@ type NativeRestoreOptions = NativeWriteOptions & {
 };
 
 type NativeDb = {
+  coverCatalogue?(
+    timeoutMs: number,
+    author?: Uint8Array,
+    claims?: Record<string, unknown>,
+  ): NativeReadResult;
+  tableIdentity?(table: string): Uint8Array;
+  columnIdentity?(table: string, column: string): Uint8Array;
   captureSnapshot?(): NativeReadResult | Promise<NativeReadResult>;
-  waitForPendingWrites?(tier: string): NativeReadResult | Promise<NativeReadResult | void>;
+  /** WASM settles its promise-shaped wait early once `cancelled` settles. */
+  waitForPendingWrites?(
+    tier: string,
+    cancelled?: Promise<void>,
+  ): NativeReadResult | Promise<NativeReadResult | void>;
   // Native runtime adapters may close synchronously or asynchronously and may
   // report whether they transitioned state. The adapter awaits either form and
   // owns idempotence, so callers never observe that implementation detail.
@@ -259,6 +276,10 @@ type NativeDb = {
   reconnectNativeUpstream?(): void;
   /** Tell the core Db what the host knows about its path to the server. */
   setRemoteLinkHint?(state: string): void;
+  /** A fresh upstream link machine for this runtime's server WebSocket. */
+  createUpstreamLink?(seed: number): NativeUpstreamLink;
+  /** How many local commits still wait for the server's verdict. */
+  pendingUploadCount?(): number;
   nativeConnectionStatus?(): {
     configured: boolean;
     explicitlyOffline: boolean;
@@ -266,13 +287,24 @@ type NativeDb = {
     /** The upstream refused the scope's credential, with its reason. */
     authRejected?: string | null;
   };
-  registerSchema(schema: Uint8Array): NativeDb;
+  registerSchema(schema: Uint8Array, migrations?: Uint8Array): NativeDb;
   beginTransaction(
     openTransactionId: string,
     kind: TransactionKind,
     author?: Uint8Array,
     attribution?: Uint8Array,
+    acceptedEvidence?: boolean,
   ): void;
+  /** Actual replica owner, with ordinary reads and separate accepted evidence. */
+  beginClientEvidenceTransaction?(openTransactionId: string): void;
+  acceptedRead?(
+    query: Uint8Array,
+    openTransactionId: OpenTransactionId,
+    includeDeleted: boolean,
+    timeoutMs: number,
+    author?: Uint8Array,
+    claims?: Record<string, unknown>,
+  ): NativeReadResult | Promise<NativeReadResult>;
   commitTransaction(openTransactionId: string, kind?: TransactionKind): Write;
   rollbackTransaction(openTransactionId: string): void;
   all(
@@ -351,6 +383,7 @@ type NativeDb = {
     updatedAtMs?: number,
     head?: unknown,
     base?: unknown,
+    transaction?: OpenTransactionId,
   ): NativeStreamingMutation;
   requestInsertPermissionAdvice?(
     table: string,
@@ -449,6 +482,8 @@ type NativeDb = {
 type NativeStreamingMutation = {
   push(chunk: Uint8Array): void | Promise<void>;
   finish(): Write | Promise<Write>;
+  /** Stage the row mutation in the transaction the mutation began in. */
+  finishInTransaction?(): void | Promise<void>;
   abort(): boolean | Promise<boolean>;
 };
 
@@ -502,6 +537,7 @@ type PendingTx = {
   kind: TransactionKind;
   identity?: Uint8Array;
   requestSession?: RuntimeSession;
+  readCapability?: TransactionReadCapability;
   /** External provenance fixed at begin, never supplied per staged operation. */
   attribution?: Uint8Array;
   hasStagedMutations: boolean;
@@ -520,6 +556,8 @@ type TransactionOwnerState = {
 
 type ServerTransportErrorWaiter = {
   active: boolean;
+  /** A write's Global wait outlives an outage the client keeps retrying (#3923). */
+  throughOutage: boolean;
   reject: (error: Error) => void;
 };
 
@@ -529,6 +567,8 @@ type ServerTransportWorkWaiter = {
 };
 
 type ServerConnectionAttempt = {
+  /** The link machine's id for this attempt. */
+  id: number;
   generation: number;
   carrier: WebSocketCarrier;
   terminal: Promise<Error>;
@@ -538,14 +578,79 @@ type ServerConnectionAttempt = {
   transport: Transport | null;
   retirement: Promise<void> | null;
   admission: Promise<Transport> | null;
-  recovery?: Promise<WebSocketCarrier>;
 };
-type ServerReplacementIntent = {
-  generation: number;
-  url: string;
-  authJson: string;
-  features: number;
+
+/**
+ * The shared upstream link machine (`jazz::link` in the core). It decides when
+ * the server WebSocket connects, how long it backs off, when an outage is
+ * published and what a refused credential does; this adapter owns the socket
+ * and the timer and steps the machine with one JSON document per input.
+ */
+type NativeUpstreamLink = { handle(nowMs: number, input: string): string };
+type UpstreamLinkFailure = {
+  kind: "network" | "refused" | "serverNotReady" | "authRejected" | "fatal";
+  message: string;
 };
+type UpstreamLinkInput =
+  | { type: "serverConfigured"; configured: boolean }
+  | { type: "setOffline"; offline: boolean }
+  | { type: "admitted"; attempt: number }
+  | { type: "ended"; attempt: number; failure: UpstreamLinkFailure }
+  | { type: "credentialUpdated" }
+  | { type: "timerFired"; token: number };
+type UpstreamLinkStatus = {
+  phase:
+    | "noServer"
+    | "offline"
+    | "connecting"
+    | "live"
+    | "backoff"
+    | "awaitingCredential"
+    | "stopped";
+  reason: string | null;
+  consecutiveFailures: number;
+  outagePublished: boolean;
+  /** Only a new server or `connect()` revives the link: a stop, or a refused credential no renewal fixes. */
+  terminal: boolean;
+};
+type RuntimeSyncStatus = { link: LinkStatus; pendingUploads: number };
+type UpstreamLinkStep = {
+  actions: Array<
+    | { type: "connect"; attempt: number }
+    | { type: "close"; attempt: number }
+    | { type: "armTimer"; token: number; afterMs: number }
+    | { type: "cancelTimer"; token: number }
+  >;
+  events: Array<
+    | { type: "status" }
+    | { type: "authFailed"; reason: string; message: string }
+    | { type: "authRestored" }
+  >;
+  status: UpstreamLinkStatus;
+};
+
+/** How the link machine should treat a server connection that ended with `error`. */
+function upstreamLinkFailure(error: WireError, negotiated: boolean): UpstreamLinkFailure {
+  const message = error.message;
+  if (wireAuthFailureReason(error)) return { kind: "authRejected", message };
+  // The server's bootstrap and overload signals. Before its hello the server
+  // is still starting; afterwards they end a link like an outage.
+  if (isReconnectLaterWireError(error)) {
+    return { kind: negotiated ? "network" : "serverNotReady", message };
+  }
+  // The network or the server dropped the socket. A local-first client must
+  // survive an outage of any length, including one it was opened in.
+  if (
+    error.retry === "later" &&
+    (error.code === "websocket_closed" || error.code === "websocket_error")
+  ) {
+    return { kind: "network", message };
+  }
+  // Anything else (a protocol error, an incompatible server) cannot succeed
+  // by retrying.
+  return { kind: "fatal", message };
+}
+
 function joinServerTransportRetirements(
   previous: Promise<void> | null,
   next: Promise<void>,
@@ -608,7 +713,7 @@ type SubscriptionState = {
   cancelled: boolean;
 };
 
-type SubscriptionOutputColumns = {
+export type SubscriptionOutputColumns = {
   rootTable: string;
   rootColumns: readonly ColumnDescriptor[];
 };
@@ -791,6 +896,42 @@ export class NativeRuntimeAdapter implements Runtime {
     return this.ownerRuntime;
   }
 
+  /** @internal One request per operation; no cross-operation coverage cache. */
+  async prepareCatalogueIdentities(
+    requests: readonly CatalogueIdentityRequest[],
+    sessionJson?: string,
+    timeoutMs = 15_000,
+  ): Promise<readonly PreparedCatalogueIdentities[]> {
+    validateCatalogueTimeout(timeoutMs);
+    if (this.closed || this.ownerRuntime.closed) throw new Error("Native runtime is closed");
+    const db = this.db;
+    if (!db.coverCatalogue || !db.tableIdentity || !db.columnIdentity)
+      throw new Error("Native runtime does not expose catalogue coverage and identities");
+    // Snapshot caller-owned name arrays before the first await. Implicit
+    // identity/claims come exclusively from the opened core, never JS state.
+    const names = requests.map(({ table, columns }) => ({ table, columns: [...(columns ?? [])] }));
+    const session = readSession(sessionJson);
+    await this.awaitNativeRead(
+      db.coverCatalogue(timeoutMs, session?.identity, session?.claims),
+      "remote",
+    );
+    if (this.closed || this.ownerRuntime.closed || this.db !== db)
+      throw new Error("Catalogue preparation owner changed");
+    const identity = (bytes: Uint8Array): string | null => {
+      if (bytes.byteLength === 0) return null;
+      if (bytes.byteLength !== 16) throw new Error("Invalid catalogue UUID bytes");
+      return formatUuid(bytes);
+    };
+    // Raw identity lookups are synchronous, all on this same schema handle.
+    return names.map(({ table, columns }) => ({
+      table,
+      identity: identity(db.tableIdentity!(table)),
+      columns: Object.fromEntries(
+        columns.map((column) => [column, identity(db.columnIdentity!(table, column))]),
+      ),
+    }));
+  }
+
   readCanEstablishAbsence(sessionJson?: string, transaction?: OpenTransactionId): boolean {
     if (this.closed || this.ownerRuntime.closed) return false;
     const context = this.nativeReadContext(
@@ -803,17 +944,18 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly subscriptions = new Map<number, SubscriptionState>();
   private authFailureCallback: ((reason: string) => void) | null = null;
   private mutationErrorCallback: ((event: MutationErrorEvent) => void) | null = null;
-  private serverTransportErrorCallback: ((error: Error) => void) | null = null;
+  private serverTransportErrorCallback:
+    | ((error: Error, state: { retrying: boolean }) => void)
+    | null = null;
   private readonly deliveredMutationErrors = new Set<string>();
   private serverTransport: Transport | null = null;
   private peerUpstreamAttached = false;
   private nonDurableClient = false;
   private serverCarrier: WebSocketCarrier | null = null;
+  private readonly webSocket: WebSocketConstructor | undefined;
   private serverCarrierPromise: Promise<WebSocketCarrier> | null = null;
   private serverConnectionAttempt: ServerConnectionAttempt | null = null;
   private serverReplacementRetirement: Promise<void> | null = null;
-  private serverReplacementIntent: ServerReplacementIntent | null = null;
-  private serverReplacementPromise: Promise<WebSocketCarrier> | null = null;
   private serverTransportError: Error | null = null;
   private serverTransportErrorWaiters: ServerTransportErrorWaiter[] = [];
   private localRelayError: Error | null = null;
@@ -822,18 +964,37 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverTransportWorkWaiters: ServerTransportWorkWaiter[] = [];
   private serverEndpointUrl: string | null = null;
   private serverAuthJson: string | null = null;
-  private serverReconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  private serverReconnectReject: ((error: Error) => void) | null = null;
-  private preHelloRetryCount = 0;
-  private networkRetryCount = 0;
-  /** The current `serverTransportError` is a published outage, not a terminal failure. */
-  private serverOutageReported = false;
-  private serverOutageStartedAt: number | null = null;
-  private serverLinkRequested = false;
+  private link: NativeUpstreamLink | null = null;
+  private linkStatus: UpstreamLinkStatus | null = null;
+  private readonly linkInputs: UpstreamLinkInput[] = [];
+  private linkStepping = false;
+  /** The attempt the link machine is waiting to hear from. */
+  private linkAttemptId: number | null = null;
+  private linkTimer: { token: number; handle: ReturnType<typeof setTimeout> } | null = null;
+  /** Settles `serverCarrierPromise` while the link is not live. */
+  private linkConnection: {
+    resolve: (carrier: WebSocketCarrier) => void;
+    reject: (error: Error) => void;
+  } | null = null;
+  /** The error that ended the attempt the machine is deciding about. */
+  private linkFailure: Error | null = null;
+  private linkCloseReason = "server transport replaced";
+  /** The client keeps reconnecting through the current `serverTransportError`. */
+  private serverTransportErrorRetrying = false;
+  private serverTransportErrorAwaitsAuth = false;
+  private nativeAuthRefusalRenewable = false;
   private nativeLinkEverConnected = false;
   private nativeLinkPoll: ReturnType<typeof setInterval> | null = null;
   private firstLoadWaitSeen = false;
   private readonly remoteLink = new RemoteLinkStatePublisher(() => this.readRemoteLinkState());
+  private readonly linkStatusPublisher = new DerivedStatePublisher<LinkStatus>(
+    () => this.upstreamLinkStatus(),
+    sameLinkStatus,
+  );
+  private readonly syncStatusPublisher = new DerivedStatePublisher<RuntimeSyncStatus>(
+    () => this.readSyncStatus(),
+    (a, b) => a.pendingUploads === b.pendingUploads && sameLinkStatus(a.link, b.link),
+  );
   private readonly pendingInboundServerFrames: Uint8Array[] = [];
   private serverInboundRouting: Promise<void> = Promise.resolve();
   private serverInboundProcessed = false;
@@ -900,9 +1061,16 @@ export class NativeRuntimeAdapter implements Runtime {
     });
   }
 
-  registerSchemaView(schema: WasmSchema): NativeRuntimeAdapter {
+  /** The migrations this runtime's app ships (see {@link ClientMigrations}). */
+  readonly migrations: ClientMigrations | undefined;
+
+  /** A view of `schema`, whose app ships `migrations` (see {@link ClientMigrations}). */
+  registerSchemaView(schema: WasmSchema, migrations?: ClientMigrations): NativeRuntimeAdapter {
     return new NativeRuntimeAdapter(null, schema, this.node, this.peerIdentity, 1, true, {
-      db: this.db.registerSchema(encodeSchema(schema)),
+      db: this.db.registerSchema(
+        encodeSchema(schema),
+        migrations ? clientMigrationsBytes(migrations) : undefined,
+      ),
       // Registered schema views are façades over this same native open. The
       // capability is private to the owner and must survive view creation so
       // backend reads keep selecting the backend ABI rather than identity ABI.
@@ -927,9 +1095,15 @@ export class NativeRuntimeAdapter implements Runtime {
       scopeIsolatedRelay?: boolean;
       readAuthorizationHost?: ReadAuthorizationHost;
       backendMode?: boolean;
+      /** The node a backend's SYSTEM provenance names, when not `node`. */
+      systemNode?: Uint8Array;
       owner?: NativeRuntimeAdapter;
       /** Where slow queries are reported (`console.warn`): see {@link SlowQueryLogOptions}. */
       slowQueryLog?: SlowQueryLogOptions;
+      /** How this runtime opens its server socket, when not the platform's own WebSocket. */
+      webSocket?: WebSocketConstructor;
+      /** The app's versions and migrations: see {@link ClientMigrations}. */
+      migrations?: ClientMigrations;
     },
   ) {
     this.ownerRuntime = opts?.owner?.ownerRuntime ?? this;
@@ -947,6 +1121,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.trustedBackend = (opts?.owner?.trustedBackend ?? opts?.backendMode) === true;
     this.selfSignedClientProof = opts?.selfSignedClientProof;
     this.scopeIsolatedRelay = opts?.scopeIsolatedRelay === true;
+    this.webSocket = opts?.webSocket;
     this.configBytes = openConfig(
       node,
       author,
@@ -954,8 +1129,11 @@ export class NativeRuntimeAdapter implements Runtime {
       historyComplete,
       opts?.initialSyncFlushEvery,
       opts?.selfSignedClientProof,
+      opts?.migrations,
+      opts?.systemNode,
     );
     this.peerIdentity = author;
+    this.migrations = opts?.owner?.migrations ?? opts?.migrations;
     this.schemaHash = serializeRuntimeSchema(schema);
     if (opts?.db) {
       this.db = opts.db;
@@ -1011,11 +1189,14 @@ export class NativeRuntimeAdapter implements Runtime {
     // unavailable and remote subscriptions fail once it stops retrying,
     // while local work keeps running (#4337).
     this.db.onUpstreamFailure?.((failure) => {
-      if (!failure) return this.clearRemoteServerTransportError();
+      if (!failure) {
+        this.nativeAuthRefusalRenewable = false;
+        return this.clearRemoteServerTransportError();
+      }
       this.handleServerTransportError(
         new Error(failure.reason),
         this.serverConnectionGeneration,
-        failure.retrying,
+        failure.retrying || this.nativeAuthRefusalRenewable,
       );
     });
   }
@@ -1225,8 +1406,18 @@ export class NativeRuntimeAdapter implements Runtime {
     return await this.db.evictExpiredStagedLargeValues();
   }
 
-  async acceptPeer(claims: Record<string, unknown> = {}, localEpoch?: bigint): Promise<Transport> {
-    if (this !== this.ownerRuntime) return this.ownerRuntime.acceptPeer(claims, localEpoch);
+  /**
+   * Serve a peer (a tab) whose replica is `identity`. A store configured as
+   * a user serves only its own identity: it uploads what its peers write as
+   * itself, so a peer of another identity is refused (`identity_mismatch`).
+   */
+  async acceptPeer(
+    claims: Record<string, unknown> = {},
+    localEpoch?: bigint,
+    identity: Uint8Array = this.peerIdentity,
+  ): Promise<Transport> {
+    if (this !== this.ownerRuntime)
+      return this.ownerRuntime.acceptPeer(claims, localEpoch, identity);
     if (this.closed) throw new Error("Native runtime is closed");
     return this.runWhenCoreIdle(async () => {
       if (this.closed) throw new Error("Native runtime is closed");
@@ -1243,6 +1434,8 @@ export class NativeRuntimeAdapter implements Runtime {
         const proof = this.selfSignedClientProof;
         let subscriber: Transport;
         if (proof) {
+          // The proof is this store's own: it vouches for no other identity.
+          if (!sameBytes(identity, this.peerIdentity)) throw identityMismatchError();
           if (!this.db.acceptSubscriberWithSelfSignedProof) {
             throw new Error(
               "Native runtime does not support self-signed subscriber admission; rebuild the matching Jazz WASM artifact",
@@ -1259,7 +1452,7 @@ export class NativeRuntimeAdapter implements Runtime {
           if (!this.db.acceptSubscriber) {
             throw new Error("Native runtime does not expose subscriber links");
           }
-          subscriber = await this.db.acceptSubscriber(this.peerIdentity, claims, localEpoch);
+          subscriber = await this.db.acceptSubscriber(identity, claims, localEpoch);
         }
         if (this.closed) {
           // We still own the slot. Awaiting gated retirement here would wait
@@ -1329,14 +1522,13 @@ export class NativeRuntimeAdapter implements Runtime {
       !this.db?.nativeConnectionStatus ||
       this.nativeLinkPoll ||
       this.closed ||
-      !this.firstLoadWaitSeen ||
-      !this.remoteLink.hasListeners
+      !this.linkHasListeners()
     ) {
       return;
     }
     this.nativeLinkPoll = setInterval(() => {
-      if (!this.remoteLink.hasListeners) this.stopNativeLinkPoll();
-      else this.remoteLink.changed();
+      if (!this.linkHasListeners()) this.stopNativeLinkPoll();
+      else this.linkChanged();
     }, NATIVE_LINK_POLL_MS);
   }
 
@@ -1351,6 +1543,75 @@ export class NativeRuntimeAdapter implements Runtime {
   private stopNativeLinkPoll(): void {
     if (this.nativeLinkPoll) clearInterval(this.nativeLinkPoll);
     this.nativeLinkPoll = null;
+  }
+
+  /**
+   * Whether someone observes the link: a sync status listener, or a read
+   * gate listener once a read may wait for the server.
+   */
+  private linkHasListeners(): boolean {
+    return (
+      this.syncStatusPublisher.hasListeners ||
+      this.linkStatusPublisher.hasListeners ||
+      (this.firstLoadWaitSeen && this.remoteLink.hasListeners)
+    );
+  }
+
+  private linkChanged(): void {
+    this.remoteLink.changed();
+    this.linkStatusPublisher.changed();
+    this.syncStatusPublisher.changed();
+  }
+
+  /** The upstream link as the app sees it; see {@link LinkStatus}. */
+  upstreamLinkStatus(): LinkStatus {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.upstreamLinkStatus();
+    if (this.closed) return offlineLink("stopped", false);
+    const nativeStatus = this.db?.nativeConnectionStatus?.();
+    if (nativeStatus) {
+      if (!nativeStatus.configured) return LOCAL_ONLY;
+      if (nativeStatus.explicitlyOffline) return offlineLink("disconnected");
+      if (nativeStatus.authRejected) return offlineLink("auth");
+      if (nativeStatus.connected) return CONNECTED;
+      // The relay reports a failure only once its link machine published
+      // an outage, or stopped.
+      if (this.serverTransportError) {
+        return this.serverTransportErrorRetrying ? offlineLink("network") : offlineLink("stopped");
+      }
+      return CONNECTING;
+    }
+    return linkStatusFromUpstream(this.linkStatus);
+  }
+
+  /** How many local commits still wait for the server's verdict. */
+  pendingUploadCount(): number {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.pendingUploadCount();
+    if (this.closed) return 0;
+    return this.db?.pendingUploadCount?.() ?? 0;
+  }
+
+  /** Observe changes of {@link upstreamLinkStatus} alone. */
+  onUpstreamLinkStatusChange(listener: (link: LinkStatus) => void, signal: AbortSignal): void {
+    if (this !== this.ownerRuntime) {
+      this.ownerRuntime.onUpstreamLinkStatusChange(listener, signal);
+      return;
+    }
+    this.linkStatusPublisher.subscribe(listener, signal);
+    this.startNativeLinkPoll();
+  }
+
+  /** Observe changes of {@link upstreamLinkStatus} and {@link pendingUploadCount}. */
+  onSyncStatusChange(listener: () => void, signal: AbortSignal): void {
+    if (this !== this.ownerRuntime) {
+      this.ownerRuntime.onSyncStatusChange(listener, signal);
+      return;
+    }
+    this.syncStatusPublisher.subscribe(listener, signal);
+    this.startNativeLinkPoll();
+  }
+
+  private readSyncStatus(): RuntimeSyncStatus {
+    return { link: this.upstreamLinkStatus(), pendingUploads: this.pendingUploadCount() };
   }
 
   private readRemoteLinkState(): RemoteLinkState {
@@ -1372,22 +1633,18 @@ export class NativeRuntimeAdapter implements Runtime {
       // reconnecting after a drop.
       return this.nativeLinkEverConnected ? "unavailable" : "connecting";
     }
-    if (!this.serverLinkRequested) return "none";
-    if (this.serverTransport) return "connected";
-    if (this.serverTransportError) return "unavailable";
-    // A dropped established link retries with backoff. Readers must not
-    // wait on that recovery; a bootstrapping server's pre-hello retry is
-    // still the first connection attempt.
-    if (this.networkRetryCount > 0) return "unavailable";
-    if (
-      this.serverConnectionAttempt ||
-      this.serverReplacementPromise ||
-      this.serverCarrierPromise ||
-      this.serverReconnectTimer
-    ) {
-      return "connecting";
+    // Readers may wait on a first attempt (including a bootstrapping
+    // server's not-ready retries), never on the recovery of a dropped link.
+    switch (this.linkStatus?.phase ?? "noServer") {
+      case "noServer":
+        return "none";
+      case "live":
+        return "connected";
+      case "connecting":
+        return this.serverTransportError ? "unavailable" : "connecting";
+      default:
+        return "unavailable";
     }
-    return "unavailable";
   }
 
   async waitForUpstreamServerConnection(): Promise<void> {
@@ -1400,8 +1657,12 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     // Reconnects continue through an outage; once it is published, callers
     // waiting for the link reject instead of waiting for the recovery.
-    if (this.serverOutageReported && this.serverTransportError) throw this.serverTransportError;
-    const outage = this.networkRetryCount > 0 ? this.waitForServerTransportError("global") : null;
+    if (this.linkStatus?.outagePublished && this.serverTransportError) {
+      throw this.serverTransportError;
+    }
+    const outage = this.linkStatus?.consecutiveFailures
+      ? this.waitForServerTransportError("global")
+      : null;
     try {
       await (outage
         ? Promise.race([this.serverCarrierPromise, outage.promise])
@@ -1479,9 +1740,11 @@ export class NativeRuntimeAdapter implements Runtime {
     this.completedTxs.clear();
     this.writes.clear();
     this.serverConnectionGeneration += 1;
-    this.clearServerReconnectTimer();
+    this.clearLinkTimer();
+    this.linkAttemptId = null;
+    this.settleLinkConnection(new Error("server transport disconnected"));
     this.stopNativeLinkPoll();
-    this.remoteLink.changed();
+    this.linkChanged();
     const connectionAttempt = this.serverConnectionAttempt;
     this.serverConnectionAttempt = null;
     if (connectionAttempt) {
@@ -1523,8 +1786,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.assertMutationAdmission("Insert");
     const suppliedRowId = objectId ? parseUuid(objectId) : undefined;
     const writeSession = sessionFromWriteContext(_writeContext);
-    this.applySessionClaims(writeSession);
-    const writeIdentity = this.trustedWriteIdentity(writeSession);
+    const writeIdentity = this.mutationWriteIdentity(writeSession, _writeContext);
     const attribution = this.backendAttribution(_writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(_writeContext);
     const branchView = branchViewFromWriteContext(_writeContext);
@@ -1578,16 +1840,17 @@ export class NativeRuntimeAdapter implements Runtime {
     const operation =
       mutation === "insert" ? "Insert" : mutation === "update" ? "Update" : "Upsert";
     this.assertMutationAdmission(operation);
-    if (this.currentTx(writeContext, operation)) {
-      throw new Error("Streaming mutations are not supported inside a transaction");
-    }
+    const tx = this.currentTx(writeContext, operation);
     const writeSession = sessionFromWriteContext(writeContext);
-    this.applySessionClaims(writeSession);
-    const writeIdentity = this.trustedWriteIdentity(writeSession);
+    const writeIdentity = this.mutationWriteIdentity(writeSession, writeContext);
     const attribution = this.backendAttribution(writeContext);
     const branchView = branchViewFromWriteContext(writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     rejectAttributedBranchWrite(attribution, branchView);
+    if (tx) {
+      this.assertTransactionAttribution(tx, attribution);
+      this.assertTransactionWriteIdentity(tx, attribution ? undefined : writeIdentity);
+    }
     if (!begin) throw new Error("Native runtime does not expose streaming mutations");
 
     const definition = this.table(table);
@@ -1615,7 +1878,12 @@ export class NativeRuntimeAdapter implements Runtime {
       updatedAtMs ?? undefined,
       branchView?.head,
       branchView?.base,
+      tx?.id,
     );
+    if (tx && !upload.finishInTransaction) {
+      await upload.abort();
+      throw new Error("This native runtime does not support streaming inside a transaction yet");
+    }
     const owner = this.ownerRuntime;
     let releaseAdmission!: () => void;
     const admission = new Promise<void>((resolve) => {
@@ -1662,7 +1930,13 @@ export class NativeRuntimeAdapter implements Runtime {
       await previousFinalization;
       let receipt: MutationResult;
       try {
-        receipt = this.finishMutation(await upload.finish());
+        if (tx) {
+          await upload.finishInTransaction!();
+          tx.hasStagedMutations = true;
+          receipt = { kind: "staged", openTransactionId: tx.id };
+        } else {
+          receipt = this.finishMutation(await upload.finish());
+        }
       } finally {
         releaseFinalization();
       }
@@ -1685,8 +1959,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.assertMutationAdmission("Restore");
     const rowId = parseUuid(objectId);
     const writeSession = sessionFromWriteContext(writeContext);
-    this.applySessionClaims(writeSession);
-    const writeIdentity = this.trustedWriteIdentity(writeSession);
+    const writeIdentity = this.mutationWriteIdentity(writeSession, writeContext);
     const attribution = this.backendAttribution(writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const branchView = branchViewFromWriteContext(writeContext);
@@ -1731,8 +2004,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.assertMutationAdmission("Update");
     const rowId = parseUuid(objectId);
     const writeSession = sessionFromWriteContext(writeContext);
-    this.applySessionClaims(writeSession);
-    const writeIdentity = this.trustedWriteIdentity(writeSession);
+    const writeIdentity = this.mutationWriteIdentity(writeSession, writeContext);
     const attribution = this.backendAttribution(writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const branchView = branchViewFromWriteContext(writeContext);
@@ -1750,7 +2022,10 @@ export class NativeRuntimeAdapter implements Runtime {
         updatedAtMs: updatedAtMs ?? undefined,
       });
       tx.hasStagedMutations = true;
-      return { kind: "staged", openTransactionId: txIdFromContext(writeContext)! };
+      return {
+        kind: "staged",
+        openTransactionId: txIdFromContext(writeContext)!,
+      };
     }
     const write = writeOrNormalizeRejection("Update", () =>
       requireNativeWrite(
@@ -1789,8 +2064,7 @@ export class NativeRuntimeAdapter implements Runtime {
       // splices against the transaction's own view of the row, so a session
       // or attributed transaction authors them like any other staged write.
       const writeSession = sessionFromWriteContext(writeContext);
-      this.applySessionClaims(writeSession);
-      const writeIdentity = this.trustedWriteIdentity(writeSession);
+      const writeIdentity = this.mutationWriteIdentity(writeSession, writeContext);
       const attribution = this.backendAttribution(writeContext);
       this.assertTransactionAttribution(tx, attribution);
       this.assertTransactionWriteIdentity(tx, attribution ? undefined : writeIdentity);
@@ -1812,7 +2086,10 @@ export class NativeRuntimeAdapter implements Runtime {
         updatedAtMs ?? undefined,
       );
       tx.hasStagedMutations = true;
-      return { kind: "staged", openTransactionId: txIdFromContext(writeContext)! };
+      return {
+        kind: "staged",
+        openTransactionId: txIdFromContext(writeContext)!,
+      };
     }
     // Outside a transaction the binding writes as the adapter's own identity.
     // Do not silently substitute it for a session or attributed write.
@@ -1840,8 +2117,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const rowId = parseUuid(objectId);
     const definition = this.table(table);
     const writeSession = sessionFromWriteContext(writeContext);
-    this.applySessionClaims(writeSession);
-    const writeIdentity = this.trustedWriteIdentity(writeSession);
+    const writeIdentity = this.mutationWriteIdentity(writeSession, writeContext);
     const attribution = this.backendAttribution(writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const branchView = branchViewFromWriteContext(writeContext);
@@ -1864,7 +2140,10 @@ export class NativeRuntimeAdapter implements Runtime {
         updatedAtMs: updatedAtMs ?? undefined,
       });
       tx.hasStagedMutations = true;
-      return { kind: "staged", openTransactionId: txIdFromContext(writeContext)! };
+      return {
+        kind: "staged",
+        openTransactionId: txIdFromContext(writeContext)!,
+      };
     }
     const write = writeOrNormalizeRejection("Upsert", () =>
       requireNativeWrite(
@@ -1885,8 +2164,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.table(table);
     const rowId = parseUuid(objectId);
     const writeSession = sessionFromWriteContext(writeContext);
-    this.applySessionClaims(writeSession);
-    const writeIdentity = this.trustedWriteIdentity(writeSession);
+    const writeIdentity = this.mutationWriteIdentity(writeSession, writeContext);
     const attribution = this.backendAttribution(writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const branchView = branchViewFromWriteContext(writeContext);
@@ -1901,7 +2179,10 @@ export class NativeRuntimeAdapter implements Runtime {
         updatedAtMs: updatedAtMs ?? undefined,
       });
       tx.hasStagedMutations = true;
-      return { kind: "staged", openTransactionId: txIdFromContext(writeContext)! };
+      return {
+        kind: "staged",
+        openTransactionId: txIdFromContext(writeContext)!,
+      };
     }
     const write = writeOrNormalizeRejection("Delete", () =>
       requireNativeWrite(
@@ -2065,9 +2346,10 @@ export class NativeRuntimeAdapter implements Runtime {
     kind: TransactionKind,
     id: OpenTransactionId,
     sessionJson?: string | null,
+    readCapability?: TransactionReadCapability,
   ): OpenTransactionId {
     if (this !== this.ownerRuntime) {
-      return this.ownerRuntime.beginTransaction(kind, id, sessionJson);
+      return this.ownerRuntime.beginTransaction(kind, id, sessionJson, readCapability);
     }
     if (this.closed) {
       throw new Error("Begin transaction failed: native runtime is closed");
@@ -2076,19 +2358,56 @@ export class NativeRuntimeAdapter implements Runtime {
       throw new Error(`Begin transaction failed: transaction ${id} has already been opened`);
     }
     const session = sessionFromWriteContext(sessionJson);
-    this.applySessionClaims(session);
+    const attribution = this.backendAttribution(sessionJson);
+    if (
+      readCapability !== undefined &&
+      (!isAcceptedReadCapability(readCapability) ||
+        kind !== "serializable" ||
+        attribution ||
+        !this.db.acceptedRead ||
+        (this.trustedBackend && (!session || session.backendAuthority)))
+    )
+      throw new Error(
+        "Accepted evidence requires a supported session-bound serializable transaction",
+      );
+    const ownClientEvidence = readCapability === "client-accepted-evidence";
+    if (
+      ownClientEvidence &&
+      (session ||
+        this.trustedBackend ||
+        this.readAuthorizationHost === "trusted-serving" ||
+        !this.db.beginClientEvidenceTransaction)
+    )
+      throw new Error("Own-client evidence requires a supported implicit replica owner");
+    if (!readCapability) this.applySessionClaims(session);
     // The native core binds a serializable transaction's identity at begin. Keep
     // the trusted-serving subject here so every staged operation and its
     // commit are authorized as that one subject.
-    const identity = this.trustedWriteIdentity(session);
-    const attribution = this.backendAttribution(sessionJson);
+    const identity = ownClientEvidence
+      ? this.peerIdentity.slice()
+      : readCapability
+        ? session?.identity
+        : this.trustedWriteIdentity(session);
     const admission = attribution ? undefined : identity;
-    this.db.beginTransaction(id, kind, admission, attribution);
+    // Rust resolves an implicit peer from the actual opening DbIdentity.
+    // Ordinary calls keep their prior four-argument admission contract.
+    if (ownClientEvidence) {
+      this.db.beginClientEvidenceTransaction!(id);
+    } else if (readCapability) {
+      this.db.beginTransaction(id, kind, admission, attribution, true);
+      try {
+        this.applySessionClaims(session, true);
+      } catch (error) {
+        this.db.rollbackTransaction(id);
+        throw error;
+      }
+    } else this.db.beginTransaction(id, kind, admission, attribution);
     this.pendingTxs.set(id, {
       id,
       kind,
       identity: admission,
       requestSession: admission ? (session ?? undefined) : undefined,
+      readCapability,
       attribution,
       hasStagedMutations: false,
     });
@@ -2111,7 +2430,10 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     const write = this.db.commitTransaction(openTransactionId, pending.kind);
     this.pendingTxs.delete(openTransactionId);
-    this.completedTxs.set(openTransactionId, { kind: pending.kind, state: "committed" });
+    this.completedTxs.set(openTransactionId, {
+      kind: pending.kind,
+      state: "committed",
+    });
     this.pumpSubscriptions();
     this.scheduleServerPump();
     this.notifyPeerTransportWork();
@@ -2133,26 +2455,60 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!write) {
       throw new Error(`Wait for transaction failed: unknown transaction ${txId}`);
     }
+    const { signal } = options;
     // Claim the error as soon as the transaction ID is available, before any
     // readiness or transport awaits. Reuse this wait across transport wakes.
     const settlement = options.observeOnly ? write.wait(tier, true) : write.wait(tier);
     // Readiness can outlive a rejected settlement. Observe it now so the host
     // never sees an unhandled Promise rejection while readiness is pending.
     void settlement.catch(() => undefined);
-    if (options.ready) await options.ready;
+    if (options.ready) {
+      if (signal) {
+        // A wait abandoned while readiness is pending must not park here.
+        let wake!: () => void;
+        const aborted = new Promise<void>((resolve) => {
+          wake = () => resolve();
+          signal.addEventListener("abort", wake, { once: true });
+        });
+        try {
+          await Promise.race([options.ready, aborted]);
+        } finally {
+          signal.removeEventListener("abort", wake);
+        }
+      } else {
+        await options.ready;
+      }
+    }
+    // One continuation for every pass: a pass that wakes for transport work
+    // must not leave another one behind on a settlement that may take long.
+    const settled = settlement.then(() => "settled" as const);
+    void settled.catch(() => undefined);
+    // An outage the client keeps retrying delays the settlement; only a
+    // terminal transport failure, closing the runtime or the caller's signal
+    // ends the wait (#3923).
     for (;;) {
-      this.throwServerTransportErrorForTier(tier);
+      if (this.closed) throw new Error("Wait for transaction failed: native runtime is closed");
+      signal?.throwIfAborted();
+      this.throwServerTransportErrorForTier(tier, true);
       const observedServerWorkEpoch = this.serverTransportWorkEpoch;
       this.startServerPump();
-      this.throwServerTransportErrorForTier(tier);
-      const transportError = this.waitForServerTransportError(tier);
+      this.throwServerTransportErrorForTier(tier, true);
+      const transportError = this.waitForServerTransportError(tier, true);
       const transportWork = this.waitForServerTransportWork(tier, observedServerWorkEpoch);
+      let stopAbortWake: (() => void) | undefined;
       try {
-        const wakes: Array<Promise<"settled" | "work"> | Promise<never>> = [
-          settlement.then(() => "settled" as const),
-        ];
+        const wakes: Array<Promise<"settled" | "work"> | Promise<never>> = [settled];
         if (transportError) wakes.push(transportError.promise);
         if (transportWork) wakes.push(transportWork.promise.then(() => "work" as const));
+        if (signal) {
+          wakes.push(
+            new Promise<"work">((resolve) => {
+              const wake = () => resolve("work");
+              signal.addEventListener("abort", wake, { once: true });
+              stopAbortWake = () => signal.removeEventListener("abort", wake);
+            }),
+          );
+        }
         if ((await Promise.race(wakes)) === "settled") {
           this.pumpSubscriptions();
           return;
@@ -2164,6 +2520,7 @@ export class NativeRuntimeAdapter implements Runtime {
         }
         throw error;
       } finally {
+        stopAbortWake?.();
         transportError?.cancel();
         transportWork?.cancel();
       }
@@ -2181,8 +2538,57 @@ export class NativeRuntimeAdapter implements Runtime {
     } finally {
       this.pendingTxs.delete(openTransactionId);
     }
-    this.completedTxs.set(openTransactionId, { kind: pending.kind, state: "rolled_back" });
+    this.completedTxs.set(openTransactionId, {
+      kind: pending.kind,
+      state: "rolled_back",
+    });
     return Promise.resolve(true);
+  }
+
+  /** @internal Authority evidence, admitted synchronously before any host wait. */
+  async queryAccepted(
+    queryJson: string,
+    openTransactionId: OpenTransactionId,
+    sessionJson: string | null | undefined,
+    timeoutMs: number,
+  ): Promise<AcceptedRows<RowState>> {
+    validateAcceptedReadTimeout(timeoutMs);
+    if (this.closed || this.ownerRuntime.closed) throw new Error("Native runtime is closed");
+    const pending = this.pendingTxs.get(openTransactionId);
+    if (
+      !pending ||
+      pending.kind !== "serializable" ||
+      !isAcceptedReadCapability(pending.readCapability) ||
+      !this.db.acceptedRead
+    )
+      throw new Error("Accepted evidence was not selected before transaction opening");
+    assertNoUnsupportedPermissionIntrospection(queryJson);
+    if (queryHasArraySubqueries(queryJson))
+      throw new Error("Accepted evidence requires ordinary stored rows");
+    const session = readSession(sessionJson);
+    if (session?.backendAuthority)
+      throw new Error("Accepted evidence requires an explicit session");
+    if (pending.readCapability === "client-accepted-evidence" && session)
+      throw new Error("Own-client evidence cannot select a read session");
+    const boundSession = session ?? pending.requestSession;
+    const read = this.db.acceptedRead(
+      nativeQueryInput(queryJson, this.schema),
+      openTransactionId,
+      queryIncludesDeleted(queryJson),
+      timeoutMs,
+      pending.readCapability === "client-accepted-evidence"
+        ? undefined
+        : (boundSession?.identity ?? pending.identity),
+      pending.readCapability === "client-accepted-evidence" ? undefined : boundSession?.claims,
+    );
+    // Existing read cancellation and owner close/discard machinery owns this.
+    const decoded = decodeAcceptedRead(await this.awaitNativeRead(read));
+    const rows = rowsFromBatches(
+      decoded.batches,
+      this.schema,
+      subscriptionOutputColumns(queryJson, this.schema).rootColumns,
+    );
+    return { rows, through: decoded.through, schema: decoded.schema, evidence: decoded.evidence };
   }
 
   async query(
@@ -2207,7 +2613,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const opts = readOptions(tier, queryIncludesDeleted(coreQueryJson), optionsJson);
     const readContext = this.nativeReadContext(session, pendingTx);
     const query = nativeQueryInput(coreQueryJson, this.schema);
-    await this.ensureClientSessionClaims(session);
+    await this.ensureClientSessionClaims(session, pendingTx);
     await this.waitForStrictRemoteQueryTransport(tier);
     await this.processPendingPeerActivityBeforeRead();
     if (this.closed || this.ownerRuntime.closed) return [];
@@ -2321,115 +2727,262 @@ export class NativeRuntimeAdapter implements Runtime {
 
   connect(url: string, authJson: string): void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.connect(url, authJson);
-    this.serverLinkRequested = true;
-    this.remoteLink.changed();
     if (this.db?.reconnectNativeUpstream) {
       // The admitted native host owns the endpoint and credentials. The JS
       // connection manager controls lifecycle only, never a parallel socket.
       this.db.reconnectNativeUpstream();
       this.nativeLinkEverConnected = false;
-      this.remoteLink.changed();
+      this.linkChanged();
       return;
     }
     const normalizedAuthJson = normalizeBackendWebSocketAuth(authJson);
     // Validate synchronously before retiring the current transport. Callers
     // historically observe an incompatible native binding at connect() time.
-    const features = this.nativeWireFeatures();
-    const generation = this.serverConnectionGeneration + 1;
-    const predecessorRetirement = this.invalidateServerTransport({
-      rejectWaiters: false,
-      preservePreHelloRetry: true,
-      preserveRemoteWaiters: true,
-      error: new Error("server transport replaced"),
-    });
-    const intent: ServerReplacementIntent = {
-      generation,
-      url,
-      authJson: normalizedAuthJson,
-      features,
-    };
-    this.serverReplacementIntent = intent;
-    this.serverReplacementRetirement = joinServerTransportRetirements(
-      this.serverReplacementRetirement,
-      predecessorRetirement,
+    this.nativeWireFeatures();
+    this.link ??= this.createUpstreamLink();
+    this.serverEndpointUrl = url;
+    this.serverAuthJson = normalizedAuthJson;
+    this.linkCloseReason = "server transport replaced";
+    // An explicit connect replaces any current attempt and tries at once,
+    // even after a refused credential or a fatal failure.
+    this.stepLink(
+      this.linkStatus && this.linkStatus.phase !== "noServer"
+        ? { type: "setOffline", offline: false }
+        : { type: "serverConfigured", configured: true },
     );
-    let replacement = this.serverReplacementPromise;
-    if (!replacement) {
-      replacement = (async () => {
-        for (;;) {
-          while (this.serverReplacementRetirement) {
-            const retirement = this.serverReplacementRetirement;
-            this.serverReplacementRetirement = null;
-            try {
-              await retirement;
-            } catch (error) {
-              // A failed close still owns its predecessor. Future connect()
-              // calls must not erase that failure and admit another transport.
-              this.serverReplacementRetirement = joinServerTransportRetirements(
-                this.serverReplacementRetirement,
-                retirement,
-              );
-              this.serverReplacementRetirement.catch(() => undefined);
-              throw error;
-            }
-          }
-          const latest = this.serverReplacementIntent;
-          if (!latest || this.closed) throw new Error("server transport disconnected");
-          this.serverReplacementIntent = null;
-          let connected: WebSocketCarrier;
-          try {
-            connected = await this.startServerConnection(latest);
-          } catch (error) {
-            if (
-              this.serverReplacementIntent &&
-              (errorMessage(error) === "server transport replaced" ||
-                errorMessage(error) === "server transport disconnected")
-            ) {
-              continue;
-            }
-            throw error;
-          }
-          if (!this.serverReplacementIntent && !this.serverReplacementRetirement) {
-            return connected;
-          }
-        }
-      })();
-      this.serverReplacementPromise = replacement;
-      replacement.then(
-        () => {
-          if (this.serverReplacementPromise === replacement) this.serverReplacementPromise = null;
-        },
-        (error: unknown) => {
-          if (this.serverReplacementPromise === replacement) {
-            this.serverReplacementPromise = null;
-            if (this.serverCarrierPromise === replacement) this.serverCarrierPromise = null;
-          }
-          if (!this.closed && errorMessage(error) !== "server transport disconnected") {
-            this.handleServerTransportError(error);
-          }
-        },
-      );
-    }
-    // Keep every caller that observed the old carrier on the same lifecycle
-    // barrier, even when a newer replacement supersedes its intent.
-    this.serverCarrierPromise = replacement;
   }
 
-  private async startServerConnection(intent: ServerReplacementIntent): Promise<WebSocketCarrier> {
-    const { generation, url, authJson: normalizedAuthJson, features } = intent;
+  private createUpstreamLink(): NativeUpstreamLink {
+    if (!this.db.createUpstreamLink) {
+      throw new Error(
+        "native runtime binding does not expose the upstream link machine; install the matching Jazz native runtime package",
+      );
+    }
+    return this.db.createUpstreamLink(Math.floor(Math.random() * Number.MAX_SAFE_INTEGER));
+  }
+
+  /** Step the shared link machine with `input` and carry out what it decides. */
+  private stepLink(input: UpstreamLinkInput): void {
+    // Carrying out an action can end an attempt synchronously; its input
+    // waits for the current step instead of interleaving with it.
+    this.linkInputs.push(input);
+    if (this.linkStepping) return;
+    this.linkStepping = true;
+    try {
+      for (let next = this.linkInputs.shift(); next; next = this.linkInputs.shift()) {
+        if (this.closed || !this.link) continue;
+        const step = JSON.parse(
+          this.link.handle(Date.now(), JSON.stringify(next)),
+        ) as UpstreamLinkStep;
+        const previous = this.linkStatus;
+        this.linkStatus = step.status;
+        for (const action of step.actions) this.runLinkAction(action);
+        this.applyLinkStatus(previous, step.status);
+        // The refusal is published before the app hears of it, so a client
+        // with no renewer can end the waits it holds (#3923).
+        for (const event of step.events) {
+          if (event.type === "authFailed") this.authFailureCallback?.(event.reason);
+        }
+        this.linkChanged();
+      }
+    } catch (error) {
+      // Inputs queued behind a failed step belong to a link state that no
+      // longer holds; never replay them.
+      this.linkInputs.length = 0;
+      throw error;
+    } finally {
+      this.linkStepping = false;
+    }
+  }
+
+  private runLinkAction(action: UpstreamLinkStep["actions"][number]): void {
+    switch (action.type) {
+      case "connect":
+        this.runLinkAttempt(action.attempt);
+        return;
+      case "close": {
+        if (this.linkAttemptId === action.attempt) this.linkAttemptId = null;
+        const attempt = this.serverConnectionAttempt;
+        if (attempt?.id === action.attempt) {
+          this.finishServerConnectionAttempt(attempt, new Error(this.linkCloseReason), false);
+        }
+        this.pendingInboundServerFrames.length = 0;
+        this.serverPumpScheduled = false;
+        this.serverPumpAgain = false;
+        return;
+      }
+      case "armTimer": {
+        this.clearLinkTimer();
+        const token = action.token;
+        const handle = setTimeout(() => {
+          if (this.linkTimer?.token !== token) return;
+          this.linkTimer = null;
+          this.stepLink({ type: "timerFired", token });
+        }, action.afterMs);
+        this.linkTimer = { token, handle };
+        return;
+      }
+      case "cancelTimer":
+        if (this.linkTimer?.token === action.token) this.clearLinkTimer();
+        return;
+    }
+  }
+
+  /** Publish what the link's new status means for readers and subscriptions. */
+  private applyLinkStatus(previous: UpstreamLinkStatus | null, next: UpstreamLinkStatus): void {
+    const failure = this.linkFailure ?? new Error(next.reason ?? "server transport failed");
+    switch (next.phase) {
+      case "live":
+        // Writes' Global waits armed through the outage keep waiting.
+        if (previous?.outagePublished) this.forgetServerTransportError();
+        return;
+      case "connecting":
+      case "backoff":
+        // Waiters for the connection follow the retries.
+        if (!this.linkConnection) this.awaitLinkConnection();
+        // The outage is reported once so Global waits do not hang; remote
+        // subscriptions stay open and resume on the reconnect.
+        if (next.outagePublished && !previous?.outagePublished) {
+          this.handleServerTransportError(new Error(failure.message), undefined, true);
+        }
+        return;
+      case "awaitingCredential":
+      case "stopped":
+        if (previous?.phase !== next.phase) {
+          // A refused credential the app renews leads to a reconnect, as an
+          // outage does: writes' Global waits and remote subscriptions wait
+          // for it (#3923).
+          const renewable = next.phase === "awaitingCredential" && !next.terminal;
+          this.handleServerTransportError(failure, undefined, renewable);
+          this.serverTransportErrorAwaitsAuth = renewable;
+          this.settleLinkConnection(failure);
+        }
+        return;
+      case "offline":
+      case "noServer":
+        this.settleLinkConnection(new Error("server transport disconnected"));
+        return;
+    }
+  }
+
+  /** Make `serverCarrierPromise` wait for the link's next admission. */
+  private awaitLinkConnection(): void {
+    const connection = new Promise<WebSocketCarrier>((resolve, reject) => {
+      this.linkConnection = { resolve, reject };
+    });
+    // Waiters observe the outcome; an unobserved failure is reported as a
+    // transport error instead.
+    connection.catch(() => undefined);
+    this.serverCarrierPromise = connection;
+  }
+
+  /** Fail the pending connection, or resolve it with `carrier`. */
+  private settleLinkConnection(outcome: Error | WebSocketCarrier): void {
+    const connection = this.linkConnection;
+    this.linkConnection = null;
+    if (outcome instanceof Error) {
+      this.serverCarrierPromise = null;
+      connection?.reject(outcome);
+    } else {
+      this.serverCarrierPromise = Promise.resolve(outcome);
+      connection?.resolve(outcome);
+    }
+  }
+
+  private clearLinkTimer(): void {
+    if (this.linkTimer) clearTimeout(this.linkTimer.handle);
+    this.linkTimer = null;
+  }
+
+  /** Report the end of `attempt` to the link machine, once. */
+  private endLinkAttempt(
+    attempt: ServerConnectionAttempt,
+    error: Error,
+    failure: UpstreamLinkFailure,
+  ): void {
+    if (attempt.finished) return;
+    const current = attempt.id === this.linkAttemptId;
+    // Retire the attempt before any suspended pump or handshake can report
+    // its close. Native subscriptions survive the detach.
+    this.finishServerConnectionAttempt(attempt, error, false);
+    if (!current || this.closed) return;
+    this.linkAttemptId = null;
+    // Frames the retired socket buffered belong to its channel state, not
+    // the next connection's.
+    this.pendingInboundServerFrames.length = 0;
+    this.linkFailure = error;
+    try {
+      this.stepLink({ type: "ended", attempt: attempt.id, failure });
+    } finally {
+      this.linkFailure = null;
+    }
+  }
+
+  /** Open the socket for link attempt `id` once its predecessors are retired. */
+  private runLinkAttempt(id: number): void {
+    this.linkAttemptId = id;
+    if (!this.linkConnection) this.awaitLinkConnection();
+    const url = this.serverEndpointUrl;
+    const authJson = this.serverAuthJson;
+    void (async () => {
+      // Every attempt waits for the same retirements; a failed one stays in
+      // place, so it keeps blocking later attempts too.
+      for (
+        let retirement = this.serverReplacementRetirement;
+        retirement;
+        retirement = this.serverReplacementRetirement
+      ) {
+        await retirement;
+        if (this.serverReplacementRetirement === retirement) {
+          this.serverReplacementRetirement = null;
+        }
+      }
+      if (this.closed || this.linkAttemptId !== id || url === null || authJson === null) return;
+      this.startServerConnection(id, url, authJson);
+    })().catch((error: unknown) => {
+      if (this.closed || this.linkAttemptId !== id) return;
+      this.linkAttemptId = null;
+      const failure = error instanceof Error ? error : new Error(errorMessage(error));
+      this.linkFailure = failure;
+      try {
+        this.stepLink({
+          type: "ended",
+          attempt: id,
+          failure: { kind: "fatal", message: failure.message },
+        });
+      } finally {
+        this.linkFailure = null;
+      }
+    });
+  }
+
+  /** One connection attempt: open, negotiate, admit, then report to the link. */
+  private startServerConnection(id: number, url: string, normalizedAuthJson: string): void {
+    this.serverConnectionGeneration += 1;
+    const generation = this.serverConnectionGeneration;
+    const features = this.nativeWireFeatures();
     const transportIdentity = peerIdentityForWebSocketAuth(normalizedAuthJson, this.peerIdentity);
     // A published outage stays visible to Global readers until a retry
     // actually reconnects; each failed attempt must not hide it again.
-    if (!this.serverOutageReported) this.serverTransportError = null;
-    this.serverEndpointUrl = url;
-    this.serverAuthJson = normalizedAuthJson;
-    this.remoteLink.changed();
+    if (!this.linkStatus?.outagePublished) this.forgetServerTransportError();
+    this.linkChanged();
     let resolveTerminal!: (error: Error) => void;
     const terminal = new Promise<Error>((resolve) => {
       resolveTerminal = resolve;
     });
     let attempt: ServerConnectionAttempt | null = null;
+    const end = (error: WireError) => {
+      if (!attempt) return;
+      // A link whose transport already failed terminally is not retried
+      // behind that published error.
+      const failure =
+        this.serverTransportError && !this.linkStatus?.outagePublished
+          ? { kind: "fatal" as const, message: error.message }
+          : upstreamLinkFailure(error, attempt.carrier.hasNegotiated);
+      this.endLinkAttempt(attempt, new Error(error.message), failure);
+    };
     const carrier = new WebSocketCarrier({
+      WebSocket: this.webSocket,
       endpointUrl: url,
       peerIdentity: transportIdentity,
       features,
@@ -2452,32 +3005,23 @@ export class NativeRuntimeAdapter implements Runtime {
           });
         }
       },
+      // A server error that leaves the socket open (or precedes its close)
+      // ends the attempt; a closed socket and the server's reconnect-later
+      // signals arrive as the terminal error.
       onError: (error) => {
-        if (isReconnectLaterWireError(error)) return;
-        if (attempt && this.canRetryNetworkConnection(attempt, error)) return;
         if (
-          this.serverTransportError &&
-          (error.code === "websocket_closed" || error.code === "websocket_error")
-        )
+          isReconnectLaterWireError(error) ||
+          error.code === "websocket_closed" ||
+          error.code === "websocket_error"
+        ) {
           return;
-        this.handleServerTransportError(error, generation);
-        const reason = wireAuthFailureReason(error);
-        if (reason) this.authFailureCallback?.(reason);
-      },
-      onTerminal: (error) => {
-        if (!attempt) return;
-        if (isReconnectLaterWireError(error) && !attempt.carrier.hasNegotiated) return;
-        if (this.canRetryNetworkConnection(attempt, error)) {
-          const recovery = this.retryNetworkConnection(attempt, error);
-          if (recovery) return;
         }
-        this.finishServerConnectionAttempt(
-          attempt,
-          this.serverTransportError ?? new Error(error.message),
-        );
+        end(error);
       },
+      onTerminal: end,
     });
     attempt = {
+      id,
       generation,
       carrier,
       terminal,
@@ -2490,104 +3034,77 @@ export class NativeRuntimeAdapter implements Runtime {
     };
     this.serverConnectionAttempt = attempt;
     this.serverCarrier = carrier;
+    const current = () =>
+      !this.closed &&
+      generation === this.serverConnectionGeneration &&
+      carrier === this.serverCarrier &&
+      attempt === this.serverConnectionAttempt;
     const ready = Promise.race([
       carrier.ready(),
-      attempt.terminal.then((error): never => {
+      terminal.then((error): never => {
         throw error;
       }),
     ]);
-    const connection = ready
+    void ready
       .then(async (negotiation) => {
-        if (
-          generation !== this.serverConnectionGeneration ||
-          carrier !== this.serverCarrier ||
-          attempt !== this.serverConnectionAttempt
-        ) {
+        if (!current()) {
           carrier.close();
-          return carrier;
+          return;
         }
         if (!this.trustedBackend) {
           await this.runWhenCoreIdle(() => {
-            if (generation !== this.serverConnectionGeneration || carrier !== this.serverCarrier)
-              return;
+            if (!current()) return;
             return this.installClientSessionClaims(
               policyClaimsForAdmittedWebSocket(normalizedAuthJson),
             );
           });
-          if (generation !== this.serverConnectionGeneration || carrier !== this.serverCarrier) {
+          if (!current()) {
             carrier.close();
-            return carrier;
+            return;
           }
         }
-        this.preHelloRetryCount = 0;
         const admission = this.connectNegotiatedUpstream(negotiation).catch((error) => {
           throw contextualError("connecting the negotiated upstream transport", error);
         });
         attempt.admission = admission;
         const outcome = await Promise.race([
           admission.then((transport) => ({ type: "admitted" as const, transport })),
-          attempt.terminal.then((error) => ({ type: "terminal" as const, error })),
+          terminal.then((error) => ({ type: "terminal" as const, error })),
         ]);
-        if (outcome.type === "terminal") {
-          throw outcome.error;
-        }
+        // The attempt already ended and reported why.
+        if (outcome.type === "terminal") return;
         attempt.admission = null;
         const transport = outcome.transport;
-        if (
-          this.closed ||
-          generation !== this.serverConnectionGeneration ||
-          carrier !== this.serverCarrier ||
-          attempt !== this.serverConnectionAttempt
-        ) {
+        if (!current()) {
           carrier.close();
           if (attempt.finished) await attempt.retirement;
           else await this.retirePeerTransport(transport);
-          return carrier;
+          return;
         }
-        this.networkRetryCount = 0;
-        this.clearServerOutage();
         attempt.transport = transport;
         this.serverTransport = transport;
-        this.remoteLink.changed();
         transport.setAuxiliaryTraceEnabled?.(this.auxiliaryTraceListeners.size > 0);
         this.watchAuxiliaryOutbound(transport, carrier, generation).catch((error) =>
           this.handleServerTransportError(error, generation),
         );
-        this.pumpServerTransport().catch((error) =>
-          this.handleServerTransportError(error, generation),
-        );
+        const firstPump = this.pumpServerTransport();
+        firstPump.catch((error) => this.handleServerTransportError(error, generation));
         this.pumpSubscriptions();
-        return carrier;
+        this.stepLink({ type: "admitted", attempt: id });
+        // Waiters resume once the new link's first pump pass has run, or has
+        // yielded to a core tick that other work holds.
+        await Promise.race([
+          firstPump.catch(() => undefined),
+          new Promise((resolve) => setTimeout(resolve, 0)),
+        ]);
+        if (current()) this.settleLinkConnection(carrier);
       })
-      .catch((error) => {
-        if (attempt.recovery) return attempt.recovery;
-        if (isRetryablePreHelloWireError(error)) {
-          const retry = this.retryPreHelloConnection(attempt);
-          if (retry) return retry;
-        }
+      .catch((error: unknown) => {
+        // A handshake or admission that fails on this side cannot succeed by
+        // retrying; a refusal from the server already ended the attempt.
         const failure = error instanceof Error ? error : new Error(errorMessage(error));
-        this.finishServerConnectionAttempt(attempt, failure);
-        throw attempt.outcome ?? failure;
+        this.endLinkAttempt(attempt, failure, { kind: "fatal", message: failure.message });
       });
-    connection.catch((error) => {
-      if (isRetryablePreHelloWireError(error)) return;
-      this.handleServerTransportError(error, generation);
-    });
-    return await connection;
-  }
-  private startServerRetry(url: string, authJson: string): Promise<WebSocketCarrier> {
-    const normalizedAuthJson = normalizeBackendWebSocketAuth(authJson);
-    const intent: ServerReplacementIntent = {
-      generation: this.serverConnectionGeneration,
-      url,
-      authJson: normalizedAuthJson,
-      features: this.nativeWireFeatures(),
-    };
-    // Retry from inside the active replacement runner. Calling connect() here
-    // would reuse that runner and make its carrier promise wait on itself.
-    const connection = this.startServerConnection(intent);
-    this.serverCarrierPromise = connection;
-    return connection;
   }
 
   private async connectNegotiatedUpstream(negotiation: WebSocketNegotiation): Promise<Transport> {
@@ -2626,99 +3143,47 @@ export class NativeRuntimeAdapter implements Runtime {
     return this.db.nativeConnectionStatus?.().configured === true;
   }
 
-  private invalidateServerTransport(options: {
-    rejectWaiters: boolean;
-    preservePreHelloRetry: boolean;
-    preserveRemoteWaiters: boolean;
-    error: Error;
-  }): Promise<void> {
-    const attempt = this.serverConnectionAttempt;
+  async disconnect(options: { rejectWaiters?: boolean } = {}): Promise<void> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.disconnect(options);
+    if (this.db?.disconnectNativeUpstream) {
+      this.db.disconnectNativeUpstream();
+      this.linkChanged();
+      return;
+    }
     const transport = this.serverTransport;
+    const attempt = this.serverConnectionAttempt;
     const attemptTransport = attempt?.transport;
-    this.remoteLink.changed();
-    if (attempt) {
-      this.finishServerConnectionAttempt(attempt, options.error, false);
-    } else {
-      this.serverConnectionGeneration += 1;
-      this.serverConnectionAttempt = null;
-      this.serverCarrier?.close();
-      this.serverCarrier = null;
-    }
-    if (!options.preservePreHelloRetry) {
-      this.preHelloRetryCount = 0;
-      this.networkRetryCount = 0;
-    }
-    this.serverOutageReported = false;
-    this.serverOutageStartedAt = null;
-    this.clearServerReconnectTimer();
-    if (!this.serverReplacementRetirement) this.serverTransportError = null;
-    if (options.rejectWaiters) {
+    this.linkCloseReason = "server transport disconnected";
+    this.stepLink({ type: "setOffline", offline: true });
+    this.linkCloseReason = "server transport replaced";
+    this.serverEndpointUrl = null;
+    this.serverAuthJson = null;
+    if (!this.serverReplacementRetirement) this.forgetServerTransportError();
+    if (options.rejectWaiters ?? true) {
       this.resolveServerTransportErrorWaiters(new Error("server transport disconnected"));
-    } else if (!options.preserveRemoteWaiters) {
+    } else {
       this.clearServerTransportErrorWaiters();
     }
     this.resolveServerTransportWorkWaiters();
     this.serverTransport = null;
-    this.serverEndpointUrl = null;
-    this.serverAuthJson = null;
-    this.pendingInboundServerFrames.length = 0;
-    this.serverPumpScheduled = false;
-    this.serverPumpAgain = false;
-    if (!this.serverReplacementPromise) this.serverCarrierPromise = null;
     const retirements: Promise<void>[] = [];
     if (attempt?.retirement) retirements.push(attempt.retirement);
     if (transport && transport !== attemptTransport) {
-      let retirement: Promise<void>;
-      try {
-        retirement = Promise.resolve(this.retirePeerTransport(transport));
-      } catch (retirementError) {
-        retirement = Promise.reject(retirementError);
-      }
-      retirement.catch((error) => {
-        if (!this.closed) this.handleServerTransportError(error);
-      });
-      retirements.push(retirement);
+      retirements.push(Promise.resolve().then(() => this.retirePeerTransport(transport)));
     }
-    if (retirements.length === 0) return Promise.resolve();
-    return Promise.all(retirements).then(() => undefined);
-  }
-
-  async disconnect(
-    options: {
-      rejectWaiters?: boolean;
-      preservePreHelloRetry?: boolean;
-      preserveRemoteWaiters?: boolean;
-    } = {},
-  ): Promise<void> {
-    if (this !== this.ownerRuntime) return this.ownerRuntime.disconnect(options);
-    if (this.db?.disconnectNativeUpstream) {
-      this.db.disconnectNativeUpstream();
-      this.remoteLink.changed();
-      return;
-    }
-    this.serverReplacementIntent = null;
-    const pendingReplacement = this.serverReplacementPromise;
-    const retirement = this.invalidateServerTransport({
-      rejectWaiters: options.rejectWaiters ?? true,
-      preservePreHelloRetry: options.preservePreHelloRetry ?? false,
-      preserveRemoteWaiters: options.preserveRemoteWaiters ?? false,
-      error: new Error("server transport disconnected"),
-    });
-    this.serverCarrierPromise = null;
-    try {
-      if (pendingReplacement) await pendingReplacement;
-    } catch (error) {
-      if (errorMessage(error) !== "server transport disconnected") throw error;
-    }
-    await retirement;
+    this.linkChanged();
+    await Promise.all(retirements);
   }
 
   updateAuth(authJson: string): Promise<void> | void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.updateAuth(authJson);
+    this.nativeAuthRefusalRenewable = false;
     if (this.db?.rejectAuthUpdate) return this.db.rejectAuthUpdate();
-    const endpoint = this.serverEndpointUrl ?? this.serverReplacementIntent?.url;
-    if (!endpoint) return;
-    return this.connect(endpoint, authJson);
+    if (!this.serverEndpointUrl) return;
+    this.serverAuthJson = normalizeBackendWebSocketAuth(authJson);
+    // A live link is replaced so the server sees the new credential; a link
+    // waiting for one connects with it.
+    this.stepLink({ type: "credentialUpdated" });
   }
 
   onAuthFailure(callback: (reason: string) => void): void {
@@ -2726,7 +3191,13 @@ export class NativeRuntimeAdapter implements Runtime {
     this.authFailureCallback = callback;
     // A native host's socket reports a refused credential as auth state, as
     // the web socket path does, so the app renews from it (#4248, #4296).
-    this.db.onAuthRejected?.((reason) => this.authFailureCallback?.(reason));
+    this.db.onAuthRejected?.((reason) => {
+      // The native host stops its link on a refused credential and reports
+      // that as a terminal upstream failure. A credential the app renews
+      // restarts it, so treat it as the web socket path does (#3923).
+      this.nativeAuthRefusalRenewable = isRenewableAuthFailure(mapAuthReason(reason));
+      this.authFailureCallback?.(reason);
+    });
   }
 
   onMutationError(callback: (event: MutationErrorEvent) => void): void {
@@ -2736,20 +3207,36 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   /**
-   * Observe a terminal upstream transport/protocol failure. This has no fate
-   * semantics: it only wakes remote waits and subscriptions that are active
-   * in this runtime.
+   * Observe the first upstream transport failure, and whether the client
+   * keeps reconnecting through it. This has no fate semantics: it only wakes
+   * remote waits and subscriptions that are active in this runtime.
    */
-  onServerTransportError(callback: (error: Error) => void): void {
+  onServerTransportError(callback: (error: Error, state: { retrying: boolean }) => void): void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.onServerTransportError(callback);
     this.serverTransportErrorCallback = callback;
   }
 
+  /**
+   * The server refused a credential that nothing renews, so the link will
+   * not reconnect on its own: end the waits and remote subscriptions held
+   * for a new credential, as a terminal failure does (#3923). A later
+   * `updateAuth` reconnects as usual.
+   */
+  endCredentialWait(): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.endCredentialWait();
+    // A native host reports its refusal before the upstream failure it ends in.
+    this.nativeAuthRefusalRenewable = false;
+    const error = this.serverTransportError;
+    if (!error || !this.serverTransportErrorRetrying) return;
+    this.serverTransportErrorAwaitsAuth = false;
+    this.handleServerTransportError(error, this.serverConnectionGeneration, false);
+  }
+
   /** Record a terminal error relayed from a durable browser-worker upstream. */
-  reportRemoteServerTransportError(error: Error): void {
+  reportRemoteServerTransportError(error: Error, retrying = false): void {
     if (this !== this.ownerRuntime)
-      return this.ownerRuntime.reportRemoteServerTransportError(error);
-    this.handleServerTransportError(error);
+      return this.ownerRuntime.reportRemoteServerTransportError(error, retrying);
+    this.handleServerTransportError(error, this.serverConnectionGeneration, retrying);
   }
 
   /** The durable worker itself failed, so a tab cannot establish Local either. */
@@ -2759,17 +3246,22 @@ export class NativeRuntimeAdapter implements Runtime {
     for (const waiter of this.localRelayErrorWaiters.splice(0)) {
       if (waiter.active) waiter.reject(this.localRelayError);
     }
-    this.handleServerTransportError(error);
+    // The broker replaces failed workers. Local persistence for this attempt
+    // has failed, but authority acceptance can still arrive after replacement.
+    // A pump or watchdog failure may already have stopped the upstream. Its
+    // teardown must preserve that terminal error for subsequent Global waits.
+    if (this.serverTransportError && !this.serverTransportErrorRetrying) return;
+    this.handleServerTransportError(error, this.serverConnectionGeneration, true);
   }
 
   /** Clear a terminal remote-peer error after its replacement transport is ready. */
   clearRemoteServerTransportError(): void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.clearRemoteServerTransportError();
-    // Armed waiters without a latched error keep their channel for a later one.
+    // Armed waiters keep their channel for a later error: writes' Global
+    // waits armed through an outage are still waiting for their settlement.
     if (!this.serverTransportError) return;
-    this.serverTransportError = null;
-    this.clearServerTransportErrorWaiters();
-    this.remoteLink.changed();
+    this.forgetServerTransportError();
+    this.linkChanged();
   }
 
   reportRemoteMutationError(event: MutationErrorEvent): void {
@@ -2777,24 +3269,53 @@ export class NativeRuntimeAdapter implements Runtime {
     this.deliverMutationError(event);
   }
 
-  /** General graceful-shutdown barrier, including recovered durable writes. */
-  async waitForPendingWrites(tier = "global"): Promise<void> {
-    if (this !== this.ownerRuntime) return this.ownerRuntime.waitForPendingWrites(tier);
+  /**
+   * Wait until every write committed so far reaches `tier`. By default a
+   * reported outage fails the wait; `throughOutage` keeps it pending until a
+   * terminal failure, as a write's own Global wait does (#3923). `signal`
+   * ends the wait with its reason; the writes are unaffected.
+   */
+  async waitForPendingWrites(
+    tier = "global",
+    options: { throughOutage?: boolean; signal?: AbortSignal } = {},
+  ): Promise<void> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.waitForPendingWrites(tier, options);
     if (!this.db.waitForPendingWrites)
       throw new Error("Native runtime lacks graceful sync shutdown; rebuild its bindings");
+    const { throughOutage = false, signal } = options;
+    signal?.throwIfAborted();
     await this.flushLocalSettlements();
-    this.throwServerTransportErrorForTier(tier);
+    this.throwServerTransportErrorForTier(tier, throughOutage);
     this.startServerPump();
-    const failure = this.waitForServerTransportError(tier);
+    const failure = this.waitForServerTransportError(tier, throughOutage);
+    // Whichever way this wait ends, stop the binding's wait with it: a
+    // cancelled native read releases its core waiter.
+    const stop = new AbortController();
+    const aborted = new Promise<never>((_, reject) => {
+      stop.signal.addEventListener("abort", () => reject(stop.signal.reason), { once: true });
+    });
+    aborted.catch(() => undefined);
+    const cancelled = new Promise<void>((resolve) => {
+      stop.signal.addEventListener("abort", () => resolve(), { once: true });
+    });
+    const forwardAbort = () => stop.abort(signal?.reason);
+    signal?.addEventListener("abort", forwardAbort, { once: true });
     try {
       const wait = this.awaitNativeRead(
-        Promise.resolve(this.db.waitForPendingWrites(tier)).then(
+        Promise.resolve(this.db.waitForPendingWrites(tier, cancelled)).then(
           (result) => result ?? new Uint8Array(),
         ),
+        undefined,
+        stop.signal,
       );
-      await (failure ? Promise.race([wait, failure.promise]) : wait);
+      wait.catch(() => undefined);
+      const races: Promise<unknown>[] = [wait, aborted];
+      if (failure) races.push(failure.promise);
+      await Promise.race(races);
     } finally {
       failure?.cancel();
+      signal?.removeEventListener("abort", forwardAbort);
+      stop.abort(new Error("waitForPendingWrites ended"));
     }
   }
 
@@ -2991,6 +3512,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private async awaitNativeRead(
     started: NativeReadResult | Promise<NativeReadResult>,
     tier?: string,
+    signal?: AbortSignal,
   ): Promise<Uint8Array> {
     const result = await started;
     if (!isPendingNativeRead(result)) return result;
@@ -3000,6 +3522,7 @@ export class NativeRuntimeAdapter implements Runtime {
       for (;;) {
         if (this.closed || this.ownerRuntime.closed)
           throw new Error("native read was cancelled by runtime shutdown");
+        signal?.throwIfAborted();
         if (tier) this.throwServerTransportErrorForTier(tier);
         const bytes = result.poll();
         if (bytes !== null) return bytes;
@@ -3024,6 +3547,23 @@ export class NativeRuntimeAdapter implements Runtime {
    * client's own session is the runtime itself, so it writes as the runtime.
    * A trusted-serving host writes as its peer when no session is given.
    */
+  private mutationWriteIdentity(
+    session: RuntimeSession | null | undefined,
+    writeContext: string | null | undefined,
+  ): Uint8Array | undefined {
+    const id = txIdFromContext(writeContext);
+    const pending = id ? this.pendingTxs.get(id) : undefined;
+    if (isAcceptedReadCapability(pending?.readCapability)) {
+      // Admission registered the explicit scope once. A staged write must not
+      // restore its cached claims over a revocation observed by the core.
+      const identity = session?.identity ?? this.peerIdentity;
+      this.assertTransactionWriteIdentity(pending!, identity);
+      return pending!.readCapability === "client-accepted-evidence" ? undefined : identity;
+    }
+    this.applySessionClaims(session);
+    return this.trustedWriteIdentity(session);
+  }
+
   private trustedWriteIdentity(session: RuntimeSession | null | undefined): Uint8Array | undefined {
     const serving = this.readAuthorizationHost === "trusted-serving";
     if (!session) return serving && !this.trustedBackend ? this.peerIdentity : undefined;
@@ -3129,8 +3669,14 @@ export class NativeRuntimeAdapter implements Runtime {
     this.clientSessionClaimsKey = key;
   }
 
-  private ensureClientSessionClaims(session: RuntimeSession | null): void | Promise<void> {
+  private ensureClientSessionClaims(
+    session: RuntimeSession | null,
+    pendingTx?: PendingTx,
+  ): void | Promise<void> {
     if (this.closed || this.ownerRuntime.closed) throw new Error("Native runtime is closed");
+    // Accepted admission registered its scope once. Ordinary reads in that
+    // batch must observe live claims, never reinstall their cached session.
+    if (isAcceptedReadCapability(pendingTx?.readCapability)) return;
     if (!session || session.backendAuthority || this.readAuthorizationHost === "trusted-serving")
       return;
     if (canonicalJson(session.claims) === this.clientSessionClaimsKey) return;
@@ -3149,9 +3695,8 @@ export class NativeRuntimeAdapter implements Runtime {
    */
   private async waitForStrictRemoteQueryTransport(tier: string | null | undefined): Promise<void> {
     if (tier !== "remote") return;
-    const initialIntent = this.serverReplacementIntent;
-    const endpoint = initialIntent?.url ?? this.serverEndpointUrl;
-    const identityAuthJson = initialIntent?.authJson ?? this.serverAuthJson ?? "{}";
+    const endpoint = this.serverEndpointUrl;
+    const identityAuthJson = this.serverAuthJson ?? "{}";
     const identity = peerIdentityForWebSocketAuth(identityAuthJson, this.peerIdentity);
     // `connect()` starts its WebSocket handshake before it can admit the
     // native transport. A strict remote read begun in that interval must
@@ -3182,9 +3727,8 @@ export class NativeRuntimeAdapter implements Runtime {
         outage?.cancel();
       }
       if (this.closed) return;
-      const activeIntent = this.serverReplacementIntent;
-      const activeEndpoint = activeIntent?.url ?? this.serverEndpointUrl;
-      const activeAuthJson = activeIntent?.authJson ?? this.serverAuthJson ?? "{}";
+      const activeEndpoint = this.serverEndpointUrl;
+      const activeAuthJson = this.serverAuthJson ?? "{}";
       if (
         this.serverCarrierPromise &&
         (activeEndpoint !== endpoint ||
@@ -3197,6 +3741,11 @@ export class NativeRuntimeAdapter implements Runtime {
             terminal.message === "server transport disconnected") &&
           this.serverCarrierPromise !== null
         ) {
+          continue;
+        }
+        // A first attempt the server is not ready for yet is retried; the
+        // read follows it like any other first attempt.
+        if (this.linkStatus?.phase === "connecting" && this.serverCarrierPromise !== null) {
           continue;
         }
         throw terminal;
@@ -3261,19 +3810,23 @@ export class NativeRuntimeAdapter implements Runtime {
       new Utf8Decoder().decode(authorBytesForSession(session)),
     );
   }
-  private applySessionClaims(session: RuntimeSession | null | undefined): void {
+  private applySessionClaims(
+    session: RuntimeSession | null | undefined,
+    explicitAcceptedIdentity = false,
+  ): void {
     // Client runtimes only evaluate their already-settled local replica. They
     // never select the policy-enforcing native entry points, so there is no
     // reason to serialize a session subject into the public native ABI here.
     // In particular, local-first and anonymous subjects are admitted by the
     // first-party TypeScript flow, while raw native identity ingress must keep
     // rejecting their reserved issuers. Claims are required only by the
-    // explicitly selected trusted-serving host, where every identity call is
-    // part of that serving boundary.
+    // explicitly selected trusted-serving host. Accepted capability also binds
+    // an explicit session before its first read. Register that session's claims
+    // after native identity admission; implicit capability leaves them intact.
     if (
       !session ||
       session.backendAuthority ||
-      this.readAuthorizationHost !== "trusted-serving" ||
+      (!explicitAcceptedIdentity && this.readAuthorizationHost !== "trusted-serving") ||
       !this.db.setIdentityClaims
     ) {
       return;
@@ -3281,7 +3834,10 @@ export class NativeRuntimeAdapter implements Runtime {
     this.db.setIdentityClaims(session.identity, session.claims);
   }
 
-  private table(table: string): { columns: ColumnDescriptor[]; policies?: TablePolicies } {
+  private table(table: string): {
+    columns: ColumnDescriptor[];
+    policies?: TablePolicies;
+  } {
     const definition = this.schema[table];
     if (!definition) throw new Error(`unknown table ${table}`);
     return definition;
@@ -3302,6 +3858,14 @@ export class NativeRuntimeAdapter implements Runtime {
     pending: PendingTx,
     identity: Uint8Array | undefined,
   ): void {
+    if (isAcceptedReadCapability(pending.readCapability)) {
+      const bound = pending.identity ?? this.peerIdentity;
+      const effective = identity ?? this.peerIdentity;
+      if (!sameBytes(bound, effective)) {
+        throw new Error("Native runtime serializable transaction cannot mix write identities");
+      }
+      return;
+    }
     if (pending.kind === "serializable") {
       if (pending.identity && (!identity || !sameBytes(pending.identity, identity))) {
         throw new Error("Native runtime serializable transaction cannot mix write identities");
@@ -3512,6 +4076,8 @@ export class NativeRuntimeAdapter implements Runtime {
       for (let round = 0; ; round += 1) {
         this.coreTickAgain = false;
         await this.db.tick();
+        // Commits and the server's verdicts change the pending count.
+        this.syncStatusPublisher.changed();
         this.reportSlowQueries();
         this.pumpSubscriptions();
         this.scheduleServerPump();
@@ -3876,6 +4442,12 @@ export class NativeRuntimeAdapter implements Runtime {
     });
   }
 
+  private forgetServerTransportError(): void {
+    this.serverTransportError = null;
+    this.serverTransportErrorRetrying = false;
+    this.serverTransportErrorAwaitsAuth = false;
+  }
+
   private handleServerTransportError(
     error: unknown,
     generation = this.serverConnectionGeneration,
@@ -3883,160 +4455,31 @@ export class NativeRuntimeAdapter implements Runtime {
   ): void {
     if (generation !== this.serverConnectionGeneration) return;
     const message = errorMessage(error);
-    if (this.serverTransportError && message === "websocket closed") return;
-    const isFirstTerminalError = this.serverTransportError === null;
+    if (this.serverTransportError && message === "websocket closed") {
+      // Keep the more telling error already published; only its escalation
+      // from retrying to terminal is news.
+      if (reconnecting || !this.serverTransportErrorRetrying) return;
+      error = this.serverTransportError;
+    }
+    // The connection a renewable credential refusal ended closes on that same
+    // error; the app's renewed token still reconnects it.
+    if (error === this.serverTransportError && this.serverTransportErrorAwaitsAuth)
+      reconnecting = true;
+    this.serverTransportErrorAwaitsAuth = false;
+    // Report the first error, and again when an error the client was
+    // retrying through turns terminal.
+    const report =
+      this.serverTransportError === null || (this.serverTransportErrorRetrying && !reconnecting);
     this.serverTransportError = error instanceof Error ? error : new Error(message);
-    this.remoteLink.changed();
+    this.serverTransportErrorRetrying = reconnecting;
+    this.linkChanged();
     // An outage the client keeps reconnecting through leaves remote
-    // subscriptions open: their native sources resume on the next connection.
+    // subscriptions and writes' Global waits open: they resume on the next
+    // connection (#3572, #3923).
     if (!reconnecting) this.failRemoteSubscriptions(this.serverTransportError);
-    this.resolveServerTransportErrorWaiters(this.serverTransportError);
-    if (isFirstTerminalError) this.serverTransportErrorCallback?.(this.serverTransportError);
-  }
-
-  private canRetryNetworkConnection(attempt: ServerConnectionAttempt, error: WireError): boolean {
-    return (
-      !this.closed &&
-      (this.serverTransportError === null || this.serverOutageReported) &&
-      attempt === this.serverConnectionAttempt &&
-      attempt.generation === this.serverConnectionGeneration &&
-      error.retry === "later" &&
-      (error.code === "websocket_closed" ||
-        error.code === "websocket_error" ||
-        isReconnectLaterWireError(error)) &&
-      // A local-first client opened while offline must also reach its server
-      // once the network returns, so a first connection that fails at the
-      // network layer is retried like a dropped established link.
-      (attempt.carrier.hasNegotiated ||
-        this.networkRetryCount > 0 ||
-        error.code === "websocket_closed" ||
-        error.code === "websocket_error")
-    );
-  }
-
-  /** Retry an established upstream without turning a temporary outage into a query failure. */
-  private retryNetworkConnection(
-    attempt: ServerConnectionAttempt,
-    error: WireError,
-  ): Promise<WebSocketCarrier> | null {
-    if (!this.serverEndpointUrl || !this.serverAuthJson) return null;
-    const url = this.serverEndpointUrl;
-    const authJson = this.serverAuthJson;
-    const delay = networkRetryDelay(
-      this.networkRetryCount++,
-      this.serverOutageReported
-        ? NETWORK_RETRY_MAX_DELAY_MS
-        : NETWORK_RETRY_UNREPORTED_MAX_DELAY_MS,
-    );
-    this.remoteLink.changed();
-    // Retire this generation before any suspended pump or handshake can report
-    // its close as a terminal failure. Native subscriptions survive the detach.
-    this.serverConnectionGeneration += 1;
-    this.serverConnectionAttempt = null;
-    this.serverCarrier = null;
-    this.finishServerConnectionAttempt(attempt, new Error(error.message));
-    // Frames the retired socket buffered belong to its channel state, not the next connection's.
-    this.pendingInboundServerFrames.length = 0;
-    const generation = this.serverConnectionGeneration;
-    this.resolveServerTransportWorkWaiters();
-    const now = Date.now();
-    this.serverOutageStartedAt ??= now;
-    const publishOutage =
-      !this.serverOutageReported && now - this.serverOutageStartedAt >= NETWORK_OUTAGE_REPORT_MS;
-    const recovery = new Promise<WebSocketCarrier>((resolve, reject) => {
-      this.serverReconnectReject = reject;
-      this.serverReconnectTimer = setTimeout(() => {
-        this.serverReconnectTimer = null;
-        this.serverReconnectReject = null;
-        void (async () => {
-          await attempt.retirement;
-          if (
-            this.closed ||
-            generation !== this.serverConnectionGeneration ||
-            this.serverEndpointUrl !== url ||
-            this.serverAuthJson !== authJson
-          ) {
-            throw new Error("server transport disconnected");
-          }
-          const reconnect = this.startServerRetry(url, authJson);
-          return await reconnect;
-        })().then(resolve, reject);
-      }, delay);
-    });
-    attempt.recovery = recovery;
-    this.serverCarrierPromise = recovery;
-    // Each attempt's catch already reports terminal failures. Cancellation by
-    // explicit disconnect/close must not publish a historical transport error.
-    void recovery.catch(() => undefined);
-    if (publishOutage) {
-      this.serverOutageReported = true;
-      this.handleServerTransportError(new Error(error.message), generation, true);
-    }
-    return recovery;
-  }
-
-  /**
-   * A server may reject the first handshake while its authoritative catalogue
-   * is still bootstrapping. This is a protocol-level retry, not a failed
-   * upstream: keep remote waits pending and reconnect with bounded backoff.
-   */
-  private retryPreHelloConnection(
-    attempt: ServerConnectionAttempt,
-  ): Promise<WebSocketCarrier> | null {
-    if (
-      this.closed ||
-      attempt !== this.serverConnectionAttempt ||
-      attempt.generation !== this.serverConnectionGeneration ||
-      attempt.carrier !== this.serverCarrier ||
-      !this.serverEndpointUrl ||
-      !this.serverAuthJson
-    ) {
-      return null;
-    }
-    const url = this.serverEndpointUrl;
-    const authJson = this.serverAuthJson;
-    const delay = Math.min(
-      PRE_HELLO_RETRY_INITIAL_DELAY_MS * 2 ** this.preHelloRetryCount,
-      PRE_HELLO_RETRY_MAX_DELAY_MS,
-    );
-    this.preHelloRetryCount = Math.min(this.preHelloRetryCount + 1, 30);
-    this.serverConnectionGeneration += 1;
-    this.serverConnectionAttempt = null;
-    this.serverCarrier = null;
-    this.serverCarrierPromise = null;
-    this.resolveServerTransportWorkWaiters();
-    attempt.carrier.close();
-    return new Promise((resolve, reject) => {
-      this.serverReconnectReject = reject;
-      this.serverReconnectTimer = setTimeout(() => {
-        this.serverReconnectTimer = null;
-        this.serverReconnectReject = null;
-        if (this.closed || this.serverEndpointUrl !== url || this.serverAuthJson !== authJson) {
-          reject(new Error("server transport disconnected"));
-          return;
-        }
-        const reconnect = this.startServerRetry(url, authJson);
-        void reconnect.then(resolve, reject);
-      }, delay);
-    });
-  }
-
-  private clearServerOutage(): void {
-    this.serverOutageStartedAt = null;
-    if (!this.serverOutageReported) return;
-    this.serverOutageReported = false;
-    this.serverTransportError = null;
-    this.clearServerTransportErrorWaiters();
-    this.remoteLink.changed();
-  }
-
-  private clearServerReconnectTimer(): void {
-    if (this.serverReconnectTimer) {
-      clearTimeout(this.serverReconnectTimer);
-      this.serverReconnectTimer = null;
-    }
-    this.serverReconnectReject?.(new Error("server transport disconnected"));
-    this.serverReconnectReject = null;
+    this.resolveServerTransportErrorWaiters(this.serverTransportError, reconnecting);
+    if (report)
+      this.serverTransportErrorCallback?.(this.serverTransportError, { retrying: reconnecting });
   }
 
   private finishServerConnectionAttempt(
@@ -4046,7 +4489,7 @@ export class NativeRuntimeAdapter implements Runtime {
   ): void {
     if (attempt.finished) return;
     attempt.finished = true;
-    this.remoteLink.changed();
+    this.linkChanged();
     attempt.outcome = error;
     attempt.resolveTerminal(error);
     const isCurrent =
@@ -4057,7 +4500,6 @@ export class NativeRuntimeAdapter implements Runtime {
       this.serverConnectionGeneration += 1;
       this.serverConnectionAttempt = null;
       this.serverCarrier = null;
-      if (!this.serverReplacementPromise) this.serverCarrierPromise = null;
     }
     attempt.carrier.close();
     const transport = attempt.transport;
@@ -4167,21 +4609,32 @@ export class NativeRuntimeAdapter implements Runtime {
     }
   }
 
-  private throwServerTransportErrorForTier(tier: string): void {
+  /**
+   * The transport error a remote operation fails on. A write's Global wait
+   * (`throughOutage`) only fails on one the client stops retrying: an outage
+   * delays its settlement, it does not decide it (#3923).
+   */
+  private serverTransportErrorFor(throughOutage: boolean): Error | null {
+    if (throughOutage && this.serverTransportErrorRetrying) return null;
+    return this.serverTransportError;
+  }
+
+  private throwServerTransportErrorForTier(tier: string, throughOutage = false): void {
     if (tier === "local" && this.nonDurableClient && this.localRelayError) {
       throw this.localRelayError;
     }
-    if ((tier === "global" || tier === "remote") && this.serverTransportError) {
-      throw this.serverTransportError;
-    }
+    if (tier !== "global" && tier !== "remote") return;
+    const error = this.serverTransportErrorFor(throughOutage);
+    if (error) throw error;
   }
 
   private waitForServerTransportError(
     tier: string,
+    throughOutage = false,
   ): { promise: Promise<never>; cancel: () => void } | null {
     const local = tier === "local" && this.nonDurableClient;
     if (!local && tier !== "global" && tier !== "remote") return null;
-    const error = local ? this.localRelayError : this.serverTransportError;
+    const error = local ? this.localRelayError : this.serverTransportErrorFor(throughOutage);
     const waiters = local ? this.localRelayErrorWaiters : this.serverTransportErrorWaiters;
     if (error) {
       return {
@@ -4191,6 +4644,7 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     const waiter: ServerTransportErrorWaiter = {
       active: true,
+      throughOutage,
       reject: () => {},
     };
     const promise = new Promise<never>((_, reject) => {
@@ -4208,10 +4662,12 @@ export class NativeRuntimeAdapter implements Runtime {
     };
   }
 
-  private resolveServerTransportErrorWaiters(error: Error): void {
+  private resolveServerTransportErrorWaiters(error: Error, retrying = false): void {
     const waiters = this.serverTransportErrorWaiters.splice(0);
     for (const waiter of waiters) {
-      if (waiter.active) waiter.reject(error);
+      if (!waiter.active) continue;
+      if (retrying && waiter.throughOutage) this.serverTransportErrorWaiters.push(waiter);
+      else waiter.reject(error);
     }
   }
 
@@ -4227,8 +4683,10 @@ export class NativeRuntimeAdapter implements Runtime {
     observedEpoch: number,
   ): { promise: Promise<void>; cancel: () => void } | null {
     if (tier !== "global" && tier !== "remote") return null;
-    // Queued frames are not new work while an earlier route is suspended.
-    // The pump owns those frames and publishes completion edges.
+    // Frames still waiting to be routed are not a reason to wake: their
+    // arrival already advanced the epoch, and the pump that routes them
+    // publishes again. Waking for them would spin in microtasks, starving the
+    // very timer that runs that pump.
     if (this.serverTransportWorkEpoch !== observedEpoch) {
       return { promise: Promise.resolve(), cancel: () => {} };
     }
@@ -4283,7 +4741,7 @@ function recordWrite(write: Write, writes: Map<string, Write>): TxId {
   return id as TxId;
 }
 
-function txIdFromContext(writeContext?: string | null): OpenTransactionId | undefined {
+export function txIdFromContext(writeContext?: string | null): OpenTransactionId | undefined {
   if (!writeContext) return undefined;
   try {
     const parsed = JSON.parse(writeContext) as { transaction_id?: unknown };
@@ -4295,9 +4753,11 @@ function txIdFromContext(writeContext?: string | null): OpenTransactionId | unde
   }
 }
 
-type EncodedBranchView = { head: unknown; base?: unknown };
+export type EncodedBranchView = { head: unknown; base?: unknown };
 
-function branchViewFromWriteContext(writeContext?: string | null): EncodedBranchView | undefined {
+export function branchViewFromWriteContext(
+  writeContext?: string | null,
+): EncodedBranchView | undefined {
   if (!writeContext) return undefined;
   try {
     const parsed = JSON.parse(writeContext) as { branch_view?: unknown };
@@ -4475,7 +4935,7 @@ function updatedAtMsFromWriteContext(writeContext?: string | null): number | und
   return parsed.updated_at;
 }
 
-function effectiveUpdatedAtMs(writeContext?: string | null): number | null {
+export function effectiveUpdatedAtMs(writeContext?: string | null): number | null {
   return updatedAtMsFromWriteContext(writeContext) ?? Date.now();
 }
 
@@ -4530,7 +4990,9 @@ function pendingTxFromOptions(
   return openTransactionId ? pendingTxs.get(openTransactionId) : undefined;
 }
 
-function openTransactionIdFromOptions(optionsJson?: string | null): OpenTransactionId | undefined {
+export function openTransactionIdFromOptions(
+  optionsJson?: string | null,
+): OpenTransactionId | undefined {
   if (!optionsJson) return undefined;
   try {
     const parsed = JSON.parse(optionsJson) as { transaction_id?: unknown };
@@ -4542,7 +5004,7 @@ function openTransactionIdFromOptions(optionsJson?: string | null): OpenTransact
   }
 }
 
-function readOptions(
+export function readOptions(
   tier?: string | null,
   includeDeleted = false,
   optionsJson?: string | null,
@@ -4559,6 +5021,9 @@ function readOptions(
   }
   const readView = options.read_view ?? options.readView;
   if (readView != null) readOptions.read_view = readView;
+  if (Array.isArray(options.splices) && options.splices.length > 0) {
+    readOptions.splices = options.splices;
+  }
   return readOptions;
 }
 
@@ -4566,7 +5031,9 @@ function readOptions(
 function readFirstLoadWaitsForRemote(optionsJson?: string | null): boolean {
   if (optionsJson == null) return false;
   try {
-    const options = JSON.parse(optionsJson) as { first_load_remote_wait_ms?: unknown };
+    const options = JSON.parse(optionsJson) as {
+      first_load_remote_wait_ms?: unknown;
+    };
     return (
       typeof options.first_load_remote_wait_ms === "number" && options.first_load_remote_wait_ms > 0
     );
@@ -4575,7 +5042,10 @@ function readFirstLoadWaitsForRemote(optionsJson?: string | null): boolean {
   }
 }
 
-function assertSupportedReadOptions(tier?: string | null, optionsJson?: string | null): void {
+export function assertSupportedReadOptions(
+  tier?: string | null,
+  optionsJson?: string | null,
+): void {
   if (tier != null && !["local-first", "remote", "local-only"].includes(tier)) {
     throw new Error(`Native runtime received unsupported read tier '${tier}'`);
   }
@@ -4670,7 +5140,7 @@ function closeSubscriptionSource(source: SubscriptionSource): void {
   source.close();
 }
 
-function queryIncludesDeleted(queryJson: string): boolean {
+export function queryIncludesDeleted(queryJson: string): boolean {
   try {
     return (JSON.parse(queryJson) as { include_deleted?: unknown }).include_deleted === true;
   } catch {
@@ -4678,7 +5148,7 @@ function queryIncludesDeleted(queryJson: string): boolean {
   }
 }
 
-function queryHasArraySubqueries(queryJson: string): boolean {
+export function queryHasArraySubqueries(queryJson: string): boolean {
   try {
     const value = (JSON.parse(queryJson) as { array_subqueries?: unknown }).array_subqueries;
     return Array.isArray(value) && value.length > 0;
@@ -4691,7 +5161,7 @@ function nativeQueryInput(queryJson: string, schema: WasmSchema): NativeQueryInp
   return encodeQueryJson(queryJson, schema);
 }
 
-function assertNoUnsupportedPermissionIntrospection(queryJson: string): void {
+export function assertNoUnsupportedPermissionIntrospection(queryJson: string): void {
   if (!queryContainsPermissionIntrospection(queryJson)) return;
   throw new Error(
     "Native runtime does not support permission-introspection query columns or predicates " +
@@ -4834,7 +5304,7 @@ function unqualifiedColumn(column: string): string {
   return stripColumnQualifier(column);
 }
 
-function subscriptionOutputColumns(
+export function subscriptionOutputColumns(
   queryJson: string,
   schema: WasmSchema,
 ): SubscriptionOutputColumns {
@@ -4932,7 +5402,9 @@ function decodeRuntimeTerminalOperations(
     return {
       root_key: terminalKey(operation.root_key),
       path,
-      edit: { Move: { key: terminalKey(edit.Move.key), index: edit.Move.index } },
+      edit: {
+        Move: { key: terminalKey(edit.Move.key), index: edit.Move.index },
+      },
     };
   });
 }
@@ -5003,7 +5475,7 @@ function outputColumnsForTable(
   return columns;
 }
 
-function addNestedOuterColumns(queryJson: string): string {
+export function addNestedOuterColumns(queryJson: string): string {
   const parsed = JSON.parse(queryJson) as { array_subqueries?: unknown };
   addNestedOuterColumnsToSubqueries(parsed.array_subqueries);
   return JSON.stringify(parsed);
@@ -5158,6 +5630,14 @@ function errorMessage(error: unknown): string {
   return String(error);
 }
 
+/** The refusal the engine gives a peer of another identity, with its reason. */
+function identityMismatchError(): Error {
+  return Object.assign(
+    new Error("a store configured as one user serves only its own identity's peers"),
+    { code: "protocol", reason: "identity_mismatch" satisfies NativeCoreErrorReason },
+  );
+}
+
 function contextualError(context: string, error: unknown): Error {
   const cause = error instanceof Error ? error : new Error(errorMessage(error));
   return new Error(`${context}: ${cause.message}`, { cause });
@@ -5179,6 +5659,9 @@ const REJECTION_CODES_BY_REASON: Readonly<Record<NativeCoreErrorReason, string>>
   missing_chunks: "write_rejected",
   permissions_head_missing: "write_rejected",
   predecessor_rejected: "write_rejected",
+  schema_version_not_deployed: "write_rejected",
+  // A refused subscriber, never a write's fate.
+  identity_mismatch: "write_rejected",
 };
 
 /** A rejected wait's code, from the core reason every binding carries on it. */
@@ -5218,7 +5701,7 @@ function extractWriteRejectedReason(message: string): string | null {
   return match ? match[1]! : null;
 }
 
-function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
+export function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
   const parsed = JSON.parse(queryJson) as {
     array_subqueries?: unknown;
     conditions?: unknown;
@@ -5236,7 +5719,9 @@ function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
   }
   const table = parsed.table;
   if (parsed.relation_ir != null) {
-    const lossless = parseRelationQueryJsonLossless(queryJson) as { relation_ir?: unknown };
+    const lossless = parseRelationQueryJsonLossless(queryJson) as {
+      relation_ir?: unknown;
+    };
     if (!lossless.relation_ir || typeof lossless.relation_ir !== "object") {
       throw new Error("Relation query is missing relation_ir");
     }
@@ -5246,6 +5731,7 @@ function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
     return queryWithPredicates(table, [], {
       relation: lossless.relation_ir,
       select: readSelectColumns(parsed.select_columns ?? parsed.select),
+      partial: readPartialSelects(parsed.select_columns),
       arraySubqueries: readQueryArraySubqueries(parsed.array_subqueries, table, schema),
     });
   }
@@ -5259,6 +5745,7 @@ function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
       offset: readOffset(parsed.offset),
       orderBy: readRootOrderBy(parsed.order_by ?? parsed.orderBy),
       select: readSelectColumns(parsed.select_columns ?? parsed.select),
+      partial: readPartialSelects(parsed.select_columns),
       arraySubqueries: readQueryArraySubqueries(parsed.array_subqueries, table, schema),
     },
   );
@@ -5283,7 +5770,10 @@ function coerceQueryPredicate(
     };
   }
   if (filter.op === "Not") {
-    return { op: "Not", predicate: coerceQueryPredicate(table, filter.predicate, schema) };
+    return {
+      op: "Not",
+      predicate: coerceQueryPredicate(table, filter.predicate, schema),
+    };
   }
   if (isHistoryTable(table) && "column" in filter) {
     if (filter.column === "$transactionId") {
@@ -5313,15 +5803,25 @@ function coerceQueryPredicate(
               boundary < 0n ? op === "Gt" || op === "Gte" : op === "Lt" || op === "Lte";
             return { op: matches ? "All" : "Any", predicates: [] };
           }
-          return { column: filter.column, op, value: { type: "U64", value: boundary } };
+          return {
+            column: filter.column,
+            op,
+            value: { type: "U64", value: boundary },
+          };
         };
         switch (filter.op) {
           case "Eq":
-            return { op: "All", predicates: [bound("Gte", lower), bound("Lte", upper)] };
+            return {
+              op: "All",
+              predicates: [bound("Gte", lower), bound("Lte", upper)],
+            };
           case "Ne":
             return {
               op: "Not",
-              predicate: { op: "All", predicates: [bound("Gte", lower), bound("Lte", upper)] },
+              predicate: {
+                op: "All",
+                predicates: [bound("Gte", lower), bound("Lte", upper)],
+              },
             };
           case "Gt":
             return bound("Gt", upper);
@@ -5415,7 +5915,10 @@ function coerceEnumPayloadPredicate(
     };
   }
   if (predicate.op === "Not") {
-    return { ...predicate, predicate: coerceEnumPayloadPredicate(predicate.predicate, fields) };
+    return {
+      ...predicate,
+      predicate: coerceEnumPayloadPredicate(predicate.predicate, fields),
+    };
   }
   if (predicate.op === "EnumMatch") {
     throw new Error("payload enum matches cannot be nested");
@@ -5457,6 +5960,45 @@ function isQueryPredicateCmp(
   );
 }
 
+/** The typed partial projections of `select_columns`: the parts the engine reads. */
+function readPartialSelects(value: unknown): QueryPartialSelect[] {
+  if (!Array.isArray(value)) return [];
+  const partial: QueryPartialSelect[] = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object") continue;
+    const projection = entry as {
+      kind?: unknown;
+      column: string;
+      from?: unknown;
+      to?: unknown;
+      at?: unknown;
+    };
+    if (projection.kind === "json_pointer") {
+      if (typeof projection.at !== "string") throw unsupportedQueryEncodingError("select_columns");
+      partial.push({
+        column: projection.column,
+        kind: "json_pointer",
+        at: projection.at,
+      });
+    } else if (
+      projection.kind === "bytes" ||
+      projection.kind === "text_utf16" ||
+      projection.kind === "text_utf8"
+    ) {
+      if (typeof projection.from !== "number" || typeof projection.to !== "number") {
+        throw unsupportedQueryEncodingError("select_columns");
+      }
+      partial.push({
+        column: projection.column,
+        kind: projection.kind,
+        from: projection.from,
+        to: projection.to,
+      });
+    }
+  }
+  return partial;
+}
+
 function readSelectColumns(value: unknown): string[] | undefined {
   if (value == null) return undefined;
   if (!Array.isArray(value)) throw unsupportedQueryEncodingError();
@@ -5496,7 +6038,10 @@ function readRootOrderBy(value: unknown): QueryOrder[] {
       if (entry[1] !== "asc" && entry[1] !== "desc") {
         throw unsupportedQueryEncodingError("order_by");
       }
-      return { column: entry[0], direction: entry[1] === "asc" ? "Asc" : "Desc" };
+      return {
+        column: entry[0],
+        direction: entry[1] === "asc" ? "Asc" : "Desc",
+      };
     }
     if (!entry || typeof entry !== "object") {
       throw unsupportedQueryEncodingError("order_by");
@@ -5603,7 +6148,10 @@ function arraySubqueryFilterToPredicates(value: unknown): QueryPredicate[] | nul
   ] as const) {
     const entry = record[key];
     if (entry && typeof entry === "object") {
-      const { column, value: literal } = entry as { column?: unknown; value?: unknown };
+      const { column, value: literal } = entry as {
+        column?: unknown;
+        value?: unknown;
+      };
       return typeof column === "string"
         ? [{ column, op, value: valueToQueryLiteral(literal) }]
         : null;
@@ -5621,7 +6169,10 @@ function arraySubqueryFilterToPredicates(value: unknown): QueryPredicate[] | nul
   }
   const contains = record.Contains;
   if (contains && typeof contains === "object") {
-    const { column, value: literal } = contains as { column?: unknown; value?: unknown };
+    const { column, value: literal } = contains as {
+      column?: unknown;
+      value?: unknown;
+    };
     return typeof column === "string"
       ? [{ column, op: "Contains", value: valueToQueryLiteral(literal) }]
       : null;
@@ -5639,7 +6190,10 @@ function readArraySubqueryOrder(value: unknown): QueryOrder[] {
     if (entry[1] !== "Ascending" && entry[1] !== "Descending") {
       throw unsupportedQueryEncodingError("array_subqueries.order_by");
     }
-    return { column: entry[0], direction: entry[1] === "Ascending" ? "Asc" : "Desc" };
+    return {
+      column: entry[0],
+      direction: entry[1] === "Ascending" ? "Asc" : "Desc",
+    };
   });
 }
 
@@ -5667,7 +6221,10 @@ function coerceQueryLiteral(
         resolveQueryTable(schema, table)?.columns.find((entry) => entry.name === column)
           ?.column_type);
   if (columnType?.type === "Bytea" && value.type === "Array") {
-    return { type: "Bytea", value: Uint8Array.from(value.value.map(readByteLiteral)) };
+    return {
+      type: "Bytea",
+      value: Uint8Array.from(value.value.map(readByteLiteral)),
+    };
   }
   if (value.type === "Array") {
     const elementType =
@@ -5694,7 +6251,10 @@ function coerceLiteralForColumnType(
 ): QueryLiteral {
   if (value.type === "Nullable") {
     return allowNullable && value.value
-      ? { type: "Nullable", value: coerceLiteralForColumnType(value.value, columnType, false) }
+      ? {
+          type: "Nullable",
+          value: coerceLiteralForColumnType(value.value, columnType, false),
+        }
       : value;
   }
   if (columnType?.type === "Uuid" && value.type === "Text" && isUuidString(value.value)) {
@@ -5707,7 +6267,10 @@ function coerceLiteralForColumnType(
     return { type: "Double", value: value.value };
   }
   if (columnType?.type === "BigInt" && value.type === "Integer") {
-    return { type: "BigInt", value: exactSignedI64(value.value, "BigInt value") };
+    return {
+      type: "BigInt",
+      value: exactSignedI64(value.value, "BigInt value"),
+    };
   }
   if (columnType?.type === "Timestamp" && value.type === "Integer") {
     return { type: "Timestamp", value: value.value };
@@ -5719,7 +6282,10 @@ function coerceLiteralForColumnType(
     }
   }
   if (columnType?.type === "Bytea" && value.type === "Array") {
-    return { type: "Bytea", value: Uint8Array.from(value.value.map(readByteLiteral)) };
+    return {
+      type: "Bytea",
+      value: Uint8Array.from(value.value.map(readByteLiteral)),
+    };
   }
   if (columnType?.type === "Array" && value.type === "Array") {
     return {
@@ -5750,7 +6316,11 @@ function readFlatConditions(conditions: unknown): QueryPredicate[] | null {
       predicates.push(canonical);
       continue;
     }
-    const record = condition as { column?: unknown; op?: unknown; value?: unknown };
+    const record = condition as {
+      column?: unknown;
+      op?: unknown;
+      value?: unknown;
+    };
     if (typeof record.column !== "string" || typeof record.op !== "string") return null;
     const column = stripColumnQualifier(record.column);
     switch (record.op) {
@@ -5758,30 +6328,58 @@ function readFlatConditions(conditions: unknown): QueryPredicate[] | null {
         if (record.value === null) {
           predicates.push({ column, op: "IsNull" });
         } else {
-          predicates.push({ column, op: "Eq", value: valueToQueryLiteral(record.value) });
+          predicates.push({
+            column,
+            op: "Eq",
+            value: valueToQueryLiteral(record.value),
+          });
         }
         break;
       case "ne":
         if (record.value === null) {
           predicates.push({ column, op: "IsNotNull" });
         } else {
-          predicates.push({ column, op: "Ne", value: valueToQueryLiteral(record.value) });
+          predicates.push({
+            column,
+            op: "Ne",
+            value: valueToQueryLiteral(record.value),
+          });
         }
         break;
       case "gt":
-        predicates.push({ column, op: "Gt", value: valueToQueryLiteral(record.value) });
+        predicates.push({
+          column,
+          op: "Gt",
+          value: valueToQueryLiteral(record.value),
+        });
         break;
       case "gte":
-        predicates.push({ column, op: "Gte", value: valueToQueryLiteral(record.value) });
+        predicates.push({
+          column,
+          op: "Gte",
+          value: valueToQueryLiteral(record.value),
+        });
         break;
       case "lt":
-        predicates.push({ column, op: "Lt", value: valueToQueryLiteral(record.value) });
+        predicates.push({
+          column,
+          op: "Lt",
+          value: valueToQueryLiteral(record.value),
+        });
         break;
       case "lte":
-        predicates.push({ column, op: "Lte", value: valueToQueryLiteral(record.value) });
+        predicates.push({
+          column,
+          op: "Lte",
+          value: valueToQueryLiteral(record.value),
+        });
         break;
       case "contains":
-        predicates.push({ column, op: "Contains", value: valueToQueryLiteral(record.value) });
+        predicates.push({
+          column,
+          op: "Contains",
+          value: valueToQueryLiteral(record.value),
+        });
         break;
       case "isNull":
         if (typeof record.value !== "boolean") return null;
@@ -5823,7 +6421,11 @@ function predicateToFilters(predicate: unknown): QueryPredicate[] | null {
   }
   const enumMatch = record.EnumMatch;
   if (enumMatch && typeof enumMatch === "object") {
-    const match = enumMatch as { column?: unknown; case?: unknown; payload?: unknown };
+    const match = enumMatch as {
+      column?: unknown;
+      case?: unknown;
+      payload?: unknown;
+    };
     const column = readColumnRef(match.column);
     const payload = predicateToFilterTree(match.payload);
     return column && typeof match.case === "string" && payload
@@ -5948,7 +6550,10 @@ function readLiteral(value: unknown): QueryLiteral | null {
       CANONICAL_SIGNED_I64_DECIMAL.test(record.value)
     ) {
       try {
-        return { type: "BigInt", value: exactSignedI64(BigInt(record.value), "BigInt value") };
+        return {
+          type: "BigInt",
+          value: exactSignedI64(BigInt(record.value), "BigInt value"),
+        };
       } catch {
         return null;
       }
@@ -6030,7 +6635,7 @@ export function encodeCellsForRow(
   return encodeCells(columns, (column) => row[column.name], true);
 }
 
-function encodeCellsForStreamingRow(
+export function encodeCellsForStreamingRow(
   definition: { columns: ColumnDescriptor[]; policies?: TablePolicies },
   row: InsertValues,
   streamedColumn: string,
@@ -6047,7 +6652,7 @@ function encodeCellsForStreamingRow(
   return encodeCells(columns, (column) => row[column.name], true);
 }
 
-function encodeCellsForStreamingPatch(
+export function encodeCellsForStreamingPatch(
   definition: { columns: ColumnDescriptor[]; policies?: TablePolicies },
   row: InsertValues,
   streamedColumn: string,
@@ -6073,7 +6678,11 @@ function encodeCells(
 ): Uint8Array {
   const descriptor = [...columns]
     .sort((left, right) => left.name.localeCompare(right.name))
-    .map((column) => ({ name: column.name, valueType: storageColumnValueType(column), column }));
+    .map((column) => ({
+      name: column.name,
+      valueType: storageColumnValueType(column),
+      column,
+    }));
   const values = descriptor.map(({ column }) =>
     encodeCellValue(column, valueFor(column), requireMissingDefaults),
   );
@@ -6123,11 +6732,11 @@ function encodeCellValue(
   return encodeNativeColumnValue(column, resolved);
 }
 
-function readRowBatches(payload: Uint8Array): NativeRowBatch[] {
+export function readRowBatches(payload: Uint8Array): NativeRowBatch[] {
   return new PostcardReader(payload).readVec(readNativeRowBatch);
 }
 
-function readRelationSnapshot(payload: Uint8Array): NativeRelationSubscriptionSnapshot {
+export function readRelationSnapshot(payload: Uint8Array): NativeRelationSubscriptionSnapshot {
   return readNativeRelationSubscriptionSnapshot(new PostcardReader(payload));
 }
 
@@ -6212,7 +6821,7 @@ function nativeRowFieldPlans(
   return plans;
 }
 
-function rowsFromRelationSnapshot(
+export function rowsFromRelationSnapshot(
   snapshot: NativeRelationSubscriptionSnapshot,
   schema: WasmSchema,
   projectedColumns?: readonly ColumnDescriptor[],
@@ -6268,26 +6877,39 @@ export function decodeSubscriptionDelta(
   reset = false,
   outputColumns: SubscriptionOutputColumns | null = null,
 ): RuntimeSubscriptionDelta {
-  const decodeRows = (batches: NativeRowBatch[], keys: Uint8Array[], indices: number[]) => {
+  const decodeRows = (
+    batches: NativeRowBatch[],
+    keys: Uint8Array[],
+    indices: number[],
+    splices?: NativeSubscriptionDelta["updatedSplices"],
+  ) => {
     const rows = rowsFromSubscriptionBatches(batches, schema, outputColumns, "full-record");
     if (rows.length !== keys.length)
       throw new Error("subscription occurrence sidecar length mismatch");
-    return rows.flatMap((row, index) =>
-      outputColumns && row.table !== outputColumns.rootTable
-        ? []
-        : [
-            {
-              sourceId: row.id,
-              occurrenceKey: keys[index]!,
-              index: indices[index]!,
-              row: runtimeSubscriptionRow(row, schema, outputColumns),
-            },
-          ],
-    );
+    return rows.flatMap((row, index) => {
+      if (outputColumns && row.table !== outputColumns.rootTable) return [];
+      const rowSplices = splices?.[index];
+      return [
+        {
+          sourceId: row.id,
+          occurrenceKey: keys[index]!,
+          index: indices[index]!,
+          row: runtimeSubscriptionRow(row, schema, outputColumns),
+          ...(rowSplices && rowSplices.length > 0
+            ? { splices: runtimeRowSplices(rowSplices, schema, row.table) }
+            : {}),
+        },
+      ];
+    });
   };
   return {
     added: decodeRows(delta.added, delta.addedOccurrenceKeys, delta.addedIndices),
-    updated: decodeRows(delta.updated, delta.updatedOccurrenceKeys, delta.updatedIndices),
+    updated: decodeRows(
+      delta.updated,
+      delta.updatedOccurrenceKeys,
+      delta.updatedIndices,
+      delta.updatedSplices,
+    ),
     removed: delta.removed.flatMap((row, index) =>
       outputColumns && row.table !== outputColumns.rootTable
         ? []
@@ -6301,6 +6923,37 @@ export function decodeSubscriptionDelta(
     ),
     ...(reset ? { reset: true } : {}),
   };
+}
+
+/** Convert native splices to each column's public coordinates: UTF-16 for TEXT, bytes for BYTEA. */
+function runtimeRowSplices(
+  columns: NativeSubscriptionDelta["updatedSplices"][number],
+  schema: WasmSchema,
+  table: string,
+): Record<string, RuntimeValueSplice[]> {
+  const descriptors = resolveQueryTable(schema, table)?.columns ?? [];
+  const result: Record<string, RuntimeValueSplice[]> = {};
+  for (const { column, splices } of columns) {
+    const type = descriptors.find((descriptor) => descriptor.name === column)?.column_type.type;
+    if (type === "Text") {
+      result[column] = splices.map((splice: NativeSplice) => ({
+        at: splice.atUtf16,
+        delete: splice.deleteUtf16,
+        insert: textDecoder.decode(splice.insert),
+      }));
+    } else if (type === "Bytea") {
+      result[column] = splices.map((splice: NativeSplice) => ({
+        at: splice.at,
+        delete: splice.delete,
+        insert: splice.insert,
+      }));
+    } else {
+      throw new Error(
+        `subscription splices for column "${column}" of type ${type} are not supported yet`,
+      );
+    }
+  }
+  return result;
 }
 
 function rowsFromSubscriptionBatches(
@@ -6662,11 +7315,16 @@ function normalizeSubscriptionRejectionReason(
   if (record.type === "ShapeRegistrationPendingCatalogueAdmission") {
     return { type: "ShapeRegistrationPendingCatalogueAdmission" };
   }
-  if (record.type === "ServerFailure" && typeof record.code === "string") {
-    return { type: "ServerFailure", code: record.code };
+  // NAPI names the server's reason `code`, WASM `detail`.
+  const failure = record.code ?? record.detail;
+  if (record.type === "ServerFailure" && typeof failure === "string") {
+    return { type: "ServerFailure", code: failure };
   }
   if (record.type === "InvalidAuthoritySourceClosure" && typeof record.transition === "string") {
-    return { type: "InvalidAuthoritySourceClosure", transition: record.transition };
+    return {
+      type: "InvalidAuthoritySourceClosure",
+      transition: record.transition,
+    };
   }
   throw new Error("unknown subscription rejection reason");
 }
@@ -6753,7 +7411,10 @@ function runtimeSubscriptionValue(value: Value, type: ColumnType): Value {
     };
   }
   if (type.type === "Row" && value.type === "Row") {
-    return { type: "Row", value: runtimeSubscriptionNestedRow(value.value, type.columns) };
+    return {
+      type: "Row",
+      value: runtimeSubscriptionNestedRow(value.value, type.columns),
+    };
   }
   if (type.type === "EnumPayload" && value.type === "Enum") {
     const payload = type.cases.find((entry) => entry.name === value.value.case)?.fields;
@@ -6815,10 +7476,6 @@ export function parseUuid(value: string): Uint8Array {
     bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
   }
   return bytes;
-}
-
-export function formatUuid(bytes: Uint8Array): string {
-  return formatUuidAt(bytes, 0);
 }
 
 function readU32Le(bytes: Uint8Array, offset: number): number {

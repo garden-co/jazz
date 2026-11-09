@@ -22,6 +22,8 @@ mod catalogue_sync_integration;
 mod claims_merge_integration;
 #[path = "../client_storage_shutdown_integration.rs"]
 mod client_storage_shutdown_integration;
+#[path = "../client_tick_driver.rs"]
+mod client_tick_driver;
 #[path = "../clients_sync.rs"]
 mod clients_sync;
 #[path = "../compatible_deployment.rs"]
@@ -86,6 +88,8 @@ mod schema_migration_policies;
 mod scope_revocation;
 #[path = "../server_subscriptions.rs"]
 mod server_subscriptions;
+#[path = "../split_messages.rs"]
+mod split_messages;
 #[path = "../subscription_initial_hydration.rs"]
 mod subscription_initial_hydration;
 #[path = "../subscription_lifecycle.rs"]

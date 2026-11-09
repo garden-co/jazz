@@ -1,6 +1,7 @@
 import { accountRegistryUrl } from "../accounts/context.js";
 import { createAccountManagerWithRuntime } from "../accounts/enrollment.js";
 import type { AuthState } from "../runtime/auth-state.js";
+import type { SyncStatus } from "../runtime/sync-status.js";
 import type { AuthMode, PublicSession } from "../runtime/context.js";
 import { attachSubscriptionStore } from "../subscription-store-internal.js";
 
@@ -24,6 +25,12 @@ export function makeFakeClient(params: {
   let state: AuthState = { authMode: params.authMode, session };
   const listeners = new Set<(s: AuthState) => void>();
   const updateAuthTokenSpy = { lastToken: null as string | null };
+  let syncStatus: SyncStatus = {
+    link: { state: "connecting" },
+    pendingUploads: 0,
+    synced: false,
+  };
+  const syncListeners = new Set<(status: SyncStatus) => void>();
   return attachSubscriptionStore(
     {
       db: {
@@ -31,6 +38,11 @@ export function makeFakeClient(params: {
         onAuthChanged: (cb: (s: AuthState) => void) => {
           listeners.add(cb);
           return () => listeners.delete(cb);
+        },
+        getSyncStatus: () => syncStatus,
+        onSyncStatusChange: (cb: (status: SyncStatus) => void) => {
+          syncListeners.add(cb);
+          return () => syncListeners.delete(cb);
         },
         updateAuthToken: (token: string) => {
           updateAuthTokenSpy.lastToken = token;
@@ -40,6 +52,11 @@ export function makeFakeClient(params: {
       },
       shutdown: async () => {},
       __updateAuthTokenSpy: updateAuthTokenSpy,
+      __setSyncStatus(next: SyncStatus) {
+        syncStatus = next;
+        for (const l of syncListeners) l(next);
+      },
+      __syncListenerCount: () => syncListeners.size,
       __markUnauthenticated(reason: "expired" | "invalid" | "missing" | "disabled" | "revoked") {
         state = { ...state, error: reason };
         for (const l of listeners) l(state);

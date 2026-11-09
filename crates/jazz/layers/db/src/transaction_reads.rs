@@ -13,6 +13,7 @@ pub(super) struct ReadState {
     queue: VecDeque<u64>,
     wakers: Vec<Waker>,
     closed: bool,
+    failure: Option<Error>,
 }
 
 fn unfinished() -> Error {
@@ -27,16 +28,37 @@ impl ReadState {
         if self.closed || !self.queue.is_empty() {
             return Err(unfinished());
         }
+        if let Some(error) = &self.failure {
+            return Err(error.clone());
+        }
         Ok(())
+    }
+
+    pub(super) fn fail(&mut self, error: Error) {
+        self.failure.get_or_insert(error);
     }
 }
 
 pub(super) struct ReadGuard {
     state: Rc<RefCell<ReadState>>,
     ticket: u64,
+    requires_evidence: bool,
+    finished: bool,
 }
 
 impl ReadGuard {
+    pub(super) fn require_evidence(&mut self) {
+        self.requires_evidence = true;
+        self.finished = false;
+    }
+
+    pub(super) fn finish<T>(&mut self, result: &Result<T, Error>) {
+        if let Err(error) = result {
+            self.state.borrow_mut().fail(error.clone());
+        }
+        self.finished = true;
+    }
+
     pub(super) fn watch(&self, waker: &Waker) {
         let mut state = self.state.borrow_mut();
         if !state.wakers.iter().any(|prior| prior.will_wake(waker)) {
@@ -68,6 +90,12 @@ impl Drop for ReadGuard {
         // Wake after releasing the state borrow: an executor can poll eagerly.
         let wakers = {
             let mut state = self.state.borrow_mut();
+            if self.requires_evidence && !self.finished {
+                state.fail(Error::new(
+                    ErrorCode::NotObserved,
+                    "an accepted transaction read was cancelled",
+                ));
+            }
             state.queue.retain(|ticket| *ticket != self.ticket);
             std::mem::take(&mut state.wakers)
         };
@@ -79,8 +107,7 @@ impl Drop for ReadGuard {
 
 impl Db {
     pub(super) fn transaction_read_guard(&self, id: OpenTransactionId) -> Result<ReadGuard, Error> {
-        self.ensure_storage_owner_active()?;
-        let inner = self.inner();
+        let inner = self.inner.staging();
         let batch = inner
             .batches
             .get(&id)
@@ -96,7 +123,12 @@ impl Db {
             state.queue.push_back(ticket);
             ticket
         };
-        Ok(ReadGuard { state, ticket })
+        Ok(ReadGuard {
+            state,
+            ticket,
+            requires_evidence: false,
+            finished: true,
+        })
     }
 
     pub(super) fn check_read_guard(
@@ -104,8 +136,7 @@ impl Db {
         id: OpenTransactionId,
         guard: &ReadGuard,
     ) -> Result<(), Error> {
-        self.ensure_storage_owner_active()?;
-        let inner = self.inner();
+        let inner = self.inner.staging();
         if guard.state.borrow().closed
             || !inner
                 .batches
@@ -113,6 +144,9 @@ impl Db {
                 .is_some_and(|batch| Rc::ptr_eq(&batch.reads_state, &guard.state))
         {
             return Err(unfinished());
+        }
+        if let Some(error) = &guard.state.borrow().failure {
+            return Err(error.clone());
         }
         Ok(())
     }
@@ -122,6 +156,18 @@ pub(super) fn close_pending_reads(state: &Rc<RefCell<ReadState>>) {
     let wakers = {
         let mut state = state.borrow_mut();
         state.closed |= !state.queue.is_empty();
+        std::mem::take(&mut state.wakers)
+    };
+    for waker in wakers {
+        waker.wake();
+    }
+}
+
+/// Notify failed readers only after the caller has released the engine borrow.
+pub(super) fn fail_pending_reads(state: &Rc<RefCell<ReadState>>, error: Error) {
+    let wakers = {
+        let mut state = state.borrow_mut();
+        state.fail(error);
         std::mem::take(&mut state.wakers)
     };
     for waker in wakers {

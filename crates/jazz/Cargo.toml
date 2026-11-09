@@ -34,7 +34,6 @@ futures-core = "0.3.31"
 futures-channel = "0.3.31"
 futures = "0.3"
 futures-util = "0.3"
-blake3 = "1"
 jazz-types.workspace = true
 jazz-model.workspace = true
 jazz-protocol.workspace = true

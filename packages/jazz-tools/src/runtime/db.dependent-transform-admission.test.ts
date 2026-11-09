@@ -3,7 +3,7 @@ import { schema as s } from "../index.js";
 import { createAccountDbWithRuntimeSource } from "../accounts/context.js";
 import { DefaultRuntimeSource } from "./default-runtime-source.js";
 import { beginDbTransactionAfter } from "./db.js";
-import type { JazzClient, TransactionalRuntime } from "./client.js";
+import type { JazzClient } from "./client.js";
 import type { RuntimeClientContext } from "./runtime-source.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
 
@@ -18,18 +18,21 @@ class PreparationSource extends DefaultRuntimeSource {
 it.each(["mergeable", "serializable"] as const)(
   "keeps generated IDs native for immediate %s transaction inserts without dependencies",
   async (kind) => {
-    const app = s.defineApp({
-      plain: s.table({ title: s.string() }, {}),
-      transformed: s.table(
-        {
-          title: s.string().transform({
-            from: (value) => value.toUpperCase(),
-            to: (value: string) => value.toLowerCase(),
-          }),
-        },
-        {},
-      ),
-    });
+    const app = s.defineApp(
+      {
+        plain: s.table({ title: s.string() }, {}),
+        transformed: s.table(
+          {
+            title: s.string().transform({
+              from: (value) => value.toUpperCase(),
+              to: (value: string) => value.toLowerCase(),
+            }),
+          },
+          {},
+        ),
+      },
+      { migrations: "none" },
+    );
     const source = new PreparationSource();
     const db = await createAccountDbWithRuntimeSource(
       await localAccountConfig(`transform-insert-${crypto.randomUUID()}`),
@@ -58,19 +61,22 @@ it.each(["mergeable", "serializable"] as const)(
 );
 
 it("retains transaction admission when an earlier transform lookup delays opening", async () => {
-  const app = s.defineApp({
-    prices: s.table(
-      {
-        amount: s.float().transform({
-          dependsOn: ["scale"],
-          from: (value, context: Readonly<{ scale: number }>) => value / context.scale,
-          to: (value: number, context: Readonly<{ scale: number }>) => value * context.scale,
-        }),
-        scale: s.float().default(100),
-      },
-      {},
-    ),
-  });
+  const app = s.defineApp(
+    {
+      prices: s.table(
+        {
+          amount: s.float().transform({
+            dependsOn: ["scale"],
+            from: (value, context: Readonly<{ scale: number }>) => value / context.scale,
+            to: (value: number, context: Readonly<{ scale: number }>) => value * context.scale,
+          }),
+          scale: s.float().default(100),
+        },
+        {},
+      ),
+    },
+    { migrations: "none" },
+  );
   const source = new PreparationSource();
   const db = await createAccountDbWithRuntimeSource(
     await localAccountConfig(`transform-admission-${crypto.randomUUID()}`),
@@ -93,10 +99,7 @@ it("retains transaction admission when an earlier transform lookup delays openin
       return originalQuery(...args);
     });
     const pending = db.update(app.prices, row.id, { amount: 2 });
-    const opening = vi.spyOn(
-      source.client.getRuntime() as TransactionalRuntime,
-      "beginTransaction",
-    );
+    const opening = vi.spyOn(source.client.getRuntime(), "beginTransaction");
     const prerequisite = vi.fn(() => admission);
     const tx = beginDbTransactionAfter(db, prerequisite);
     tx.update(app.prices, row.id, { amount: 3, scale: 100 });

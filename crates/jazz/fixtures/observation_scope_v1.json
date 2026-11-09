@@ -1,0 +1,52 @@
+{
+  "format": "jazz.sqlite.observation-scope.v1",
+  "assembly": "Independent Python little-endian field assembly and hashlib SHA256 derive_key (u64LE context length, UTF-8 context, preimage). SYSTEM canonical identity; empty claims or a single a claim containing all supported scalar/container tags. Values: null,true,u8/u16/u32/u64 MAX,i32/i64 MIN,f64 negative zero,UTF-8 é,bytes ff00,UUID 11*16,empty tuple,empty array,Some(u8=1),enumtag7,u48 MAX.",
+  "empty": {
+    "preimage_hex": "6a617a7a2e73716c6974652e6f62736572766174696f6e2d73636f70652e7631001c0000005b2275726e3a6a617a7a3a73797374656d222c2273797374656d225d00000000",
+    "sha256_hex": "dacc56358834d471acb29837f67b2526c6737558b72651007f38289c1df6e85d"
+  },
+  "values": {
+    "preimage_hex": "6a617a7a2e73716c6974652e6f62736572766174696f6e2d73636f70652e7631001c0000005b2275726e3a6a617a7a3a73797374656d222c2273797374656d225d0100000001000000610d1100000000010102ff03ffff04ffffffff05ffffffffffffffff06000000800700000000000000800800000000000000800902000000c3a90a02000000ff000b111111111111111111111111111111110c000000000d000000000e02010f0710ffffffffffff",
+    "sha256_hex": "2e9efd6db78c81555ef39830af5443c2734a21bdaaaf8c509f539f85e5bdf370"
+  },
+  "submission_contexts": {
+    "owner_unknown_upstream": {
+      "preimage_hex": "dacc56358834d471acb29837f67b2526c6737558b72651007f38289c1df6e85d002222222222222222222222222222222200",
+      "sha256_hex": "a66d40e4abdb59cb6eeab1c2289c60043ef637841d8e5780141423e515a6f02c"
+    },
+    "owner_authority": {
+      "preimage_hex": "dacc56358834d471acb29837f67b2526c6737558b72651007f38289c1df6e85d002222222222222222222222222222222201",
+      "sha256_hex": "816b3cbc65049a28a85476125e73f855c419b322778f76be5e3d5914ad82f5dd"
+    },
+    "selected_unknown_upstream": {
+      "preimage_hex": "dacc56358834d471acb29837f67b2526c6737558b72651007f38289c1df6e85d01333333333333333333333333333333333333333333333333333333333333333300",
+      "sha256_hex": "1ee286a6809886c79fec269d36e0fb3746c597b56e4b2a232bf272c534a0238f"
+    },
+    "selected_authority": {
+      "preimage_hex": "dacc56358834d471acb29837f67b2526c6737558b72651007f38289c1df6e85d01333333333333333333333333333333333333333333333333333333333333333301",
+      "sha256_hex": "2832c02d3a8069ac8fea21daa42f55fd457555bdcec4deab1a98d96400f25705"
+    }
+  },
+  "forward_tx_ids": [
+    {
+      "u64": "0",
+      "sqlite_i64": "0",
+      "little_endian_hex": "0000000000000000"
+    },
+    {
+      "u64": "9223372036854775807",
+      "sqlite_i64": "9223372036854775807",
+      "little_endian_hex": "ffffffffffffff7f"
+    },
+    {
+      "u64": "9223372036854775808",
+      "sqlite_i64": "-9223372036854775808",
+      "little_endian_hex": "0000000000000080"
+    },
+    {
+      "u64": "18446744073709551615",
+      "sqlite_i64": "-1",
+      "little_endian_hex": "ffffffffffffffff"
+    }
+  ]
+}

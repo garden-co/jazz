@@ -11,7 +11,7 @@ import { testAuthorBytes } from "./testing/account-fixtures.js";
 import { hasJazzNapiBuild, loadNapiModule } from "./testing/napi-runtime-test-utils.js";
 import { hasJazzWasmBuild, loadWasmModuleForTest } from "./testing/wasm-runtime-test-utils.js";
 
-const app = s.defineApp({ notes: s.table({ text: s.string() }, {}) });
+const app = s.defineApp({ notes: s.table({ text: s.string() }, {}) }, { migrations: "none" });
 // Existing SQLite Unsubscribe { id: 128 }, assembled from independent fields.
 // Byte-level ingress checks are required here: row equality cannot detect an
 // unread suffix or alternate varint spelling at the generated artifact boundary.
@@ -21,7 +21,7 @@ const invalid = [
   new Uint8Array([129, 0, 128, 1]),
   new Uint8Array([1, 128, 129, 0]),
   new Uint8Array(),
-  new Uint8Array([255]),
+  new Uint8Array([254]),
   valid.slice(0, -1),
 ];
 
@@ -83,15 +83,15 @@ for (const artifact of ["napi", "wasm"] as const) {
             throw new Error("Remote read completed without an answer");
           expect(read.poll()).toBeNull();
           await db.tick();
-          const fetches = (link.recvWireFrames() as Uint8Array[]).filter((frame) => frame[0] === 3);
+          const fetches = (link.recvWireFrames() as Uint8Array[]).filter((frame) => frame[0] === 0);
           expect(fetches).toHaveLength(1);
-          // Fetch's first field is its canonical request ID. Answer uses the
-          // same ID, followed by through=0 and an empty row-ID vector. Copy
+          // Read's first field is its canonical request ID. Settled uses the
+          // same ID, through=0, Some(empty members), and global=true. Copy
           // only the ID bytes, not a serializer's complete expected output.
           const fetch = fetches[0];
           let idEnd = 1;
           while (fetch[idEnd++] & 0x80) {}
-          const answer = new Uint8Array([11, ...fetch.slice(1, idEnd), 0, 0]);
+          const answer = new Uint8Array([3, ...fetch.slice(1, idEnd), 0, 1, 0, 1]);
 
           expect(() => link.sendWireFrames([answer, invalid[0]])).toThrow(
             /invalid SQLite sync frame/,

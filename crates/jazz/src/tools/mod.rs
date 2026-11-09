@@ -78,9 +78,25 @@ pub struct AppContext {
     /// Backend secret for session impersonation.
     /// Enables `for_session()` to act as any user.
     pub backend_secret: Option<String>,
+    /// With `backend_secret`: the user this client acts for, as the app's
+    /// backend states it (the way `createJazz` relays its users' clients).
+    /// The client is then that user's session, not the backend's own link.
+    pub backend_session: Option<Session>,
+    /// With `backend_session`: the published permissions bundle (its hex
+    /// id) that session is pinned to, as `createJazz` pins every session it
+    /// states. A core governs a stated session only by its bundle, and
+    /// refuses one without.
+    pub bundle: Option<String>,
     /// Admin secret for privileged sync over WebSocket and `/admin/*` HTTP.
     /// On `/ws`, a valid admin secret authenticates this client as the backend.
     pub admin_secret: Option<String>,
+    /// The app's schema versions and the lenses between them, as
+    /// `jazz-tools validate` and `deploy` write them to `migrations/index.ts`
+    /// beside schema.ts (load it with
+    /// [`deployment::published::client_migrations_module`]): the store
+    /// reaches `schema` along them, so it stores each version as the server
+    /// does (SPEC 10.7).
+    pub migrations: crate::db::Migrations,
 }
 
 #[cfg(feature = "testing")]
@@ -96,7 +112,10 @@ impl AppContext {
             account_id: None,
             jwt_token: None,
             backend_secret: None,
+            backend_session: None,
+            bundle: None,
             admin_secret: None,
+            migrations: Default::default(),
         }
     }
 }

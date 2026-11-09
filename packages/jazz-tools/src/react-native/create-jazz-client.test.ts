@@ -46,9 +46,12 @@ import {
   useLocalFirstAuth,
 } from "./index.js";
 
-const app = s.defineApp({
-  notes: s.table({ title: s.string() }, {}),
-});
+const app = s.defineApp(
+  {
+    notes: s.table({ title: s.string() }, {}),
+  },
+  { migrations: "none" },
+);
 
 const nativeRelayCapability = Uint8Array.from({ length: 32 }, (_, index) => index);
 
@@ -388,6 +391,8 @@ function encodeSubscriptionDelta(delta: { added: EncodedRow[] }): Uint8Array {
   writer.vec(() => undefined, 0);
   writer.vec(() => undefined, 0);
   writer.vec(() => undefined, 0);
+  // No updated rows, so no splices.
+  writer.vec(() => undefined, 0);
   return writer.finish();
 }
 
@@ -413,7 +418,7 @@ function encodeSubscriptionEvents(delta: Uint8Array): Uint8Array {
 
 function encodeNativeSession(userId: string): Uint8Array {
   const identity = new PostcardWriter();
-  identity.string(accountRegistryUrl("https://core.example", selectedConfig.appId));
+  identity.string(accountRegistryUrl("https://core.example", selectedConfig.appId!));
   identity.u64(1);
   const accountBytes = Uint8Array.from(
     selectedConfig.account.id.replaceAll("-", "").match(/../g)!,
