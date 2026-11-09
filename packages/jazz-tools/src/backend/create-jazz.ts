@@ -56,13 +56,23 @@ import {
 } from "./core-transport.js";
 export { pinnedSocket } from "./core-transport.js";
 export type { CoreSocket } from "./core-transport.js";
-export { sqlite, memory, remote, vercel, files, s3, vercelBlob } from "./core-providers/index.js";
+export {
+  sqlite,
+  memory,
+  remote,
+  vercel,
+  durableObjects,
+  files,
+  s3,
+  vercelBlob,
+} from "./core-providers/index.js";
 export type {
   BlobStore,
   S3BlobStore,
   VercelBlobStore,
   BackendCredential,
   VercelStoreOptions,
+  DurableObjectsOptions,
 } from "./core-providers/index.js";
 /** A provider of a compatible Jazz core. */
 export type JazzStore = JazzCoreProvider;

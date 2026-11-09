@@ -9,7 +9,8 @@
   "files": [
     "bin/**",
     "dist/**",
-    "README.md"
+    "README.md",
+    "durable-object-worker/**"
   ],
   "type": "module",
   "main": "dist/index.js",
@@ -185,7 +186,9 @@
     "bench:abstract:browser": "JAZZ_ABSTRACT_BENCH=1 vitest run --config vitest.config.browser.ts tests/browser/schema-marshalling.abstract-bench.test.ts",
     "bench:realistic:browser": "vitest run --config vitest.config.browser.ts tests/browser/realistic-bench.test.ts",
     "stage:inspector-overlay": "node scripts/stage-inspector-overlay.mjs",
-    "pack:dry-run": "npm pack --dry-run"
+    "pack:dry-run": "npm pack --dry-run",
+    "build:durable-objects": "node scripts/bundle-durable-object-worker.mjs",
+    "prepack": "pnpm build:durable-objects"
   },
   "dependencies": {
     "@noble/curves": "2.0.1",

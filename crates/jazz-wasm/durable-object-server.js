@@ -360,6 +360,11 @@ export function createJazzDurableObject({
         )
       )
         return failure(401, "unauthorized", "admin backend credential required");
+      if (path === "admin/host" && request.method === "GET")
+        return Response.json({
+          appId: this.env.JAZZ_APP_ID,
+          artifact: this.env.JAZZ_HOST?.artifact,
+        });
       const known =
         path === "schemas" ||
         path.startsWith("schema/") ||

@@ -822,6 +822,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-do-server"
+version = "0.1.0"
+dependencies = [
+ "jazz-wasm",
+]
+
+[[package]]
 name = "jazz-do-server-core-check"
 version = "0.1.0"
 dependencies = [

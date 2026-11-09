@@ -483,3 +483,72 @@ ordinary backend-stated user sync sessions. It refuses direct proof-only auth,
 admin/backend-only links, relays, catalogue bootstrap, and thin clients. Production
 account admission/revocation, HTTP routes, lifecycle, and provider wiring remain
 in the plan. No storage or wire encoding changed.
+
+## Provisioning provider and packaged host
+
+Node backends can now use the same provider architecture as Vercel:
+
+```ts
+import { createJazz, durableObjects } from "jazz-tools/backend";
+
+const jazz = createJazz({
+  app,
+  permissions,
+  store: durableObjects({ name: "my-jazz-authority" }),
+});
+await jazz.ready();
+```
+
+Supply `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, and a stable, randomly
+generated `JAZZ_CORE_SECRET` (at least 32 characters). Explicit `credentials:
+{ accountId, apiToken }` and `secret` options override these. The API token needs
+Worker script/settings and workers.dev access for the selected account. Configure
+that account's workers.dev subdomain first. API-token rotation does not rotate
+core credentials. Changing the name creates another authority; keep the core
+secret and name across backend restarts. Secret rotation is not implemented.
+
+Opening uploads the packaged production host when absent, reuses matching bytes,
+or upgrades an older recognized version. It preserves the SQLite namespace and
+secret binding, refuses downgrades and same-version/different-byte builds, and
+checks the live authenticated host before returning the existing remote transport.
+Closing releases the backend handle without deleting the shared authority.
+The upload uses Cloudflare's migration `old_tag` check to reject stale upgrades;
+creation additionally sends `If-None-Match: *`. Actual Cloudflare provisioning,
+including these concurrency guards, has **not** been deployment-tested.
+See the [upload API](https://developers.cloudflare.com/api/resources/workers/subresources/scripts/methods/update/).
+
+`pnpm --filter jazz-tools build:durable-objects` builds the production-only
+`jazz-do-server` wrapper and bundles Worker JavaScript plus WASM into the package's
+`durable-object-worker/` directory. `prepack` runs this build. The fixture crate
+and test endpoints are excluded. `FAST=1` skips WASM optimization for iteration;
+release packages should use the default optimized build. Generated artifacts are
+ignored by Git, included in npm packages, and verified before upload.
+
+Provisioning metadata has explicit versions, separate from database and sync
+encodings (which are unchanged):
+
+- App ID: UUIDv5 in the DNS namespace over UTF-8
+  `jazz-durable-objects-v1:<accountId>:<workerName>`. Never change this mapping
+  for an existing authority.
+- `jazz-do-worker-v1` manifest: SHA-256 hex hashes of the exact Worker/WASM bytes;
+  artifact digest is SHA-256 of UTF-8 `format`, package version, Worker hash,
+  and WASM hash joined with NUL bytes, with no trailing NUL.
+- `jazz-do-host-v1` JSON binding records version, artifact digest, app ID and
+  SHA-256 of the core secret. Unknown formats fail closed. Upgrades retain
+  identity and namespace; incompatible future formats require an explicit
+  migration, not regeneration of the app ID or deletion of the namespace.
+
+Validation:
+
+```sh
+# Mock Cloudflare HTTP API: create, reuse, upgrade, concurrent opens and refusals.
+cd packages/jazz-tools
+pnpm exec vitest run src/backend/core-providers/durable-objects.test.ts
+# From repository root, test the actual packaged host in local workerd.
+JAZZ_DO_PACKAGED=1 node dev/durable-objects/native-sqlite/harness/test-create-jazz.mjs
+```
+
+The packaged-host integration covers createJazz readiness, authenticated writes
+and reads, reconnect and SQLite-only restart. Provisioning tests do not contact
+Cloudflare. The host still has the account/guest/thin and transaction-overlay/
+large-value limitations recorded in the plan; this provider does not remove them.

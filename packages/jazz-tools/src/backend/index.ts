@@ -32,6 +32,7 @@ export {
   s3,
   sqlite,
   vercel,
+  durableObjects,
   vercelBlob,
   type BlobStore,
   type S3BlobStore,
@@ -44,6 +45,7 @@ export {
   type LocalFirstGuest,
   acceptLocalFirstAuth,
   type VercelStoreOptions,
+  type DurableObjectsOptions,
   type WsLikeSocket,
 } from "./create-jazz.js";
 

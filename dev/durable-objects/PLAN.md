@@ -193,7 +193,8 @@ responsibility as `vercel()`. Given Cloudflare account credentials and a stable
 resource name, find or deploy a versioned Jazz Worker, ensure its SQLite DO
 namespace exists, contact the app's object, and return the existing remote-core
 transport. Users should not have to write or manually deploy the DO class.
-The precise options shape is not yet a public API.
+The provider accepts a stable `name`, optional Cloudflare `credentials`, and a
+stable core `secret` (or their documented environment variables).
 
 Keep provisioning credentials separate from credentials used to access the core.
 Preserve app identity and the namespace across restarts and upgrades. Coordinate
@@ -205,6 +206,13 @@ The resulting core implements the existing `appId`, `handle`, `openSocket`,
 `signLinkChallenge`, and `close` contract. Keep provider branches out of
 `createJazz()` and the deferred interface rename out of scope. Test provisioning
 with an injected Cloudflare API client before deploying to a real account.
+
+The production-only Worker/WASM packaging and provider are implemented. Mocked
+API tests cover creation, reuse, upgrade preservation, concurrent opening, lost
+upload responses and refusal of unrelated hosts, changed secrets and downgrades.
+The packaged host passes local workerd createJazz readiness, read/write, reconnect
+and persisted restart checks. Real Cloudflare provisioning and concurrency behavior
+remain unverified; this section is not a production-deployment acceptance pass.
 
 ## 11. Validate correctness, then measure deployment behavior
 
@@ -226,7 +234,7 @@ sync. Use same-base CodSpeed comparisons for end-to-end performance claims.
 Sections 5 and 7 remain deferred. The reusable host is in production modules,
 and Node `createJazz({ store: remote(...) })` now reaches readiness against it in
 workerd. Backend read/write, live reconnect and persisted restart are validated.
-Add the `durableObjects()` provisioning provider around this host while keeping
+The `durableObjects()` provisioning provider now wraps this host, keeping
 the unsupported account/guest/thin modes explicit (section 8.6). Workers-hosted
 `createJazz()` is not a prerequisite. Do not claim full transaction or large-value
 support while sections 5 and 7 remain deferred; hibernation remains separate.

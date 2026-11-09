@@ -10,3 +10,5 @@ export { memory } from "./memory.js";
 export { remote, type BackendCredential } from "./remote.js";
 export { sqlite } from "./sqlite.js";
 export { vercel, type VercelStoreOptions } from "./vercel.js";
+
+export { durableObjects, type DurableObjectsOptions } from "./durable-objects.js";
