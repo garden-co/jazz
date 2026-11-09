@@ -43,7 +43,9 @@ it("raw transaction streaming refuses encrypted payloads before pulling plaintex
     })();
     tx = fixture.owner.beginSerializableTransaction();
     await expect(
-      tx.updateStreaming(uploadApp.files, row.value.id, { payload: source }),
+      Promise.resolve().then(() =>
+        tx!.updateStreaming(uploadApp.files, row.value.id, { payload: source }),
+      ),
     ).rejects.toThrow("Encrypted streaming is not supported");
     expect(consumed).toBe(0);
     await tx.rollback();
