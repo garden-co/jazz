@@ -2396,6 +2396,7 @@ dependencies = [
  "indexed_db_futures",
  "jazz",
  "jazz-db",
+ "jazz-server",
  "jazz-text",
  "jazz-wasm-tracing",
  "js-sys",

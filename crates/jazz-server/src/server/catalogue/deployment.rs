@@ -1,28 +1,8 @@
 use super::*;
-use crate::server::permissions_validation::validate_permissions_relations;
-use jazz::catalogue::{CatalogueLens, CataloguePut};
+use jazz::catalogue::CataloguePut;
 use jazz::tools::deployment::{DeploymentCatalogue, PreparedDeployment};
 
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct DeploymentResponse {
-    pub changed: bool,
-    pub published: PublishedArtifacts,
-    /// The published permissions bundle (see [`jazz::catalogue`]): what
-    /// the backend pins its sessions to.
-    pub bundle: String,
-}
-#[derive(Debug, Clone, Default, serde::Serialize)]
-pub(crate) struct PublishedArtifacts {
-    pub schemas: Vec<String>,
-    pub migrations: Vec<PublishedMigration>,
-}
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct PublishedMigration {
-    pub from_hash: String,
-    pub to_hash: String,
-}
+pub(crate) use crate::runtime::catalogue::DeploymentResponse;
 
 pub(crate) struct StagedDeployment {
     expected: CatalogueIndex,
@@ -34,11 +14,7 @@ pub(crate) struct StagedDeployment {
 impl StoredCatalogue {
     pub(crate) fn deployment_catalogue(&self) -> Result<DeploymentCatalogue, CatalogueError> {
         let index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
-        Ok(DeploymentCatalogue {
-            schemas: index.schemas.values().cloned().collect(),
-            migrations: index.lenses.values().cloned().collect(),
-            admitted_schema_hashes: index.admitted.clone(),
-        })
+        Ok(index.deployment_catalogue())
     }
 
     /// Stage `prepared` as a published bundle: its schemas, lenses and
@@ -52,73 +28,11 @@ impl StoredCatalogue {
             .lock()
             .map_err(|_| CatalogueError::LockError)?
             .clone();
-        let now = unix_timestamp_millis();
-        let mut put = CataloguePut::default();
-        let mut published = PublishedArtifacts::default();
-        for schema in prepared.schemas() {
-            let hash = SchemaHash::compute(schema);
-            let unchanged = expected.schemas.get(&hash).is_some_and(|stored| {
-                let mut structural = stored.clone();
-                for table in structural.values_mut() {
-                    table.policies = TablePolicies::default();
-                }
-                structural == *schema
-            });
-            // A configured initial schema, or one the store admitted, is
-            // published only once a deployment publishes it.
-            if unchanged && expected.schema_published_at.contains_key(&hash) {
-                continue;
-            }
-            published.schemas.push(hash.to_string());
-            put.schemas.push((schema.clone(), now));
-        }
-        for lens in prepared.migrations() {
-            // Preparation already rejects conflicting definitions for this pair.
-            if expected
-                .lenses
-                .contains_key(&(lens.source_hash, lens.target_hash))
-            {
-                continue;
-            }
-            published.migrations.push(PublishedMigration {
-                from_hash: lens.source_hash.to_string(),
-                to_hash: lens.target_hash.to_string(),
-            });
-            put.lenses.push(CatalogueLens {
-                source: lens.source_hash,
-                target: lens.target_hash,
-                published_at: now,
-                forward: lens.forward.clone(),
-            });
-        }
-        let source = prepared.active_schema().public_schema();
-        let schema_hash = SchemaHash::compute(source);
-        let permissions = source
-            .iter()
-            .filter(|(_, table)| table.policies != TablePolicies::default())
-            .map(|(name, table)| (*name, table.policies.clone()))
-            .collect::<HashMap<_, _>>();
-        validate_permissions_relations(&permissions).map_err(CatalogueError::WriteError)?;
-        let permissions: jazz::catalogue::Permissions = permissions.into_iter().collect();
-        let bundle = jazz::catalogue::bundle_id(&schema_hash, &permissions)
-            .map_err(|error| CatalogueError::WriteError(error.to_string()))?;
-        let new = !expected.bundles.iter().any(|known| known.id == bundle);
-        if new {
-            put.bundles.push((schema_hash, permissions, now));
-        }
-        let changed = new || !published.schemas.is_empty() || !published.migrations.is_empty();
-        published.schemas.sort();
-        published
-            .migrations
-            .sort_by(|a, b| (&a.from_hash, &a.to_hash).cmp(&(&b.from_hash, &b.to_hash)));
+        let (put, response) = expected.stage_deployment(prepared, unix_timestamp_millis())?;
         Ok(StagedDeployment {
             expected,
             put,
-            response: DeploymentResponse {
-                changed,
-                published,
-                bundle: bundle.to_hex(),
-            },
+            response,
         })
     }
 
@@ -136,11 +50,13 @@ impl StoredCatalogue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jazz::tools::public_schema::TablePolicies;
     use jazz::tools::{
         deployment::{DeploymentRequest, prepare_deployment},
         public_schema::{ColumnType, PolicyExpr, SchemaBuilder, TableSchema, Value},
         schema_lens::{LensOp, LensTransform},
     };
+    use std::collections::HashMap;
 
     // Internal: public reads cannot distinguish an unnecessary rewrite from
     // leaving the same durable record untouched. Inspect the actual write batch.

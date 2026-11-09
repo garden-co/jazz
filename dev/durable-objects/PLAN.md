@@ -62,26 +62,65 @@ abstractions.
 
 ## 8. Adapt the server core to the DO runtime
 
-Start from the existing `JazzCore` contract, not a broad server rewrite. Map
-`appId`, `handle`, `openSocket`, `signLinkChallenge`, and `close` to a DO host;
-extract only the shared server logic those operations need. Unlike Vercel's
-Linux Sandbox, a DO hosts the engine inside the Workers runtime, so the native
-server's operating-system dependencies need adapters.
+Work top-down from the existing Node backend and remote-core contract:
+
+```text
+createJazz({ store: durableObjects(options) })
+  -> provider provisions/reuses the Jazz Worker and DO namespace
+  -> existing remote-core HTTP/WebSocket transport
+  -> Worker routes to the app's DO
+  -> WASM ServerCore on ctx.storage.sql
+```
+
+This follows the Vercel provider: `createJazz()` retains authentication,
+catalogue publication, and its existing NAPI backend client. Running
+`createJazz()` itself inside a Worker or DO is outside this implementation.
+No second SQLite-in-WASM client is needed for this architecture.
+
+Build the production DO core host first and connect a Node `createJazz()` through
+`remote(...)` in local workerd. Its readiness must perform real schema/permissions
+publication and backend admission. Then verify an authenticated client read/write
+and reconstruction from persisted SQLite before adding automatic provisioning.
+Move reusable hosting into production modules; retain fixture setup, raw probe
+routes, and assertions only in the harness. Do not maintain two server engines.
 
 ### 8.1 Database scheduling and threads — production integration remaining
 
-Integrate the harness's serialized `ServerCore` ticks, bounded input queues,
-async request handling, and microtask wakeups into the production DO host.
+WASM core ownership, async ticks, microtask wakeups, session transport, and
+backend-session handshake now live in `crates/jazz-wasm/src/server.rs`, behind
+its optional `server` feature. The harness's `FixtureServer` supplies test setup
+and delegates to that host. Integrate the remaining JavaScript event scheduling
+and bounded input queues into the production Worker adapter.
 Preserve ordering, cancellation, error propagation, and persistence before
 publication. Connect background I/O completion to host wakeups (section 8.4)
 and validate scheduling across production lifecycle events (section 9).
 
-### 8.3 HTTP and WebSocket hosting
+### 8.3 HTTP and WebSocket hosting — in progress
 
 Native standalone startup binds TCP listeners and serves Axum requests. A DO
 receives requests and WebSockets through Cloudflare handlers. Adapt requests,
 responses, and ordered frames at that boundary; share route/protocol behavior.
 Porting the standalone listener is unnecessary for the `JazzCore` contract.
+
+Prelude parsing, Hello decoding, foreign-version refusals, and bounded frame
+batching now live in `jazz-server::runtime::websocket`, compiled for native and
+WASM hosts. The native route uses these shared helpers. The harness now has a
+`/socket` endpoint for the normal prelude/Hello and batched sync carrier, with
+bounded admission queues and a handshake deadline. It verifies a host-configured
+backend credential and opens a bundle-pinned user session.
+
+Catalogue request validation, migration lowering, permission validation, artifact
+staging, and read response shapes now live in the shared runtime. Native HTTP
+handlers use them; `ServerCore::deploy` applies publication through the owner's
+connection and supersedes sessions only for new bundles. `WasmServerCore` exposes
+catalogue reads and publication, and fixture startup now uses that publication
+path. Native deployment tests and an owner restart/idempotency test cover the
+extraction. The workerd catalogue suite exercises publication on DO SQLite.
+
+HTTP routing, admin authentication, bounded request bodies, blank-store startup,
+and publication lifetime after disconnect still need a production Worker adapter.
+The WASM methods are host APIs, not authenticated HTTP endpoints. This is not yet
+a deployable host or an end-to-end `createJazz().ready()` implementation.
 
 ### 8.4 Outbound HTTP and background I/O
 
@@ -100,9 +139,14 @@ new authority; lifecycle verification belongs to section 9.
 
 ### 8.6 Production admission and shared server behavior
 
-The harness accepts a caller-supplied author; it is not production authentication.
-Share hello/prelude handling, authenticated session admission, bundle validation,
-accounts, and catalogue operations with the native core. Keep `createJazz()`'s
+The harness's raw `/session` endpoint still accepts a fixture author. Its new
+`/socket` endpoint verifies backend-stated user sessions, sharing credential
+comparison, canonical identity checks, and policy-claim conversion with native
+hosting. Bundle validation uses the existing core admission path. Local workerd
+checks cover credential/identity/bundle refusals, policy-scoped sync, and restart.
+Direct guest proofs and account revocation, trusted/admin links, thin-client
+hosting, and shared HTTP account/catalogue routes remain unconnected; unsupported
+socket modes fail explicitly. Keep `createJazz()`'s
 application authentication and publication responsibilities intact. Verify valid
 sessions and rejection of invalid credentials/bundles through the normal paths.
 
@@ -118,19 +162,23 @@ as a separate lifecycle step.
 
 ## 10. Connect the provider and assess Workers compatibility
 
-Implement `durableObjects(...)` as a `JazzCoreProvider` returning the existing
-`JazzCore` interface: request handling, sockets, stable link-challenge signing,
-and close. Preserve socket ordering, authentication, bundle pinning, and the
-meaning of close for a shared core. Add no provider-specific branch to
-`createJazz()` and keep the deferred interface rename out of scope. The target
-API is `createJazz({ store: durableObjects(env.JAZZ) })`: the provider connects to
-the DO host from sections 8–9; it does not itself replace that host. Provider
-credentials remain private, and local routing markers are not DO credentials.
+Implement `durableObjects(options)` as a `JazzCoreProvider` with the same lifecycle
+responsibility as `vercel()`. Given Cloudflare account credentials and a stable
+resource name, find or deploy a versioned Jazz Worker, ensure its SQLite DO
+namespace exists, contact the app's object, and return the existing remote-core
+transport. Users should not have to write or manually deploy the DO class.
+The precise options shape is not yet a public API.
 
-A supported backend can initially reach the DO core through the remote provider.
-Running `createJazz()` itself in a Worker requires a separate dependency audit
-and replacements for its native backend-client/runtime dependencies; hosting
-the core in a DO does not solve that automatically.
+Keep provisioning credentials separate from credentials used to access the core.
+Preserve app identity and the namespace across restarts and upgrades. Coordinate
+concurrent opens and check version compatibility before reusing/upgrading a host;
+an older backend must not overwrite a newer deployment. Closing a provider releases
+its connections without deleting storage or stopping a shared authority.
+
+The resulting core implements the existing `appId`, `handle`, `openSocket`,
+`signLinkChallenge`, and `close` contract. Keep provider branches out of
+`createJazz()` and the deferred interface rename out of scope. Test provisioning
+with an injected Cloudflare API client before deploying to a real account.
 
 ## 11. Validate correctness, then measure deployment behavior
 
@@ -149,8 +197,10 @@ sync. Use same-base CodSpeed comparisons for end-to-end performance claims.
 
 ## Delivery order
 
-Sections 5 and 7 remain deferred. Next implement production HTTP/WebSocket
-hosting (8.3), then the remaining runtime adaptations in section 8, lifecycle
-and routing, and provider integration. Do not claim full transaction or
-large-value support while sections 5 and 7 remain deferred. Workers-hosted
-`createJazz()` and WebSocket hibernation have separate acceptance criteria.
+Sections 5 and 7 remain deferred. First move the tested host implementation out
+of the harness. Then make Node `createJazz({ store: remote(...) })` reach readiness
+against the production DO host in workerd, including catalogue publication and
+backend admission. Validate authenticated read/write and restart. Finally add the
+`durableObjects()` provisioning provider around that host. Workers-hosted
+`createJazz()` is not a prerequisite. Do not claim full transaction or large-value
+support while sections 5 and 7 remain deferred; hibernation remains separate.

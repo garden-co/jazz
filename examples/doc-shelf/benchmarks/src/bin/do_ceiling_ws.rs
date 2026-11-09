@@ -179,19 +179,122 @@ fn control(socket: &mut Option<Socket>, request: Json) -> Json {
 /// A sync session over one WebSocket: each message one wire frame.
 struct Wire {
     socket: Socket,
+    batched: bool,
+    pending: std::collections::VecDeque<Vec<u8>>,
 }
 
 impl Wire {
     fn new(url: &str) -> Self {
         Self {
             socket: connect(url),
+            batched: false,
+            pending: Default::default(),
+        }
+    }
+
+    fn session(base: &str, author: AuthorSubject) -> Self {
+        let Ok(secret) = std::env::var("AUTHENTICATED_SESSION") else {
+            return Self::new(&format!(
+                "{base}/session?author={}",
+                percent(author.canonical())
+            ));
+        };
+        let mut control_socket = Some(connect(&format!("{base}/control")));
+        let stats = control(&mut control_socket, json!({ "op": "stats" }));
+        let (issuer, subject) = author.principal_parts();
+        let prelude = json!({
+            "peer_identity": author.canonical(),
+            "auth": { "backend_secret": secret, "backend_session": {
+                "issuer": issuer, "user_id": subject, "claims": {}, "auth_mode": "external"
+            }},
+            "bundle": stats["bundle"]
+        });
+        static CHECKED: std::sync::Once = std::sync::Once::new();
+        CHECKED.call_once(|| {
+            for case in ["secret", "missing_secret", "identity", "missing_bundle", "unknown_bundle", "malformed_session", "admin", "jwt", "relay", "bootstrap"] {
+                let mut bad = prelude.clone();
+                match case {
+                    "secret" => bad["auth"]["backend_secret"] = json!("incorrect"),
+                    "missing_secret" => { bad["auth"].as_object_mut().unwrap().remove("backend_secret"); },
+                    "admin" => bad["auth"]["admin_secret"] = json!("not-an-admin"),
+                    "jwt" => { bad["auth"].as_object_mut().unwrap().remove("backend_session"); bad["auth"]["jwt_token"] = json!("unverified-token"); },
+                    "relay" => bad["requested_link"] = json!("scope_isolated_client_relay"),
+                    "bootstrap" => bad["bootstrap_catalogue"] = json!(true),
+                    "identity" => bad["peer_identity"] = json!(AuthorSubject::SYSTEM.canonical()),
+                    "missing_bundle" => { bad.as_object_mut().unwrap().remove("bundle"); },
+                    "unknown_bundle" => bad["bundle"] = json!("00".repeat(32)),
+                    _ => bad["auth"]["backend_session"] = json!({}),
+                }
+                let (_, reply) = Self::handshake(base, &bad, false);
+                let expected = if matches!(case, "admin" | "jwt" | "relay" | "bootstrap") {
+                    jazz::wire::WireErrorCode::UnsupportedFeature
+                } else { jazz::wire::WireErrorCode::AuthFailed };
+                assert!(matches!(reply, jazz::wire::WireFrame::Error(ref error) if error.code == expected), "{case}: {reply:?}");
+            }
+        });
+        let (_, reply) = Self::handshake(base, &prelude, true);
+        assert!(
+            matches!(reply, jazz::wire::WireFrame::Error(ref error) if error.code == jazz::wire::WireErrorCode::UnsupportedFeature),
+            "thin: {reply:?}"
+        );
+        let (wire, reply) = Self::handshake(base, &prelude, false);
+        assert!(
+            matches!(reply, jazz::wire::WireFrame::Hello(_)),
+            "admission: {reply:?}"
+        );
+        wire
+    }
+
+    fn handshake(base: &str, prelude: &Json, thin: bool) -> (Self, jazz::wire::WireFrame) {
+        let mut wire = Self::new(&format!("{base}/socket"));
+        wire.socket
+            .send(Message::text(prelude.to_string()))
+            .expect("prelude");
+        let hello = jazz::wire::WireFrame::Hello(jazz::wire::WireHello::current(
+            jazz::wire::WirePeerRole::Client,
+            jazz::wire::current_wire_features()
+                | if thin {
+                    jazz::wire::FEATURE_THIN_RESULTS
+                } else {
+                    0
+                },
+        ));
+        wire.batched = true;
+        wire.send_frame(jazz::wire::encode_frame(&hello).unwrap())
+            .unwrap();
+        let start = Instant::now();
+        loop {
+            if let Some(frame) = wire.recv() {
+                return (
+                    wire,
+                    jazz::wire::decode_frame(&frame).expect("handshake reply"),
+                );
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "handshake timeout"
+            );
+            std::thread::sleep(Duration::from_millis(1));
         }
     }
 
     fn recv(&mut self) -> Option<Vec<u8>> {
+        if let Some(frame) = self.pending.pop_front() {
+            return Some(frame);
+        }
         loop {
             match self.socket.read() {
-                Ok(Message::Binary(frame)) => return Some(frame.to_vec()),
+                Ok(Message::Binary(frame)) => {
+                    if !self.batched {
+                        return Some(frame.to_vec());
+                    }
+                    self.pending.extend(
+                        jazz::wire::decode_websocket_frame_batch(&frame).expect("frame batch"),
+                    );
+                    if let Some(frame) = self.pending.pop_front() {
+                        return Some(frame);
+                    }
+                }
                 Ok(_) => {}
                 Err(tungstenite::Error::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     return None;
@@ -204,6 +307,11 @@ impl Wire {
 
 impl WireTransport for Wire {
     fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
+        let frame = if self.batched {
+            jazz::wire::encode_websocket_frame_batch(&[frame]).expect("encode carrier")
+        } else {
+            frame
+        };
         match self.socket.send(Message::binary(frame)) {
             Ok(()) => {}
             // Queued: flush until the socket takes it.
@@ -418,10 +526,10 @@ fn main() {
             });
             Box::new(WireTransportAdapter::current(client))
         } else {
-            Box::new(WireTransportAdapter::current(Wire::new(&format!(
-                "{base}/session?author={}",
-                percent(author(s).canonical())
-            ))))
+            Box::new(WireTransportAdapter::current(Wire::session(
+                &base,
+                author(s),
+            )))
         };
         let link = block_on(db.connect_upstream(transport));
         (db, link)

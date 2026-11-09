@@ -281,10 +281,7 @@ impl BackendCredential {
     }
 }
 
-pub(crate) fn constant_time_eq(a: &str, b: &str) -> bool {
-    let (a, b) = (a.as_bytes(), b.as_bytes());
-    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
-}
+pub(crate) use crate::runtime::session_admission::constant_time_eq;
 
 /// The secrets a verified workload stands in for, held only by this process.
 #[derive(Clone)]

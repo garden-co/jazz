@@ -1,18 +1,22 @@
+pub use crate::runtime::catalogue::CatalogueError;
+use crate::runtime::catalogue::CatalogueSnapshot as CatalogueIndex;
 mod deployment;
 pub(crate) use deployment::DeploymentResponse;
 
 #[cfg(test)]
+use std::collections::HashSet;
+#[cfg(test)]
 use std::collections::VecDeque;
-use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::server::catalogue_storage::{CatalogueStorage, CatalogueStorageError};
-use jazz::catalogue::CatalogueRows;
 #[cfg(any(test, feature = "embedded-server"))]
 use jazz::catalogue::{CatalogueLens, CataloguePut};
+#[cfg(any(test, feature = "embedded-server"))]
 use jazz::tools::ObjectId;
-use jazz::tools::public_schema::{Schema, SchemaHash, TablePolicies};
+use jazz::tools::public_schema::{Schema, SchemaHash};
+#[cfg(any(test, feature = "embedded-server"))]
 use jazz::tools::schema_lens::Lens;
 #[cfg(test)]
 use jazz::tx::DurabilityTier;
@@ -34,63 +38,7 @@ impl ConnectionSchemaDiagnostics {
     }
 }
 
-/// HTTP graph inventory, captured under one catalogue index lock.
-#[derive(Debug, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct MigrationGraph {
-    /// The schema of the bundle published last, which new sessions pin to.
-    latest_bundle_schema_hash: Option<String>,
-    schemas: Vec<String>,
-    migrations: Vec<MigrationGraphEdge>,
-}
-
-#[derive(Debug, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct MigrationGraphEdge {
-    from_hash: String,
-    to_hash: String,
-    /// Derived capability, not persisted provenance: no migration file is needed.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    automatic: bool,
-}
-
-/// Errors from server-local catalogue operations.
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
-pub enum CatalogueError {
-    QueryError(String),
-    WriteError(String),
-    StorageError(String),
-    DecodeError {
-        object_id: ObjectId,
-        object_type: String,
-        error: String,
-    },
-    NotFound,
-    LockError,
-}
-
-impl std::fmt::Display for CatalogueError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CatalogueError::QueryError(message) => write!(f, "Query error: {message}"),
-            CatalogueError::WriteError(message) => write!(f, "Write error: {message}"),
-            CatalogueError::StorageError(message) => write!(f, "Storage error: {message}"),
-            CatalogueError::DecodeError {
-                object_id,
-                object_type,
-                error,
-            } => write!(
-                f,
-                "Decode error in durable catalogue entry {object_id} ({object_type}): {error}"
-            ),
-            CatalogueError::NotFound => write!(f, "Not found"),
-            CatalogueError::LockError => write!(f, "Lock error"),
-        }
-    }
-}
-
-impl std::error::Error for CatalogueError {}
+pub(crate) use crate::runtime::catalogue::MigrationGraph;
 
 /// Server-local catalogue facade.
 ///
@@ -107,6 +55,7 @@ pub(crate) trait CatalogueStore {
     fn known_schema(&self, schema_hash: &SchemaHash) -> Result<Option<Schema>, CatalogueError>;
     #[cfg(feature = "embedded-server")]
     fn known_lenses(&self) -> Result<Vec<Lens>, CatalogueError>;
+    #[cfg(test)]
     fn schema_published_at(&self, schema_hash: &SchemaHash) -> Result<Option<u64>, CatalogueError>;
     #[cfg(any(test, feature = "embedded-server"))]
     fn publish_schema(&self, schema: Schema) -> Result<ObjectId, CatalogueError>;
@@ -126,6 +75,35 @@ pub(crate) struct StoredCatalogue {
 }
 
 impl StoredCatalogue {
+    pub(crate) fn schema_response(
+        &self,
+        hash: &SchemaHash,
+    ) -> Result<Option<crate::runtime::catalogue::StoredSchemaResponse>, CatalogueError> {
+        Ok(self
+            .index
+            .lock()
+            .map_err(|_| CatalogueError::LockError)?
+            .schema(hash))
+    }
+    pub(crate) fn schema_summaries(
+        &self,
+    ) -> Result<crate::runtime::catalogue::SchemaSummaryResponse, CatalogueError> {
+        Ok(self
+            .index
+            .lock()
+            .map_err(|_| CatalogueError::LockError)?
+            .schemas())
+    }
+    pub(crate) fn bundle_inventory(
+        &self,
+    ) -> Result<crate::runtime::catalogue::PublishedBundlesResponse, CatalogueError> {
+        Ok(self
+            .index
+            .lock()
+            .map_err(|_| CatalogueError::LockError)?
+            .bundles())
+    }
+
     /// The permissions bundle published last, if any.
     #[cfg(feature = "embedded-server")]
     pub(crate) fn latest_bundle(&self) -> Option<jazz::catalogue::BundleId> {
@@ -271,93 +249,7 @@ pub(crate) fn unix_timestamp_millis() -> u64 {
         .min(u128::from(u64::MAX)) as u64
 }
 
-/// The catalogue as the HTTP routes read it, rebuilt from the store's
-/// rows after every change.
-#[derive(Debug, Default, Clone, PartialEq)]
-struct CatalogueIndex {
-    schemas: HashMap<SchemaHash, Schema>,
-    schema_published_at: HashMap<SchemaHash, u64>,
-    lens_edges: HashSet<(SchemaHash, SchemaHash)>,
-    lenses: HashMap<(SchemaHash, SchemaHash), Lens>,
-    /// Every published permissions bundle (see [`jazz::catalogue`]),
-    /// oldest first.
-    bundles: Vec<jazz::catalogue::CatalogueBundle>,
-    /// The admitted schemas, oldest first.
-    admitted: Vec<SchemaHash>,
-}
-
 impl CatalogueIndex {
-    fn from_rows(
-        rows: &CatalogueRows,
-        initial_schema: Option<&Schema>,
-    ) -> Result<Self, CatalogueError> {
-        let mut index = Self::default();
-        for schema in &rows.schemas {
-            index.schemas.insert(schema.hash, schema.schema.clone());
-            if let Some(published_at) = schema.published_at {
-                index.schema_published_at.insert(schema.hash, published_at);
-            }
-        }
-        for lens in &rows.lenses {
-            let lens = Lens::new(lens.source, lens.target, lens.forward.clone());
-            if !lens.is_draft() {
-                index
-                    .lens_edges
-                    .insert((lens.source_hash, lens.target_hash));
-                index
-                    .lenses
-                    .insert((lens.source_hash, lens.target_hash), lens);
-            }
-        }
-        index.bundles = rows.bundles.clone();
-        index
-            .bundles
-            .sort_by_key(|bundle| (bundle.published_at, bundle.id.0));
-        let mut admitted: Vec<_> = rows
-            .schemas
-            .iter()
-            .filter_map(|schema| Some((schema.admitted?, schema.hash)))
-            .collect();
-        admitted.sort_by_key(|(n, _)| *n);
-        index.admitted = admitted.into_iter().map(|(_, hash)| hash).collect();
-        if let Some(schema) = initial_schema {
-            // The store's data was written under it too: the deploy guard
-            // counts it as admitted (SPEC 4 §4.9), oldest.
-            let hash = index.add_schema(schema.clone());
-            if !index.admitted.contains(&hash) {
-                index.admitted.insert(0, hash);
-            }
-        }
-        Ok(index)
-    }
-
-    fn add_schema(&mut self, schema: Schema) -> SchemaHash {
-        let hash = SchemaHash::compute(&schema);
-        self.schemas.entry(hash).or_insert(schema);
-        hash
-    }
-
-    fn known_schema_hashes(&self) -> Vec<SchemaHash> {
-        let mut hashes = self.schemas.keys().copied().collect::<Vec<_>>();
-        hashes.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
-        hashes
-    }
-
-    fn latest_published_schema(&self) -> Option<Schema> {
-        let mut candidates = self
-            .schema_published_at
-            .iter()
-            .map(|(hash, published_at)| (*published_at, *hash))
-            .collect::<Vec<_>>();
-        candidates.sort_by(|(left_time, left_hash), (right_time, right_hash)| {
-            left_time
-                .cmp(right_time)
-                .then_with(|| left_hash.as_bytes().cmp(right_hash.as_bytes()))
-        });
-        let (_, hash) = candidates.pop()?;
-        self.schemas.get(&hash).cloned()
-    }
-
     #[cfg(test)]
     fn connection_schema_diagnostics(
         &self,
@@ -415,32 +307,7 @@ impl CatalogueIndex {
 impl CatalogueStore for StoredCatalogue {
     fn migration_graph(&self) -> Result<MigrationGraph, CatalogueError> {
         let index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
-        let mut schemas: Vec<_> = index.schemas.keys().map(ToString::to_string).collect();
-        schemas.sort();
-        let mut migrations: Vec<_> = index
-            .lenses
-            .values()
-            .map(|lens| MigrationGraphEdge {
-                from_hash: lens.source_hash.to_string(),
-                to_hash: lens.target_hash.to_string(),
-                automatic: lens.forward.ops.is_empty()
-                    && lens.backward.ops.is_empty()
-                    && !lens.is_draft()
-                    && index
-                        .schemas
-                        .get(&lens.source_hash)
-                        .zip(index.schemas.get(&lens.target_hash))
-                        .is_some_and(|(from, to)| {
-                            jazz::tools::deployment::schemas_are_compatible(from, to)
-                        }),
-            })
-            .collect();
-        migrations.sort_by(|a, b| (&a.from_hash, &a.to_hash).cmp(&(&b.from_hash, &b.to_hash)));
-        Ok(MigrationGraph {
-            latest_bundle_schema_hash: index.bundles.last().map(|bundle| bundle.schema.to_string()),
-            schemas,
-            migrations,
-        })
+        Ok(index.migration_graph())
     }
 
     fn known_schema_hashes(&self) -> Result<Vec<SchemaHash>, CatalogueError> {
@@ -459,6 +326,7 @@ impl CatalogueStore for StoredCatalogue {
         Ok(index.lenses.values().cloned().collect())
     }
 
+    #[cfg(test)]
     fn schema_published_at(&self, schema_hash: &SchemaHash) -> Result<Option<u64>, CatalogueError> {
         let index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
         Ok(index.schema_published_at.get(schema_hash).copied())
@@ -531,14 +399,6 @@ impl ServerCatalogue {
         store: &impl CatalogueStore,
     ) -> Result<Vec<Lens>, CatalogueError> {
         store.known_lenses()
-    }
-
-    pub(crate) fn schema_published_at(
-        &self,
-        store: &impl CatalogueStore,
-        schema_hash: &SchemaHash,
-    ) -> Result<Option<u64>, CatalogueError> {
-        store.schema_published_at(schema_hash)
     }
 
     #[cfg(any(test, feature = "embedded-server"))]

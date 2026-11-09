@@ -62,10 +62,7 @@ pub(super) fn run(base: &str) {
         )))
         .unwrap();
         let link = block_on(db.connect_upstream(Box::new(WireTransportAdapter::current(
-            Wire::new(&format!(
-                "{base}/session?author={}",
-                percent(author(id as usize).canonical())
-            )),
+            Wire::session(base, author(id as usize)),
         ))));
         (db, link)
     };

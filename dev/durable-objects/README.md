@@ -165,9 +165,18 @@ retains DO storage, `TRACE=1` counts SQL statements, and `INSPECTOR_PORT=9229`
 enables the optional CPU profiler. The harness accepts fixture identities from
 its caller; bind it only to local loopback. It is not production authentication.
 
-The sync authority uses the dev-only `WasmServerCore` adapter in
-`native-sqlite/jazz-do/src/server.rs`. It opens a DO-backed `Db`, publishes the
-fixture schema and permissions bundle, and hands ownership to `ServerCore`.
+The sync authority uses the production `WasmServerCore` host in
+`crates/jazz-wasm/src/server.rs` (the optional `server` feature). The dev-only
+`FixtureServer` in `native-sqlite/jazz-do/src/fixture.rs` opens a DO-backed `Db`,
+hands ownership to that host, and publishes the fixture schema and permissions
+bundle through its shared deployment path. Scheduling, session transport, and backend-session handshake have one Rust
+implementation; fixture setup and raw test controls are not production APIs.
+Catalogue validation and staging live in `jazz-server::runtime::{catalogue,
+deployment}` and are also used by native HTTP handlers. The WASM host exposes
+`publishCatalogue`, `catalogueSnapshot`, and `catalogueSchema`; its caller must
+provide admin authentication, request bounds, and serialized scheduling. These
+are host APIs, not public HTTP routes. Blank-store startup and production HTTP
+routing remain to be integrated.
 Socket frames enter session queues; one async tick advances and flushes the
 core before the host sends output. Microtask wakeups avoid re-entering Rust;
 disconnects close session input. `WasmDb` remains only for standalone value probes.
@@ -378,3 +387,34 @@ current tree. Its 89/95 app-column figures and large-value TEXT-marker advice
 are obsolete. The subsequent #4579 experiment ran sync over WebSockets with
 10–500 sessions, but its timing and memory estimates are not measurements of
 this refreshed build.
+
+### Authenticated WebSocket harness
+
+The dev harness's `/socket` route accepts the normal JSON prelude, binary Hello,
+and batched sync frames. It requires a `BACKEND_SECRET` Worker binding and a
+backend-stated user session. Native and DO hosts share credential comparison,
+canonical identity validation, and policy-claim conversion; `ServerCore` validates
+the bundle and governs the session's reads/writes. The secret is never taken from
+`/control` or used to trust a caller-supplied author without checking the session.
+
+After rebuilding the scope-test WASM and `doc-shelf-do-ceiling-ws`, run:
+
+```sh
+BACKEND_SECRET=do-admission-test-secret AUTHENTICATED_SESSION=do-admission-test-secret \
+  node dev/durable-objects/native-sqlite/harness/test-scopes.mjs --catalogue
+BACKEND_SECRET=do-admission-test-secret AUTHENTICATED_SESSION=do-admission-test-secret \
+  node dev/durable-objects/native-sqlite/harness/test-server-core.mjs
+```
+
+The client checks invalid/missing credentials, mismatched identity, malformed
+sessions, missing/unknown bundles, and unsupported admission modes before using
+native replicas through the authenticated carrier. The scope suite exercises
+permission-filtered reads and rejected writes, then reconstructs two objects from
+SQLite and verifies successful data with fresh replicas.
+
+This remains a **development harness**: `/control` and raw `/session` are fixture
+interfaces, not authenticated production routes. The new route supports only
+ordinary backend-stated user sync sessions. It refuses direct proof-only auth,
+admin/backend-only links, relays, catalogue bootstrap, and thin clients. Production
+account admission/revocation, HTTP routes, lifecycle, and provider wiring remain
+in the plan. No storage or wire encoding changed.

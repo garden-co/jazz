@@ -20,7 +20,10 @@ export function createHarness(overrides = {}) {
     modulesRoot: here,
     compatibilityDate: "2026-07-01",
     durableObjects: { AUTHORITY: { className: "Authority", useSQLite: true } },
-    bindings: process.env.TRACE ? { TRACE: "1" } : {},
+    bindings: {
+      ...(process.env.TRACE ? { TRACE: "1" } : {}),
+      ...(process.env.BACKEND_SECRET ? { BACKEND_SECRET: process.env.BACKEND_SECRET } : {}),
+    },
     durableObjectsPersist: process.env.PERSIST ?? false,
     port: Number(process.env.PORT ?? 8787),
     host: "127.0.0.1",

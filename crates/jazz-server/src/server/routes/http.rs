@@ -11,9 +11,11 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 
 use crate::middleware::auth::validate_admin_secret;
+use crate::runtime::catalogue::{
+    PublishedBundlesResponse, SchemaSummaryResponse, StoredSchemaResponse,
+};
 use crate::server::catalogue::MigrationGraph;
 use crate::server::{ServerState, ShutdownPhase};
-use jazz::tools::public_schema::{Schema, TablePolicies};
 use jazz::tools::transport_error::ErrorResponse;
 
 use super::utils::{parse_app_id_param, parse_schema_hash_param, unix_timestamp_millis};
@@ -55,27 +57,6 @@ fn read_failed<E: std::fmt::Display>(what: &'static str) -> impl FnOnce(E) -> Re
     }
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct SchemaSummary {
-    hash: String,
-    published_at: Option<u64>,
-}
-
-#[derive(Debug, Serialize)]
-pub(super) struct SchemaSummaryResponse {
-    #[deprecated(note = "Use `schemas` instead")]
-    hashes: Vec<String>,
-    schemas: Vec<SchemaSummary>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct StoredSchemaResponse {
-    schema: Schema,
-    published_at: Option<u64>,
-}
-
 #[derive(Debug, Deserialize)]
 pub(super) struct AdminSubscriptionIntrospectionParams {
     #[serde(rename = "appId")]
@@ -88,21 +69,6 @@ pub(super) struct AdminSubscriptionIntrospectionResponse {
     app_id: String,
     generated_at: u64,
     queries: Vec<serde_json::Value>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct PublishedBundleView {
-    bundle: String,
-    schema_hash: String,
-    published_at: u64,
-    permissions: std::collections::HashMap<String, TablePolicies>,
-}
-
-#[derive(Debug, Serialize)]
-pub(super) struct PublishedBundlesResponse {
-    /// Oldest first; the last is what a backend booting now pins to.
-    bundles: Vec<PublishedBundleView>,
 }
 
 #[derive(Debug, Serialize)]
@@ -124,23 +90,12 @@ pub(super) async fn schema_handler(
     require_admin(&state, &headers)?;
     let schema_hash = parse_schema_hash_param(hash_text).map_err(bad_request)?;
 
-    let schema = state
-        .catalogue
-        .known_schema(&state.catalogue_store, &schema_hash)
+    let body = state
+        .catalogue_store
+        .schema_response(&schema_hash)
         .map_err(read_failed("schema catalogue"))?
         .ok_or_else(|| not_found(format!("schema catalogue not found for hash {schema_hash}")))?;
-    let published_at = state
-        .catalogue
-        .schema_published_at(&state.catalogue_store, &schema_hash)
-        .map_err(read_failed("schema publish timestamp"))?;
-    tracing::info!(
-        requested_hash = %schema_hash.short(),
-        "schema request: returning requested hash"
-    );
-    Ok(Json(StoredSchemaResponse {
-        schema,
-        published_at,
-    }))
+    Ok(Json(body))
 }
 
 /// Return all known schema hashes from catalogue state.
@@ -152,27 +107,12 @@ pub(super) async fn schema_hashes_handler(
 ) -> Result<Json<SchemaSummaryResponse>, Response> {
     require_admin(&state, &headers)?;
 
-    let hashes = state
-        .catalogue
-        .known_schema_hashes(&state.catalogue_store)
-        .map_err(read_failed("schema hashes"))?;
-    let mut schemas = Vec::with_capacity(hashes.len());
-    for hash in &hashes {
-        let published_at = state
-            .catalogue
-            .schema_published_at(&state.catalogue_store, hash)
-            .map_err(read_failed("schema publish timestamp"))?;
-        schemas.push(SchemaSummary {
-            hash: hash.to_string(),
-            published_at,
-        });
-    }
-    #[allow(deprecated)]
-    let body = SchemaSummaryResponse {
-        hashes: hashes.iter().map(ToString::to_string).collect(),
-        schemas,
-    };
-    Ok(Json(body))
+    Ok(Json(
+        state
+            .catalogue_store
+            .schema_summaries()
+            .map_err(read_failed("schema hashes"))?,
+    ))
 }
 
 /// Return whether two known schema hashes are connected by non-draft uploaded migrations.
@@ -197,22 +137,12 @@ pub(super) async fn published_bundles_handler(
     headers: HeaderMap,
 ) -> Result<Json<PublishedBundlesResponse>, Response> {
     require_admin(&state, &headers)?;
-    let bundles = state
-        .catalogue_store
-        .published_bundles()
-        .into_iter()
-        .map(|bundle| PublishedBundleView {
-            bundle: bundle.id.to_string(),
-            schema_hash: bundle.schema.to_string(),
-            published_at: bundle.published_at,
-            permissions: bundle
-                .permissions
-                .into_iter()
-                .map(|(table, policies)| (table.to_string(), policies))
-                .collect(),
-        })
-        .collect();
-    Ok(Json(PublishedBundlesResponse { bundles }))
+    Ok(Json(
+        state
+            .catalogue_store
+            .bundle_inventory()
+            .map_err(read_failed("published bundles"))?,
+    ))
 }
 
 pub(super) async fn admin_subscription_introspection_handler(

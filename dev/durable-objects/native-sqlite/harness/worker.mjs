@@ -10,7 +10,7 @@
 // the frames that caused it; each tick's wall time is recorded.
 import {
   WasmDb,
-  WasmServerCore,
+  FixtureServer,
   durableObjectSqlQueries,
   durableObjectSqlStats,
   durableObjectSqlTrace,
@@ -27,6 +27,8 @@ function bytes(base64) {
 export class Authority {
   constructor(ctx, env) {
     this.ctx = ctx;
+    this.backendSecret = env.BACKEND_SECRET;
+    this.openSockets = 0;
     // TRACE=1 counts execs by statement text; stats returns them.
     this.trace = Boolean(env.TRACE);
     this.db = null;
@@ -48,10 +50,10 @@ export class Authority {
     const start = performance.now();
     try {
       this.db = reopen
-        ? await WasmServerCore.reopenDurableObject(this.ctx.storage, bytes(config), () =>
+        ? await FixtureServer.reopenDurableObject(this.ctx.storage, bytes(config), () =>
             this.schedule(),
           )
-        : await WasmServerCore.openDurableObject(
+        : await FixtureServer.openDurableObject(
             this.ctx.storage,
             bytes(schema),
             bytes(config),
@@ -126,6 +128,7 @@ export class Authority {
     const at = (p) => ticks[Math.min(ticks.length - 1, Math.floor(p * ticks.length))] ?? 0;
     const out = {
       runtime: "ServerCore",
+      bundle: this.db?.bundle,
       startup: this.startup,
       ticks: ticks.length,
       tickMsTotal: ticks.reduce((a, b) => a + b, 0),
@@ -152,12 +155,110 @@ export class Authority {
     return out;
   }
 
+  // The ordinary carrier is separate from the raw fixture sync endpoint.
+  // Authentication configuration comes only from the Worker environment.
+  openSocket() {
+    const [client, server] = Object.values(new WebSocketPair());
+    server.accept();
+    server.binaryType = "arraybuffer";
+    this.openSockets += 1;
+    let session,
+      prelude,
+      stopped = false,
+      draining = false,
+      queuedBytes = 0;
+    const queue = [];
+    const cleanup = () => {
+      if (stopped) return;
+      stopped = true;
+      clearTimeout(deadline);
+      this.openSockets -= 1;
+      queue.length = 0;
+      queuedBytes = 0;
+      if (session) this.detach(session);
+    };
+    const close = (code, reason) => {
+      server.close(code, reason);
+      cleanup();
+    };
+    const deadline = setTimeout(() => close(1008, "handshake timeout"), 2000);
+    const drain = async () => {
+      if (draining) return;
+      draining = true;
+      try {
+        while (!stopped && queue.length) {
+          const frame = queue.shift();
+          queuedBytes -= frame.byteLength;
+          if (!prelude) {
+            prelude = frame;
+            continue;
+          }
+          if (!session) {
+            await this.waitForIdle();
+            if (stopped) return;
+            const admission = this.db.acceptSocket(prelude, frame, this.backendSecret);
+            let transport;
+            try {
+              transport = admission.takeTransport();
+              if (transport) {
+                session = { ws: server, transport };
+                this.sessions.add(session);
+              }
+              server.send(admission.response());
+            } finally {
+              admission.free();
+            }
+            if (!transport) {
+              close(1008, "admission refused");
+              return;
+            }
+            clearTimeout(deadline);
+          } else {
+            session.transport.sendWireFrame(frame);
+            this.schedule();
+          }
+        }
+      } catch (error) {
+        this.errors.push(String(error?.stack ?? error));
+        close(1008, "session failed");
+      } finally {
+        draining = false;
+      }
+    };
+    server.addEventListener("message", (event) => {
+      if (stopped) return;
+      if (typeof event.data === "string" && (prelude || queue.length)) {
+        close(1008, "binary wire message required");
+        return;
+      }
+      const frame =
+        typeof event.data === "string"
+          ? new TextEncoder().encode(event.data)
+          : new Uint8Array(event.data);
+      if (frame.byteLength > 2 * 1024 * 1024 || queuedBytes + frame.byteLength > 8 * 1024 * 1024) {
+        close(1009, "input budget exceeded");
+        return;
+      }
+      queuedBytes += frame.byteLength;
+      queue.push(frame);
+      void drain();
+    });
+    server.addEventListener("close", cleanup);
+    server.addEventListener("error", cleanup);
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
   async fetch(request) {
     const url = new URL(request.url);
     if (url.pathname === "/value-checks") {
       wasm ??= initSync({ module: wasmModule });
       WasmDb.checkDurableObjectValues(this.ctx.storage);
       return new Response("value checks passed");
+    }
+    if (url.pathname === "/socket") {
+      if (!this.db) return new Response("authority is not open", { status: 503 });
+      if (this.openSockets >= 64) return new Response("socket capacity", { status: 503 });
+      return this.openSocket();
     }
     const [client, server] = Object.values(new WebSocketPair());
     server.accept();

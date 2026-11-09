@@ -37,6 +37,8 @@ pub mod browser_bench;
 mod durable_object;
 #[cfg(all(target_arch = "wasm32", feature = "browser"))]
 mod idb_vfs;
+#[cfg(all(target_arch = "wasm32", feature = "server"))]
+pub mod server;
 #[cfg(all(target_arch = "wasm32", feature = "durable-object-tests"))]
 pub use durable_object::check_durable_object_scopes;
 #[cfg(all(target_arch = "wasm32", feature = "durable-object"))]

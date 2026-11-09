@@ -1,6 +1,11 @@
 //! Shared server state and optional native hosting.
+pub mod catalogue;
 mod core;
+pub mod deployment;
+mod permissions_validation;
+pub mod session_admission;
 mod thin;
+pub mod websocket;
 
 #[cfg(feature = "native")]
 pub(crate) use core::SESSION_QUEUE_BUDGET;

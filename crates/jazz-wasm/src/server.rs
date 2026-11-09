@@ -1,0 +1,384 @@
+//! WASM hosting for the shared Jazz authority.
+//!
+//! Startup supplies an opened database and catalogue through Rust APIs. The
+//! JavaScript host owns event delivery; it must serialize ticks and admit
+//! connections between ticks. Fixture publication and raw test routes live in dev/.
+use futures_channel::mpsc;
+use futures_util::StreamExt;
+use jazz::catalogue::{BundleId, CatalogueChange};
+use jazz::db::Db;
+use jazz::wire::{WireError, WireErrorCode, WireFrame, WireHello, WirePeerRole, WireRetry};
+use jazz_server::runtime::websocket;
+use jazz_server::runtime::{ServerCore, ServerSession, SessionInput};
+use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::task::{Wake, Waker};
+use tokio::sync::mpsc as output;
+use wasm_bindgen::prelude::*;
+
+fn error(error: impl std::fmt::Display) -> JsValue {
+    JsValue::from_str(&error.to_string())
+}
+
+struct Schedule {
+    sender: mpsc::UnboundedSender<()>,
+    queued: Arc<AtomicBool>,
+}
+impl Wake for Schedule {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+    fn wake_by_ref(self: &Arc<Self>) {
+        if !self.queued.swap(true, Ordering::AcqRel) {
+            let _ = self.sender.unbounded_send(());
+        }
+    }
+}
+
+/// The channel waker contains no JS references. The receiver calls JavaScript
+/// on a later microtask, after Rust has released its mutable borrows.
+fn scheduler(callback: js_sys::Function) -> Waker {
+    let (sender, mut receiver) = mpsc::unbounded();
+    let queued = Arc::new(AtomicBool::new(false));
+    let ready = Arc::clone(&queued);
+    wasm_bindgen_futures::spawn_local(async move {
+        while receiver.next().await.is_some() {
+            ready.store(false, Ordering::Release);
+            let _ = callback.call0(&JsValue::NULL);
+        }
+    });
+    Waker::from(Arc::new(Schedule { sender, queued }))
+}
+
+#[wasm_bindgen]
+pub struct WasmServerCore {
+    core: Rc<RefCell<Option<ServerCore>>>,
+    next_session: Cell<u64>,
+    wake: Waker,
+}
+
+// A tick owns the core across await without holding a RefCell borrow. Dropping
+// the future restores ownership as well, rather than leaving the host busy.
+struct Running<'a> {
+    slot: &'a RefCell<Option<ServerCore>>,
+    core: Option<ServerCore>,
+}
+impl Drop for Running<'_> {
+    fn drop(&mut self) {
+        *self.slot.borrow_mut() = self.core.take();
+    }
+}
+
+impl WasmServerCore {
+    /// Host an opened authority. Catalogue selection and storage ownership are
+    /// decided by startup before calling this constructor.
+    pub fn from_db(
+        db: Db,
+        app: Option<String>,
+        schedule: js_sys::Function,
+    ) -> Result<Self, JsValue> {
+        let wake = scheduler(schedule);
+        let core = ServerCore::from_db(db, app, wake.clone()).map_err(error)?;
+        Ok(Self {
+            core: Rc::new(RefCell::new(Some(core))),
+            next_session: Cell::new(1),
+            wake,
+        })
+    }
+
+    pub fn is_idle(&self) -> bool {
+        self.core.borrow().is_some()
+    }
+
+    /// Apply a validated catalogue change through the same authority path as
+    /// native hosting. Ownership is restored if the future is cancelled.
+    pub async fn apply_catalogue(&self, change: CatalogueChange) -> Result<(), JsValue> {
+        let core = self
+            .core
+            .borrow_mut()
+            .take()
+            .ok_or_else(|| error("server core is already ticking"))?;
+        let mut running = Running {
+            slot: &self.core,
+            core: Some(core),
+        };
+        let (_, result) = running
+            .core
+            .as_mut()
+            .unwrap()
+            .apply_catalogue(change, None)
+            .await;
+        result.map_err(error)
+    }
+}
+
+#[wasm_bindgen]
+impl WasmServerCore {
+    /// Catalogue reads for an authenticated host adapter. These methods do not
+    /// authenticate HTTP requests: the host must enforce its admin credential.
+    #[wasm_bindgen(js_name = catalogueSnapshot)]
+    pub fn catalogue_snapshot(&self) -> Result<String, JsValue> {
+        let slot = self.core.borrow();
+        let core = slot.as_ref().ok_or_else(|| error("server core is busy"))?;
+        let snapshot = core.catalogue_snapshot().map_err(error)?;
+        serde_json::to_string(&serde_json::json!({
+            "schemas": snapshot.schemas(),
+            "migrationGraph": snapshot.migration_graph(),
+            "bundles": snapshot.bundles(),
+        }))
+        .map_err(error)
+    }
+
+    #[wasm_bindgen(js_name = catalogueSchema)]
+    pub fn catalogue_schema(&self, hash: &str) -> Result<Option<String>, JsValue> {
+        let hash = jazz::tools::public_schema::SchemaHash::from_hex(hash)
+            .ok_or_else(|| error("invalid schema hash"))?;
+        let slot = self.core.borrow();
+        let core = slot.as_ref().ok_or_else(|| error("server core is busy"))?;
+        core.catalogue_snapshot()
+            .map_err(error)?
+            .schema(&hash)
+            .map(|schema| serde_json::to_string(&schema).map_err(error))
+            .transpose()
+    }
+
+    /// Publish the same request body as the native admin bundles endpoint.
+    /// Returns its status and JSON body; the host owns authentication, request
+    /// limits, serialization with ticks, and keeping publication alive after a
+    /// caller disconnects.
+    #[wasm_bindgen(js_name = publishCatalogue)]
+    pub async fn publish_catalogue(&self, request: &str) -> Result<String, JsValue> {
+        let request = match serde_json::from_str::<jazz_server::runtime::deployment::DeployRequest>(request) {
+            Ok(request) => request,
+            Err(err) => return Ok(serde_json::json!({"status":400,"body":{"code":"bad_request","error":err.to_string()}}).to_string()),
+        };
+        let core = self
+            .core
+            .borrow_mut()
+            .take()
+            .ok_or_else(|| error("server core is busy"))?;
+        let mut running = Running {
+            slot: &self.core,
+            core: Some(core),
+        };
+        let result = running
+            .core
+            .as_mut()
+            .unwrap()
+            .deploy(request, js_sys::Date::now() as u64)
+            .await;
+        let response = match result {
+            Ok(body) => serde_json::json!({"status":200,"body":body}),
+            Err(err) => serde_json::json!({"status":err.status.as_u16(),"body":err.body}),
+        };
+        Ok(response.to_string())
+    }
+
+    pub async fn tick(&self) -> Result<(), JsValue> {
+        let core = self
+            .core
+            .borrow_mut()
+            .take()
+            .ok_or_else(|| error("server core is already ticking"))?;
+        let mut running = Running {
+            slot: &self.core,
+            core: Some(core),
+        };
+        let core = running.core.as_mut().unwrap();
+        core.advance().await;
+        core.flush();
+        let again = core.inbound_pending();
+        drop(running);
+        if again {
+            self.wake.wake_by_ref();
+        }
+        Ok(())
+    }
+}
+
+impl WasmServerCore {
+    /// Open an already authenticated session. Raw framing is for embedding hosts.
+    pub fn open_session(
+        &self,
+        author: jazz::ids::AuthorSubject,
+        claims: BTreeMap<String, jazz::records::Value>,
+        bundle: Option<BundleId>,
+        batched: bool,
+    ) -> Result<ServerTransport, String> {
+        let mut slot = self.core.borrow_mut();
+        let core = slot
+            .as_mut()
+            .ok_or_else(|| "admit sessions between ticks".to_owned())?;
+        let id = self.next_session.get();
+        self.next_session.set(
+            id.checked_add(1)
+                .ok_or_else(|| "session ids exhausted".to_owned())?,
+        );
+        let session = ServerSession::from_host_id(id);
+        let (sender, receiver) = output::unbounded_channel();
+        let egress = Arc::new(AtomicUsize::new(0));
+        core.open_session(session, author, claims, bundle, sender, Arc::clone(&egress))
+            .map_err(|e| e.to_string())?;
+        self.wake.wake_by_ref();
+        Ok(ServerTransport {
+            input: core.input(session),
+            receiver,
+            egress,
+            wake: self.wake.clone(),
+            closed: false,
+            batched,
+        })
+    }
+}
+
+type Outbound = (Result<Vec<Vec<u8>>, jazz::wire::WireError>, usize);
+#[wasm_bindgen]
+pub struct ServerTransport {
+    input: Option<SessionInput>,
+    receiver: output::UnboundedReceiver<Outbound>,
+    egress: Arc<AtomicUsize>,
+    wake: Waker,
+    closed: bool,
+    batched: bool,
+}
+#[wasm_bindgen]
+impl ServerTransport {
+    #[wasm_bindgen(js_name = sendWireFrame)]
+    pub fn send_wire_frame(&self, frame: Vec<u8>) -> Result<(), JsValue> {
+        self.input
+            .as_ref()
+            .ok_or_else(|| error("session is closed"))?
+            .receive(if self.batched {
+                websocket::decode_frame_batch(&frame).map_err(error)?
+            } else {
+                vec![frame]
+            })
+            .map_err(error)?;
+        self.wake.wake_by_ref();
+        Ok(())
+    }
+    #[wasm_bindgen(js_name = recvWireFrames)]
+    pub fn recv_wire_frames(&mut self) -> Result<js_sys::Array, JsValue> {
+        let frames = js_sys::Array::new();
+        while let Ok((result, bytes)) = self.receiver.try_recv() {
+            self.egress.fetch_sub(bytes, Ordering::AcqRel);
+            let encoded = match result {
+                Ok(frames) => frames,
+                Err(failure) if self.batched => {
+                    vec![jazz::wire::encode_frame(&WireFrame::Error(failure)).map_err(error)?]
+                }
+                Err(failure) => {
+                    return Err(error(format!("{:?}: {}", failure.code, failure.message)))
+                }
+            };
+            let encoded = if self.batched {
+                websocket::encode_frame_batches(&encoded).map_err(error)?
+            } else {
+                encoded
+            };
+            for frame in encoded {
+                frames.push(&js_sys::Uint8Array::from(frame.as_slice()));
+            }
+            // Reading releases backpressure; held output may now be drainable.
+            self.wake.wake_by_ref();
+        }
+        Ok(frames)
+    }
+    #[wasm_bindgen(js_name = isClosed)]
+    pub fn is_closed(&self) -> bool {
+        self.closed || self.receiver.is_closed()
+    }
+    pub fn close(&mut self) {
+        if let Some(input) = self.input.take() {
+            input.close();
+        }
+        self.receiver.close();
+        self.closed = true;
+        self.wake.wake_by_ref();
+    }
+}
+impl Drop for ServerTransport {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+#[wasm_bindgen]
+pub struct SocketAdmission {
+    reply: Vec<u8>,
+    transport: Option<ServerTransport>,
+}
+impl SocketAdmission {
+    fn reply(frame: Vec<u8>, transport: Option<ServerTransport>) -> Result<Self, JsValue> {
+        let mut batches = websocket::encode_frame_batches(&[frame]).map_err(error)?;
+        Ok(Self {
+            reply: batches.remove(0),
+            transport,
+        })
+    }
+}
+#[wasm_bindgen]
+impl SocketAdmission {
+    pub fn response(&self) -> Vec<u8> {
+        self.reply.clone()
+    }
+    #[wasm_bindgen(js_name = takeTransport)]
+    pub fn take_transport(&mut self) -> Option<ServerTransport> {
+        self.transport.take()
+    }
+}
+
+#[wasm_bindgen]
+impl WasmServerCore {
+    /// Normal WebSocket carrier with a host-configured backend credential.
+    /// Only backend-stated user sessions are currently supported.
+    #[wasm_bindgen(js_name = acceptSocket)]
+    pub fn accept_socket(
+        &self,
+        prelude: &[u8],
+        hello: &[u8],
+        backend_secret: Option<String>,
+    ) -> Result<SocketAdmission, JsValue> {
+        if let Some(refusal) = websocket::foreign_version_refusal(hello) {
+            return SocketAdmission::reply(refusal, None);
+        }
+        let admit = || -> Result<(ServerTransport, Vec<u8>), WireError> {
+            let prelude = websocket::Prelude::decode(prelude)?;
+            let admitted = websocket::admit_backend_session(prelude, backend_secret.as_deref())?;
+            let remote = websocket::decode_hello(hello)?;
+            let negotiated =
+                jazz::wire::negotiate_wire(&remote, jazz::wire::current_wire_features())?;
+            if remote.features & jazz::wire::FEATURE_THIN_RESULTS != 0 {
+                return Err(WireError::new(
+                    WireErrorCode::UnsupportedFeature,
+                    WireRetry::Never,
+                    "thin WebSocket hosting is not supported on this host yet",
+                ));
+            }
+            let endpoint = jazz::wire::WireAuthorityEndpoint::fresh(
+                jazz::ids::NodeUuid::from_bytes([0x5e; 16]),
+            );
+            let response = jazz::wire::encode_frame(&WireFrame::Hello(
+                WireHello::current(WirePeerRole::Core, negotiated.features)
+                    .with_authority(endpoint.node, endpoint.epoch),
+            ))
+            .map_err(|e| {
+                WireError::new(WireErrorCode::Internal, WireRetry::Never, e.to_string())
+            })?;
+            let transport = self
+                .open_session(admitted.identity, admitted.claims, admitted.bundle, true)
+                .map_err(|e| WireError::new(WireErrorCode::AuthFailed, WireRetry::Never, e))?;
+            Ok((transport, response))
+        };
+        match admit() {
+            Ok((transport, response)) => SocketAdmission::reply(response, Some(transport)),
+            Err(failure) => SocketAdmission::reply(
+                jazz::wire::encode_frame(&WireFrame::Error(failure)).map_err(error)?,
+                None,
+            ),
+        }
+    }
+}
