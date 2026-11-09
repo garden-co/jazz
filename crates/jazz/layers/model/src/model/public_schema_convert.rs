@@ -3182,6 +3182,25 @@ fn convert_session_path_operand(
     path: &str,
     path_segments: &[String],
 ) -> Result<Operand, SchemaConversionError> {
+    if path_segments.first().map(String::as_str) == Some("__jazz_table_identity_v1") {
+        let [_, name] = path_segments else {
+            return Err(err(
+                policy_path(table, path),
+                "CatalogueTableIdentityV1 requires exactly one non-empty table name",
+            ));
+        };
+        if name.is_empty() {
+            return Err(err(
+                policy_path(table, path),
+                "CatalogueTableIdentityV1 requires exactly one non-empty table name",
+            ));
+        }
+        return Ok(Operand::Claim(format!(
+            "{}{name}",
+            crate::query::TABLE_IDENTITY_OPERAND_PREFIX,
+        )));
+    }
+
     if let Some(name) = crate::query::author_claim_path_key(path_segments) {
         return Ok(Operand::Claim(name));
     }
@@ -3201,7 +3220,7 @@ fn convert_session_path_operand(
     Err(err(
         policy_path(table, path),
         format!(
-            "core schema policies only support session.user, session.authMode, and provider claims through session.claims; got session.{}",
+            "core schema policies only support session.user, session.authMode, provider claims through session.claims, and CatalogueTableIdentityV1; got session.{}",
             path_segments.join(".")
         ),
     ))

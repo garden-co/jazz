@@ -31,3 +31,7 @@ code that defines its format.
 - `observation_scope_v1.json`, `local_observation_v1.sql`: owner-local provenance
   hashes, full-u64 forward references and additive SQLite evidence/cleanup
   contracts (`dev/proofs/owner-local-observation-v1.md`).
+
+- `catalogue_identity_operand_v1.md`: reserved policy path and lowered operand bytes,
+  pinned by `catalogue_identity_operands.rs`; identities use the authority-confirmed
+  governing schema names, never caller claims.

@@ -31,6 +31,8 @@ mod branch_view_sync;
 mod branch_views;
 #[path = "../bundle_permissions.rs"]
 mod bundle_permissions;
+#[path = "../catalogue_identity_operands.rs"]
+mod catalogue_identity_operands;
 #[path = "../catalogue_rows.rs"]
 mod catalogue_rows;
 #[path = "../claims_change.rs"]

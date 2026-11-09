@@ -2298,7 +2298,9 @@ impl Db {
         // options are not known yet: validate the widest read (deleted rows
         // included, so their metadata columns are accepted).
         let session = Session::system();
-        Ctx::new(&inner.schema, None, &session, &binding).compile_query(query, true)?;
+        Ctx::new(&inner.schema, None, &session, &binding)
+            .with_catalogue(&*inner)
+            .compile_query(query, true)?;
         let shape = jazz_types::sha256::hash(
             format!("{query:?}{:?}", inner.schema.jazz.version_id()).as_bytes(),
         );
@@ -3585,6 +3587,32 @@ impl MergeableTx<'_> {
     }
 }
 
+// The compiler names the captured governing schema, not this Inner's ambient
+// handle schema. Use the same authority-confirmed namespace/stored-name proof
+// as Db::table_identity; a local schema or caller claim cannot mint an identity.
+impl crate::compile::CatalogueIdentityLookup for Inner {
+    fn table_identity(
+        &self,
+        version: crate::ids::SchemaVersionId,
+        table: &str,
+    ) -> Result<uuid::Uuid, Error> {
+        let namespace = self.namespace()?;
+        let (Some(namespace), true) = (namespace, self.names_confirmed(&version)) else {
+            return Err(Error::new(
+                ErrorCode::Query,
+                "CatalogueTableIdentityV1 requires the authority's catalogue for the governing schema version",
+            ));
+        };
+        let stored = self.names.get(&version)
+            .and_then(|names| names.tables.get(table))
+            .ok_or_else(|| Error::new(
+                ErrorCode::Query,
+                format!("CatalogueTableIdentityV1 has no accepted table `{table}` in governing schema {version:?}"),
+            ))?;
+        Ok(crate::names::identity(namespace, &stored.0, None))
+    }
+}
+
 impl Drop for Inner {
     fn drop(&mut self) {
         // An abandoned handle's overlay never reaches the file.
@@ -3963,6 +3991,7 @@ impl Inner {
         read: &ReadSpec,
     ) -> Ctx<'s> {
         Ctx::new(schema, policy, claims, &prepared.binding)
+            .with_catalogue(self)
             .with_view(read.view.clone())
             .with_withheld(self.withheld.get())
             .with_cut(read.cut.clone(), read.settled_only)
@@ -4648,7 +4677,9 @@ impl Inner {
     ) -> Result<(String, Vec<Sql>, OverlayRead), Error> {
         let binding = BTreeMap::new();
         let claims = Session::default();
-        let mut ctx = Ctx::new(schema, None, &claims, &binding).with_cut(cut, false);
+        let mut ctx = Ctx::new(schema, None, &claims, &binding)
+            .with_catalogue(self)
+            .with_cut(cut, false);
         let condition = policy(&mut ctx)?;
         let read = OverlayRead {
             rows: ctx.overlaid_rows,
@@ -4716,7 +4747,9 @@ impl Inner {
     ) -> Result<bool, Error> {
         let binding = BTreeMap::new();
         let claims = Session::default();
-        let mut ctx = Ctx::new(schema, None, &claims, &binding).with_cut(Some(cut), false);
+        let mut ctx = Ctx::new(schema, None, &claims, &binding)
+            .with_catalogue(self)
+            .with_cut(Some(cut), false);
         let condition = policy(&mut ctx)?;
         let source = ctx.source(table)?;
         let mut params = ctx.params;
