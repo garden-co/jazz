@@ -3,7 +3,7 @@ import { Component, Suspense, useState, type ReactNode } from "react";
 import { afterEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import { act, cleanup, render, waitFor } from "@testing-library/react";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { DbDeltaSubscriptionCallbacks, QueryBuilder } from "../runtime/db.js";
+import type { Db, DbDeltaSubscriptionCallbacks, QueryBuilder } from "../runtime/db.js";
 import type { SubscriptionDelta } from "../runtime/subscription-manager.js";
 import { SubscriptionsOrchestrator } from "../subscriptions-orchestrator.js";
 import { attachSubscriptionStore } from "../subscription-store-internal.js";
@@ -11,7 +11,7 @@ import { JazzClientProvider } from "./provider.js";
 import { useAll, useAllSuspense, type UseAllResult } from "./use-all.js";
 
 type Todo = { id: string; title: string };
-type NoQueryResult = { data: undefined; isLoading: false; error: null };
+type NoQueryResult = { data: undefined; isLoading: false; error: null; db: Db };
 
 function makeQuery(table = "todos"): QueryBuilder<Todo> {
   return {
@@ -105,8 +105,74 @@ describe("react-core/useAll", () => {
     );
 
     expect(container.textContent).toBe("idle");
-    expect(result).toEqual({ data: undefined, isLoading: false, error: null });
+    expect(result).toEqual({ data: undefined, isLoading: false, error: null, db: client.db });
     expect(subscribeCalls).toHaveLength(0);
+  });
+
+  it("returns the provider's db handle alongside the data in every state", () => {
+    const { client, subscribeCalls } = makeHarness("rc-all-db-handle");
+    const seen: UseAllResult<Todo>[] = [];
+
+    function Probe() {
+      seen.push(useAll(makeQuery()));
+      return null;
+    }
+
+    render(
+      <JazzClientProvider client={client}>
+        <Probe />
+      </JazzClientProvider>,
+    );
+
+    expect(seen.at(-1)!.isLoading).toBe(true);
+    expect(seen.at(-1)!.db).toBe(client.db);
+
+    act(() => subscribeCalls[0]!.callback(delta([{ id: "1", title: "first" }])));
+
+    expect(seen.at(-1)!.data).toEqual([{ id: "1", title: "first" }]);
+    expect(seen.at(-1)!.db).toBe(client.db);
+  });
+
+  it("useAllSuspense returns the rows and the provider's db handle", () => {
+    const { client, subscribeCalls } = makeHarness("rc-all-suspense-db-handle");
+    let result: { data: Todo[]; db: Db } | undefined;
+    let showSuspense!: (show: boolean) => void;
+
+    // A non-suspense reader keeps the entry subscribed and fulfilled, so the
+    // suspense reader mounted afterwards reads it synchronously.
+    function Warm() {
+      useAll(makeQuery());
+      return null;
+    }
+
+    function List() {
+      result = useAllSuspense(makeQuery());
+      return <span>{result.data.length}</span>;
+    }
+
+    function Root() {
+      const [show, setShow] = useState(false);
+      showSuspense = setShow;
+      return (
+        <>
+          <Warm />
+          <Suspense fallback={<span>loading</span>}>{show ? <List /> : null}</Suspense>
+        </>
+      );
+    }
+
+    const { container } = render(
+      <JazzClientProvider client={client}>
+        <Root />
+      </JazzClientProvider>,
+    );
+
+    act(() => subscribeCalls[0]!.callback(delta([{ id: "1", title: "first" }])));
+    act(() => showSuspense(true));
+
+    expect(container.textContent).toBe("1");
+    expect(result!.data).toEqual([{ id: "1", title: "first" }]);
+    expect(result!.db).toBe(client.db);
   });
 
   it("keeps result object identity stable while the state is unchanged", () => {
@@ -284,7 +350,7 @@ describe("react-core/useAll", () => {
     });
 
     function List() {
-      const todos = useAllSuspense(makeQuery());
+      const { data: todos } = useAllSuspense(makeQuery());
       return <span>{todos.length}</span>;
     }
 

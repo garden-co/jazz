@@ -437,7 +437,6 @@ fn include_deleted_subscriptions_keep_the_read_policy() {
                                 column: "owner".to_owned(),
                                 op: CmpOp::Eq,
                                 value: PolicyValue::SessionRef(vec![
-                                    "user".to_owned(),
                                     "identity".to_owned(),
                                     "subject".to_owned(),
                                 ]),

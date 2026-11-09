@@ -13,7 +13,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::protocol::SchemaVersion;
 use crate::schema::JazzSchema;
-use crate::tools::public_schema::{Schema, SchemaHash, TableName, TablePolicies, Value};
+use crate::tools::public_schema::{
+    HistoryRetention, Schema, SchemaHash, TableName, TablePolicies, Value,
+};
 use crate::tools::schema_lens::{Lens, LensOp, runtime::compile_lens};
 use migration_validation::{validate_lineage_table_partition, validate_migration_lens_between};
 
@@ -25,6 +27,10 @@ type Edge = (Hash, Hash);
 pub struct DeploymentCatalogue {
     pub schemas: Vec<Schema>,
     pub migrations: Vec<Lens>,
+    /// The schemas the store admitted, oldest first. The newest that has
+    /// a table decides how much of its history the store keeps
+    /// (SPEC 4 §4.9).
+    pub admitted_schema_hashes: Vec<SchemaHash>,
 }
 
 /// Missing artifacts plus the requested target and its complete permission set.
@@ -35,6 +41,9 @@ pub struct DeploymentRequest {
     pub schemas: Vec<(SchemaHash, Schema)>,
     pub migrations: Vec<Lens>,
     pub permissions: HashMap<TableName, TablePolicies>,
+    /// Confirms switching tables of the active schema to latest-only history
+    /// (SPEC 4 §4.9), which drops their past versions for good.
+    pub allow_dropping_history: bool,
 }
 
 /// Validated combined history, ordered so parents precede children. This does not
@@ -83,13 +92,114 @@ pub enum DeploymentError {
     },
     #[error("migration graph contains a cycle; blocked schemas: {}", display_hashes(.schemas, ", "))]
     Cycle { schemas: Vec<SchemaHash> },
-    #[error("migration history has disconnected roots: {}. Add migrations connecting these histories to one common root before deploying", display_hashes(.roots, ", "))]
+    #[error(
+        "migration history has disconnected roots: {}. No migration connects these schema versions. \
+         Run `jazz-tools migrations create --name <name>` to write the missing migration and add it \
+         to migrations/index.ts, then deploy again. If one of them is \
+         a version your store already runs that migrations/snapshots has no snapshot of, check out \
+         that schema.ts and run `jazz-tools migrations create` to snapshot it first",
+        display_hashes(.roots, ", ")
+    )]
     DisconnectedGraph { roots: Vec<SchemaHash> },
-    #[error("migration paths disagree: {} and {}", display_hashes(.first, " -> "), display_hashes(.second, " -> "))]
+    #[error(
+        "the migrations from {} to {} disagree along two paths ({} and {}): {difference}. Make the migrations on both paths give the same result",
+        short_hash(.first.first()),
+        short_hash(.first.last()),
+        short_hashes(.first),
+        short_hashes(.second)
+    )]
     ConflictingPaths {
         first: Vec<SchemaHash>,
         second: Vec<SchemaHash>,
+        /// What differs, by table and column.
+        difference: String,
     },
+    #[error(
+        "deploying schema {target} switches {} to latest-only history, which drops each row's past versions at its next write and cannot be undone. Deploy again with `allowDroppingHistory: true` to confirm.",
+        display_tables(.tables)
+    )]
+    DropsHistory {
+        target: SchemaHash,
+        tables: Vec<TableName>,
+    },
+}
+
+fn display_tables(tables: &[TableName]) -> String {
+    let names = tables
+        .iter()
+        .map(|table| format!("`{}`", table.as_str()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    match tables.len() {
+        1 => format!("table {names}"),
+        _ => format!("tables {names}"),
+    }
+}
+
+/// A schema hash as `migrations/snapshots` names it.
+fn short_hash(hash: Option<&SchemaHash>) -> String {
+    hash.map(|hash| hash.to_hex()[..12].to_owned())
+        .unwrap_or_default()
+}
+
+fn short_hashes(hashes: &[SchemaHash]) -> String {
+    hashes
+        .iter()
+        .map(|hash| short_hash(Some(hash)))
+        .collect::<Vec<_>>()
+        .join(" -> ")
+}
+
+/// A default as an app author writes it.
+fn value_text(value: &Value) -> String {
+    match value {
+        Value::Text(text) => serde_json::to_string(text).unwrap_or_default(),
+        Value::Integer(n) => n.to_string(),
+        Value::BigInt(n) => n.to_string(),
+        Value::Double(n) => n.to_string(),
+        Value::Boolean(b) => b.to_string(),
+        Value::Null => "null".into(),
+        other => serde_json::to_string(other).unwrap_or_else(|_| "a value".into()),
+    }
+}
+
+/// Where two projections of one schema first differ, by table and column.
+fn projection_difference(first: &Projection, second: &Projection) -> String {
+    let describe = |origin: Option<&ColumnOrigin>| match origin {
+        Some(ColumnOrigin::Source(column)) => format!("keeps column `{column}`"),
+        Some(ColumnOrigin::Default(value)) => format!("adds it with default {}", value_text(value)),
+        Some(ColumnOrigin::NewTable) => "adds it with a new table".into(),
+        None => "has no such column".into(),
+    };
+    let tables: BTreeSet<&String> = first.keys().chain(second.keys()).collect();
+    for table in tables {
+        let (Some(a), Some(b)) = (first.get(table), second.get(table)) else {
+            return format!("table `{table}` exists along only one of them");
+        };
+        if a.source != b.source {
+            let source = |source: &Option<String>| match source {
+                Some(name) => format!("keeps table `{name}`"),
+                None => "adds it".into(),
+            };
+            return format!(
+                "for table `{table}`, one path {} and the other {}",
+                source(&a.source),
+                source(&b.source)
+            );
+        }
+        let columns: BTreeSet<&String> = a.columns.keys().chain(b.columns.keys()).collect();
+        for column in columns {
+            let (x, y) = (a.columns.get(column), b.columns.get(column));
+            if x != y {
+                return format!(
+                    "for `{table}.{column}`, one path {} and the other {}",
+                    describe(x),
+                    describe(y)
+                );
+            }
+        }
+    }
+    "they give different results".into()
 }
 
 fn display_hashes(hashes: &[SchemaHash], separator: &str) -> String {
@@ -127,6 +237,20 @@ pub fn prepare_deployment(
         return Err(DeploymentError::MissingSchema {
             schema: request.target_schema_hash,
         });
+    }
+    if !request.allow_dropping_history {
+        let deployed: Vec<&Schema> = stored
+            .admitted_schema_hashes
+            .iter()
+            .filter_map(|hash| schemas.get(&hash.0))
+            .collect();
+        let tables = drops_history(&deployed, &schemas[&request.target_schema_hash.0]);
+        if !tables.is_empty() {
+            return Err(DeploymentError::DropsHistory {
+                target: request.target_schema_hash,
+                tables,
+            });
+        }
     }
     let compiled = schemas
         .iter()
@@ -171,37 +295,7 @@ pub fn prepare_deployment(
     )?;
     let order = topological_order(&schemas, &migrations)?;
     compatible::validate_compatible_graph(&schemas, &migrations, &representatives)?;
-    for ((from, to), lens) in &migrations {
-        let check = || -> Result<(), String> {
-            if lens.is_draft() {
-                return Err("migration contains unreviewed draft operations".into());
-            }
-            // Public deployment supports auto-invertible lenses only. Historical
-            // custom inverses must not silently lose their semantics during preparation.
-            if lens.backward.ops != lens.forward.invert().ops {
-                return Err("custom backward transforms are not supported by deployment".into());
-            }
-            let runtime_lens = compile_lens(lens, &schemas[from], &schemas[to])?;
-            let (new_tables, dropped_tables) = lens.table_changes();
-            validate_migration_lens_between(&runtime_lens, &compiled[from], &compiled[to])
-                .map_err(|error| error.to_string())?;
-            validate_lineage_table_partition(
-                &compiled[from].schema,
-                &compiled[to].schema,
-                &runtime_lens,
-                &new_tables,
-                &dropped_tables,
-            )
-            .map_err(|error| error.to_string())?;
-            validate_public_operations(lens, &schemas[from], &schemas[to])?;
-            Ok(())
-        };
-        check().map_err(|reason| DeploymentError::InvalidMigration {
-            from: SchemaHash(*from),
-            to: SchemaHash(*to),
-            reason,
-        })?;
-    }
+    check_lenses(&schemas, &compiled, &migrations)?;
     validate_parallel_paths(&order, &schemas, &migrations)?;
     let mut target = schemas[&request.target_schema_hash.0].clone();
     for (name, policies) in request.permissions {
@@ -233,6 +327,72 @@ pub fn prepare_deployment(
         migrations,
         active_schema,
     })
+}
+
+/// Each migration's own checks, apart from where it sits in the history:
+/// its lens is reviewed, auto-invertible, reproduces its target schema
+/// from its source, and uses only public operations.
+fn check_lenses(
+    schemas: &BTreeMap<Hash, Schema>,
+    compiled: &BTreeMap<Hash, SchemaVersion>,
+    migrations: &BTreeMap<Edge, Lens>,
+) -> Result<(), DeploymentError> {
+    for ((from, to), lens) in migrations {
+        let check = || -> Result<(), String> {
+            if lens.is_draft() {
+                return Err("migration contains unreviewed draft operations".into());
+            }
+            // Public deployment supports auto-invertible lenses only. Historical
+            // custom inverses must not silently lose their semantics during preparation.
+            if lens.backward.ops != lens.forward.invert().ops {
+                return Err("custom backward transforms are not supported by deployment".into());
+            }
+            let runtime_lens = compile_lens(lens, &schemas[from], &schemas[to])?;
+            let (new_tables, dropped_tables) = lens.table_changes();
+            validate_migration_lens_between(&runtime_lens, &compiled[from], &compiled[to])
+                .map_err(|error| error.to_string())?;
+            validate_lineage_table_partition(
+                &compiled[from].schema,
+                &compiled[to].schema,
+                &runtime_lens,
+                &new_tables,
+                &dropped_tables,
+            )
+            .map_err(|error| error.to_string())?;
+            validate_public_operations(lens, &schemas[from], &schemas[to])?;
+            Ok(())
+        };
+        check().map_err(|reason| DeploymentError::InvalidMigration {
+            from: SchemaHash(*from),
+            to: SchemaHash(*to),
+            reason,
+        })?;
+    }
+    Ok(())
+}
+
+/// The tables `target` makes latest-only for the first time, by name: some
+/// of `deployed` keeps them in full and none latest-only yet, so writes
+/// under `target` start dropping past versions the store kept (SPEC 4
+/// §4.9). Once any deployed version made a table latest-only, publishing
+/// another such version, or rolling back to a full-history one, needs no
+/// confirmation. A table renamed in the same deploy is not caught.
+fn drops_history(deployed: &[&Schema], target: &Schema) -> Vec<TableName> {
+    target
+        .iter()
+        .filter(|(name, table)| {
+            let kept = |history| {
+                deployed
+                    .iter()
+                    .filter_map(|schema| schema.get(*name))
+                    .any(|before| before.history == history)
+            };
+            table.history == HistoryRetention::Latest
+                && kept(HistoryRetention::Full)
+                && !kept(HistoryRetention::Latest)
+        })
+        .map(|(name, _)| name.clone())
+        .collect()
 }
 
 fn topological_order(
@@ -501,6 +661,7 @@ fn validate_parallel_paths(
                         return Err(DeploymentError::ConflictingPaths {
                             first: previous_path.clone(),
                             second: next_path,
+                            difference: projection_difference(previous, &next),
                         });
                     }
                 } else {

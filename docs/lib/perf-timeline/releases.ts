@@ -1,7 +1,13 @@
 import type { RawRun, Release } from "./model.ts";
 
+/**
+ * A published release's tag. Release candidates (`v2.0.0-alpha.60-rc.3`) and
+ * previews are not releases: commits they contain are attributed to the
+ * release that ships them, so the timeline compares alpha.60 with alpha.59.
+ */
 export function isVersionTag(name: string): boolean {
-  return /^v?\d+\.\d+\.\d+(?:[-+].+)?$/.test(name);
+  if (!/^v?\d+\.\d+\.\d+(?:[-+].+)?$/.test(name)) return false;
+  return !/[-.](?:rc|preview)(?:[.\d]|$)/i.test(name);
 }
 
 /**

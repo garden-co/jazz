@@ -23,8 +23,8 @@ export {
   useJazzClient,
   useSession,
 } from "./provider.js";
-export { useAll, useAllSuspense, type UseAllResult } from "./use-all.js";
-export { useOne, useOneSuspense, type UseOneResult } from "./use-one.js";
+export { useAll, useAllSuspense, type UseAllResult, type UseAllSuspenseResult } from "./use-all.js";
+export { useOne, useOneSuspense, type UseOneResult, type UseOneSuspenseResult } from "./use-one.js";
 export {
   useLocalFirstAuth,
   REACT_NATIVE_AUTH_SECRET_STORE_REQUIRED_ERROR,
@@ -40,6 +40,7 @@ export {
   REACT_NATIVE_NATIVE_RELAY_MEMORY_ONLY_ERROR,
   REACT_NATIVE_NATIVE_RELAY_REQUIRED_ERROR,
   REACT_NATIVE_UNSUPPORTED_ERROR,
+  REACT_NATIVE_WEB_UNSUPPORTED_ERROR,
 } from "./errors.js";
 export {
   UnsupportedStorageCodecsError,

@@ -10,6 +10,12 @@ export default defineConfig({
   plugins: [react()],
   resolve: {
     alias: [
+      // Exact, ahead of the "jazz-tools" prefix alias below, which would turn
+      // the backend's `import("jazz-tools/package.json")` into src/index.ts/package.json.
+      {
+        find: /^jazz-tools\/package\.json$/,
+        replacement: resolve(__dirname, "../jazz-tools/package.json"),
+      },
       {
         find: "jazz-tools/_dev/inspector-client",
         replacement: resolve(__dirname, "../jazz-tools/src/_dev/inspector-client.ts"),

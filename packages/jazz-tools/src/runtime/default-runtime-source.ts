@@ -45,6 +45,9 @@ import {
 } from "./browser-worker-config.js";
 import { getRuntimeSchemaCacheKey } from "../drivers/schema-wire.js";
 import { randomNodeUuidBytes } from "./runtime-entropy.js";
+import { accountConfigBearer } from "../accounts/config-capability.js";
+import { bearerWebSocket } from "./credentialed-transport.js";
+import type { WebSocketConstructor } from "./native-runtime/websocket.js";
 
 const DEFAULT_WASM_LOG_LEVEL = "warn";
 
@@ -196,6 +199,10 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     const author = authorBytesForSession(runtimeAuthorFromConfig(config));
     const flushEvery = initialSyncFlushEvery(config);
     const browserMode = isPersistentBrowserConfig(config);
+    // A user the app's backend signed in with its bearer (a host without
+    // cookies): the sync socket carries it, as a browser's carries the cookie.
+    const bearer =
+      config.cookieSession && config.accountId ? accountConfigBearer(config) : undefined;
     const mainThreadPeerRuntime = this.nativeSchemaView(
       schema,
       node,
@@ -206,6 +213,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
       backendMode,
       { appId: clientScope(config), thresholdMs: config.slowQueryThresholdMs },
       migrations,
+      bearer && config.serverUrl ? bearerWebSocket(config.serverUrl, bearer) : undefined,
     );
     if (foregroundNodeLease) {
       mainThreadPeerRuntime.seedForegroundTxTimeHighWater(foregroundNodeLease.confirmedTxTime);
@@ -394,6 +402,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     backendMode = false,
     slowQueryLog?: SlowQueryLogOptions,
     migrations?: ClientMigrations,
+    webSocket?: WebSocketConstructor,
   ): NativeRuntimeAdapter {
     if (!this.ownerRuntime || this.ownerRuntime.isClosed()) {
       this.ownerRuntime = new NativeRuntimeAdapter(
@@ -409,6 +418,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
           backendMode,
           slowQueryLog,
           migrations,
+          webSocket,
         },
       );
       return this.ownerRuntime;

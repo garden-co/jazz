@@ -12,7 +12,7 @@ import {
   VStack,
   VisuallyHidden,
 } from "@astryxdesign/core";
-import { useAll, useDb } from "jazz-tools/react";
+import { useAll } from "jazz-tools/react";
 import { app } from "../../schema";
 import { AddMemberDialog } from "../components/forms";
 import { PageHeader, PageSection } from "../components/page";
@@ -24,10 +24,9 @@ import { capabilities, roleLabels, roles, isRole } from "../roles";
 export function PeoplePage() {
   const organization = useOrganization();
   const canManage = useCan("manageMembers");
-  const db = useDb();
   const write = useWrite();
   const [isAdding, setIsAdding] = useState(false);
-  const { data: memberships = [] } = useAll(
+  const { data: memberships = [], db } = useAll(
     app.memberships.where({ organizationId: organization.id }).include({ person: true }).limit(500),
   );
   const members = [...memberships].sort((a, b) =>

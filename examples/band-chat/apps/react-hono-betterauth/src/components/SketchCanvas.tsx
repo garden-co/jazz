@@ -1,5 +1,5 @@
 import { useRef, useState, type PointerEvent } from "react";
-import { useAll, useDb } from "jazz-tools/react";
+import { useAll } from "jazz-tools/react";
 import { Button, HStack, Text, ToggleButton, VStack } from "@astryxdesign/core";
 import { app } from "../../schema";
 
@@ -47,9 +47,8 @@ export function SketchCanvas({
   roomId: string;
   author: string;
 }) {
-  const db = useDb();
   const svg = useRef<SVGSVGElement>(null);
-  const { data: strokes = [] } = useAll(
+  const { data: strokes = [], db } = useAll(
     app.strokes.where({ canvasId }).select("*", "$createdAt").orderBy("$createdAt", "asc"),
   );
   const [pen, setPen] = useState<Pen>("ink");

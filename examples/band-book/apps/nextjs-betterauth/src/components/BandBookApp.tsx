@@ -37,7 +37,7 @@ export function BandBookApp({
   settingUp?: boolean;
   setupError?: { message: string; retry: () => void } | null;
 }) {
-  const me = useSession()?.user.account ?? null;
+  const me = useSession()?.user ?? null;
   const { reauthenticate } = useJazzAuth();
   const router = useRouter();
   const pathname = usePathname();

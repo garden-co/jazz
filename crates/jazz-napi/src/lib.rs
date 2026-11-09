@@ -91,6 +91,15 @@ pub fn validate_schema(schema: Uint8Array) -> js::Result<()> {
     Ok(())
 }
 
+/// Check an app's shipped migrations (the `ClientMigrations` JSON) leading
+/// to the schema hash `target` as a deployment to a new authority would,
+/// without opening a database. `jazz-tools validate` runs it.
+#[napi(js_name = "checkClientMigrations")]
+pub fn check_client_migrations(migrations: String, target: String) -> napi::Result<()> {
+    jazz::tools::deployment::published::check_client_migrations(migrations.as_bytes(), &target)
+        .map_err(napi::Error::from_reason)
+}
+
 /// Exact build/ABI fingerprint for the generated native artifact.
 #[napi]
 pub fn native_artifact_fingerprint() -> String {
@@ -864,11 +873,13 @@ impl Write {
         };
         let fate = inner
             .binding
-            .wait_for_write(&self.write, &tier)
+            .wait_for_write(
+                &self.write,
+                &tier,
+                (!observe_only.unwrap_or(false)).then(|| Rc::clone(&self.claimed)),
+            )
             .map_err(host_error)?;
-        if !observe_only.unwrap_or(false) {
-            self.claimed.set(true);
-        }
+
         Ok(host_promise(&env, fate)?)
     }
 
@@ -1085,10 +1096,31 @@ impl Transport {
         Ok(self.link.outbound_len() as u32)
     }
 
+    /// Why the database dropped this upstream link on its own, with the
+    /// core's stable `code` (`authority_changed` for a server whose store
+    /// was recreated), or `null` while the link stands. The host stops the
+    /// link with it rather than retry.
+    #[napi(js_name = "upstreamRefusal")]
+    pub fn upstream_refusal(&self) -> Option<UpstreamRefusal> {
+        self.link.upstream_refusal().map(|error| UpstreamRefusal {
+            code: error.code.as_str().to_owned(),
+            message: error.to_string(),
+        })
+    }
+
     #[napi]
     pub fn close(&mut self) -> bool {
         self.link.close()
     }
+}
+
+/// Why the database dropped an upstream link (see `Transport.upstreamRefusal`).
+#[napi(object)]
+pub struct UpstreamRefusal {
+    /// The core's stable error code.
+    pub code: String,
+    /// What the core said, as an error's message.
+    pub message: String,
 }
 
 // ---- the database --------------------------------------------------------------

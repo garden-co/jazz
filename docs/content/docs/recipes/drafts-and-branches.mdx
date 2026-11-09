@@ -1,6 +1,6 @@
 ---
 title: Branches
-description: Model application-owned branches with ordinary columns and head-over-base views.
+description: "Learn how to model your app's own branches with ordinary columns and head-over-base views."
 reviewedAt: "ce310cf5a"
 ---
 
@@ -126,7 +126,7 @@ example, an app can allow writes only when:
 ```text
 document.branch_id -> branches.id
 branches.workspace_id -> workspace_memberships.workspace_id
-workspace_memberships.user_id == session.user.account
+workspace_memberships.user_id == session.user
 branches.status == "open"
 ```
 

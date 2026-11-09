@@ -11,13 +11,11 @@ export function makeFakeClient(params: {
   claims: Record<string, unknown>;
 }) {
   const session: PublicSession = {
-    user: {
-      account: "00000000-0000-4000-8000-000000000002",
-      identity: {
-        issuer:
-          params.authMode === "external" ? "https://issuer.example" : `urn:jazz:${params.authMode}`,
-        subject: params.userId,
-      },
+    user: "00000000-0000-4000-8000-000000000002",
+    identity: {
+      issuer:
+        params.authMode === "external" ? "https://issuer.example" : `urn:jazz:${params.authMode}`,
+      subject: params.userId,
     },
     claims: params.claims,
     authMode: params.authMode,

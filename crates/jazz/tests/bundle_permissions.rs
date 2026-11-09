@@ -594,3 +594,158 @@ fn a_pinned_subscription_keeps_its_bundle_when_the_schema_changes() {
         "still closed after the schema changed"
     );
 }
+
+/// A write made under one bundle and uploaded after a stricter one is
+/// published is refused by the new bundle, and the refusal reaches the
+/// writer as a permission refusal: it does not vanish (alpha.60 adopter
+/// pass V3).
+#[test]
+fn an_offline_write_a_tightened_bundle_refuses_is_reported_as_denied() {
+    let (server, row) = server_with_row(
+        block_on(Db::open(config(0, AuthorSubject::SYSTEM, PolicyExpr::True))).unwrap(),
+    );
+    let open = block_on(server.publish_bundle(&users(PolicyExpr::True))).unwrap();
+    let alice = AuthorSubject::for_test_bytes([0x55; 16]);
+    let (db, keep) = pinned(&server, 1, alice, open);
+    db.track_upstream_rejections();
+    pump(&server, &[&db]);
+    assert_eq!(local(&db), [row]);
+
+    // Offline: the write stays local while a stricter bundle comes out.
+    let written = block_on(db.update(
+        "users",
+        row,
+        BTreeMap::from([("name".to_owned(), Value::String("eve".into()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    // A second offline write builds on the first.
+    let built_on = block_on(db.update(
+        "users",
+        row,
+        BTreeMap::from([("name".to_owned(), Value::String("eve 2".into()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    let mut no_updates = users(PolicyExpr::True);
+    for table in no_updates.values_mut() {
+        table.policies.update.using = Some(PolicyExpr::False);
+    }
+    let strict = block_on(server.publish_bundle(&no_updates)).unwrap();
+    drop(keep);
+
+    // Back online, on the deployment that serves the stricter bundle.
+    let (client_side, server_side) = duplex();
+    let _upstream = block_on(db.connect_upstream(client_side));
+    server
+        .accept_pinned_subscriber(server_side, alice, None, Some(strict))
+        .unwrap();
+    pump(&server, &[&db]);
+
+    let rejections = db.take_upstream_rejections();
+    assert_eq!(
+        rejections.iter().map(|r| r.seq).collect::<Vec<_>>(),
+        [written.mergeable_tx_id(), built_on.mergeable_tx_id()],
+        "both refusals reach the writer"
+    );
+    assert!(
+        rejections[0].error.is_authorization_denied(),
+        "{}",
+        rejections[0].error
+    );
+    // The write built on the refused one says why that one was refused.
+    let message = &rejections[1].error.message;
+    assert!(
+        message.starts_with(
+            "the write was built on a write the authority rejected (permission denied: "
+        ) && !message.contains("authorization_denied"),
+        "{message}"
+    );
+    assert_eq!(local(&db), [row], "the row is back to the accepted version");
+}
+
+/// The same through a relay that holds the writer's store, as a browser
+/// worker does for its tabs: the refusal reaches the tab that wrote.
+#[test]
+fn an_offline_write_relayed_for_a_tab_is_reported_to_the_tab() {
+    let (server, row) = server_with_row(
+        block_on(Db::open(config(0, AuthorSubject::SYSTEM, PolicyExpr::True))).unwrap(),
+    );
+    let open = block_on(server.publish_bundle(&users(PolicyExpr::True))).unwrap();
+    let alice = AuthorSubject::for_test_bytes([0x55; 16]);
+    let edge = client(5, alice);
+    edge.track_upstream_rejections();
+    let (edge_up, server_side) = duplex();
+    let _edge_upstream = block_on(edge.connect_upstream(edge_up));
+    let session = server
+        .accept_pinned_subscriber(server_side, alice, None, Some(open))
+        .unwrap();
+    let tab = client(1, alice);
+    tab.track_upstream_rejections();
+    let (tab_side, edge_side) = duplex();
+    let _tab_upstream = block_on(tab.connect_upstream(tab_side));
+    edge.accept_subscriber(edge_side, alice).unwrap();
+    let prepared = tab.prepare_query(&Query::from("users")).unwrap();
+    let _stream = block_on(tab.subscribe(&prepared, ReadOpts::default())).unwrap();
+    let pump_all = |server: &Db| {
+        for _ in 0..6 {
+            block_on(tab.tick()).unwrap();
+            block_on(edge.tick()).unwrap();
+            block_on(server.tick()).unwrap();
+            block_on(edge.tick()).unwrap();
+        }
+        block_on(tab.tick()).unwrap();
+    };
+    pump_all(&server);
+    assert_eq!(local(&tab), [row]);
+
+    // A stricter deployment comes out, which ends the worker's session on
+    // the old bundle; the tab's write reaches the worker meanwhile.
+    let mut no_updates = users(PolicyExpr::True);
+    for table in no_updates.values_mut() {
+        table.policies.update.using = Some(PolicyExpr::False);
+    }
+    let strict = block_on(server.publish_bundle(&no_updates)).unwrap();
+    server.disconnect_subscriber(session);
+    let written = block_on(tab.update(
+        "users",
+        row,
+        BTreeMap::from([("name".to_owned(), Value::String("eve".into()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    let built_on = block_on(tab.update(
+        "users",
+        row,
+        BTreeMap::from([("name".to_owned(), Value::String("eve 2".into()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    pump_all(&server);
+    let (client_side, server_side) = duplex();
+    let _upstream = block_on(edge.connect_upstream(client_side));
+    server
+        .accept_pinned_subscriber(server_side, alice, None, Some(strict))
+        .unwrap();
+    pump_all(&server);
+
+    let at_tab = tab.take_upstream_rejections();
+    let at_edge = edge.take_upstream_rejections();
+    assert_eq!(
+        at_tab.iter().map(|r| r.seq).collect::<Vec<_>>(),
+        [written.mergeable_tx_id(), built_on.mergeable_tx_id()],
+        "the refusals reach the tab (edge saw {at_edge:?})"
+    );
+    assert!(
+        at_tab[0].error.is_authorization_denied(),
+        "{}",
+        at_tab[0].error
+    );
+    let message = &at_tab[1].error.message;
+    assert!(
+        message.starts_with(
+            "the write was built on a write the authority rejected (permission denied: "
+        ) && !message.contains("authorization_denied"),
+        "{message}"
+    );
+}

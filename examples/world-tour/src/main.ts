@@ -6,8 +6,8 @@ import { JazzProvider } from "jazz-tools/vue";
 import { createAccountManager } from "jazz-tools";
 import App from "./App.vue";
 
-// The app's backend serves Jazz on this origin (`/jazz`), so the client needs no URL.
-const config = {};
+// The app's backend serves Jazz on this origin, under `/jazz`.
+const config = { serverUrl: "/jazz" };
 
 // Every visitor gets a local-first account. Band membership, not a login, decides
 // what they can see and edit.

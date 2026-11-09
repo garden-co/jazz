@@ -56,7 +56,7 @@ use common::{
 
 const USERS: usize = 4;
 const ROOMS: usize = 3;
-const ME: [&str; 3] = ["user", "identity", "subject"];
+const ME: [&str; 2] = ["identity", "subject"];
 
 fn user(n: usize) -> AuthorSubject {
     AuthorSubject::for_test_bytes([0x40 + n as u8; 16])

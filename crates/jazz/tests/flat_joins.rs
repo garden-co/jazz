@@ -266,7 +266,7 @@ fn flat_join_subscriptions_address_occurrences() {
 #[test]
 fn flat_join_applies_each_sources_read_policy() {
     let db = open(
-        schema(Some(session_eq("owner", &["user", "identity", "subject"]))),
+        schema(Some(session_eq("owner", &["identity", "subject"]))),
         1,
     );
     let bob = AuthorSubject::for_test_bytes([0xb0; 16]);

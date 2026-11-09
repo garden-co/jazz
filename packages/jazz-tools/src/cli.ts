@@ -39,6 +39,19 @@ const DEPLOY_REMOVED =
   "createJazz publishes your schema, its permissions and its migrations when your backend starts, " +
   "so deploying the backend is the deployment.";
 
+const SERVER_REMOVED =
+  "`jazz-tools server` was removed. Jazz runs inside your backend: " +
+  "`createJazz({ store: sqlite({ path }) })` serves sync from your own server, and " +
+  "`createJazz({ store: remote({ url, appId, secret }) })` uses Jazz Cloud.";
+
+const CREATE_REMOVED = "`jazz-tools create` was removed. Start a project with `npm create jazz`.";
+
+const MIGRATE_ALPHA59_MOVED =
+  "`jazz-tools migrate-alpha59` moved to `jazz-alpha59-alpha60-import`, a native binary attached to each " +
+  "GitHub release next to `jazz-alpha59-alpha60-export`. Download both for your platform from " +
+  "https://github.com/garden-co/jazz/releases and run `jazz-alpha59-alpha60-import import --dump <dump> " +
+  "--data-dir <dir> --app-id <app id>`.";
+
 const PERMISSIONS_LIFECYCLE_NOTE =
   "Permission-only changes do not create schema hashes or require migrations.";
 
@@ -62,9 +75,25 @@ export async function validate(options: BuildOptions): Promise<void> {
   console.log(`Loaded schema from ${result.schemaFile}.`);
   if (result.permissionsFile) {
     console.log(`Loaded current permissions from ${result.permissionsFile}.`);
-    console.log(PERMISSIONS_LIFECYCLE_NOTE);
-    console.log(DEPLOY_NOTE);
   }
+  switch (result.schema.status) {
+    case "changed":
+      console.log(
+        `schema.ts (${result.schema.hash.slice(0, 12)}) changed since the latest snapshot in migrations/snapshots. ` +
+          "Run `jazz-tools migrations create --name <name>` before you deploy it.",
+      );
+      break;
+    case "unsnapshotted":
+      console.log(
+        "This project has no schema snapshot yet: before you change schema.ts, run `jazz-tools migrations create` " +
+          "on the version your backend runs, so later migrations start from it.",
+      );
+      break;
+    case "snapshotted":
+      console.log(PERMISSIONS_LIFECYCLE_NOTE);
+      break;
+  }
+  if (result.schema.status !== "changed") console.log(DEPLOY_NOTE);
   for (const warning of result.warnings) {
     console.warn(`\x1b[33m${warning}\x1b[0m`);
   }
@@ -291,6 +320,14 @@ export async function createMigration(options: CreateMigrationOptions): Promise<
     case "unchanged":
       console.log("No schema changes detected.");
       return null;
+    case "initial-snapshot":
+      console.log(
+        `Snapshotted schema.ts (${result.hash.slice(0, 12)}) as this project's first schema version: ${result.snapshotPath}`,
+      );
+      console.log(
+        "No migration was created: there is no earlier version to migrate from. Change schema.ts, then run `jazz-tools migrations create --name <name>`.",
+      );
+      return null;
     case "migration-not-required": {
       console.log(
         "No reviewed migration file needed because this schema change does not require row transformations.",
@@ -506,6 +543,15 @@ if (isMainModule()) {
     exitOnError(task);
   } else if (command === "deploy") {
     console.error(DEPLOY_REMOVED);
+    process.exit(1);
+  } else if (command === "server") {
+    console.error(SERVER_REMOVED);
+    process.exit(1);
+  } else if (command === "create") {
+    console.error(CREATE_REMOVED);
+    process.exit(1);
+  } else if (command === "migrate-alpha59") {
+    console.error(MIGRATE_ALPHA59_MOVED);
     process.exit(1);
   } else {
     printHelp();

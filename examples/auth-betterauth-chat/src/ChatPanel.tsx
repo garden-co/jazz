@@ -1,5 +1,5 @@
 import * as React from "react";
-import { useAll, useDb, useSession } from "jazz-tools/react";
+import { useAll, useSession } from "jazz-tools/react";
 import { app } from "../schema";
 
 export type ChatPanelProps = {
@@ -26,11 +26,10 @@ export function ChatPanel({
   placeholder,
   readOnlyNotice,
 }: ChatPanelProps) {
-  const db = useDb();
   const session = useSession();
-  const sessionUserId = session?.user.account ?? null;
+  const sessionUserId = session?.user ?? null;
 
-  const { data: rows = [] } = useAll(
+  const { data: rows = [], db } = useAll(
     app.messages
       .where({ chat_id: chatId })
       .select("id", "author_name", "text", "sent_at")

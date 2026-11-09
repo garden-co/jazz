@@ -89,10 +89,10 @@ struct Cli {
 #[allow(clippy::large_enum_variant)]
 enum Commands {
     /// Import an alpha.59 server data dir into a new one, from the dump that
-    /// `jazz-alpha59-export` writes (`import`), and check the result
-    /// (`verify`). Run `jazz-tools migrate-alpha59` for its usage.
-    #[command(name = "migrate-alpha59")]
-    MigrateAlpha59 {
+    /// `jazz-alpha59-alpha60-export` writes (`import`), and check the result
+    /// (`verify`). Run `jazz-tools alpha59-alpha60` for its usage.
+    #[command(name = "alpha59-alpha60")]
+    Alpha59Alpha60 {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -310,9 +310,9 @@ fn main() {
 
 async fn run() {
     let cli = Cli::parse();
-    // migrate-alpha59 prints its JSON summary on stdout, so its logs go to
+    // alpha59-alpha60 prints its JSON summary on stdout, so its logs go to
     // stderr.
-    init_tracing(matches!(cli.command, Commands::MigrateAlpha59 { .. }));
+    init_tracing(matches!(cli.command, Commands::Alpha59Alpha60 { .. }));
     if let Err(error) = validate_server_cli_options(&cli.command) {
         eprintln!("Server error: {error}");
         shutdown_tracing();
@@ -320,8 +320,8 @@ async fn run() {
     }
 
     match cli.command {
-        Commands::MigrateAlpha59 { args } => {
-            let code = jazz_cli::migrate_alpha59::main(args).await;
+        Commands::Alpha59Alpha60 { args } => {
+            let code = jazz_cli::alpha59_alpha60::main("jazz-tools alpha59-alpha60", args).await;
             shutdown_tracing();
             std::process::exit(code);
         }

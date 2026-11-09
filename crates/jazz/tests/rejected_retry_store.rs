@@ -30,11 +30,7 @@ fn schema() -> JazzSchema {
     let mine = PolicyExpr::Cmp {
         column: "owner".to_owned(),
         op: CmpOp::Eq,
-        value: PolicyValue::SessionRef(vec![
-            "user".to_owned(),
-            "identity".to_owned(),
-            "subject".to_owned(),
-        ]),
+        value: PolicyValue::SessionRef(vec!["identity".to_owned(), "subject".to_owned()]),
     };
     compile_schema(
         &SchemaBuilder::new()

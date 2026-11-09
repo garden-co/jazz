@@ -18,6 +18,9 @@ pub(crate) struct DeployRequest {
     pub schemas: Vec<DeploySchema>,
     pub migrations: Vec<PublishMigrationRequest>,
     pub permissions: HashMap<TableName, TablePolicies>,
+    /// Confirms switching existing tables to latest-only history.
+    #[serde(default)]
+    pub allow_dropping_history: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -91,9 +94,17 @@ impl From<DeploymentError> for DeployError {
                 "disconnected_migration_graph",
                 serde_json::json!({"roots":roots.iter().map(ToString::to_string).collect::<Vec<_>>()}),
             ),
-            ConflictingPaths { first, second } => (
+            ConflictingPaths {
+                first,
+                second,
+                difference,
+            } => (
                 "conflicting_paths",
-                serde_json::json!({"first":first.iter().map(ToString::to_string).collect::<Vec<_>>(),"second":second.iter().map(ToString::to_string).collect::<Vec<_>>()}),
+                serde_json::json!({"first":first.iter().map(ToString::to_string).collect::<Vec<_>>(),"second":second.iter().map(ToString::to_string).collect::<Vec<_>>(),"difference":difference}),
+            ),
+            DropsHistory { target, tables } => (
+                "drops_history",
+                serde_json::json!({"target":target.to_string(),"tables":tables.iter().map(|t| t.as_str()).collect::<Vec<_>>()}),
             ),
         };
         Self {
@@ -167,6 +178,7 @@ pub(crate) async fn deploy(
             schemas,
             migrations,
             permissions: request.permissions,
+            allow_dropping_history: request.allow_dropping_history,
         },
     )?;
     let staged = state
@@ -263,6 +275,7 @@ pub(crate) async fn publish_source_bundle(
             }],
             migrations: Vec::new(),
             permissions,
+            allow_dropping_history: false,
         },
     )
     .await

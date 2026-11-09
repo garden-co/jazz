@@ -159,6 +159,11 @@ export type AuthUpdate =
  */
 export interface Runtime {
   /**
+   * @internal The Db handed over to a successor: end reads not sent yet with
+   * a `RuntimeClosedError` cause, so they ask the successor instead.
+   */
+  endUnsentReads?(): void;
+  /**
    * Wait until every write committed so far reaches `tier`. `throughOutage`
    * keeps the wait pending through outages until a terminal failure.
    */
@@ -1941,7 +1946,9 @@ export class JazzClient {
     branch?: BranchView,
   ): MutationResult {
     if (branch) {
-      throw new Error("Partial-value updates are not yet supported in branch views.");
+      throw new Error(
+        "Partial-value updates (applyDiffs, editedFrom) are not yet supported in branch views.",
+      );
     }
     const writeContext = this.writeContext(session, attribution, openTransactionId, { updatedAt });
     if (!this.runtime.updateLargeValues) {

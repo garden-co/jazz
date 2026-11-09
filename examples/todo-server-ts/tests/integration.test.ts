@@ -46,6 +46,15 @@ async function createIdentity(
   return { token, userId, user: account };
 }
 let primaryIdentity: Identity;
+
+/** Sign `identity` in on a server with its own store: Jazz has no account for them there yet. */
+async function signIn(baseUrl: string, identity = primaryIdentity): Promise<void> {
+  const response = await fetch(`${baseUrl}/sign-in`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${identity.token}` },
+  });
+  expect(response.status).toBe(200);
+}
 let jwtIssuer: TestJwtIssuerHandle;
 
 function authenticatedFetch(
@@ -294,6 +303,7 @@ describe("Todo Server Integration", () => {
         await createServer({ type: "persistent", dataPath: dbPath }, jazzOptions()),
         0,
       );
+      await signIn(server1.baseUrl);
 
       const createRes1 = await authenticatedFetch(`${server1.baseUrl}/todos`, {
         method: "POST",
@@ -351,6 +361,7 @@ describe("Todo Server Integration", () => {
         await createServer({ type: "persistent", dataPath: dbPath }, jazzOptions()),
         0,
       );
+      await signIn(server1.baseUrl);
 
       let todoId: string | undefined;
       try {
@@ -407,8 +418,8 @@ describe("Todo Server Integration", () => {
       const sseBaseUrl = sseServer.baseUrl;
       let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
       try {
-        const sseIdentity = await createIdentity(jwtIssuer, baseUrl, "todo-rest-sse-primary");
-        const otherIdentity = await createIdentity(jwtIssuer, baseUrl, "todo-rest-sse-other");
+        const sseIdentity = await createIdentity(jwtIssuer, sseBaseUrl, "todo-rest-sse-primary");
+        const otherIdentity = await createIdentity(jwtIssuer, sseBaseUrl, "todo-rest-sse-other");
         const foreignCreate = await authenticatedFetch(
           `${sseBaseUrl}/todos`,
           {
@@ -552,6 +563,7 @@ describe("Todo Server Integration", () => {
     it("gracefully closes active SSE connections during shutdown", async () => {
       const sseServer = await startServer(await createServer({ type: "memory" }, jazzOptions()), 0);
       const sseBaseUrl = sseServer.baseUrl;
+      await signIn(sseBaseUrl);
       let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
       let shutdown: Promise<void> | undefined;
       let succeeded = false;

@@ -17,6 +17,7 @@
 // row, permissions not checked) unless they ask to act as a user. That is
 // the point of the Inspector, and it is why the hook must be narrow.
 
+import { NoJazzAccountError } from "./no-account-error.js";
 import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { ColumnType, WasmSchema } from "../drivers/types.js";
 import type { Db, QueryBuilder, TableProxy } from "../runtime/db.js";
@@ -406,7 +407,13 @@ export function createInspector(deps: InspectorDeps) {
     if (!user || typeof user.userId !== "string" || !user.userId) {
       throw new InspectError("bad_request", "as must name a user id");
     }
-    return { db: await deps.dbAs(user), as: user.userId };
+    try {
+      return { db: await deps.dbAs(user), as: user.userId };
+    } catch (error) {
+      // Viewing as a user who never signed in: there is no one to be.
+      if (error instanceof NoJazzAccountError) throw new InspectError("not_found", error.message);
+      throw error;
+    }
   }
 
   async function readRows(

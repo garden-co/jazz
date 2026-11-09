@@ -4,6 +4,7 @@ import {
   attachJazzSessionConsumer,
   createJazzSessionOwner,
   replaceJazzSessionClient,
+  switchJazzSessionUser,
 } from "./state.js";
 import type { JWTAuth } from "../accounts/enrollment.js";
 import { GracefulShutdownSyncError } from "../runtime/graceful-shutdown-error.js";
@@ -43,6 +44,18 @@ const tick = async () => {
   for (let i = 0; i < 12; i++) await Promise.resolve();
 };
 describe("Jazz session lifecycle", () => {
+  it("refuses a malformed secret to restore without touching the current client", async () => {
+    const { session, enrollment, clients } = await setup();
+    const before = session.getSnapshot();
+    await expect(session.restoreLocalFirst(undefined as unknown as string)).rejects.toThrow(
+      "jazz-auth-v1:",
+    );
+    await expect(session.restoreLocalFirst("not a secret")).rejects.toThrow();
+    expect(session.getSnapshot()).toBe(before);
+    expect(enrollment.restoreLocalFirst).not.toHaveBeenCalled();
+    expect(clients[0]!.shutdown).not.toHaveBeenCalled();
+  });
+
   it("does not open an unsaved selection and retries its failed synchronous persistence hook", async () => {
     const selected = handle("selected");
     const failure = new Error("cannot queue selection");
@@ -138,6 +151,61 @@ describe("Jazz session lifecycle", () => {
       client: clients[0],
       error: failure,
     });
+    await session.close();
+  });
+  it("signs out past writes the server refused for a sign-in it no longer accepts", async () => {
+    const { session, clients } = await setup();
+    const client = clients[0]! as (typeof clients)[0] & { db?: unknown };
+    client.db = {
+      getAuthState: () => ({ error: "invalid" }),
+      getSyncStatus: () => ({ pendingUploads: 2 }),
+      getConfig: () => ({ driver: { type: "persistent" } }),
+    };
+    const failure = new GracefulShutdownSyncError(new Error("session missing: not signed in"));
+    client.shutdown.mockRejectedValueOnce(failure);
+    const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await session.logout();
+    expect(session.getSnapshot().status).toBe("signed-out");
+    expect(client.shutdown.mock.calls).toEqual([[{ waitForSync: true }], []]);
+    expect(warned).toHaveBeenCalledWith(
+      expect.stringMatching(/2 write\(s\) the server refused.*stay on this device/),
+      failure.cause,
+    );
+    warned.mockRestore();
+    await session.close();
+  });
+  // Another user signed in through the app (no sign-out first): the server
+  // refuses the first user's socket, which carries the next user's cookie,
+  // so their client can't finish syncing. The switch signs them out anyway.
+  it("switches to the next user past a client the server refuses", async () => {
+    const { session, clients, enrollment, old, next } = await setup();
+    const client = clients[0]! as (typeof clients)[0] & { db?: unknown };
+    client.db = {
+      getAuthState: () => ({ error: "missing" }),
+      getSyncStatus: () => ({ pendingUploads: 0 }),
+      getConfig: () => ({ driver: { type: "persistent" } }),
+    };
+    client.shutdown.mockRejectedValueOnce(
+      new GracefulShutdownSyncError(new Error("session missing: not signed in")),
+    );
+    const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await expect(switchJazzSessionUser(session, old)).resolves.toBe(true);
+    expect(enrollment.logout).toHaveBeenCalled();
+    expect(session.getSnapshot()).toMatchObject({ status: "ready", account: next });
+    expect(session.getSnapshot().error).toBeUndefined();
+    expect(clients.at(-1)!.account).toBe(next);
+    expect(warned).not.toHaveBeenCalled();
+    warned.mockRestore();
+    await session.close();
+  });
+  it("keeps a sign-out failing while its writes may still upload (an outage)", async () => {
+    const { session, clients, old } = await setup();
+    const client = clients[0]! as (typeof clients)[0] & { db?: unknown };
+    client.db = { getAuthState: () => ({}) };
+    const failure = new GracefulShutdownSyncError(new Error("websocket transport error"));
+    client.shutdown.mockRejectedValueOnce(failure);
+    await expect(session.logout()).rejects.toBe(failure);
+    expect(session.getSnapshot()).toMatchObject({ status: "ready", account: old, error: failure });
     await session.close();
   });
   it("failed link reopens old selection and preserves primary error", async () => {
@@ -330,6 +398,35 @@ it("clearOnSignOut wipes the signed-out account's storage instead of syncing it"
   await session.logout();
   expect(calls).toEqual(["wipe", "shutdown"]);
   expect(session.getSnapshot().status).toBe("signed-out");
+  await session.close();
+});
+
+it("clearOnSignOut says how many writes its wipe takes", async () => {
+  const old = handle("old");
+  const accounts = new AccountManager(
+    {
+      createLocalFirst: () => old,
+      restoreLocalFirst: () => old,
+      logout() {},
+      loginWithBackend: async () => old,
+    },
+    old,
+  );
+  const openClient = async () => ({
+    db: {
+      // The server didn't take them within the wait (it refuses this user).
+      waitForSync: async () => Promise.reject(new Error("timed out")),
+      getSyncStatus: () => ({ pendingUploads: 3 }),
+      deleteClientStorage: async () => {},
+    },
+    shutdown: async () => {},
+  });
+  const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+  const session = await createJazzSessionOwner({ accounts, openClient, clearOnSignOut: true });
+  await session.logout();
+  expect(session.getSnapshot().status).toBe("signed-out");
+  expect(warned).toHaveBeenCalledWith(expect.stringMatching(/wiped 3 write\(s\)/));
+  warned.mockRestore();
   await session.close();
 });
 

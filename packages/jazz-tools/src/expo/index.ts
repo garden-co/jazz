@@ -38,3 +38,6 @@ export type { JazzUser } from "../session/app.js";
 export { useDb, useJazzClient, useSession } from "../react-native/provider.js";
 export { useAll, useAllSuspense } from "../react-native/use-all.js";
 export { useOne, useOneSuspense } from "../react-native/use-one.js";
+export { useAccountState } from "../react-core/use-account-state.js";
+export { useSyncStatus } from "../react-core/use-sync-status.js";
+export type { LinkStatus, SyncStatus } from "../runtime/sync-status.js";

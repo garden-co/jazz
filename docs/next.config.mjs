@@ -82,14 +82,51 @@ const config = {
     // working. Temporary until the new structure settles.
     return [
       { source: "/perf-timeline", destination: "/examples", permanent: false },
+      // Older create-jazz builds fetch the agent brief from its old URL.
+      { source: "/agent-brief.md", destination: "/quickstart.md", permanent: false },
       {
         source: "/docs/tooling/agent-skills",
         destination: "/docs/setup/run-locally",
         permanent: false,
       },
       {
+        source: "/docs/recipes/auth/better-auth-adapter",
+        destination: "/docs/setup/auth/better-auth#store-better-auths-tables-in-jazz",
+        permanent: false,
+      },
+      {
+        source: "/docs/setup/deployment",
+        destination: "/docs/setup/deployment/own-server",
+        permanent: false,
+      },
+      {
+        source: "/docs/recipes/local-first",
+        destination: "/docs/setup/web-client/local-first-client",
+        permanent: false,
+      },
+      {
+        source: "/docs/setup/backend",
+        destination: "/docs/setup/deployment/own-server",
+        permanent: false,
+      },
+      {
         source: "/docs/setup/backend/install",
-        destination: "/docs/setup/backend",
+        destination: "/docs/setup/deployment/own-server",
+        permanent: false,
+      },
+      {
+        source: "/docs/setup/backend/trusted",
+        destination: "/docs/setup/deployment/own-server#trusted-backend-use",
+        permanent: false,
+      },
+      {
+        source: "/docs/setup/backend/user-scoped",
+        destination: "/docs/setup/deployment/own-server#user-scoped-use",
+        permanent: false,
+      },
+      {
+        source: "/docs/setup/backend/backend-clients",
+        destination: "/docs/setup/backend-client",
         permanent: false,
       },
       {
@@ -125,7 +162,7 @@ const config = {
       },
       {
         source: "/docs/auth/lifecycle",
-        destination: "/docs/setup/auth/lifecycle",
+        destination: "/docs/setup/auth/backend#lifecycle",
         permanent: false,
       },
       {
@@ -134,7 +171,21 @@ const config = {
         permanent: false,
       },
       { source: "/docs/auth/permissions", destination: "/docs/schemas/policies", permanent: false },
-      { source: "/docs/auth/sessions", destination: "/docs/setup/auth/sessions", permanent: false },
+      {
+        source: "/docs/auth/sessions",
+        destination: "/docs/setup/auth/backend#the-session",
+        permanent: false,
+      },
+      {
+        source: "/docs/setup/auth/sessions",
+        destination: "/docs/setup/auth/backend#the-session",
+        permanent: false,
+      },
+      {
+        source: "/docs/setup/auth/lifecycle",
+        destination: "/docs/setup/auth/backend#lifecycle",
+        permanent: false,
+      },
       {
         source: "/docs/concepts/branches",
         destination: "/docs/recipes/drafts-and-branches",
@@ -157,12 +208,7 @@ const config = {
       },
       {
         source: "/docs/getting-started/server-setup",
-        destination: "/docs/setup/backend",
-        permanent: false,
-      },
-      {
-        source: "/docs/setup/backend/trusted",
-        destination: "/docs/setup/backend#trusted-backend-use",
+        destination: "/docs/setup/deployment/own-server",
         permanent: false,
       },
       {
@@ -172,7 +218,7 @@ const config = {
       },
       {
         source: "/docs/install/typescript-server",
-        destination: "/docs/setup/backend",
+        destination: "/docs/setup/deployment/own-server",
         permanent: false,
       },
       { source: "/docs/quickstart", destination: "/docs/setup/run-locally", permanent: false },
