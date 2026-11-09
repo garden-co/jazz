@@ -1,10 +1,52 @@
 # Jazz on Durable Object SQLite
 
-Jazz's authority can use a Durable Object's own `ctx.storage.sql`, without a
-page VFS. The refresh found a query-compilation limit the earlier spike missed;
-not every current query shape fits yet. This directory contains compatibility probes
-and an **experimental** WASM host, not a production DO provider. Implementation
-work is described in [PLAN.md](PLAN.md).
+Jazz's authority uses a Durable Object's own `ctx.storage.sql`, without a page
+VFS. The production host and `durableObjects()` provider live in the main crates
+and packages; this directory contains integration tests, probes and historical
+spike evidence. Transaction overlays and durable large-value storage remain
+unsupported. Remaining work is in [PLAN.md](PLAN.md).
+
+## Maintained integration suites
+
+Run from any directory using the path to `test.mjs`:
+
+```sh
+node dev/durable-objects/test.mjs          # production-host suite
+node dev/durable-objects/test.mjs storage # lower-level SQL/engine conformance
+node dev/durable-objects/test.mjs all     # both local suites; never deploys
+```
+
+The runner builds the selected WASM artifacts (fast local builds by default)
+and the storage suite's native sync client, then runs tests sequentially with
+inherited output and a nonzero exit on failure. Host tests require the repository's
+built NAPI artifacts; local tests need permission to bind loopback sockets. The
+crash suite requires POSIX process groups. Use `--no-build` only when artifacts
+match current source. Set `RUSTC_WRAPPER= CC=cc CXX=c++` if local compiler wrappers
+are unavailable. This runner is not the repository's CI-equivalent gate.
+
+| Suite        | Retained coverage                                                                                                                                                                                           |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `host`       | Provider unit tests; production `createJazz` publication/admission/read/write, accounts and revocation, reconnect/restart, and abrupt process-crash recovery.                                               |
+| `storage`    | Catalogue validation/rollback with generated fixtures, nested SQL scopes, rejected sync batches, independent storage owners, exact SQL values and native replica sync, plus shared-core scheduling/cleanup. |
+| `cloudflare` | Opt-in disposable deployment, lost uploads/acknowledgements, deferred upgrades, fresh-client persistence and verified resource cleanup.                                                                     |
+
+```sh
+CLOUDFLARE_ACCOUNT_ID=... CLOUDFLARE_API_TOKEN=... \
+  node dev/durable-objects/test.mjs cloudflare
+```
+
+Cloudflare is never included in `all` and requires explicit credentials. Its
+build uses the normal release settings unless overridden. No test identities,
+fault controls or probe routes are added to the production host.
+
+Focused scripts remain in `native-sqlite/harness/` for debugging distinct
+contracts; they are not separate server implementations. The older
+`test-cloudflare.mjs` provisioning experiment remains a manual diagnostic with
+its own state/cleanup instructions below, not part of the disposable suite.
+Performance probes and historical SQL replay are also outside the regression
+runner. On 2026-11-09, both local suites passed with freshly built artifacts:
+11 provider unit tests and all eight integration scripts. Detailed evidence and
+limitations follow.
 
 ## Compatibility baseline (2026-11-04)
 
@@ -648,8 +690,9 @@ The Cloudflare mode creates a randomly named `jazz-do-lifecycle-*` Worker with
 synthetic data. It disconnects sockets at the lost-upload boundary, applies one
 synthetic host upgrade with the committed write still unacknowledged, then checks
 fresh clients. The upgrade retains app/namespace identity; it is not an abrupt
-process kill. The temporary artifact version is never packaged or published. Cleanup deletes the dedicated Worker and checks its namespace is gone;
-it never reuses an existing Worker. The normal local run needs no credentials.
+process kill. The temporary artifact version is never packaged or published. Cleanup deletes
+the dedicated Worker and checks its namespace is gone; it never reuses an
+existing Worker. The normal local run needs no credentials.
 
 Local validation passed on 2026-11-09. These are transport-loss and reconstruction
 checks, not forced eviction or process termination during SQLite commit.
@@ -666,11 +709,50 @@ only poll readiness and do not repeat uploads or force active objects to reset.
 Provider tests cover delayed adoption and bounded failure without changing the
 existing cold-host retry expectations.
 
-Deployed validation on 2026-11-09 reached initial global writes, independent
-reads and lost-upload reconnect settlement. The old two-minute upgrade wait
-failed with active clients. After extending it, two reruns were blocked by
-Cloudflare upload connections closing (`UND_ERR_SOCKET`), so the extended wait
-and lost-acknowledgement recovery are **not yet validated on Cloudflare**. All
-temporary Workers and their namespaces were removed. The local lifecycle test
-and all 11 provider unit tests pass; production reconstruction during the new
-readiness window still needs a successful deployed run.
+Deployed validation passed on 2026-11-09. The active object adopted the synthetic
+upgrade within the extended readiness window, retaining its app identity and
+namespace. The writer's pending global receipt settled after reconnect; history
+retained the same acceptance timestamps and transaction IDs without duplicate
+versions. A fresh client read the persisted rows/history, and a subsequent write
+succeeded. Lost-upload reconnect recovery also passed. Cleanup deleted the
+temporary Worker and verified its namespace was absent.
+
+Earlier attempts exposed the old two-minute readiness timeout and were then
+blocked by upload connections closing (`UND_ERR_SOCKET`); the successful run
+closes that validation gap. The local lifecycle test and all 11 provider unit
+tests also pass. This verifies upgrade-driven reconstruction, not abrupt eviction
+or interruption inside SQLite commit; section 9 remains in progress.
+
+### Abrupt local workerd termination
+
+```sh
+# Uses the same packaged production host as the lifecycle test above.
+node dev/durable-objects/native-sqlite/harness/test-crash.mjs
+```
+
+This POSIX-only harness starts Miniflare/workerd in a dedicated process group,
+checks that workerd belongs to it, and sends the group `SIGKILL`. Fault runs never
+call `dispose()` or a shutdown hook. Each restart retains only the same temporary
+SQLite storage; normal cleanup stops the final host and removes that directory.
+There are no production-code changes or fault routes.
+
+Alice submits 20-row transactions through the native backend client, so the DO
+receives completed replica batches rather than using its deferred transaction
+overlay. Cases cover a deliberately undelivered upload, kills at 0/1/5/20 ms after
+a transport send, and a kill after Bob independently observes the entire committed
+batch while Alice's acknowledgement is withheld. Alice's outgoing traffic stays
+blocked after restart until a fresh Bob has inspected persisted rows/history.
+Every batch must be entirely absent or entirely present before retry. Then Alice
+reconnects, the pending receipt settles, and Bob checks all row values and exactly
+one history version per row. Already accepted versions retain their timestamps
+and transaction IDs. An acknowledged baseline must survive every crash, and a
+final fresh client checks all six batches after both earlier client caches close.
+
+Local validation passed on 2026-11-09: before-delivery and 0/1 ms cases recovered
+0/20 rows; 5/20 ms and the known-committed case recovered 20/20. All six settled
+successfully after retry without duplicate history; all 120 batch rows plus the
+acknowledged baseline survived. Timing outcomes can vary across runs. The test
+asserts atomicity for whichever outcome occurs, not a required outcome at each
+delay. These timings do **not** establish that the kill landed inside SQLite
+commit. Deterministic interruption within commit and deployed abrupt eviction
+remain unverified; section 9 stays in progress.
