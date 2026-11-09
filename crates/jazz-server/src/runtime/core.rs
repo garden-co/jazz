@@ -166,6 +166,9 @@ pub(super) struct SessionInbox {
 }
 
 impl SessionInput {
+    pub fn is_closed(&self) -> bool {
+        self.inbox.borrow().closed
+    }
     pub fn receive(&self, frames: Vec<AbiBytes>) -> Result<(), String> {
         let mut inbox = self.inbox.borrow_mut();
         if inbox.closed {
@@ -573,6 +576,10 @@ impl Owner {
 
     /// Attach server session state to an already-open database. The host
     /// owns storage construction and execution of the returned tick future.
+    pub fn accounts(&self) -> super::accounts::LocalRegistry<'_> {
+        super::accounts::LocalRegistry(self.db.as_ref())
+    }
+
     pub fn from_db(db: Db, app: Option<String>, wake: std::task::Waker) -> Result<Self, String> {
         db.set_authority();
         db.require_session_pins();

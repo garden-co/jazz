@@ -7,11 +7,8 @@ use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
 };
-use jazz::account_registry::{
-    AccountCommand, AccountCommandResult, AccountId, Assignment, Principal,
-};
+use jazz::account_registry::{AccountCommand, AccountId, Principal};
 use jazz::tools::transport_error::{UnauthenticatedCode, UnauthenticatedResponse};
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -56,137 +53,54 @@ fn owner(state: &ServerState) -> Result<&crate::server::accounts::AccountRegistr
         "account operation requires the core authority",
     ))
 }
-fn failure(error: RegistryError) -> Failure {
-    use jazz::account_registry::AccountError;
-    match error {
-        RegistryError::Decision(AccountError::NotAssigned) => {
-            (StatusCode::NOT_FOUND, "identity_not_assigned")
-        }
-        RegistryError::Decision(AccountError::AlreadyAssigned) => {
-            (StatusCode::CONFLICT, "identity_already_assigned")
-        }
-        RegistryError::Decision(AccountError::NotAuthorized) => {
-            (StatusCode::FORBIDDEN, "identity_not_authorized")
-        }
-        RegistryError::Decision(_) => (StatusCode::BAD_REQUEST, "invalid_link_intent"),
-        RegistryError::Unavailable(_) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "account_registry_unavailable",
-        ),
-    }
+fn account_failure((status, message): crate::runtime::accounts::Failure) -> Failure {
+    (
+        StatusCode::from_u16(status).expect("account HTTP status"),
+        message,
+    )
 }
+use crate::runtime::accounts::{
+    self as shared, AccountResponse, AdminFoundLocalFirst, AdminLink, AdminRevoke, IdentityRequest,
+};
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct IdentityRequest {
-    identity: Principal,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct AccountResponse {
-    account: Uuid,
-    identity: Principal,
-    generation: u64,
-}
-
-/// Read-only administrative lookup;
-/// service authority can resolve an assignment but cannot create or link one.
 pub(super) async fn resolve_for_admin(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
     Json(request): Json<IdentityRequest>,
 ) -> Result<Json<AccountResponse>, Failure> {
     validate_vouching_backend(&headers, &state)?;
-    let assignment = owner(&state)?
-        .login(request.identity.clone())
+    shared::resolve(owner(&state)?, request)
         .await
-        .map_err(failure)?;
-    Ok(response(request.identity, assignment))
+        .map(Json)
+        .map_err(account_failure)
 }
-
-/// The app's backend vouches for this identity (`createJazz` in front of a
-/// remote core): its own auth verified the user, so the core resolves the
-/// assignment or creates the account, as `login-or-register` would for that
-/// user's own credential.
 pub(super) async fn login_or_register_for_admin(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
     Json(request): Json<IdentityRequest>,
 ) -> Result<Json<AccountResponse>, Failure> {
     validate_vouching_backend(&headers, &state)?;
-    jazz::ids::AuthorSubject::authenticated(&request.identity.issuer, &request.identity.subject)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "invalid_external_identity"))?;
-    let assignment = owner(&state)?
-        .login_or_register(request.identity.clone())
+    shared::register(owner(&state)?, request)
         .await
-        .map_err(failure)?;
-    Ok(response(request.identity, assignment))
+        .map(Json)
+        .map_err(account_failure)
 }
-
-/// The app's backend vouches for a local-first guest: it checked the
-/// guest's proof of its key itself (`createJazz` links a guest only on a
-/// fresh, single-use challenge the guest signed). The core founds the
-/// guest's account deterministically, as `found-local-first` would for the
-/// guest's own token.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct AdminFoundLocalFirst {
-    identity: Principal,
-    /// The namespace the guest's account was founded in, when it is not
-    /// this app: the endpoint an app-less client's proofs are for.
-    #[serde(default)]
-    audience: Option<String>,
-}
-
 pub(super) async fn found_local_first_for_admin(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
     Json(request): Json<AdminFoundLocalFirst>,
 ) -> Result<Json<AccountResponse>, Failure> {
     validate_vouching_backend(&headers, &state)?;
-    if request.identity.issuer != jazz::tools::identity::LOCAL_FIRST_ISSUER {
-        return Err((StatusCode::BAD_REQUEST, "local_first_identity_required"));
-    }
-    // A core that admits no local-first accounts admits none on a backend's
-    // word either.
-    if !state.auth_config.allow_local_first_auth {
-        return Err((StatusCode::FORBIDDEN, "local_first_auth_disabled"));
-    }
-    let result = owner(&state)?
-        .execute(AccountCommand::FoundLocalFirst {
-            principal: request.identity.clone(),
-            app: match request.audience.as_deref().map(str::trim) {
-                Some("") => return Err((StatusCode::BAD_REQUEST, "invalid_local_first_audience")),
-                Some(audience) => {
-                    *crate::middleware::auth::local_first_founding_app(audience).uuid()
-                }
-                None => *state.app_id.uuid(),
-            },
-        })
-        .await
-        .map_err(failure)?;
-    let AccountCommandResult::Assignment(assignment) = result else {
-        unreachable!("founding result")
-    };
-    Ok(response(request.identity, assignment))
+    shared::found(
+        owner(&state)?,
+        request,
+        *state.app_id.uuid(),
+        state.auth_config.allow_local_first_auth,
+    )
+    .await
+    .map(Json)
+    .map_err(account_failure)
 }
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct AdminLink {
-    from: Principal,
-    to: Principal,
-    /// The link's single-use intent id, when the backend has one (the nonce
-    /// of the challenge a guest signed): a second link with the same nonce
-    /// is refused, whoever it names.
-    #[serde(default)]
-    nonce: Option<Uuid>,
-}
-
-/// The app's backend vouches for both identities: link `to` to the account
-/// `from` uses, in the same request-and-accept steps the two users' own
-/// credentials would take.
 pub(super) async fn link_for_admin(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
@@ -196,57 +110,15 @@ pub(super) async fn link_for_admin(
         super::http::admin_secret_header(&headers),
         &state.auth_config,
     )?;
-    jazz::ids::AuthorSubject::authenticated(&request.to.issuer, &request.to.subject)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "invalid_external_identity"))?;
-    let registry = owner(&state)?;
-    // `from` names an account that already exists (a user the backend signed
-    // in, or a local-first guest founded from its own key proof): linking
-    // never creates it.
-    registry
-        .login(request.from.clone())
-        .await
-        .map_err(failure)?;
-    let now = state.auth_config.clock.now_seconds();
-    let expires_at = now
-        .checked_add(300)
-        .ok_or((StatusCode::SERVICE_UNAVAILABLE, "invalid_clock"))?;
-    let nonce = request.nonce.unwrap_or_else(Uuid::new_v4);
-    registry
-        .execute(AccountCommand::RequestLink {
-            approver: request.from,
-            candidate: request.to.clone(),
-            nonce,
-            now,
-            expires_at,
-        })
-        .await
-        .map_err(failure)?;
-    let result = registry
-        .execute(AccountCommand::AcceptLink {
-            candidate: request.to.clone(),
-            nonce,
-            now,
-        })
-        .await
-        .map_err(failure)?;
-    let AccountCommandResult::Assignment(assignment) = result else {
-        unreachable!("accept result")
-    };
-    Ok(response(request.to, assignment))
+    shared::link(
+        owner(&state)?,
+        request,
+        state.auth_config.clock.now_seconds(),
+    )
+    .await
+    .map(Json)
+    .map_err(account_failure)
 }
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct AdminRevoke {
-    approver: Principal,
-    target: Principal,
-}
-
-/// The app's backend vouches for `approver`, an identity of the account, and
-/// revokes `target`, another of its identities, as the approver's own
-/// credential would (`createJazz` revokes a local-first guest's key once it
-/// links to a signed-in user, when the app asks for that). The assignment
-/// stays: the target can no longer sign in, and is never reassigned.
 pub(super) async fn revoke_for_admin(
     State(state): State<Arc<ServerState>>,
     headers: HeaderMap,
@@ -256,13 +128,9 @@ pub(super) async fn revoke_for_admin(
         super::http::admin_secret_header(&headers),
         &state.auth_config,
     )?;
-    owner(&state)?
-        .execute(AccountCommand::Revoke {
-            approver: request.approver,
-            target: request.target,
-        })
+    shared::revoke(owner(&state)?, request)
         .await
-        .map_err(failure)?;
+        .map_err(account_failure)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -370,14 +238,6 @@ pub(super) async fn admit_local_founder(
     }
     Err(AdmissionError::Unavailable)
 }
-fn response(identity: Principal, assignment: Assignment) -> Json<AccountResponse> {
-    Json(AccountResponse {
-        account: assignment.account.0,
-        identity,
-        generation: assignment.generation,
-    })
-}
-
 #[cfg(all(test, feature = "embedded-server"))]
 mod tests {
     use super::*;

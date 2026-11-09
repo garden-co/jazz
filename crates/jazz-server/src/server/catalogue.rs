@@ -52,6 +52,7 @@ pub struct ServerCatalogue;
 pub(crate) trait CatalogueStore {
     fn migration_graph(&self) -> Result<MigrationGraph, CatalogueError>;
     fn known_schema_hashes(&self) -> Result<Vec<SchemaHash>, CatalogueError>;
+    #[cfg(any(test, feature = "embedded-server"))]
     fn known_schema(&self, schema_hash: &SchemaHash) -> Result<Option<Schema>, CatalogueError>;
     #[cfg(feature = "embedded-server")]
     fn known_lenses(&self) -> Result<Vec<Lens>, CatalogueError>;
@@ -315,6 +316,7 @@ impl CatalogueStore for StoredCatalogue {
         Ok(index.known_schema_hashes())
     }
 
+    #[cfg(any(test, feature = "embedded-server"))]
     fn known_schema(&self, schema_hash: &SchemaHash) -> Result<Option<Schema>, CatalogueError> {
         let index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
         Ok(index.schemas.get(schema_hash).cloned())
@@ -385,6 +387,7 @@ impl ServerCatalogue {
         store.known_schema_hashes()
     }
 
+    #[cfg(any(test, feature = "embedded-server"))]
     pub(crate) fn known_schema(
         &self,
         store: &impl CatalogueStore,

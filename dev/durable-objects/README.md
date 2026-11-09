@@ -235,7 +235,8 @@ verifies the upgrade credential, then uses the normal prelude/Hello handshake.
 Prelude secrets cannot override the upgrade's access. Backend/admin service links
 are trusted as on native hosting, while backend-stated user sessions remain
 policy-scoped. Session-only upgrades do not grant service or stated-user access;
-guest proofs, thin sessions and relay modes are explicitly unsupported.
+guest proofs use the account admission described below. Thin sessions and relay
+modes remain explicitly unsupported.
 
 The adapter serializes admission with catalogue operations and ticks. Established
 socket input uses `SessionInput` directly, even while a tick awaits progress.
@@ -256,8 +257,8 @@ opens a fresh backend against the retained SQLite. It also checks user-session
 handshakes and access/identity/bundle refusals. The schema denies ordinary users;
 service writes exercise native-equivalent trusted-backend authority. Existing
 `test-scopes.mjs` checks policy-filtered user sync and rollback through the shared
-engine. Account registration/link/revocation HTTP routes, direct guest proofs,
-thin hosting and a provisionable package are not implemented by this adapter.
+engine. Account routes and guest proofs are covered by `test-accounts.mjs` below;
+packaging/provisioning are documented separately. Thin hosting remains deferred.
 
 Validated locally: numeric sync and atomic rejection on two objects, disconnected
 session cleanup, and fresh replicas reading persisted values after workerd restart
@@ -481,8 +482,9 @@ This remains a **development harness**: `/control` and raw `/session` are fixtur
 interfaces, not authenticated production routes. The new route supports only
 ordinary backend-stated user sync sessions. It refuses direct proof-only auth,
 admin/backend-only links, relays, catalogue bootstrap, and thin clients. Production
-account admission/revocation, HTTP routes, lifecycle, and provider wiring remain
-in the plan. No storage or wire encoding changed.
+account admission/revocation, HTTP routes and provider wiring are now implemented
+outside this fixture harness; broader lifecycle work remains in the plan. No
+storage or wire encoding changed.
 
 ## Provisioning provider and packaged host
 
@@ -550,8 +552,8 @@ JAZZ_DO_PACKAGED=1 node dev/durable-objects/native-sqlite/harness/test-create-ja
 
 The packaged-host integration covers createJazz readiness, authenticated writes
 and reads, reconnect and SQLite-only restart. Provisioning tests do not contact
-Cloudflare. The host still has the account/guest/thin and transaction-overlay/
-large-value limitations recorded in the plan; this provider does not remove them.
+Cloudflare. Thin-client hosting, transaction overlays and large-value storage
+remain limited as recorded in the plan; this provider does not remove those limits.
 
 ### Opt-in Cloudflare deployment check
 
@@ -581,3 +583,43 @@ encountered TLS setup delay and the upgrade encountered version propagation dela
 readiness now retries network/HTTP failures within two minutes, while rejecting
 invalid credentials immediately. No production-load or forced-eviction claim is
 made by these checks.
+
+## Account routes and guest admission
+
+The production host now serves `POST /apps/<app>/admin/accounts/resolve`,
+`login-or-register`, `found-local-first`, `link`, and `revoke`. Backend access may
+resolve/register/found; linking and revocation require admin access. Requests use
+the existing body/queue limits and serialize with admission and ticks.
+
+Account request types, decisions and SQL rows are shared in
+`jazz-server::runtime::accounts`. Native HTTP retains its threaded registry owner
+and notifications; the DO borrows the owning database through `HostTables::host_sql`
+for short callback scopes. The two host tables, UUID blobs, principal strings,
+link nonces and integer encodings are unchanged. No storage or wire format changed.
+
+Guest admission verifies the existing Jazz self-signed proof (signature, audience,
+expiry and canonical identity), founds a local-first account when necessary, and
+checks its persisted assignment. Only verified backend access can override the
+proof audience. External provider JWT verification remains the Node backend's
+responsibility, matching native core behavior. Backend-stated sessions retain
+native semantics; they are not reclassified as guest-proof sessions.
+
+Revocation rechecks active proof-authenticated sessions. Revoked sessions stop
+accepting frames and discard queued output immediately, then close. Registry
+storage failures fail these checks closed. Thin sessions and relay modes remain
+explicitly unsupported; the persistent overlay is still deferred.
+
+Build the production package, then run:
+
+```sh
+node dev/durable-objects/native-sqlite/harness/test-accounts.mjs
+```
+
+Local validation (2026-11-09) covers public `createJazz` enrollment/linking,
+permission-scoped reads and rejected writes, concurrent first registration,
+backend/admin access separation, link nonce reuse, wrong-account revocation,
+valid guest admission, forged proofs/identities/audiences, active revocation,
+and assignment/revocation persistence after SQLite-only workerd restart. The
+existing packaged-host sync/reconnect test and 18 native account/storage/admission
+tests also pass. Native and DO WASM Clippy pass. These account changes have not
+been deployed to Cloudflare; the earlier deployment test covered provisioning.

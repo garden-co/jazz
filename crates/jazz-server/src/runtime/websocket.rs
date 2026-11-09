@@ -274,3 +274,109 @@ pub fn admit_remote_session(
         bundle,
     })
 }
+
+/// Verify a client's own Jazz proof, then bind its immutable registry assignment.
+/// The remote transport credential authenticates the backend hop, not the user.
+pub fn admit_remote_guest(
+    prelude: Prelude,
+    credential: &str,
+    access: &str,
+    expected: &str,
+    app: &str,
+    registry: &super::accounts::LocalRegistry<'_>,
+    now: u64,
+) -> Result<BackendSession, WireError> {
+    use super::session_admission::{
+        constant_time_eq, peer_identity, session_claims, validate_session_identity,
+    };
+    use jazz::account_registry::{AccountCommand, Principal};
+    let denied =
+        |message: String| WireError::new(WireErrorCode::AuthFailed, WireRetry::Never, message);
+    let registry_error = |error: super::accounts::RegistryError| match error {
+        super::accounts::RegistryError::Unavailable(_) => WireError::new(
+            WireErrorCode::NotReady,
+            WireRetry::Later,
+            "account registry unavailable",
+        ),
+        error => denied(error.to_string()),
+    };
+    if expected.is_empty()
+        || !constant_time_eq(credential, expected)
+        || !matches!(access, "" | "backend")
+    {
+        return Err(denied("Invalid backend credential or access".into()));
+    }
+    if prelude.bootstrap_catalogue
+        || prelude.requested_link != RequestedLink::OrdinarySession
+        || prelude.auth.backend_session.is_some()
+    {
+        return Err(denied("Invalid guest session mode".into()));
+    }
+    let audience = match prelude.local_first_audience.as_deref() {
+        Some(audience) if access == "backend" && !audience.trim().is_empty() => audience.trim(),
+        Some(_) => {
+            return Err(denied(
+                "A local-first audience must be vouched for with backend access".into(),
+            ));
+        }
+        None => app,
+    };
+    let proof = jazz::tools::identity::verify_jazz_self_signed_proof_at(
+        prelude
+            .auth
+            .jwt_token
+            .as_deref()
+            .ok_or_else(|| denied("Session proof required".into()))?,
+        audience,
+        now,
+    )
+    .map_err(denied)?;
+    let identity = peer_identity(&prelude.peer_identity).map_err(denied)?;
+    let account = identity
+        .account_id()
+        .ok_or_else(|| denied("public sessions require an enrolled account identity".into()))?;
+    let principal = Principal {
+        issuer: proof.issuer.to_owned(),
+        subject: proof.user_id.clone(),
+    };
+    if proof.issuer == jazz::tools::identity::LOCAL_FIRST_ISSUER {
+        let app = jazz::app_id::AppId::from_string(audience)
+            .unwrap_or_else(|_| jazz::app_id::AppId::from_name(audience));
+        registry
+            .command(&AccountCommand::FoundLocalFirst {
+                principal: principal.clone(),
+                app: *app.uuid(),
+            })
+            .map_err(registry_error)?;
+    }
+    if registry.lookup(&principal).map_err(registry_error)?.account != account {
+        return Err(denied(
+            "account does not match authenticated identity assignment".into(),
+        ));
+    }
+    let session = jazz::tools::Session {
+        account_id: Some(account),
+        issuer: proof.issuer.to_owned(),
+        user_id: proof.user_id,
+        claims: serde_json::json!({}),
+        auth_mode: if proof.issuer == jazz::tools::identity::LOCAL_FIRST_ISSUER {
+            jazz::tools::AuthMode::LocalFirst
+        } else {
+            jazz::tools::AuthMode::Anonymous
+        },
+    };
+    validate_session_identity(&session, identity).map_err(denied)?;
+    let bundle = prelude
+        .bundle
+        .as_deref()
+        .map(|s| {
+            jazz::catalogue::BundleId::from_hex(s)
+                .ok_or_else(|| denied("invalid permissions bundle id".into()))
+        })
+        .transpose()?;
+    Ok(BackendSession {
+        identity,
+        claims: session_claims(session).map_err(denied)?,
+        bundle,
+    })
+}

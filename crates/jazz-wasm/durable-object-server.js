@@ -265,7 +265,7 @@ export function createJazzDurableObject({
       }
     }
 
-    async handle(method, path, body) {
+    async handle(method, path, body, access) {
       if (this.failed) return failure(503, "unavailable", "Jazz authority must restart");
       if (!this.core) {
         // Recovery uses only the existing catalogue, never the submitted schema.
@@ -275,6 +275,19 @@ export function createJazzDurableObject({
           () => this.schedule(),
           undefined,
         );
+      }
+      if (path.startsWith("admin/accounts/")) {
+        if (!this.core)
+          return failure(503, "unavailable", "account registry requires a published app");
+        const reply = JSON.parse(
+          await this.core.accountRequest(path.slice("admin/accounts/".length), body, access),
+        );
+        this.flushSockets();
+        return reply.status === 204
+          ? new Response(null, { status: 204 })
+          : reply.error
+            ? new Response(reply.error, { status: reply.status })
+            : json(reply.body, reply.status);
       }
       if (method === "POST") {
         if (this.core) {
@@ -352,7 +365,15 @@ export function createJazzDurableObject({
         if (this.failed) return failure(503, "unavailable", "Jazz authority must restart");
         return this.openSocket(credential, access);
       }
+      const accountRoute = path.startsWith("admin/accounts/");
       if (
+        accountRoute &&
+        (!authorizeDurableObjectAccess(credential, access, this.env.JAZZ_ADMIN_SECRET) ||
+          !["admin", "backend"].includes(access))
+      )
+        return failure(401, "unauthorized", "backend credential required");
+      if (
+        !accountRoute &&
         !authorizeDurableObjectAdmin(
           request.headers.get("x-jazz-backend-credential") ?? "",
           request.headers.get("x-jazz-backend-access") ?? "",
@@ -366,12 +387,17 @@ export function createJazzDurableObject({
           artifact: this.env.JAZZ_HOST?.artifact,
         });
       const known =
+        accountRoute ||
         path === "schemas" ||
         path.startsWith("schema/") ||
         path === "admin/migrations/graph" ||
         path === "admin/bundles";
       if (!known) return failure(404, "not_found", "route not found");
-      if (request.method !== "GET" && !(request.method === "POST" && path === "admin/bundles")) {
+      if (
+        accountRoute
+          ? request.method !== "POST"
+          : request.method !== "GET" && !(request.method === "POST" && path === "admin/bundles")
+      ) {
         return failure(405, "method_not_allowed", "method not allowed");
       }
       if (this.pendingRequests >= MAX_PENDING_REQUESTS)
@@ -381,7 +407,7 @@ export function createJazzDurableObject({
       const operation = (async () => {
         try {
           const body = request.method === "POST" ? await this.readBody(request, reservation) : "";
-          return await this.enqueue(() => this.handle(request.method, path, body));
+          return await this.enqueue(() => this.handle(request.method, path, body, access));
         } catch (error) {
           if (Number.isInteger(error?.status) && error?.body) return json(error.body, error.status);
           console.error("Jazz catalogue request failed", error);

@@ -1,4 +1,5 @@
 //! Shared server state and optional native hosting.
+pub mod accounts;
 pub mod catalogue;
 mod core;
 pub mod deployment;

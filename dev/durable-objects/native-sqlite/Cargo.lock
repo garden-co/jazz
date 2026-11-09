@@ -892,8 +892,10 @@ dependencies = [
  "postcard",
  "serde",
  "serde_json",
+ "thiserror",
  "tokio",
  "tracing",
+ "uuid",
  "web-time",
 ]
 

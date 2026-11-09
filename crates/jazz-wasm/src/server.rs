@@ -60,7 +60,15 @@ fn scheduler(callback: js_sys::Function) -> Waker {
 pub struct WasmServerCore {
     core: Rc<RefCell<Option<ServerCore>>>,
     next_session: Cell<u64>,
+    app: Option<String>,
+    guests: RefCell<Vec<GuestSession>>,
     wake: Waker,
+}
+
+struct GuestSession {
+    identity: jazz::ids::AuthorSubject,
+    input: SessionInput,
+    revoked: Rc<Cell<bool>>,
 }
 
 // A tick owns the core across await without holding a RefCell borrow. Dropping
@@ -84,8 +92,11 @@ impl WasmServerCore {
         schedule: js_sys::Function,
     ) -> Result<Self, JsValue> {
         let wake = scheduler(schedule);
-        let core = ServerCore::from_db(db, app, wake.clone()).map_err(error)?;
+        let core = ServerCore::from_db(db, app.clone(), wake.clone()).map_err(error)?;
+        core.accounts().initialize().map_err(error)?;
         Ok(Self {
+            app,
+            guests: RefCell::default(),
             core: Rc::new(RefCell::new(Some(core))),
             next_session: Cell::new(1),
             wake,
@@ -180,6 +191,92 @@ impl WasmServerCore {
         Ok(response.to_string())
     }
 
+    /// Authenticated, bounded HTTP input; the adapter supplies verified access.
+    #[wasm_bindgen(js_name = accountRequest)]
+    pub async fn account_request(
+        &self,
+        operation: &str,
+        body: &str,
+        access: &str,
+    ) -> Result<String, JsValue> {
+        use jazz_server::runtime::accounts;
+        let core = self
+            .core
+            .borrow_mut()
+            .take()
+            .ok_or_else(|| error("server core is busy"))?;
+        let running = Running {
+            slot: &self.core,
+            core: Some(core),
+        };
+        let registry = running.core.as_ref().unwrap().accounts();
+        let app = self
+            .app
+            .as_deref()
+            .and_then(|s| uuid::Uuid::parse_str(s).ok())
+            .ok_or_else(|| error("account operations require an app id"))?;
+        let result: Result<Option<accounts::AccountResponse>, accounts::Failure> = async {
+            let admin = access == "admin";
+            if !admin && access != "backend" {
+                return Err((401, "backend credential required"));
+            }
+            if matches!(operation, "link" | "revoke") && !admin {
+                return Err((401, "admin backend credential required"));
+            }
+            macro_rules! request {
+                () => {
+                    serde_json::from_str(body).map_err(|_| (400, "invalid_account_request"))?
+                };
+            }
+            match operation {
+                "resolve" => accounts::resolve(&registry, request!()).await.map(Some),
+                "login-or-register" => accounts::register(&registry, request!()).await.map(Some),
+                "found-local-first" => accounts::found(&registry, request!(), app, true)
+                    .await
+                    .map(Some),
+                "link" => {
+                    accounts::link(&registry, request!(), (js_sys::Date::now() / 1000.0) as u64)
+                        .await
+                        .map(Some)
+                }
+                "revoke" => accounts::revoke(&registry, request!()).await.map(|_| None),
+                _ => Err((404, "not_found")),
+            }
+        }
+        .await;
+        // Recheck proof-authenticated sockets after mutations, including ambiguous
+        // storage failures. Backend-stated identities retain native semantics.
+        if (operation == "revoke" && result.is_ok()) || matches!(result, Err((503, _))) {
+            self.guests.borrow_mut().retain(|guest| {
+                let GuestSession {
+                    identity,
+                    input,
+                    revoked,
+                } = guest;
+                if input.is_closed() {
+                    return false;
+                }
+                let (issuer, subject) = identity.principal_parts();
+                if !registry
+                    .lookup(&jazz::account_registry::Principal { issuer, subject })
+                    .is_ok_and(|a| Some(a.account) == identity.account_id())
+                {
+                    revoked.set(true);
+                    input.close();
+                    self.wake.wake_by_ref();
+                    return false;
+                }
+                true
+            });
+        }
+        Ok(match result {
+            Ok(Some(body)) => serde_json::json!({"status":200,"body":body}),
+            Ok(None) => serde_json::json!({"status":204}),
+            Err((status, message)) => serde_json::json!({"status":status,"error":message}),
+        }
+        .to_string())
+    }
+
     pub async fn tick(&self) -> Result<(), JsValue> {
         let core = self
             .core
@@ -232,6 +329,7 @@ impl WasmServerCore {
             egress,
             wake: self.wake.clone(),
             closed: false,
+            revoked: Rc::new(Cell::new(false)),
             batched,
         })
     }
@@ -245,12 +343,17 @@ pub struct ServerTransport {
     egress: Arc<AtomicUsize>,
     wake: Waker,
     closed: bool,
+    // Revocation suppresses already queued output before the next owner tick.
+    revoked: Rc<Cell<bool>>,
     batched: bool,
 }
 #[wasm_bindgen]
 impl ServerTransport {
     #[wasm_bindgen(js_name = sendWireFrame)]
     pub fn send_wire_frame(&self, frame: Vec<u8>) -> Result<(), JsValue> {
+        if self.revoked.get() {
+            return Err(error("account identity revoked"));
+        }
         self.input
             .as_ref()
             .ok_or_else(|| error("session is closed"))?
@@ -266,6 +369,21 @@ impl ServerTransport {
     #[wasm_bindgen(js_name = recvWireFrames)]
     pub fn recv_wire_frames(&mut self) -> Result<js_sys::Array, JsValue> {
         let frames = js_sys::Array::new();
+        if self.revoked.get() {
+            if !self.closed {
+                let refusal = jazz::wire::encode_frame(&WireFrame::Error(WireError::new(
+                    WireErrorCode::AuthFailed,
+                    WireRetry::Never,
+                    "account identity revoked",
+                )))
+                .map_err(error)?;
+                for batch in websocket::encode_frame_batches(&[refusal]).map_err(error)? {
+                    frames.push(&js_sys::Uint8Array::from(batch.as_slice()));
+                }
+            }
+            self.close();
+            return Ok(frames);
+        }
         while let Ok((result, bytes)) = self.receiver.try_recv() {
             self.egress.fetch_sub(bytes, Ordering::AcqRel);
             let encoded = match result {
@@ -292,7 +410,7 @@ impl ServerTransport {
     }
     #[wasm_bindgen(js_name = isClosed)]
     pub fn is_closed(&self) -> bool {
-        self.closed || self.receiver.is_closed()
+        self.closed || self.revoked.get() || self.receiver.is_closed()
     }
     pub fn close(&mut self) {
         if let Some(input) = self.input.take() {
@@ -363,14 +481,49 @@ impl WasmServerCore {
         access: &str,
         expected: &str,
     ) -> Result<SocketAdmission, JsValue> {
-        self.finish_socket(hello, || {
-            websocket::admit_remote_session(
-                websocket::Prelude::decode(prelude)?,
-                credential,
-                access,
-                expected,
-            )
-        })
+        let guest = RefCell::new(None);
+        let result = self.finish_socket(hello, || {
+            let prelude = websocket::Prelude::decode(prelude)?;
+            if access.is_empty()
+                || (access == "backend"
+                    && prelude.auth.backend_session.is_none()
+                    && prelude.auth.jwt_token.is_some())
+            {
+                let slot = self.core.borrow();
+                let core = slot.as_ref().ok_or_else(|| {
+                    WireError::new(
+                        WireErrorCode::NotReady,
+                        WireRetry::Later,
+                        "server core is busy",
+                    )
+                })?;
+                let admitted = websocket::admit_remote_guest(
+                    prelude,
+                    credential,
+                    access,
+                    expected,
+                    self.app.as_deref().unwrap_or(""),
+                    &core.accounts(),
+                    (js_sys::Date::now() / 1000.0) as u64,
+                )?;
+                *guest.borrow_mut() = Some(admitted.identity);
+                Ok(admitted)
+            } else {
+                websocket::admit_remote_session(prelude, credential, access, expected)
+            }
+        })?;
+        if let (Some(identity), Some(transport)) = (guest.into_inner(), result.transport.as_ref()) {
+            let mut guests = self.guests.borrow_mut();
+            guests.retain(|guest| !guest.input.is_closed());
+            if let Some(input) = &transport.input {
+                guests.push(GuestSession {
+                    identity,
+                    input: input.clone(),
+                    revoked: Rc::clone(&transport.revoked),
+                });
+            }
+        }
+        Ok(result)
     }
 }
 
