@@ -11,7 +11,6 @@ import {
   type PreparedCatalogueIdentities,
 } from "../catalogue-identities.js";
 import type { ClientMigrations } from "../client-migrations.js";
-import { streamingChunks } from "../streaming-source.js";
 import { isHistoryTable, resolveQueryTable } from "../history-relation.js";
 import { AuxiliaryReceiveDeadline } from "./auxiliary-receive-deadline.js";
 import { Utf8Decoder } from "../utf8.js";
@@ -49,6 +48,8 @@ import type {
 } from "../../drivers/types.js";
 import { serializeRuntimeSchema } from "../../drivers/schema-wire.js";
 import { parseRelationQueryJsonLossless } from "../../ir.js";
+import { streamingChunks } from "../streaming-source.js";
+import { assertRequiredRowColumnsPresent } from "../row-validation.js";
 import type {
   LocalObservationSnapshot,
   TxId,
@@ -7042,23 +7043,6 @@ function encodeCells(
   writeDescriptor(writer, descriptor);
   writer.bytes(createRecord(descriptor, values));
   return writer.finish();
-}
-
-function assertRequiredRowColumnsPresent(
-  columns: ColumnDescriptor[],
-  row: InsertValues,
-  table?: string,
-): void {
-  for (const column of columns) {
-    const value = row[column.name] ?? column.default;
-    if (value && value.type !== "Null") continue;
-    if (column.nullable) continue;
-    throw new Error(
-      table
-        ? `encoding error: missing required field \`${column.name}\` on table \`${table}\``
-        : `missing required column ${column.name}`,
-    );
-  }
 }
 
 /**

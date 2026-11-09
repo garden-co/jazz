@@ -1,3 +1,4 @@
+import { sameSnapshotValue } from "./public-snapshot.js";
 import { acceptedDeviceTransaction } from "./accepted-membership.js";
 import type { AccountStore } from "../accounts/persistence.js";
 import type { WasmSchema } from "../drivers/types.js";
@@ -43,9 +44,27 @@ import { Groups } from "./group-lifecycle.js";
 import type { GroupRecoveryPath } from "./group-lifecycle.js";
 import { groupSchema, type GroupMember, type GroupTables } from "./groups.js";
 import { Spaces, SpaceInitialisationRequired } from "./space-lifecycle.js";
-import type { SpaceDataPreparation, SpaceRecoveryPath } from "./space-lifecycle.js";
+import type {
+  SpaceDataPreparation,
+  SpaceRecoveryPath,
+  InitialSpaceSeed,
+  StreamingSpacePlan,
+  StreamingSpaceOptions,
+} from "./space-lifecycle.js";
+export type {
+  InitialSpaceSeed,
+  StreamingSpacePlan,
+  StreamingSpaceOptions,
+} from "./space-lifecycle.js";
 import { spaceSchema, type SpaceTables, type SpaceRoot } from "./spaces.js";
-import type { CellCipher, DeviceSigner, EqualityIndex, JazzCrypto, KeyEnvelope } from "./types.js";
+import type {
+  CellCipher,
+  DeviceSigner,
+  EqualityIndex,
+  JazzCrypto,
+  KeyEnvelope,
+  LargeValueCipher,
+} from "./types.js";
 
 export type E2eeConfig = {
   /** Application returned by defineApp; encrypted apps include managed bindings automatically. */
@@ -98,6 +117,78 @@ export async function cellCryptoForDb(
 ): Promise<{ cipher: CellCipher; application: string }> {
   e2eeForDb(db);
   return cellCrypto.get(db)!();
+}
+
+const streamingCrypto = new WeakMap<
+  Db,
+  () => Promise<{ cipher: LargeValueCipher; application: string }>
+>();
+export async function streamingCryptoForDb(db: Db) {
+  e2eeForDb(db);
+  return streamingCrypto.get(db)!();
+}
+
+const streamingSpacePreparers = new WeakMap<Db, Spaces["prepareStreaming"]>();
+export async function prepareStreamingSpace<T, Init, R>(
+  db: Db,
+  scope: TableProxy<T, Init>,
+  identifier: string,
+  options: StreamingSpaceOptions,
+  stage: (secret: Uint8Array, root: Readonly<SpaceRoot>) => Promise<R>,
+): Promise<{ value: R; plan: StreamingSpacePlan }> {
+  e2eeForDb(db);
+  let stageFailure: { error: unknown } | undefined;
+  try {
+    const prepared = await streamingSpacePreparers.get(db)!(
+      scope,
+      identifier,
+      options,
+      async (secret, root) => {
+        try {
+          return await stage(secret, root);
+        } catch (error) {
+          stageFailure = { error };
+          throw error;
+        }
+      },
+    );
+    const plan = prepared.plan;
+    return {
+      value: prepared.value,
+      plan: {
+        validation: plan.validation,
+        initialSeed: plan.initialSeed,
+        async validate(tx) {
+          try {
+            await plan.validate(tx);
+          } catch (error) {
+            if (error instanceof E2eeDataError) throw error;
+            throw new E2eeDataError("key-unavailable");
+          }
+        },
+        dispose() {
+          plan.dispose();
+        },
+      },
+    };
+  } catch (error) {
+    if (error instanceof E2eeDataError || (stageFailure && stageFailure.error === error))
+      throw error;
+    throw new E2eeDataError("key-unavailable");
+  }
+}
+
+const initialSpaceCompletions = new WeakMap<Db, Spaces["completeInitial"]>();
+/** The owner transaction is already accepted; later key delivery cannot reject its receipt. */
+export async function completeInitialSpace(db: Db, root: SpaceRoot): Promise<void> {
+  try {
+    e2eeForDb(db);
+    await initialSpaceCompletions.get(db)!(root);
+  } catch {
+    console.warn(
+      "E2EE: initial data was accepted, but recipient key delivery requires maintenance. Retry with db.e2ee.explain().",
+    );
+  }
 }
 const configuredSchemas = new WeakMap<Db, WasmSchema>();
 /** @internal The configured application can bind a cold transaction's schema. */
@@ -333,6 +424,7 @@ export async function prepareInitialSpaceForTransaction<T, Init>(
   identifier: string,
   prepareData: SpaceDataPreparation,
   recipientIds?: readonly string[],
+  seed?: InitialSpaceSeed,
 ): Promise<void> {
   const recipients = recipientIds?.slice();
   const ownScopeInsert = transactionHasRegisteredInsert(tx, scope, identifier);
@@ -347,6 +439,7 @@ export async function prepareInitialSpaceForTransaction<T, Init>(
         prepareData,
         recipients,
         ownScopeInsert,
+        seed,
       );
     });
   } catch (error) {
@@ -369,6 +462,7 @@ export async function prepareRegisteredInitialSpaceRows<T, Init>(
   prepareData: SpaceDataPreparation,
   recipients?: readonly string[],
   ownScopeInsert = false,
+  seed?: InitialSpaceSeed,
 ): Promise<void> {
   const authority = initialAuthorityMemos.get(transaction);
   if (!authority) throw new Error("Initial space authority was not registered before staging");
@@ -382,6 +476,7 @@ export async function prepareRegisteredInitialSpaceRows<T, Init>(
     prepareData,
     recipients,
     ownScopeInsert,
+    seed,
   );
 }
 
@@ -418,6 +513,7 @@ export async function prepareMissingSpaceWrite<T, Init>(
   scope: TableProxy<T, Init>,
   identifier: string,
   prepareData: Parameters<Spaces["prepareMissing"]>[3],
+  seed?: InitialSpaceSeed,
 ): Promise<boolean> {
   e2eeForDb(db);
   let callbackFailure: { error: unknown } | undefined;
@@ -435,6 +531,7 @@ export async function prepareMissingSpaceWrite<T, Init>(
         }
       },
       transaction ? initialAuthorityMemos.get(transaction)?.recipientIds : undefined,
+      seed,
     );
   } catch (error) {
     if (
@@ -467,6 +564,7 @@ export async function prepareInitialSpaceRows<T, Init>(
   prepareData: SpaceDataPreparation,
   recipientIds?: readonly string[],
   ownScopeInsert = false,
+  seed?: InitialSpaceSeed,
 ): Promise<void> {
   e2eeForDb(db);
   await initialSpacePreparers.get(db)!(
@@ -476,6 +574,7 @@ export async function prepareInitialSpaceRows<T, Init>(
     prepareData,
     recipientIds,
     ownScopeInsert,
+    seed,
   );
 }
 
@@ -1000,6 +1099,84 @@ export class E2ee {
     });
     let cellCipher: Promise<CellCipher> | undefined;
     let equalityIndex: Promise<EqualityIndex> | undefined;
+    let largeValueCipher: Promise<LargeValueCipher> | undefined;
+    streamingCrypto.set(db, async () => {
+      this.assertOpen();
+      largeValueCipher ??= this.config.crypto?.largeValueCipher
+        ? Promise.resolve(this.config.crypto.largeValueCipher)
+        : import("./browser.js").then((module) => module.createBrowserLargeValueCipher());
+      const cipher = await largeValueCipher;
+      this.assertOpen();
+      return { cipher, application: JSON.stringify([accountRegistry(this.account), this.env]) };
+    });
+    streamingSpacePreparers.set(
+      db,
+      async <T, Init, R>(
+        scope: TableProxy<T, Init>,
+        identifier: string,
+        options: StreamingSpaceOptions,
+        stage: (secret: Uint8Array, root: Readonly<SpaceRoot>) => Promise<R>,
+      ) => {
+        this.rememberSpace(scope, identifier);
+        if (await this.needsRetainedKeyPath(true)) {
+          // This is E10's already approved prior-online-bound provisional
+          // write route, never current membership or an accepted snapshot.
+          if (options.newScope || options.initialRecipients !== undefined)
+            throw new E2eeHistoryUnavailable(
+              "Offline streamed writes require an existing retained scope; new scopes or recipient declarations require online authority",
+            );
+          const cache = await this.prepareRetainedContent();
+          const staleWrites = this.config.staleWrites ?? "warn";
+          let value!: R;
+          let expected: Readonly<SpaceRoot> | undefined;
+          let used = false;
+          const result = await cache.withProvisionalKey(
+            scope,
+            identifier,
+            async (secret, root) => {
+              this.assertOpen();
+              if (used) throw new E2eeDataError("key-unavailable");
+              used = true;
+              expected = structuredClone(root);
+              // Borrow revision/denial/device checks enclose ALL source use.
+              value = await stage(secret, root);
+              this.assertOpen();
+            },
+            staleWrites,
+          );
+          this.assertOpen();
+          if (result !== "used" || !used || !expected) throw new E2eeDataError("key-unavailable");
+          let disposed = false;
+          const plan: StreamingSpacePlan = {
+            validation: "retained-provisional",
+            validate: async () => {
+              this.assertOpen();
+              if (disposed) throw new E2eeDataError("key-unavailable");
+              // Reborrow the SAME bound prior key at publication. A local
+              // denial/owner revision cannot be cleared by this read route.
+              const current = await cache.withProvisionalKey(
+                scope,
+                identifier,
+                async (_secret, root) => {
+                  this.assertOpen();
+                  if (disposed || !sameSnapshotValue(expected, root))
+                    throw new E2eeDataError("key-unavailable");
+                },
+                staleWrites,
+              );
+              this.assertOpen();
+              if (disposed || current !== "used") throw new E2eeDataError("key-unavailable");
+            },
+            dispose: () => {
+              disposed = true;
+            },
+          };
+          return { value, plan };
+        }
+        await this.prepare();
+        return this.requireSpaces().prepareStreaming(scope, identifier, options, stage);
+      },
+    );
     equalityCrypto.set(db, async () => {
       this.assertOpen();
       equalityIndex ??= this.config.crypto?.equalityIndex
@@ -1118,6 +1295,10 @@ export class E2ee {
     initialSpacePreparers.set(db, async (...args) => {
       await this.prepare();
       await this.requireSpaces().prepareInitial(...args);
+    });
+    initialSpaceCompletions.set(db, async (root) => {
+      this.assertOpen();
+      await this.requireSpaces().completeInitial(root);
     });
     missingSpacePreparers.set(db, async (...args) => {
       await this.prepare();

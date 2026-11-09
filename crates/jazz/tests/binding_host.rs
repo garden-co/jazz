@@ -1891,3 +1891,82 @@ fn a_retained_stream_capability_cannot_outlive_its_binding_owner() {
     assert!(staged.attach(&tx).is_err());
     assert!(!staged.abort().unwrap());
 }
+
+/// Alice stages a large value through the host binding, edits it in the same
+/// serializable batch, and publishes both writes together. Invalid attachment
+/// consumes its capability; neither rollback nor retry can publish it later.
+#[test]
+fn staged_upload_and_partial_edit_share_one_binding_transaction() {
+    use jazz::db::{LargeValueUpdate, LargeValueUpdatePage, LargeValueUpdateSplice};
+    let alice = open(0xa1);
+    let upload = |id: u8| {
+        let mut streaming = alice
+            .begin_streaming_mutation(
+                "notes".to_owned(),
+                &[id; 16],
+                &empty_cells(),
+                "title".to_owned(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        streaming.push("x".repeat(200 * 1024).as_bytes()).unwrap();
+        let staged = streaming.stage().unwrap();
+        assert!(streaming.finish().is_err());
+        staged
+    };
+    let tx = OpenTransactionId::new().to_string();
+    alice
+        .begin_transaction(&tx, "serializable", None, None)
+        .unwrap();
+    let mut staged = upload(3);
+    staged.attach(&tx).unwrap();
+    assert!(!staged.abort().unwrap());
+    alice
+        .update_large_values_in_transaction(
+            &tx,
+            "notes",
+            &[3; 16],
+            &empty_cells(),
+            vec![LargeValueUpdate::Splice {
+                column: "title".to_owned(),
+                within: LargeValueUpdatePage::TextUtf8 { from: 0, to: 1 },
+                splices: vec![LargeValueUpdateSplice {
+                    at: 0,
+                    delete: 1,
+                    insert: b"A".to_vec(),
+                }],
+            }],
+            None,
+        )
+        .unwrap();
+    alice
+        .insert_in_transaction(&tx, "notes", &title("manifest"), &none())
+        .unwrap();
+    assert!(titles(&alice).is_empty());
+    alice.commit_transaction(&tx, Some("serializable")).unwrap();
+    assert_eq!(
+        titles(&alice),
+        [
+            format!("A{}", "x".repeat(200 * 1024 - 1)),
+            "manifest".to_owned()
+        ]
+    );
+
+    let mut invalid = upload(4);
+    assert!(invalid.attach("invalid transaction").is_err());
+    assert!(invalid.attach(&tx).is_err());
+    assert!(!invalid.abort().unwrap());
+    let tx = OpenTransactionId::new().to_string();
+    alice
+        .begin_transaction(&tx, "serializable", None, None)
+        .unwrap();
+    upload(5).attach(&tx).unwrap();
+    alice.rollback_transaction(&tx).unwrap();
+    assert_eq!(titles(&alice).len(), 2);
+}

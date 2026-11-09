@@ -54,6 +54,7 @@ export {
   type QualifiedBranch,
   type InsertOptions,
   type StreamingInsertOptions,
+  type StreamingWritePlan,
   type RestoreOptions,
   type UpdateOptions,
   type UpsertOptions,
