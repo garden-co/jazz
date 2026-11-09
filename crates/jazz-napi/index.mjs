@@ -10,6 +10,7 @@ export default nativeBinding;
 export const {
   captureTextAnchor,
   captureTextRange,
+  checkClientMigrations,
   E2EeSodiumStream,
   e2eeSodiumDecrypt,
   e2eeSodiumEncrypt,

@@ -195,6 +195,7 @@ for (const [entrypoint, provider] of [
         export const CryptoDigestAlgorithm = { SHA256: "SHA-256" };
         export const TurboModuleRegistry = { get: unavailable, getEnforcing: unavailable };
         export const AppState = { addEventListener: () => ({ remove() {} }) };
+        export const Platform = { OS: "ios" };
         export {
           unavailable as View, unavailable as Text, unavailable as Pressable,
           unavailable as getRandomBytes, unavailable as digestStringAsync,

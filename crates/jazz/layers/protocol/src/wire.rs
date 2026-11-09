@@ -49,6 +49,11 @@ pub const FEATURE_SCOPE_ISOLATED_CLIENT_RELAY: WireFeatures = 1 << 9;
 /// The peer is a thin client, or serves thin clients: it exchanges
 /// [`WireFrame::ThinRequest`] and [`WireFrame::ThinResponse`] (SPEC 8.14).
 pub const FEATURE_THIN_RESULTS: WireFeatures = 1 << 10;
+/// The peer keeps an idle link audible: a server sends
+/// [`WireFrame::Heartbeat`] on its keepalive cadence to a client that
+/// advertised this, so a client whose platform hides WebSocket pings (a
+/// browser) can tell a link that went silently dead from a quiet one.
+pub const FEATURE_HEARTBEAT: WireFeatures = 1 << 11;
 
 /// Bitset of optional protocol features advertised by one peer.
 pub type WireFeatures = u64;
@@ -74,6 +79,10 @@ pub enum WireFrame {
     /// Postcard-v1 enum tag 6 within wire v6; only after both peers
     /// negotiated [`FEATURE_THIN_RESULTS`].
     ThinPart(crate::thin::ThinPart),
+    /// Proof of life on an otherwise quiet link, server to client. Carries
+    /// nothing and needs no answer. Postcard-v1 enum tag 7 within wire v6;
+    /// only after both peers negotiated [`FEATURE_HEARTBEAT`].
+    Heartbeat,
 }
 
 /// Which independently bounded transport resource this grant releases.
@@ -569,6 +578,11 @@ pub fn validate_frames_for_artifact_corpus(
             WireFrame::ThinRequest(_) | WireFrame::ThinResponse(_) | WireFrame::ThinPart(_) => {
                 if negotiated_features & FEATURE_THIN_RESULTS == 0 {
                     return Err("thin frames require the thin results feature".to_owned());
+                }
+            }
+            WireFrame::Heartbeat => {
+                if negotiated_features & FEATURE_HEARTBEAT == 0 {
+                    return Err("heartbeat frames require the heartbeat feature".to_owned());
                 }
             }
         }

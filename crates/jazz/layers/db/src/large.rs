@@ -567,6 +567,9 @@ struct State {
     /// The batch of chunk-store work that is out, if one is: one at a
     /// time, so a delete never overtakes the put it undoes.
     batch: Option<u64>,
+    /// Counts fetches answered (installed or failed) and failures
+    /// forgotten: a read that waited on offloaded nodes may answer now.
+    answered: u64,
 }
 
 /// Where a node's verified bytes are.
@@ -633,6 +636,7 @@ impl Chunks {
                 in_flight: BTreeSet::new(),
                 failed: BTreeMap::new(),
                 batch: None,
+                answered: 0,
             }),
             store,
             host_io,
@@ -693,6 +697,7 @@ impl Chunks {
     /// are no longer out, and what waited on them has its answer.
     pub(crate) fn landed(&self, requests: &[ChunkRequest]) {
         let mut state = self.state.lock().expect("chunk cache");
+        state.answered += 1;
         for request in requests {
             state.in_flight.remove(request);
             state.fetch.remove(request);
@@ -743,6 +748,11 @@ impl Chunks {
         self.state.lock().expect("chunk cache").take_wanted()
     }
 
+    /// [`State::answered`].
+    pub(crate) fn answered(&self) -> u64 {
+        self.state.lock().expect("chunk cache").answered
+    }
+
     /// The batch that is out, if one is.
     pub(crate) fn outstanding(&self) -> Option<u64> {
         self.state.lock().expect("chunk cache").batch
@@ -770,6 +780,9 @@ impl Chunks {
         let mut state = self.state.lock().expect("chunk cache");
         let any = !state.failed.is_empty();
         state.failed.clear();
+        if any {
+            state.answered += 1;
+        }
         any
     }
 

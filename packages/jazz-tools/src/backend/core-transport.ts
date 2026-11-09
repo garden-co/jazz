@@ -69,7 +69,32 @@ export function inProcessWebSocket(
 
     send(data: Uint8Array | string): void {
       if (this.readyState !== 1 || !this.session) throw new Error("socket is not open");
-      this.session.send(toBytes(data));
+      // Like a socket's own buffer: messages wait here, in order, until the
+      // core has room, so this client's pace is the core's.
+      this.outbox.push(toBytes(data));
+      void this.drain();
+    }
+
+    private readonly outbox: Uint8Array[] = [];
+    private draining = false;
+
+    private async drain(): Promise<void> {
+      if (this.draining) return;
+      this.draining = true;
+      try {
+        while (this.outbox.length > 0 && this.readyState === 1 && this.session) {
+          const data = this.outbox.shift()!;
+          const sent = this.session.sendWithRoom
+            ? await this.session.sendWithRoom(data)
+            : this.session.send(data);
+          if (!sent) break;
+        }
+      } catch (error) {
+        this.emit("error", error);
+        this.close();
+      } finally {
+        this.draining = false;
+      }
     }
 
     close(): void {
@@ -108,19 +133,24 @@ export function inProcessWebSocket(
  */
 export function pinnedSocket(socket: CoreSocket, bundle: () => string | undefined): CoreSocket {
   let first = true;
+  /** `data`, with the pin stamped into the prelude; null if it can't be. */
+  const pin = (data: Uint8Array): Uint8Array | null => {
+    if (!first) return data;
+    first = false;
+    const pinned = withBundle(data, bundle());
+    // A prelude the pin cannot be stamped into would open unpinned.
+    if (pinned === null) socket.close();
+    return pinned;
+  };
   return {
     send(data) {
-      if (first) {
-        first = false;
-        const pinned = withBundle(data, bundle());
-        // A prelude the pin cannot be stamped into would open unpinned.
-        if (pinned === null) {
-          socket.close();
-          return false;
-        }
-        data = pinned;
-      }
-      return socket.send(data);
+      const pinned = pin(data);
+      return pinned !== null && socket.send(pinned);
+    },
+    async sendWithRoom(data) {
+      const pinned = pin(data);
+      if (pinned === null) return false;
+      return socket.sendWithRoom ? socket.sendWithRoom(pinned) : socket.send(pinned);
     },
     close: () => socket.close(),
   };

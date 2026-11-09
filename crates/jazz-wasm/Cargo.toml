@@ -34,29 +34,22 @@ getrandom = { version = "0.3", features = ["wasm_js"] }
 getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
 talc = "5.0.4"
 sqlite-wasm-rs = { version = "0.5", default-features = false, optional = true }
-sqlite-wasm-vfs = { version = "0.2", optional = true }
+indexed_db_futures = { version = "0.6.4", optional = true }
+rsqlite-vfs = { version = "0.1", optional = true }
+thiserror = { version = "2", optional = true }
+tokio = { version = "1", default-features = false, features = ["sync"], optional = true }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
 
-[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
-web-sys = { version = "0.3", features = [
-  "FileSystemDirectoryHandle",
-  "MessageChannel",
-  "StorageManager",
-  "Navigator",
-  "WorkerGlobalScope",
-  "WorkerNavigator",
-] }
-
 [features]
 default = ["browser", "console_error_panic_hook", "transport-compression-ruzstd"]
 # Browser stores select SQLite; Durable Objects inject their managed backend.
-browser = ["jazz/sqlite", "dep:sqlite-wasm-rs", "dep:sqlite-wasm-vfs"]
+browser = ["jazz/sqlite", "dep:sqlite-wasm-rs", "dep:indexed_db_futures", "dep:rsqlite-vfs", "dep:thiserror", "dep:tokio"]
 durable-object = []
 durable-object-tests = ["durable-object", "dep:jazz-db"]
 bench-probes = []
-# Browser store comparison probes (IndexedDB vs OPFS); never in release builds.
+# Browser store probes (IndexedDB vs in memory); never in release builds.
 browser-bench = ["browser"]
 transport-compression-lz4 = ["jazz/transport-compression-lz4"]
 transport-compression-zstd = ["jazz/transport-compression-zstd"]

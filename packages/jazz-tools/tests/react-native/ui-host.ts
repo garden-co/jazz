@@ -4,3 +4,4 @@
 export const View = "native-view";
 export const Text = "native-text";
 export const Pressable = "native-pressable";
+export const Platform = { OS: "ios" };

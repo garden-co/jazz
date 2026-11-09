@@ -144,6 +144,11 @@ pub(super) struct OwnerSession {
     pub(super) egress: Arc<AtomicUsize>,
 }
 
+/// Room held until the engine consumes an admitted batch.
+pub struct WireIngress {
+    pub(super) _room: tokio::sync::OwnedSemaphorePermit,
+}
+
 /// A host can retain this handle while `Owner::advance` borrows the owner.
 /// It only queues input; decoding and database access stay with the owner.
 #[derive(Clone)]
@@ -197,6 +202,9 @@ impl SessionInput {
 }
 
 pub(super) struct SessionQueues {
+    held_ingress: RefCell<VecDeque<(u64, WireIngress)>>,
+    pushed: std::cell::Cell<u64>,
+    taken: std::cell::Cell<u64>,
     pub(super) inbound: RefCell<VecDeque<SyncMessage>>,
     /// Output the socket has not taken yet, encoded as it is queued so its
     /// size is known, with its bytes.
@@ -281,9 +289,20 @@ pub(super) fn start_tick<'a>(sessions: impl Iterator<Item = &'a SessionQueues> +
 pub(super) struct SessionTransport(pub(super) Rc<SessionQueues>);
 
 impl SessionQueues {
+    fn release_taken_ingress(&self) {
+        let taken = self.taken.get();
+        let mut held = self.held_ingress.borrow_mut();
+        while held.front().is_some_and(|(through, _)| *through <= taken) {
+            held.pop_front();
+        }
+    }
+
     pub(super) fn new(slice: Rc<TickSlice>, egress: Arc<AtomicUsize>) -> Self {
         Self {
             inbound: RefCell::default(),
+            held_ingress: RefCell::default(),
+            pushed: std::cell::Cell::new(0),
+            taken: std::cell::Cell::new(0),
             outbound: RefCell::default(),
             backlog: Backlog::new(egress),
             budget: std::cell::Cell::new(0),
@@ -410,6 +429,8 @@ impl Transport for SessionTransport {
         }
         let message = queues.inbound.borrow_mut().pop_front()?;
         queues.budget.set(budget - 1);
+        queues.taken.set(queues.taken.get() + 1);
+        queues.release_taken_ingress();
         Some(message)
     }
 }
@@ -735,14 +756,36 @@ impl Owner {
             self.close_session(session);
             return;
         }
+        self.decode_input(session, frames, None);
+    }
+
+    pub fn receive_admitted(
+        &mut self,
+        session: ServerSession,
+        frames: Vec<AbiBytes>,
+        ingress: WireIngress,
+    ) {
+        self.decode_input(session, frames.into(), Some(ingress));
+    }
+
+    fn decode_input(
+        &mut self,
+        session: ServerSession,
+        frames: VecDeque<AbiBytes>,
+        ingress: Option<WireIngress>,
+    ) {
         let Some(owner_session) = self.sessions.get_mut(&session) else {
             return;
         };
-        let mut inbound = owner_session.queues.inbound.borrow_mut();
+        let queues = Rc::clone(&owner_session.queues);
+        let mut inbound = queues.inbound.borrow_mut();
         for frame in frames {
             match owner_session.joiner.push(&frame) {
                 Ok(None) => {}
-                Ok(Some(message)) => inbound.push_back(message),
+                Ok(Some(message)) => {
+                    inbound.push_back(message);
+                    queues.pushed.set(queues.pushed.get() + 1);
+                }
                 Err(error) => {
                     drop(inbound);
                     let _ = owner_session.output.send((
@@ -758,6 +801,14 @@ impl Owner {
                 }
             }
         }
+        drop(inbound);
+        if let Some(ingress) = ingress {
+            queues
+                .held_ingress
+                .borrow_mut()
+                .push_back((queues.pushed.get(), ingress));
+        }
+        queues.release_taken_ingress();
     }
 
     /// End every session (sync or thin) pinned to a bundle `ends` names,

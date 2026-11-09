@@ -72,26 +72,71 @@ function rounded(points: Point[], r = 10): string {
   return `${d} L${lx} ${ly}`;
 }
 
+/** Pulls both ends of a path in by `t`, so a halo stops short of the boxes it joins. */
+function trimmed(points: Point[], t: number): Point[] {
+  const pull = ([ax, ay]: Point, [bx, by]: Point): Point => {
+    const len = Math.hypot(bx - ax, by - ay);
+    const k = Math.min(t, len / 2) / len;
+    return [ax + (bx - ax) * k, ay + (by - ay) * k];
+  };
+  const out = points.slice();
+  out[0] = pull(points[0], points[1]);
+  out[out.length - 1] = pull(points[points.length - 1], points[points.length - 2]);
+  return out;
+}
+
+/**
+ * A wire, optionally over a halo in the figure's background color so it cuts
+ * cleanly through the lines it crosses. `part` draws only the halo or only the
+ * stroke, so a bundle of wires can lay all its halos down first.
+ */
 function Wire({
   points,
   tone = "ink",
   start,
   end = true,
   dashed,
+  halo,
+  part = "both",
 }: {
   points: Point[];
   tone?: Exclude<Tone, "shared">;
   start?: boolean;
   end?: boolean;
   dashed?: boolean;
+  halo?: boolean;
+  part?: "both" | "halo" | "stroke";
 }) {
+  const under =
+    halo && part !== "stroke" ? <path d={rounded(trimmed(points, 4))} className="dg-halo" /> : null;
+  const over =
+    part === "halo" ? null : (
+      <path
+        d={rounded(points)}
+        className={`dg-wire dg-stroke-${tone}${dashed ? " dg-wire-dashed" : ""}`}
+        markerStart={start ? `url(#dg-arrow-${tone})` : undefined}
+        markerEnd={end ? `url(#dg-arrow-${tone})` : undefined}
+      />
+    );
   return (
-    <path
-      d={rounded(points)}
-      className={`dg-wire dg-stroke-${tone}${dashed ? " dg-wire-dashed" : ""}`}
-      markerStart={start ? `url(#dg-arrow-${tone})` : undefined}
-      markerEnd={end ? `url(#dg-arrow-${tone})` : undefined}
-    />
+    <>
+      {under}
+      {over}
+    </>
+  );
+}
+
+/** Several wires that share segments: every halo first, then every stroke. */
+function Bundle({ wires }: { wires: Parameters<typeof Wire>[0][] }) {
+  return (
+    <g>
+      {wires.map((wire, index) => (
+        <Wire key={`h${index}`} {...wire} halo part="halo" />
+      ))}
+      {wires.map((wire, index) => (
+        <Wire key={`s${index}`} {...wire} part="stroke" />
+      ))}
+    </g>
   );
 }
 
@@ -251,159 +296,447 @@ function Grid({
   );
 }
 
-/** Clients and server modules each hold a partial copy; Jazz Cloud holds all data. */
-export function StackDiagram() {
-  const copy = (where: string) => [
-    { text: "partial local copy", tone: "blue" as const },
-    { text: `(${where})`, tone: "blue" as const },
-  ];
-  const w = 188;
-  const peers = [
-    { x: 8, title: "web app", lines: [...copy("on disk"), "react · svelte · vue · …"] },
-    { x: 206, title: "mobile app", lines: [...copy("on disk"), "react native"] },
-    { x: 404, title: "backend", lines: [...copy("in memory"), "typescript · rust"] },
-    { x: 602, title: "agents & jobs", lines: [...copy("in memory"), "any server"] },
-  ];
-  // Jazz Cloud sits left-aligned with the web app. Every peer's wire enters it
-  // from below, at evenly spaced points along its bottom edge: the web app's
-  // goes straight up, the others turn, the farthest peer turning highest so
-  // wires never cross. The one "sync" label by their entries covers them all.
-  const coreX = 8;
-  const coreW = 340;
-  const coreY = 16;
-  const coreH = 82;
-  const coreBottom = coreY + coreH;
-  const peerY = 180;
-  const firstX = peers[0].x + w / 2;
-  // The last entry sits 54px in from the cloud's right edge; the rest share
-  // the span evenly.
-  const lastEntryX = coreX + coreW - 54;
-  const entryGap = (lastEntryX - firstX) / (peers.length - 1);
-  const turnGap = (peerY - coreBottom) / peers.length;
-  const wires: Point[][] = peers.map((peer, index) => {
-    const entryX = firstX + index * entryGap;
-    const peerX = peer.x + w / 2;
-    if (index === 0) {
-      return [
-        [entryX, coreBottom],
-        [peerX, peerY],
-      ];
-    }
-    const turnY = coreBottom + turnGap * (peers.length - index);
-    return [
-      [entryX, coreBottom],
-      [entryX, turnY],
-      [peerX, turnY],
-      [peerX, peerY],
-    ];
-  });
+export type DeploymentScenario = "vercel" | "cloudflare" | "aws" | "server";
+
+type Platform = {
+  label: string;
+  /** Your backend's runtime, under "Your Backend". */
+  runtime: string[];
+  /** Each shard: the platform's box title lines, and the Jazz box inside. */
+  shard: { title: string[]; small?: boolean; inner: string[]; count: number };
+  store: string;
+};
+
+const LARGE_VALUES = ["Jazz large", "values"];
+
+const deploymentScenarios: Record<DeploymentScenario, Platform> = {
+  vercel: {
+    label:
+      "On Vercel, everything stays in your Vercel account: Jazz SQLite shards in Vercel Sandboxes, auto-scaling and hibernating, Jazz large value chunks in Vercel Blobs, and the Jazz core in your backend's Vercel functions, next to your normal API routes and behind your auth. Web pages, web apps, native apps, backend workers and agent VMs get efficient realtime sync through the mounted /jazz route; traditional clients make manual HTTP requests and streaming.",
+    runtime: ["(Functions)"],
+    shard: { title: ["Sandbox"], inner: ["Jazz SQLite", "shard"], count: 4 },
+    store: "Blobs",
+  },
+  cloudflare: {
+    label:
+      "On Cloudflare, coming soon: everything stays in your Cloudflare account: Jazz shards in Durable Objects with their own SQLite, auto-scaling and hibernating, Jazz large value chunks in R2, and the Jazz core in your backend's Workers, next to your normal API routes and behind your auth. Clients get efficient realtime sync through the mounted /jazz route; traditional clients make manual HTTP requests and streaming.",
+    runtime: ["(CF Workers)"],
+    shard: { title: ["Durable", "Object"], small: true, inner: ["Jazz", "shard"], count: 6 },
+    store: "R2",
+  },
+  aws: {
+    label:
+      "On AWS, everything stays in your AWS account: Jazz SQLite shards on EC2 instances, manually scaled and long running, Jazz large value chunks in S3, and the Jazz core in your backend on AWS Lambda, next to your normal API routes and behind your auth. Clients get efficient realtime sync through the mounted /jazz route; traditional clients make manual HTTP requests and streaming.",
+    runtime: ["(AWS Lambda)"],
+    shard: { title: ["EC2 instance"], inner: ["Jazz SQLite", "shard"], count: 2 },
+    store: "S3",
+  },
+  server: {
+    label:
+      "On a local machine or your own server: a Jazz SQLite shard on local disk, Jazz large value chunks in local files, and the Jazz core in your backend next to your normal API routes, behind your auth. Clients get efficient realtime sync through the mounted /jazz route; traditional clients make manual HTTP requests and streaming.",
+    runtime: ["(local machine", "or your server)"],
+    shard: { title: ["local disk"], inner: ["Jazz SQLite", "shard"], count: 1 },
+    store: "local files",
+  },
+};
+
+export const deploymentScenarioNames: Record<DeploymentScenario, string> = {
+  vercel: "Vercel",
+  cloudflare: "Cloudflare (coming soon)",
+  aws: "AWS",
+  server: "Server",
+};
+
+/** Lines of text from `y`, `step` apart, in one style. */
+function Lines({
+  x,
+  y,
+  lines,
+  className,
+  step = 18,
+  anchor,
+}: {
+  x: number;
+  y: number;
+  lines: string[];
+  className: string;
+  step?: number;
+  anchor?: "middle";
+}) {
   return (
-    <Diagram
-      viewBox="0 0 800 316"
-      label="Web apps, mobile apps, backends and agents each keep a partial local copy of the data they use, on disk or in memory, and sync it with Jazz Cloud, which holds all data and authorizes every write."
-    >
-      <Box
-        x={coreX}
-        y={coreY}
-        w={coreW}
-        h={coreH}
-        title="jazz cloud"
-        note="(or self-hosted via CLI)"
-        lines={[{ text: "all data", tone: "blue" }, "authorizes every write"]}
-      />
-      {wires.map((points) => (
-        <Wire key={points[points.length - 1][0]} points={points} start />
+    <text x={x} y={y} textAnchor={anchor} className={className}>
+      {lines.map((line, index) => (
+        <tspan key={line} x={x} dy={index === 0 ? 0 : step}>
+          {line}
+        </tspan>
       ))}
-      <Label x={firstX + entryGap / 2} y={coreBottom + 18} anchor="middle">
-        sync
+    </text>
+  );
+}
+
+/** A Jazz storage box (a shard or the large-value store), all in blue so
+ * the pieces of the Jazz system read as one: platform title, then its part. */
+function Nested({
+  x,
+  y,
+  w,
+  h,
+  title,
+  inner,
+  small,
+}: {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  title: string[];
+  inner: string[];
+  /** Title in the detail size, for narrow boxes with a long name. */
+  small?: boolean;
+}) {
+  // A small title (narrow boxes) centres its four lines with even padding.
+  const pad = small ? 8 : w < 90 ? 8 : 12;
+  const step = small ? 13 : 18;
+  const titleY = small ? y + 18 : y + 23;
+  return (
+    <g>
+      <Frame x={x} y={y} w={w} h={h} tone="blue" />
+      <Lines
+        x={x + pad}
+        y={titleY}
+        lines={title}
+        step={step}
+        className={small ? "dg-detail dg-small dg-fill-blue" : "dg-title dg-fill-blue"}
+      />
+      <Lines
+        x={x + pad}
+        y={titleY + title.length * step + (small ? 7 : 8)}
+        lines={inner}
+        step={16}
+        className="dg-detail dg-fill-blue"
+      />
+    </g>
+  );
+}
+
+type Client = { name: string[]; inner: string[]; tone: Tone };
+
+const clients: Client[] = [
+  {
+    name: ["traditional", "client"],
+    inner: ["your own request", "& state handling"],
+    tone: "ink",
+  },
+  { name: ["web page"], inner: ["thin Jazz client"], tone: "blue" },
+  {
+    name: ["web app"],
+    inner: ["local-first Jazz client", "(SQLite on IndexedDB)"],
+    tone: "blue",
+  },
+  {
+    name: ["native app"],
+    inner: ["local-first Jazz client", "(native SQLite)"],
+    tone: "blue",
+  },
+  { name: ["backend worker"], inner: ["thin Jazz client"], tone: "blue" },
+  { name: ["agent VM"], inner: ["thin Jazz client"], tone: "blue" },
+];
+
+/** A client: its name, then its Jazz client (or your own code) below. */
+function ClientBox({
+  x,
+  y,
+  w,
+  h,
+  client,
+}: {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  client: Client;
+}) {
+  // The client's own part on top (a size smaller, so "local-first jazz
+  // client" fits one line), its name along the bottom.
+  return (
+    <g>
+      <Frame x={x} y={y} w={w} h={h} tone="ink" />
+      <Lines
+        x={x + 10}
+        y={y + 22}
+        lines={client.inner}
+        step={16}
+        className={
+          client.tone === "blue" ? "dg-detail dg-small dg-fill-blue" : "dg-detail dg-small"
+        }
+      />
+      <Lines
+        x={x + 10}
+        y={y + h - 14 - (client.name.length - 1) * 18}
+        lines={client.name}
+        className="dg-title dg-fill-ink"
+      />
+    </g>
+  );
+}
+
+/** Each client shows for this long before the next one in its slot. */
+const CYCLE_TURN_S = 6;
+
+/**
+ * The negative delay that puts a slot's `turn`th client on stage during its
+ * turn; the local-first slot runs half a turn behind the thin one, so the two
+ * never change together.
+ */
+function cycleDelay(count: number, turn: number, col: number): string {
+  const offset = col === 2 ? CYCLE_TURN_S / 2 : 0;
+  const shift = (count * CYCLE_TURN_S - turn * CYCLE_TURN_S + offset) % (count * CYCLE_TURN_S);
+  return `${-shift}s`;
+}
+
+/**
+ * Fig. 1's size, shared with the carousel so its stage keeps the diagram's
+ * aspect ratio while the slides cross-fade.
+ */
+export const DEPLOYMENT_LAYOUT = {
+  width: 552,
+  height: 458,
+};
+
+/**
+ * Fig. 1: where Jazz runs, drawn narrow enough for a phone. Your own platform
+ * on top (the shards and the large-value store in one row), your backend with the Jazz core beside its normal API route, behind your
+ * auth, then three clients, getting simpler to the right: the traditional
+ * one, a local-first one (web app, native app in turn) and a thin client (web
+ * page, backend worker, agent VM in turn). Sync goes through your auth into
+ * the mount; the dashed large-value reads come down one lane on the right that
+ * branches to the core and the Jazz clients. In this figure blue marks
+ * Jazz's own parts and mint your auth.
+ */
+export function DeploymentDiagram({ scenario }: { scenario: DeploymentScenario }) {
+  const { label, runtime, shard, store } = deploymentScenarios[scenario];
+  const { width: W, height: H } = DEPLOYMENT_LAYOUT;
+  // The store closes the shard row, as wide as a Vercel Sandbox (one of
+  // four, 10 apart) and set off from the shards by a wider gap.
+  const storeGap = 16;
+  const unit = (520 - storeGap - 3 * 10) / 5;
+  const shardRow = { x: 16, y: 16, w: 4 * unit + 3 * 10, h: 80 };
+  const storeBox = { x: 536 - unit, y: shardRow.y, w: unit, h: shardRow.h };
+  const backend = { x: 16, y: 136, w: 484 };
+  const backendBottom = 244;
+  const authH = 24;
+  // The Jazz core level with the normal API route, so the route's wire runs
+  // straight across into it.
+  const jazz = { x: 224, y: 172, w: 264, h: 60 };
+  const api = { x: 32, y: jazz.y + 8, w: 156, h: jazz.h - 16 };
+  const cws = [168, 168, 168];
+  const colX = [16, 192, 368];
+  // The one large-value lane, right of your backend.
+  const lane = 512;
+  const center = (col: number) => colX[col] + cws[col] / 2;
+  const rowY = 332;
+  // Shorter to the right, as each kind of client does less itself.
+  const clientH = [H - rowY - 6, 98, 76];
+  // The traditional client stays; the local-first and thin slots take
+  // turns between their kinds of client.
+  const slots = [[clients[0]], [clients[2], clients[3]], [clients[1], clients[4], clients[5]]];
+  const gap = shard.count > 4 ? 4 : 10;
+  const sw = (shardRow.w - gap * (shard.count - 1)) / shard.count;
+  const shardXs = Array.from({ length: shard.count }, (_, i) => shardRow.x + i * (sw + gap));
+  const coreMid = jazz.y + jazz.h / 2;
+  // Where the large-value lane turns off to the local-first client.
+  const blobBranchY = 312;
+  // On a single server there are no platform services: local SQLite and
+  // local files sit inside your backend, on top of the core. Everything else
+  // stays where it is in the other variants.
+  const single = scenario === "server";
+  const local = { y: 50, h: 76, sqlite: { x: 224, w: 124 }, files: { x: 364, w: 124 } };
+  // Snug around the local boxes on a single server.
+  const backendTop = single ? local.y - 12 : backend.y;
+  return (
+    <Diagram viewBox={`0 0 ${W} ${H}`} label={label}>
+      <Frame x={backend.x} y={backendTop} w={backend.w} h={backendBottom - backendTop} tone="ink" />
+      <Lines
+        x={backend.x + 16}
+        y={backendTop + 24}
+        lines={single ? ["your backend", ...runtime] : [`your backend ${runtime.join(" ")}`]}
+        step={18}
+        className="dg-title dg-fill-ink"
+      />
+      {single ? (
+        <g>
+          <Nested
+            {...local.sqlite}
+            y={local.y}
+            h={local.h}
+            title={["local SQLite"]}
+            inner={["Jazz SQLite", "shard"]}
+          />
+          <Nested
+            {...local.files}
+            y={local.y}
+            h={local.h}
+            title={["local files"]}
+            inner={LARGE_VALUES}
+          />
+          {[local.sqlite, local.files].map((box) => (
+            <Wire
+              key={box.x}
+              points={[
+                [box.x + box.w / 2, local.y + local.h],
+                [box.x + box.w / 2, jazz.y],
+              ]}
+              tone="blue"
+              start
+              halo
+            />
+          ))}
+        </g>
+      ) : (
+        <g>
+          <Nested {...storeBox} title={[store]} inner={LARGE_VALUES} />
+          {shardXs.map((x) => (
+            <Nested
+              key={x}
+              x={x}
+              y={shardRow.y}
+              w={sw}
+              h={shardRow.h}
+              title={shard.title}
+              small={shard.small}
+              inner={shard.inner}
+            />
+          ))}
+          <Bundle
+            wires={shardXs.map((x, index) => ({
+              points: [
+                // A lone shard spans the row; drop straight into the core.
+                [shard.count === 1 ? 360 : x + sw / 2, shardRow.y + shardRow.h],
+                [shard.count === 1 ? 360 : x + sw / 2, 116],
+                [360, 116],
+                [360, jazz.y],
+              ],
+              start: true,
+              end: index === 0,
+              tone: "blue",
+            }))}
+          />
+          {/* One large-value lane: from the store down the right, curving off
+              into the core and to the local-first client on the way to the
+              thin client. Jazz clients read large values directly. */}
+          <Bundle
+            wires={[
+              [
+                [lane, storeBox.y + storeBox.h],
+                [lane, rowY],
+              ],
+              [
+                [lane, storeBox.y + storeBox.h],
+                [lane, coreMid],
+                [jazz.x + jazz.w, coreMid],
+              ],
+              [
+                [lane, storeBox.y + storeBox.h],
+                [lane, blobBranchY],
+                [colX[1] + cws[1] - 16, blobBranchY],
+                [colX[1] + cws[1] - 16, rowY],
+              ],
+            ].map((points, index) => ({
+              points: points as Point[],
+              tone: "blue" as const,
+              dashed: true,
+              start: index === 0,
+            }))}
+          />
+        </g>
+      )}
+      <Frame x={jazz.x} y={jazz.y} w={jazz.w} h={jazz.h} tone="blue" />
+      <text
+        x={jazz.x + jazz.w / 2}
+        y={coreMid + 5}
+        textAnchor="middle"
+        className="dg-title dg-fill-blue"
+      >
+        {single ? "Jazz core" : "Jazz serverless core"}
+      </text>
+      <Box {...api} title="normal API route" center />
+      <Wire
+        points={[
+          [api.x + api.w, coreMid],
+          [jazz.x, coreMid],
+        ]}
+        tone="blue"
+        start
+        halo
+      />
+      <Frame x={backend.x} y={backendBottom} w={backend.w} h={authH} tone="mint" />
+      {/* Between the request and sync wires that pass through it. */}
+      <Label x={190} y={backendBottom + 16} tone="mint" anchor="middle">
+        your auth
       </Label>
-      {peers.map((peer) => (
-        <Box
-          key={peer.title}
-          x={peer.x}
-          y={peerY}
-          w={w}
-          h={98}
-          title={peer.title}
-          lines={peer.lines}
+      {/* The traditional client makes ordinary requests (and streams) to your
+          API routes; the others sync through your auth into the mount. */}
+      <Wire
+        points={[
+          [center(0), rowY],
+          [center(0), api.y + api.h],
+        ]}
+        start
+        halo
+      />
+      <Lines
+        x={center(0) + 6}
+        y={284}
+        lines={["manual http", "requests &", "streaming"]}
+        step={14}
+        className="dg-label dg-fill-ink"
+      />
+      {[1, 2].map((col) => (
+        <Wire
+          key={`s${col}`}
+          points={[
+            [center(col), rowY],
+            [center(col), jazz.y + jazz.h],
+          ]}
+          tone="blue"
+          start
+          halo
         />
       ))}
-      <Label x={8} y={304} tone="muted">
-        the clients and server modules making up your app
-      </Label>
+      <Lines
+        x={(center(1) + center(2)) / 2}
+        y={290}
+        lines={
+          single
+            ? ["efficient realtime sync"]
+            : ["efficient realtime sync", "+ direct blob streaming"]
+        }
+        step={14}
+        anchor="middle"
+        className="dg-label dg-fill-blue"
+      />
+      {slots.map((kinds, col) =>
+        kinds.map((client, turn) => (
+          <g
+            key={client.name.join(" ")}
+            className={
+              kinds.length > 1
+                ? `dg-cycle dg-cycle-${kinds.length}${turn ? " dg-cycle-rest" : ""}`
+                : undefined
+            }
+            style={
+              kinds.length > 1 ? { animationDelay: cycleDelay(kinds.length, turn, col) } : undefined
+            }
+          >
+            <ClientBox x={colX[col]} y={rowY} w={cws[col]} h={clientH[col]} client={client} />
+          </g>
+        )),
+      )}
     </Diagram>
   );
 }
 
 /** Node-message-state: a write's local state, its sync message, and its confirmed fate. */
-export function ConsistencyDiagram() {
-  const device = 116;
-  const cloud = 524;
-  return (
-    <Diagram
-      viewBox="0 0 640 340"
-      label="On the device, a write is applied to local state and visible at once; the local tier resolves. It syncs to the cloud with a permission check, which authorizes and stores it as new remote state. The cloud sends back the write's fate, and the device reaches confirmed state; the global tier resolves."
-    >
-      <Label x={device} y={20} tone="blue" anchor="middle">
-        device
-      </Label>
-      <Label x={cloud} y={20} tone="mint" anchor="middle">
-        cloud
-      </Label>
-      <line x1={device} x2={device} y1={30} y2={330} className="dg-region" />
-      <line x1={cloud} x2={cloud} y1={30} y2={330} className="dg-region" />
-      <Box
-        x={16}
-        y={44}
-        w={200}
-        h={74}
-        tone="blue"
-        title="local state"
-        lines={["write visible at once", 'tier "local" resolves']}
-      />
-      <Wire
-        points={[
-          [216, 96],
-          [424, 150],
-        ]}
-        tone="periwinkle"
-      />
-      <Label x={236} y={86} tone="periwinkle">
-        sync + permission check
-      </Label>
-      <Box
-        x={424}
-        y={136}
-        w={200}
-        h={74}
-        tone="mint"
-        title="remote state"
-        lines={["authorized", "stored durably"]}
-      />
-      <Wire
-        points={[
-          [424, 196],
-          [216, 250],
-        ]}
-        tone="periwinkle"
-      />
-      <Label x={300} y={252} tone="periwinkle">
-        fate confirmation
-      </Label>
-      <Box
-        x={16}
-        y={236}
-        w={200}
-        h={74}
-        tone="shared"
-        title="confirmed state"
-        lines={['tier "global" resolves', "or rolled back"]}
-      />
-    </Diagram>
-  );
-}
-
-/** The read policy and the query run as one plan; only matching rows reach you. */
 export function PermissionsDiagram() {
   const tasks = [
     ["plan launch", "false", "you"],
@@ -471,7 +804,7 @@ export function PermissionsDiagram() {
         cellTone={() => "blue"}
       />
       <Label x={16} y={214} tone="muted">
-        one plan · rows you may not read never leave the cloud
+        one plan · rows a user may not read never leave your backend
       </Label>
     </Diagram>
   );
@@ -644,10 +977,35 @@ export function LargeValuesDiagram() {
     append?: boolean;
     op: string;
   }[] = [
-    { name: "events", kind: "stream", chunks: 8, hot: [], append: true, op: "append · stream out" },
-    { name: "video", kind: "binary · 2GB", chunks: 10, hot: [4, 5, 6], op: "read a byte range" },
-    { name: "settings", kind: "json", chunks: 6, hot: [2], op: "read /theme by pointer" },
-    { name: "body", kind: "markdown", chunks: 9, hot: [5], op: "edit mid-document" },
+    {
+      name: "events",
+      kind: "stream",
+      chunks: 8,
+      hot: [],
+      append: true,
+      op: "append · stream out",
+    },
+    {
+      name: "video",
+      kind: "binary · 2GB",
+      chunks: 10,
+      hot: [4, 5, 6],
+      op: "read a byte range",
+    },
+    {
+      name: "settings",
+      kind: "json",
+      chunks: 6,
+      hot: [2],
+      op: "read /theme by pointer",
+    },
+    {
+      name: "body",
+      kind: "markdown",
+      chunks: 9,
+      hot: [5],
+      op: "edit mid-document",
+    },
   ];
   const chunkX = (index: number) => 176 + index * 26;
   return (
@@ -734,7 +1092,7 @@ export function BackendDiagram() {
   ];
   const jazz = [
     "sync + live queries",
-    "row-level permissions",
+    "declarative permissions",
     "durable streams",
     "files + blobs",
     "database",
@@ -742,8 +1100,9 @@ export function BackendDiagram() {
   const row = 32;
   const listY = 82;
   const listBottom = listY + (typical.length - 1) * (row + 6) + row;
-  const frameH = listBottom - listY;
-  const jazzStep = (frameH - 34 - row - 16) / (jazz.length - 1);
+  // The jazz frame hugs its items, so it reads as the smaller stack it is.
+  const jazzStep = row + 6;
+  const frameH = 34 + (jazz.length - 1) * jazzStep + row + 12;
   return (
     <Diagram
       viewBox={`0 0 640 ${listBottom + 16}`}
@@ -783,6 +1142,83 @@ export function BackendDiagram() {
           title={item}
         />
       ))}
+    </Diagram>
+  );
+}
+
+export function FrontendDiagram() {
+  const typical = [
+    "fetch calls per endpoint",
+    "loading + error states",
+    "client state store",
+    "cache invalidation + refetch",
+    "websocket subscriptions",
+    "optimistic updates",
+    "rollback on failure",
+    "offline queue + retries",
+    "local persistence",
+  ];
+  const thin = ["one reactive query hook", "live updates", "writes as plain calls"];
+  const localFirst = [
+    "instant optimistic writes",
+    "durable local copy",
+    "offline + background sync",
+  ];
+  const row = 32;
+  const gap = 6;
+  const listY = 82;
+  const listBottom = listY + (typical.length - 1) * (row + gap) + row;
+  const frameGap = 12;
+  const inner = (count: number) => 34 + count * row + (count - 1) * gap + 12;
+  const thinH = inner(thin.length);
+  const localY = listY + thinH + frameGap;
+  const localH = listBottom - localY;
+  const boxes = (items: string[], y: number, tone: "mint" | "blue") =>
+    items.map((item, index) => (
+      <Box
+        key={item}
+        x={356}
+        y={y + 34 + index * (row + gap)}
+        w={256}
+        h={row}
+        tone={tone}
+        title={item}
+      />
+    ));
+  return (
+    <Diagram
+      viewBox={`0 0 640 ${listBottom + 16}`}
+      label="A typical client needs fetch calls per endpoint, loading and error states, a client state store, cache invalidation, WebSocket subscriptions, optimistic updates with rollback, an offline queue and local persistence. A thin Jazz client replaces the fetching, caching and subscriptions with one reactive query hook. A local-first Jazz client also takes over optimistic writes, a durable local copy, offline use and background sync."
+    >
+      <Label x={16} y={24} tone="muted">
+        typical client
+      </Label>
+      <Label x={344} y={24} tone="muted">
+        with jazz
+      </Label>
+      <Box x={16} y={36} w={280} h={row + 4} title="ui components" />
+      {typical.map((item, index) => (
+        <Box
+          key={item}
+          x={16}
+          y={listY + index * (row + gap)}
+          w={280}
+          h={row}
+          tone="muted"
+          title={item}
+        />
+      ))}
+      <Box x={344} y={36} w={280} h={row + 4} title="ui components" />
+      <Frame x={344} y={listY} w={280} h={thinH} tone="mint" />
+      <Label x={356} y={listY + 22} tone="mint">
+        thin client
+      </Label>
+      {boxes(thin, listY, "mint")}
+      <Frame x={344} y={localY} w={280} h={localH} tone="blue" />
+      <Label x={356} y={localY + 22} tone="blue">
+        + local-first
+      </Label>
+      {boxes(localFirst, localY, "blue")}
     </Diagram>
   );
 }

@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { schema as s } from "../../index.js";
 import { startLocalJazzServer } from "../../dev/dev-server.js";
-import { createJazz, vercel } from "../index.js";
+import { createJazz, vercel, vercelBlob } from "../index.js";
 import {
   defaultCoreName,
   newerVersion,
@@ -381,6 +381,47 @@ describe("vercel() store", () => {
       /could not start/,
     );
     expect(fake.calls.length).toBe(calls);
+  }, 60_000);
+
+  it("refuses a Blob store another environment claimed, before serving", async () => {
+    const appId = randomUUID();
+    const core = await startTrustedCore(appId);
+    const fake = fakeVercel({ ...core, appId });
+    const asked: string[] = [];
+    // The test core's workload is production's; the store says preview's.
+    // Answers at once, before the wake is done.
+    const claimedByPreview = (async (input: RequestInfo | URL) => {
+      asked.push(String(input));
+      return new Response("preview\n");
+    }) as typeof fetch;
+    let closed = 0;
+    await expect(
+      openVercelCore({
+        options: {
+          sdk: fake.sdk,
+          backendCredential: core.credential,
+          name: "jazz-test",
+          blobs: vercelBlob({ storeId: "store_Shared1" }),
+        },
+        openRemote: ({ url }) =>
+          ({
+            serverUrl: url,
+            handle: async () => ({}),
+            close: async () => {
+              closed++;
+            },
+          }) as never,
+        version: "1.2.3",
+        env: { VERCEL_ENV: "production" },
+        fetch: claimedByPreview,
+      }),
+    ).rejects.toThrow(/Blob store Shared1 serves the preview environment, not production/);
+    // The core the wake came up with is closed, though the refusal came first.
+    for (let i = 0; closed === 0 && i < 300; i++) await new Promise((r) => setTimeout(r, 100));
+    expect(closed).toBe(1);
+    expect(asked).toEqual([
+      "https://shared1.private.blob.vercel-storage.com/.jazz-environment?cache=0",
+    ]);
   }, 60_000);
 
   it("never reads an error file it didn't cause as its start's failure", async () => {

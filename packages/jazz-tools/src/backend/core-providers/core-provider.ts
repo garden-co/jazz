@@ -29,6 +29,8 @@ export interface JazzCoreEvent {
 export interface JazzCoreSocket {
   /** Queue/send a frame in order. False means this session has ended. */
   send(data: Uint8Array): boolean;
+  /** Wait for room before sending; do not interleave with send. */
+  sendWithRoom?(data: Uint8Array): Promise<boolean>;
   close(): void;
 }
 
@@ -56,6 +58,8 @@ export interface JazzCore {
     headers: string[][],
     onEvent: (error: Error | null, event: JazzCoreEvent) => void,
     access?: JazzCoreAccess,
+    /** Local transport: native hosts may omit the network handshake deadline. */
+    options?: { inProcess?: boolean },
   ): JazzCoreSocket;
   /**
    * Deterministic, domain-separated MAC (base64url) for account-link challenges.

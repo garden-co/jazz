@@ -44,6 +44,20 @@ export function isReconnectLaterWireError(error: WireError): boolean {
   return error.retry === "later" && (error.code === "not_ready" || error.code === "backpressure");
 }
 
+/**
+ * Whether the carrier itself ended the link because the socket went away:
+ * closed, failed, or silent past {@link HEARTBEAT_SILENCE_MS}. These are
+ * network outages, which a client retries however long they last.
+ */
+export function isSocketDropWireError(error: WireError): boolean {
+  return (
+    error.retry === "later" &&
+    (error.code === "websocket_closed" ||
+      error.code === "websocket_error" ||
+      error.code === "websocket_silent")
+  );
+}
+
 export function isRetryablePreHelloWireError(error: unknown): error is PreHelloWireError {
   return error instanceof PreHelloWireError && isReconnectLaterWireError(error.wireError);
 }
@@ -94,6 +108,26 @@ export const MAX_WIRE_PROTOCOL_VERSION = WIRE_PROTOCOL_VERSION;
 export const FEATURE_PAYLOAD_ZSTD = 1 << 4;
 export const FEATURE_AUTHORIZATION_SCOPE_VIEWS = 1 << 7;
 export const FEATURE_AUXILIARY_CHUNKS = 1 << 8;
+/**
+ * `FEATURE_HEARTBEAT` in `crates/jazz/layers/protocol/src/wire.rs`: the server
+ * sends a `Heartbeat` frame on its keepalive cadence (20 s). The WebSocket API
+ * shows neither pings nor partial messages, so this is how a carrier tells a
+ * link that went silently dead (a half-open TCP connection, a stalled proxy)
+ * from a quiet one. Every carrier asks for it; it never reaches the runtime
+ * above.
+ */
+export const FEATURE_HEARTBEAT = 1 << 11;
+/**
+ * How long a heartbeat link may stay silent before the carrier gives it up.
+ * A message arrives whole, and a heartbeat queues behind the message being
+ * sent, so this also bounds the slowest link a full 2 MiB message survives:
+ * about 18 KB/s. A link slower than that is treated as gone.
+ */
+export const HEARTBEAT_SILENCE_MS = 120_000;
+/** A silence past the limit is confirmed after this long, so that messages
+ * a frozen page or a long task held back are delivered before it counts. */
+const HEARTBEAT_CONFIRM_MS = 1_000;
+const WIRE_FRAME_HEARTBEAT = 7;
 export const CLIENT_WIRE_FEATURES =
   FEATURE_PAYLOAD_ZSTD | FEATURE_AUTHORIZATION_SCOPE_VIEWS | FEATURE_AUXILIARY_CHUNKS;
 
@@ -245,6 +279,8 @@ export class WebSocketCarrier {
   private negotiated = false;
   private closing = false;
   private terminated = false;
+  private lastInbound = performance.now();
+  private silenceTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(options: WebSocketCarrierOptions) {
     this.url = options.endpointUrl;
@@ -253,7 +289,7 @@ export class WebSocketCarrier {
     this.onFrame = options.onFrame;
     this.onError = options.onError;
     this.onTerminal = options.onTerminal;
-    this.localFeatures = options.features ?? CLIENT_WIRE_FEATURES;
+    this.localFeatures = (options.features ?? CLIENT_WIRE_FEATURES) | FEATURE_HEARTBEAT;
     assertWireFeatures(this.localFeatures, "client wire features");
     this.socket = new WebSocketCtor(this.url);
     this.socket.binaryType = "arraybuffer";
@@ -283,6 +319,7 @@ export class WebSocketCarrier {
       },
     );
     this.socket.addEventListener("message", (event) => {
+      this.lastInbound = performance.now();
       void this.handleMessage(event.data).catch((error) => {
         this.reportTerminal(
           {
@@ -351,6 +388,7 @@ export class WebSocketCarrier {
   close(): void {
     if (this.closing) return;
     this.closing = true;
+    clearTimeout(this.silenceTimer);
     this.reportTerminal(
       {
         code: "websocket_closed",
@@ -377,9 +415,35 @@ export class WebSocketCarrier {
   ): void {
     if (this.terminated) return;
     this.terminated = true;
+    clearTimeout(this.silenceTimer);
     this.rejectNegotiation(negotiationError);
     if (notifyError) this.onError?.(error);
     if (notifyTerminal) this.onTerminal?.(error);
+  }
+
+  /** Give the link up once the server has sent nothing, not even a
+   * heartbeat, for {@link HEARTBEAT_SILENCE_MS}. Checked against the time
+   * of the last message, so a timer the browser throttled judges the
+   * silence it actually saw; a silence past the limit is confirmed a moment
+   * later, after any messages a frozen page held back were delivered. */
+  private watchSilence(confirming = false): void {
+    clearTimeout(this.silenceTimer);
+    if (this.closing || this.terminated) return;
+    const silentFor = performance.now() - this.lastInbound;
+    if (silentFor >= HEARTBEAT_SILENCE_MS && !confirming) {
+      this.silenceTimer = setTimeout(() => this.watchSilence(true), HEARTBEAT_CONFIRM_MS);
+      return;
+    }
+    if (silentFor >= HEARTBEAT_SILENCE_MS) {
+      this.reportTerminal({
+        code: "websocket_silent",
+        retry: "later",
+        message: `the server sent nothing for ${Math.round(silentFor / 1000)} s, not even a heartbeat`,
+      });
+      this.close();
+      return;
+    }
+    this.silenceTimer = setTimeout(() => this.watchSilence(), HEARTBEAT_SILENCE_MS - silentFor);
   }
 
   private async handleMessage(data: unknown): Promise<void> {
@@ -388,7 +452,15 @@ export class WebSocketCarrier {
       if (isWireHello(frame)) {
         if (this.negotiated) continue;
         this.negotiated = true;
-        this.resolveNegotiation(decodeServerHello(frame, this.localFeatures));
+        const negotiation = decodeServerHello(frame, this.localFeatures);
+        if ((negotiation.features & FEATURE_HEARTBEAT) !== 0) this.watchSilence();
+        this.resolveNegotiation({
+          ...negotiation,
+          features: negotiation.features & ~FEATURE_HEARTBEAT,
+        });
+        continue;
+      }
+      if (this.negotiated && frame.byteLength === 1 && frame[0] === WIRE_FRAME_HEARTBEAT) {
         continue;
       }
       if (!this.negotiated) {

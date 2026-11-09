@@ -150,6 +150,27 @@ export class IndexedDbStorageInvalidatedError extends Error {
 }
 
 /**
+ * A write IndexedDB refused for lack of space (`QuotaExceededError`), with
+ * the same `storage` code as a refused database write. Opening a store
+ * records a node lease, so it fails this way too while storage is full.
+ */
+export class IndexedDbStorageFullError extends Error {
+  readonly code = "storage";
+  constructor(cause: unknown) {
+    super(
+      "browser storage: could not write to IndexedDB (QuotaExceededError); the browser may be out of storage space for this site",
+      { cause },
+    );
+    this.name = "IndexedDbStorageFullError";
+  }
+}
+
+function indexedDbFailure(error: DOMException | null, fallback: string): Error {
+  if (error?.name === "QuotaExceededError") return new IndexedDbStorageFullError(error);
+  return error ?? new Error(fallback);
+}
+
+/**
  * Dumb, atomic page persistence for the browser B-tree.
  *
  * Tree traversal, caching, dirty generations, and backpressure deliberately
@@ -888,15 +909,21 @@ function pageBytes(pageId: number, value: unknown): Uint8Array | null {
 function requestResult<T>(request: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
     request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error ?? new Error("IndexedDB request failed"));
+    request.onerror = () => reject(indexedDbFailure(request.error, "IndexedDB request failed"));
   });
 }
 
 function transactionDone(tx: IDBTransaction): Promise<void> {
   return new Promise((resolve, reject) => {
     tx.oncomplete = () => resolve();
-    tx.onabort = () => reject(tx.error ?? new Error("IndexedDB transaction aborted"));
-    tx.onerror = () => reject(tx.error ?? new Error("IndexedDB transaction failed"));
+    tx.onabort = () => reject(indexedDbFailure(tx.error, "IndexedDB transaction aborted"));
+    // A failed request reaches the transaction before the transaction
+    // records the error (while an abort records it first), so fall back to
+    // the request's own.
+    tx.onerror = (event) => {
+      const request = event.target === tx ? null : (event.target as IDBRequest | null);
+      reject(indexedDbFailure(tx.error ?? request?.error ?? null, "IndexedDB transaction failed"));
+    };
   });
 }
 

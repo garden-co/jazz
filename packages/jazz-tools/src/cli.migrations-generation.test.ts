@@ -109,6 +109,61 @@ describe("cli migrations", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  // A migration validate passed used to fail only at deploy (adopter b22):
+  // renaming an optional column to a required one.
+  it("refuses in validate a migration that a deploy would refuse, naming the column", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const shipping = (source: string) =>
+      `import { migrations } from "./migrations/index.ts";\n` +
+      source.replace('{ migrations: "none" }', "{ migrations }");
+    await writeFile(join(root, "schema.ts"), shipping(rootSchemaWithTodoNotes()));
+    await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
+    await mkdir(join(root, "node_modules"), { recursive: true });
+    await symlink(
+      fileURLToPath(new URL("..", import.meta.url)),
+      join(root, "node_modules", "jazz-tools"),
+      "dir",
+    );
+    vi.stubGlobal("fetch", vi.fn());
+    const first = await createCatalogueMigration({ schemaDir: root, migrationsDir });
+    assert(first.status === "initial-snapshot");
+
+    await writeFile(
+      join(root, "schema.ts"),
+      shipping(
+        rootSchemaWithTodoNotes().replace(
+          "notes: s.string().optional(),",
+          'body: s.string().default(""),',
+        ),
+      ),
+    );
+    const second = await createCatalogueMigration({
+      schemaDir: root,
+      migrationsDir,
+      name: "notes-to-body",
+    });
+    assert(second.status === "generated");
+    await validate({ schemaDir: root });
+
+    // The author keeps the values by renaming, but the column's optionality
+    // changes with it, which no migration step does.
+    const stub = await readFile(second.filePath, "utf8");
+    await writeFile(
+      second.filePath,
+      stub
+        .split("\n")
+        .filter((line) => !line.includes('"notes": m.drop'))
+        .map((line) =>
+          line.includes('"body": m.add') ? '      "body": m.renameFrom("notes"),' : line,
+        )
+        .join("\n"),
+    );
+    await expect(validate({ schemaDir: root })).rejects.toThrow(
+      /The migrations in migrations would not deploy: .*table "todos".*"body" comes out optional but is required/,
+    );
+  });
+
   it.each([false, true])(
     "uses the active server schema on first run (unchanged=%s)",
     async (unchanged) => {
@@ -393,7 +448,8 @@ describe("cli migrations", () => {
                 nullable: false,
                 merge_strategy: "Counter",
               },
-              { name: "addedValue", column_type: { type: "BigInt" }, nullable: true },
+              // Another type than removedValue, so it can't be its rename.
+              { name: "addedValue", column_type: { type: "Text" }, nullable: true },
               { name: "label", column_type: { type: "Text" }, nullable: false },
             ],
           },
@@ -421,7 +477,7 @@ describe("cli migrations", () => {
     }
 
     const generated = await readFile(filePath, "utf8");
-    expect(generated).toContain('"addedValue": m.add.bigint({ default: null }),');
+    expect(generated).toContain('"addedValue": m.add.string({ default: null }),');
     expect(generated).toContain('"removedValue": m.drop.bigint({ backwardsDefault: null }),');
     expect(generated).toContain('"value": s.bigint().merge("counter"),');
     await typecheckGeneratedMigration(filePath);
@@ -469,7 +525,7 @@ describe("cli migrations", () => {
         toHash: toHash.slice(0, 12),
       }),
     ).rejects.toThrow(
-      'Changing column "todos.done" from required to optional is not supported yet. Add a column under a new name and drop the old one instead.',
+      'Changing column "todos.done" from required to optional is not supported yet. A migration can add, drop or rename a column but not convert its values',
     );
     expect(
       (await readdir(migrationsDir).catch(() => [])).filter((name) => name.endsWith(".ts")),
@@ -522,7 +578,7 @@ describe("cli migrations", () => {
           toHash: toHash.slice(0, 12),
         }),
       ).rejects.toThrow(
-        `Changing ${change} column "todos.state" is not supported yet. Add a column under a new name and drop the old one instead.`,
+        `Changing ${change} column "todos.state" is not supported yet. A migration can add, drop or rename a column but not convert its values`,
       );
       expect(
         (await readdir(migrationsDir).catch(() => [])).filter((name) => name.endsWith(".ts")),

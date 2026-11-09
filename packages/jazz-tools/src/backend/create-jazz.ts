@@ -1,6 +1,7 @@
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { verifyChallenge } from "../local-first-auth/server.js";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
+import type { Http2SecureServer, Http2Server } from "node:http2";
 import type { Duplex } from "node:stream";
 import type { JazzCoreSocketEvent } from "jazz-napi";
 import { accountAppId, localFirstAccountId } from "../accounts/local-first.js";
@@ -70,6 +71,8 @@ import { earlyDb, type EarlyDb } from "./early-db.js";
 import { isSameAdmission, recheckEvery } from "./session-recheck.js";
 import { NoJazzAccountError } from "./no-account-error.js";
 import { RequestAuthenticationError } from "./request-auth.js";
+import { optionalPeerImportError } from "./optional-peer.js";
+import { closingBeforeDeadline } from "./socket-deadline.js";
 
 declare const localFirstGuestBrand: unique symbol;
 
@@ -232,6 +235,9 @@ export interface WsLikeSocket {
   on(event: "message", listener: (data: unknown, isBinary?: boolean) => void): unknown;
   on(event: "close", listener: () => void): unknown;
   on(event: "error", listener: (error: unknown) => void): unknown;
+  /** Stop reading from the client until `resume` (the `ws` package has both). */
+  pause?(): void;
+  resume?(): void;
 }
 
 export interface Jazz {
@@ -265,10 +271,13 @@ export interface Jazz {
     DELETE(request: Request): Promise<Response>;
   };
   /**
-   * Accept sync sockets on a Node HTTP server (needs the `ws` package).
-   * Plain requests still go through `nodeHandler` or `handle`.
+   * Accept sync sockets on a Node HTTP server (needs the `ws` package),
+   * such as the one Hono's `serve()` returns. It doesn't open the store:
+   * that happens on the first socket or request, and while the store can't
+   * open (a remote core that is down) sockets and requests get a 503 the
+   * clients retry. Plain requests still go through `nodeHandler` or `handle`.
    */
-  attach(server: Server): Promise<void>;
+  attach(server: Server | Http2Server | Http2SecureServer): Promise<void>;
   /** Node `(req, res)` handler for requests under `basePath` (Express, Fastify's raw mode). */
   nodeHandler(req: IncomingMessage, res: ServerResponse, next?: () => void): void;
   /** Bridge an upgraded socket (the `ws` package's shape) to a sync session. */
@@ -356,6 +365,12 @@ const STRIPPED_HEADERS = [
 // never its cookies or its app session.
 const REMOTE_FORWARDED_HEADERS = ["accept", "content-type", "if-none-match"];
 const MAX_STREAM_MESSAGE_BYTES = 2 * 1024 * 1024;
+/**
+ * Bytes a session's client may have sent that the core has not taken yet.
+ * A transport that waits for the core stays well under it; past it, the
+ * client ignored flow control and its session ends.
+ */
+const MAX_WAITING_SESSION_BYTES = 32 * 1024 * 1024;
 
 function headerPairs(headers: Headers): string[][] {
   const pairs: string[][] = [];
@@ -480,8 +495,12 @@ function jazzSettings(options: CreateJazzOptions): JazzSettings {
 }
 
 /** A Jazz with its store open: what a `createJazz` facade hands each call to. */
-interface OpenedJazz extends Omit<Jazz, "ready" | "db"> {
+interface OpenedJazz extends Omit<Jazz, "ready" | "db" | "attach"> {
   readonly db: Db;
+  /** Take over a sync socket's upgrade request that an attached server received. */
+  upgrade(wss: SocketUpgrader, req: IncomingMessage, socket: Duplex, head: Buffer): void;
+  /** A server is attached: socket upgrades work on this host. */
+  markAttached(): void;
   /** Apply a later `createJazz` call's app, permissions and options to this open store. */
   reload(options: CreateJazzOptions): Promise<void>;
 }
@@ -532,7 +551,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     ({ session, client: backend } = await backendSession(options));
   } catch (error) {
     await core.close();
-    throw error;
+    throw unreachableCore(error);
   }
 
   let backendClients = backendClientVerifier(options.backendClients ?? []);
@@ -941,6 +960,12 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
    */
   interface ClientSession {
     send(data: Uint8Array): boolean;
+    /**
+     * `send`, resolving once the core has room for it (or with false once
+     * the session ended): a transport that awaits it before reading more
+     * from its client holds a fast client back.
+     */
+    deliver(data: Uint8Array): Promise<boolean>;
     close(): void;
     /** The user the session was admitted as, once it is. */
     readonly userId: string | undefined;
@@ -1027,12 +1052,43 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     };
     // Messages after the prelude wait for its admission, in order.
     let chain: Promise<boolean> | undefined;
-    return {
-      send(data) {
-        if (ended) return false;
-        chain = chain
-          ? chain.then((ok) => ok && !ended && !!socket?.send(data))
-          : admit(data).catch((error: unknown) => {
+    // Bytes handed to `deliver` the core has not taken yet: a host that
+    // doesn't wait for it (a socket that can't pause) is cut off past the
+    // limit, as the core cuts off a peer that ignores flow control.
+    let waitingBytes = 0;
+    const deliver = (data: Uint8Array): Promise<boolean> => {
+      if (ended) return Promise.resolve(false);
+      if (waitingBytes + data.byteLength > MAX_WAITING_SESSION_BYTES) {
+        // 1013 (try again later): the client may come back and send at the
+        // pace this host takes.
+        onEvent(null, {
+          kind: "close",
+          code: 1013,
+          reason: "client sent faster than the server takes",
+        });
+        end();
+        return Promise.resolve(false);
+      }
+      waitingBytes += data.byteLength;
+      const taken = (ok: boolean) => {
+        waitingBytes -= data.byteLength;
+        return ok;
+      };
+      chain = chain
+        ? chain
+            .then(async (ok) => {
+              if (!ok || ended || !socket) return false;
+              return socket.sendWithRoom ? socket.sendWithRoom(data) : socket.send(data);
+            })
+            .catch(() => {
+              // A core that failed to take a message ends the session.
+              onEvent(null, { kind: "close", code: 1011, reason: "session failed" });
+              end();
+              return false;
+            })
+            .then(taken)
+        : admit(data)
+            .catch((error: unknown) => {
               if (!ended && isRefusal(error)) {
                 // The core refused this identity (revoked, local-first auth
                 // disabled, invalid): an auth failure the client must not
@@ -1049,9 +1105,17 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
               }
               end();
               return false;
-            });
+            })
+            .then(taken);
+      return chain;
+    };
+    return {
+      send(data) {
+        if (ended) return false;
+        void deliver(data);
         return true;
       },
+      deliver,
       close: end,
       get userId() {
         return userId;
@@ -1283,22 +1347,59 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     return socket;
   }
 
+  /**
+   * Pass a send's records to the session as they arrive, each once the core
+   * has room for it: the body is not read ahead of the core, so a client
+   * sending faster than the core takes is held back by the request itself.
+   */
   async function streamSend(id: string, request: Request): Promise<Response> {
     const socket = await ownStream(id, request);
     if (socket instanceof Response) return socket;
-    const reader = new StreamRecordReader();
-    const records = reader.push(new Uint8Array(await request.arrayBuffer()));
-    if (reader.pending > 0) return new Response("truncated record", { status: 400 });
-    for (const record of records) {
-      if (
-        record.kind !== STREAM_RECORD_MESSAGE ||
-        record.payload.byteLength > MAX_STREAM_MESSAGE_BYTES
-      ) {
-        socket.close();
-        return new Response("invalid record", { status: 400 });
-      }
-      if (!socket.send(record.payload)) return new Response("session ended", { status: 410 });
+    // A send's records go in whole and in order: one send at a time.
+    if (sendingStreams.has(id)) {
+      return new Response("a send to this stream is in progress", { status: 409 });
     }
+    sendingStreams.add(id);
+    try {
+      return await passStreamRecords(socket, request);
+    } finally {
+      sendingStreams.delete(id);
+    }
+  }
+
+  /** Stream sessions with a send in progress. */
+  const sendingStreams = new Set<string>();
+
+  async function passStreamRecords(socket: ClientSession, request: Request): Promise<Response> {
+    const refuse = (reason: string) => {
+      socket.close();
+      return new Response(reason, { status: 400 });
+    };
+    const records = new StreamRecordReader();
+    const body = request.body?.getReader();
+    for (;;) {
+      const chunk = body ? await body.read() : { done: true as const, value: undefined };
+      if (chunk.done) break;
+      for (const record of records.push(chunk.value)) {
+        if (
+          record.kind !== STREAM_RECORD_MESSAGE ||
+          record.payload.byteLength > MAX_STREAM_MESSAGE_BYTES
+        ) {
+          void body?.cancel().catch(() => undefined);
+          return refuse("invalid record");
+        }
+        if (!(await socket.deliver(record.payload))) {
+          void body?.cancel().catch(() => undefined);
+          return new Response("session ended", { status: 410 });
+        }
+      }
+      // A record no message may be: refused before it is buffered.
+      if (records.pending > 5 + MAX_STREAM_MESSAGE_BYTES) {
+        void body?.cancel().catch(() => undefined);
+        return refuse("invalid record");
+      }
+    }
+    if (records.pending > 0) return refuse("truncated record");
     return new Response(null, { status: 204 });
   }
 
@@ -1314,22 +1415,37 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       ws.close(1008, "origin not allowed");
       return;
     }
+    // A paused socket reads no close handshake: resume it to close.
+    const close = (code: number, reason: string) => {
+      ws.resume?.();
+      ws.close(code, reason);
+    };
     let socket: ClientSession;
     try {
       socket = openClientSession(request, (error, event) => {
-        if (error) return ws.close(1011, error.message);
+        if (error) return close(1011, error.message);
         if (event.kind === "message" && event.data) ws.send(event.data);
         else if (event.kind === "close") {
-          ws.close(sendableCloseCode(event.code), event.reason ?? "");
+          close(sendableCloseCode(event.code), event.reason ?? "");
         }
       });
     } catch (error) {
-      ws.close(1013, error instanceof Error ? error.message : String(error));
+      close(1013, error instanceof Error ? error.message : String(error));
       return;
     }
     clientSockets.add(ws);
+    // Messages go to the core in order, each once it has room; the socket
+    // is not read while one waits, so a fast client is held back.
+    let waiting = 0;
     ws.on("message", (data) => {
-      if (!socket.send(toBytes(data))) ws.close(1000, "session ended");
+      waiting += 1;
+      ws.pause?.();
+      // `deliver` resolves false, never rejects, when the session fails.
+      void socket.deliver(toBytes(data)).then((ok) => {
+        waiting -= 1;
+        if (!ok) close(1000, "session ended");
+        else if (waiting === 0) ws.resume?.();
+      });
     });
     ws.on("close", () => {
       clientSockets.delete(ws);
@@ -1604,7 +1720,11 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       // after a socket failed before it opened. Where this host upgrades
       // sockets (attach(), or Vercel), that failure was transient (a
       // restart, a draining instance) and the client should retry the
-      // socket. Only where it can't does the marker send it to the stream.
+      // socket. Only where it can't does the marker send it to the stream
+      // at once; the client also switches after several failed sockets in
+      // a row, when something in between doesn't pass upgrades on. It asks
+      // with a POST, so a page origin the socket was refused for is refused
+      // here too (403, above), and not taken for a proxy's doing.
       if (upgrades) {
         return new Response("Upgrade to a WebSocket", { status: 426 });
       }
@@ -1641,17 +1761,31 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       onVercelHost()
     ) {
       if (!originAllowed(request)) return new Response("origin not allowed", { status: 403 });
-      const { upgradeWebSocket } = (await import(
-        /* @vite-ignore */ "@vercel/functions" as string
-      )) as {
+      // An optional peer: a literal import inside `try`, so bundlers report
+      // a missing one at runtime, not on every route (see importSandboxSdk).
+      let vercelFunctions: {
         upgradeWebSocket(
           handler: (ws: WsLikeSocket) => void,
           options?: { maxPayload?: number },
         ): Response;
+        getDeadline?(): Date | undefined;
       };
-      return upgradeWebSocket((ws) => acceptSocket(request, ws), {
-        maxPayload: MAX_STREAM_MESSAGE_BYTES,
-      });
+      try {
+        vercelFunctions = (await import(
+          /* @vite-ignore */ "@vercel/functions"
+        )) as unknown as typeof vercelFunctions;
+      } catch (error) {
+        throw optionalPeerImportError("Jazz on Vercel", "@vercel/functions", error);
+      }
+      const { upgradeWebSocket } = vercelFunctions;
+      // The socket ends with this invocation, at the route's maxDuration:
+      // close it just before, so the client reconnects without a stall.
+      const deadline = vercelFunctions.getDeadline?.()?.getTime();
+      return upgradeWebSocket(
+        (ws) =>
+          acceptSocket(request, deadline === undefined ? ws : closingBeforeDeadline(ws, deadline)),
+        { maxPayload: MAX_STREAM_MESSAGE_BYTES },
+      );
     }
     // On Vercel this handler upgrades sockets (above); elsewhere (next dev)
     // only if attach() runs on the same server.
@@ -1704,8 +1838,8 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
   function nodeHandler(req: IncomingMessage, res: ServerResponse, next?: () => void): void {
     // Only Jazz's own paths: a request for the app passes on untouched, its
     // body unread, whatever read it before.
-    const { pathname } = new URL(req.url ?? "/", "http://localhost");
-    if (pathname !== basePath && !pathname.startsWith(`${basePath}/`)) {
+    const pathname = requestPathname(req.url);
+    if (pathname === null || (pathname !== basePath && !pathname.startsWith(`${basePath}/`))) {
       if (next) return next();
       res.statusCode = 404;
       res.end();
@@ -1745,33 +1879,27 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     );
   }
 
-  async function attach(server: Server): Promise<void> {
-    const { WebSocketServer } = (await import("ws" as string)) as {
-      WebSocketServer: new (options: { noServer: true; maxPayload: number }) => {
-        handleUpgrade(
-          req: IncomingMessage,
-          socket: Duplex,
-          head: Buffer,
-          callback: (ws: WsLikeSocket) => void,
-        ): void;
-        close(): void;
-      };
-    };
-    const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_STREAM_MESSAGE_BYTES });
-    server.on("upgrade", (req: IncomingMessage, socket: Duplex, head: Buffer) => {
-      const request = nodeRequest(req);
-      const path = innerPath(request);
-      if (path === null || !/^\/apps\/[^/]+\/ws$/.test(path)) return;
-      if (!originAllowed(request)) {
-        socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
-        return;
-      }
-      wss.handleUpgrade(req, socket, head, (ws) => acceptSocket(request, ws));
-    });
-    // Only now, with `ws` loaded and the listener on: this server upgrades.
+  function upgrade(wss: SocketUpgrader, req: IncomingMessage, socket: Duplex, head: Buffer): void {
+    let request: Request;
+    try {
+      request = nodeRequest(req);
+    } catch {
+      // A request no URL can be made of (a bad Host header).
+      socket.end(BAD_UPGRADE);
+      return;
+    }
+    const path = innerPath(request);
+    if (path === null || !SOCKET_PATH.test(path)) return void socket.end(BAD_UPGRADE);
+    if (!originAllowed(request)) {
+      socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
+      return;
+    }
+    wss.handleUpgrade(req, socket, head, (ws) => acceptSocket(request, ws));
+  }
+
+  function markAttached(): void {
     upgradesSockets = true;
     attached = true;
-    server.on("close", () => wss.close());
   }
 
   let closing: Promise<void> | undefined;
@@ -1783,7 +1911,8 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     reload,
     handle: (request) => handle(request),
     next: () => ({ GET: nextHandler, POST: nextHandler, DELETE: nextHandler }),
-    attach,
+    upgrade,
+    markAttached,
     nodeHandler,
     acceptSocket,
     get db() {
@@ -1819,7 +1948,10 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
           stream.end(1012, "server shutting down");
         }
         streams.clear();
-        for (const ws of [...clientSockets]) ws.close(1012, "server shutting down");
+        for (const ws of [...clientSockets]) {
+          ws.resume?.();
+          ws.close(1012, "server shutting down");
+        }
         clientSockets.clear();
         await Promise.all([...retiring].map((close) => close()));
         // Writes that resolved at the "local" tier may still be on their way
@@ -1891,6 +2023,8 @@ interface Entry {
   released?: Promise<void>;
   /** A previous Jazz for this store, closing: this one opens once it is released. */
   after?: Promise<void>;
+  /** `attach()` ran: the Jazz it opens upgrades sockets. */
+  attached?: boolean;
   jazz: Jazz;
 }
 
@@ -2041,6 +2175,7 @@ function openEntry(entry: Entry): Promise<OpenedJazz> {
   })().then(
     (opened) => {
       entry.failure = undefined;
+      if (entry.attached) opened.markAttached();
       entry.opened = opened;
       entry.applied = options;
       drainOnSignal(entry);
@@ -2185,6 +2320,8 @@ function heldSocket(ws: WsLikeSocket): { socket: WsLikeSocket; refuse(reason: st
   const socket: WsLikeSocket = {
     send: (data) => ws.send(data),
     close: (code, reason) => ws.close(code, reason),
+    pause: () => ws.pause?.(),
+    resume: () => ws.resume?.(),
     on(event: "message" | "close" | "error", listener: (...args: never[]) => void) {
       const first = listeners === null;
       listeners ??= {};
@@ -2208,12 +2345,138 @@ function byteLength(data: unknown): number {
   return typeof sized?.byteLength === "number" ? sized.byteLength : 0;
 }
 
+/**
+ * A remote core that could not be reached, named, instead of the bare
+ * `fetch failed` the request saw. The next use of this Jazz tries again.
+ */
+function unreachableCore(error: unknown): unknown {
+  const cause = (error as { cause?: { code?: unknown; message?: unknown } } | null)?.cause;
+  if (!(error instanceof TypeError) || !cause) return error;
+  const why = typeof cause.code === "string" ? cause.code : String(cause.message ?? error.message);
+  return new Error(
+    `createJazz: could not reach the Jazz core (${why}); this Jazz tries again on its next use`,
+    { cause: error },
+  );
+}
+
+/** What `attach()` hands an upgrade to: the `ws` package's server, without one of its own. */
+interface SocketUpgrader {
+  handleUpgrade(
+    req: IncomingMessage,
+    socket: Duplex,
+    head: Buffer,
+    callback: (ws: WsLikeSocket) => void,
+  ): void;
+  close(): void;
+}
+
+async function socketUpgrader(): Promise<SocketUpgrader> {
+  const { WebSocketServer } = (await import("ws" as string)) as {
+    WebSocketServer: new (options: { noServer: true; maxPayload: number }) => SocketUpgrader;
+  };
+  return new WebSocketServer({ noServer: true, maxPayload: MAX_STREAM_MESSAGE_BYTES });
+}
+
+/** A sync socket's path below `basePath`. */
+const SOCKET_PATH = /^\/apps\/[^/]+\/ws$/;
+
+/** Whether an upgrade's URL is a sync socket of this Jazz (`<basePath>/apps/<app>/ws`). */
+function isSocketUpgrade(url: string | undefined, basePath: string): boolean {
+  const pathname = requestPathname(url);
+  return (
+    pathname !== null &&
+    pathname.startsWith(`${basePath}/`) &&
+    SOCKET_PATH.test(pathname.slice(basePath.length))
+  );
+}
+
+/** A Node request's path, or null for one no URL can be made of: not Jazz's. */
+function requestPathname(url: string | undefined): string | null {
+  try {
+    return new URL(url ?? "/", "http://localhost").pathname;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether `server` is an HTTP/2 server that can't serve HTTP/1: one without
+ * upgrades (h2c, or TLS without `allowHTTP1`). Node keeps the options under
+ * a symbol; a server that hides them is taken as able.
+ */
+function http2Only(server: object): boolean {
+  const name = server.constructor?.name;
+  if (name === "Http2Server") return true;
+  if (name !== "Http2SecureServer") return false;
+  const key = Object.getOwnPropertySymbols(server).find(
+    (symbol) => symbol.description === "options",
+  );
+  const options = key
+    ? (server as Record<symbol, { allowHTTP1?: boolean } | undefined>)[key]
+    : undefined;
+  return options !== undefined && options.allowHTTP1 !== true;
+}
+
+/**
+ * What a 503 tells the client to wait: until the store is tried again. The
+ * reason stays in the backend's logs; it can name internal hosts.
+ */
+function retryAfterSeconds(entry: Entry): number {
+  const at = entry.failure?.retryAt;
+  return at === undefined ? 1 : Math.max(1, Math.ceil((at - Date.now()) / 1000));
+}
+
+const UNAVAILABLE_BODY = "Jazz is unavailable; try again shortly";
+
+/**
+ * The 503 a Jazz route answers while its store can't open, or after it
+ * closed. After a close it also closes the connection: a host shutting down
+ * (`next start` on SIGTERM) waits for its keep-alive connections, and a
+ * client re-opening its sync stream over one would keep it, and the
+ * process, alive. (A Fetch response can't tell an HTTP/2 host, which drops
+ * the header with a warning; nodeHandler leaves it off there.)
+ */
+function storeUnavailable(retryAfter: number, closed: boolean): Response {
+  return new Response(UNAVAILABLE_BODY, {
+    status: 503,
+    headers: {
+      "content-type": "text/plain",
+      "retry-after": String(retryAfter),
+      ...(closed ? { connection: "close" } : {}),
+    },
+  });
+}
+
+const storeUnavailableUpgrade = (retryAfter: number) =>
+  `HTTP/1.1 503 Service Unavailable\r\nRetry-After: ${retryAfter}\r\nConnection: close\r\n\r\n`;
+
+const BAD_UPGRADE = "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n";
+
 /** The `Jazz` every `createJazz` for one store returns. */
 function facade(entry: Entry): Jazz {
   const use = () => settled(entry);
   const basePath = () => jazzSettings(entry.options).basePath;
-  const handle = async (request: Request) => (await use()).handle(request);
-  const nextHandler = async (request: Request) => (await use()).next().GET(request);
+  // After close() its routes answer 503 as the host shuts down: no news.
+  const logUnavailable = (error: unknown) => {
+    if (!entry.closing) console.error("jazz: the store did not open", error);
+  };
+  /** The open Jazz, or the 503 a Jazz route answers while its store can't open. */
+  const useOr503 = async (): Promise<OpenedJazz | Response> => {
+    try {
+      return await use();
+    } catch (error) {
+      logUnavailable(error);
+      return storeUnavailable(retryAfterSeconds(entry), entry.closing !== undefined);
+    }
+  };
+  const handle = async (request: Request) => {
+    const opened = await useOr503();
+    return opened instanceof Response ? opened : opened.handle(request);
+  };
+  const nextHandler = async (request: Request) => {
+    const opened = await useOr503();
+    return opened instanceof Response ? opened : opened.next().GET(request);
+  };
   // The writes made before a close still apply as it drains them.
   const early = earlyDb(
     async () => (await settled(entry, true)).db,
@@ -2221,6 +2484,8 @@ function facade(entry: Entry): Jazz {
   );
   const db = early.db;
   let heldSockets = 0;
+  /** The servers `attach()` took the upgrades of: a second call changes nothing. */
+  const attachedTo = new WeakSet<object>();
   const jazz = {
     get basePath() {
       return basePath();
@@ -2228,15 +2493,66 @@ function facade(entry: Entry): Jazz {
     handle,
     next: () => ({ GET: nextHandler, POST: nextHandler, DELETE: nextHandler }),
     async attach(server) {
-      await (await use()).attach(server);
+      // An HTTP/2 server without HTTP/1 never sees a WebSocket upgrade.
+      if (http2Only(server)) {
+        throw new Error(
+          "attach(): an HTTP/2 server has no WebSocket upgrades; pass an HTTP/1 server (or an HTTPS one with allowHTTP1), or serve Jazz with handle() alone, over its HTTP stream",
+        );
+      }
+      if (attachedTo.has(server)) return;
+      attachedTo.add(server);
+      const wss = await socketUpgrader();
+      // Upgrades work from now on, opened or not: the store opens on the
+      // first socket (or request), and one that can't open is refused with
+      // a 503 the client retries, instead of failing the host's startup.
+      entry.attached = true;
+      entry.opened?.markAttached();
+      const take = (opened: OpenedJazz, req: IncomingMessage, socket: Duplex, head: Buffer) => {
+        try {
+          opened.upgrade(wss, req, socket, head);
+        } catch (error) {
+          console.error("jazz: a socket upgrade failed", error);
+          socket.destroy();
+        }
+      };
+      const upgradeJazz = (req: IncomingMessage, socket: Duplex, head: Buffer) => {
+        const now = settledNow(entry);
+        if (now) return take(now, req, socket, head);
+        use().then(
+          (opened) => take(opened, req, socket, head),
+          (error: unknown) => {
+            logUnavailable(error);
+            socket.end(storeUnavailableUpgrade(retryAfterSeconds(entry)));
+          },
+        );
+      };
+      const events = server as unknown as NodeJS.EventEmitter;
+      // Jazz's own sync sockets go to Jazz alone: another upgrade listener
+      // on the server (a custom Next.js server adds one on its first
+      // request) would take the same socket too, and close it. The listener
+      // is there because Node only emits upgrades to a server that has one.
+      events.on("upgrade", () => undefined);
+      const emit = events.emit;
+      events.emit = function (
+        this: NodeJS.EventEmitter,
+        event: string | symbol,
+        ...args: unknown[]
+      ) {
+        if (event === "upgrade" && isSocketUpgrade((args[0] as IncomingMessage).url, basePath())) {
+          upgradeJazz(...(args as [IncomingMessage, Duplex, Buffer]));
+          return true;
+        }
+        return emit.call(this, event, ...args);
+      } as typeof events.emit;
+      events.on("close", () => wss.close());
     },
     nodeHandler(req, res, next) {
       const now = settledNow(entry);
       if (now) return now.nodeHandler(req, res, next);
       const prefix = basePath();
-      const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
+      const pathname = requestPathname(req.url);
       // Requests Jazz doesn't serve pass on without opening the store.
-      if (pathname !== prefix && !pathname.startsWith(`${prefix}/`)) {
+      if (pathname === null || (pathname !== prefix && !pathname.startsWith(`${prefix}/`))) {
         if (next) return next();
         res.statusCode = 404;
         res.end();
@@ -2245,9 +2561,13 @@ function facade(entry: Entry): Jazz {
       use().then(
         (opened) => opened.nodeHandler(req, res, next),
         (error: unknown) => {
-          console.error("jazz: the store did not open", error);
-          res.statusCode = 500;
-          res.end("Internal error");
+          logUnavailable(error);
+          res.statusCode = 503;
+          res.setHeader("retry-after", String(retryAfterSeconds(entry)));
+          // HTTP/2 has no Connection header (Node warns and drops it).
+          if (entry.closing && req.httpVersionMajor < 2) res.setHeader("connection", "close");
+          res.setHeader("content-type", "text/plain");
+          res.end(UNAVAILABLE_BODY);
         },
       );
     },
@@ -2261,7 +2581,7 @@ function facade(entry: Entry): Jazz {
         .then(
           (opened) => opened.acceptSocket(request, socket),
           (error: unknown) => {
-            console.error("jazz: the store did not open", error);
+            logUnavailable(error);
             refuse("store unavailable");
           },
         )
@@ -2373,7 +2693,7 @@ async function openProvider(
     async handle(method, path, headers, body, access = "session") {
       return opened.handle(method, path, cleanHeaders(headers), body, access);
     },
-    openSocket(headers, onEvent, access = "session") {
+    openSocket(headers, onEvent, access = "session", options) {
       if (closed) throw new Error("Jazz core connection is closed");
       const pin = bundle();
       const socket = opened.openSocket(
@@ -2383,31 +2703,41 @@ async function openProvider(
           if (error || event.kind === "close") sockets.delete(wrapped);
         },
         access,
+        options,
       );
       let first = true;
+      const prepare = (data: Uint8Array): Uint8Array | null => {
+        if (first) {
+          first = false;
+          try {
+            const parsed = JSON.parse(new TextDecoder().decode(data));
+            if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+              throw new Error("invalid prelude");
+            delete parsed.admin_secret;
+            delete parsed.backend_secret;
+            if (parsed.auth && typeof parsed.auth === "object") {
+              delete parsed.auth.admin_secret;
+              delete parsed.auth.backend_secret;
+            }
+            delete parsed.bundle;
+            if (pin !== undefined) parsed.bundle = pin;
+            data = new TextEncoder().encode(JSON.stringify(parsed));
+          } catch {
+            wrapped.close();
+            return null;
+          }
+        }
+        return data;
+      };
       const wrapped = {
         send(data: Uint8Array) {
-          if (first) {
-            first = false;
-            try {
-              const parsed = JSON.parse(new TextDecoder().decode(data));
-              if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
-                throw new Error("invalid prelude");
-              delete parsed.admin_secret;
-              delete parsed.backend_secret;
-              if (parsed.auth && typeof parsed.auth === "object") {
-                delete parsed.auth.admin_secret;
-                delete parsed.auth.backend_secret;
-              }
-              delete parsed.bundle;
-              if (pin !== undefined) parsed.bundle = pin;
-              data = new TextEncoder().encode(JSON.stringify(parsed));
-            } catch {
-              wrapped.close();
-              return false;
-            }
-          }
-          return socket.send(data);
+          const frame = prepare(data);
+          return frame !== null && socket.send(frame);
+        },
+        async sendWithRoom(data: Uint8Array) {
+          const frame = prepare(data);
+          if (frame === null) return false;
+          return socket.sendWithRoom ? socket.sendWithRoom(frame) : socket.send(frame);
         },
         close() {
           sockets.delete(wrapped);
@@ -2444,7 +2774,9 @@ async function openProvider(
         ),
       );
     },
-    WebSocket: inProcessWebSocket((_url, onEvent) => core.openSocket([], onEvent, "backend")),
+    WebSocket: inProcessWebSocket((_url, onEvent) =>
+      core.openSocket([], onEvent, "backend", { inProcess: true }),
+    ),
   });
   return { core, serverUrl, adminSecret, backendSecret };
 }

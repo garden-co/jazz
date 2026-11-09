@@ -1,7 +1,7 @@
 import React, { StrictMode, useEffect, useSyncExternalStore } from "react";
 import { act, cleanup, render, waitFor } from "@testing-library/react";
 import { renderToString } from "react-dom/server";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { AccountManager } from "../accounts/state.js";
 import { createJazzSessionOwner } from "../session/state.js";
 import {
@@ -184,6 +184,9 @@ describe("JazzSessionProvider", () => {
   });
 
   it("exposes initialization errors and retries from the fallback", async () => {
+    // A fallback may render nothing, so the failure is also logged.
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    onTestFinished(() => consoleError.mockRestore());
     const { session } = await setup();
     const factory = vi
       .fn()
@@ -195,6 +198,10 @@ describe("JazzSessionProvider", () => {
       </ConfiguredJazzSessionProvider>,
     );
     await waitFor(() => expect(view.container.textContent).toBe("error:startup failed"));
+    expect(consoleError).toHaveBeenCalledWith(
+      "Jazz could not start:",
+      expect.objectContaining({ message: "startup failed" }),
+    );
     await act(async () => {
       await latest.retry();
     });

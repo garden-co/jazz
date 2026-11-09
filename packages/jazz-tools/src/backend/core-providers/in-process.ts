@@ -27,15 +27,17 @@ export async function openInProcessCore(options: {
       if (access === "backend") authenticated.push(["x-jazz-backend-secret", backendSecret]);
       return core.handle(method, path, authenticated, Buffer.from(body));
     },
-    openSocket: (headers, onEvent) =>
-      authenticatedSocket(
-        core.openSocket(headers, (error, event) => {
-          if (error) onEvent(error, { kind: "close", code: 1011, reason: error.message });
-          else if (event.kind === "message" || event.kind === "close")
-            onEvent(null, { ...event, kind: event.kind });
-        }),
+    openSocket: (headers, onEvent, _access, options) => {
+      const receive: Parameters<typeof core.openSocket>[1] = (error, event) => {
+        if (error) onEvent(error, { kind: "close", code: 1011, reason: error.message });
+        else if (event.kind === "message" || event.kind === "close")
+          onEvent(null, { ...event, kind: event.kind });
+      };
+      return authenticatedSocket(
+        options?.inProcess ? core.openInProcessSocket(receive) : core.openSocket(headers, receive),
         backendSecret,
-      ),
+      );
+    },
     async close() {
       await core.close();
     },

@@ -8,6 +8,7 @@ import {
 import { createListeners, toError } from "../runtime/util.js";
 import type { Db } from "../runtime/db.js";
 import { isThinDb } from "../runtime/local-first-upgrade.js";
+import { parseAuthSecret } from "../runtime/auth-secret-codec.js";
 import type { DbReplacedReason } from "../runtime/db-replaced-error.js";
 
 export interface SessionClient {
@@ -19,6 +20,7 @@ type WipeableClient = {
     markReplaced?(reason: DbReplacedReason): void;
     waitForSync?(options?: { timeoutMs?: number }): Promise<void>;
     deleteClientStorage?(): Promise<void>;
+    getSyncStatus?(): { pendingUploads: number };
   };
 };
 export type JazzSessionOperation =
@@ -214,8 +216,16 @@ export async function createJazzSessionOwner<
           const db = (client as WipeableClient).db;
           // Upload what the server still accepts before wiping the rest.
           await db?.waitForSync?.({ timeoutMs: 5_000 }).catch(() => {});
+          // Say what the wipe took, as a sign-out past refused writes does.
+          const writes = db?.getSyncStatus?.().pendingUploads ?? 0;
           await db?.deleteClientStorage?.();
+          if (writes > 0)
+            console.warn(
+              `Jazz signed out and wiped ${writes} write(s) the server hadn't confirmed, as clearOnSignOut asks. They are gone from this device; any the server did receive stay there.`,
+            );
           await client.shutdown();
+        } else if (signsOut) {
+          await signOutOf(client);
         } else {
           await client.shutdown({ waitForSync: true });
         }
@@ -313,8 +323,16 @@ export async function createJazzSessionOwner<
     getSnapshot: () => snapshot,
     subscribe: listeners.subscribe,
     createLocalFirst: () => run("createLocalFirst", () => accounts.createLocalFirst()),
-    restoreLocalFirst: (secret) =>
-      run("restoreLocalFirst", () => accounts.restoreLocalFirst(secret)),
+    restoreLocalFirst: (secret) => {
+      // A malformed secret is the caller's mistake: refuse it before the
+      // current client is shut down, so the session goes on as it was.
+      try {
+        parseAuthSecret(secret);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      return run("restoreLocalFirst", () => accounts.restoreLocalFirst(secret));
+    },
     loginWithBackend: () => run("loginWithBackend", () => accounts.loginWithBackend()),
     linkWithBackend: () => run("linkWithBackend", () => accounts.linkWithBackend()),
     retry: () => run("retry", () => selected),
@@ -429,4 +447,45 @@ export async function createJazzSessionOwner<
   });
   if (options.decorate) Object.assign(session, options.decorate(session));
   return Object.freeze(session) as JazzSession<Client> & Extra;
+}
+
+type SigningOutClient = {
+  shutdown(options?: { waitForSync?: boolean }): Promise<void>;
+  db?: {
+    getAuthState?(): { error?: unknown };
+    getSyncStatus?(): { pendingUploads: number };
+    getConfig?(): { driver?: { type?: string } };
+  };
+};
+
+/**
+ * Sign out of `client`: upload what the server still accepts, then stop it.
+ * When the server refuses this user's sign-in (their session at the backend
+ * ended), no retry uploads the rest while they are signed out, and refusing
+ * the sign-out would leave them no way out, through reloads too: it signs
+ * out and says what became of those writes. A persistent client keeps them
+ * on this device, under that account, and uploads them when it next opens;
+ * one that keeps nothing (in memory, or thin) loses them. Any refusal counts,
+ * an `expired` credential too: the user is leaving, and no one renews it once
+ * they have. Any other failure (an outage) may pass, so it still fails the
+ * sign-out for the app to retry.
+ */
+async function signOutOf(client: SigningOutClient) {
+  try {
+    await client.shutdown({ waitForSync: true });
+  } catch (cause) {
+    const db = client.db;
+    if (!(cause instanceof GracefulShutdownSyncError) || !db?.getAuthState?.().error) throw cause;
+    const writes = db.getSyncStatus?.().pendingUploads ?? 0;
+    const kept = !isThinDb(db as Db) && db.getConfig?.().driver?.type !== "memory";
+    // Warn only about writes left behind: with none, nothing was lost.
+    if (writes > 0)
+      console.warn(
+        kept
+          ? `Jazz signed out with ${writes} write(s) the server refused, as it no longer accepts this user's sign-in. They stay on this device and upload when this account signs in again.`
+          : `Jazz signed out and dropped ${writes} write(s) the server refused, as it no longer accepts this user's sign-in. This client keeps nothing on the device.`,
+        cause.cause,
+      );
+    await client.shutdown();
+  }
 }

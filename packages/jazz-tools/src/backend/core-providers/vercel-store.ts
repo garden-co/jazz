@@ -8,7 +8,7 @@
 // Wake handling is adapted from garden-co/infra's v2 sync proxy (ADR 0004).
 
 import { createHash, randomUUID } from "node:crypto";
-import { createRequire } from "node:module";
+import { optionalPeerImportError } from "../optional-peer.js";
 import {
   connectedBlobStore,
   resolveVercelBlob,
@@ -415,6 +415,41 @@ export function resolveCoreBlobs(
   return resolveVercelS3(blobs, options.region ?? "iad1", env);
 }
 
+/**
+ * Refuse a Blob store that another environment claimed, so a preview
+ * deployment given production's store (an API- or CLI-created store is
+ * connected to every environment) fails at start and says why. The core
+ * checks the same claim, but only at its first large value, since no token
+ * reaches it before a request does, and then it only retries in the
+ * background while writes are acknowledged. A store nobody claimed yet, or
+ * a read that fails, is left to the core's own check.
+ */
+export async function refuseOtherEnvironmentsBlobStore(
+  storeId: string,
+  environment: string | undefined,
+  token: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  if (environment === undefined) return;
+  const id = storeId.replace(/^store_/, "").toLowerCase();
+  const response = await fetchImpl(
+    `https://${id}.private.blob.vercel-storage.com/${BLOB_ENVIRONMENT_MARKER}?cache=0`,
+    { headers: { authorization: `Bearer ${token}` } },
+  ).catch(() => undefined);
+  if (!response?.ok) return;
+  const claimed = (await response.text().catch(() => "")).trim();
+  if (claimed && claimed !== environment) {
+    throw new Error(
+      `vercel(): Blob store ${storeId} serves the ${claimed} environment, not ${environment}; ` +
+        "connect a separate Blob store to each environment (a store connected through the API or " +
+        "CLI is connected to all of them)",
+    );
+  }
+}
+
+/** Where a core claims a bucket or Blob store for its environment (jazz-server's `ENVIRONMENT_OBJECT`). */
+const BLOB_ENVIRONMENT_MARKER = ".jazz-environment";
+
 /** The workload an OIDC token names: whoever holds such a token is trusted. */
 export function workloadOf(token: string): TrustedWorkload {
   let claims: { iss?: unknown; aud?: unknown; sub?: unknown };
@@ -453,9 +488,10 @@ async function functionOidcToken(): Promise<string> {
   let fetched: string | undefined;
   let failure: unknown;
   try {
-    const { getVercelOidcToken } = (await import(
-      /* @vite-ignore */ "@vercel/functions/oidc" as string
-    )) as { getVercelOidcToken(): Promise<string> };
+    // A literal inside `try`, like `importSandboxSdk`'s.
+    const { getVercelOidcToken } = (await import(/* @vite-ignore */ "@vercel/functions/oidc")) as {
+      getVercelOidcToken(): Promise<string>;
+    };
     fetched = await getVercelOidcToken();
   } catch (error) {
     failure = error;
@@ -549,13 +585,19 @@ export function defaultCoreTarballUrl(version: string): string {
 }
 
 /**
- * The installed jazz-tools version. Read through `require` of the package's
- * own export, not `readFile(new URL(…, import.meta.url))`: webpack (Next 15)
- * rewrites `new URL(…, import.meta.url)` into an asset URL that `fs` refuses,
- * while it bundles a required JSON file as is.
+ * The installed jazz-tools version, as a JSON import of the package's own
+ * `package.json` export. Bundlers (webpack, Turbopack) inline it, and Node
+ * loads it as a module. Neither reads a path at runtime, unlike `readFile`
+ * of a URL resolved against `import.meta.url` (webpack rewrites that URL
+ * into one `fs` refuses) or `createRequire` from `import.meta.url`
+ * (bundlers bake the build machine's path into it, so a deployed function
+ * can't find it).
  */
-function installedVersion(): string {
-  return (createRequire(import.meta.url)("jazz-tools/package.json") as { version: string }).version;
+async function installedVersion(): Promise<string> {
+  const packageJson = (await import("jazz-tools/package.json", { with: { type: "json" } })) as {
+    default: { version: string };
+  };
+  return packageJson.default.version;
 }
 
 export interface OpenVercelCoreOptions {
@@ -564,19 +606,31 @@ export interface OpenVercelCoreOptions {
   sdk?: SandboxSdk;
   version?: string;
   env?: Record<string, string | undefined>;
+  /** Reads the Blob store's environment claim (tests). */
+  fetch?: typeof fetch;
+}
+
+/**
+ * `@vercel/sandbox`, an optional peer dependency. The import is a literal
+ * inside `try`: bundlers (Turbopack, webpack) then bundle the package when
+ * it's installed, and turn a missing one into an error at runtime instead
+ * of failing every route that imports jazz-tools (an app on `sqlite()`
+ * never needs it). A `.catch()` on the import isn't enough for that.
+ */
+async function importSandboxSdk(): Promise<SandboxSdk> {
+  try {
+    return (await import(/* @vite-ignore */ "@vercel/sandbox")) as unknown as SandboxSdk;
+  } catch (error) {
+    throw optionalPeerImportError("vercel()", "@vercel/sandbox", error);
+  }
 }
 
 export async function openVercelCore(params: OpenVercelCoreOptions): Promise<VercelCore> {
   const { options, openRemote } = params;
   refuseVercelAppId(options);
   const env = params.env ?? process.env;
-  const sdk =
-    params.sdk ??
-    options.sdk ??
-    ((await import(/* @vite-ignore */ "@vercel/sandbox" as string).catch(() => {
-      throw new Error("vercel() needs the @vercel/sandbox package: npm install @vercel/sandbox");
-    })) as SandboxSdk);
-  const version = params.version ?? installedVersion();
+  const sdk = params.sdk ?? options.sdk ?? (await importSandboxSdk());
+  const version = params.version ?? (await installedVersion());
   const tarballUrl = options.coreTarballUrl ?? defaultCoreTarballUrl(version);
   const project = options.credentials?.projectId ?? env.VERCEL_PROJECT_ID;
   if (!options.name && !project) {
@@ -590,7 +644,8 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   const backendCredential = options.backendCredential ?? functionOidcToken;
   // The core trusts the workload this function's token names, so every
   // instance of this project and environment reaches it, and nothing else.
-  const trust = workloadOf(await backendCredential());
+  const token = await backendCredential();
+  const trust = workloadOf(token);
   // Skipped for a `backendCredential` of your own, which names whatever
   // workload you chose.
   if (!options.backendCredential) refuseOtherEnvironment(trust, env);
@@ -601,6 +656,12 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
       `vercel(): the core's workload ${trust.subject} names no Vercel environment, so its blob store is not claimed for one; make sure no other environment uses that store`,
     );
   }
+  // Read while the core wakes; refused before anything is served.
+  const storeChecked =
+    blobs && "storeId" in blobs
+      ? refuseOtherEnvironmentsBlobStore(blobs.storeId, environmentOf(trust), token, params.fetch)
+      : undefined;
+  void storeChecked?.catch(() => {});
   const script = Buffer.from(startScript(version, tarballUrl, trust, blobs));
 
   /** This instance's recent starts, by id (its script's file name). */
@@ -899,7 +960,16 @@ export async function openVercelCore(params: OpenVercelCoreOptions): Promise<Ver
   }, KEEPALIVE_MS);
   (keepalive as { unref?: () => void }).unref?.();
 
-  const first = await ensure();
+  const ensured = ensure();
+  let first: Awaited<typeof ensured>;
+  try {
+    [first] = await Promise.all([ensured, storeChecked]);
+  } catch (error) {
+    clearInterval(keepalive);
+    // The wake may still be under way: close the core it comes up with.
+    void ensured.then(({ core }) => core.close()).catch(() => {});
+    throw error;
+  }
   return {
     appId: first.appId,
     signLinkChallenge: (payload) => first.core.signLinkChallenge(payload),

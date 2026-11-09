@@ -145,6 +145,18 @@ function withPolicyTestAccount(session: Session): Session {
   };
 }
 
+/** Rethrow `error` unless it is a policy's denial of the write. */
+function throwUnlessDenial(error: unknown): void {
+  const { code, message } = (error ?? {}) as { code?: unknown; message?: unknown };
+  if (code === "permission_denied") return;
+  if (
+    typeof message === "string" &&
+    /AuthorizationDenied|authorization_denied|Write rejected by server authorization/.test(message)
+  )
+    return;
+  throw error;
+}
+
 function asTestDb(db: Db, expect: ExpectLike): TestDb {
   const testDb = db as TestDb;
 
@@ -161,10 +173,22 @@ function asTestDb(db: Db, expect: ExpectLike): TestDb {
     },
     expectDenied: {
       value: async (callback: (db: Db) => PendingWrite) => {
-        const write = callback(db);
-        await expect(write.wait({ tier: "global" })).rejects.toThrow(
-          /AuthorizationDenied|Write rejected by server authorization/,
-        );
+        // A write can be denied at once, as it is staged (a row this
+        // replica holds deleted), or later by the server: both count.
+        let write: PendingWrite;
+        try {
+          write = callback(db);
+        } catch (error) {
+          throwUnlessDenial(error);
+          return;
+        }
+        try {
+          await write.wait({ tier: "global" });
+        } catch (error) {
+          throwUnlessDenial(error);
+          return;
+        }
+        throw new Error("expectDenied: expected the write to be denied, but it was accepted");
       },
     },
   });

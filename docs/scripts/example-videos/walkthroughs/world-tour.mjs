@@ -3,8 +3,7 @@
 // hides at first, so captions can name them ("{tentative.0}").
 import { click as stageClick, sleep, type as stageType } from "../stage.mjs";
 
-// The globe animates every frame on a software renderer, so point quickly and
-// click directly.
+// The globe redraws every frame, so point quickly and click directly.
 const fast = { steps: 2, hover: 150, direct: true };
 const click = (page, locator, options) => stageClick(page, locator, { ...fast, ...options });
 const type = (page, locator, text, options) =>
@@ -18,7 +17,7 @@ export const server = () => ({
   command: "pnpm",
   args: ["exec", "vite", "dev", "--port", String(port), "--strictPort", "--host", "127.0.0.1"],
   // A fresh in-memory server (so the demo tour is new) and no dev inspector toggle.
-  env: { VITE_E2E: "true" },
+  env: { VITE_E2E: "true", JAZZ_IN_MEMORY: "1" },
   ready: /Local:\s+http/,
 });
 export const deviceOptions = { keepPorts: [port] };

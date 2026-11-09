@@ -64,7 +64,7 @@ s.definePermissions(app, ({ policy, session, anyOf, allOf }) => {
     anyOf([
       hasRole(doc.workspaceId, "writer"),
       hasRole(doc.workspaceId, "admin"),
-      allOf([{ "$createdBy.account": session.user }, hasRole(doc.workspaceId, "contributor")]),
+      allOf([{ $createdBy: session.user }, hasRole(doc.workspaceId, "contributor")]),
     ]),
   );
 
@@ -73,7 +73,7 @@ s.definePermissions(app, ({ policy, session, anyOf, allOf }) => {
     anyOf([
       hasRole(doc.workspaceId, "writer"),
       isAdmin(doc.workspaceId),
-      allOf([{ "$createdBy.account": session.user }, hasRole(doc.workspaceId, "contributor")]),
+      allOf([{ $createdBy: session.user }, hasRole(doc.workspaceId, "contributor")]),
     ]),
   );
 
@@ -96,7 +96,7 @@ s.definePermissions(app, ({ policy, session, anyOf, allOf }) => {
         { user_id: session.user, role: "admin" },
         policy.workspaces.exists.where({
           id: member.workspaceId,
-          "$createdBy.account": session.user,
+          $createdBy: session.user,
         }),
       ]),
     ]),
