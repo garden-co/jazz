@@ -30,6 +30,7 @@ function cloud() {
   let hostFailures = 0,
     hostStatus = 200,
     hostCalls = 0;
+  let staleReplies = 0;
   const uploads: any[] = [];
   const fetch = vi.fn(async (input: any, init: RequestInit = {}) => {
     const url = String(input),
@@ -41,7 +42,10 @@ function cloud() {
       if (hostStatus !== 200) return new Response(null, { status: hostStatus });
       expect(headers.get("authorization")).toBeNull();
       expect(headers.get("x-jazz-backend-credential")).toBe(options.secret);
-      return Response.json(settings.bindings.find((b: any) => b.name === "JAZZ_HOST").json);
+      const marker = settings.bindings.find((b: any) => b.name === "JAZZ_HOST").json;
+      return Response.json(
+        staleReplies-- > 0 ? { ...marker, artifact: "previous-version" } : marker,
+      );
     }
     expect(headers.get("authorization")).toBe("Bearer api-token");
     if (url.endsWith("/settings"))
@@ -96,6 +100,9 @@ function cloud() {
       hostStatus = status;
     },
     hostCalls: () => hostCalls,
+    staleReplies: (count: number) => {
+      staleReplies = count;
+    },
     setSettings: (s: any) => {
       settings = s;
     },
@@ -182,4 +189,21 @@ it("bounds readiness retries and refuses invalid credentials immediately", async
   denied.hostStatus(401);
   await expect(denied.open()).rejects.toThrow("refused its core credential");
   expect(denied.hostCalls()).toBe(1);
+});
+
+it("waits for an active object to adopt upgraded code beyond cold-host retries", async () => {
+  const c = cloud();
+  await c.open();
+  c.staleReplies(40);
+  await c.open("2.0.0-alpha.61");
+  expect(c.hostCalls()).toBe(42);
+  expect(c.uploads).toHaveLength(2);
+});
+
+it("also bounds readiness retries when an active object stays on old code", async () => {
+  const c = cloud();
+  c.staleReplies(100);
+  await expect(c.open()).rejects.toThrow("did not become ready");
+  expect(c.hostCalls()).toBe(56);
+  expect(c.uploads).toHaveLength(1);
 });

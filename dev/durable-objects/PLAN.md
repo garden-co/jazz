@@ -77,13 +77,6 @@ catalogue publication, and its existing NAPI backend client. Running
 `createJazz()` itself inside a Worker or DO is outside this implementation.
 No second SQLite-in-WASM client is needed for this architecture.
 
-### 8.4 Outbound HTTP and background I/O
-
-Authentication fetches keys through an HTTP client; the S3 adapter also owns a
-multithreaded Tokio runtime. Use Worker-compatible HTTP execution and scheduling
-where needed. HTTP itself is supported. Preserve credential checks, timeouts,
-cancellation, and retry behavior; leave native S3 and Vercel Blob paths intact.
-
 ### 8.6 Thin-client hosting — deferred
 
 Account routes, guest proof admission and active-session revocation are implemented
@@ -92,15 +85,24 @@ shared transaction overlay is supported (section 5). Until then, unsupported
 socket modes must fail explicitly. Keep fixture identities and probe routes
 confined to the development harness.
 
-## 9. Complete DO lifecycle validation
+## 9. Complete DO lifecycle validation — in progress
+
+The packaged-host lifecycle test now covers a lost upload and a committed write
+whose acknowledgement is dropped. An independent client observes authority
+state; after workerd reconstruction, the writer settles and a fresh client sees
+the same accepted history without duplicates. Deployed testing exposed the
+provider's readiness timeout being shorter than Cloudflare's deferred-update
+window; the wait is now extended for an authenticated app running older code.
+Live validation of that fix was blocked by upload connection failures. See the
+README for commands and validation limits.
 
 Extend existing restart/reconnect coverage to deployed eviction, interrupted
 commits and idempotent replay. Verify reconstruction retains app identity,
 signing material, catalogue and sync state before admission, and that multiple
 objects in one isolate cannot share storage handles or mutable authority state.
 Preserve frame ordering, cancellation, error propagation and persistence before
-publication across lifecycle events. Connect background I/O completion to host
-wakeups (section 8.4) without blocking input needed by suspended work.
+publication across lifecycle events. Validate the existing microtask wakeups and
+request/tick retention without blocking input needed by suspended work.
 
 Add WebSocket hibernation with explicit session reconstruction as a separate
 lifecycle step. Broaden concurrent deployment/upgrade race coverage beyond the
@@ -123,8 +125,8 @@ end-to-end performance claims.
 
 ## Delivery order
 
-Next assess remaining outbound I/O requirements (section 8.4) and broaden
-lifecycle validation (section 9). Thin-client hosting (section 8.6) remains
+The outbound I/O audit (section 8.4) found no additional HTTP adapter needed for
+the current host; see the README. Next broaden lifecycle validation (section 9). Thin-client hosting (section 8.6) remains
 dependent on the deferred transaction overlay.
 Sections 5 and 7 remain deferred; resolve them before claiming full transaction
 or large-value support. Workers-hosted `createJazz()` remains outside this

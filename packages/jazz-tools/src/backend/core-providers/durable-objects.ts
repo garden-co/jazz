@@ -230,7 +230,9 @@ export async function openDurableObjectsCore(
       body: JSON.stringify({ enabled: true, previews_enabled: false }),
     });
   const url = `https://${options.name}.${subdomain}.workers.dev`;
-  const readinessDeadline = Date.now() + 120_000;
+  const readinessStarted = Date.now();
+  let readinessDeadline = readinessStarted + 120_000;
+  let waitingForVersion = false;
   for (let attempt = 0; ; attempt++) {
     let response: Response | undefined;
     try {
@@ -245,11 +247,18 @@ export async function openDurableObjectsCore(
     }
     if (response?.ok) {
       const live = (await response.json()) as Marker;
-      if (live.appId === appId && live.artifact === marker.artifact) break;
+      if (live.appId === appId) {
+        if (live.artifact === marker.artifact) break;
+        // Active DOs defer code updates for up to five minutes by default.
+        // Allow that window plus propagation, without extending cold-host or
+        // credential failures or forcing existing sessions to reset early.
+        waitingForVersion = true;
+        readinessDeadline = readinessStarted + 420_000;
+      }
     } else if (response?.status === 401)
       throw new Error("Deployed Jazz host refused its core credential");
     if (response && !response.bodyUsed) await response.body?.cancel();
-    if (attempt === 15 || Date.now() >= readinessDeadline)
+    if (attempt === (waitingForVersion ? 55 : 15) || Date.now() >= readinessDeadline)
       throw new Error("Deployed Jazz host did not become ready at the expected version");
     await (deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))))(
       Math.min(1000 * 2 ** attempt, 8000, readinessDeadline - Date.now()),

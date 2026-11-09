@@ -623,3 +623,54 @@ and assignment/revocation persistence after SQLite-only workerd restart. The
 existing packaged-host sync/reconnect test and 18 native account/storage/admission
 tests also pass. Native and DO WASM Clippy pass. These account changes have not
 been deployed to Cloudflare; the earlier deployment test covered provisioning.
+
+## Interrupted transport and lifecycle validation (section 9)
+
+`test-lifecycle.mjs` runs against the packaged production host. Its test provider
+drops Alice's outgoing frames before an upload, or drops incoming frames after
+sending a write. Bob observes the authority independently: the first write has
+not landed; the second is committed while Alice's global receipt remains pending.
+After workerd reconstruction with SQLite retained, Alice reconnects and both
+receipts settle. Fresh clients verify the row counts and history, including
+unchanged acceptance timestamps and transaction IDs for the already accepted
+write. A further write proves forward progress. No fault routes or sync bypasses
+are added to production code.
+
+```sh
+FAST=1 node packages/jazz-tools/scripts/bundle-durable-object-worker.mjs
+node dev/durable-objects/native-sqlite/harness/test-lifecycle.mjs
+# Opt-in real deployment; credentials stay in the environment:
+CLOUDFLARE_ACCOUNT_ID=... CLOUDFLARE_API_TOKEN=... \
+  node dev/durable-objects/native-sqlite/harness/test-lifecycle.mjs --cloudflare
+```
+
+The Cloudflare mode creates a randomly named `jazz-do-lifecycle-*` Worker with
+synthetic data. It disconnects sockets at the lost-upload boundary, applies one
+synthetic host upgrade with the committed write still unacknowledged, then checks
+fresh clients. The upgrade retains app/namespace identity; it is not an abrupt
+process kill. The temporary artifact version is never packaged or published. Cleanup deletes the dedicated Worker and checks its namespace is gone;
+it never reuses an existing Worker. The normal local run needs no credentials.
+
+Local validation passed on 2026-11-09. These are transport-loss and reconstruction
+checks, not forced eviction or process termination during SQLite commit.
+Hibernation, interruption inside a commit and wider lifecycle coverage remain
+unverified. Section 9 is not complete.
+
+The deployed test exposed a readiness mismatch: an active object's upgrade timed
+out after two minutes. Cloudflare's [deferred code-update policy](https://developers.cloudflare.com/durable-objects/deployments/durable-objects-code-updates/)
+allows old code to serve for five minutes. The provider now allows up to seven
+minutes (deferral plus propagation) after an authenticated readiness response
+identifies the expected app running different code. Cold-host/network failures
+retain the two-minute bound; invalid credentials still fail immediately. Retries
+only poll readiness and do not repeat uploads or force active objects to reset.
+Provider tests cover delayed adoption and bounded failure without changing the
+existing cold-host retry expectations.
+
+Deployed validation on 2026-11-09 reached initial global writes, independent
+reads and lost-upload reconnect settlement. The old two-minute upgrade wait
+failed with active clients. After extending it, two reruns were blocked by
+Cloudflare upload connections closing (`UND_ERR_SOCKET`), so the extended wait
+and lost-acknowledgement recovery are **not yet validated on Cloudflare**. All
+temporary Workers and their namespaces were removed. The local lifecycle test
+and all 11 provider unit tests pass; production reconstruction during the new
+readiness window still needs a successful deployed run.
