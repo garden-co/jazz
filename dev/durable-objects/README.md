@@ -513,8 +513,8 @@ secret binding, refuses downgrades and same-version/different-byte builds, and
 checks the live authenticated host before returning the existing remote transport.
 Closing releases the backend handle without deleting the shared authority.
 The upload uses Cloudflare's migration `old_tag` check to reject stale upgrades;
-creation additionally sends `If-None-Match: *`. Actual Cloudflare provisioning,
-including these concurrency guards, has **not** been deployment-tested.
+creation additionally sends `If-None-Match: *`. Actual Cloudflare provisioning and concurrent opens were tested on 2026-11-09;
+this does not prove every cross-process upgrade race.
 See the [upload API](https://developers.cloudflare.com/api/resources/workers/subresources/scripts/methods/update/).
 
 `pnpm --filter jazz-tools build:durable-objects` builds the production-only
@@ -552,3 +552,32 @@ The packaged-host integration covers createJazz readiness, authenticated writes
 and reads, reconnect and SQLite-only restart. Provisioning tests do not contact
 Cloudflare. The host still has the account/guest/thin and transaction-overlay/
 large-value limitations recorded in the plan; this provider does not remove them.
+
+### Opt-in Cloudflare deployment check
+
+`native-sqlite/harness/test-cloudflare.mjs` deploys the dedicated
+`jazz-do-provisioning-test` Worker using the real provider. Set
+`CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN` (a Wrangler OAuth token also works),
+and `JAZZ_DO_TEST_STATE` to a private file **outside the repository**. The script
+creates that file with mode 0600, retaining the randomly generated core secret
+and synthetic test row identity. It never prints the credentials. The account
+must already have a workers.dev subdomain.
+
+Run once to provision and write, then in a fresh process to verify reuse and the
+previously acknowledged row. Run with `--upgrade` last to install a synthetic
+next-alpha artifact on this test Worker, verify namespace/identity/data retention
+and new writes, and check that the original provider refuses a downgrade. This
+fixture does not publish a package or change the repository's package version.
+After the upgrade, ordinary opens with the original package deliberately fail.
+The script leaves the authority and its data in place for inspection; it never
+deletes the Worker or namespace. This is a deployment test, not a benchmark.
+
+Deployed validation (2026-11-09): provider opening and createJazz readiness passed,
+a write received global acknowledgement and was read by a fresh backend process,
+and a synthetic next-alpha host retained the namespace, identity, credential and
+saved row. New writes after upgrade succeeded and the old version refused to
+open. Concurrent opens converged on the same authority. The first deployment
+encountered TLS setup delay and the upgrade encountered version propagation delay;
+readiness now retries network/HTTP failures within two minutes, while rejecting
+invalid credentials immediately. No production-load or forced-eviction claim is
+made by these checks.

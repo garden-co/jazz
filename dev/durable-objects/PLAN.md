@@ -211,8 +211,14 @@ The production-only Worker/WASM packaging and provider are implemented. Mocked
 API tests cover creation, reuse, upgrade preservation, concurrent opening, lost
 upload responses and refusal of unrelated hosts, changed secrets and downgrades.
 The packaged host passes local workerd createJazz readiness, read/write, reconnect
-and persisted restart checks. Real Cloudflare provisioning and concurrency behavior
-remain unverified; this section is not a production-deployment acceptance pass.
+and persisted restart checks. On 2026-11-09, the dedicated Cloudflare deployment
+passed provider opening, createJazz readiness, globally acknowledged writes,
+fresh-backend reads, and a synthetic host upgrade with retained data/identity/
+namespace/credentials and downgrade refusal. Concurrent opens converged on one
+authority. Initial hostname TLS and upgraded-code propagation required readiness
+retries; the provider now bounds network/HTTP retries to two minutes. Full lifecycle,
+production load, account/guest/thin and deferred storage features remain outside
+this provisioning validation.
 
 ## 11. Validate correctness, then measure deployment behavior
 

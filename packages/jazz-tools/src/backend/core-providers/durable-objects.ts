@@ -230,20 +230,30 @@ export async function openDurableObjectsCore(
       body: JSON.stringify({ enabled: true, previews_enabled: false }),
     });
   const url = `https://${options.name}.${subdomain}.workers.dev`;
+  const readinessDeadline = Date.now() + 120_000;
   for (let attempt = 0; ; attempt++) {
-    const response = await fetcher(`${url}/apps/${appId}/admin/host`, {
-      redirect: "error",
-      signal: AbortSignal.timeout(30_000),
-      headers: { "X-Jazz-Backend-Credential": secret, "X-Jazz-Backend-Access": "admin" },
-    });
-    if (response.ok) {
+    let response: Response | undefined;
+    try {
+      response = await fetcher(`${url}/apps/${appId}/admin/host`, {
+        redirect: "error",
+        signal: AbortSignal.timeout(Math.max(1, Math.min(10_000, readinessDeadline - Date.now()))),
+        headers: { "X-Jazz-Backend-Credential": secret, "X-Jazz-Backend-Access": "admin" },
+      });
+    } catch {
+      // New workers.dev hostnames can fail DNS/TLS before returning HTTP.
+      // Retry only this read, never blindly repeat a deployment mutation.
+    }
+    if (response?.ok) {
       const live = (await response.json()) as Marker;
       if (live.appId === appId && live.artifact === marker.artifact) break;
-    } else if (response.status === 401)
+    } else if (response?.status === 401)
       throw new Error("Deployed Jazz host refused its core credential");
-    if (attempt === 4)
+    if (response && !response.bodyUsed) await response.body?.cancel();
+    if (attempt === 15 || Date.now() >= readinessDeadline)
       throw new Error("Deployed Jazz host did not become ready at the expected version");
-    await (deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))))(1000);
+    await (deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))))(
+      Math.min(1000 * 2 ** attempt, 8000, readinessDeadline - Date.now()),
+    );
   }
   return (deps.openRemote ?? openRemoteCore)(appId, {
     url,
