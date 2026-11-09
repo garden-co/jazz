@@ -27,3 +27,24 @@ export {
   SnapshotRefFormatError,
   UnsupportedSnapshotError,
 } from "../runtime/snapshot-ref.js";
+export { trustWorkload, type BackendClientTrust } from "./backend-clients.js";
+export {
+  createJazz,
+  files,
+  memory,
+  remote,
+  s3,
+  sqlite,
+  vercel,
+  vercelBlob,
+  type BlobStore,
+  type S3BlobStore,
+  type VercelBlobStore,
+  type CreateJazzOptions,
+  type Jazz,
+  type JazzStore,
+  type BackendCredential,
+  type JazzUser,
+  type VercelStoreOptions,
+  type WsLikeSocket,
+} from "./create-jazz.js";

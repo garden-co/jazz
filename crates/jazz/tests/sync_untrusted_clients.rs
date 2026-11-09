@@ -31,17 +31,18 @@ fn allow_all() -> TablePolicies {
         .with_delete(PolicyExpr::True)
 }
 
+fn public_schema() -> jazz::tools::public_schema::Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchemaBuilder::new("messages")
+                .column("body", ColumnType::Text)
+                .policies(allow_all()),
+        )
+        .build()
+}
+
 fn schema() -> JazzSchema {
-    JazzSchema::new(
-        &SchemaBuilder::new()
-            .table(
-                TableSchemaBuilder::new("messages")
-                    .column("body", ColumnType::Text)
-                    .policies(allow_all()),
-            )
-            .build(),
-    )
-    .unwrap()
+    JazzSchema::new(&public_schema()).unwrap()
 }
 
 fn user(n: u8) -> AuthorSubject {
@@ -313,6 +314,216 @@ fn a_commit_as_another_identitys_node_is_refused_and_claims_nothing() {
     }
     assert!(fates(&a_down).iter().all(|(_, ok)| *ok));
     assert_eq!(count(&server), 2, "alice's second write landed");
+}
+
+fn account_of(n: u8) -> jazz::account_registry::AccountId {
+    user(n).account_id().expect("a test user has an account")
+}
+
+/// A local-first guest of account `n`, as the account registry admits it.
+fn guest_of(n: u8) -> AuthorSubject {
+    AuthorSubject::reserved(AuthorSubject::LOCAL_FIRST_ISSUER, &format!("key-{n}"))
+        .unwrap()
+        .with_account(account_of(n))
+}
+
+/// The same account signed in through the app's backend.
+fn signed_in_as(n: u8, issuer: &str) -> AuthorSubject {
+    AuthorSubject::authenticated(issuer, &format!("user-{n}"))
+        .unwrap()
+        .with_account(account_of(n))
+}
+
+/// The first commit alice's store `node` makes as `owner`, landed at the
+/// server: its id and kind, from which raw commits as that node are built.
+fn owned_node(server: &Db, owner: AuthorSubject) -> (Db, TxId, WireKind) {
+    let store = client(1, owner);
+    let (c, s, up, _down) = pipe();
+    let upstream = block_on(store.connect_upstream(c));
+    server.accept_subscriber(s, owner).unwrap();
+    post(&store, "first");
+    block_on(store.tick()).unwrap();
+    let Some(SyncMessage::Commit { id, kind, .. }) = up
+        .borrow()
+        .iter()
+        .find(|m| matches!(m, SyncMessage::Commit { .. }))
+        .cloned()
+    else {
+        panic!("the owner's commit");
+    };
+    for _ in 0..4 {
+        block_on(server.tick()).unwrap();
+        block_on(store.tick()).unwrap();
+    }
+    assert_eq!(count(server), 1);
+    drop(upstream);
+    (store, id, kind)
+}
+
+/// Send a raw commit as `node` at `tx` over a session of `identity`, and
+/// return whether it was accepted.
+fn commit_as(
+    server: &Db,
+    identity: AuthorSubject,
+    node: NodeUuid,
+    tx: u64,
+    kind: &WireKind,
+) -> bool {
+    let (_c, s, up, down) = pipe();
+    server.accept_subscriber(s, identity).unwrap();
+    up.borrow_mut().push_back(SyncMessage::Commit {
+        clock: 0,
+        id: TxId::new(TxTime(tx), node),
+        kind: kind.clone(),
+        ops: Vec::new(),
+        acting: Acting::Own,
+    });
+    block_on(server.tick()).unwrap();
+    let fates = fates(&down);
+    assert_eq!(fates.len(), 1, "{fates:?}");
+    fates[0] == (tx, true)
+}
+
+/// A local-first guest that signs up keeps its account and its store, and
+/// so its node: the signed-in principal takes the node over, and from then
+/// on the guest's key no longer writes as it.
+#[test]
+fn a_signed_up_guest_takes_over_its_node() {
+    let server = server();
+    let (_store, id, kind) = owned_node(&server, guest_of(1));
+    let tx = id.time.0;
+
+    // Another account's principal may not, and claims nothing by trying.
+    assert!(!commit_as(&server, user(9), id.node, tx + 1, &kind));
+    // The account's backend principal takes it over.
+    assert!(commit_as(
+        &server,
+        signed_in_as(1, "urn:jazz:backend"),
+        id.node,
+        tx + 1,
+        &kind
+    ));
+    // The guest's key (still unexpired, or leaked) no longer writes as it.
+    assert!(!commit_as(&server, guest_of(1), id.node, tx + 2, &kind));
+    assert!(commit_as(
+        &server,
+        signed_in_as(1, "urn:jazz:backend"),
+        id.node,
+        tx + 2,
+        &kind
+    ));
+}
+
+/// The account later signs in another way on the same device (another
+/// issuer, or an identity the backend linked): that principal takes the
+/// node over, and the earlier one takes it back when it signs in again.
+/// The guest's key never gets it back.
+#[test]
+fn a_later_sign_in_method_of_the_account_takes_over_its_node() {
+    let server = server();
+    let (_store, id, kind) = owned_node(&server, guest_of(1));
+    let tx = id.time.0;
+    let backend = signed_in_as(1, "urn:jazz:backend");
+    let other = signed_in_as(1, "urn:jazz:other");
+
+    assert!(commit_as(&server, backend, id.node, tx + 1, &kind));
+    assert!(commit_as(&server, other, id.node, tx + 2, &kind));
+    assert!(commit_as(&server, backend, id.node, tx + 4, &kind));
+    assert!(!commit_as(&server, guest_of(1), id.node, tx + 5, &kind));
+    assert!(!commit_as(&server, user(9), id.node, tx + 5, &kind));
+    assert!(commit_as(&server, backend, id.node, tx + 5, &kind));
+}
+
+/// Two signed-in principals of the account race for the guest's node in
+/// one tick: each takes it over in turn, and the guest's key is refused.
+#[test]
+fn racing_principals_of_the_account_each_take_over_the_guest_node() {
+    let server = server();
+    let (_store, id, kind) = owned_node(&server, guest_of(1));
+    let tx = id.time.0;
+    let send = |identity: AuthorSubject, tx: u64| {
+        let (c, s, up, down) = pipe();
+        server.accept_subscriber(s, identity).unwrap();
+        up.borrow_mut().push_back(SyncMessage::Commit {
+            clock: 0,
+            id: TxId::new(TxTime(tx), id.node),
+            kind: kind.clone(),
+            ops: Vec::new(),
+            acting: Acting::Own,
+        });
+        (c, down)
+    };
+    let (_a, first) = send(signed_in_as(1, "urn:jazz:backend"), tx + 1);
+    let (_b, second) = send(signed_in_as(1, "urn:jazz:other"), tx + 2);
+    block_on(server.tick()).unwrap();
+    assert_eq!(fates(&first), vec![(tx + 1, true)]);
+    assert_eq!(fates(&second), vec![(tx + 2, true)]);
+    assert!(!commit_as(&server, guest_of(1), id.node, tx + 3, &kind));
+}
+
+/// The hand-over is stored: after a restart the guest's key still doesn't
+/// write as the node, and the principal that took it over still does.
+#[test]
+fn a_handed_over_node_stays_handed_over_after_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("jazz.sqlite");
+    let open = || {
+        let server = block_on(Db::open_at(
+            config(0, AuthorSubject::SYSTEM),
+            &path,
+            jazz::db::FileOptions::default(),
+        ))
+        .unwrap();
+        server.set_authority();
+        server.track_closed_subscribers();
+        server
+    };
+    let (id, kind) = {
+        let server = open();
+        let (_store, id, kind) = owned_node(&server, guest_of(1));
+        assert!(commit_as(
+            &server,
+            signed_in_as(1, "urn:jazz:backend"),
+            id.node,
+            id.time.0 + 1,
+            &kind
+        ));
+        (id, kind)
+    };
+    let server = open();
+    let tx = id.time.0;
+    assert!(!commit_as(&server, guest_of(1), id.node, tx + 2, &kind));
+    assert!(commit_as(
+        &server,
+        signed_in_as(1, "urn:jazz:backend"),
+        id.node,
+        tx + 2,
+        &kind
+    ));
+}
+
+/// A signed-in principal's node goes only to another signed-in principal
+/// of the same account: never to the account's guest key, another account,
+/// or a principal with no account.
+#[test]
+fn a_node_of_a_signed_in_principal_goes_only_to_its_account() {
+    let server = server();
+    let owner = signed_in_as(1, "urn:jazz:backend");
+    let (_store, id, kind) = owned_node(&server, owner);
+    let tx = id.time.0;
+
+    assert!(!commit_as(&server, guest_of(1), id.node, tx + 1, &kind));
+    assert!(!commit_as(&server, user(9), id.node, tx + 1, &kind));
+    let accountless = AuthorSubject::authenticated("urn:jazz:backend", "user-1").unwrap();
+    assert!(!commit_as(&server, accountless, id.node, tx + 1, &kind));
+    assert!(commit_as(&server, owner, id.node, tx + 1, &kind));
+    assert!(commit_as(
+        &server,
+        signed_in_as(1, "urn:jazz:other"),
+        id.node,
+        tx + 2,
+        &kind
+    ));
 }
 
 /// A base on another identity's commit tells its sender nothing: whether
@@ -742,4 +953,80 @@ fn a_session_link_may_not_attribute_and_its_session_writes_are_its_own() {
     assert_eq!(fates(&m_down), vec![(1, false), (2, true)]);
     let (_, link) = user(2).principal_parts();
     assert_eq!(creators(&server), vec![("as a session".to_owned(), link)]);
+}
+
+/// A trusted link that acts for a user must be pinned once the store serves
+/// bundles: its user would otherwise be checked by the store's own
+/// permissions, which no deployment chose. Its own writes need no pin.
+#[test]
+fn an_unpinned_trusted_link_may_not_act_for_a_user_once_bundles_are_served() {
+    let server = server();
+    let bundle = block_on(server.publish_bundle(&public_schema())).unwrap();
+    let commit = |tx: u64, row: u8, acting: Acting| SyncMessage::Commit {
+        clock: 0,
+        id: TxId::new(TxTime(tx), NodeUuid::from_bytes([4; 16])),
+        kind: WireKind::Mergeable,
+        ops: vec![
+            WireWrite::Insert {
+                table: "messages".to_owned(),
+                row: [row; 16],
+                cells: [(
+                    stored(&server, "messages", "body"),
+                    Value::String(format!("row {row}")),
+                )]
+                .into(),
+                target: WireTarget::Root,
+                at: None,
+            }
+            .into(),
+        ],
+        acting,
+    };
+    let as_alice = || Acting::Session {
+        author: user(5).canonical().to_owned(),
+        claims: BTreeMap::new(),
+    };
+
+    let (_unpinned_client, unpinned_server, unpinned_up, unpinned_down) = pipe();
+    server
+        .accept_pinned_subscriber(unpinned_server, AuthorSubject::SYSTEM, None, None)
+        .unwrap();
+    unpinned_up
+        .borrow_mut()
+        .extend([commit(1, 1, as_alice()), commit(2, 2, Acting::Own)]);
+    block_on(server.tick()).unwrap();
+    assert_eq!(
+        fates(&unpinned_down),
+        vec![(1, false), (2, true)],
+        "unpinned, the link writes as itself but not for alice"
+    );
+
+    // A core that requires pins refuses it too before its backend has
+    // published anything.
+    let core = self::server();
+    core.require_session_pins();
+    let (_core_client, core_server, core_up, core_down) = pipe();
+    core.accept_pinned_subscriber(core_server, AuthorSubject::SYSTEM, None, None)
+        .unwrap();
+    core_up
+        .borrow_mut()
+        .extend([commit(4, 4, as_alice()), commit(5, 5, Acting::Own)]);
+    block_on(core.tick()).unwrap();
+    assert_eq!(
+        fates(&core_down),
+        vec![(4, false), (5, true)],
+        "a core requiring pins refuses an unpinned act-for with no bundle published"
+    );
+
+    let (_pinned_client, pinned_server, pinned_up, pinned_down) = pipe();
+    server
+        .accept_pinned_subscriber(pinned_server, AuthorSubject::SYSTEM, None, Some(bundle))
+        .unwrap();
+    pinned_up.borrow_mut().push_back(commit(3, 3, as_alice()));
+    block_on(server.tick()).unwrap();
+    assert_eq!(
+        fates(&pinned_down),
+        vec![(3, true)],
+        "pinned, it acts for alice"
+    );
 }

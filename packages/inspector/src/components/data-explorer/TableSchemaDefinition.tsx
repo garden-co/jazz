@@ -12,7 +12,7 @@ export function TableSchemaDefinition() {
     return <Navigate to="/data-explorer" replace />;
   }
 
-  const { runtime, storedPermissions, wasmSchema: schema } = useDevtoolsContext();
+  const { runtime, bundle, wasmSchema: schema } = useDevtoolsContext();
 
   if (!schema) {
     return <p>No schema loaded for this connection.</p>;
@@ -32,15 +32,15 @@ export function TableSchemaDefinition() {
     if (runtime === "overlay") {
       return null;
     }
-    if (!storedPermissions?.head) {
-      return "No published sync-server permissions found for this app.";
+    if (!bundle) {
+      return "No published bundle found for this schema.";
     }
-    const tablePermissions = storedPermissions.permissions?.[table];
+    const tablePermissions = bundle.permissions[table];
     if (!tablePermissions) {
       return `No stored permissions for table "${table}".`;
     }
     return stringifyForPresentation({ [table]: tablePermissions }, 2);
-  }, [runtime, storedPermissions, table]);
+  }, [runtime, bundle, table]);
 
   return (
     <section className={styles.container}>

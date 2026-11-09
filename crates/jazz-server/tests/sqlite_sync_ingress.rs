@@ -27,6 +27,26 @@ async fn malformed_sqlite_message_closes_only_its_session() {
     .unwrap();
     let runtime =
         ServerRuntimeHandle::start_with_storage(schema.clone(), StorageConfig::InMemory).unwrap();
+    // Publish this exact fixture's existing permissions through the real
+    // catalogue API, then pin both ordinary sessions to its returned ID.
+    let write_schema = runtime.catalogue().await.unwrap().genesis().unwrap().hash;
+    runtime
+        .apply_catalogue(jazz::catalogue::CatalogueChange {
+            put: jazz::catalogue::CataloguePut {
+                bundles: vec![(
+                    write_schema,
+                    jazz::catalogue::permissions_of(schema.public_schema()),
+                    1,
+                )],
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let published = runtime.catalogue().await.unwrap();
+    assert_eq!(published.bundles.len(), 1);
+    let bundle = published.bundles[0].id;
     let hello = postcard::to_allocvec(&SyncMessage::Join {
         known: Vec::new(),
         version: *schema.version_id().as_bytes(),
@@ -54,6 +74,7 @@ async fn malformed_sqlite_message_closes_only_its_session() {
             .open_with_session_context(
                 mallory,
                 BTreeMap::new(),
+                Some(bundle),
                 CommitUnitTrust::Session,
                 0,
                 None,
@@ -105,6 +126,7 @@ async fn malformed_sqlite_message_closes_only_its_session() {
         .open_with_session_context(
             alice,
             BTreeMap::new(),
+            Some(bundle),
             CommitUnitTrust::Session,
             0,
             None,

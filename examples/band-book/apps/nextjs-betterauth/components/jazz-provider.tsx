@@ -1,17 +1,19 @@
 "use client";
 
 import { Button } from "@astryxdesign/core";
-import { betterAuth, JazzProvider as CoreJazzProvider } from "jazz-tools/react";
+import { JazzProvider as CoreJazzProvider } from "jazz-tools/react";
 import { SignInForm } from "@/components/sign-in-form";
 import { StatusScreen } from "@/components/status-screen";
-import { authClient } from "@/src/lib/auth-client";
-import { jazzAppId, jazzEnv, jazzServerUrl } from "@/src/lib/config";
+import { jazzAppId } from "@/src/lib/config";
 
-const auth = betterAuth(authClient);
+// Start on the thin client; load the local-first one (WASM, local storage,
+// offline writes) in its own chunk once the page has loaded.
+const loadLocalFirst = () => import("jazz-tools/local-first");
 
 /**
- * Jazz owns the session lifecycle: it follows Better Auth's session,
- * atomically logs in or registers the account, and renders the app only once
+ * Jazz owns the session lifecycle: it asks BandBook's backend (`createJazz` in
+ * src/lib/jazz.server.ts) who is signed in, which reads Better Auth's session
+ * in `authenticate`, and renders the app only once
  * its client is ready. Signed-out visitors see the sign-in form wherever they
  * land, so an invite link works before and after signing in.
  */
@@ -19,9 +21,8 @@ export function JazzProvider({ children }: { children: React.ReactNode }) {
   return (
     <CoreJazzProvider
       appId={jazzAppId}
-      serverUrl={jazzServerUrl}
-      env={jazzEnv}
-      auth={auth}
+      serverUrl="/jazz"
+      client={loadLocalFirst}
       signedOut={<SignInForm />}
       loading={<StatusScreen label="Opening BandBook" />}
       error={(state) => (

@@ -220,6 +220,7 @@ mod tests {
                 forward: adds_a("default"),
             }],
             permissions: Vec::new(),
+            bundles: Vec::new(),
         };
         let prepared = PreparedDeployment {
             schemas: vec![a.clone(), b.clone(), indexed.clone()],

@@ -2,7 +2,7 @@ import { createJazzContext, type JazzContext } from "../backend/create-jazz-cont
 import { Db } from "../runtime/db.js";
 import { localFirstAccountId } from "../accounts/local-first.js";
 import { createHash } from "node:crypto";
-import { mintLocalFirstToken } from "jazz-napi";
+import { mintLocalFirstTokenFromSeed } from "../runtime/local-first-token.js";
 import { localFirstSessionFromToken } from "../backend/request-auth.js";
 import { ANONYMOUS_JWT_ISSUER, LOCAL_FIRST_JWT_ISSUER } from "../runtime/client-session.js";
 import type { Session } from "../runtime/context.js";
@@ -128,7 +128,7 @@ function localFirstPolicySession(appId: string, session: PolicyTestSession): Ses
   const seed = createHash("sha256")
     .update(`jazz-policy-test-local-first\0${session.user_id}`)
     .digest("base64url");
-  const token = mintLocalFirstToken(seed, appId, LOCAL_FIRST_TOKEN_TTL_SECONDS);
+  const token = mintLocalFirstTokenFromSeed(seed, appId, LOCAL_FIRST_TOKEN_TTL_SECONDS);
   return localFirstSessionFromToken(token, appId);
 }
 
@@ -263,7 +263,8 @@ export async function createPolicyTestApp(
     adminSecret,
   });
 
-  await deploy({
+  // Published as createJazz publishes it; the backend link is pinned to it.
+  const { bundle } = await deploy({
     appId: server.appId,
     serverUrl: server.url,
     adminSecret,
@@ -281,6 +282,7 @@ export async function createPolicyTestApp(
       options.clientBackendSecret === undefined
         ? backendSecret
         : (options.clientBackendSecret ?? undefined),
+    bundle,
     env: "test",
   });
 

@@ -80,9 +80,12 @@ Chunking depends only on content, so two stores that build a tree over the
 same bytes build the same nodes, and an edit changes only the leaves around
 it and the path above them.
 
-A node is identified by its hash: BLAKE3 over its canonical encoding, in a
-domain fixed by the format version and the column kind (bytes, string, JSON).
-A JSON tree therefore never reads as a string tree. A leaf encodes its bytes;
+A node is identified by its hash: plain SHA-256 over its canonical encoding,
+which opens with the node tag, the format version and the column kind (bytes,
+string, JSON). A JSON tree therefore never reads as a string tree. The encoding is
+also exactly the object a chunk store holds, so an object store that checks
+a SHA-256 checksum on upload (a presigned PUT that signs
+`x-amz-checksum-sha256`) verifies the node hash itself. A leaf encodes its bytes;
 a branch encodes, per child, the child's hash, byte length and (for strings)
 UTF-16 length. A node has no locator and no second identity.
 
@@ -190,7 +193,10 @@ prepared into nodes before the write (streaming for `insert_streaming_value`
 and the binding upload APIs). Those nodes are held by an upload lease
 (`_jazz_lv_upload`) or, when pushed by a client, by a receipt
 (`_jazz_lv_receipt`) until the commit referencing them lands or the staging
-maximum age passes.
+maximum age passes. A streamed value staged in an open transaction keeps its
+upload lease in the transaction until the transaction commits or is
+abandoned; a commit whose lease expired meanwhile is refused, since its nodes
+may be gone.
 
 `INV-CONTENT-4`: staged nodes are unreachable from any row; staging needs no
 write permission and grants none, and an expired lease or receipt releases
@@ -633,7 +639,10 @@ admission and ordinary row-write admission. TypeScript exposes
 `Db.insertStreaming`, `Db.updateStreaming` and `Db.upsertStreaming` with one
 column replaced by a `ReadableStream` or `AsyncIterable` source; NAPI and
 Browser/WASM feed the same leased upload in bounded windows without
-collecting the whole value or holding a transaction open. Explicit abort and
+collecting the whole value. A transaction's `insertStreaming`,
+`updateStreaming` and `upsertStreaming` stage the finished row write in the
+transaction instead (native Rust: `TxRef::finish_streaming_value_upload`);
+its commit waits for the stream and fails if the stream did. Explicit abort and
 terminal validation failure release the lease at once; the staging maximum
 age bounds abandoned uploads.
 

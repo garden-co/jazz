@@ -1,3 +1,10 @@
+import {
+  validateAcceptedReadTimeout,
+  isAcceptedReadCapability,
+  type AcceptedRows,
+  type TransactionReadCapability,
+} from "./accepted-read.js";
+import { clientScope } from "./client-scope.js";
 import { isHistoryTable, resolveQueryTable } from "./history-relation.js";
 import type { ConnectionRequirement } from "./connection-manager/types.js";
 import type { DbAccessContext } from "./db-access-context.js";
@@ -34,6 +41,7 @@ import {
   createOpenTransactionId,
   setWriteWaitReadiness,
   type TransactionKind,
+  type Runtime,
   type ReadTierOptions,
   type InternalQueryExecutionOptions,
   type QueryVisibility,
@@ -47,11 +55,14 @@ import {
   type OpenTransactionId,
   type TxId,
   type PermissionAdvice,
+  type TransactionPreparationIO,
+  type StreamingMutationKind,
   type StreamingValueSource,
   validateWriteWaitTimeout,
   WriteWaitTimeoutError,
 } from "./client.js";
 import { sameSyncStatus, type SyncStatus } from "./sync-status.js";
+import type { TextAnchors } from "./text-anchors.js";
 import {
   type BrowserForegroundNodeLease,
   type RuntimeSource,
@@ -97,7 +108,6 @@ import {
   parseJwtPayload,
   internalSessionFromVerifiedReservedJwtPayload,
   resolveClientInternalSessionSync,
-  isRetainedAccountSessionInput,
 } from "./client-session.js";
 import {
   createBrowserPhysicalDatabaseName,
@@ -129,6 +139,7 @@ import {
   type DbForConnection,
 } from "./connection-manager/index.js";
 import { toError } from "./util.js";
+import { upgradeDbToLocalFirst, type LocalFirstLoader } from "./local-first-upgrade.js";
 
 type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
 type AnyRuntimeSource = RuntimeSource<any>;
@@ -142,8 +153,17 @@ export type DbConfig = {
   accountId?: string;
   /** @internal Handle-derived enrollment authority, independent of active transport. */
   accountRegistryAuthority?: string;
-  /** Application identifier (used for isolation) */
-  appId: string;
+  /**
+   * Application identifier. Backend and test code only: a browser client
+   * leaves it out, and its local data, secret and identity are scoped by the
+   * endpoint it syncs with (see `clientScope`).
+   */
+  appId?: string;
+  /**
+   * For apps that already have local-first users: the app id their secrets
+   * and accounts were created under, so they keep them. New apps leave it out.
+   */
+  scope?: string;
   /** Storage driver mode (defaults to persistent). */
   driver?: StorageDriver;
   /** Optional server URL for sync */
@@ -217,7 +237,7 @@ export function resolvePersistentDbBaseName(config: DbConfig): string {
   const explicitDbName = trimOptionalString(
     (driver.type === "persistent" ? driver.dbName : undefined) ?? config.dbName,
   );
-  return explicitDbName ?? config.appId;
+  return explicitDbName ?? clientScope(config);
 }
 
 /** @internal Derive the physical browser persistence namespace for this Db config. */
@@ -1232,12 +1252,16 @@ async function finishComputedRead<T>(
 }
 type DbTransactionHandleBinding = {
   ownerClient: JazzClient;
+  resolveClient: (schema: WasmSchema) => JazzClient;
+  readSession?: Session;
+  readCapability?: TransactionReadCapability;
   openTransactionId: OpenTransactionId;
   session?: Session;
   attribution?: string;
   preparation: WritePreparation;
   committing?: boolean;
   begun: boolean;
+  registeredInserts?: WeakMap<WasmSchema, Set<string>>;
 };
 
 const dbTxHandleBindings = new WeakMap<Transaction, DbTransactionHandleBinding>();
@@ -1643,6 +1667,8 @@ export async function runInTransaction<TResult, TKind extends TransactionKind>(
 /**
  * Groups a set of writes as either a mergeable or serializable transaction (see {@link TransactionKind}).
  */
+const acceptedRows = Symbol("accepted transaction rows");
+
 export class Transaction<TKind extends TransactionKind = TransactionKind> {
   /** @internal Install the prerequisite before binding the owner. */
   static createWithAdmission<TKind extends TransactionKind>(
@@ -1651,14 +1677,17 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     context: DbAccessContext | null,
     ownerClient: JazzClient | undefined,
     prerequisite: TransactionAdmission | undefined,
+    readCapability?: TransactionReadCapability,
   ): Transaction<TKind> {
     const transaction = new Transaction(kind, resolveClient, context);
     transaction.openingPrerequisite = prerequisite;
+    transaction.openingReadCapability = readCapability;
     if (ownerClient) transaction.bindOwnerClient(ownerClient);
     return transaction;
   }
 
   private openingPrerequisite?: TransactionAdmission;
+  private openingReadCapability?: TransactionReadCapability;
 
   private readonly pendingReads = new Set<Promise<unknown>>();
   private committing = false;
@@ -1699,7 +1728,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     const owner = getOwnerPreparation(ownerClient);
     const openTransactionId = owner?.pending
       ? createOpenTransactionId()
-      : this.openingPrerequisite
+      : this.openingPrerequisite || this.openingReadCapability
         ? beginClientTransactionAfter(
             ownerClient,
             this.kind,
@@ -1707,10 +1736,14 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
             attribution,
             undefined,
             this.openingPrerequisite,
+            this.openingReadCapability,
           )
         : ownerClient.beginTransaction(this.kind, session, attribution);
     const binding: DbTransactionHandleBinding = {
       ownerClient,
+      resolveClient: this.resolveClient,
+      readSession: this.context?.readSession,
+      readCapability: this.openingReadCapability,
       openTransactionId,
       session: session,
       attribution: attribution,
@@ -1722,7 +1755,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       preparation.run(() =>
         owner!.run(() => {
           if (preparation.cancelled) return;
-          if (this.openingPrerequisite)
+          if (this.openingPrerequisite || this.openingReadCapability)
             beginClientTransactionAfter(
               ownerClient,
               this.kind,
@@ -1730,6 +1763,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
               attribution,
               openTransactionId,
               this.openingPrerequisite,
+              this.openingReadCapability,
             );
           else ownerClient.beginTransaction(this.kind, session, attribution, openTransactionId);
           binding.begun = true;
@@ -1786,6 +1820,114 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
   }
 
   /**
+   * Stream one Text, Json, or Bytea column into a new row, staged in this
+   * transaction. Resolves with the row id once the stream is consumed; the
+   * commit waits for it and fails if the stream did.
+   *
+   * The streamed value is held for the transaction for at most the store's
+   * staging max age (10 minutes by default) after the stream finishes. A
+   * transaction left open longer than that is refused at commit, with
+   * `streaming upload expired`, so its storage is never held indefinitely;
+   * start it again. The same applies to `updateStreaming` and
+   * `upsertStreaming`.
+   */
+  insertStreaming<T, Init, StreamingInit>(
+    table: TableProxy<T, Init, StreamingInit>,
+    data: StreamingInit,
+    options?: StreamingInsertOptions,
+  ): Promise<{ id: string }> {
+    return this.streamingMutation("insert", table, options?.id, data, options);
+  }
+
+  /** Stream one large column of an existing row, staged in this transaction. */
+  updateStreaming<T, Init, StreamingInit, StreamingUpdate>(
+    table: TableProxy<T, Init, StreamingInit, StreamingUpdate>,
+    id: string,
+    data: StreamingUpdate,
+    options?: UpdateOptions,
+  ): Promise<{ id: string }> {
+    return this.streamingMutation("update", table, id, data, options);
+  }
+
+  /** Stream one large column of a row, creating it if absent, staged in this transaction. */
+  upsertStreaming<T, Init, StreamingInit, StreamingUpdate>(
+    table: TableProxy<T, Init, StreamingInit, StreamingUpdate>,
+    id: string,
+    data: StreamingUpdate,
+    options?: UpdateOptions,
+  ): Promise<{ id: string }> {
+    return this.streamingMutation("upsert", table, id, data, options);
+  }
+
+  private streamingMutation(
+    mutation: StreamingMutationKind,
+    table: TableProxy<any, any, any, any>,
+    id: string | undefined,
+    data: unknown,
+    options?: StreamingInsertOptions | UpdateOptions,
+  ): Promise<{ id: string }> {
+    assertWritableTable(table);
+    this.bindTable(table);
+    const client = this.resolveClient(table._schema);
+    const operation =
+      mutation === "insert" ? "Insert" : mutation === "update" ? "Update" : "Upsert";
+    const { openTransactionId, session, attribution, preparation } = this.requireBinding(
+      `${mutation}Streaming`,
+    );
+    const { column, source, values: ordinaryData } = splitStreamingMutation(table, data);
+    rejectIncompleteDependencies(table, ordinaryData, [column]);
+    const rowId =
+      id ??
+      (missingWriteDependencies(table, ordinaryData).includes("id") ? reserveRowId() : undefined);
+    const stage = async () => {
+      const record =
+        mutation === "insert"
+          ? transformInputColumns(table, ordinaryData, rowId ? { id: rowId } : {}, true)
+          : await prepareInputColumns(
+              table,
+              ordinaryData,
+              operation,
+              rowId!,
+              client,
+              session,
+              undefined,
+              normalizeViewOptions(table._schema, table._table, options as UpdateOptions),
+            );
+      const values = toWriteRecordForOperation(operation, record, table._schema, table._table);
+      const branch =
+        mutation === "insert" ? deriveStreamingInsertBranch(table, ordinaryData) : undefined;
+      const normalized =
+        mutation === "insert"
+          ? normalizeSelectorOptions(table._schema, table._table, {
+              ...options,
+              ...(rowId ? { id: rowId } : {}),
+              ...(branch ? { branch } : {}),
+            })
+          : normalizeViewOptions(table._schema, table._table, options as UpdateOptions);
+      return client.streamingMutationInTransaction(
+        mutation,
+        table._table,
+        values,
+        column,
+        source,
+        openTransactionId,
+        normalized,
+        session,
+        attribution,
+        rowId,
+      );
+    };
+    return Promise.resolve(
+      preparation.run(() =>
+        runAfterPreparation(client, () => (preparation.cancelled ? undefined : stage())),
+      ),
+    ).then((staged) => {
+      if (!staged) throw new Error("Transaction was rolled back before the stream was staged");
+      return staged;
+    });
+  }
+
+  /**
    * Insert a new row into a table.
    *
    * The insert is scoped to this transaction, and will only be globally visible
@@ -1793,7 +1935,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
    */
   insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: InsertOptions): T {
     assertWritableTable(table);
-    this.bindTable(table);
+    const binding = this.bindTable(table);
     const client = this.resolveClient(table._schema);
     const { openTransactionId, session, attribution, preparation } = this.requireBinding("insert");
     let id = options?.id ?? (hasDependentTransforms(table) ? reserveRowId() : undefined);
@@ -1818,12 +1960,19 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
         }),
       );
     try {
-      return (
+      const result: T =
         value ??
         (row
           ? transformOutputRow(table, transformRow(row, table._schema, table._table))
-          : immediateWriteRow(table, id!, values))
-      );
+          : immediateWriteRow(table, id!, values));
+      const registeredId = id ?? row?.id;
+      if (registeredId && !options?.branch && !table._schema[table._table]?.branchBy?.length) {
+        const bySchema = (binding.registeredInserts ??= new WeakMap());
+        let rows = bySchema.get(table._schema);
+        if (!rows) bySchema.set(table._schema, (rows = new Set()));
+        rows.add(`${table._table}\0${registeredId}`);
+      }
+      return result;
     } catch (error) {
       preparation.failure = error;
       throw error;
@@ -2063,7 +2212,8 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
    */
   delete<T, Init>(table: TableProxy<T, Init>, id: string, options?: DeleteOptions): void {
     assertWritableTable(table);
-    this.bindTable(table);
+    const binding = this.bindTable(table);
+    binding.registeredInserts?.get(table._schema)?.delete(`${table._table}\0${id}`);
     const client = this.resolveClient(table._schema);
     const { openTransactionId, session, attribution, preparation } = this.requireBinding("delete");
     const normalizedOptions = normalizeViewOptions(table._schema, table._table, options);
@@ -2093,14 +2243,36 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
    * Read data is scoped to this transaction.
    */
   all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
-    const reading = this.readAll(query, options);
+    return this.trackRead(this.readAll(query, options));
+  }
+
+  [acceptedRows]<T>(query: QueryBuilder<T>, timeoutMs: number): Promise<AcceptedRows<T>> {
+    validateAcceptedReadTimeout(timeoutMs);
+    if (this.kind !== "serializable" || !isAcceptedReadCapability(this.openingReadCapability))
+      return Promise.reject(
+        new Error("Accepted evidence was not selected before transaction opening"),
+      );
+    return this.trackRead(this.readAll(query, undefined, timeoutMs));
+  }
+
+  private trackRead<T>(reading: Promise<T>): Promise<T> {
     this.pendingReads.add(reading);
     const settled = () => this.pendingReads.delete(reading);
     reading.then(settled, settled);
     return reading;
   }
 
-  private async readAll<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
+  private readAll<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]>;
+  private readAll<T>(
+    query: QueryBuilder<T>,
+    options: undefined,
+    acceptedTimeoutMs: number,
+  ): Promise<AcceptedRows<T>>;
+  private async readAll<T>(
+    query: QueryBuilder<T>,
+    options?: QueryOptions,
+    acceptedTimeoutMs?: number,
+  ): Promise<T[] | AcceptedRows<T>> {
     this.bindQuery(query);
     const { preparation, openTransactionId } = this.requireBinding("query");
     if (preparation.pending || preparation.failed) await preparation.drain();
@@ -2110,6 +2282,17 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     const planningSchema = requireSchemaWithTable(query._schema, builtQuery.table);
     const outputTable = resolveQueryOutputTable(planningSchema, builtQuery);
     const prepared = prepareTransformRead(query, builtQuery, outputTable);
+    if (acceptedTimeoutMs !== undefined) {
+      if (prepared.computedState)
+        throw new Error("Accepted evidence does not support computed preparation");
+      const result = await client.queryAcceptedInternal(
+        translateQuery(builderJson, planningSchema, prepared.physical),
+        openTransactionId,
+        acceptedTimeoutMs,
+        this.context?.readSession,
+      );
+      return { ...result, rows: result.rows.map(prepared.transform) };
+    }
     // Transactions accept the same public options surface as Db. Lower before
     // reaching native options so JavaScript callers cannot smuggle runtime
     // controls (for example `localUpdates` or `openTransactionId`) through this
@@ -2157,8 +2340,197 @@ export type TransactionScope<TKind extends TransactionKind = TransactionKind> = 
 export function beginDbTransactionAfter(
   db: Db,
   prepare: TransactionAdmission,
+  readCapability?: TransactionReadCapability,
 ): Transaction<"serializable"> {
-  return db.createTransaction("serializable", prepare);
+  return db.createTransaction("serializable", prepare, readCapability);
+}
+
+/** @internal Registered insert intent, not accepted data or proof of authority. */
+export function transactionHasRegisteredInsert<T, Init>(
+  transaction: Transaction<"serializable">,
+  table: TableProxy<T, Init>,
+  id: string,
+): boolean {
+  transaction.openTransactionId();
+  const binding = getDbTxHandleBinding(transaction, "registered insert");
+  if (binding.preparation.cancelled)
+    throw new Error("Transaction was rolled back before preparation");
+  if (binding.resolveClient(table._schema) !== binding.ownerClient)
+    throw new Error("Registered insert belongs to a different owner");
+  return binding.registeredInserts?.get(table._schema)?.has(`${table._table}\0${id}`) ?? false;
+}
+
+/** @internal Revocable typed IO for work registered before commit. */
+export type PreparedTransactionScope = Pick<
+  TransactionScope<"serializable">,
+  "kind" | "all" | "one" | "insert" | "upsert"
+> & {
+  assertActive(): void;
+  readAccepted<T>(query: QueryBuilder<T>): Promise<AcceptedRows<T>>;
+};
+
+/** @internal Register synchronously; both preparation queues drain before commit. */
+export function prepareDbTransaction(
+  transaction: Transaction<"serializable">,
+  prepare: (scope: PreparedTransactionScope, io: TransactionPreparationIO) => Promise<void>,
+): Promise<void> {
+  if (transaction.kind !== "serializable")
+    throw new Error("Typed preparation requires a serializable transaction");
+  transaction.openTransactionId(); // Reject new registrations after commit was requested.
+  const binding = getDbTxHandleBinding(transaction, "prepare");
+  const { ownerClient, openTransactionId, preparation } = binding;
+  return Promise.resolve(
+    preparation.run(async () => {
+      if (preparation.cancelled || dbTxHandleBindings.get(transaction) !== binding)
+        throw new Error("Transaction was rolled back before preparation");
+      await ownerClient.prepareTransaction(openTransactionId, async (io) => {
+        let active = true;
+        const children: Promise<unknown>[] = [];
+        const assertActive = () => {
+          io.assertActive();
+          if (!active || preparation.cancelled || dbTxHandleBindings.get(transaction) !== binding)
+            throw new Error("Typed transaction preparation is no longer active");
+        };
+        const bind = (schema: WasmSchema) => {
+          assertActive();
+          if (binding.resolveClient(schema) !== ownerClient)
+            throw new Error("Typed preparation belongs to a different owner");
+        };
+        const track = <T>(reading: Promise<T>): Promise<T> => {
+          const result = reading.then((value) => {
+            assertActive();
+            return value;
+          });
+          children.push(result);
+          result.catch(() => {});
+          return result;
+        };
+        const read = async <T>(
+          query: QueryBuilder<T>,
+          options?: QueryOptions,
+          acceptedTimeout?: number,
+        ): Promise<T[] | AcceptedRows<T>> => {
+          bind(query._schema);
+          const json = query._build();
+          const built = normalizeBuiltQuery(JSON.parse(json));
+          const schema = requireSchemaWithTable(query._schema, built.table);
+          const output = resolveQueryOutputTable(schema, built);
+          const planned = prepareTransformRead(query, built, output);
+          if (acceptedTimeout !== undefined) {
+            if (!isAcceptedReadCapability(binding.readCapability))
+              throw new Error("Accepted evidence was not selected before transaction opening");
+            if (planned.computedState)
+              throw new Error("Accepted evidence does not support computed preparation");
+            const result = await io.queryAcceptedInternal(
+              translateQuery(json, schema, planned.physical),
+              openTransactionId,
+              acceptedTimeout,
+              binding.readSession,
+            );
+            assertActive();
+            return { ...result, rows: result.rows.map(planned.transform) };
+          }
+          const queryOptions =
+            normalizeViewOptions(query._schema, built.table, lowerPublicDbQueryOptions(options)) ??
+            {};
+          const physicalRead = (physical: NormalizedBuiltQuery) => {
+            assertActive();
+            return io.queryInternal(
+              translateQuery(json, schema, physical),
+              { ...queryOptions, openTransactionId },
+              binding.readSession,
+            );
+          };
+          const rows = await physicalRead(planned.physical);
+          assertActive();
+          if (!planned.computedState) return rows.map(planned.transform);
+          return finishComputedRead(query, built, output, planned, rows, physicalRead);
+        };
+        const scope: PreparedTransactionScope = {
+          kind: "serializable",
+          assertActive,
+          all<T>(query: QueryBuilder<T>, options?: QueryOptions) {
+            return track(read(query, options) as Promise<T[]>);
+          },
+          async one<T>(query: QueryBuilder<T>, options?: QueryOptions) {
+            return (await scope.all(limitQueryToOne(query), options))[0] ?? null;
+          },
+          readAccepted<T>(query: QueryBuilder<T>) {
+            return track(read(query, undefined, 15_000) as Promise<AcceptedRows<T>>);
+          },
+          insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: InsertOptions): T {
+            bind(table._schema);
+            assertWritableTable(table);
+            const record = table._columnTransforms
+              ? transformInputColumns(
+                  table,
+                  data,
+                  options?.id ? { id: options.id } : undefined,
+                  true,
+                )
+              : (data as Record<string, unknown>);
+            const values = toWriteRecordForOperation("Insert", record, table._schema, table._table);
+            const row = io.insertInternal(
+              table._table,
+              values,
+              normalizeSelectorOptions(table._schema, table._table, options),
+              binding.session,
+              binding.attribution,
+              openTransactionId,
+            );
+            return transformOutputRow(table, transformRow(row, table._schema, table._table));
+          },
+          upsert<T, Init>(
+            table: TableProxy<T, Init>,
+            id: string,
+            data: Partial<Init>,
+            options?: UpdateOptions,
+          ): void {
+            bind(table._schema);
+            assertWritableTable(table);
+            // This narrow preparation scope cannot start another asynchronous dependency lookup.
+            rejectIncompleteDependencies(table, { ...data, id } as Record<string, unknown>, []);
+            const record = table._columnTransforms
+              ? transformInputColumns(table, data, { id })
+              : (data as Record<string, unknown>);
+            const values = toWriteRecordForOperation("Upsert", record, table._schema, table._table);
+            io.upsertInternal(
+              table._table,
+              id,
+              values,
+              normalizeViewOptions(table._schema, table._table, options),
+              binding.session,
+              binding.attribution,
+              openTransactionId,
+            );
+          },
+        };
+        let callbackFailed = false;
+        let callbackError: unknown;
+        try {
+          await prepare(scope, io);
+        } catch (error) {
+          callbackFailed = true;
+          callbackError = error;
+        } finally {
+          active = false;
+        }
+        const results = await Promise.allSettled(children);
+        if (callbackFailed) throw callbackError;
+        const failed = results.find((result) => result.status === "rejected");
+        if (failed?.status === "rejected") throw failed.reason;
+      });
+    }),
+  );
+}
+
+/** @internal Typed read adapter; creation owns capability and preparation. */
+export function readAcceptedTransactionRows<T>(
+  transaction: Transaction<"serializable">,
+  query: QueryBuilder<T>,
+  timeoutMs: number,
+): Promise<AcceptedRows<T>> {
+  return transaction[acceptedRows](query, timeoutMs);
 }
 
 /**
@@ -2367,7 +2739,7 @@ export class Db {
       const ttlSeconds = 3600;
       const newToken = this.mintLocalFirstToken(
         this._localFirstSecret,
-        this.config.appId,
+        clientScope(this.config),
         ttlSeconds,
       );
       const trustedReservedSession = internalSessionFromVerifiedReservedJwtPayload(
@@ -2534,6 +2906,21 @@ export class Db {
     return this.connection.getCurrentClient();
   }
 
+  /** @internal The runtime behind this Db's client, once it exists. */
+  currentRuntime(): Runtime | null {
+    return this.getCurrentClient()?.getRuntime() ?? null;
+  }
+
+  /**
+   * @internal Read each runtime query at the remote tier, so that this Db's
+   * store holds what the server holds for it before anything subscribes.
+   */
+  async prefetchRuntimeQueries(schema: WasmSchema, queryJsons: readonly string[]): Promise<void> {
+    const client = this.getClient(schema);
+    await this.ensureReady("server");
+    await Promise.all(queryJsons.map((queryJson) => client.query(queryJson, { tier: "remote" })));
+  }
+
   protected async ensureReady(
     requirement: ConnectionRequirement,
     signal?: AbortSignal,
@@ -2619,7 +3006,7 @@ export class Db {
     }
 
     const ttl = options?.ttlSeconds ?? 60;
-    const audience = options?.audience ?? this.config.appId;
+    const audience = options?.audience ?? clientScope(this.config);
     return this.mintLocalFirstToken(this._localFirstSecret, audience, ttl);
   }
 
@@ -2627,6 +3014,71 @@ export class Db {
     return this.authStateStore.onChange((state) => {
       listener(state);
     });
+  }
+
+  /** @internal Fresh structural catalogue identity; never row or membership proof. */
+  async tableIdentity<T, Init>(table: TableProxy<T, Init>): Promise<string | null> {
+    this.assertOpen();
+    const client = this.getClient(table._schema);
+    const readSession = this.getAccessContext()?.readSession;
+    const name = table._table;
+    await this.ensureReady("server");
+    this.assertOpen();
+    if (this.getClient(table._schema) !== client)
+      throw new Error("Catalogue preparation owner changed");
+    const prepared = await client.prepareCatalogueIdentitiesInternal(
+      [{ table: name }],
+      readSession,
+    );
+    this.assertOpen();
+    if (this.getClient(table._schema) !== client)
+      throw new Error("Catalogue preparation owner changed");
+    const result = prepared[0];
+    if (prepared.length !== 1 || result?.table !== name)
+      throw new Error("Invalid catalogue preparation result");
+    if (
+      result.identity !== null &&
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(result.identity)
+    )
+      throw new Error("Invalid catalogue table identity");
+    return result.identity;
+  }
+
+  /** @internal Fresh structural column identity, never row or membership proof. */
+  async columnIdentity<T, Init>(
+    table: TableProxy<T, Init>,
+    column: string,
+  ): Promise<string | null> {
+    this.assertOpen();
+    const client = this.getClient(table._schema);
+    const readSession = this.getAccessContext()?.readSession;
+    await this.ensureReady("server");
+    this.assertOpen();
+    if (this.getClient(table._schema) !== client)
+      throw new Error("Catalogue preparation owner changed");
+    const prepared = await client.prepareCatalogueIdentitiesInternal(
+      [{ table: table._table, columns: [column] }],
+      readSession,
+    );
+    this.assertOpen();
+    if (this.getClient(table._schema) !== client)
+      throw new Error("Catalogue preparation owner changed");
+    const result = prepared[0];
+    if (
+      prepared.length !== 1 ||
+      result?.table !== table._table ||
+      Object.keys(result.columns).length !== 1 ||
+      !Object.hasOwn(result.columns, column)
+    )
+      throw new Error("Invalid catalogue column preparation result");
+    const identity = result.columns[column]!;
+    if (
+      identity !== null &&
+      (!result.identity ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(identity))
+    )
+      throw new Error("Invalid catalogue column identity");
+    return identity;
   }
 
   /**
@@ -2651,6 +3103,15 @@ export class Db {
    * accepted or rejected yet. The same object is returned until the status
    * changes, so it can back `useSyncExternalStore` directly.
    */
+  /**
+   * Stateless anchors and ranges into text values, such as cursors,
+   * selections and comments on a text column: captured from one value and
+   * found again in later ones by the text around them.
+   */
+  textAnchors(): TextAnchors {
+    return this.runtimeSource.textAnchors();
+  }
+
   getSyncStatus(): SyncStatus {
     const next = this.connection.syncStatus();
     if (this.syncStatusSnapshot && sameSyncStatus(next, this.syncStatusSnapshot)) {
@@ -3274,6 +3735,7 @@ export class Db {
   createTransaction<TKind extends TransactionKind>(
     kind: TKind,
     prerequisite?: TransactionAdmission,
+    readCapability?: TransactionReadCapability,
   ): Transaction<TKind> {
     this.assertOpen();
     notifyLocalWrite(this);
@@ -3290,6 +3752,7 @@ export class Db {
       context,
       ownerClient ?? undefined,
       prerequisite,
+      readCapability,
     );
   }
 
@@ -3368,6 +3831,19 @@ export class Db {
       callback,
       () => getDbTxHandleBinding(transaction, "result").ownerClient,
     );
+  }
+
+  /**
+   * Move this app from the thin client to the local-first one, loading it with
+   * `loader` (for example `() => import("jazz-tools/local-first")`). Under a
+   * Jazz provider the provider swaps in the local-first `Db` once it holds the
+   * app's live queries, and this resolves then. A local-first `Db` resolves at
+   * once. (A thin `Db` opened directly, outside a session, upgrades with
+   * `upgradeToLocalFirst(thin, open)` from `jazz-tools/thin`, which returns
+   * the new `Db` for the app to swap in itself.)
+   */
+  async upgradeToLocalFirst(loader: LocalFirstLoader): Promise<void> {
+    await upgradeDbToLocalFirst(this, loader);
   }
 
   /**
@@ -4176,7 +4652,7 @@ async function openDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
 
     if (!config.jwtToken) {
       const jwtToken = runtimeSource.mintLocalFirstToken(
-        createRuntimeTokenOptions(secret, config.appId, 3600),
+        createRuntimeTokenOptions(secret, clientScope(config), 3600),
       );
       const trustedReservedSession = internalSessionFromVerifiedReservedJwtPayload(
         parseJwtPayload(jwtToken) ?? {},
@@ -4185,21 +4661,13 @@ async function openDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
       resolvedConfig = { ...configWithoutAuth, jwtToken };
       setTrustedReservedSession(resolvedConfig, trustedReservedSession);
     }
-  } else if (
-    !config.jwtToken &&
-    !config.cookieSession &&
-    !config.adminSecret &&
-    !isRetainedAccountSessionInput({
-      ...config,
-      trustedReservedSession: getTrustedReservedSession(config),
-    })
-  ) {
+  } else if (!config.jwtToken && !config.cookieSession && !config.adminSecret) {
     // Anonymous: mint an ephemeral keypair + anonymous JWT.
     // Admin-secret clients intentionally stay sessionless so local policy
     // evaluation does not preempt backend-authorized transport writes.
     const ephemeralSeed = generateEphemeralSeedBase64Url();
     const jwtToken = runtimeSource.mintAnonymousToken(
-      createRuntimeTokenOptions(ephemeralSeed, config.appId, 3600),
+      createRuntimeTokenOptions(ephemeralSeed, clientScope(config), 3600),
     );
     const trustedReservedSession = internalSessionFromVerifiedReservedJwtPayload(
       parseJwtPayload(jwtToken) ?? {},

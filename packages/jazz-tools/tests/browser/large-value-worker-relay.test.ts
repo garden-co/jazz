@@ -18,7 +18,7 @@ import {
   waitForQuery,
   withTimeout,
 } from "./support.js";
-import { getJazzServerInfo } from "./testing-server.js";
+import { getJazzServerInfo, startJazzApp } from "./testing-server.js";
 
 const app = s.defineApp(
   {
@@ -93,18 +93,19 @@ describe("browser persistent-worker large-value relay", () => {
   ///
   /// writer tab -> persistent SharedWorker -> server -> reader tab
   it("syncs streamed text and bytes without poisoning the relay", async () => {
-    const server = await withTimeout(
+    const core = await withTimeout(
       getJazzServerInfo(uniqueDbName("large-value-worker-relay")),
       10_000,
       "test server did not become available",
     );
     await deploy({
-      appId: server.appId,
-      serverUrl: server.serverUrl,
-      adminSecret: server.adminSecret,
+      appId: core.appId,
+      serverUrl: core.serverUrl,
+      adminSecret: core.adminSecret,
       schema: app.wasmSchema,
       permissions,
     });
+    const server = await startJazzApp(core, { schema: app.wasmSchema, permissions });
 
     const secret = generateAuthSecret();
     const writer = await withTimeout(
@@ -192,15 +193,19 @@ describe("browser persistent-worker large-value relay", () => {
    * tab transaction(project + large document) -> SharedWorker -> server
    */
   it("settles an ordinary multi-row transaction with an automatic large value", async () => {
-    const server = await withTimeout(
+    const core = await withTimeout(
       getJazzServerInfo(uniqueDbName("large-value-transaction-relay")),
       10_000,
       "test server did not become available",
     );
     await deploy({
-      appId: server.appId,
-      serverUrl: server.serverUrl,
-      adminSecret: server.adminSecret,
+      appId: core.appId,
+      serverUrl: core.serverUrl,
+      adminSecret: core.adminSecret,
+      schema: transactionApp.wasmSchema,
+      permissions: transactionPermissions,
+    });
+    const server = await startJazzApp(core, {
       schema: transactionApp.wasmSchema,
       permissions: transactionPermissions,
     });

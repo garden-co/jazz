@@ -5,17 +5,15 @@ import { app } from "../schema";
 import { createAccountManager, type AccountHandle } from "jazz-tools";
 import { JazzProvider, useAll, useDb } from "jazz-tools/react";
 
+// This app's backend serves Jazz on its own origin (`/jazz`).
+const jazzUrl = () => `${location.origin}/jazz`;
+
 export default function ClientTodo() {
   const [account, setAccount] = useState<AccountHandle>();
   const [error, setError] = useState<string>();
-  const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID!;
-
   useEffect(() => {
     let cancelled = false;
-    void createAccountManager({
-      appId,
-      serverUrl: process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!,
-    })
+    void createAccountManager({ serverUrl: jazzUrl() })
       .then((accounts) => {
         if (!cancelled) setAccount(accounts.getLoggedIn() ?? accounts.createLocalFirst());
       })
@@ -25,19 +23,13 @@ export default function ClientTodo() {
     return () => {
       cancelled = true;
     };
-  }, [appId]);
+  }, []);
 
   if (error) return <p role="alert">{error}</p>;
   if (!account) return <p>Loading account…</p>;
 
   return (
-    <JazzProvider
-      config={{
-        appId,
-        serverUrl: process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!,
-        account,
-      }}
-    >
+    <JazzProvider config={{ serverUrl: jazzUrl(), account }}>
       <TodoForm />
       <TodoList />
     </JazzProvider>

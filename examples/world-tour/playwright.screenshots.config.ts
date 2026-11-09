@@ -25,7 +25,8 @@ export default defineConfig({
     reuseExistingServer: false,
     cwd: import.meta.dirname,
     env: {
-      VITE_E2E: "true",
+      // Walkthrough screenshots start from empty, in-memory Jazz, so the demo tour is always fresh.
+      JAZZ_IN_MEMORY: "1",
     },
   },
 });

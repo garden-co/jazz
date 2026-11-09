@@ -1,10 +1,24 @@
+import {
+  validateAcceptedReadTimeout,
+  isAcceptedReadCapability,
+  type AcceptedRows,
+  type TransactionReadCapability,
+} from "../accepted-read.js";
+import { decodeAcceptedRead } from "./accepted-read-codec.js";
+import {
+  validateCatalogueTimeout,
+  type CatalogueIdentityRequest,
+  type PreparedCatalogueIdentities,
+} from "../catalogue-identities.js";
 import type { ClientMigrations } from "../client-migrations.js";
 import { streamingChunks } from "../streaming-source.js";
 import { isHistoryTable, resolveQueryTable } from "../history-relation.js";
 import { AuxiliaryReceiveDeadline } from "./auxiliary-receive-deadline.js";
 import { Utf8Decoder } from "../utf8.js";
 import { parseSnapshotRef, UnsupportedSnapshotError, type SnapshotRef } from "../snapshot-ref.js";
-import { formatUuidAt } from "../hex.js";
+import { formatUuid, formatUuidAt } from "../hex.js";
+
+export { formatUuid };
 import { runtimeConnectionIncarnation, runtimeRandomBytes } from "../runtime-entropy.js";
 import { stripColumnQualifier } from "../query-column-name.js";
 import { writeRow } from "../write-row.js";
@@ -105,6 +119,7 @@ import {
   normalizeBackendWebSocketAuth,
   peerIdentityForWebSocketAuth,
   policyClaimsForAdmittedWebSocket,
+  type WebSocketConstructor,
   type WebSocketNegotiation,
   type WireError,
   wireAuthFailureReason,
@@ -237,6 +252,13 @@ type NativeRestoreOptions = NativeWriteOptions & {
 };
 
 type NativeDb = {
+  coverCatalogue?(
+    timeoutMs: number,
+    author?: Uint8Array,
+    claims?: Record<string, unknown>,
+  ): NativeReadResult;
+  tableIdentity?(table: string): Uint8Array;
+  columnIdentity?(table: string, column: string): Uint8Array;
   captureSnapshot?(): NativeReadResult | Promise<NativeReadResult>;
   /** WASM settles its promise-shaped wait early once `cancelled` settles. */
   waitForPendingWrites?(
@@ -271,7 +293,18 @@ type NativeDb = {
     kind: TransactionKind,
     author?: Uint8Array,
     attribution?: Uint8Array,
+    acceptedEvidence?: boolean,
   ): void;
+  /** Actual replica owner, with ordinary reads and separate accepted evidence. */
+  beginClientEvidenceTransaction?(openTransactionId: string): void;
+  acceptedRead?(
+    query: Uint8Array,
+    openTransactionId: OpenTransactionId,
+    includeDeleted: boolean,
+    timeoutMs: number,
+    author?: Uint8Array,
+    claims?: Record<string, unknown>,
+  ): NativeReadResult | Promise<NativeReadResult>;
   commitTransaction(openTransactionId: string, kind?: TransactionKind): Write;
   rollbackTransaction(openTransactionId: string): void;
   all(
@@ -350,6 +383,7 @@ type NativeDb = {
     updatedAtMs?: number,
     head?: unknown,
     base?: unknown,
+    transaction?: OpenTransactionId,
   ): NativeStreamingMutation;
   requestInsertPermissionAdvice?(
     table: string,
@@ -448,6 +482,8 @@ type NativeDb = {
 type NativeStreamingMutation = {
   push(chunk: Uint8Array): void | Promise<void>;
   finish(): Write | Promise<Write>;
+  /** Stage the row mutation in the transaction the mutation began in. */
+  finishInTransaction?(): void | Promise<void>;
   abort(): boolean | Promise<boolean>;
 };
 
@@ -501,6 +537,7 @@ type PendingTx = {
   kind: TransactionKind;
   identity?: Uint8Array;
   requestSession?: RuntimeSession;
+  readCapability?: TransactionReadCapability;
   /** External provenance fixed at begin, never supplied per staged operation. */
   attribution?: Uint8Array;
   hasStagedMutations: boolean;
@@ -676,7 +713,7 @@ type SubscriptionState = {
   cancelled: boolean;
 };
 
-type SubscriptionOutputColumns = {
+export type SubscriptionOutputColumns = {
   rootTable: string;
   rootColumns: readonly ColumnDescriptor[];
 };
@@ -859,6 +896,42 @@ export class NativeRuntimeAdapter implements Runtime {
     return this.ownerRuntime;
   }
 
+  /** @internal One request per operation; no cross-operation coverage cache. */
+  async prepareCatalogueIdentities(
+    requests: readonly CatalogueIdentityRequest[],
+    sessionJson?: string,
+    timeoutMs = 15_000,
+  ): Promise<readonly PreparedCatalogueIdentities[]> {
+    validateCatalogueTimeout(timeoutMs);
+    if (this.closed || this.ownerRuntime.closed) throw new Error("Native runtime is closed");
+    const db = this.db;
+    if (!db.coverCatalogue || !db.tableIdentity || !db.columnIdentity)
+      throw new Error("Native runtime does not expose catalogue coverage and identities");
+    // Snapshot caller-owned name arrays before the first await. Implicit
+    // identity/claims come exclusively from the opened core, never JS state.
+    const names = requests.map(({ table, columns }) => ({ table, columns: [...(columns ?? [])] }));
+    const session = readSession(sessionJson);
+    await this.awaitNativeRead(
+      db.coverCatalogue(timeoutMs, session?.identity, session?.claims),
+      "remote",
+    );
+    if (this.closed || this.ownerRuntime.closed || this.db !== db)
+      throw new Error("Catalogue preparation owner changed");
+    const identity = (bytes: Uint8Array): string | null => {
+      if (bytes.byteLength === 0) return null;
+      if (bytes.byteLength !== 16) throw new Error("Invalid catalogue UUID bytes");
+      return formatUuid(bytes);
+    };
+    // Raw identity lookups are synchronous, all on this same schema handle.
+    return names.map(({ table, columns }) => ({
+      table,
+      identity: identity(db.tableIdentity!(table)),
+      columns: Object.fromEntries(
+        columns.map((column) => [column, identity(db.columnIdentity!(table, column))]),
+      ),
+    }));
+  }
+
   readCanEstablishAbsence(sessionJson?: string, transaction?: OpenTransactionId): boolean {
     if (this.closed || this.ownerRuntime.closed) return false;
     const context = this.nativeReadContext(
@@ -879,11 +952,14 @@ export class NativeRuntimeAdapter implements Runtime {
   private peerUpstreamAttached = false;
   private nonDurableClient = false;
   private serverCarrier: WebSocketCarrier | null = null;
+  private readonly webSocket: WebSocketConstructor | undefined;
   private serverCarrierPromise: Promise<WebSocketCarrier> | null = null;
   private serverConnectionAttempt: ServerConnectionAttempt | null = null;
   private serverReplacementRetirement: Promise<void> | null = null;
   private serverTransportError: Error | null = null;
   private serverTransportErrorWaiters: ServerTransportErrorWaiter[] = [];
+  private localRelayError: Error | null = null;
+  private readonly localRelayErrorWaiters: ServerTransportErrorWaiter[] = [];
   private serverTransportWorkEpoch = 0;
   private serverTransportWorkWaiters: ServerTransportWorkWaiter[] = [];
   private serverEndpointUrl: string | null = null;
@@ -1024,6 +1100,8 @@ export class NativeRuntimeAdapter implements Runtime {
       owner?: NativeRuntimeAdapter;
       /** Where slow queries are reported (`console.warn`): see {@link SlowQueryLogOptions}. */
       slowQueryLog?: SlowQueryLogOptions;
+      /** How this runtime opens its server socket, when not the platform's own WebSocket. */
+      webSocket?: WebSocketConstructor;
       /** The app's versions and migrations: see {@link ClientMigrations}. */
       migrations?: ClientMigrations;
     },
@@ -1043,6 +1121,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.trustedBackend = (opts?.owner?.trustedBackend ?? opts?.backendMode) === true;
     this.selfSignedClientProof = opts?.selfSignedClientProof;
     this.scopeIsolatedRelay = opts?.scopeIsolatedRelay === true;
+    this.webSocket = opts?.webSocket;
     this.configBytes = openConfig(
       node,
       author,
@@ -1137,13 +1216,15 @@ export class NativeRuntimeAdapter implements Runtime {
   }): Promise<Transport> {
     if (this !== this.ownerRuntime) return await this.ownerRuntime.connectUpstreamPeer(authority);
     this.peerUpstreamAttached = true;
-    if (authority)
-      return this.connectNegotiatedUpstream({
-        protocolVersion: WIRE_PROTOCOL_VERSION,
-        features: authority.features,
-        authority,
-      });
-    return await this.db.connectUpstream();
+    const transport = authority
+      ? await this.connectNegotiatedUpstream({
+          protocolVersion: WIRE_PROTOCOL_VERSION,
+          features: authority.features,
+          authority,
+        })
+      : await this.db.connectUpstream();
+    this.localRelayError = null;
+    return transport;
   }
 
   onPeerTransportWork(listener: (requiresDistinctPass?: boolean) => void): () => void {
@@ -1705,8 +1786,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.assertMutationAdmission("Insert");
     const suppliedRowId = objectId ? parseUuid(objectId) : undefined;
     const writeSession = sessionFromWriteContext(_writeContext);
-    this.applySessionClaims(writeSession);
-    const writeIdentity = this.trustedWriteIdentity(writeSession);
+    const writeIdentity = this.mutationWriteIdentity(writeSession, _writeContext);
     const attribution = this.backendAttribution(_writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(_writeContext);
     const branchView = branchViewFromWriteContext(_writeContext);
@@ -1760,16 +1840,17 @@ export class NativeRuntimeAdapter implements Runtime {
     const operation =
       mutation === "insert" ? "Insert" : mutation === "update" ? "Update" : "Upsert";
     this.assertMutationAdmission(operation);
-    if (this.currentTx(writeContext, operation)) {
-      throw new Error("Streaming mutations are not supported inside a transaction");
-    }
+    const tx = this.currentTx(writeContext, operation);
     const writeSession = sessionFromWriteContext(writeContext);
-    this.applySessionClaims(writeSession);
-    const writeIdentity = this.trustedWriteIdentity(writeSession);
+    const writeIdentity = this.mutationWriteIdentity(writeSession, writeContext);
     const attribution = this.backendAttribution(writeContext);
     const branchView = branchViewFromWriteContext(writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     rejectAttributedBranchWrite(attribution, branchView);
+    if (tx) {
+      this.assertTransactionAttribution(tx, attribution);
+      this.assertTransactionWriteIdentity(tx, attribution ? undefined : writeIdentity);
+    }
     if (!begin) throw new Error("Native runtime does not expose streaming mutations");
 
     const definition = this.table(table);
@@ -1797,7 +1878,12 @@ export class NativeRuntimeAdapter implements Runtime {
       updatedAtMs ?? undefined,
       branchView?.head,
       branchView?.base,
+      tx?.id,
     );
+    if (tx && !upload.finishInTransaction) {
+      await upload.abort();
+      throw new Error("This native runtime does not support streaming inside a transaction yet");
+    }
     const owner = this.ownerRuntime;
     let releaseAdmission!: () => void;
     const admission = new Promise<void>((resolve) => {
@@ -1844,7 +1930,13 @@ export class NativeRuntimeAdapter implements Runtime {
       await previousFinalization;
       let receipt: MutationResult;
       try {
-        receipt = this.finishMutation(await upload.finish());
+        if (tx) {
+          await upload.finishInTransaction!();
+          tx.hasStagedMutations = true;
+          receipt = { kind: "staged", openTransactionId: tx.id };
+        } else {
+          receipt = this.finishMutation(await upload.finish());
+        }
       } finally {
         releaseFinalization();
       }
@@ -1867,8 +1959,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.assertMutationAdmission("Restore");
     const rowId = parseUuid(objectId);
     const writeSession = sessionFromWriteContext(writeContext);
-    this.applySessionClaims(writeSession);
-    const writeIdentity = this.trustedWriteIdentity(writeSession);
+    const writeIdentity = this.mutationWriteIdentity(writeSession, writeContext);
     const attribution = this.backendAttribution(writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const branchView = branchViewFromWriteContext(writeContext);
@@ -1913,8 +2004,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.assertMutationAdmission("Update");
     const rowId = parseUuid(objectId);
     const writeSession = sessionFromWriteContext(writeContext);
-    this.applySessionClaims(writeSession);
-    const writeIdentity = this.trustedWriteIdentity(writeSession);
+    const writeIdentity = this.mutationWriteIdentity(writeSession, writeContext);
     const attribution = this.backendAttribution(writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const branchView = branchViewFromWriteContext(writeContext);
@@ -1974,8 +2064,7 @@ export class NativeRuntimeAdapter implements Runtime {
       // splices against the transaction's own view of the row, so a session
       // or attributed transaction authors them like any other staged write.
       const writeSession = sessionFromWriteContext(writeContext);
-      this.applySessionClaims(writeSession);
-      const writeIdentity = this.trustedWriteIdentity(writeSession);
+      const writeIdentity = this.mutationWriteIdentity(writeSession, writeContext);
       const attribution = this.backendAttribution(writeContext);
       this.assertTransactionAttribution(tx, attribution);
       this.assertTransactionWriteIdentity(tx, attribution ? undefined : writeIdentity);
@@ -2028,8 +2117,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const rowId = parseUuid(objectId);
     const definition = this.table(table);
     const writeSession = sessionFromWriteContext(writeContext);
-    this.applySessionClaims(writeSession);
-    const writeIdentity = this.trustedWriteIdentity(writeSession);
+    const writeIdentity = this.mutationWriteIdentity(writeSession, writeContext);
     const attribution = this.backendAttribution(writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const branchView = branchViewFromWriteContext(writeContext);
@@ -2076,8 +2164,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.table(table);
     const rowId = parseUuid(objectId);
     const writeSession = sessionFromWriteContext(writeContext);
-    this.applySessionClaims(writeSession);
-    const writeIdentity = this.trustedWriteIdentity(writeSession);
+    const writeIdentity = this.mutationWriteIdentity(writeSession, writeContext);
     const attribution = this.backendAttribution(writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const branchView = branchViewFromWriteContext(writeContext);
@@ -2259,9 +2346,10 @@ export class NativeRuntimeAdapter implements Runtime {
     kind: TransactionKind,
     id: OpenTransactionId,
     sessionJson?: string | null,
+    readCapability?: TransactionReadCapability,
   ): OpenTransactionId {
     if (this !== this.ownerRuntime) {
-      return this.ownerRuntime.beginTransaction(kind, id, sessionJson);
+      return this.ownerRuntime.beginTransaction(kind, id, sessionJson, readCapability);
     }
     if (this.closed) {
       throw new Error("Begin transaction failed: native runtime is closed");
@@ -2270,19 +2358,56 @@ export class NativeRuntimeAdapter implements Runtime {
       throw new Error(`Begin transaction failed: transaction ${id} has already been opened`);
     }
     const session = sessionFromWriteContext(sessionJson);
-    this.applySessionClaims(session);
+    const attribution = this.backendAttribution(sessionJson);
+    if (
+      readCapability !== undefined &&
+      (!isAcceptedReadCapability(readCapability) ||
+        kind !== "serializable" ||
+        attribution ||
+        !this.db.acceptedRead ||
+        (this.trustedBackend && (!session || session.backendAuthority)))
+    )
+      throw new Error(
+        "Accepted evidence requires a supported session-bound serializable transaction",
+      );
+    const ownClientEvidence = readCapability === "client-accepted-evidence";
+    if (
+      ownClientEvidence &&
+      (session ||
+        this.trustedBackend ||
+        this.readAuthorizationHost === "trusted-serving" ||
+        !this.db.beginClientEvidenceTransaction)
+    )
+      throw new Error("Own-client evidence requires a supported implicit replica owner");
+    if (!readCapability) this.applySessionClaims(session);
     // The native core binds a serializable transaction's identity at begin. Keep
     // the trusted-serving subject here so every staged operation and its
     // commit are authorized as that one subject.
-    const identity = this.trustedWriteIdentity(session);
-    const attribution = this.backendAttribution(sessionJson);
+    const identity = ownClientEvidence
+      ? this.peerIdentity.slice()
+      : readCapability
+        ? session?.identity
+        : this.trustedWriteIdentity(session);
     const admission = attribution ? undefined : identity;
-    this.db.beginTransaction(id, kind, admission, attribution);
+    // Rust resolves an implicit peer from the actual opening DbIdentity.
+    // Ordinary calls keep their prior four-argument admission contract.
+    if (ownClientEvidence) {
+      this.db.beginClientEvidenceTransaction!(id);
+    } else if (readCapability) {
+      this.db.beginTransaction(id, kind, admission, attribution, true);
+      try {
+        this.applySessionClaims(session, true);
+      } catch (error) {
+        this.db.rollbackTransaction(id);
+        throw error;
+      }
+    } else this.db.beginTransaction(id, kind, admission, attribution);
     this.pendingTxs.set(id, {
       id,
       kind,
       identity: admission,
       requestSession: admission ? (session ?? undefined) : undefined,
+      readCapability,
       attribution,
       hasStagedMutations: false,
     });
@@ -2420,6 +2545,52 @@ export class NativeRuntimeAdapter implements Runtime {
     return Promise.resolve(true);
   }
 
+  /** @internal Authority evidence, admitted synchronously before any host wait. */
+  async queryAccepted(
+    queryJson: string,
+    openTransactionId: OpenTransactionId,
+    sessionJson: string | null | undefined,
+    timeoutMs: number,
+  ): Promise<AcceptedRows<RowState>> {
+    validateAcceptedReadTimeout(timeoutMs);
+    if (this.closed || this.ownerRuntime.closed) throw new Error("Native runtime is closed");
+    const pending = this.pendingTxs.get(openTransactionId);
+    if (
+      !pending ||
+      pending.kind !== "serializable" ||
+      !isAcceptedReadCapability(pending.readCapability) ||
+      !this.db.acceptedRead
+    )
+      throw new Error("Accepted evidence was not selected before transaction opening");
+    assertNoUnsupportedPermissionIntrospection(queryJson);
+    if (queryHasArraySubqueries(queryJson))
+      throw new Error("Accepted evidence requires ordinary stored rows");
+    const session = readSession(sessionJson);
+    if (session?.backendAuthority)
+      throw new Error("Accepted evidence requires an explicit session");
+    if (pending.readCapability === "client-accepted-evidence" && session)
+      throw new Error("Own-client evidence cannot select a read session");
+    const boundSession = session ?? pending.requestSession;
+    const read = this.db.acceptedRead(
+      nativeQueryInput(queryJson, this.schema),
+      openTransactionId,
+      queryIncludesDeleted(queryJson),
+      timeoutMs,
+      pending.readCapability === "client-accepted-evidence"
+        ? undefined
+        : (boundSession?.identity ?? pending.identity),
+      pending.readCapability === "client-accepted-evidence" ? undefined : boundSession?.claims,
+    );
+    // Existing read cancellation and owner close/discard machinery owns this.
+    const decoded = decodeAcceptedRead(await this.awaitNativeRead(read));
+    const rows = rowsFromBatches(
+      decoded.batches,
+      this.schema,
+      subscriptionOutputColumns(queryJson, this.schema).rootColumns,
+    );
+    return { rows, through: decoded.through, schema: decoded.schema, evidence: decoded.evidence };
+  }
+
   async query(
     queryJson: string,
     sessionJson?: string | null,
@@ -2442,7 +2613,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const opts = readOptions(tier, queryIncludesDeleted(coreQueryJson), optionsJson);
     const readContext = this.nativeReadContext(session, pendingTx);
     const query = nativeQueryInput(coreQueryJson, this.schema);
-    await this.ensureClientSessionClaims(session);
+    await this.ensureClientSessionClaims(session, pendingTx);
     await this.waitForStrictRemoteQueryTransport(tier);
     await this.processPendingPeerActivityBeforeRead();
     if (this.closed || this.ownerRuntime.closed) return [];
@@ -2811,6 +2982,7 @@ export class NativeRuntimeAdapter implements Runtime {
       this.endLinkAttempt(attempt, new Error(error.message), failure);
     };
     const carrier = new WebSocketCarrier({
+      WebSocket: this.webSocket,
       endpointUrl: url,
       peerIdentity: transportIdentity,
       features,
@@ -3067,6 +3239,21 @@ export class NativeRuntimeAdapter implements Runtime {
     this.handleServerTransportError(error, this.serverConnectionGeneration, retrying);
   }
 
+  /** The durable worker itself failed, so a tab cannot establish Local either. */
+  reportLocalRelayError(error: Error): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.reportLocalRelayError(error);
+    this.localRelayError ??= error;
+    for (const waiter of this.localRelayErrorWaiters.splice(0)) {
+      if (waiter.active) waiter.reject(this.localRelayError);
+    }
+    // The broker replaces failed workers. Local persistence for this attempt
+    // has failed, but authority acceptance can still arrive after replacement.
+    // A pump or watchdog failure may already have stopped the upstream. Its
+    // teardown must preserve that terminal error for subsequent Global waits.
+    if (this.serverTransportError && !this.serverTransportErrorRetrying) return;
+    this.handleServerTransportError(error, this.serverConnectionGeneration, true);
+  }
+
   /** Clear a terminal remote-peer error after its replacement transport is ready. */
   clearRemoteServerTransportError(): void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.clearRemoteServerTransportError();
@@ -3137,6 +3324,7 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this.pendingLocalSettlements.size > 0) {
       await Promise.all(this.pendingLocalSettlements);
     }
+    this.throwServerTransportErrorForTier("local");
   }
 
   /** Observe worker durability work, including fire-and-forget mutations. */
@@ -3359,6 +3547,23 @@ export class NativeRuntimeAdapter implements Runtime {
    * client's own session is the runtime itself, so it writes as the runtime.
    * A trusted-serving host writes as its peer when no session is given.
    */
+  private mutationWriteIdentity(
+    session: RuntimeSession | null | undefined,
+    writeContext: string | null | undefined,
+  ): Uint8Array | undefined {
+    const id = txIdFromContext(writeContext);
+    const pending = id ? this.pendingTxs.get(id) : undefined;
+    if (isAcceptedReadCapability(pending?.readCapability)) {
+      // Admission registered the explicit scope once. A staged write must not
+      // restore its cached claims over a revocation observed by the core.
+      const identity = session?.identity ?? this.peerIdentity;
+      this.assertTransactionWriteIdentity(pending!, identity);
+      return pending!.readCapability === "client-accepted-evidence" ? undefined : identity;
+    }
+    this.applySessionClaims(session);
+    return this.trustedWriteIdentity(session);
+  }
+
   private trustedWriteIdentity(session: RuntimeSession | null | undefined): Uint8Array | undefined {
     const serving = this.readAuthorizationHost === "trusted-serving";
     if (!session) return serving && !this.trustedBackend ? this.peerIdentity : undefined;
@@ -3464,8 +3669,14 @@ export class NativeRuntimeAdapter implements Runtime {
     this.clientSessionClaimsKey = key;
   }
 
-  private ensureClientSessionClaims(session: RuntimeSession | null): void | Promise<void> {
+  private ensureClientSessionClaims(
+    session: RuntimeSession | null,
+    pendingTx?: PendingTx,
+  ): void | Promise<void> {
     if (this.closed || this.ownerRuntime.closed) throw new Error("Native runtime is closed");
+    // Accepted admission registered its scope once. Ordinary reads in that
+    // batch must observe live claims, never reinstall their cached session.
+    if (isAcceptedReadCapability(pendingTx?.readCapability)) return;
     if (!session || session.backendAuthority || this.readAuthorizationHost === "trusted-serving")
       return;
     if (canonicalJson(session.claims) === this.clientSessionClaimsKey) return;
@@ -3599,19 +3810,23 @@ export class NativeRuntimeAdapter implements Runtime {
       new Utf8Decoder().decode(authorBytesForSession(session)),
     );
   }
-  private applySessionClaims(session: RuntimeSession | null | undefined): void {
+  private applySessionClaims(
+    session: RuntimeSession | null | undefined,
+    explicitAcceptedIdentity = false,
+  ): void {
     // Client runtimes only evaluate their already-settled local replica. They
     // never select the policy-enforcing native entry points, so there is no
     // reason to serialize a session subject into the public native ABI here.
     // In particular, local-first and anonymous subjects are admitted by the
     // first-party TypeScript flow, while raw native identity ingress must keep
     // rejecting their reserved issuers. Claims are required only by the
-    // explicitly selected trusted-serving host, where every identity call is
-    // part of that serving boundary.
+    // explicitly selected trusted-serving host. Accepted capability also binds
+    // an explicit session before its first read. Register that session's claims
+    // after native identity admission; implicit capability leaves them intact.
     if (
       !session ||
       session.backendAuthority ||
-      this.readAuthorizationHost !== "trusted-serving" ||
+      (!explicitAcceptedIdentity && this.readAuthorizationHost !== "trusted-serving") ||
       !this.db.setIdentityClaims
     ) {
       return;
@@ -3643,6 +3858,14 @@ export class NativeRuntimeAdapter implements Runtime {
     pending: PendingTx,
     identity: Uint8Array | undefined,
   ): void {
+    if (isAcceptedReadCapability(pending.readCapability)) {
+      const bound = pending.identity ?? this.peerIdentity;
+      const effective = identity ?? this.peerIdentity;
+      if (!sameBytes(bound, effective)) {
+        throw new Error("Native runtime serializable transaction cannot mix write identities");
+      }
+      return;
+    }
     if (pending.kind === "serializable") {
       if (pending.identity && (!identity || !sameBytes(pending.identity, identity))) {
         throw new Error("Native runtime serializable transaction cannot mix write identities");
@@ -4397,6 +4620,9 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private throwServerTransportErrorForTier(tier: string, throughOutage = false): void {
+    if (tier === "local" && this.nonDurableClient && this.localRelayError) {
+      throw this.localRelayError;
+    }
     if (tier !== "global" && tier !== "remote") return;
     const error = this.serverTransportErrorFor(throughOutage);
     if (error) throw error;
@@ -4406,8 +4632,10 @@ export class NativeRuntimeAdapter implements Runtime {
     tier: string,
     throughOutage = false,
   ): { promise: Promise<never>; cancel: () => void } | null {
-    if (tier !== "global" && tier !== "remote") return null;
-    const error = this.serverTransportErrorFor(throughOutage);
+    const local = tier === "local" && this.nonDurableClient;
+    if (!local && tier !== "global" && tier !== "remote") return null;
+    const error = local ? this.localRelayError : this.serverTransportErrorFor(throughOutage);
+    const waiters = local ? this.localRelayErrorWaiters : this.serverTransportErrorWaiters;
     if (error) {
       return {
         promise: Promise.reject(error),
@@ -4422,14 +4650,14 @@ export class NativeRuntimeAdapter implements Runtime {
     const promise = new Promise<never>((_, reject) => {
       waiter.reject = reject;
     });
-    this.serverTransportErrorWaiters.push(waiter);
+    waiters.push(waiter);
     return {
       promise,
       cancel: () => {
         if (!waiter.active) return;
         waiter.active = false;
-        const index = this.serverTransportErrorWaiters.indexOf(waiter);
-        if (index >= 0) this.serverTransportErrorWaiters.splice(index, 1);
+        const index = waiters.indexOf(waiter);
+        if (index >= 0) waiters.splice(index, 1);
       },
     };
   }
@@ -4513,7 +4741,7 @@ function recordWrite(write: Write, writes: Map<string, Write>): TxId {
   return id as TxId;
 }
 
-function txIdFromContext(writeContext?: string | null): OpenTransactionId | undefined {
+export function txIdFromContext(writeContext?: string | null): OpenTransactionId | undefined {
   if (!writeContext) return undefined;
   try {
     const parsed = JSON.parse(writeContext) as { transaction_id?: unknown };
@@ -4525,9 +4753,11 @@ function txIdFromContext(writeContext?: string | null): OpenTransactionId | unde
   }
 }
 
-type EncodedBranchView = { head: unknown; base?: unknown };
+export type EncodedBranchView = { head: unknown; base?: unknown };
 
-function branchViewFromWriteContext(writeContext?: string | null): EncodedBranchView | undefined {
+export function branchViewFromWriteContext(
+  writeContext?: string | null,
+): EncodedBranchView | undefined {
   if (!writeContext) return undefined;
   try {
     const parsed = JSON.parse(writeContext) as { branch_view?: unknown };
@@ -4705,7 +4935,7 @@ function updatedAtMsFromWriteContext(writeContext?: string | null): number | und
   return parsed.updated_at;
 }
 
-function effectiveUpdatedAtMs(writeContext?: string | null): number | null {
+export function effectiveUpdatedAtMs(writeContext?: string | null): number | null {
   return updatedAtMsFromWriteContext(writeContext) ?? Date.now();
 }
 
@@ -4760,7 +4990,9 @@ function pendingTxFromOptions(
   return openTransactionId ? pendingTxs.get(openTransactionId) : undefined;
 }
 
-function openTransactionIdFromOptions(optionsJson?: string | null): OpenTransactionId | undefined {
+export function openTransactionIdFromOptions(
+  optionsJson?: string | null,
+): OpenTransactionId | undefined {
   if (!optionsJson) return undefined;
   try {
     const parsed = JSON.parse(optionsJson) as { transaction_id?: unknown };
@@ -4772,7 +5004,7 @@ function openTransactionIdFromOptions(optionsJson?: string | null): OpenTransact
   }
 }
 
-function readOptions(
+export function readOptions(
   tier?: string | null,
   includeDeleted = false,
   optionsJson?: string | null,
@@ -4810,7 +5042,10 @@ function readFirstLoadWaitsForRemote(optionsJson?: string | null): boolean {
   }
 }
 
-function assertSupportedReadOptions(tier?: string | null, optionsJson?: string | null): void {
+export function assertSupportedReadOptions(
+  tier?: string | null,
+  optionsJson?: string | null,
+): void {
   if (tier != null && !["local-first", "remote", "local-only"].includes(tier)) {
     throw new Error(`Native runtime received unsupported read tier '${tier}'`);
   }
@@ -4905,7 +5140,7 @@ function closeSubscriptionSource(source: SubscriptionSource): void {
   source.close();
 }
 
-function queryIncludesDeleted(queryJson: string): boolean {
+export function queryIncludesDeleted(queryJson: string): boolean {
   try {
     return (JSON.parse(queryJson) as { include_deleted?: unknown }).include_deleted === true;
   } catch {
@@ -4913,7 +5148,7 @@ function queryIncludesDeleted(queryJson: string): boolean {
   }
 }
 
-function queryHasArraySubqueries(queryJson: string): boolean {
+export function queryHasArraySubqueries(queryJson: string): boolean {
   try {
     const value = (JSON.parse(queryJson) as { array_subqueries?: unknown }).array_subqueries;
     return Array.isArray(value) && value.length > 0;
@@ -4926,7 +5161,7 @@ function nativeQueryInput(queryJson: string, schema: WasmSchema): NativeQueryInp
   return encodeQueryJson(queryJson, schema);
 }
 
-function assertNoUnsupportedPermissionIntrospection(queryJson: string): void {
+export function assertNoUnsupportedPermissionIntrospection(queryJson: string): void {
   if (!queryContainsPermissionIntrospection(queryJson)) return;
   throw new Error(
     "Native runtime does not support permission-introspection query columns or predicates " +
@@ -5069,7 +5304,7 @@ function unqualifiedColumn(column: string): string {
   return stripColumnQualifier(column);
 }
 
-function subscriptionOutputColumns(
+export function subscriptionOutputColumns(
   queryJson: string,
   schema: WasmSchema,
 ): SubscriptionOutputColumns {
@@ -5240,7 +5475,7 @@ function outputColumnsForTable(
   return columns;
 }
 
-function addNestedOuterColumns(queryJson: string): string {
+export function addNestedOuterColumns(queryJson: string): string {
   const parsed = JSON.parse(queryJson) as { array_subqueries?: unknown };
   addNestedOuterColumnsToSubqueries(parsed.array_subqueries);
   return JSON.stringify(parsed);
@@ -5466,7 +5701,7 @@ function extractWriteRejectedReason(message: string): string | null {
   return match ? match[1]! : null;
 }
 
-function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
+export function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
   const parsed = JSON.parse(queryJson) as {
     array_subqueries?: unknown;
     conditions?: unknown;
@@ -6400,7 +6635,7 @@ export function encodeCellsForRow(
   return encodeCells(columns, (column) => row[column.name], true);
 }
 
-function encodeCellsForStreamingRow(
+export function encodeCellsForStreamingRow(
   definition: { columns: ColumnDescriptor[]; policies?: TablePolicies },
   row: InsertValues,
   streamedColumn: string,
@@ -6417,7 +6652,7 @@ function encodeCellsForStreamingRow(
   return encodeCells(columns, (column) => row[column.name], true);
 }
 
-function encodeCellsForStreamingPatch(
+export function encodeCellsForStreamingPatch(
   definition: { columns: ColumnDescriptor[]; policies?: TablePolicies },
   row: InsertValues,
   streamedColumn: string,
@@ -6497,11 +6732,11 @@ function encodeCellValue(
   return encodeNativeColumnValue(column, resolved);
 }
 
-function readRowBatches(payload: Uint8Array): NativeRowBatch[] {
+export function readRowBatches(payload: Uint8Array): NativeRowBatch[] {
   return new PostcardReader(payload).readVec(readNativeRowBatch);
 }
 
-function readRelationSnapshot(payload: Uint8Array): NativeRelationSubscriptionSnapshot {
+export function readRelationSnapshot(payload: Uint8Array): NativeRelationSubscriptionSnapshot {
   return readNativeRelationSubscriptionSnapshot(new PostcardReader(payload));
 }
 
@@ -6586,7 +6821,7 @@ function nativeRowFieldPlans(
   return plans;
 }
 
-function rowsFromRelationSnapshot(
+export function rowsFromRelationSnapshot(
   snapshot: NativeRelationSubscriptionSnapshot,
   schema: WasmSchema,
   projectedColumns?: readonly ColumnDescriptor[],
@@ -7241,10 +7476,6 @@ export function parseUuid(value: string): Uint8Array {
     bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
   }
   return bytes;
-}
-
-export function formatUuid(bytes: Uint8Array): string {
-  return formatUuidAt(bytes, 0);
 }
 
 function readU32Le(bytes: Uint8Array, offset: number): number {

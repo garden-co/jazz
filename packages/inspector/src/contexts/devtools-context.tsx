@@ -1,11 +1,12 @@
-import type { StoredPermissionsResponse, WasmSchema } from "jazz-tools";
+import type { PublishedBundle, WasmSchema } from "jazz-tools";
 import { createContext, useContext, useMemo, type PropsWithChildren } from "react";
 
 export type InspectorRuntime = "standalone" | "overlay";
 
 interface DevtoolsContextValue {
   wasmSchema: WasmSchema;
-  storedPermissions: StoredPermissionsResponse | null;
+  /** The latest published bundle for the inspected schema. */
+  bundle: PublishedBundle | null;
   runtime: InspectorRuntime;
 }
 
@@ -14,17 +15,14 @@ export const DevtoolsContext = createContext<DevtoolsContextValue | null>(null);
 export function DevtoolsProvider({
   children,
   wasmSchema,
-  storedPermissions = null,
+  bundle = null,
   runtime,
 }: PropsWithChildren<{
   wasmSchema: WasmSchema;
-  storedPermissions?: StoredPermissionsResponse | null;
+  bundle?: PublishedBundle | null;
   runtime: InspectorRuntime;
 }>) {
-  const value = useMemo(
-    () => ({ wasmSchema, storedPermissions, runtime }),
-    [wasmSchema, storedPermissions, runtime],
-  );
+  const value = useMemo(() => ({ wasmSchema, bundle, runtime }), [wasmSchema, bundle, runtime]);
   return <DevtoolsContext.Provider value={value}>{children}</DevtoolsContext.Provider>;
 }
 
