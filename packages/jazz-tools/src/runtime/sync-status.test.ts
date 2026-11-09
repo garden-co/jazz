@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  DerivedStatePublisher,
   linkStatusFromUpstream,
   sameSyncStatus,
   syncStatus,
@@ -76,4 +77,41 @@ describe("syncStatus", () => {
       ),
     ).toBe(false);
   });
+});
+
+describe("DerivedStatePublisher", () => {
+  it.each([false, true])(
+    "keeps a shared callback until its last scope ends (newer first: %s)",
+    async (newerFirst) => {
+      let value = 0;
+      const publisher = new DerivedStatePublisher(() => value);
+      const seen: number[] = [];
+      const listen = (next: number) => seen.push(next);
+      const a = new AbortController();
+      const b = new AbortController();
+      publisher.subscribe(listen, AbortSignal.abort());
+      expect(publisher.hasListeners).toBe(false);
+      publisher.subscribe(listen, a.signal);
+      publisher.subscribe(listen, a.signal);
+      publisher.subscribe(listen, b.signal);
+      value = 1;
+      publisher.changed();
+      value = 2;
+      publisher.changed();
+      await Promise.resolve();
+      expect(seen).toEqual([2]);
+      (newerFirst ? b : a).abort();
+      expect(publisher.hasListeners).toBe(true);
+      value = 3;
+      publisher.changed();
+      await Promise.resolve();
+      expect(seen).toEqual([2, 3]);
+      (newerFirst ? a : b).abort();
+      expect(publisher.hasListeners).toBe(false);
+      value = 4;
+      publisher.changed();
+      await Promise.resolve();
+      expect(seen).toEqual([2, 3]);
+    },
+  );
 });

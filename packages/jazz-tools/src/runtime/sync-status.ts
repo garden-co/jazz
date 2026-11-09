@@ -135,7 +135,7 @@ export function sameSyncStatus(a: SyncStatus, b: SyncStatus): boolean {
  * one synchronous transition are never observed.
  */
 export class DerivedStatePublisher<T> {
-  private readonly listeners = new Set<(value: T) => void>();
+  private readonly listeners = new Map<(value: T) => void, Set<AbortSignal>>();
   private published: T | undefined;
   private scheduled = false;
 
@@ -148,10 +148,18 @@ export class DerivedStatePublisher<T> {
     if (signal.aborted) return;
     // Changes are not tracked while nobody listens; resynchronize first.
     if (this.listeners.size === 0) this.published = this.read();
-    this.listeners.add(listener);
-    signal.addEventListener("abort", () => this.listeners.delete(listener), {
-      once: true,
-    });
+    const scopes = this.listeners.get(listener) ?? new Set<AbortSignal>();
+    if (scopes.has(signal)) return;
+    scopes.add(signal);
+    this.listeners.set(listener, scopes);
+    signal.addEventListener(
+      "abort",
+      () => {
+        scopes.delete(signal);
+        if (scopes.size === 0) this.listeners.delete(listener);
+      },
+      { once: true },
+    );
   }
 
   get hasListeners(): boolean {
@@ -167,7 +175,9 @@ export class DerivedStatePublisher<T> {
       const value = this.read();
       if (this.published !== undefined && this.same(value, this.published)) return;
       this.published = value;
-      for (const listener of [...this.listeners]) listener(value);
+      // A callback may subscribe or abort another scope during delivery.
+      const recipients = Array.from(this.listeners.keys());
+      for (const listener of recipients) listener(value);
     });
   }
 }
