@@ -174,6 +174,7 @@ declare module "jazz-wasm" {
       kind: string,
       author?: Uint8Array | null,
       attribution?: Uint8Array | null,
+      acceptedEvidence?: boolean | null,
     ): void;
     commitTransaction(openTransactionId: string, kind?: string | null): WasmWrite;
     rollbackTransaction(openTransactionId: string): void;
@@ -182,6 +183,14 @@ declare module "jazz-wasm" {
       query: Uint8Array,
       opts: unknown,
       openTransactionId?: string,
+      author?: Uint8Array,
+      claims?: Record<string, unknown>,
+    ): Uint8Array | PendingNativeRead;
+    acceptedRead(
+      query: Uint8Array,
+      openTransactionId: string,
+      includeDeleted: boolean,
+      timeoutMs: number,
       author?: Uint8Array,
       claims?: Record<string, unknown>,
     ): Uint8Array | PendingNativeRead;

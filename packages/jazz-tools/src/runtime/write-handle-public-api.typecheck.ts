@@ -81,12 +81,16 @@ async function assertWriteHandleContract() {
   serializableResult.wait();
   // Serializable results accept an explicit durability tier as well as the default.
   serializableResult.wait({ tier: "global" });
+  // @ts-expect-error Serializable results accept only Local and Global durability.
+  serializableResult.wait({ tier: "edge" });
 
   const mergeableCommit: WriteHandle = db.beginTransaction().commit();
   const serializableCommit: SerializableWriteHandle = db.beginSerializableTransaction().commit();
   serializableCommit.wait();
   // Serializable commits accept an explicit durability tier as well as the default.
   serializableCommit.wait({ tier: "global" });
+  // @ts-expect-error Serializable handles accept only Local and Global durability.
+  serializableCommit.wait({ tier: "edge" });
 
   void restored;
   void updated;

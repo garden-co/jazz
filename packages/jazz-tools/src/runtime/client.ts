@@ -1,3 +1,8 @@
+import {
+  validateAcceptedReadTimeout,
+  type AcceptedRows,
+  type TransactionReadCapability,
+} from "./accepted-read.js";
 import { runtimeRandomBytes } from "./runtime-entropy.js";
 import { UnsupportedSnapshotError, type SnapshotRef } from "./snapshot-ref.js";
 /**
@@ -172,7 +177,15 @@ export interface Runtime {
     transactionKind: TransactionKind,
     id: OpenTransactionId,
     sessionJson?: string | null,
+    readCapability?: TransactionReadCapability,
   ): OpenTransactionId;
+  /** @internal Authority evidence in an opted-in existing serializable batch. */
+  queryAccepted?(
+    queryJson: string,
+    openTransactionId: OpenTransactionId,
+    sessionJson: string | null | undefined,
+    timeoutMs: number,
+  ): Promise<AcceptedRows<Row>>;
   /** Completion may include asynchronous preparation before physical submission. */
   commitTransaction(id: OpenTransactionId): TxId | Promise<TxId>;
   rollbackTransaction(id: OpenTransactionId): Promise<boolean>;
@@ -1094,8 +1107,16 @@ export function beginClientTransactionAfter(
   attribution: string | undefined,
   reservedId: OpenTransactionId | undefined,
   prerequisite: TransactionAdmission | undefined,
+  readCapability?: TransactionReadCapability,
 ): OpenTransactionId {
-  return client.openTransaction(kind, session, attribution, reservedId, prerequisite);
+  return client.openTransaction(
+    kind,
+    session,
+    attribution,
+    reservedId,
+    prerequisite,
+    readCapability,
+  );
 }
 
 /** High-level Jazz client. */
@@ -1224,10 +1245,24 @@ export class JazzClient {
     attribution: string | undefined,
     reservedId: OpenTransactionId | undefined,
     prerequisite?: TransactionAdmission,
+    readCapability?: TransactionReadCapability,
   ): OpenTransactionId {
+    if (
+      readCapability !== undefined &&
+      (readCapability !== "accepted-evidence" ||
+        kind !== "serializable" ||
+        attribution !== undefined ||
+        !this.runtime.queryAccepted)
+    )
+      throw new Error(
+        "Accepted evidence requires a supported session-bound serializable transaction",
+      );
     const id = reservedId ?? createOpenTransactionId();
     if (prerequisite) {
-      const context = this.writeContext(session, attribution);
+      const context =
+        readCapability && session === undefined
+          ? undefined
+          : this.writeContext(session, attribution);
       const state: { pending?: Promise<void>; committing: boolean; unopened?: boolean } = {
         committing: false,
         unopened: true,
@@ -1244,13 +1279,18 @@ export class JazzClient {
         assertCurrent();
         await prerequisite();
         assertCurrent();
-        this.runtime.beginTransaction(kind, id, context);
+        if (readCapability) this.runtime.beginTransaction(kind, id, context, readCapability);
+        else this.runtime.beginTransaction(kind, id, context);
         state.unopened = false;
       });
       state.pending.catch(() => {});
       return id;
     }
-    const opened = this.runtime.beginTransaction(kind, id, this.writeContext(session, attribution));
+    const context =
+      readCapability && session === undefined ? undefined : this.writeContext(session, attribution);
+    const opened = readCapability
+      ? this.runtime.beginTransaction(kind, id, context, readCapability)
+      : this.runtime.beginTransaction(kind, id, context);
     this.transactionPreparations.set(opened, { committing: false });
     return opened;
   }
@@ -1881,6 +1921,26 @@ export class JazzClient {
       optionsJson,
     );
     return results as Row[];
+  }
+
+  /** @internal Reuse the existing admission chain before the native read. */
+  async queryAcceptedInternal(
+    query: string,
+    openTransactionId: OpenTransactionId,
+    timeoutMs: number,
+    session?: Session,
+  ): Promise<AcceptedRows<Row>> {
+    validateAcceptedReadTimeout(timeoutMs);
+    if (!this.runtime.queryAccepted) throw new Error("Runtime does not expose accepted reads");
+    const state = this.transactionPreparations.get(openTransactionId);
+    if (!state || state.committing) throw new Error("Accepted read requires an open transaction");
+    if (state.pending) await state.pending;
+    return this.runtime.queryAccepted(
+      query,
+      openTransactionId,
+      session ? JSON.stringify(serializeRuntimeSession(session)) : undefined,
+      timeoutMs,
+    );
   }
 
   /**

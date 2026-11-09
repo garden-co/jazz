@@ -1,3 +1,9 @@
+import {
+  validateAcceptedReadTimeout,
+  type AcceptedRows,
+  type TransactionReadCapability,
+} from "../accepted-read.js";
+import { decodeAcceptedRead } from "./accepted-read-codec.js";
 import type { ClientMigrations } from "../client-migrations.js";
 import { streamingChunks } from "../streaming-source.js";
 import { isHistoryTable, resolveQueryTable } from "../history-relation.js";
@@ -274,7 +280,16 @@ type NativeDb = {
     kind: TransactionKind,
     author?: Uint8Array,
     attribution?: Uint8Array,
+    acceptedEvidence?: boolean,
   ): void;
+  acceptedRead?(
+    query: Uint8Array,
+    openTransactionId: OpenTransactionId,
+    includeDeleted: boolean,
+    timeoutMs: number,
+    author?: Uint8Array,
+    claims?: Record<string, unknown>,
+  ): NativeReadResult | Promise<NativeReadResult>;
   commitTransaction(openTransactionId: string, kind?: TransactionKind): Write;
   rollbackTransaction(openTransactionId: string): void;
   all(
@@ -507,6 +522,7 @@ type PendingTx = {
   kind: TransactionKind;
   identity?: Uint8Array;
   requestSession?: RuntimeSession;
+  readCapability?: TransactionReadCapability;
   /** External provenance fixed at begin, never supplied per staged operation. */
   attribution?: Uint8Array;
   hasStagedMutations: boolean;
@@ -1715,8 +1731,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.assertMutationAdmission("Insert");
     const suppliedRowId = objectId ? parseUuid(objectId) : undefined;
     const writeSession = sessionFromWriteContext(_writeContext);
-    this.applySessionClaims(writeSession);
-    const writeIdentity = this.trustedWriteIdentity(writeSession);
+    const writeIdentity = this.mutationWriteIdentity(writeSession, _writeContext);
     const attribution = this.backendAttribution(_writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(_writeContext);
     const branchView = branchViewFromWriteContext(_writeContext);
@@ -1772,8 +1787,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.assertMutationAdmission(operation);
     const tx = this.currentTx(writeContext, operation);
     const writeSession = sessionFromWriteContext(writeContext);
-    this.applySessionClaims(writeSession);
-    const writeIdentity = this.trustedWriteIdentity(writeSession);
+    const writeIdentity = this.mutationWriteIdentity(writeSession, writeContext);
     const attribution = this.backendAttribution(writeContext);
     const branchView = branchViewFromWriteContext(writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
@@ -1890,8 +1904,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.assertMutationAdmission("Restore");
     const rowId = parseUuid(objectId);
     const writeSession = sessionFromWriteContext(writeContext);
-    this.applySessionClaims(writeSession);
-    const writeIdentity = this.trustedWriteIdentity(writeSession);
+    const writeIdentity = this.mutationWriteIdentity(writeSession, writeContext);
     const attribution = this.backendAttribution(writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const branchView = branchViewFromWriteContext(writeContext);
@@ -1936,8 +1949,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.assertMutationAdmission("Update");
     const rowId = parseUuid(objectId);
     const writeSession = sessionFromWriteContext(writeContext);
-    this.applySessionClaims(writeSession);
-    const writeIdentity = this.trustedWriteIdentity(writeSession);
+    const writeIdentity = this.mutationWriteIdentity(writeSession, writeContext);
     const attribution = this.backendAttribution(writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const branchView = branchViewFromWriteContext(writeContext);
@@ -1997,8 +2009,7 @@ export class NativeRuntimeAdapter implements Runtime {
       // splices against the transaction's own view of the row, so a session
       // or attributed transaction authors them like any other staged write.
       const writeSession = sessionFromWriteContext(writeContext);
-      this.applySessionClaims(writeSession);
-      const writeIdentity = this.trustedWriteIdentity(writeSession);
+      const writeIdentity = this.mutationWriteIdentity(writeSession, writeContext);
       const attribution = this.backendAttribution(writeContext);
       this.assertTransactionAttribution(tx, attribution);
       this.assertTransactionWriteIdentity(tx, attribution ? undefined : writeIdentity);
@@ -2051,8 +2062,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const rowId = parseUuid(objectId);
     const definition = this.table(table);
     const writeSession = sessionFromWriteContext(writeContext);
-    this.applySessionClaims(writeSession);
-    const writeIdentity = this.trustedWriteIdentity(writeSession);
+    const writeIdentity = this.mutationWriteIdentity(writeSession, writeContext);
     const attribution = this.backendAttribution(writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const branchView = branchViewFromWriteContext(writeContext);
@@ -2099,8 +2109,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.table(table);
     const rowId = parseUuid(objectId);
     const writeSession = sessionFromWriteContext(writeContext);
-    this.applySessionClaims(writeSession);
-    const writeIdentity = this.trustedWriteIdentity(writeSession);
+    const writeIdentity = this.mutationWriteIdentity(writeSession, writeContext);
     const attribution = this.backendAttribution(writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const branchView = branchViewFromWriteContext(writeContext);
@@ -2282,9 +2291,10 @@ export class NativeRuntimeAdapter implements Runtime {
     kind: TransactionKind,
     id: OpenTransactionId,
     sessionJson?: string | null,
+    readCapability?: TransactionReadCapability,
   ): OpenTransactionId {
     if (this !== this.ownerRuntime) {
-      return this.ownerRuntime.beginTransaction(kind, id, sessionJson);
+      return this.ownerRuntime.beginTransaction(kind, id, sessionJson, readCapability);
     }
     if (this.closed) {
       throw new Error("Begin transaction failed: native runtime is closed");
@@ -2293,19 +2303,41 @@ export class NativeRuntimeAdapter implements Runtime {
       throw new Error(`Begin transaction failed: transaction ${id} has already been opened`);
     }
     const session = sessionFromWriteContext(sessionJson);
-    this.applySessionClaims(session);
+    const attribution = this.backendAttribution(sessionJson);
+    if (
+      readCapability !== undefined &&
+      (readCapability !== "accepted-evidence" ||
+        kind !== "serializable" ||
+        attribution ||
+        !this.db.acceptedRead ||
+        (this.trustedBackend && (!session || session.backendAuthority)))
+    )
+      throw new Error(
+        "Accepted evidence requires a supported session-bound serializable transaction",
+      );
+    if (!readCapability) this.applySessionClaims(session);
     // The native core binds a serializable transaction's identity at begin. Keep
     // the trusted-serving subject here so every staged operation and its
     // commit are authorized as that one subject.
-    const identity = this.trustedWriteIdentity(session);
-    const attribution = this.backendAttribution(sessionJson);
+    const identity = readCapability ? session?.identity : this.trustedWriteIdentity(session);
     const admission = attribution ? undefined : identity;
-    this.db.beginTransaction(id, kind, admission, attribution);
+    // Rust resolves an implicit peer from the actual opening DbIdentity.
+    // Ordinary calls keep their prior four-argument admission contract.
+    if (readCapability) {
+      this.db.beginTransaction(id, kind, admission, attribution, true);
+      try {
+        this.applySessionClaims(session, true);
+      } catch (error) {
+        this.db.rollbackTransaction(id);
+        throw error;
+      }
+    } else this.db.beginTransaction(id, kind, admission, attribution);
     this.pendingTxs.set(id, {
       id,
       kind,
       identity: admission,
       requestSession: admission ? (session ?? undefined) : undefined,
+      readCapability,
       attribution,
       hasStagedMutations: false,
     });
@@ -2443,6 +2475,48 @@ export class NativeRuntimeAdapter implements Runtime {
     return Promise.resolve(true);
   }
 
+  /** @internal Authority evidence, admitted synchronously before any host wait. */
+  async queryAccepted(
+    queryJson: string,
+    openTransactionId: OpenTransactionId,
+    sessionJson: string | null | undefined,
+    timeoutMs: number,
+  ): Promise<AcceptedRows<RowState>> {
+    validateAcceptedReadTimeout(timeoutMs);
+    if (this.closed || this.ownerRuntime.closed) throw new Error("Native runtime is closed");
+    const pending = this.pendingTxs.get(openTransactionId);
+    if (
+      !pending ||
+      pending.kind !== "serializable" ||
+      pending.readCapability !== "accepted-evidence" ||
+      !this.db.acceptedRead
+    )
+      throw new Error("Accepted evidence was not selected before transaction opening");
+    assertNoUnsupportedPermissionIntrospection(queryJson);
+    if (queryHasArraySubqueries(queryJson))
+      throw new Error("Accepted evidence requires ordinary stored rows");
+    const session = readSession(sessionJson);
+    if (session?.backendAuthority)
+      throw new Error("Accepted evidence requires an explicit session");
+    const boundSession = session ?? pending.requestSession;
+    const read = this.db.acceptedRead(
+      nativeQueryInput(queryJson, this.schema),
+      openTransactionId,
+      queryIncludesDeleted(queryJson),
+      timeoutMs,
+      boundSession?.identity ?? pending.identity,
+      boundSession?.claims,
+    );
+    // Existing read cancellation and owner close/discard machinery owns this.
+    const decoded = decodeAcceptedRead(await this.awaitNativeRead(read));
+    const rows = rowsFromBatches(
+      decoded.batches,
+      this.schema,
+      subscriptionOutputColumns(queryJson, this.schema).rootColumns,
+    );
+    return { rows, through: decoded.through, schema: decoded.schema, evidence: decoded.evidence };
+  }
+
   async query(
     queryJson: string,
     sessionJson?: string | null,
@@ -2465,7 +2539,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const opts = readOptions(tier, queryIncludesDeleted(coreQueryJson), optionsJson);
     const readContext = this.nativeReadContext(session, pendingTx);
     const query = nativeQueryInput(coreQueryJson, this.schema);
-    await this.ensureClientSessionClaims(session);
+    await this.ensureClientSessionClaims(session, pendingTx);
     await this.waitForStrictRemoteQueryTransport(tier);
     await this.processPendingPeerActivityBeforeRead();
     if (this.closed || this.ownerRuntime.closed) return [];
@@ -3383,6 +3457,23 @@ export class NativeRuntimeAdapter implements Runtime {
    * client's own session is the runtime itself, so it writes as the runtime.
    * A trusted-serving host writes as its peer when no session is given.
    */
+  private mutationWriteIdentity(
+    session: RuntimeSession | null | undefined,
+    writeContext: string | null | undefined,
+  ): Uint8Array | undefined {
+    const id = txIdFromContext(writeContext);
+    const pending = id ? this.pendingTxs.get(id) : undefined;
+    if (pending?.readCapability === "accepted-evidence") {
+      // Admission registered the explicit scope once. A staged write must not
+      // restore its cached claims over a revocation observed by the core.
+      const identity = session?.identity ?? this.peerIdentity;
+      this.assertTransactionWriteIdentity(pending, identity);
+      return identity;
+    }
+    this.applySessionClaims(session);
+    return this.trustedWriteIdentity(session);
+  }
+
   private trustedWriteIdentity(session: RuntimeSession | null | undefined): Uint8Array | undefined {
     const serving = this.readAuthorizationHost === "trusted-serving";
     if (!session) return serving && !this.trustedBackend ? this.peerIdentity : undefined;
@@ -3488,8 +3579,14 @@ export class NativeRuntimeAdapter implements Runtime {
     this.clientSessionClaimsKey = key;
   }
 
-  private ensureClientSessionClaims(session: RuntimeSession | null): void | Promise<void> {
+  private ensureClientSessionClaims(
+    session: RuntimeSession | null,
+    pendingTx?: PendingTx,
+  ): void | Promise<void> {
     if (this.closed || this.ownerRuntime.closed) throw new Error("Native runtime is closed");
+    // Accepted admission registered its scope once. Ordinary reads in that
+    // batch must observe live claims, never reinstall their cached session.
+    if (pendingTx?.readCapability === "accepted-evidence") return;
     if (!session || session.backendAuthority || this.readAuthorizationHost === "trusted-serving")
       return;
     if (canonicalJson(session.claims) === this.clientSessionClaimsKey) return;
@@ -3623,19 +3720,23 @@ export class NativeRuntimeAdapter implements Runtime {
       new Utf8Decoder().decode(authorBytesForSession(session)),
     );
   }
-  private applySessionClaims(session: RuntimeSession | null | undefined): void {
+  private applySessionClaims(
+    session: RuntimeSession | null | undefined,
+    explicitAcceptedIdentity = false,
+  ): void {
     // Client runtimes only evaluate their already-settled local replica. They
     // never select the policy-enforcing native entry points, so there is no
     // reason to serialize a session subject into the public native ABI here.
     // In particular, local-first and anonymous subjects are admitted by the
     // first-party TypeScript flow, while raw native identity ingress must keep
     // rejecting their reserved issuers. Claims are required only by the
-    // explicitly selected trusted-serving host, where every identity call is
-    // part of that serving boundary.
+    // explicitly selected trusted-serving host. Accepted capability also binds
+    // an explicit session before its first read. Register that session's claims
+    // after native identity admission; implicit capability leaves them intact.
     if (
       !session ||
       session.backendAuthority ||
-      this.readAuthorizationHost !== "trusted-serving" ||
+      (!explicitAcceptedIdentity && this.readAuthorizationHost !== "trusted-serving") ||
       !this.db.setIdentityClaims
     ) {
       return;
@@ -3667,6 +3768,14 @@ export class NativeRuntimeAdapter implements Runtime {
     pending: PendingTx,
     identity: Uint8Array | undefined,
   ): void {
+    if (pending.readCapability === "accepted-evidence") {
+      const bound = pending.identity ?? this.peerIdentity;
+      const effective = identity ?? this.peerIdentity;
+      if (!sameBytes(bound, effective)) {
+        throw new Error("Native runtime serializable transaction cannot mix write identities");
+      }
+      return;
+    }
     if (pending.kind === "serializable") {
       if (pending.identity && (!identity || !sameBytes(pending.identity, identity))) {
         throw new Error("Native runtime serializable transaction cannot mix write identities");

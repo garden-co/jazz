@@ -1731,14 +1731,16 @@ impl NapiDb {
         kind: String,
         author: Option<Uint8Array>,
         attribution: Option<Uint8Array>,
+        accepted_evidence: Option<bool>,
     ) -> js::Result<()> {
         Ok(self
             .binding()?
-            .begin_transaction(
+            .begin_transaction_with_capability(
                 &open_transaction_id,
                 &kind,
                 author.as_deref(),
                 attribution.as_deref(),
+                accepted_evidence.unwrap_or(false),
             )
             .map_err(host_error)?)
     }
@@ -1834,6 +1836,31 @@ impl NapiDb {
                 query.to_vec(),
                 &json_or_null(opts),
                 open_transaction_id.as_deref(),
+                author.as_deref(),
+                claims,
+            )
+            .map_err(host_error)?;
+        read_or_pending(read)
+    }
+
+    /// Authority evidence in one explicitly admitted serializable transaction.
+    #[napi(js_name = "acceptedRead")]
+    pub fn accepted_read(
+        &self,
+        query: Uint8Array,
+        open_transaction_id: String,
+        include_deleted: bool,
+        timeout_ms: f64,
+        author: Option<Uint8Array>,
+        claims: Option<JsonValue>,
+    ) -> js::Result<Either<Uint8Array, PendingNativeRead>> {
+        let read = self
+            .binding()?
+            .accepted_read(
+                query.to_vec(),
+                &open_transaction_id,
+                include_deleted,
+                timeout_ms,
                 author.as_deref(),
                 claims,
             )
