@@ -3,6 +3,9 @@
 //! Startup supplies an opened database and catalogue through Rust APIs. The
 //! JavaScript host owns event delivery; it must serialize ticks and admit
 //! connections between ticks. Fixture publication and raw test routes live in dev/.
+#[cfg(feature = "durable-object")]
+mod durable_object;
+
 use futures_channel::mpsc;
 use futures_util::StreamExt;
 use jazz::catalogue::{BundleId, CatalogueChange};
@@ -342,12 +345,46 @@ impl WasmServerCore {
         hello: &[u8],
         backend_secret: Option<String>,
     ) -> Result<SocketAdmission, JsValue> {
+        self.finish_socket(hello, || {
+            websocket::admit_backend_session(
+                websocket::Prelude::decode(prelude)?,
+                backend_secret.as_deref(),
+            )
+        })
+    }
+
+    /// Upgrade credentials come from the host's request headers, not the prelude.
+    #[wasm_bindgen(js_name = acceptRemoteSocket)]
+    pub fn accept_remote_socket(
+        &self,
+        prelude: &[u8],
+        hello: &[u8],
+        credential: &str,
+        access: &str,
+        expected: &str,
+    ) -> Result<SocketAdmission, JsValue> {
+        self.finish_socket(hello, || {
+            websocket::admit_remote_session(
+                websocket::Prelude::decode(prelude)?,
+                credential,
+                access,
+                expected,
+            )
+        })
+    }
+}
+
+impl WasmServerCore {
+    fn finish_socket(
+        &self,
+        hello: &[u8],
+        admission: impl FnOnce() -> Result<websocket::BackendSession, WireError>,
+    ) -> Result<SocketAdmission, JsValue> {
         if let Some(refusal) = websocket::foreign_version_refusal(hello) {
             return SocketAdmission::reply(refusal, None);
         }
         let admit = || -> Result<(ServerTransport, Vec<u8>), WireError> {
-            let prelude = websocket::Prelude::decode(prelude)?;
-            let admitted = websocket::admit_backend_session(prelude, backend_secret.as_deref())?;
+            let admitted = admission()?;
             let remote = websocket::decode_hello(hello)?;
             let negotiated =
                 jazz::wire::negotiate_wire(&remote, jazz::wire::current_wire_features())?;

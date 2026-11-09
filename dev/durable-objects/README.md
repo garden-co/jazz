@@ -175,8 +175,8 @@ Catalogue validation and staging live in `jazz-server::runtime::{catalogue,
 deployment}` and are also used by native HTTP handlers. The WASM host exposes
 `publishCatalogue`, `catalogueSnapshot`, and `catalogueSchema`; its caller must
 provide admin authentication, request bounds, and serialized scheduling. These
-are host APIs, not public HTTP routes. Blank-store startup and production HTTP
-routing remain to be integrated.
+are host APIs, not public HTTP routes. The production catalogue adapter below
+provides those boundaries; the raw sync harness still uses fixture startup.
 Socket frames enter session queues; one async tick advances and flushes the
 core before the host sends output. Microtask wakeups avoid re-entering Rust;
 disconnects close session input. `WasmDb` remains only for standalone value probes.
@@ -193,6 +193,71 @@ node dev/durable-objects/native-sqlite/harness/test-server-core.mjs
 # Policy-filtered subscriptions and rejected writes, then catalogue-only restart:
 node dev/durable-objects/native-sqlite/harness/test-scopes.mjs --catalogue
 ```
+
+### Production DO HTTP and WebSocket adapter
+
+`crates/jazz-wasm/durable-object-server.js` owns catalogue HTTP routing and startup.
+The build entry supplies the generated WASM exports to `createJazzDurableObject`
+and exports the returned class. `routeJazzRequest` forwards requests through the
+`JAZZ` SQLite DO namespace, using `idFromName(JAZZ_APP_ID)`. Configure a canonical
+UUID `JAZZ_APP_ID` and a nonempty `JAZZ_ADMIN_SECRET`; the app's object and the
+outer Worker both check the requested app. There is no new durable encoding:
+startup uses the existing catalogue and native authority node convention.
+
+Supported routes are `GET /apps/<app>/schemas`, `GET /apps/<app>/schema/<hash>`,
+`GET /apps/<app>/admin/migrations/graph`, and `GET|POST /apps/<app>/admin/bundles`.
+Every route requires `X-Jazz-Backend-Credential` matching the configured secret
+and `X-Jazz-Backend-Access: admin`, as sent by `remote()`. Direct admin-secret
+headers and user/session access do not grant catalogue access. Body and queue
+limits are enforced before entering Rust. Jobs and ticks share one owner queue.
+
+First creation and publication run inside a short
+[DO storage transaction](https://developers.cloudflare.com/durable-objects/api/legacy-kv-storage-api/#transaction).
+The callback performs local initialization only, with no network waits or admitted
+sessions. A rejected first publication drops the new host and rolls back schema
+creation; a later valid publication can start cleanly. Existing authorities use
+the shared publication path. Reconstruction reads only the persisted catalogue.
+The adapter keeps accepted jobs alive independently of the request with `waitUntil`.
+
+After building with `--features scope-tests`, run:
+
+```sh
+node dev/durable-objects/native-sqlite/harness/test-catalogue.mjs
+```
+
+The test-only entry `catalogue-worker.mjs` supplies WASM build wiring and generated
+fixtures; HTTP behavior comes from the production adapter. Coverage includes the
+real Node remote provider, missing/wrong credentials, access separation, oversized
+bodies, failed first startup, concurrent publication retries, catalogue reads, and
+workerd reconstruction. `POST /apps/<app>/backend/admit` also verifies service authority without creating
+an account; it requires verified `backend` or `admin` access. `/apps/<app>/ws`
+verifies the upgrade credential, then uses the normal prelude/Hello handshake.
+Prelude secrets cannot override the upgrade's access. Backend/admin service links
+are trusted as on native hosting, while backend-stated user sessions remain
+policy-scoped. Session-only upgrades do not grant service or stated-user access;
+guest proofs, thin sessions and relay modes are explicitly unsupported.
+
+The adapter serializes admission with catalogue operations and ticks. Established
+socket input uses `SessionInput` directly, even while a tick awaits progress.
+Frames are capped at 2 MiB, pending input at 8 MiB per socket and 16 MiB per
+object, including retained preludes. It permits 64 sockets with a two-second
+handshake deadline. Output is flushed after ticks and catalogue publication;
+close/error paths release the transport and queued bytes. Hibernation is not used.
+
+```sh
+node dev/durable-objects/native-sqlite/harness/test-create-jazz.mjs
+```
+
+This uses the real Node `createJazz()` and `remote()` provider: readiness publishes
+the catalogue and admits its backend client, writes settle globally, and reads
+recover persisted values. The test restarts workerd with the same Node backend
+still alive and verifies another globally settled write after reconnect, then
+opens a fresh backend against the retained SQLite. It also checks user-session
+handshakes and access/identity/bundle refusals. The schema denies ordinary users;
+service writes exercise native-equivalent trusted-backend authority. Existing
+`test-scopes.mjs` checks policy-filtered user sync and rollback through the shared
+engine. Account registration/link/revocation HTTP routes, direct guest proofs,
+thin hosting and a provisionable package are not implemented by this adapter.
 
 Validated locally: numeric sync and atomic rejection on two objects, disconnected
 session cleanup, and fresh replicas reading persisted values after workerd restart

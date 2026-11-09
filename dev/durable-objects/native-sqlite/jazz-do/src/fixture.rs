@@ -182,3 +182,44 @@ impl FixtureServer {
         })
     }
 }
+
+/// Public-schema builders produce requests for the real HTTP adapter tests.
+#[cfg(feature = "scope-tests")]
+#[wasm_bindgen(js_name = catalogueRequestsForTest)]
+pub fn catalogue_requests_for_test() -> String {
+    use jazz::tools::public_schema::{
+        ColumnType, PolicyExpr, RelationExpr, SchemaBuilder, SchemaHash, TablePolicies, TableSchema,
+    };
+    let request = |table| {
+        let schema = SchemaBuilder::new().table(table).build();
+        let hash = SchemaHash::compute(&schema).to_string();
+        DeployRequest {
+            target_schema_hash: hash.clone(),
+            schemas: vec![DeploySchema { hash, schema }],
+            migrations: vec![],
+            permissions: Default::default(),
+            allow_dropping_history: false,
+        }
+    };
+    let valid = request(TableSchema::builder("notes").column("title", ColumnType::Text));
+    let different = request(TableSchema::builder("other").column("body", ColumnType::Text));
+    let mut invalid_policy =
+        request(TableSchema::builder("invalid_policy").column("title", ColumnType::Text));
+    invalid_policy.permissions.insert(
+        "invalid_policy".into(),
+        TablePolicies::new().with_select(PolicyExpr::ExistsRel {
+            rel: RelationExpr::Limit {
+                input: Box::new(RelationExpr::TableScan {
+                    table: "invalid_policy".into(),
+                    alias: None,
+                }),
+                limit: 1,
+            },
+        }),
+    );
+    let mut wide = TableSchema::builder("too_wide");
+    for i in 0..101 {
+        wide = wide.column(format!("column_{i}").as_str(), ColumnType::Text);
+    }
+    serde_json::json!({"valid": valid, "different": different, "invalidPolicy": invalid_policy, "wide": request(wide)}).to_string()
+}

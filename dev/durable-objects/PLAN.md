@@ -84,13 +84,16 @@ and reconstruction from persisted SQLite before adding automatic provisioning.
 Move reusable hosting into production modules; retain fixture setup, raw probe
 routes, and assertions only in the harness. Do not maintain two server engines.
 
-### 8.1 Database scheduling and threads — production integration remaining
+### 8.1 Database scheduling and threads — sync host integrated
 
 WASM core ownership, async ticks, microtask wakeups, session transport, and
 backend-session handshake now live in `crates/jazz-wasm/src/server.rs`, behind
 its optional `server` feature. The harness's `FixtureServer` supplies test setup
-and delegates to that host. Integrate the remaining JavaScript event scheduling
-and bounded input queues into the production Worker adapter.
+and delegates to that host. The production adapter serializes catalogue jobs,
+socket admission and microtask ticks. Established sockets deliver through
+`SessionInput` without borrowing the owner, so a suspended tick cannot block
+input it needs. Bounded handshake/frame queues and disconnect cleanup are now
+in the production adapter.
 Preserve ordering, cancellation, error propagation, and persistence before
 publication. Connect background I/O completion to host wakeups (section 8.4)
 and validate scheduling across production lifecycle events (section 9).
@@ -117,10 +120,32 @@ catalogue reads and publication, and fixture startup now uses that publication
 path. Native deployment tests and an owner restart/idempotency test cover the
 extraction. The workerd catalogue suite exercises publication on DO SQLite.
 
-HTTP routing, admin authentication, bounded request bodies, blank-store startup,
-and publication lifetime after disconnect still need a production Worker adapter.
-The WASM methods are host APIs, not authenticated HTTP endpoints. This is not yet
-a deployable host or an end-to-end `createJazz().ready()` implementation.
+The production adapter in `crates/jazz-wasm/durable-object-server.js` now routes
+catalogue requests to the configured app's stable object, verifies the remote
+provider's credential plus admin access, and serializes catalogue jobs and ticks.
+Bodies are limited to 8 MiB, pending input to 16 MiB, and pending requests to 16.
+Accepted operations are retained with `waitUntil`. First database creation and
+publication share a short storage transaction; errors discard the new host and
+roll back its schema. This transaction performs no network I/O and is not an
+application transaction overlay. Recovery opens the persisted catalogue without
+republishing or accepting a client-supplied recovery schema.
+
+`test-catalogue.mjs` validates authentication, size limits, rejected first
+publication (permissions and SQLite errors), concurrent retries, catalogue reads,
+and workerd restart. It also calls the real Node `remote()` provider over HTTP.
+The production adapter also serves `POST /backend/admit` and `/ws`. Upgrade
+credentials and access override prelude secrets: service links have the same
+trusted access as native backends; backend-stated user sessions remain scoped.
+Session-only upgrades cannot elevate themselves. Guest proofs and thin sessions
+are refused explicitly. Socket frames are limited to 2 MiB, pending frames to
+8 MiB per socket and 16 MiB per object (including retained preludes), with 64
+sockets and a two-second handshake deadline.
+
+`test-create-jazz.mjs` now exercises Node `createJazz({ store: remote(...) })`
+through readiness, globally settled backend writes and reads, live reconnect
+while Node stays running across workerd restart, and a fresh backend reading the
+persisted data. It also checks stated-user admission and credential/access,
+identity and bundle refusals. Automatic provisioning remains section 10.
 
 ### 8.4 Outbound HTTP and background I/O
 
@@ -144,8 +169,9 @@ The harness's raw `/session` endpoint still accepts a fixture author. Its new
 comparison, canonical identity checks, and policy-claim conversion with native
 hosting. Bundle validation uses the existing core admission path. Local workerd
 checks cover credential/identity/bundle refusals, policy-scoped sync, and restart.
-Direct guest proofs and account revocation, trusted/admin links, thin-client
-hosting, and shared HTTP account/catalogue routes remain unconnected; unsupported
+Trusted backend/admin links and backend-stated sessions now work through the
+production host. Direct guest proofs and account revocation, thin-client
+hosting, and shared HTTP account routes remain unconnected; unsupported
 socket modes fail explicitly. Keep `createJazz()`'s
 application authentication and publication responsibilities intact. Verify valid
 sessions and rejection of invalid credentials/bundles through the normal paths.
@@ -197,10 +223,10 @@ sync. Use same-base CodSpeed comparisons for end-to-end performance claims.
 
 ## Delivery order
 
-Sections 5 and 7 remain deferred. First move the tested host implementation out
-of the harness. Then make Node `createJazz({ store: remote(...) })` reach readiness
-against the production DO host in workerd, including catalogue publication and
-backend admission. Validate authenticated read/write and restart. Finally add the
-`durableObjects()` provisioning provider around that host. Workers-hosted
+Sections 5 and 7 remain deferred. The reusable host is in production modules,
+and Node `createJazz({ store: remote(...) })` now reaches readiness against it in
+workerd. Backend read/write, live reconnect and persisted restart are validated.
+Add the `durableObjects()` provisioning provider around this host while keeping
+the unsupported account/guest/thin modes explicit (section 8.6). Workers-hosted
 `createJazz()` is not a prerequisite. Do not claim full transaction or large-value
 support while sections 5 and 7 remain deferred; hibernation remains separate.

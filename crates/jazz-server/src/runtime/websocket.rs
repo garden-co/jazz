@@ -149,7 +149,8 @@ pub fn encode_frame_batches(frames: &[Vec<u8>]) -> Result<Vec<Vec<u8>>, postcard
     Ok(batches)
 }
 
-/// A backend-authenticated user session. This never grants SYSTEM access.
+/// The identity served by an admitted connection. Trusted service links use
+/// SYSTEM; backend-stated user sessions keep their policy-scoped identity.
 pub struct BackendSession {
     pub identity: jazz::ids::AuthorSubject,
     pub claims: std::collections::BTreeMap<String, jazz::records::Value>,
@@ -203,6 +204,73 @@ pub fn admit_backend_session(
     Ok(BackendSession {
         identity,
         claims,
+        bundle,
+    })
+}
+
+/// Admit a socket whose HTTP upgrade is authenticated by the remote provider.
+/// Only the verified header access grants authority; prelude secrets never do.
+/// This mirrors the native workload gate and its backend/admin link semantics.
+pub fn admit_remote_session(
+    mut prelude: Prelude,
+    credential: &str,
+    access: &str,
+    expected: &str,
+) -> Result<BackendSession, WireError> {
+    use super::session_admission::{constant_time_eq, peer_identity};
+    let denied = |message: &str| {
+        WireError::new(
+            WireErrorCode::AuthFailed,
+            WireRetry::Never,
+            message.to_owned(),
+        )
+    };
+    if expected.is_empty() || !constant_time_eq(credential, expected) {
+        return Err(denied("Invalid backend credential"));
+    }
+    if !matches!(access, "" | "backend" | "admin") {
+        return Err(denied("Invalid backend access"));
+    }
+    // Session-only upgrades cannot assert users or authenticate service links.
+    // Guest proof verification needs the account registry and is not wired yet.
+    if access.is_empty() {
+        return Err(WireError::new(
+            WireErrorCode::UnsupportedFeature,
+            WireRetry::Never,
+            "guest proof admission is not supported on this host yet",
+        ));
+    }
+    if prelude.bootstrap_catalogue || prelude.requested_link != RequestedLink::OrdinarySession {
+        return Err(WireError::new(
+            WireErrorCode::UnsupportedFeature,
+            WireRetry::Never,
+            "this host currently supports ordinary sessions only",
+        ));
+    }
+    peer_identity(&prelude.peer_identity).map_err(|message| denied(&message))?;
+    prelude.auth.admin_secret = None;
+    prelude.auth.backend_secret = Some(expected.to_owned());
+    if access == "backend" && prelude.auth.backend_session.is_some() {
+        return admit_backend_session(prelude, Some(expected));
+    }
+    if access == "backend" && prelude.auth.jwt_token.is_some() {
+        return Err(WireError::new(
+            WireErrorCode::UnsupportedFeature,
+            WireRetry::Never,
+            "guest proof admission is not supported on this host yet",
+        ));
+    }
+    let bundle = prelude
+        .bundle
+        .as_deref()
+        .map(|text| {
+            jazz::catalogue::BundleId::from_hex(text)
+                .ok_or_else(|| denied("invalid permissions bundle id"))
+        })
+        .transpose()?;
+    Ok(BackendSession {
+        identity: jazz::ids::AuthorSubject::SYSTEM,
+        claims: Default::default(),
         bundle,
     })
 }

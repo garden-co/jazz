@@ -63,3 +63,36 @@ fn provider_claims_cannot_replace_the_authenticated_subject() {
         Some(&Value::String("editor".into()))
     );
 }
+
+/// Alice's backend service link is trusted, but a session it states for Alice
+/// remains Alice. Mallory cannot elevate a session-only upgrade using secrets
+/// supplied inside the untrusted prelude.
+#[test]
+fn upgrade_access_controls_service_authority() {
+    use jazz_server::runtime::websocket::admit_remote_session;
+    let user = || prelude(Some("untrusted-prelude-secret"), json!({}));
+    let alice = admit_remote_session(user(), "secret", "backend", "secret").unwrap();
+    assert_ne!(alice.identity, AuthorSubject::SYSTEM);
+    for access in ["", "unknown"] {
+        let mut forged = user();
+        forged.auth.admin_secret = Some("secret".into());
+        assert!(admit_remote_session(forged, "secret", access, "secret").is_err());
+    }
+    assert!(admit_remote_session(user(), "wrong", "admin", "secret").is_err());
+    assert!(admit_remote_session(user(), "", "admin", "").is_err());
+    let mut backend = user();
+    backend.auth.backend_session = None;
+    assert_eq!(
+        admit_remote_session(backend, "secret", "backend", "secret")
+            .unwrap()
+            .identity,
+        AuthorSubject::SYSTEM
+    );
+    // Just like native admin links, explicit admin access is full authority.
+    assert_eq!(
+        admit_remote_session(user(), "secret", "admin", "secret")
+            .unwrap()
+            .identity,
+        AuthorSubject::SYSTEM
+    );
+}
