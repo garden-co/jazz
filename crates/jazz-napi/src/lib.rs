@@ -59,7 +59,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use futures::FutureExt;
 use jazz::binding_host::{self, Binding, EventChunk, HostError, HostFuture, HostResult, OpenAs};
 use jazz::db::{Error as CoreError, FileOptions, LargeValueUpdate, SubscriptionEvent as CoreEvent};
-use jazz::db::{SubscriptionStream, block_on};
+use jazz::db::{SubscriptionStream, TickScheduler, TickUrgency, block_on};
 use jazz::identity;
 use jazz::tools::AppId;
 use jazz::tx::DurabilityTier;
@@ -577,6 +577,32 @@ impl Host {
         );
         if status != napi::Status::Ok {
             self.tick_requested.store(false, Ordering::Release);
+        }
+    }
+}
+
+impl TickScheduler for Host {
+    fn schedule_tick(&self, urgency: TickUrgency) {
+        if urgency == TickUrgency::Immediate {
+            self.request_tick();
+            return;
+        }
+        let wake = match urgency {
+            TickUrgency::Deferred => "deferred",
+            TickUrgency::AfterCurrentTurn => "after-current-turn",
+            TickUrgency::Immediate => unreachable!(),
+        };
+        if let Some(scheduler) = self.tick_scheduler.borrow().as_ref() {
+            scheduler.call(Ok(wake.to_owned()), ThreadsafeFunctionCallMode::NonBlocking);
+        }
+    }
+
+    fn schedule_tick_after(&self, delay_ms: u64) {
+        if let Some(scheduler) = self.tick_scheduler.borrow().as_ref() {
+            scheduler.call(
+                Ok(format!("after:{delay_ms}")),
+                ThreadsafeFunctionCallMode::NonBlocking,
+            );
         }
     }
 }
@@ -1723,8 +1749,8 @@ impl NapiDb {
             .map_err(host_error)?)
     }
 
-    /// The host's tick callback: called with `"immediate"` whenever there
-    /// is sync work (a local write to upload, frames to apply).
+    /// Install the core's progress/deadline hook. The host schedules ticks
+    /// and re-polls pending reads, using `"after:<milliseconds>"` for timers.
     #[napi(
         js_name = "setTickScheduler",
         ts_args_type = "callback: ((err: Error | null, arg: string) => void)"
@@ -1738,10 +1764,16 @@ impl NapiDb {
             .build_callback(move |context| {
                 // Clear before calling JS so reentrant progress can request
                 // the next turn without losing its wake.
-                requested.store(false, Ordering::Release);
+                if context.value == "immediate" {
+                    requested.store(false, Ordering::Release);
+                }
                 Ok(context.value)
             })?;
         *inner.host.tick_scheduler.borrow_mut() = Some(callback);
+        inner
+            .binding
+            .db
+            .set_tick_scheduler(Some(inner.host.clone()));
         Ok(())
     }
 
@@ -2030,6 +2062,7 @@ impl NapiDb {
             return Ok(Either::A(Vec::new().into()));
         };
         if self.owns_runtime {
+            inner.binding.db.set_tick_scheduler(None);
             inner.host.tick_scheduler.borrow_mut().take();
             inner.host.mutation_errors.borrow_mut().take();
             inner.host.upstream_mutation_errors.borrow_mut().take();
