@@ -279,6 +279,7 @@ export interface ReachableSeedBuilder {
     user_column: string,
     from: SessionRefValue,
     team_column: string,
+    seed_filters?: Record<string, unknown>,
   ): PermissionRelation;
 }
 
@@ -619,6 +620,7 @@ class ReachableRelationSeedBuilder implements ReachableSeedBuilder {
     user_column: string,
     from: SessionRefValue,
     team_column: string,
+    seed_filters: Record<string, unknown> = {},
   ): PermissionRelation {
     if (!isSessionRefValue(from)) {
       throw new Error(
@@ -629,6 +631,7 @@ class ReachableRelationSeedBuilder implements ReachableSeedBuilder {
     const seedScope = seed_table;
 
     const seedPredicates: RelPredicateExpr[] = [
+      ...whereObjectToRelationPredicates(seed_filters, seedScope),
       {
         Cmp: {
           left: { scope: seedScope, column: user_column },
