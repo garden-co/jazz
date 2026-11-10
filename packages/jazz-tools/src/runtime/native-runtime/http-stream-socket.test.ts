@@ -4,7 +4,7 @@ import {
   STREAM_RECORD_SESSION,
   UPGRADE_FAILURES_BEFORE_STREAM,
   encodeStreamRecord,
-  sameOriginWebSocketConstructor,
+  httpStreamFallbackWebSocket,
   streamUrlForSocketUrl,
 } from "./http-stream-socket.js";
 import type { WebSocketConstructor } from "./websocket.js";
@@ -156,7 +156,7 @@ describe("same-origin socket fallback", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const Socket = sameOriginWebSocketConstructor(failingNative());
+    const Socket = httpStreamFallbackWebSocket(failingNative());
     const socket = new Socket(url);
     expect(await outcome(socket)).toBe("open");
     socket.close();
@@ -185,7 +185,7 @@ describe("same-origin socket fallback", () => {
     vi.stubGlobal("fetch", fetchMock);
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
 
-    const Socket = sameOriginWebSocketConstructor(failingNative());
+    const Socket = httpStreamFallbackWebSocket(failingNative());
     // A restart or a draining instance fails a socket or two: retried as sockets.
     for (let attempt = 1; attempt < UPGRADE_FAILURES_BEFORE_STREAM; attempt++) {
       expect(await outcome(new Socket(url))).toBe("closed");
@@ -208,7 +208,7 @@ describe("same-origin socket fallback", () => {
     vi.stubGlobal("fetch", fetchMock);
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const closed: string[] = [];
-    const Socket = sameOriginWebSocketConstructor(hangingNative(closed));
+    const Socket = httpStreamFallbackWebSocket(hangingNative(closed));
     // The first hang fails as a socket: a scale-to-zero edge holds the
     // first upgrade after idle while the instance starts.
     const first = outcome(new Socket(url));
@@ -233,7 +233,7 @@ describe("same-origin socket fallback", () => {
     const fetchMock = backendThatUpgrades("slow-open.test", url, "s4");
     vi.stubGlobal("fetch", fetchMock);
     const natives: HeldSocket[] = [];
-    const Socket = sameOriginWebSocketConstructor(heldNative(natives));
+    const Socket = httpStreamFallbackWebSocket(heldNative(natives));
     const socket = new Socket(url);
     const result = outcome(socket);
     await vi.advanceTimersByTimeAsync(SOCKET_OPEN_DEADLINE_MS - 1);
@@ -264,7 +264,7 @@ describe("same-origin socket fallback", () => {
     const fetchMock = backendThatUpgrades("closed-early.test", url, "s5");
     vi.stubGlobal("fetch", fetchMock);
     const natives: HeldSocket[] = [];
-    const socket = new (sameOriginWebSocketConstructor(heldNative(natives)))(url);
+    const socket = new (httpStreamFallbackWebSocket(heldNative(natives)))(url);
     socket.close();
     await vi.advanceTimersByTimeAsync(2 * SOCKET_OPEN_DEADLINE_MS);
     expect(fetchMock).not.toHaveBeenCalled();
@@ -277,7 +277,7 @@ describe("same-origin socket fallback", () => {
       "fetch",
       vi.fn(async () => new Response(null, { status: 404 })),
     );
-    const Socket = sameOriginWebSocketConstructor(hangingNative([]));
+    const Socket = httpStreamFallbackWebSocket(hangingNative([]));
     for (let attempt = 0; attempt < 3; attempt++) {
       const result = outcome(new Socket(url));
       await vi.advanceTimersByTimeAsync(SOCKET_OPEN_DEADLINE_MS);
@@ -292,8 +292,8 @@ describe("same-origin socket fallback", () => {
       vi.fn(async () => new Response("Upgrade to a WebSocket", { status: 426 })),
     );
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    const Failing = sameOriginWebSocketConstructor(failingNative());
-    const Opening = sameOriginWebSocketConstructor(openingNative());
+    const Failing = httpStreamFallbackWebSocket(failingNative());
+    const Opening = httpStreamFallbackWebSocket(openingNative());
     for (let round = 0; round < 2; round++) {
       for (let attempt = 1; attempt < UPGRADE_FAILURES_BEFORE_STREAM; attempt++) {
         expect(await outcome(new Failing(url))).toBe("closed");
@@ -315,7 +315,7 @@ describe("same-origin socket fallback", () => {
       vi.fn(async () => answers.shift()!()),
     );
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    const Socket = sameOriginWebSocketConstructor(failingNative());
+    const Socket = httpStreamFallbackWebSocket(failingNative());
     const fail = async (answer: () => Response) => {
       answers.push(answer);
       expect(await outcome(new Socket(url))).toBe("closed");
@@ -347,7 +347,7 @@ describe("same-origin socket fallback", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    const Socket = sameOriginWebSocketConstructor(failingNative());
+    const Socket = httpStreamFallbackWebSocket(failingNative());
     const url = "ws://proxy.test/apps/a1/ws";
     expect(await outcome(new Socket(url))).toBe("closed");
     // Not remembered: the next session tries a native socket again.
@@ -366,7 +366,7 @@ describe("same-origin socket fallback", () => {
         throw new TypeError("network down");
       }),
     );
-    const Socket = sameOriginWebSocketConstructor(failingNative());
+    const Socket = httpStreamFallbackWebSocket(failingNative());
     const socket = new Socket("ws://down.test/jazz/apps/a1/ws");
     const result = outcome(socket);
     // The native socket has failed, but while the probe runs it's still connecting.
