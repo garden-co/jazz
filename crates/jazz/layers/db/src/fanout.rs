@@ -534,6 +534,7 @@ impl Inner {
     ) -> Result<(Compiled, bool), Error> {
         let (policy, claims) = self.read_sessions(prepared, identity);
         let schema = self.read_schema(prepared, read);
+        self.require_cached_catalogue_schema(&schema)?;
         let compiled = self
             .read_ctx(prepared, &schema, policy.as_ref(), &claims, read)
             .compile_query(&prepared.query, read.include_deleted)?;
@@ -550,6 +551,7 @@ impl Inner {
         compiled: &Compiled,
     ) -> Result<Vec<Watch>, Error> {
         let schema = self.read_schema(prepared, read);
+        self.require_cached_catalogue_schema(&schema)?;
         // Watches name stored tables and columns: changed rows do.
         let stored = |name: &str| schema.stored_table(name).map(str::to_owned);
         // Under a branch view, inherited rows read with the head's branch
@@ -828,6 +830,7 @@ impl Inner {
                     let prepared = &group.prepared;
                     let read = &group.read;
                     let schema = self.read_schema(prepared, read);
+                    self.require_cached_catalogue_schema(&schema)?;
                     let root = schema
                         .stored_table(
                             history_source_table(&prepared.query.table)

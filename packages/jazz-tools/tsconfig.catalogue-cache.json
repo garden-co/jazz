@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.tests.json",
+  "include": [
+    "src/types/fs-native-extensions.d.ts",
+    "src/runtime/catalogue-cache.ts",
+    "src/runtime/catalogue-cache-node.ts",
+    "src/runtime/catalogue-cache-node.browser.ts",
+    "src/runtime/catalogue-cache.test.ts",
+    "src/runtime/catalogue-cache-node-process.test.ts"
+  ],
+  "exclude": ["node_modules", "dist"]
+}

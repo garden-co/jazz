@@ -36,6 +36,7 @@ use wasm_bindgen_futures::future_to_promise;
 mod browser;
 #[cfg(all(target_arch = "wasm32", feature = "browser-bench"))]
 pub mod browser_bench;
+mod catalogue_cache;
 mod identity;
 mod text;
 
@@ -1150,6 +1151,15 @@ impl WasmDb {
     }
 
     fn open_memory_as(schema: &[u8], config: &[u8], how: OpenAs<'_>) -> Result<WasmDb, JsValue> {
+        Self::open_memory_as_with_catalogue(schema, config, how, None)
+    }
+
+    fn open_memory_as_with_catalogue(
+        schema: &[u8],
+        config: &[u8],
+        how: OpenAs<'_>,
+        cached: Option<&[u8]>,
+    ) -> Result<WasmDb, JsValue> {
         initialize_wasm_tracing();
         let (schema, mut config) = binding_host::decode_open(schema, config).map_err(host_error)?;
         let (identity, trusted) =
@@ -1160,6 +1170,10 @@ impl WasmDb {
         )
         .map_err(|error| host_error(binding_host::HostError::Argument(error)))?;
         let db = block_on(binding_host::open_memory(db_config)).map_err(to_js_error)?;
+        if let Some(bytes) = cached {
+            // SAFETY: explicit trusted-host constructor, before Binding admits a replica.
+            unsafe { db.install_cached_catalogue(bytes) }.map_err(to_js_error)?;
+        }
         Ok(Self::runtime_owner(Binding::new(db, identity, trusted)))
     }
 
@@ -1240,6 +1254,18 @@ impl WasmDb {
         database: String,
         how: OpenAs<'_>,
     ) -> Result<WasmDb, JsValue> {
+        Self::open_browser_as_with_catalogue(storage, schema, config, database, how, None).await
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    async fn open_browser_as_with_catalogue(
+        storage: JsValue,
+        schema: Vec<u8>,
+        config: Vec<u8>,
+        database: String,
+        how: OpenAs<'_>,
+        cached: Option<Vec<u8>>,
+    ) -> Result<WasmDb, JsValue> {
         initialize_wasm_tracing();
         let (schema, mut config) =
             binding_host::decode_open(&schema, &config).map_err(host_error)?;
@@ -1254,6 +1280,10 @@ impl WasmDb {
         )
         .map_err(|error| host_error(binding_host::HostError::Argument(error)))?;
         let (db, store) = browser::open(&spec, db_config).await?;
+        if let Some(bytes) = cached.as_deref() {
+            // SAFETY: explicit trusted-host constructor, before sharing or transport.
+            unsafe { db.install_cached_catalogue(bytes) }.map_err(to_js_error)?;
+        }
         let owner = Self::runtime_owner(Binding::new(db, identity, trusted));
         *owner.open_inner()?.host.store.borrow_mut() = Some(store);
         Ok(owner)

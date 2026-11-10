@@ -52,6 +52,14 @@ export declare class JazzServer {
 }
 
 export declare class NapiDb {
+  hasAuthenticatedCatalogue(): boolean
+  takeAuthenticatedCatalogueState(): NativeCatalogueState
+  validateCatalogueCaptureReplacement(previous: Uint8Array, next: Uint8Array): void
+  /** Trusted same-app host cache, restored before replica/session admission. */
+  static openMemoryWithCatalogue(schema: Uint8Array, config: Uint8Array, capture: Uint8Array): NapiDb
+  static openMemoryWithSelfSignedProofAndCatalogue(schema: Uint8Array, config: Uint8Array, token: string, appId: string, claimedAuthor: string, capture: Uint8Array): NapiDb
+  static openPersistentWithCatalogue(dataPath: string, schema: Uint8Array, config: Uint8Array, capture: Uint8Array): NapiDb
+  static openPersistentWithSelfSignedProofAndCatalogue(dataPath: string, schema: Uint8Array, config: Uint8Array, token: string, appId: string, claimedAuthor: string, capture: Uint8Array): NapiDb
   /**
    * Exact wire capabilities compiled into this native binding.
    *
@@ -408,6 +416,11 @@ export declare function mintLocalFirstToken(seedB64: string, audience: string, t
 
 /** Exact build/ABI fingerprint for the generated native artifact. */
 export declare function nativeArtifactFingerprint(): string
+
+export interface NativeCatalogueState {
+  capture?: Uint8Array
+  ready: boolean
+}
 
 /** Where `anchor` lands in `text`: `{ position, confidence, ambiguous }`. */
 export declare function resolveTextAnchor(anchor: JsonValue, text: string, version?: number | undefined | null): JsonValue

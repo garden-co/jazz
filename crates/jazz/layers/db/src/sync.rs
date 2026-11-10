@@ -7047,6 +7047,8 @@ impl Db {
     /// refuses every upstream (see [`stranded`]).
     pub fn become_replica(&self) {
         let mut inner = self.inner.borrow_mut();
+        // Even an already-restored replica is now published in this lifetime.
+        inner.catalogue_owner_published.set(true);
         if inner.client.is_some() {
             return;
         }
@@ -8362,6 +8364,7 @@ impl Db {
                                 let client = inner.client.as_mut().expect("client");
                                 client.catalogued = true;
                                 client.uncatalogued = None;
+                                inner.catalogue_capture_pending.set(true);
                             }
                             // This store cannot store rows as its upstream
                             // does: it stops syncing with it, nothing that
@@ -9909,6 +9912,7 @@ impl Db {
     ) -> Result<SubscriberId, Error> {
         self.check_session_pin(identity, bundle.as_ref())?;
         let mut inner = self.inner.borrow_mut();
+        inner.catalogue_owner_published.set(true);
         // One relay tier only (SPEC 9 §9.5).
         debug_assert!(
             !inner.non_durable,
