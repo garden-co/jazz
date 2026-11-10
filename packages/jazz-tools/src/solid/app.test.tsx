@@ -9,7 +9,6 @@ import { useJazzClient } from "./provider.js";
 const factory = vi.hoisted(() => vi.fn());
 vi.mock("../session/create-jazz-session.js", () => ({ createJazzClient: factory }));
 vi.mock("../web/create-jazz-client.js", () => ({ openJazzClient: vi.fn() }));
-vi.mock("../dev-tools/auto-attach.js", () => ({ startInspectorOnce: vi.fn() }));
 const flush = async () => {
   for (let i = 0; i < 40; i++) await Promise.resolve();
 };
@@ -85,7 +84,7 @@ it("retries startup through the default UI and exposes unified auth to children"
   document.body.append(node);
   dispose = render(
     () => (
-      <JazzProvider scope="test" autoAttachDevTools={false}>
+      <JazzProvider scope="test">
         <Child />
       </JazzProvider>
     ),
@@ -135,7 +134,6 @@ it("follows the backend on reauthenticate and releases children before shutdown"
         initial="signed-out"
         signedOut={<SignedOut />}
         loading={<p>WAIT</p>}
-        autoAttachDevTools={false}
       >
         <Child />
       </JazzProvider>
@@ -162,4 +160,20 @@ it("follows the backend on reauthenticate and releases children before shutdown"
   await flush();
   expect(owner.getSnapshot().status).toBe("closed");
   expect(events.slice(-2)).toEqual(["detached", "shutdown:b"]);
+});
+it("refuses the removed autoAttachDevTools prop instead of passing it to the client", () => {
+  const node = document.createElement("div");
+  document.body.append(node);
+  const props = { autoAttachDevTools: false } as Record<string, unknown>;
+  expect(() =>
+    render(
+      () => (
+        <JazzProvider scope="test" {...props}>
+          <p>ready</p>
+        </JazzProvider>
+      ),
+      node,
+    ),
+  ).toThrow(/JazzProvider takes no autoAttachDevTools.*mountInspector/);
+  expect(factory).not.toHaveBeenCalled();
 });

@@ -73,7 +73,7 @@ it("upgrades to the local-first client under a mounted tree, keeping its state a
   await db.insert(app.notes, { text: "before" }).wait({ tier: "global" });
 
   const view = render(
-    <JazzSessionProvider session={session} autoAttachDevTools={false}>
+    <JazzSessionProvider session={session}>
       <Notes />
     </JazzSessionProvider>,
   );
