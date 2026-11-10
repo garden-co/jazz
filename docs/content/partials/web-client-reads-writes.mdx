@@ -2,7 +2,6 @@
 
 Both clients return the same `Db`: [queries](/docs/reading/queries), `subscribe`, insert, update,
 upsert, delete, [transactions](/docs/writing/transactions) and the framework hooks work unchanged.
-The difference is when a write shows up:
 
 - **Thin client.** A write shows after one round trip to your backend, and `wait()` resolves when
   the server has answered.
