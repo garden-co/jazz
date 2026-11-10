@@ -1,6 +1,6 @@
 //! The single-object ceiling workload against a real Durable Object: a
 //! Jazz authority on the object's own SQLite in workerd, reached over
-//! WebSockets (dev/durable-objects/native-sqlite/harness).
+//! WebSockets (packages/jazz-tools/tests/durable-objects).
 //!
 //! A collaborative task app: `tasks` rows in projects of `PROJECT` (200),
 //! `GROUP` connected users per project, each subscribed to its project. A

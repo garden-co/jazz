@@ -1,0 +1,14 @@
+# Development fixtures for the production managed-SQLite backend.
+[workspace]
+resolver = "2"
+members = ["jazz-do"]
+
+[patch.crates-io]
+sqlite-wasm-rs = { path = "../../../crates/jazz-wasm/durable-object/sqlite-wasm-rs-decls" }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+
+[profile.release.package.jazz-do]
+opt-level = "s"

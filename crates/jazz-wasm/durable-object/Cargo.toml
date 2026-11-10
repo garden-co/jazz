@@ -1,0 +1,12 @@
+# Production managed-SQLite WASM build. Keep this patch isolated from the
+# main workspace, whose browser build bundles SQLite.
+[workspace]
+resolver = "2"
+members = ["jazz-do-server"]
+
+[patch.crates-io]
+sqlite-wasm-rs = { path = "sqlite-wasm-rs-decls" }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1

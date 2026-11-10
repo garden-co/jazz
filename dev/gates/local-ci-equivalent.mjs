@@ -278,7 +278,7 @@ export const ciPartitions = Object.freeze({
   // The whole suite on native SQLite with Cloudflare Durable Object SQLite's
   // limits (100 bound parameters, 100 KB statements, expression depth 100,
   // ...), so SQL that would fail there fails here. See
-  // dev/durable-objects/README.md.
+  // packages/jazz-tools/tests/durable-objects/README.md.
   "durable-object-limits": Object.freeze([
     command("Durable Object SQLite limits", "cargo", [
       "test",

@@ -192,7 +192,8 @@
     "stage:inspector-overlay": "node scripts/stage-inspector-overlay.mjs",
     "pack:dry-run": "npm pack --dry-run",
     "build:durable-objects": "node scripts/bundle-durable-object-worker.mjs",
-    "prepack": "pnpm build:durable-objects"
+    "prepack": "pnpm build:durable-objects",
+    "test:durable-objects": "node scripts/prepare-durable-object-tests.mjs && node ../../dev/gates/run-correctness-consumer.mjs -- pnpm exec vitest run --config vitest.config.durable-objects.ts"
   },
   "dependencies": {
     "@noble/curves": "2.0.1",
@@ -233,6 +234,7 @@
     "jsdom": "^26.0.0",
     "libsodium": "0.8.3",
     "libsodium-wrappers": "0.8.3",
+    "miniflare": "4.20260730.0",
     "prosemirror-markdown": "^1.13.9",
     "prosemirror-model": "^1.25.4",
     "prosemirror-state": "^1.4.4",

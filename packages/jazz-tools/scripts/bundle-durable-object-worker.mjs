@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 const root = fileURLToPath(new URL("../../../", import.meta.url));
-const workspace = join(root, "dev/durable-objects/native-sqlite");
+const workspace = join(root, "crates/jazz-wasm/durable-object");
 const output = join(root, "packages/jazz-tools/durable-object-worker");
 const pkg = join(workspace, "server-pkg");
 const args = [
