@@ -11,7 +11,7 @@ entry uses supported Node crypto and Buffer APIs, but no NAPI, local database,
 Node listener or Vercel SDK. Import the schema DSL from this entry as well to
 avoid pulling browser-runtime initialization from the general package entry.
 
-The package's `workerd` condition selects internal socket, artifact and lifecycle
+The package's `workerd` condition selects internal socket and lifecycle
 adapters; Node selects its native adapters by default. Wrangler resolves this
 automatically. With another bundler, enable the `workerd` condition. Set TypeScript
 `compilerOptions.customConditions` to `["workerd"]` in the Worker application to
@@ -24,7 +24,8 @@ Pass credentials from Worker bindings; the API token deploys the host, while
 the separate stable core secret authenticates database requests and sockets.
 The application Worker itself is deployed by your normal application tooling.
 
-The package bundles a compressed copy of the release host for upload, verifies
+Both Node and Workers load the same generated `artifact.js`, containing the
+compressed Worker/WASM bytes and version manifest. The provider verifies
 its hashes and package version, and uses Worker `fetch()` for HTTP and socket
 upgrades. This increases application bundle size; `remote({ url, appId, secret })`
 remains available when provisioning happens elsewhere and does not need those

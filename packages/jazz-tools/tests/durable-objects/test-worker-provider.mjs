@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { Miniflare, Response as WorkerResponse } from "miniflare";
 import { createHash } from "node:crypto";
 import { builtinModules, createRequire } from "node:module";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,9 +30,7 @@ let worker,
   uploads = 0,
   apiCalls = 0,
   upgrades = 0;
-const manifest = JSON.parse(
-  await readFile(new URL("../../durable-object-worker/manifest.json", import.meta.url), "utf8"),
-);
+const { manifest } = await import("../../durable-object-worker/artifact.js");
 const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
 async function outbound(request) {
   const url = new URL(request.url);

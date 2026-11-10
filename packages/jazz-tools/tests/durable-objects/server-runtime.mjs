@@ -2,6 +2,9 @@ import { Miniflare } from "miniflare";
 import { readdirSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { loadArtifact } from "../../dist/backend/runtime/durable-object-artifact.js";
+// Supply decoded modules directly; paths below are virtual import identities.
+const artifact = await loadArtifact();
 const here = fileURLToPath(new URL(".", import.meta.url));
 const root = resolve(here, "../../../..");
 const pkg = join(here, "pkg");
@@ -14,10 +17,12 @@ export function createServerHarness(app, secret, overrides = {}) {
             {
               type: "ESModule",
               path: join(root, "packages/jazz-tools/durable-object-worker/worker.mjs"),
+              contents: new TextDecoder().decode(artifact.worker),
             },
             {
               type: "CompiledWasm",
               path: join(root, "packages/jazz-tools/durable-object-worker/jazz.wasm"),
+              contents: artifact.wasm,
             },
           ]
         : [

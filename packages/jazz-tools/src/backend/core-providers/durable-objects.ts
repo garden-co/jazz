@@ -1,4 +1,4 @@
-import { loadArtifact } from "#jazz/backend-artifact";
+import { loadArtifact } from "../runtime/durable-object-artifact.js";
 import { createHash } from "node:crypto";
 import { accountAppId } from "../../accounts/local-first.js";
 import type { JazzCoreProvider } from "./core-provider.js";

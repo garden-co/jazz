@@ -5,7 +5,7 @@ permissions and sync semantics. This plan lists remaining work; completed
 implementation, validation and known limits are in the [test README](../../../packages/jazz-tools/tests/durable-objects/README.md).
 Section numbers are retained for existing references.
 
-## 5. Replace the persistent transaction overlay — deferred
+## 1. Replace the persistent transaction overlay
 
 Client DBs, thin-client servers and application transactions on an authority
 share the staged transaction engine. Its private queryable view currently holds
@@ -27,7 +27,7 @@ First prove inserts, updates and deletes with intervening committed writes;
 then cover joins, policies, large values and session loss. This remains required
 for full transaction support, including thin-client transactions on a DO server.
 
-## 7. Durable chunk storage on one connection — deferred
+## 2. Durable chunk storage on one connection
 
 Separate durability and cache budgets from file paths. Read chunks and epochs
 through the owning DO connection, without locks across SQL calls or unsafe
@@ -36,7 +36,7 @@ updates of rows, epochs, chunks and reference counts. Native hosts may retain
 separate readers. Keep S3 and Vercel Blob behavior intact through shared
 blob-store abstractions; include Worker-compatible blob I/O where needed.
 
-## 9. Additional lifecycle work — deferred
+## 3. Additional lifecycle work
 
 Retain the existing restart, lost-upload/acknowledgement, deployed upgrade and
 local SIGKILL tests as regression coverage. Stop expanding crash scenarios for
@@ -47,21 +47,9 @@ Remaining coverage includes deployed abrupt eviction, deterministic interruption
 within commit and broader deployment races. WebSocket hibernation is a separate
 feature requiring explicit session reconstruction. None is claimed complete.
 
-## 11. Maintain regression coverage and assess deployment limits
+## 4. Maintain regression coverage and assess deployment limits
 
 Local workerd regression tests live in `packages/jazz-tools/tests/durable-objects`.
 Run `pnpm --filter jazz-tools test:durable-objects`; this never deploys resources.
 Real deployment tests have been removed. Preserve existing expectations as the
 deferred overlay and chunk-storage implementations land.
-
-## Delivery order
-
-Node and Worker `createJazz()` share the `jazz-tools/backend` entry, with internal
-conditional runtime adapters and the shared thin client; local Worker
-HTTP/WebSocket integration and Worker-side provisioning against a local Cloudflare
-API double are validated (see README). Deployment of the
-application Worker is not yet validated.
-Transaction overlays (section 5) and durable chunks (section 7) remain deferred.
-Keep current integration tests as regression coverage; further lifecycle
-expansion is deferred. Do not claim full DO transaction or large-value support
-until those implementations are complete.

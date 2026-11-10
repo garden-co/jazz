@@ -12,7 +12,7 @@ export default defineConfig({
   resolve: {
     alias: [
       // Source tests must not mix source auth sentinels/classes with dist copies.
-      ...["host", "socket", "artifact"].map((name) => ({
+      ...["host", "socket"].map((name) => ({
         find: `#jazz/backend-${name}`,
         replacement: resolve(__dirname, `src/backend/runtime/node-${name}.ts`),
       })),

@@ -10,7 +10,8 @@
     "bin/**",
     "dist/**",
     "README.md",
-    "durable-object-worker/**"
+    "durable-object-worker/artifact.js",
+    "durable-object-worker/artifact.d.ts"
   ],
   "type": "module",
   "main": "dist/index.js",
@@ -42,16 +43,6 @@
       "default": {
         "types": "./dist/backend/runtime/node-socket.d.ts",
         "default": "./dist/backend/runtime/node-socket.js"
-      }
-    },
-    "#jazz/backend-artifact": {
-      "workerd": {
-        "types": "./dist/backend/runtime/workerd-artifact.d.ts",
-        "default": "./dist/backend/runtime/workerd-artifact.js"
-      },
-      "default": {
-        "types": "./dist/backend/runtime/node-artifact.d.ts",
-        "default": "./dist/backend/runtime/node-artifact.js"
       }
     }
   },
