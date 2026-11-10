@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Jazz + Rivet todos</title>
+    <style>
+      body {
+        font-family: system-ui;
+        max-width: 40rem;
+        margin: 3rem auto;
+        padding: 0 1rem;
+      }
+      form,
+      li {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        margin: 1rem 0;
+      }
+      input[name="title"] {
+        flex: 1;
+        padding: 0.5rem;
+      }
+      ul {
+        list-style: none;
+        padding: 0;
+      }
+      li span {
+        flex: 1;
+      }
+      li.done span {
+        text-decoration: line-through;
+      }
+      #error {
+        color: #b91c1c;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Shared todos</h1>
+    <p>Everyone can read the list. You can edit or delete tasks you create.</p>
+    <form id="add">
+      <input name="title" placeholder="What needs doing?" required /><button disabled>Add</button>
+    </form>
+    <p id="error" role="alert"></p>
+    <ul id="todos"></ul>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

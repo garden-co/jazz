@@ -117,8 +117,12 @@ import { optionalPeerImportError } from "./optional-peer.js";
 import { closingBeforeDeadline } from "./socket-deadline.js";
 import { importWs, vercelUpgradesSockets } from "./ws-peer.js";
 
+import { openRivetStore, type RivetStoreOptions } from "./rivet-store.js";
+export { rivet, type RivetStoreOptions } from "./rivet-store.js";
+
 /** Where the core keeps its data. */
 export type JazzStore =
+  | { readonly kind: "rivet"; readonly options: RivetStoreOptions }
   | {
       readonly kind: "sqlite";
       readonly path: string;
@@ -1332,10 +1336,13 @@ function openRemoteCore(
     url: string;
     backendCredential: BackendCredential;
     secrets?: { adminSecret: string; backendSecret: string };
+    socketUrl?: string;
+    headers?: () => Promise<Record<string, string>>;
   },
   bundle: () => string | undefined,
 ): Core {
-  const socketUrl = `${target.url.replace(/^http/, "ws")}/apps/${encodeURIComponent(appId)}/ws`;
+  const socketUrl =
+    target.socketUrl ?? `${target.url.replace(/^http/, "ws")}/apps/${encodeURIComponent(appId)}/ws`;
   if (!globalThis.WebSocket) {
     throw new Error("remote() needs a global WebSocket (Node 22 or newer)");
   }
@@ -1349,12 +1356,10 @@ function openRemoteCore(
     if (typeof credential !== "string" || !credential) {
       throw new Error("backendCredential() returned no credential");
     }
+    const transport = Object.entries((await target.headers?.()) ?? {});
     return access === "session"
-      ? [[CREDENTIAL_HEADER, credential]]
-      : [
-          [CREDENTIAL_HEADER, credential],
-          [ACCESS_HEADER, access],
-        ];
+      ? [...transport, [CREDENTIAL_HEADER, credential]]
+      : [...transport, [CREDENTIAL_HEADER, credential], [ACCESS_HEADER, access]];
   };
   const withoutStated = (headers: string[][]) =>
     headers.filter(([name]) => {
@@ -1593,14 +1598,18 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
   const core =
     store.kind === "remote"
       ? openRemoteCore(store.appId, store, bundle)
-      : store.kind === "vercel"
-        ? await openVercelCore({
-            options: store.options,
-            // The function's OIDC token is the core's only credential.
-            openRemote: ({ appId, url, backendCredential }) =>
-              openRemoteCore(appId, { url, backendCredential }, bundle),
-          })
-        : await openInProcessCore(store, bundle);
+      : store.kind === "rivet"
+        ? await openRivetStore(store.options).then((target) =>
+            openRemoteCore(target.appId, target, bundle),
+          )
+        : store.kind === "vercel"
+          ? await openVercelCore({
+              options: store.options,
+              // The function's OIDC token is the core's only credential.
+              openRemote: ({ appId, url, backendCredential }) =>
+                openRemoteCore(appId, { url, backendCredential }, bundle),
+            })
+          : await openInProcessCore(store, bundle);
   // A vercel() core says which it opened itself.
   if (store.kind !== "vercel") logStoreOpened(storeOpenedLine(store));
   const appId = core.appId;
@@ -3454,7 +3463,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       await core.handle(
         request.method,
         corePath + url.search,
-        store.kind === "remote" || store.kind === "vercel"
+        store.kind === "remote" || store.kind === "vercel" || store.kind === "rivet"
           ? headers.filter(([name]) => REMOTE_FORWARDED_HEADERS.includes(name!.toLowerCase()))
           : headers,
         body,
