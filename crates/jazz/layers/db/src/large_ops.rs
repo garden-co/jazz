@@ -1372,7 +1372,12 @@ impl Db {
         let max_age = i64::try_from(inner.staging.max_age_ms).unwrap_or(i64::MAX);
         inner.release_dropped_uploads()?;
         crate::large::expire_receipts(&inner.conn, now)?;
-        crate::large::expire_uploads(&inner.conn, now.saturating_sub(max_age))
+        let pinned = inner
+            .batches
+            .values()
+            .flat_map(|batch| batch.uploads.iter().map(|lease| lease.id))
+            .collect();
+        crate::large::expire_uploads_except(&inner.conn, now.saturating_sub(max_age), &pinned)
     }
 }
 
