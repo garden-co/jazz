@@ -1,13 +1,12 @@
 //! SQLite candidate authorization exercised through the real browser ABI.
 #![cfg(target_arch = "wasm32")]
+use futures_util::FutureExt;
 use jazz::binding_host::{OpenConfig as Config, OpenIdentity as Identity};
-use jazz::db::WriteState;
 use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::records::{OwnedRecord, RecordDescriptor, Value, ValueType};
 use jazz::tools::{
     ColumnType, OpenTransactionId, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder,
 };
-use jazz::tx::Fate;
 use jazz_wasm::{WasmDb, WasmWrite};
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
@@ -80,9 +79,6 @@ fn stage(db: &WasmDb, tx: &str, id: u8, parent: u8, seed: bool) {
     )
     .unwrap();
 }
-fn state(write: &WasmWrite) -> WriteState {
-    serde_wasm_bindgen::from_value(write.write_state().unwrap()).unwrap()
-}
 fn rows(db: &WasmDb) -> usize {
     let value = db
         .all(
@@ -119,7 +115,7 @@ async fn browser_wire_candidates_require_an_independent_seed() {
         let bob = open(2, true);
         let tx = OpenTransactionId::new().to_string();
         client
-            .begin_transaction(tx.clone(), "serializable".into(), None, None)
+            .begin_transaction(tx.clone(), "serializable".into(), None, None, None)
             .unwrap();
         stage(&client, &tx, 1, 2, false);
         stage(&client, &tx, 2, 1, seeded);
@@ -135,23 +131,14 @@ async fn browser_wire_candidates_require_an_independent_seed() {
         )
         .await
         .unwrap();
-        for _ in 0..20 {
-            JsFuture::from(client.tick()).await.unwrap();
-            transfer(&up, &down);
-            JsFuture::from(bob.tick()).await.unwrap();
-            transfer(&down, &up);
-            JsFuture::from(client.tick()).await.unwrap();
-            if !matches!(state(&write).fate, Fate::Pending) {
-                break;
-            }
+        let settled = settle_browser(&client, &bob, &up, &down, &write, 20).await;
+        assert_eq!(settled.is_ok(), seeded, "{settled:?}");
+        if let Err(error) = settled {
+            assert!(
+                format!("{error:?}").contains("authorization_denied"),
+                "{error:?}"
+            );
         }
-        assert_eq!(
-            matches!(state(&write).fate, Fate::Accepted),
-            seeded,
-            "{:?}",
-            state(&write)
-        );
-        assert_eq!(matches!(state(&write).fate, Fate::Rejected(_)), !seeded);
         assert_eq!(rows(&bob), if seeded { 2 } else { 0 });
         assert_eq!(rows(&client), if seeded { 2 } else { 0 });
         JsFuture::from(client.close()).await.unwrap();
@@ -170,13 +157,16 @@ async fn browser_backend_session_candidates_use_the_same_proof() {
             "serializable".into(),
             Some(alice().canonical().as_bytes().to_vec()),
             None,
+            None,
         )
         .unwrap();
         stage(&bob, &tx, 1, 2, false);
         stage(&bob, &tx, 2, 1, seeded);
         let result = bob.commit_transaction(tx, Some("serializable".into()));
         if seeded {
-            assert!(matches!(state(&result.unwrap()).fate, Fate::Accepted));
+            JsFuture::from(result.unwrap().wait("global".into(), None).unwrap())
+                .await
+                .unwrap();
         } else {
             let error = match result {
                 Err(error) => error,
@@ -324,16 +314,20 @@ async fn settle_browser(
     up: &JsValue,
     down: &JsValue,
     write: &WasmWrite,
-) -> Fate {
-    for _ in 0..50 {
+    max_ticks: usize,
+) -> Result<(), JsValue> {
+    // The actual ABI reports terminal authority fate through Global wait;
+    // writeState snapshots are explicitly unsupported. A pending receipt
+    // cannot satisfy either outcome, and unexpected errors are not acceptance.
+    let mut settled = Box::pin(JsFuture::from(write.wait("global".into(), None).unwrap()));
+    for _ in 0..max_ticks {
         JsFuture::from(client.tick()).await.unwrap();
         transfer(up, down);
         JsFuture::from(bob.tick()).await.unwrap();
         transfer(down, up);
         JsFuture::from(client.tick()).await.unwrap();
-        let fate = state(write).fate;
-        if !matches!(fate, Fate::Pending) {
-            return fate;
+        if let Some(result) = settled.as_mut().now_or_never() {
+            return result.map(|_| ());
         }
     }
     panic!("did not settle")
@@ -362,7 +356,7 @@ async fn browser_inherited_grants_preserve_creation_and_acceptance_boundaries() 
     ] {
         let tx = OpenTransactionId::new().to_string();
         client
-            .begin_transaction(tx.clone(), "serializable".into(), None, None)
+            .begin_transaction(tx.clone(), "serializable".into(), None, None, None)
             .unwrap();
         let node = if new_root { number } else { 1 };
         named_stage(
@@ -402,9 +396,14 @@ async fn browser_inherited_grants_preserve_creation_and_acceptance_boundaries() 
         let write = client
             .commit_transaction(tx, Some("serializable".into()))
             .unwrap();
-        let fate = settle_browser(&client, &bob, &up, &down, &write).await;
-        assert_eq!(matches!(fate, Fate::Accepted), accepted, "{fate:?}");
-        assert_eq!(matches!(fate, Fate::Rejected(_)), !accepted, "{fate:?}");
+        let settled = settle_browser(&client, &bob, &up, &down, &write, 50).await;
+        assert_eq!(settled.is_ok(), accepted, "{settled:?}");
+        if let Err(error) = settled {
+            assert!(
+                format!("{error:?}").contains("authorization_denied"),
+                "{error:?}"
+            );
+        }
     }
     assert_eq!(count_table(&bob, "nodes"), 1);
     assert_eq!(count_table(&bob, "admins"), 1);

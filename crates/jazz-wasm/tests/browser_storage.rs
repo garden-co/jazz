@@ -123,7 +123,7 @@ async fn closed_owner_cannot_write_through_retained_browser_handles() {
     let owner = format!("retirement-{}", jazz_wasm::generate_id());
     let path = format!("/{owner}.sqlite");
     let db = open(storage(&path, false), &owner).await.unwrap();
-    let view = db.register_schema(schema()).unwrap();
+    let view = db.register_schema(schema(), None).unwrap();
     insert(&view).unwrap();
     let upload = db
         .begin_streaming_mutation(
@@ -136,6 +136,7 @@ async fn closed_owner_cannot_write_through_retained_browser_handles() {
             },
             "text".into(),
             Some("insert".into()),
+            None,
             None,
             None,
             None,
