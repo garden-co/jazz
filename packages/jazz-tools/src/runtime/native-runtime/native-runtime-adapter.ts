@@ -18,9 +18,14 @@ import {
   DerivedStatePublisher,
   LOCAL_ONLY,
   linkStatusFromUpstream,
+  linkFailureOf,
+  NO_UPLOADS,
   offlineLink,
   sameLinkStatus,
+  sameUploadStatus,
+  type LinkFailure,
   type LinkStatus,
+  type UploadStatus,
 } from "../sync-status.js";
 import type {
   ColumnDescriptor,
@@ -262,7 +267,8 @@ type NativeDb = {
   /** A fresh upstream link machine for this runtime's server WebSocket. */
   createUpstreamLink?(seed: number): NativeUpstreamLink;
   /** How many local commits still wait for the server's verdict. */
-  pendingUploadCount?(): number;
+  /** This store's uploads; see {@link UploadStatus}. */
+  uploadStatus?(): UploadStatus;
   nativeConnectionStatus?(): {
     configured: boolean;
     explicitlyOffline: boolean;
@@ -595,7 +601,7 @@ type UpstreamLinkStatus = {
   /** Only a new server or `connect()` revives the link: a stop, or a refused credential no renewal fixes. */
   terminal: boolean;
 };
-type RuntimeSyncStatus = { link: LinkStatus; pendingUploads: number };
+type RuntimeSyncStatus = { link: LinkStatus; uploads: UploadStatus };
 type UpstreamLinkStep = {
   actions: Array<
     | { type: "connect"; attempt: number }
@@ -947,8 +953,11 @@ export class NativeRuntimeAdapter implements Runtime {
   );
   private readonly syncStatusPublisher = new DerivedStatePublisher<RuntimeSyncStatus>(
     () => this.readSyncStatus(),
-    (a, b) => a.pendingUploads === b.pendingUploads && sameLinkStatus(a.link, b.link),
+    (a, b) => sameUploadStatus(a.uploads, b.uploads) && sameLinkStatus(a.link, b.link),
   );
+  /** The latest link failure, and the failing state it was recorded for. */
+  private lastFailure: LinkFailure | null = null;
+  private failingAs: string | null = null;
   private readonly pendingInboundServerFrames: Uint8Array[] = [];
   private serverInboundRouting: Promise<void> = Promise.resolve();
   private serverInboundProcessed = false;
@@ -1510,6 +1519,7 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private linkChanged(): void {
+    if (this === this.ownerRuntime) this.noteLinkFailure();
     this.remoteLink.changed();
     this.linkStatusPublisher.changed();
     this.syncStatusPublisher.changed();
@@ -1538,11 +1548,28 @@ export class NativeRuntimeAdapter implements Runtime {
     return linkStatusFromUpstream(this.linkStatus);
   }
 
-  /** How many local commits still wait for the server's verdict. */
-  pendingUploadCount(): number {
-    if (this !== this.ownerRuntime) return this.ownerRuntime.pendingUploadCount();
-    if (this.closed) return 0;
-    return this.db?.pendingUploadCount?.() ?? 0;
+  /** This client's uploads: pending, since when, and the server's refusals. */
+  uploadStatus(): UploadStatus {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.uploadStatus();
+    if (this.closed) return NO_UPLOADS;
+    return this.db?.uploadStatus?.() ?? NO_UPLOADS;
+  }
+
+  /** The latest time the link failed, and how; it stays after the link recovers. */
+  lastLinkFailure(): LinkFailure | null {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.lastLinkFailure();
+    this.noteLinkFailure();
+    return this.lastFailure;
+  }
+
+  /** Record a failure the first time the link is seen failing that way. */
+  private noteLinkFailure(): void {
+    const link = this.upstreamLinkStatus();
+    const failing = link.state === "offline" ? link.reason : null;
+    if (failing === this.failingAs) return;
+    this.failingAs = failing;
+    const failure = linkFailureOf(link, (this.linkFailure ?? this.serverTransportError)?.message);
+    if (failure) this.lastFailure = failure;
   }
 
   /** Observe changes of {@link upstreamLinkStatus} alone. */
@@ -1555,7 +1582,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.startNativeLinkPoll();
   }
 
-  /** Observe changes of {@link upstreamLinkStatus} and {@link pendingUploadCount}. */
+  /** Observe changes of {@link upstreamLinkStatus} and {@link uploadStatus}. */
   onSyncStatusChange(listener: () => void, signal: AbortSignal): void {
     if (this !== this.ownerRuntime) {
       this.ownerRuntime.onSyncStatusChange(listener, signal);
@@ -1566,7 +1593,7 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private readSyncStatus(): RuntimeSyncStatus {
-    return { link: this.upstreamLinkStatus(), pendingUploads: this.pendingUploadCount() };
+    return { link: this.upstreamLinkStatus(), uploads: this.uploadStatus() };
   }
 
   private readRemoteLinkState(): RemoteLinkState {

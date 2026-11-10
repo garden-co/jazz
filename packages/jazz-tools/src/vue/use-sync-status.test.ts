@@ -3,7 +3,14 @@ import { describe, expect, it, vi } from "vitest";
 import type { SyncStatus } from "../runtime/sync-status.js";
 
 const listeners = new Set<(status: SyncStatus) => void>();
-let current: SyncStatus = { link: { state: "connecting" }, pendingUploads: 1, synced: false };
+let current: SyncStatus = {
+  link: { state: "connecting" },
+  pendingUploads: 1,
+  oldestPendingAt: 1,
+  rejected: 0,
+  lastError: null,
+  synced: false,
+};
 
 vi.mock("./provider.js", () => ({
   useDb: () => ({
@@ -23,7 +30,14 @@ describe("useSyncStatus", () => {
     const status = scope.run(() => useSyncStatus())!;
     expect(status.value).toEqual(current);
 
-    const connected: SyncStatus = { link: { state: "connected" }, pendingUploads: 0, synced: true };
+    const connected: SyncStatus = {
+      link: { state: "connected" },
+      pendingUploads: 0,
+      oldestPendingAt: null,
+      rejected: 0,
+      lastError: null,
+      synced: true,
+    };
     current = connected;
     for (const listener of listeners) listener(connected);
     expect(status.value).toEqual(connected);
