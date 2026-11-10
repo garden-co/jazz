@@ -111,7 +111,7 @@ it("does not lose messages when a history page boundary shares a timestamp", asy
   })();
   await messages.wait({ tier: "global" });
 
-  const firstPage = await owner.all(historyQuery(room.id, {}), { tier: "global" });
+  const firstPage = await owner.all(historyQuery(room.id, {}), { tier: "remote" });
   expect(firstPage).toHaveLength(50);
 
   const oldest = firstPage.at(-1)!;
@@ -119,11 +119,11 @@ it("does not lose messages when a history page boundary shares a timestamp", asy
     (message) => message.$createdAt.getTime() === oldest.$createdAt.getTime(),
   ).length;
   const pinnedLiveWindow = await owner.all(historyQuery(room.id, { from: oldest.$createdAt }), {
-    tier: "global",
+    tier: "remote",
   });
   const olderPage = await owner.all(
     historyQuery(room.id, { before: { at: oldest.$createdAt, offset } }),
-    { tier: "global" },
+    { tier: "remote" },
   );
   expect(olderPage[0].$createdAt.getTime()).toBe(oldest.$createdAt.getTime());
   const visibleMessages = mergeHistoryPages(pinnedLiveWindow, olderPage);

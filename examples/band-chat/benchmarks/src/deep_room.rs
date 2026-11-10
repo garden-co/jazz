@@ -288,7 +288,7 @@ fn outer(column: &str) -> jazz::tools::policy_expr::PolicyValueInput {
 /// `permissions.ts`, for the tables these workloads touch.
 fn schema() -> JazzSchema {
     use jazz::tools::policy_expr::eq as is;
-    let me = || session("user.account");
+    let me = || session("user");
     // isMemberOf(row.roomId)
     let is_member_of = |room_column: &str| {
         exists(table("roomMembers").where_(all_of([

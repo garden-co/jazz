@@ -8,7 +8,7 @@ import type { ClientMigrations } from "jazz-tools";
 export const migrations: ClientMigrations = {
   "schemas": [
     {
-      "hash": "22763a78d819642815e2ed6b1d3d0944f01f5415c59f7e0955cf5a734a2c522a",
+      "hash": "d46ff6236ee77f7e2036979cb3105a7ccc2a29ff897d1a19471082c1fccc20fb",
       "schema": {
         "tables": {
           "better_auth_user": {
@@ -335,13 +335,6 @@ export const migrations: ClientMigrations = {
                   "type": "Text"
                 },
                 "nullable": false
-              },
-              {
-                "name": "lastActivityAt",
-                "column_type": {
-                  "type": "Timestamp"
-                },
-                "nullable": true
               }
             ],
             "relations": {
@@ -368,6 +361,11 @@ export const migrations: ClientMigrations = {
               "readMarkersViaRoom": {
                 "kind": "reverse",
                 "table": "readMarkers",
+                "relation": "room"
+              },
+              "readProgressViaRoom": {
+                "kind": "reverse",
+                "table": "readProgress",
                 "relation": "room"
               },
               "canvasesViaRoom": {
@@ -413,6 +411,11 @@ export const migrations: ClientMigrations = {
                 "kind": "forward",
                 "table": "profiles",
                 "column": "memberProfileId"
+              },
+              "progressViaMember": {
+                "kind": "reverse",
+                "table": "readProgress",
+                "relation": "member"
               }
             }
           },
@@ -485,6 +488,52 @@ export const migrations: ClientMigrations = {
                 "kind": "forward",
                 "table": "rooms",
                 "column": "roomId"
+              }
+            }
+          },
+          "readProgress": {
+            "columns": [
+              {
+                "name": "roomId",
+                "column_type": {
+                  "type": "Uuid"
+                },
+                "nullable": false,
+                "references": "rooms"
+              },
+              {
+                "name": "memberId",
+                "column_type": {
+                  "type": "Uuid"
+                },
+                "nullable": false,
+                "references": "roomMembers"
+              },
+              {
+                "name": "reader",
+                "column_type": {
+                  "type": "Uuid"
+                },
+                "nullable": false
+              },
+              {
+                "name": "upToAt",
+                "column_type": {
+                  "type": "Timestamp"
+                },
+                "nullable": false
+              }
+            ],
+            "relations": {
+              "room": {
+                "kind": "forward",
+                "table": "rooms",
+                "column": "roomId"
+              },
+              "member": {
+                "kind": "forward",
+                "table": "roomMembers",
+                "column": "memberId"
               }
             }
           },
