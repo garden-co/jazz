@@ -2396,6 +2396,7 @@ dependencies = [
  "js-sys",
  "postcard",
  "rsqlite-vfs",
+ "rusqlite",
  "serde",
  "serde-wasm-bindgen",
  "serde_json",

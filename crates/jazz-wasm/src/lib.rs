@@ -34,6 +34,13 @@ use wasm_bindgen_futures::future_to_promise;
 mod browser;
 #[cfg(all(target_arch = "wasm32", feature = "browser-bench"))]
 pub mod browser_bench;
+#[cfg(all(target_arch = "wasm32", feature = "durable-object-kv"))]
+pub mod do_kv;
+#[cfg(all(target_arch = "wasm32", feature = "do-kv-bench"))]
+pub mod do_kv_bench;
+// Natively only for its tests, which run on the engine's SQLite.
+#[cfg(any(test, all(target_arch = "wasm32", feature = "durable-object-kv")))]
+pub mod do_kv_vfs;
 #[cfg(target_arch = "wasm32")]
 mod idb_vfs;
 mod identity;

@@ -27,6 +27,10 @@ uuid = { version = "1.18.1", features = ["v5", "v7", "serde", "js"] }
 wasm-bindgen = "0.2.105"
 wasm-bindgen-futures = "0.4.55"
 web-time = "1.1"
+# The SQLite VFS helpers of the IndexedDB and Durable Object KV VFSes. Links
+# against whichever SQLite the build has (sqlite-wasm-rs in wasm, the
+# engine's bundled one natively, for the KV VFS's tests).
+rsqlite-vfs = "0.1"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.3", features = ["wasm_js"] }
@@ -35,18 +39,25 @@ talc = "5.0.4"
 sqlite-wasm-rs = { version = "0.5", default-features = false }
 # The IndexedDB VFS's (`src/idb_vfs.rs`) own dependencies.
 indexed_db_futures = "0.6.4"
-rsqlite-vfs = "0.1"
 thiserror = "2"
 tokio = { version = "1", default-features = false, features = ["sync"] }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
+# The Durable Object KV VFS's tests run natively on the engine's SQLite.
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 [features]
 default = ["console_error_panic_hook", "transport-compression-ruzstd"]
 bench-probes = []
 # Browser store probes (IndexedDB vs in memory); never in release builds.
 browser-bench = []
+# The store on a Cloudflare Durable Object's synchronous KV storage
+# (`src/do_kv_vfs.rs`, `src/do_kv.rs`); not in the browser bundle.
+durable-object-kv = []
+# Durable Object KV store probes for the workerd smoke test; implies
+# `durable-object-kv`.
+do-kv-bench = ["durable-object-kv"]
 transport-compression-lz4 = ["jazz/transport-compression-lz4"]
 transport-compression-zstd = ["jazz/transport-compression-zstd"]
 transport-compression-ruzstd = ["jazz/transport-compression-ruzstd"]
