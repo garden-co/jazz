@@ -1404,6 +1404,60 @@ impl WasmDb {
             .map_err(host_error)
     }
 
+    /// Enable the actual owner's durable initialization journal before writes.
+    #[wasm_bindgen(js_name = enableInitializationJournal)]
+    pub fn enable_initialization_journal(&self) -> Result<(), JsValue> {
+        self.binding()?
+            .enable_initialization_journal()
+            .map_err(host_error)
+    }
+
+    /// Ordinary same-batch coordinate eligibility, never authority evidence.
+    #[wasm_bindgen(js_name = prepareInitializationInsert)]
+    pub fn prepare_initialization_insert(
+        &self,
+        id: String,
+        table: String,
+        row: Vec<u8>,
+    ) -> Result<(), JsValue> {
+        self.binding()?
+            .prepare_initialization_insert(&id, &table, &row)
+            .map_err(host_error)
+    }
+
+    /// Named JSON with the owner-local token and exact reserved identity.
+    #[wasm_bindgen(js_name = sealInitializationTransaction)]
+    pub fn seal_initialization_transaction(&self, id: String) -> Result<String, JsValue> {
+        let seal = self
+            .binding()?
+            .seal_initialization_transaction(&id)
+            .map_err(host_error)?;
+        serde_json::to_string(&seal).map_err(|error| JsValue::from_str(&error.to_string()))
+    }
+
+    /// Consume once without publication or reserved identity recycling.
+    #[wasm_bindgen(js_name = cancelInitializationTransaction)]
+    pub fn cancel_initialization_transaction(&self, token: String) -> Result<(), JsValue> {
+        self.binding()?
+            .cancel_initialization_transaction(&token)
+            .map_err(host_error)
+    }
+
+    /// Named exact owner status, distinct from complete history or acceptance.
+    #[wasm_bindgen(js_name = initializationTransactionStatus)]
+    pub fn initialization_transaction_status(&self, ids: Vec<String>) -> Result<String, JsValue> {
+        self.binding()?
+            .initialization_transaction_status(&ids)
+            .map_err(host_error)
+    }
+
+    /// Publish through the exact frozen replica batch and original context.
+    #[wasm_bindgen(js_name = publishInitializationTransaction)]
+    pub fn publish_initialization_transaction(&self, token: String) -> Result<WasmWrite, JsValue> {
+        let inner = self.open_inner()?;
+        inner.write(inner.binding.publish_initialization_transaction(&token))
+    }
+
     /// Commit an owner-wide transaction by id.
     #[wasm_bindgen(js_name = commitTransaction)]
     pub fn commit_transaction(

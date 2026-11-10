@@ -135,6 +135,18 @@ export declare class NapiDb {
   beginTransaction(openTransactionId: string, kind: string, author?: Uint8Array | undefined | null, attribution?: Uint8Array | undefined | null, acceptedEvidence?: boolean | undefined | null): void
   /** Open the actual replica owner with ordinary reads and separate evidence. */
   beginClientEvidenceTransaction(openTransactionId: string): void
+  /** Enable the actual owner's durable initialization journal before writes. */
+  enableInitializationJournal(): void
+  /** Ordinary same-batch coordinate eligibility, never authority evidence. */
+  prepareInitializationInsert(id: string, table: string, row: Uint8Array): void
+  /** Named JSON with the owner-local token and exact reserved identity. */
+  sealInitializationTransaction(id: string): string
+  /** Consume once without publication or reserved identity recycling. */
+  cancelInitializationTransaction(token: string): void
+  /** Named exact owner status, distinct from complete history or acceptance. */
+  initializationTransactionStatus(ids: Array<string>): string
+  /** Publish through the exact frozen replica batch and original context. */
+  publishInitializationTransaction(token: string): Write
   /** Commit an owner-wide transaction by id and optional kind. */
   commitTransaction(openTransactionId: string, kind?: string | undefined | null): Write
   /** Roll back an owner-wide open transaction by id. */

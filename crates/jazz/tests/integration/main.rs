@@ -171,6 +171,8 @@ mod sqlite_candidate_uuid_correlations;
 mod sqlite_candidates;
 #[path = "../sqlite_catalogue_cache.rs"]
 mod sqlite_catalogue_cache;
+#[path = "../sqlite_initialization.rs"]
+mod sqlite_initialization;
 #[path = "../sqlite_read_policy_literals.rs"]
 mod sqlite_read_policy_literals;
 #[path = "../sqlite_sync_ingress.rs"]
@@ -219,6 +221,8 @@ mod sync_support_access;
 mod sync_untrusted_clients;
 #[path = "../sync_wire_corpus.rs"]
 mod sync_wire_corpus;
+#[path = "../sync_write_only.rs"]
+mod sync_write_only;
 #[path = "../text_merge.rs"]
 mod text_merge;
 #[path = "../transaction_commit_kind.rs"]

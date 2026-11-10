@@ -850,6 +850,9 @@ pub struct Binding {
     admitted: Rc<RefCell<BTreeMap<String, SelfSignedProof>>>,
     /// Whether the next tick reports the retry store's refusals again.
     requeue: Rc<Cell<bool>>,
+    /// Owner-shared opaque, single-use frozen replica batches. View closure
+    /// leaves its physical owner's tokens alive; root closure clears them.
+    initializations: Rc<RefCell<BTreeMap<uuid::Uuid, crate::db::InitializationSeal>>>,
 }
 
 /// A Jazz self-signed proof of a local-first account.
@@ -857,6 +860,17 @@ pub struct Binding {
 struct SelfSignedProof {
     token: String,
     app_id: String,
+}
+
+/// Named host result; reservation bytes are metadata, the random token is the
+/// owner-local single-use capability and is never a wire authority grant.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SealedInitialization {
+    /// Opaque token scoped to the current physical owner.
+    pub token: String,
+    /// Exact canonical reserved original transaction identity.
+    pub reserved_tx_id: String,
 }
 
 impl Binding {
@@ -878,6 +892,7 @@ impl Binding {
             bound: Rc::default(),
             admitted: Rc::default(),
             requeue: Rc::new(Cell::new(true)),
+            initializations: Rc::default(),
         }
     }
 
@@ -1257,6 +1272,122 @@ impl Binding {
                 .begin_client_evidence_transaction(open_transaction(id)?),
         )?;
         Ok(())
+    }
+
+    /// Enable the actual authenticated durable owner's journal. Native
+    /// admission preserves its real role; this wrapper selects no identity.
+    pub fn enable_initialization_journal(&self) -> HostResult<()> {
+        Ok(self.db.enable_initialization_journal()?)
+    }
+
+    /// Check ordinary physical coordinate eligibility in this same batch.
+    pub fn prepare_initialization_insert(
+        &self,
+        id: &str,
+        table: &str,
+        row: &[u8],
+    ) -> HostResult<()> {
+        Ok(self
+            .db
+            .prepare_initialization_insert(open_transaction(id)?, table, row_uuid(row)?)?)
+    }
+
+    /// Freeze the complete admitted batch, refusing a poisoned staged prefix.
+    pub fn seal_initialization_transaction(&self, id: &str) -> HostResult<SealedInitialization> {
+        self.db.ensure_initialization_owner_active()?;
+        let id = open_transaction(id)?;
+        if self.initializations.borrow().len() >= 64 {
+            return Err(not_supported(
+                "more than 64 outstanding initialization seals",
+            ));
+        }
+        if let Some(error) = self.refused.borrow_mut().remove(&id) {
+            self.bound.borrow_mut().remove(&id);
+            self.db.abandon_transaction_handle(id)?;
+            return Err(error.into());
+        }
+        let seal = self.db.seal_initialization_transaction(id)?;
+        self.bound.borrow_mut().remove(&id);
+        let reserved_tx_id = seal.reservation().encode();
+        let token = uuid::Uuid::new_v4();
+        self.initializations.borrow_mut().insert(token, seal);
+        Ok(SealedInitialization {
+            token: token.to_string(),
+            reserved_tx_id,
+        })
+    }
+
+    fn take_initialization(&self, token: &str) -> HostResult<crate::db::InitializationSeal> {
+        self.db.ensure_initialization_owner_active()?;
+        let token = uuid::Uuid::parse_str(token)
+            .map_err(|_| HostError::Argument("invalid initialization token".into()))?;
+        self.initializations
+            .borrow_mut()
+            .remove(&token)
+            .ok_or_else(|| {
+                HostError::Argument(
+                    "unknown, consumed or foreign-owner initialization token".into(),
+                )
+            })
+    }
+
+    /// Consume once and use the exact typed native batch/context checks.
+    pub fn publish_initialization_transaction(&self, token: &str) -> HostResult<Write> {
+        let seal = self.take_initialization(token)?;
+        let original = seal.reservation().transaction_id();
+        let receipt = self.db.publish_initialization_transaction(seal)?;
+        let row_id = RowUuid::from_bytes([0; 16]);
+        let payload = postcard::to_allocvec(&WriteResultPayload {
+            row_id,
+            tx_id: original,
+        })
+        .map_err(|error| HostError::Argument(error.to_string()))?;
+        self.hooks.after_write();
+        Ok(Write {
+            node: original.node,
+            payload,
+            row_id,
+            tx_id: TransactionId::from_committed_tx(original),
+            seq: receipt.0,
+            rejected: None,
+            serializable: true,
+        })
+    }
+
+    /// Consume once without publication; the original identity stays spent.
+    pub fn cancel_initialization_transaction(&self, token: &str) -> HostResult<()> {
+        Ok(self
+            .db
+            .cancel_initialization_transaction(self.take_initialization(token)?)?)
+    }
+
+    /// Exact owner-scoped status; no accepted rows or history are manufactured.
+    pub fn initialization_transaction_status(&self, ids: &[String]) -> HostResult<String> {
+        if ids.len() > 64 {
+            return Err(not_supported(
+                "more than 64 initialization status identities",
+            ));
+        }
+        let ids = ids
+            .iter()
+            .map(|id| crate::db::ReservedTxId::decode(id))
+            .collect::<Result<Vec<_>, _>>()?;
+        let states = self.db.initialization_transaction_status(&ids)?;
+        let states = states.into_iter().zip(ids).map(|(state,id)| {
+            use crate::db::{InitializationTransactionStatus as Status,InitializationFate as Fate};
+            match state {
+                Status::NotObserved => serde_json::json!({"transactionId":id.encode(),"status":"not-observed"}),
+                Status::Incomplete => serde_json::json!({"transactionId":id.encode(),"status":"incomplete"}),
+                Status::Complete(state) => {
+                    let (fate,error) = match state.fate { Fate::Pending => ("pending",None),Fate::Accepted => ("accepted",None),Fate::Rejected { code,reason,message } => ("rejected",Some(serde_json::json!({"code":code,"reason":reason,"message":message}))) };
+                    serde_json::json!({"transactionId":id.encode(),"status":"complete","publicationPosition":state.publication_position.to_string(),"fate":fate,"error":error,"durability":state.durability,"globalPosition":state.global_position.map(|position|position.to_string())})
+                }
+            }
+        }).collect::<Vec<_>>();
+        serde_json::to_string(
+            &serde_json::json!({"format":"jazz.sqlite.initialization-status.v1","states":states}),
+        )
+        .map_err(|error| HostError::Argument(error.to_string()))
     }
 
     /// Commit an owner-wide transaction (`kind` defaults to mergeable).
@@ -1955,6 +2086,9 @@ impl Binding {
 
     /// Close the database (a schema view leaves its owner open).
     pub async fn close(&self) -> HostResult<()> {
+        if self.db.owns_initialization_runtime() {
+            self.initializations.borrow_mut().clear();
+        }
         Ok(self.db.close().await?)
     }
 }

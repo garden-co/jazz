@@ -70,7 +70,11 @@ impl Inner {
     /// no read/write authority: the normal policy/read-set checks still decide
     /// the operation. Like the former MAX(_seq) lookup, any current branch or
     /// tombstone makes the coordinate existing, regardless of policy visibility.
-    fn candidate_coordinate_absent(&self, table: &str, row: RowUuid) -> Result<bool, Error> {
+    pub(super) fn candidate_coordinate_absent(
+        &self,
+        table: &str,
+        row: RowUuid,
+    ) -> Result<bool, Error> {
         self.conn
             .cached_row(
                 &format!(
