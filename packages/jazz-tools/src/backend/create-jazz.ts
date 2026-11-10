@@ -88,6 +88,7 @@ import { NoJazzAccountError } from "./no-account-error.js";
 import { RequestAuthenticationError } from "./request-auth.js";
 import { optionalPeerImportError } from "./optional-peer.js";
 import { closingBeforeDeadline } from "./socket-deadline.js";
+import { vercelUpgradesSockets } from "./vercel-sockets.js";
 
 /** Where the core keeps its data. */
 export type JazzStore =
@@ -569,6 +570,12 @@ const DEFAULT_BASE_PATH = "/jazz";
 const PRELUDE_DEADLINE_MS = 30_000;
 /** On createJazz's 426 for a socket path: this endpoint serves the HTTP stream. */
 const STREAM_AVAILABLE_HEADER = "x-jazz-stream";
+/** The answer for a socket path where this host can't upgrade sockets. */
+const useHttpStream = () =>
+  new Response("WebSocket upgrade not available here; use the HTTP stream", {
+    status: 426,
+    headers: { [STREAM_AVAILABLE_HEADER]: "1" },
+  });
 /** The stream session's key, on each send and close (see `openStream`). */
 const STREAM_KEY_HEADER = "x-jazz-stream-key";
 const PUBLIC_APP_ROUTES = /^\/apps\/[^/]+\/(schemas|schema\/[^/]+)$/;
@@ -2531,10 +2538,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
       if (upgrades) {
         return new Response("Upgrade to a WebSocket", { status: 426 });
       }
-      return new Response("WebSocket upgrade not available here; use the HTTP stream", {
-        status: 426,
-        headers: { [STREAM_AVAILABLE_HEADER]: "1" },
-      });
+      return useHttpStream();
     }
     if (!PUBLIC_APP_ROUTES.test(path)) return new Response("Not found", { status: 404 });
     const url = new URL(request.url);
@@ -2559,13 +2563,20 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
 
   async function nextHandler(request: Request): Promise<Response> {
     const path = innerPath(request);
+    // On Vercel this handler upgrades sockets (below), once `ws` is
+    // installed; elsewhere (next dev) only if attach() runs on the same
+    // server. Where it can't, a socket gets the HTTP stream marker, as a
+    // plain request for the socket path does.
+    const onVercel = onVercelHost();
+    const vercelUpgrades = onVercel && (await vercelUpgradesSockets());
     if (
       request.method === "GET" &&
       path?.endsWith("/ws") &&
       request.headers.get("upgrade")?.toLowerCase() === "websocket" &&
-      onVercelHost()
+      onVercel
     ) {
       if (!originAllowed(request)) return new Response("origin not allowed", { status: 403 });
+      if (!vercelUpgrades) return useHttpStream();
       // An optional peer: a literal import inside `try`, so bundlers report
       // a missing one at runtime, not on every route (see importSandboxSdk).
       let vercelFunctions: {
@@ -2592,9 +2603,7 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         { maxPayload: MAX_STREAM_MESSAGE_BYTES },
       );
     }
-    // On Vercel this handler upgrades sockets (above); elsewhere (next dev)
-    // only if attach() runs on the same server.
-    return handle(request, upgradesSockets || onVercelHost());
+    return handle(request, upgradesSockets || vercelUpgrades);
   }
 
   function nodeRequest(req: IncomingMessage): Request {
@@ -2858,6 +2867,8 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
  */
 export function createJazz(options: CreateJazzOptions): Jazz {
   jazzSettings(options);
+  // Checked at startup, so a missing `ws` is in the logs before the first socket.
+  if (onVercelHost()) void vercelUpgradesSockets();
   const store = runningStore(options.store);
   const key = storeKey(store);
   const entries = registry();
