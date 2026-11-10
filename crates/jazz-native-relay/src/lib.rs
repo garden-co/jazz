@@ -526,6 +526,10 @@ pub enum ForegroundDbCommandRequest {
     /// verdict (append-only: an older native build answers it with an error
     /// and the host reports none).
     PendingUploadCount,
+    /// The foreground's uploads: pending, since when, and what the server
+    /// refused since it opened (append-only: an older native build answers
+    /// it with an error and the host falls back to `PendingUploadCount`).
+    UploadStatus,
 }
 
 /// One refusal of a scope's credential by its upstream. Every refusal gets a
@@ -725,6 +729,12 @@ pub enum ForegroundDbCommandResponse {
     /// Answer to [`ForegroundDbCommandRequest::PendingUploadCount`].
     PendingUploadCount {
         count: u64,
+    },
+    /// Answer to [`ForegroundDbCommandRequest::UploadStatus`]: the core's
+    /// upload status as JSON (`{ pending, oldestPendingAt, rejected,
+    /// lastRejection }`).
+    UploadStatus {
+        status_json: String,
     },
 }
 
