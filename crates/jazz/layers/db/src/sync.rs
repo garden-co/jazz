@@ -11532,15 +11532,33 @@ impl Db {
                     hidden,
                 });
             }
-            // Superseded versions of the client's own commits land in its
-            // history, while the row stays readable.
+            // Commit acknowledgement is not a read subscription. The
+            // writer can confirm the exact current image it supplied even
+            // without SELECT; only its authenticated, accepted Fate may
+            // acknowledge that image. Real result/access-loss events still
+            // evict it below, before any as-written acknowledgement.
+            // Superseded history still requires current read permission.
             for (table, row, key, at) in committed {
-                let superseded = match inner.current_image(&table, row, &key)? {
-                    Some(current) => {
-                        current.at != at.0 || at.1.is_some_and(|_| rank(&current).1 != at.1)
+                let current = inner.current_image(&table, row, &key)?;
+                let superseded = current.as_ref().is_some_and(|current| {
+                    current.at != at.0 || at.1.is_some_and(|_| rank(current).1 != at.1)
+                });
+                if let Some(current) = current {
+                    let exact_accepted_echo = !superseded && echoes.iter().any(|echo| {
+                        echo.table == table && echo.row == row && echo.key == key
+                            && echo.at == current.at && current.at.accepted()
+                            && inner.sessions[index].outbox.iter().any(|message| matches!(
+                                message,
+                                SyncMessage::Fate { id, outcome: Outcome::Accepted { .. }, global: true }
+                                    if *id == echo.id
+                            ))
+                    });
+                    if exact_accepted_echo
+                        || readable(&inner, &policies, &table, row, &key, policy)?
+                    {
+                        images.push(current);
                     }
-                    None => false,
-                };
+                }
                 if superseded {
                     echoes.retain(|e| !(e.table == table && e.row == row && e.key == key));
                 }
@@ -12840,7 +12858,11 @@ impl Db {
                             )
                         }));
                 }
-                session.touched.extend(rows.iter().cloned());
+                // A commit's rows are acknowledged through `committed`;
+                // treating its (even refused) target as a read result would
+                // manufacture access loss for an initially write-only row.
+                // Subscription/held-row reconciliation retains its separate
+                // touched set and normal revocation/eviction behaviour.
                 // A relay's accepted commit is final once its upstream
                 // accepts the upload carrying it: the session waits for that
                 // fate, not this store's. A relay its host says has no
