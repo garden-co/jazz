@@ -16,6 +16,7 @@ import type { JazzSessionActions } from "../session/state.js";
 import type { JazzClient } from "../web/create-jazz-client.js";
 import { ActiveClient } from "./session.js";
 import { LegacyJazzProvider, type LegacyJazzProviderProps } from "./provider.js";
+import { refuseAutoAttachDevTools } from "../runtime/removed-provider-props.js";
 
 export interface UseJazzAuth {
   snapshot: Accessor<JazzAppSnapshot<JazzClient>>;
@@ -40,22 +41,16 @@ export type JazzAppProviderProps = JazzAppConfig & {
   signedOut?: JSX.Element;
   loading?: JSX.Element;
   error?: (error: Error, retry: () => Promise<void>) => JSX.Element;
-  autoAttachDevTools?: boolean;
 };
 export type JazzProviderProps = JazzAppProviderProps | LegacyJazzProviderProps;
 /** Own the common auth/session lifecycle; JSX getters preserve Solid reactivity. */
 export function JazzProvider(props: JazzProviderProps) {
+  refuseAutoAttachDevTools("JazzProvider", props);
   if ("config" in props) return <LegacyJazzProvider {...props} />;
   return <AppProvider {...props} />;
 }
 function AppProvider(props: JazzAppProviderProps) {
-  const [, config] = splitProps(props, [
-    "children",
-    "signedOut",
-    "loading",
-    "error",
-    "autoAttachDevTools",
-  ]);
+  const [, config] = splitProps(props, ["children", "signedOut", "loading", "error"]);
   const app = createJazzApp({ ...config }, { start: false });
   const [snapshot, setSnapshot] = createSignal(app.getSnapshot());
   let acknowledge: (() => void) | undefined;
@@ -115,11 +110,7 @@ function AppProvider(props: JazzAppProviderProps) {
   return (
     <AuthContext.Provider value={value}>
       <Show when={snapshot().client} keyed fallback={fallback()}>
-        {(client) => (
-          <ActiveClient client={client} autoAttachDevTools={props.autoAttachDevTools}>
-            {props.children}
-          </ActiveClient>
-        )}
+        {(client) => <ActiveClient client={client}>{props.children}</ActiveClient>}
       </Show>
     </AuthContext.Provider>
   );

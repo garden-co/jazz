@@ -41,7 +41,7 @@ function mount() {
     render: () =>
       h(
         JazzProvider,
-        { config: config.value, autoAttachDevTools: false },
+        { config: config.value },
         {
           default: () => h("p", "ready"),
           fallback: () => h("p", "loading"),

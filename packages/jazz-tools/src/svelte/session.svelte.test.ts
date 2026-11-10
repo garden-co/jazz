@@ -67,7 +67,6 @@ describe("Svelte Jazz session", () => {
       target,
       props: {
         config: { scope: "test", serverUrl: "http://localhost:1", initial: "local-first" },
-        autoAttachDevTools: false,
         children: createRawSnippet(() => ({ render: () => "<p>Ready</p>" })),
         fallback: createRawSnippet(() => ({
           render: () => "<div></div>",
@@ -99,7 +98,6 @@ describe("Svelte Jazz session", () => {
       target,
       props: {
         session,
-        autoAttachDevTools: false,
         children: createRawSnippet(() => ({
           render: () => "<p>Ready</p>",
           setup: () => () => {
@@ -129,7 +127,6 @@ describe("Svelte Jazz session", () => {
       target,
       props: {
         session,
-        autoAttachDevTools: false,
         children: createRawSnippet(() => ({ render: () => "<p>Ready</p>" })),
       },
     });

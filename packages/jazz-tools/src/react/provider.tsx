@@ -1,7 +1,6 @@
 import { type ReactNode } from "react";
 import type { PublicSession } from "../runtime/context.js";
 import type { AccountDbConfig as DbConfig } from "../accounts/context.js";
-import { jazzDevPluginActive } from "../dev-tools/auto-attach.js";
 import {
   JazzProvider as CoreJazzProvider,
   useDb as useCoreDb,
@@ -12,7 +11,7 @@ import {
 import { ConfiguredJazzAppProvider, type JazzAppViewProps } from "../react-core/app.js";
 import { createJazzClient, type JazzClientConfig } from "../session/create-jazz-session.js";
 import type { JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
-import { DevToolsAutoAttach } from "./devtools-auto-attach.js";
+import { refuseAutoAttachDevTools } from "../runtime/removed-provider-props.js";
 
 export { JazzClientProvider, type JazzClientProviderProps } from "../react-core/provider.js";
 
@@ -32,14 +31,9 @@ const createClient: OpenJazzClient = async (config) => {
 type JazzProviderCommonProps = {
   fallback?: ReactNode;
   children: ReactNode;
-  /** Dev-only: auto-open the inspector overlay. Default true. */
-  autoAttachDevTools?: boolean;
 };
 
-export type JazzAppProviderProps = JazzClientConfig &
-  JazzAppViewProps<CreatedJazzClient> & {
-    autoAttachDevTools?: boolean;
-  };
+export type JazzAppProviderProps = JazzClientConfig & JazzAppViewProps<CreatedJazzClient>;
 export type JazzProviderProps =
   | (JazzProviderCommonProps & { config: DbConfig })
   | JazzAppProviderProps;
@@ -48,32 +42,16 @@ type ConfiguredJazzProviderProps = JazzProviderCommonProps & {
   config: DbConfig;
 };
 
-function ConfiguredJazzProvider({
-  config,
-  fallback,
-  children,
-  autoAttachDevTools,
-}: ConfiguredJazzProviderProps) {
-  const shouldAutoAttach = process.env.NODE_ENV !== "production" && autoAttachDevTools !== false;
-  // Subscription traces only register while devMode is on at subscribe time,
-  // so it must be on from Db construction for the overlay's Subscriptions tab
-  // to see the app's startup queries — the host bridge's later setDevMode(true)
-  // only covers subscriptions opened after the overlay attached. Default it on
-  // exactly when the overlay will mount; an explicit config value always wins.
-  const effectiveConfig =
-    shouldAutoAttach && config.devMode === undefined && jazzDevPluginActive()
-      ? { ...config, devMode: true }
-      : config;
-
+function ConfiguredJazzProvider({ config, fallback, children }: ConfiguredJazzProviderProps) {
   return (
-    <CoreJazzProvider config={effectiveConfig} fallback={fallback} openJazzClient={createClient}>
-      {shouldAutoAttach ? <DevToolsAutoAttach /> : null}
+    <CoreJazzProvider config={config} fallback={fallback} openJazzClient={createClient}>
       {children}
     </CoreJazzProvider>
   );
 }
 
 export function JazzProvider(props: JazzProviderProps) {
+  refuseAutoAttachDevTools("JazzProvider", props);
   if ("config" in props) return <ConfiguredJazzProvider {...props} />;
   return <ApplicationJazzProvider {...props} />;
 }
@@ -101,8 +79,7 @@ function ApplicationJazzProvider(props: JazzAppProviderProps) {
       "<JazzProvider serverUrl=…> shows `loading` while it starts and `signedOut` while no one is signed in; it has no `fallback` prop (that is <JazzSessionProvider>'s and <JazzProvider config={…}>'s).",
     );
   }
-  const { children, signedOut, loading, error, autoAttachDevTools, ...config } = props;
-  const shouldAutoAttach = process.env.NODE_ENV !== "production" && autoAttachDevTools !== false;
+  const { children, signedOut, loading, error, ...config } = props;
   return (
     <ConfiguredJazzAppProvider
       config={config}
@@ -122,7 +99,6 @@ function ApplicationJazzProvider(props: JazzAppProviderProps) {
           : error
       }
     >
-      {shouldAutoAttach ? <DevToolsAutoAttach /> : null}
       {children}
     </ConfiguredJazzAppProvider>
   );

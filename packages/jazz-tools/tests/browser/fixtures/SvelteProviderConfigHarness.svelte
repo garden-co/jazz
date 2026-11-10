@@ -16,7 +16,7 @@
   }
 </script>
 
-<JazzSvelteProvider config={effectiveConfig} autoAttachDevTools={false}>
+<JazzSvelteProvider config={effectiveConfig}>
   {#snippet children({ db })}
     <p data-provider-account>{db.getAuthState().session?.user}</p>
     <p data-provider-state="ready">{db.getAuthState().session?.authMode}</p>

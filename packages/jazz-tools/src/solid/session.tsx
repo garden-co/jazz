@@ -14,6 +14,7 @@ import { attachJazzSessionConsumer } from "../session/consumer.js";
 import { attachSubscriptionStore, getSubscriptionStore } from "../subscription-store-internal.js";
 import { createSolidJazzClientStore } from "./solid-jazz-client-store.js";
 import { JazzClientProvider } from "./provider.js";
+import { refuseAutoAttachDevTools } from "../runtime/removed-provider-props.js";
 import type { SolidJazzClient } from "./create-solid-jazz-client.js";
 
 const SessionContext = createContext<JazzSession<JazzClient>>();
@@ -32,13 +33,8 @@ export interface JazzSessionProviderProps {
   session: JazzSession<JazzClient>;
   children: JSX.Element;
   fallback?: JSX.Element;
-  autoAttachDevTools?: boolean;
 }
-export function ActiveClient(props: {
-  client: JazzClient;
-  children: JSX.Element;
-  autoAttachDevTools?: boolean;
-}) {
+export function ActiveClient(props: { client: JazzClient; children: JSX.Element }) {
   const client = props.client;
   const state = createSolidJazzClientStore(() => client);
   const adapted: SolidJazzClient = attachSubscriptionStore(
@@ -57,14 +53,11 @@ export function ActiveClient(props: {
     },
     getSubscriptionStore(client),
   );
-  return (
-    <JazzClientProvider client={adapted} autoAttachDevTools={props.autoAttachDevTools}>
-      {props.children}
-    </JazzClientProvider>
-  );
+  return <JazzClientProvider client={adapted}>{props.children}</JazzClientProvider>;
 }
 /** Caller owns the session; this provider owns only its reactive consumer lease. */
 export function JazzSessionProvider(props: JazzSessionProviderProps) {
+  refuseAutoAttachDevTools("JazzSessionProvider", props);
   const session = props.session;
   const [snapshot, setSnapshot] = createSignal(session.getSnapshot());
   const lease = attachJazzSessionConsumer(session);
@@ -81,11 +74,7 @@ export function JazzSessionProvider(props: JazzSessionProviderProps) {
   return (
     <SessionContext.Provider value={session}>
       <Show when={snapshot().client} keyed fallback={props.fallback ?? null}>
-        {(client) => (
-          <ActiveClient client={client} autoAttachDevTools={props.autoAttachDevTools}>
-            {props.children}
-          </ActiveClient>
-        )}
+        {(client) => <ActiveClient client={client}>{props.children}</ActiveClient>}
       </Show>
     </SessionContext.Provider>
   );
