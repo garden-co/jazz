@@ -189,3 +189,11 @@ describe("thin frames over a wire frame", () => {
     expect(assembler.push(second!)?.byteLength).toBe(3 * 1024 * 1024);
   });
 });
+
+// thin-backend-scope-v1 is also pinned in the Rust protocol tests. Older
+// servers reject variant 18 instead of treating a scoped read as SYSTEM.
+it("pins the authenticated backend scope envelope bytes", () => {
+  expect(
+    Array.from(encodeThinRequest(7, { type: "captureSnapshot", backendContext: "{}" })),
+  ).toEqual([4, 7, 18, 2, 123, 125, 3, 4, 7, 13]);
+});

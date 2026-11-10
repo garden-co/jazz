@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { connectedBlobStore, resolveVercelBlob, resolveVercelS3, s3, vercelBlob } from "./blobs.js";
-import { environmentOf, resolveCoreBlobs } from "./vercel-store.js";
+import { environmentOf, resolveCoreBlobs } from "./core-providers/vercel-store.js";
 
 describe("s3()", () => {
   it("keeps only the options given", () => {

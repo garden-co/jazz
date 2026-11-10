@@ -10,6 +10,16 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::runtime::ServerLinkAdmission;
+use crate::runtime::session_admission::{
+    peer_identity as ws_peer_identity, session_claims,
+    validate_session_identity as ws_validate_session_identity,
+};
+use crate::runtime::websocket::{
+    Prelude as WebSocketPrelude, RequestedLink as RequestedWebSocketLink,
+    decode_frame_batch as decode_ws_encoded_frame_batch, decode_hello as decode_ws_hello,
+    encode_frame_batches as encode_ws_frame_batches,
+    foreign_version_refusal as ws_foreign_version_refusal,
+};
 use crate::runtime::{
     CommitUnitTrust, ConnectionSessionContext, ServerRuntimeHandle, ServerSession,
 };
@@ -23,6 +33,7 @@ use futures::{SinkExt as _, StreamExt as _};
 use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::protocol_limits::MAX_WIRE_FRAME_BYTES;
 use jazz::records::Value as CoreValue;
+#[cfg(test)]
 use jazz::tools::Session;
 use jazz::wire::{
     WireAuthorityEndpoint, WireError, WireErrorCode, WireFrame, WireHello, WirePeerRole, WireRetry,
@@ -260,43 +271,6 @@ fn ws_live_admissions_for(state: &ServerState, key: WebSocketAdmissionKey) -> us
         .by_key
         .get(&key)
         .map_or(0, VecDeque::len)
-}
-
-#[derive(serde::Deserialize)]
-struct WebSocketPrelude {
-    peer_identity: String,
-    auth: jazz::tools::websocket_prelude_auth::AuthConfig,
-    /// A one-shot authenticated authority-catalogue transfer. This is not a
-    /// subscriber session and never admits application frames.
-    #[serde(default)]
-    bootstrap_catalogue: bool,
-    /// Requested before any wire frame.  It is only a request: after JWT/cookie
-    /// authentication and feature negotiation the server either creates its
-    /// own immutable admitted relay capability or rejects the connection.
-    #[serde(default)]
-    requested_link: RequestedWebSocketLink,
-    /// The audience a trusted backend verified the client's local-first
-    /// proof against; honoured only with that backend's secret (see
-    /// [`crate::middleware::auth::LOCAL_FIRST_AUDIENCE_HEADER`]).
-    #[serde(default)]
-    local_first_audience: Option<String>,
-    /// The published permissions bundle (hex id) the backend that opened
-    /// this socket serves with; honoured only on that backend's word (its
-    /// credential on the upgrade, or its secret here), as a client could
-    /// otherwise pick an older bundle's laxer policies.
-    #[serde(default)]
-    bundle: Option<String>,
-}
-
-/// The only client-selectable *request* at the WebSocket boundary.  This is
-/// intentionally separate from `WirePeerRole`: a wire hello says what a peer
-/// implements, not what authority it receives.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum RequestedWebSocketLink {
-    #[default]
-    OrdinarySession,
-    ScopeIsolatedClientRelay,
 }
 
 /// Select the server-owned link capability after credential admission and wire
@@ -564,51 +538,6 @@ async fn account_admission_current(
     account_still_admitted(state, identity).await
 }
 
-fn session_claims(
-    session: jazz::tools::public_schema::Session,
-) -> Result<BTreeMap<String, CoreValue>, String> {
-    let author = session
-        .author_subject()
-        .map_err(|error| error.to_string())?;
-    let provider_claims = match session.claims {
-        serde_json::Value::Object(map) => {
-            // Middleware exposes these convenient aliases to server handlers,
-            // but they duplicate the verified transport identity. A relay
-            // capability must use the one canonical binding vocabulary: the
-            // shared admission constructor derives `claims.iss`/`claims.sub`,
-            // `user`, and `authMode` from the verified AuthorSubject.
-            map.into_iter().collect()
-        }
-        _ => BTreeMap::new(),
-    };
-    let provider_claims =
-        crate::runtime::auth_admission::jwt_json_claims_to_policy_claims(provider_claims)
-            .map_err(|error| error.to_string())?;
-    Ok(crate::runtime::auth_admission::admitted_session_claims(
-        &session.issuer,
-        &session.user_id,
-        author,
-        provider_claims,
-    ))
-}
-
-fn ws_peer_identity(identity: &str) -> Result<AuthorSubject, String> {
-    AuthorSubject::from_canonical(identity).map_err(|error| error.to_string())
-}
-
-fn ws_validate_session_identity(
-    session: &Session,
-    peer_identity: AuthorSubject,
-) -> Result<(), String> {
-    let session_identity = session
-        .author_subject()
-        .map_err(|error| error.to_string())?;
-    if session_identity != peer_identity {
-        return Err("websocket peer_identity must match authenticated session author".to_owned());
-    }
-    Ok(())
-}
-
 /// How long a new connection's peer may take to send its prelude and Hello.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Handshake {
@@ -620,6 +549,7 @@ pub(crate) enum Handshake {
     /// be half-open, and its Hello waits on the host's event loop, which a
     /// burst of synchronous work can hold for longer than a network
     /// peer's handshake may take.
+    #[cfg(feature = "embedded-server")]
     InProcess,
 }
 
@@ -632,6 +562,7 @@ async fn within_handshake<T: Default>(
         Handshake::Network => tokio::time::timeout(WS_HANDSHAKE_READ_TIMEOUT, read)
             .await
             .unwrap_or_default(),
+        #[cfg(feature = "embedded-server")]
         Handshake::InProcess => read.await,
     }
 }
@@ -714,16 +645,10 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
         let _ = socket.close().await;
         return;
     }
-    let prelude = match serde_json::from_slice::<WebSocketPrelude>(&auth_bytes)
-        .map_err(|error| format!("invalid websocket prelude: {error}"))
-    {
+    let prelude = match WebSocketPrelude::decode(&auth_bytes) {
         Ok(prelude) => prelude,
         Err(error) => {
-            send_ws_error(
-                &mut socket,
-                WireError::new(WireErrorCode::AuthFailed, WireRetry::Never, error),
-            )
-            .await;
+            send_ws_error(&mut socket, error).await;
             let _ = socket.close().await;
             return;
         }
@@ -761,7 +686,10 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     // advertises thin results is answered with results, not sync.
     let negotiated = match negotiate_wire(
         &remote_hello,
-        current_wire_features() | jazz::wire::FEATURE_THIN_RESULTS | jazz::wire::FEATURE_HEARTBEAT,
+        current_wire_features()
+            | jazz::wire::FEATURE_THIN_RESULTS
+            | jazz::wire::FEATURE_THIN_BACKEND_SCOPE_V1
+            | jazz::wire::FEATURE_HEARTBEAT,
     ) {
         Ok(negotiated) => negotiated,
         Err(error) => {
@@ -1168,14 +1096,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     }
 }
 
-/// How long a split thin request may go without its next part before its
-/// connection ends, so a stalled upload does not keep the server's room
-/// for splits. Every part but the last is full, so this is also the
-/// slowest a split may arrive (one wire frame per timeout).
-#[cfg(not(test))]
-const THIN_PART_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
-#[cfg(test)]
-const THIN_PART_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+use crate::runtime::thin_input::{THIN_PART_TIMEOUT, ThinRequestInput};
 
 /// The wait for room for a sync batch in its session's ingress budget.
 type WireAdmission = std::pin::Pin<
@@ -1195,9 +1116,7 @@ type ThinAdmission = std::pin::Pin<
 struct ThinReader {
     /// Frames read and not yet handed on, oldest first, with their length.
     queue: VecDeque<(WireFrame, usize)>,
-    assembler: jazz::thin::ThinAssembler,
-    /// The room of the split being joined.
-    joining: Option<crate::runtime::ThinIngress>,
+    assembler: ThinRequestInput,
     /// Room granted for the frame at the head of `queue`.
     granted: Option<crate::runtime::ThinIngress>,
     /// The wait for that room.
@@ -1271,16 +1190,7 @@ impl ThinReader {
     ) -> Result<(), WireError> {
         while let Some((frame, len)) = self.queue.front() {
             // A request too large for one frame arrives in parts, back to back.
-            let needs = match frame {
-                WireFrame::ThinPart(part) if !self.assembler.is_joining() => {
-                    Some((part.total().map_err(thin_malformed)?, true))
-                }
-                WireFrame::ThinPart(_) => None,
-                _ if self.assembler.is_joining() => {
-                    return Err(thin_malformed("a thin frame arrived inside a split one"));
-                }
-                _ => Some((*len, false)),
-            };
+            let needs = self.assembler.reservation(frame, *len)?;
             if let Some((bytes, split)) = needs
                 && self.granted.is_none()
             {
@@ -1291,31 +1201,15 @@ impl ThinReader {
                 return Ok(());
             }
             let (frame, _) = self.queue.pop_front().expect("a frame at the head");
-            let (frame, room) = match frame {
-                WireFrame::ThinPart(part) => {
-                    if !self.assembler.is_joining() {
-                        self.joining = self.granted.take();
-                    }
-                    let Some(joined) = self.assembler.push(part).map_err(thin_malformed)? else {
-                        self.part_deadline = Some(tokio::time::Instant::now() + THIN_PART_TIMEOUT);
-                        continue;
-                    };
-                    self.part_deadline = None;
-                    let room = self.joining.take().expect("a joined frame was admitted");
-                    let frame = jazz::wire::decode_postcard_frame(&joined)
-                        .map_err(|_| thin_malformed("a split thin frame does not decode"))?;
-                    (frame, room)
-                }
-                frame => (
-                    frame,
-                    self.granted.take().expect("a whole frame was admitted"),
-                ),
-            };
-            match frame {
-                WireFrame::ThinRequest(request) => runtime
+            let request = self.assembler.push(frame, self.granted.take())?;
+            self.part_deadline = self
+                .assembler
+                .is_joining()
+                .then(|| tokio::time::Instant::now() + THIN_PART_TIMEOUT);
+            if let Some((request, room)) = request {
+                runtime
                     .receive_thin_request(session, request, room)
-                    .map_err(thin_stopped)?,
-                _ => return Err(thin_malformed("a thin connection sends only thin requests")),
+                    .map_err(thin_stopped)?;
             }
         }
         Ok(())
@@ -1356,67 +1250,6 @@ fn queue_ws_error(writer: &mpsc::Sender<Vec<Message>>, error: WireError) {
     }
 }
 
-/// Decode the opening `Hello`, which arrives as a one-frame batch or a bare
-/// frame. A peer on another wire version gets `UnsupportedProtocolVersion`
-/// even when the rest of its `Hello` uses that version's layout.
-fn decode_ws_hello(bytes: &[u8]) -> Result<WireHello, WireError> {
-    let not_hello = || {
-        WireError::new(
-            WireErrorCode::MalformedFrame,
-            WireRetry::Never,
-            "websocket expects first wire frame to be WireFrame::Hello",
-        )
-    };
-    let frame = match decode_ws_encoded_frame_batch(bytes) {
-        Ok(mut frames) if frames.len() == 1 => frames.remove(0),
-        Ok(_) => return Err(not_hello()),
-        Err(_) => bytes.to_vec(),
-    };
-    jazz::wire::decode_hello_frame(&frame).map_err(|error| match error.code {
-        WireErrorCode::UnsupportedProtocolVersion => error,
-        _ => not_hello(),
-    })
-}
-
-/// The refusal for a client whose `Hello` advertises a wire version range
-/// without this server's, encoded so that client decodes it: an alpha.59
-/// client is told to upgrade instead of failing on a frame it cannot read.
-/// `None` when the first frame is not a `Hello` or speaks this version.
-fn ws_foreign_version_refusal(bytes: &[u8]) -> Option<Vec<u8>> {
-    let frame = match decode_ws_encoded_frame_batch(bytes) {
-        Ok(mut frames) if frames.len() == 1 => frames.remove(0),
-        Ok(_) => return None,
-        Err(_) => bytes.to_vec(),
-    };
-    let (min, max) = jazz::wire::wire_hello_version_range(&frame)?;
-    let ours = jazz::wire::WIRE_PROTOCOL_VERSION;
-    let message = if max < ours {
-        format!(
-            "this Jazz client speaks wire protocol {min}..={max}, older than this server's \
-             {ours}: upgrade the client to the server's Jazz release (a client from \
-             2.0.0-alpha.59 or earlier cannot connect to 2.0.0-alpha.60 or later)"
-        )
-    } else if min > ours {
-        format!(
-            "this Jazz client speaks wire protocol {min}..={max}, newer than this server's \
-             {ours}: upgrade the server to the client's Jazz release"
-        )
-    } else if min == ours && max == ours {
-        return None;
-    } else {
-        format!(
-            "this Jazz client advertises wire protocol {min}..={max}; this server speaks \
-             exactly {ours}: use the same Jazz release on client and server"
-        )
-    };
-    let error = WireError::new(
-        WireErrorCode::UnsupportedProtocolVersion,
-        WireRetry::Never,
-        message,
-    );
-    jazz::wire::encode_error_frame_for_peer(&error, max).ok()
-}
-
 #[cfg(test)]
 fn decode_ws_frame_batch(bytes: &[u8]) -> Result<Vec<WireFrame>, postcard::Error> {
     let encoded_frames = decode_ws_encoded_frame_batch(bytes)?;
@@ -1424,10 +1257,6 @@ fn decode_ws_frame_batch(bytes: &[u8]) -> Result<Vec<WireFrame>, postcard::Error
         .iter()
         .map(|frame| jazz::wire::decode_frame(frame))
         .collect()
-}
-
-fn decode_ws_encoded_frame_batch(bytes: &[u8]) -> Result<Vec<Vec<u8>>, postcard::Error> {
-    jazz::wire::decode_websocket_frame_batch(bytes)
 }
 
 async fn send_ws_encoded_frames<S: SyncSocket>(
@@ -1454,32 +1283,6 @@ async fn send_ws_frames<S: SyncSocket>(
         .collect::<Result<Vec<_>, _>>()
         .map_err(axum::Error::new)?;
     send_ws_encoded_frames(socket, &encoded).await
-}
-
-/// Pack encoded wire frames into as few bounded WebSocket batch payloads as fit.
-pub(crate) fn encode_ws_frame_batches(frames: &[Vec<u8>]) -> Result<Vec<Vec<u8>>, postcard::Error> {
-    let mut batches = Vec::new();
-    let mut current = Vec::new();
-    for frame in frames {
-        let mut candidate = current.clone();
-        candidate.push(frame.clone());
-        let candidate_fits = jazz::wire::encode_websocket_frame_batch(&candidate).is_ok();
-        if !candidate_fits && !current.is_empty() {
-            batches.push(jazz::wire::encode_websocket_frame_batch(&current)?);
-            current.clear();
-            // A singleton has its own count and length prefixes. Validate the
-            // actual carrier after the flush instead of assuming a raw frame
-            // at the frame limit can fit by itself.
-            jazz::wire::encode_websocket_frame_batch(std::slice::from_ref(frame))?;
-        } else if !candidate_fits {
-            return Err(postcard::Error::SerializeBufferFull);
-        }
-        current.push(frame.clone());
-    }
-    if !current.is_empty() {
-        batches.push(jazz::wire::encode_websocket_frame_batch(&current)?);
-    }
-    Ok(batches)
 }
 
 async fn close_ws_for_shutdown<S: SyncSocket>(socket: &mut S) {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { defaultCoreTarballUrl } from "./vercel-store.js";
+import { defaultCoreTarballUrl } from "./core-providers/vercel-store.js";
 
 describe("vercel() default core tarball", () => {
   it("is npm's tarball for a published version", () => {

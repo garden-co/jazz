@@ -29,12 +29,20 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::future_to_promise;
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "browser"))]
 mod browser;
 #[cfg(all(target_arch = "wasm32", feature = "browser-bench"))]
 pub mod browser_bench;
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "durable-object"))]
+mod durable_object;
+#[cfg(all(target_arch = "wasm32", feature = "browser"))]
 mod idb_vfs;
+#[cfg(all(target_arch = "wasm32", feature = "server"))]
+pub mod server;
+#[cfg(all(target_arch = "wasm32", feature = "durable-object-tests"))]
+pub use durable_object::check_durable_object_scopes;
+#[cfg(all(target_arch = "wasm32", feature = "durable-object"))]
+pub use durable_object::{durable_object_storage, ObjectStorage};
 mod identity;
 mod text;
 
@@ -411,15 +419,15 @@ struct Host {
     tick_scheduler: RefCell<Option<js_sys::Function>>,
     /// Told of a write rejected at apply time that no wait claimed.
     mutation_errors: RefCell<Option<js_sys::Function>>,
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", feature = "browser"))]
     store: RefCell<Option<browser::Store>>,
     /// Persisting the store, as asked for after ticks.
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", feature = "browser"))]
     persist: Persist,
 }
 
 /// The store's persists: whether one runs, and how the last one failed.
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "browser"))]
 #[derive(Default)]
 struct Persist {
     /// A background persist is running.
@@ -441,11 +449,11 @@ struct Persist {
 
 /// The first and the longest wait before persisting again after a failed
 /// persist (ms).
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "browser"))]
 const PERSIST_RETRY_MS: (f64, f64) = (1_000.0, 10_000.0);
 
 /// The error a persist failure is reported as, with code `storage`.
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "browser"))]
 fn storage_error(message: &str) -> JsValue {
     core_error_to_js(&Error::new(
         jazz::db::ErrorCode::Storage,
@@ -465,7 +473,7 @@ impl WasmDbInner {
     /// storage (at once without one), then send the acks the database held
     /// for them; fail, with code `storage`, if they could not be written.
     async fn flush(&self) -> Result<(), JsValue> {
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(all(target_arch = "wasm32", feature = "browser"))]
         {
             let store = self.host.store.borrow().clone();
             if let Some(store) = store {
@@ -509,7 +517,7 @@ impl WasmDbInner {
     /// worker applied itself (upstream rows) must reach IndexedDB too, and
     /// tabs must hear when it works again. After a failed persist, the next
     /// waits for its backoff.
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", feature = "browser"))]
     fn request_persist(&self) {
         let persist = &self.host.persist;
         let wanted = match self.host.store.borrow().as_ref() {
@@ -550,7 +558,7 @@ impl WasmDbInner {
         });
     }
 
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", feature = "browser"))]
     fn retry_persist_later(&self, delay: f64) {
         let persist = &self.host.persist;
         if persist.retry_timer.replace(true) {
@@ -569,7 +577,7 @@ impl WasmDbInner {
         }
     }
 
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", feature = "browser"))]
     fn tell_storage_failure(&self, message: Option<&str>) {
         let listener = self.host.persist.listener.borrow().clone();
         if let Some(listener) = listener {
@@ -578,7 +586,7 @@ impl WasmDbInner {
         }
     }
 
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", feature = "browser"))]
     fn schedule_tick(&self) {
         let scheduler = self.host.tick_scheduler.borrow().clone();
         if let Some(scheduler) = scheduler {
@@ -1306,7 +1314,7 @@ impl WasmDb {
     /// file: `{ backend?: "indexeddb", path?: string }` (see [`browser`]).
     /// The default file is named after `database`, the physical database
     /// name the worker admitted.
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", feature = "browser"))]
     #[wasm_bindgen(js_name = openBrowser)]
     pub async fn open_browser(
         storage: JsValue,
@@ -1317,7 +1325,7 @@ impl WasmDb {
         Self::open_browser_as(storage, schema, config, database, OpenAs::Untrusted).await
     }
 
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", feature = "browser"))]
     #[wasm_bindgen(js_name = openBrowserWithSelfSignedProof)]
     pub async fn open_browser_with_self_signed_proof(
         storage: JsValue,
@@ -1336,7 +1344,7 @@ impl WasmDb {
         Self::open_browser_as(storage, schema, config, database, how).await
     }
 
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", feature = "browser"))]
     async fn open_browser_as(
         storage: JsValue,
         schema: Vec<u8>,
@@ -1381,7 +1389,7 @@ impl WasmDb {
 
     /// Delete a durable browser store (`{ backend, path }`, as for
     /// `openBrowser`). No database may have it open.
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(target_arch = "wasm32", feature = "browser"))]
     #[wasm_bindgen(js_name = destroyBrowserStorage)]
     pub async fn destroy_browser_storage(
         storage: JsValue,
@@ -1550,7 +1558,7 @@ impl WasmDb {
     /// `flush` fails with code `storage`. Called at once if failing now.
     #[wasm_bindgen(js_name = onStorageFailure)]
     pub fn on_storage_failure(&self, callback: js_sys::Function) {
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(all(target_arch = "wasm32", feature = "browser"))]
         if let Ok(inner) = self.open_inner() {
             let failure = inner.host.persist.failure.borrow().clone();
             *inner.host.persist.listener.borrow_mut() = Some(callback);
@@ -1558,7 +1566,7 @@ impl WasmDb {
                 inner.tell_storage_failure(Some(&message));
             }
         }
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "browser")))]
         let _ = callback;
     }
 
@@ -1672,12 +1680,12 @@ impl WasmDb {
             Ok(binding) => binding,
             Err(error) => return js_sys::Promise::reject(&error),
         };
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(all(target_arch = "wasm32", feature = "browser"))]
         let inner = self.open_inner().ok();
         future_to_promise(async move {
             binding.tick().await.map_err(host_error)?;
             // The tick may have held acks for commits it applied.
-            #[cfg(target_arch = "wasm32")]
+            #[cfg(all(target_arch = "wasm32", feature = "browser"))]
             if let Some(inner) = inner {
                 inner.request_persist();
             }
@@ -1926,7 +1934,7 @@ impl WasmDb {
                 // could not write stays as IndexedDB last held it (whole),
                 // and the error says so.
                 let flushed = inner.flush().await;
-                #[cfg(target_arch = "wasm32")]
+                #[cfg(all(target_arch = "wasm32", feature = "browser"))]
                 if let Some(store) = inner.host.store.borrow_mut().take() {
                     store.on_write_failed(None);
                 }

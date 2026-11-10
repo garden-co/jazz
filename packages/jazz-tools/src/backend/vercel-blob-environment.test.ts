@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { refuseOtherEnvironmentsBlobStore } from "./vercel-store.js";
+import { refuseOtherEnvironmentsBlobStore } from "./core-providers/vercel-store.js";
 
 /** A fetch that answers every request with `answer`, and records what it was asked. */
 function fakeFetch(answer: () => Response | Promise<Response>) {

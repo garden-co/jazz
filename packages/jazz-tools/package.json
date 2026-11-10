@@ -9,7 +9,9 @@
   "files": [
     "bin/**",
     "dist/**",
-    "README.md"
+    "README.md",
+    "durable-object-worker/artifact.js",
+    "durable-object-worker/artifact.d.ts"
   ],
   "type": "module",
   "main": "dist/index.js",
@@ -21,6 +23,28 @@
     "./dist/runtime/platform-url.js": "./dist/runtime/platform-url.native.js",
     "./dist/runtime/telemetry-env.js": "./dist/runtime/telemetry-env.native.js",
     "./dist/runtime/browser-worker-assets.js": "./dist/runtime/browser-worker-assets.native.js"
+  },
+  "imports": {
+    "#jazz/backend-host": {
+      "workerd": {
+        "types": "./dist/backend/runtime/workerd-host.d.ts",
+        "default": "./dist/backend/runtime/workerd-host.js"
+      },
+      "default": {
+        "types": "./dist/backend/runtime/node-host.d.ts",
+        "default": "./dist/backend/runtime/node-host.js"
+      }
+    },
+    "#jazz/backend-socket": {
+      "workerd": {
+        "types": "./dist/backend/runtime/workerd-socket.d.ts",
+        "default": "./dist/backend/runtime/workerd-socket.js"
+      },
+      "default": {
+        "types": "./dist/backend/runtime/node-socket.d.ts",
+        "default": "./dist/backend/runtime/node-socket.js"
+      }
+    }
   },
   "exports": {
     ".": {
@@ -40,8 +64,14 @@
       "default": "./dist/e2ee/native.js"
     },
     "./backend": {
-      "types": "./dist/backend/index.d.ts",
-      "default": "./dist/backend/index.js"
+      "workerd": {
+        "types": "./dist/backend/runtime/workerd-entry.d.ts",
+        "default": "./dist/backend/runtime/workerd-entry.js"
+      },
+      "default": {
+        "types": "./dist/backend/index.d.ts",
+        "default": "./dist/backend/index.js"
+      }
     },
     "./better-auth-adapter": {
       "types": "./dist/better-auth-adapter/index.d.ts",
@@ -185,7 +215,10 @@
     "bench:abstract:browser": "JAZZ_ABSTRACT_BENCH=1 vitest run --config vitest.config.browser.ts tests/browser/schema-marshalling.abstract-bench.test.ts",
     "bench:realistic:browser": "vitest run --config vitest.config.browser.ts tests/browser/realistic-bench.test.ts",
     "stage:inspector-overlay": "node scripts/stage-inspector-overlay.mjs",
-    "pack:dry-run": "npm pack --dry-run"
+    "pack:dry-run": "npm pack --dry-run",
+    "build:durable-objects": "node scripts/bundle-durable-object-worker.mjs",
+    "prepack": "node scripts/verify-durable-object-artifact.mjs",
+    "test:durable-objects": "node scripts/prepare-durable-object-tests.mjs && node ../../dev/gates/run-correctness-consumer.mjs -- pnpm exec vitest run --config vitest.config.durable-objects.ts"
   },
   "dependencies": {
     "@noble/curves": "2.0.1",
@@ -226,6 +259,7 @@
     "jsdom": "^26.0.0",
     "libsodium": "0.8.3",
     "libsodium-wrappers": "0.8.3",
+    "miniflare": "4.20260730.0",
     "prosemirror-markdown": "^1.13.9",
     "prosemirror-model": "^1.25.4",
     "prosemirror-state": "^1.4.4",

@@ -1,0 +1,14 @@
+[package]
+name = "jazz-do-server"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+jazz-wasm = { path = "../..", default-features = false, features = ["durable-object", "server", "console_error_panic_hook", "transport-compression-ruzstd"] }
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-O", "--low-memory-unused"]

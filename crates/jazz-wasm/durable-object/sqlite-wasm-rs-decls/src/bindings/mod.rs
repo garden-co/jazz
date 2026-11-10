@@ -1,0 +1,42 @@
+//! Copied unchanged from sqlite-wasm-rs 0.5.5 (`src/bindings`), minus the
+//! sqlite3mc and build-time bindgen variants.
+
+mod sqlite3_bindgen;
+
+mod bindgen {
+    pub use super::sqlite3_bindgen::*;
+}
+
+mod error;
+
+pub use bindgen::*;
+pub use error::*;
+
+use core::mem;
+
+#[must_use]
+pub fn SQLITE_STATIC() -> sqlite3_destructor_type {
+    None
+}
+
+#[must_use]
+pub fn SQLITE_TRANSIENT() -> sqlite3_destructor_type {
+    // SQLite uses -1 as a sentinel for "make your own copy".
+    Some(unsafe {
+        mem::transmute::<isize, unsafe extern "C" fn(*mut core::ffi::c_void)>(-1_isize)
+    })
+}
+
+impl Default for sqlite3_vtab {
+    fn default() -> Self {
+        // C expects zero-initialized vtab structs.
+        unsafe { mem::zeroed() }
+    }
+}
+
+impl Default for sqlite3_vtab_cursor {
+    fn default() -> Self {
+        // C expects zero-initialized vtab cursor structs.
+        unsafe { mem::zeroed() }
+    }
+}

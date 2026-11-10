@@ -20,7 +20,7 @@ pub fn history_source_table(name: &str) -> Option<&str> {
 
 /// Portable transaction identity of a settled content version.
 pub const TRANSACTION_ID_COLUMN: &str = "$transactionId";
-/// Acceptance HLC of a settled content version.
+/// Acceptance time of a settled content version in Unix milliseconds.
 pub const ACCEPTED_AT_COLUMN: &str = "$acceptedAt";
 
 /// Metadata supplied for each accepted content version.
@@ -28,7 +28,7 @@ pub const ACCEPTED_AT_COLUMN: &str = "$acceptedAt";
 pub enum HistoryMetadataColumn {
     /// Portable content transaction identity.
     TransactionId,
-    /// Acceptance HLC, retaining physical and logical components.
+    /// Acceptance time in Unix milliseconds.
     AcceptedAt,
 }
 

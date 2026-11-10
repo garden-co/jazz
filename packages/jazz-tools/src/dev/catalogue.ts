@@ -1,3 +1,5 @@
+import { deployArtifacts } from "./deploy-artifacts.js";
+export { deployArtifacts } from "./deploy-artifacts.js";
 import { validateSchemaAndPermissions } from "./schema-validation.js";
 /**
  * Contains utilities for deploying schemas, permissions, and migrations to a Jazz server.
@@ -9,17 +11,13 @@ import { schemaDefinitionToAst } from "../migrations.js";
 import { toValue } from "../runtime/value-converter.js";
 import type { Lens, SqlType } from "../schema.js";
 import type { CompiledPermissionsMap } from "../schema-permissions.js";
-import {
-  collectMissingExplicitPolicyDiagnostics,
-  mergePermissionsIntoWasmSchema,
-} from "../schema-permissions.js";
+import { mergePermissionsIntoWasmSchema } from "../schema-permissions.js";
 import { schemaToWasm } from "../codegen/schema-reader.js";
 import { resolveSchemaSource, type SchemaSourceInput } from "../schema-source.js";
 import { computeSchemaHash } from "../schema-hash.js";
 import {
   encodePublishedMigrationValue,
   fetchStoredWasmSchema,
-  publishDeployment,
   type DeploymentArtifacts,
   type DeploymentResponse,
   type PublishedTableLens,
@@ -31,7 +29,7 @@ import {
   tableSchemasEqual,
 } from "./schema-utils.js";
 
-import { fetchMigrationGraph, type MigrationGraph } from "./migration-graph.js";
+import { fetchMigrationGraph } from "./migration-graph.js";
 
 export { computeSchemaHash, shortSchemaHash };
 export type { SchemaSourceInput };
@@ -324,40 +322,6 @@ async function loadSchema(options: CatalogueServerOptions, hash: string): Promis
     schemaHash: hash,
   });
   return storedSchema.schema;
-}
-
-/** Diff against the fetched graph and publish all missing artifacts in one request. */
-export async function deployArtifacts(
-  options: CatalogueServerOptions & { allowDroppingHistory?: boolean },
-  graph: MigrationGraph,
-  artifacts: DeploymentArtifacts,
-): Promise<DeployResult> {
-  const storedSchemas = new Set(graph.schemas);
-  const storedMigrations = new Set(
-    graph.migrations.map((edge) => `${edge.fromHash}:${edge.toHash}`),
-  );
-  const result = await publishDeployment(options.serverUrl, {
-    ...options,
-    ...artifacts,
-    schemas: artifacts.schemas.filter(({ hash }) => !storedSchemas.has(hash)),
-    migrations: artifacts.migrations.filter(
-      (edge) => !storedMigrations.has(`${edge.fromHash}:${edge.toHash}`),
-    ),
-  });
-  const target = artifacts.schemas.find(({ hash }) => hash === artifacts.targetSchemaHash)!;
-  return {
-    ...result,
-    schema: {
-      hash: artifacts.targetSchemaHash,
-      status: result.published.schemas.includes(artifacts.targetSchemaHash)
-        ? "published"
-        : "already-stored",
-    },
-    warnings: collectMissingExplicitPolicyDiagnostics(
-      Object.keys(target.schema),
-      artifacts.permissions,
-    ).map((diagnostic) => diagnostic.message),
-  };
 }
 
 /** Publish schemas, migrations and permissions together. */

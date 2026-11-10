@@ -674,6 +674,7 @@ jobs:
           pnpm --filter jazz-tools pack --pack-destination "${TMP_DIR}"
           TARBALL=$(ls "${TMP_DIR}"/jazz-tools-*.tgz | head -n 1)
           tar -xOf "${TARBALL}" package/package.json | node -e 'let s="";process.stdin.on("data",(d)=>s+=d);process.stdin.on("end",()=>{const p=JSON.parse(s);for(const field of ["dependencies","optionalDependencies","peerDependencies"]){for(const [name,version] of Object.entries(p[field]||{})){if(typeof version==="string"&&version.startsWith("workspace:")){throw new Error(`${field}.${name} uses workspace protocol (${version}) in packed manifest`);}}}console.log(`Packed manifest OK for ${p.name}@${p.version}`);});'
+          node dev/artifacts/verify-packed-durable-object.mjs "${TARBALL}"
           # The inspector overlay's embedded build must be bundled into jazz-tools.
           tar -tf "${TARBALL}" | grep -q "package/dist/dev/inspector-overlay/embedded/embedded.html"
 

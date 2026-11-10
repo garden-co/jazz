@@ -16,17 +16,13 @@
 //! `_jazz_transactions` records it for an upload. The authority's own commits
 //! are not recorded there: they are `(seq, authority node)`. A replica
 //! lists only versions whose transaction it knows. `$acceptedAt` is the
-//! authority's stamp for the commit (ms, distinct per commit) as an HLC
-//! with a zero logical counter.
+//! authority's acceptance time in Unix milliseconds, derived from the compact
+//! shard clock. The full clock breaks ordering ties within a millisecond. Authored
+//! provenance timestamps do not determine acceptance time or ordering.
 
 use crate::schema::history::{ACCEPTED_AT_COLUMN, HistoryMetadataColumn, TRANSACTION_ID_COLUMN};
 
 use super::*;
-
-/// Bits below the physical milliseconds of a `$acceptedAt` value (its
-/// logical counter): the jazz-types HLC encoding, not the commit HLC of
-/// positions (`shard::HLC_COUNTER_BITS`).
-const ACCEPTED_AT_COUNTER_BITS: u32 = 18;
 
 impl Ctx<'_> {
     /// A `history.<source>` read. See the module docs.
@@ -203,8 +199,11 @@ impl Ctx<'_> {
                 recorded.to_owned()
             }
         };
-        let accepted =
-            format!("(COALESCE(v.\"$updatedAt\", v.\"$createdAt\") << {ACCEPTED_AT_COUNTER_BITS})");
+        // Expose ordinary timestamps in both predicates and results. The full
+        // _clock remains available as the ordering tie-breaker.
+        let counter_bits = crate::db::shard::HLC_COUNTER_BITS;
+        let epoch_ms = crate::db::shard::HLC_EPOCH_MS;
+        let accepted = format!("((v._clock >> {counter_bits}) + {epoch_ms})");
         let mut deletion = String::new();
         for column in ["$deletedAt", "$deletedBy"] {
             deletion.push_str(&format!(

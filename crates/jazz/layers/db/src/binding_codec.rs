@@ -300,11 +300,10 @@ pub fn row_record(row: &CurrentRow) -> Result<OwnedRecord, postcard::Error> {
 /// [`row_record`] as a host reads it. History metadata (reserved names,
 /// read only from `history.<table>`) is converted only here, after the
 /// read: `$transactionId` becomes the public transaction id a write handle
-/// reports, and `$acceptedAt` its HLC's milliseconds. Ordering and
-/// occurrence identity keep the full values.
+/// reports. `$acceptedAt` already contains Unix milliseconds.
 fn published_record(row: &CurrentRow) -> Result<OwnedRecord, postcard::Error> {
     use crate::schema::history::HistoryMetadataColumn;
-    use crate::schema::history::{ACCEPTED_AT_COLUMN, TRANSACTION_ID_COLUMN};
+    use crate::schema::history::TRANSACTION_ID_COLUMN;
     let record = row_record(row)?;
     if !row
         .cells()
@@ -328,10 +327,6 @@ fn published_record(row: &CurrentRow) -> Result<OwnedRecord, postcard::Error> {
                 let id = jazz_model::model::transaction::TransactionId::from_committed_tx(tx);
                 (ValueType::String, Value::String(id.to_string()))
             }
-            (ACCEPTED_AT_COLUMN, Value::U64(hlc)) => (
-                ValueType::U64,
-                Value::U64(jazz_types::time::GlobalTime(hlc).physical_ms()),
-            ),
             (_, value) => (field.value_type.clone(), value),
         };
         fields.push((name.to_owned(), ty));

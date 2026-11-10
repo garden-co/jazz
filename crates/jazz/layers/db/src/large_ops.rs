@@ -693,8 +693,7 @@ impl Db {
         range: std::ops::Range<u64>,
     ) -> Result<Vec<u8>, Error> {
         self.fetching(|| {
-            self.inner()
-                .read_range(table, row, column, range.clone(), false)
+            self.callback_read(|inner| inner.read_range(table, row, column, range.clone(), false))
         })
         .await
     }
@@ -711,15 +710,16 @@ impl Db {
         to: Pos,
     ) -> Result<Vec<LargeValueDeltaSplice>, Error> {
         self.fetching(|| {
-            let inner = self.inner();
-            inner.value_delta(
-                table,
-                row,
-                column,
-                ((from, None), (to, None)),
-                inner.reader(),
-                &inner.schema,
-            )
+            self.callback_read(|inner| {
+                inner.value_delta(
+                    table,
+                    row,
+                    column,
+                    ((from, None), (to, None)),
+                    inner.reader(),
+                    &inner.schema,
+                )
+            })
         })
         .await
     }
@@ -735,8 +735,9 @@ impl Db {
     ) -> Result<String, Error> {
         let bytes = self
             .fetching(|| {
-                self.inner()
-                    .read_range(table, row, column, range.clone(), true)
+                self.callback_read(|inner| {
+                    inner.read_range(table, row, column, range.clone(), true)
+                })
             })
             .await?;
         String::from_utf8(bytes).map_err(|_| query("UTF-16 range splits a surrogate pair"))
@@ -762,19 +763,20 @@ impl Db {
         column: &str,
         pointer: &str,
     ) -> Result<Option<serde_json::Value>, Error> {
-        let inner = self.inner();
-        let reader = inner.reader();
-        let (col, cell) = inner.physical_cell(table, row, column, reader)?;
-        if crate::large::kind(&col) != lv::LargeValueKind::Json {
-            return Err(Error::new(
-                ErrorCode::Schema,
-                "JSON pointer selection requires a JSON column",
-            ));
-        }
-        if !large_cell(&cell) {
-            return Ok(None);
-        }
-        inner.cell_pointer(cell.as_ref(), pointer)
+        self.callback_read(|inner| {
+            let reader = inner.reader();
+            let (col, cell) = inner.physical_cell(table, row, column, reader)?;
+            if crate::large::kind(&col) != lv::LargeValueKind::Json {
+                return Err(Error::new(
+                    ErrorCode::Schema,
+                    "JSON pointer selection requires a JSON column",
+                ));
+            }
+            if !large_cell(&cell) {
+                return Ok(None);
+            }
+            inner.cell_pointer(cell.as_ref(), pointer)
+        })
     }
 
     /// Append bytes (UTF-8 for a string) to a cell, as one row update.
@@ -833,28 +835,27 @@ impl Db {
         edit: Edit,
         opts: UpdateOptions,
     ) -> Result<WriteHandle, Error> {
-        let value = {
-            let mut inner = self.inner();
+        let value = self.callback_read(|inner| {
             inner.require_mutation_admission()?;
             let edited = inner
                 .physical_cell(table, row, column, identity_of(opts.identity))
                 .and_then(|(col, cell)| Ok(nullable(&col, inner.edited(table, &col, cell, edit)?)));
             match edited {
-                Ok(value) => value,
+                Ok(value) => Ok(value),
                 Err(error) => {
                     // Nothing derived survives a failed edit (which may be
                     // retried once its chunks are fetched).
                     inner.clear_derived();
-                    return Err(error);
+                    Err(error)
                 }
             }
-        };
+        })?;
         let cells = BTreeMap::from([(column.to_owned(), value)]);
         let result = self.write_op(
             StagedOp::Update(table.to_owned(), row, cells, opts.clone()),
             who(opts.identity),
         );
-        self.inner().clear_derived();
+        self.inner.staging().clear_derived();
         result
     }
 
@@ -882,21 +883,20 @@ impl Db {
         mutations: Vec<LargeValueUpdate>,
         opts: UpdateOptions,
     ) -> Result<WriteHandle, Error> {
-        let lowered = {
-            let mut inner = self.inner();
+        let lowered = self.callback_read(|inner| {
             inner.require_mutation_admission()?;
             let identity = identity_of(opts.identity);
             inner.lower_large_mutations(table, row, &mut patch, mutations, identity)
-        };
+        });
         if let Err(error) = lowered {
-            self.inner().clear_derived();
+            self.inner.staging().clear_derived();
             return Err(error);
         }
         let result = self.write_op(
             StagedOp::Update(table.to_owned(), row, patch, opts.clone()),
             who(opts.identity),
         );
-        self.inner().clear_derived();
+        self.inner.staging().clear_derived();
         result
     }
 
@@ -1133,6 +1133,14 @@ impl Db {
         head: Option<BranchSelector>,
         base: Option<BranchViewBase>,
     ) -> Result<WriteHandle, Error> {
+        if let Some(id) = self.callback_batch() {
+            self.tx_ref(id)
+                .finish_streaming_value_upload(
+                    upload, mutation, table, row, cells, column, identity, now_ms, head, base,
+                )
+                .await?;
+            return Ok(self.callback_write_handle(id, row));
+        }
         if let Some(value) = self.seal_streaming_upload(&mut upload, table, &mut cells, column)? {
             self.inner().derived.push(value);
         }

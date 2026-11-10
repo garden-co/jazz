@@ -10,7 +10,7 @@ import { describe, expect, it } from "vitest";
 //   import is not enough for that), and an installed one is bundled.
 // - Nothing finds a file through `import.meta.url` at runtime: bundlers
 //   bake the build machine's path into it, which a deployed function lacks.
-const sources = ["vercel-store.ts", "create-jazz.ts"].map((file) => ({
+const sources = ["core-providers/vercel-store.ts", "create-jazz.ts"].map((file) => ({
   file,
   text: readFileSync(new URL(file, import.meta.url), "utf8"),
 }));

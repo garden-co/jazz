@@ -1,3 +1,4 @@
+import { unreadableTargetError } from "../runtime/native-runtime/native-error-code.js";
 /**
  * A runtime with no local engine (SPEC 8.14). The server evaluates every
  * query under this connection's session and sends finished results; writes
@@ -8,7 +9,8 @@
  * streams run on the server too: their options travel as the native
  * bindings take them, and the server binds every write and read to the
  * session. Not supported: writes while offline beyond the reconnect that
- * follows, and backend attribution.
+ * follows. Authenticated backend connections can additionally supply per-request
+ * permission scopes and attribution, including transactions bound to that scope.
  */
 import type {
   InsertValues,
@@ -78,6 +80,7 @@ import {
 } from "../runtime/native-runtime/websocket.js";
 import {
   FEATURE_THIN_RESULTS,
+  FEATURE_THIN_BACKEND_SCOPE_V1,
   decodeThinResponse,
   encodeThinRequest,
   MAX_THIN_MESSAGE_BYTES,
@@ -89,6 +92,8 @@ import {
 } from "./wire.js";
 
 export interface ThinRuntimeOptions {
+  /** @internal Authenticated backend connection; scope is verified by the authority. */
+  backend?: boolean;
   /** WebSocket implementation; the global one by default. */
   WebSocket?: WebSocketConstructor;
   /** Delays between reconnect attempts, in ms; the last one repeats. */
@@ -177,6 +182,7 @@ const RESENDABLE_WRITES = new Set<ThinOp["type"]>([
 ]);
 
 type LiveQuery = {
+  backendContext?: string;
   /** The runtime query as the client gave it, for {@link ThinRuntime.liveQueryJsons}. */
   queryJson: string;
   query: Uint8Array;
@@ -192,6 +198,8 @@ type LiveQuery = {
 };
 
 type OpenTransaction = {
+  /** Permission scope and attribution captured at begin, reused at completion. */
+  backendContext?: string;
   kind: TransactionKind;
   /** The begin and every staged write: the commit waits for their answers. */
   requests: Promise<ThinBody>[];
@@ -276,7 +284,10 @@ export class ThinRuntime implements Runtime {
   private mutationErrorCallback?: (event: MutationErrorEvent) => void;
   private authFailureCallback?: (reason: string) => void;
 
+  private readonly backend: boolean;
+
   constructor(schema: WasmSchema, options: ThinRuntimeOptions = {}) {
+    this.backend = options.backend ?? false;
     this.schema = schema;
     this.schemaBytes = encodeSchema(schema);
     this.WebSocketImpl = options.WebSocket;
@@ -378,7 +389,7 @@ export class ThinRuntime implements Runtime {
         this.authJson,
         this.author === undefined ? runtimeRandomBytes(16) : new TextEncoder().encode(this.author),
       ),
-      features: FEATURE_THIN_RESULTS,
+      features: FEATURE_THIN_RESULTS | (this.backend ? FEATURE_THIN_BACKEND_SCOPE_V1 : 0),
       authJson: this.authJson,
       WebSocket: this.WebSocketImpl,
       onFrame: (frame) => this.receive(carrier, frame),
@@ -390,6 +401,10 @@ export class ThinRuntime implements Runtime {
         if (this.carrier !== carrier) return;
         if ((negotiation.features & FEATURE_THIN_RESULTS) === 0) {
           this.fatal(new Error("this Jazz server does not serve thin clients"));
+          return;
+        }
+        if (this.backend && (negotiation.features & FEATURE_THIN_BACKEND_SCOPE_V1) === 0) {
+          this.fatal(new Error("this Jazz server does not support backend thin request scopes"));
           return;
         }
         this.bindSchema(carrier);
@@ -626,7 +641,10 @@ export class ThinRuntime implements Runtime {
       this.oneShots.set(id, oneShot);
       if (this.bound) this.transmit(id, oneShot);
     }).then((body) => {
-      if (body.type === "error") throw new ThinRemoteError(body.code, body.message);
+      if (body.type === "error") {
+        if (op.backendContext !== undefined) throw backendRequestError(op, body);
+        throw new ThinRemoteError(body.code, body.message);
+      }
       return body;
     });
     return { answer, oneShot };
@@ -687,7 +705,7 @@ export class ThinRuntime implements Runtime {
    * author (a cookie session) refuses any session named explicitly.
    */
   private refuseOtherSession(sessionJson: string | null | undefined, operation: string): void {
-    if (sessionJson == null) return;
+    if (this.backend || sessionJson == null) return;
     type SessionJson = {
       issuer?: string;
       user_id?: string;
@@ -718,6 +736,7 @@ export class ThinRuntime implements Runtime {
     this.refuseOtherSession(writeContext, operation);
     return {
       operation,
+      backendContext: this.backend ? (writeContext ?? "{}") : undefined,
       transaction: txIdFromContext(writeContext),
       branchView: branchViewFromWriteContext(writeContext),
       updatedAtMs: effectiveUpdatedAtMs(writeContext) ?? Date.now(),
@@ -738,6 +757,7 @@ export class ThinRuntime implements Runtime {
     if (transaction) this.openTransaction(transaction, "Query setup");
     const body = await this.request({
       type: "query",
+      backendContext: this.backend ? (sessionJson ?? "{}") : undefined,
       query: encodeQueryJson(coreQueryJson, this.schema),
       options: readOptions(tier, queryIncludesDeleted(coreQueryJson), optionsJson) as object,
       transaction,
@@ -760,6 +780,7 @@ export class ThinRuntime implements Runtime {
     assertNoUnsupportedPermissionIntrospection(queryJson);
     const handle = this.nextHandle++;
     this.liveQueries.set(handle, {
+      backendContext: this.backend ? (sessionJson ?? "{}") : undefined,
       queryJson,
       query: encodeQueryJson(queryJson, this.schema),
       options: readOptions(tier, queryIncludesDeleted(queryJson), optionsJson) as object,
@@ -813,7 +834,12 @@ export class ThinRuntime implements Runtime {
     this.liveByRequest.set(id, handle);
     this.sendFrame(
       this.carrier,
-      encodeThinRequest(id, { type: "subscribe", query: live.query, options: live.options }),
+      encodeThinRequest(id, {
+        type: "subscribe",
+        query: live.query,
+        options: live.options,
+        backendContext: live.backendContext,
+      }),
       (bytes) => {
         this.liveByRequest.delete(id);
         live.requestId = undefined;
@@ -999,6 +1025,7 @@ export class ThinRuntime implements Runtime {
     const begun = this.request(
       {
         type: "beginStream",
+        backendContext: context.backendContext,
         table,
         row,
         cells:
@@ -1019,6 +1046,7 @@ export class ThinRuntime implements Runtime {
       for (let offset = 0; offset < bytes.byteLength; offset += windowBytes) {
         await this.request({
           type: "streamChunk",
+          backendContext: context.backendContext,
           stream,
           chunk: bytes.subarray(offset, offset + windowBytes),
         });
@@ -1059,7 +1087,11 @@ export class ThinRuntime implements Runtime {
       // The value is staged in the transaction; its commit reports a
       // refusal of the row write.
       transaction.rows.push(...written);
-      const staged = this.request({ type: "finishStream", stream });
+      const staged = this.request({
+        type: "finishStream",
+        stream,
+        backendContext: context.backendContext,
+      });
       transaction.requests.push(staged);
       transaction.staged = true;
       await staged;
@@ -1072,7 +1104,10 @@ export class ThinRuntime implements Runtime {
     return {
       id: formatUuid(row),
       kind: "committed",
-      txId: this.write({ type: "finishStream", stream }, written),
+      txId: this.write(
+        { type: "finishStream", stream, backendContext: context.backendContext },
+        written,
+      ),
     };
   }
 
@@ -1089,13 +1124,16 @@ export class ThinRuntime implements Runtime {
       throw new Error(`Begin transaction failed: transaction ${id} has already been opened`);
     }
     // The server binds the transaction to this connection's session.
+    const backendContext = this.backend ? (sessionJson ?? "{}") : undefined;
     const { answer: begun, oneShot: begin } = this.requestWith({
+      backendContext,
       type: "begin",
       transaction: id,
       kind,
     });
     begun.catch(() => undefined);
     this.transactions.set(id, {
+      backendContext,
       kind,
       requests: [begun],
       staged: false,
@@ -1123,9 +1161,17 @@ export class ThinRuntime implements Runtime {
     // A staged write the server refused outright fails the commit; one its
     // row's state refused is the commit's own rejection, from the server.
     return Promise.all(transaction.requests).then(
-      () => this.write({ type: "commit", transaction: id }, transaction.rows),
+      () =>
+        this.write(
+          { type: "commit", transaction: id, backendContext: transaction.backendContext },
+          transaction.rows,
+        ),
       (error: unknown) => {
-        void this.request({ type: "rollback", transaction: id }).catch(() => undefined);
+        void this.request({
+          type: "rollback",
+          transaction: id,
+          backendContext: transaction.backendContext,
+        }).catch(() => undefined);
         throw error;
       },
     );
@@ -1141,7 +1187,11 @@ export class ThinRuntime implements Runtime {
     this.transactions.delete(id);
     // The server already abandoned a lost transaction.
     if (transaction.lost) return true;
-    await this.request({ type: "rollback", transaction: id });
+    await this.request({
+      type: "rollback",
+      transaction: id,
+      backendContext: transaction.backendContext,
+    });
     return true;
   }
 
@@ -1169,6 +1219,7 @@ export class ThinRuntime implements Runtime {
     context: WriteTarget,
     op: Extract<ThinOp, { transaction?: string }>,
   ): MutationResult {
+    op = { ...op, backendContext: context.backendContext };
     const id = context.transaction;
     const row = writtenRow(context, op);
     if (!id) return { kind: "committed", txId: this.write(op, row ? [row] : []) };
@@ -1425,6 +1476,7 @@ export class ThinRuntime implements Runtime {
 }
 
 type WriteTarget = {
+  backendContext?: string;
   operation: string;
   transaction?: OpenTransactionId;
   branchView?: EncodedBranchView;
@@ -1509,4 +1561,29 @@ function unknownOutcome(cause: Error): ThinConnectionLostError {
         `the connection ended before the server answered: ${cause.message}`,
         { cause },
       );
+}
+
+/** Preserve the backend facade's public errors when the authority, rather
+ * than its former replica, rejects the write. The legacy engine's SYSTEM
+ * missing-target error has no reason tag; only that exact diagnostic shape
+ * needs the fallback below. User denials already carry authorization_denied.
+ */
+function backendRequestError(op: ThinOp, body: Extract<ThinBody, { type: "error" }>): Error {
+  if (body.code === "write_rejected") {
+    const denied = body.message.startsWith("authorization_denied:");
+    if (op.type === "update" || op.type === "upsert") {
+      const verb = op.type.toUpperCase();
+      const unreadable = body.message.startsWith(
+        `authorization_denied: read policy denied ${verb}`,
+      );
+      const missing =
+        body.message.startsWith(`${verb} target `) &&
+        body.message.endsWith(`does not exist in \`${op.table}\``);
+      if (unreadable || missing)
+        return unreadableTargetError(op.type === "update" ? "Update" : "Upsert", op.table);
+    }
+    if (denied)
+      return new ThinRemoteError("permission_denied", "Write rejected by server authorization");
+  }
+  return new ThinRemoteError(body.code, body.message);
 }

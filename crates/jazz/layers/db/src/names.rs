@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use rusqlite::Connection;
+use crate::storage::Storage;
 
 use crate::ids::SchemaVersionId;
 use crate::options::{Error, ErrorCode};
@@ -287,7 +287,7 @@ fn schema_error(message: impl Into<String>) -> Error {
 }
 
 impl Names {
-    pub(crate) fn load(conn: &Connection) -> Result<Self, Error> {
+    pub(crate) fn load(conn: &Storage) -> Result<Self, Error> {
         conn.execute_batch(DDL).map_err(storage)?;
         conn.execute_batch(crate::catalogue::DDL).map_err(storage)?;
         let mut names = Self::default();
@@ -463,7 +463,7 @@ impl Names {
     /// Record lens cells (once each), in memory and in the file.
     pub(crate) fn record_lens_cells(
         &mut self,
-        conn: &Connection,
+        conn: &Storage,
         cells: Vec<LensCell>,
     ) -> Result<(), Error> {
         if cells.is_empty() {
@@ -614,7 +614,7 @@ impl Names {
     /// stored columns. Another hash of a version admitted already (one that
     /// differs only in defaults or indexes) adds no names; its definition
     /// is kept, so a bundle selecting it resolves.
-    pub(crate) fn admit(&mut self, conn: &Connection, schema: &Schema) -> Result<(), Error> {
+    pub(crate) fn admit(&mut self, conn: &Storage, schema: &Schema) -> Result<(), Error> {
         let version = schema.jazz.version_id();
         if self.versions.contains_key(&version) {
             return crate::catalogue::record_equivalent(conn, &schema.jazz);
@@ -707,6 +707,32 @@ impl Names {
         self.types.get(table)?.get(column)
     }
 
+    /// Physical result descriptions for SELECT * on current/history tables,
+    /// including columns retained for older schema versions.
+    pub(crate) fn result_types(&self, table: &str) -> crate::storage::ResultTypes {
+        use crate::storage::{ResultType as T, ResultTypes};
+        let mut named = self
+            .types
+            .get(table)
+            .into_iter()
+            .flat_map(|columns| columns.iter())
+            .map(|(name, ty)| (name.clone(), crate::values::result_type(ty)))
+            .collect::<BTreeMap<_, _>>();
+        for name in ["rid", "_clock", "_state", "_base"]
+            .into_iter()
+            .chain(crate::values::STORED_PROVENANCE)
+        {
+            named.insert(name.into(), T::Integer);
+        }
+        for name in ["id", "_branch", "_writer", "_touched"] {
+            named.insert(name.into(), T::NonNumeric);
+        }
+        ResultTypes {
+            named,
+            ..ResultTypes::default()
+        }
+    }
+
     /// Every stored enum column's tags.
     pub(crate) fn tags(&self) -> &TagRegistry {
         &self.tags
@@ -716,7 +742,7 @@ impl Names {
     /// tag for yet: each column's next tags, in declaration order. Every
     /// store does this as it admits a version; [`Self::align`] then puts
     /// the current schema's in its order.
-    pub(crate) fn mint(&self, conn: &Connection, schema: &Schema) -> Result<(), Error> {
+    pub(crate) fn mint(&self, conn: &Storage, schema: &Schema) -> Result<(), Error> {
         for table in schema.tables.values() {
             for column in &table.columns {
                 if let Some(variants) = &column.variants {
@@ -734,7 +760,7 @@ impl Names {
     /// still holds, say) gets one too: every enum cell is a tag.
     pub(crate) fn intern(
         &self,
-        conn: &Connection,
+        conn: &Storage,
         table: &str,
         column: &str,
         names: &[&str],
@@ -785,7 +811,7 @@ impl Names {
     /// cells.
     pub(crate) fn align(
         &self,
-        conn: &Connection,
+        conn: &Storage,
         table: &str,
         column: &str,
         declared: &[String],
@@ -868,7 +894,7 @@ impl Names {
     /// are its source's and it sorts like its source.
     pub(crate) fn copy_tags(
         &self,
-        conn: &Connection,
+        conn: &Storage,
         table: &str,
         source: &str,
         copy: &str,
@@ -906,7 +932,7 @@ impl Names {
     /// whether any is new here.
     pub(crate) fn confirm(
         &mut self,
-        conn: &Connection,
+        conn: &Storage,
         confirmed: &[([u8; 16], [u8; 16])],
     ) -> Result<bool, Error> {
         // Only a version this store admitted is kept confirmed: the
@@ -1294,7 +1320,7 @@ impl Names {
 
 /// The tag stored column `column` of stored table `table` was added with
 /// (`ADD COLUMN ... DEFAULT`), if any.
-fn table_exists(conn: &Connection, name: &str) -> Result<bool, Error> {
+fn table_exists(conn: &Storage, name: &str) -> Result<bool, Error> {
     conn.query_row(
         "SELECT count(*) > 0 FROM sqlite_master WHERE name = ?1",
         [name],
@@ -1303,7 +1329,7 @@ fn table_exists(conn: &Connection, name: &str) -> Result<bool, Error> {
     .map_err(storage)
 }
 
-fn ddl_default(conn: &Connection, table: &str, column: &str) -> Result<Option<i64>, Error> {
+fn ddl_default(conn: &Storage, table: &str, column: &str) -> Result<Option<i64>, Error> {
     let mut statement = conn
         .prepare(&format!(
             "PRAGMA table_info({})",
@@ -1324,7 +1350,7 @@ fn ddl_default(conn: &Connection, table: &str, column: &str) -> Result<Option<i6
     Ok(None)
 }
 
-fn write_names(conn: &Connection, n: i64, names: &StoredNames) -> Result<(), Error> {
+fn write_names(conn: &Storage, n: i64, names: &StoredNames) -> Result<(), Error> {
     let mut insert = conn
         .prepare_cached(
             "INSERT INTO _jazz_names (n, tbl, col, stored_tbl, stored_col) \
@@ -1353,7 +1379,7 @@ struct NewStoredColumn {
     branch: Option<Option<Sql>>,
 }
 
-fn write_stored_columns(conn: &Connection, columns: &[NewStoredColumn]) -> Result<(), Error> {
+fn write_stored_columns(conn: &Storage, columns: &[NewStoredColumn]) -> Result<(), Error> {
     let mut insert = conn
         .prepare_cached(
             "INSERT OR IGNORE INTO _jazz_stored_columns (tbl, col, ty, branch, has_dflt, dflt) \
@@ -1480,7 +1506,7 @@ mod tests {
     #[test]
     fn a_rolled_back_savepoint_takes_its_interned_tags_with_it() {
         use crate::values::{begin_savepoint, end_savepoint};
-        let conn = Connection::open_in_memory().unwrap();
+        let conn = Storage::open_in_memory().unwrap();
         let names = Names::load(&conn).unwrap();
         let file = || -> Vec<(i64, String)> {
             if !table_exists(&conn, "_jazz_enum_tags").unwrap() {

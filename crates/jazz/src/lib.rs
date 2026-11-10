@@ -66,3 +66,5 @@ pub use jazz_protocol::wire;
 #[doc(hidden)]
 #[cfg(any(test, feature = "testing"))]
 pub use jazz_types::delivery_diagnostics;
+
+pub use jazz_db::storage;

@@ -8,6 +8,11 @@ on:
         required: false
         type: string
         default: ""
+      package_version:
+        description: Optional package version stamped before building (release candidates).
+        required: false
+        type: string
+        default: ""
       napi_matrix:
         description: JSON matrix for NAPI platform packages. Release callers use every platform; preview callers may omit expensive optional platforms.
         required: false
@@ -190,6 +195,25 @@ jobs:
           # The sealed provenance receipt is intentionally dot-prefixed. The
           # upload action excludes hidden files unless this is explicit.
           include-hidden-files: true
+          if-no-files-found: error
+
+      - name: Stamp jazz-tools build version
+        if: inputs.package_version != ''
+        env:
+          PACKAGE_VERSION: ${{ inputs.package_version }}
+        run: node -e 'const fs=require("node:fs");const p="packages/jazz-tools/package.json";const pkg=JSON.parse(fs.readFileSync(p));pkg.version=process.env.PACKAGE_VERSION;fs.writeFileSync(p,JSON.stringify(pkg,null,2)+"\n")'
+
+      - name: Build and verify Durable Object host
+        env:
+          FAST: "0"
+        run: |
+          pnpm --filter jazz-tools build:durable-objects
+          node packages/jazz-tools/scripts/verify-durable-object-artifact.mjs
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jazz-durable-object-host
+          path: packages/jazz-tools/durable-object-worker
           if-no-files-found: error
 
   build-napi:
@@ -395,6 +419,20 @@ jobs:
 
       - name: Derive Jazz artifact expectations from sealed manifests
         run: node dev/artifacts/stage-native-fingerprints.mjs
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: jazz-durable-object-host
+          path: packages/jazz-tools/durable-object-worker
+
+      - name: Stamp jazz-tools build version
+        if: inputs.package_version != ''
+        env:
+          PACKAGE_VERSION: ${{ inputs.package_version }}
+        run: node -e 'const fs=require("node:fs");const p="packages/jazz-tools/package.json";const pkg=JSON.parse(fs.readFileSync(p));pkg.version=process.env.PACKAGE_VERSION;fs.writeFileSync(p,JSON.stringify(pkg,null,2)+"\n")'
+
+      - name: Verify Durable Object host
+        run: node packages/jazz-tools/scripts/verify-durable-object-artifact.mjs
 
       - name: Build jazz-tools TypeScript package
         run: pnpm --filter jazz-tools build

@@ -251,7 +251,7 @@ fn sql_cell(ty: &str, nulls: i64, sql: SqlValue) -> Result<Value, Error> {
 
 /// Store pending commit `tx`: `commit` and the local rows it wrote.
 pub(crate) fn write(
-    conn: &rusqlite::Connection,
+    conn: &crate::storage::Storage,
     tx: u64,
     commit: &SyncMessage,
     rows: &[RowKey],
@@ -364,7 +364,7 @@ pub(crate) fn write(
     Ok(())
 }
 
-fn write_op(conn: &rusqlite::Connection, tx: i64, n: i64, op: &WireOp) -> Result<(), Error> {
+fn write_op(conn: &crate::storage::Storage, tx: i64, n: i64, op: &WireOp) -> Result<(), Error> {
     let none = || None::<&BTreeMap<String, Value>>;
     let (target, moved, at, cells, created) = match &op.write {
         WireWrite::Insert {
@@ -456,7 +456,7 @@ fn write_op(conn: &rusqlite::Connection, tx: i64, n: i64, op: &WireOp) -> Result
 }
 
 /// The txs of the pending commits, oldest first.
-pub(crate) fn txs(conn: &rusqlite::Connection) -> Result<Vec<u64>, Error> {
+pub(crate) fn txs(conn: &crate::storage::Storage) -> Result<Vec<u64>, Error> {
     let mut statement = conn
         .prepare_cached("SELECT tx FROM _jazz_pending ORDER BY tx")
         .map_err(storage)?;
@@ -468,7 +468,7 @@ pub(crate) fn txs(conn: &rusqlite::Connection) -> Result<Vec<u64>, Error> {
 }
 
 /// Pending commit `tx` as [`write`] stored it.
-pub(crate) fn read(conn: &rusqlite::Connection, tx: u64) -> Result<SyncMessage, Error> {
+pub(crate) fn read(conn: &crate::storage::Storage, tx: u64) -> Result<SyncMessage, Error> {
     type Header = (
         Vec<u8>,
         i64,
@@ -534,7 +534,7 @@ pub(crate) fn read(conn: &rusqlite::Connection, tx: u64) -> Result<SyncMessage, 
     })
 }
 
-fn count(conn: &rusqlite::Connection, table: &str, tx: i64) -> Result<i64, Error> {
+fn count(conn: &crate::storage::Storage, table: &str, tx: i64) -> Result<i64, Error> {
     conn.cached_row(
         &format!("SELECT count(*) FROM {table} WHERE tx = ?1"),
         [tx],
@@ -543,7 +543,7 @@ fn count(conn: &rusqlite::Connection, table: &str, tx: i64) -> Result<i64, Error
     .map_err(storage)
 }
 
-fn reads(conn: &rusqlite::Connection, tx: i64) -> Result<Vec<WireRead>, Error> {
+fn reads(conn: &crate::storage::Storage, tx: i64) -> Result<Vec<WireRead>, Error> {
     let mut statement = conn
         .prepare_cached(
             "SELECT n, version, query, binding, include_deleted \
@@ -605,7 +605,7 @@ fn reads(conn: &rusqlite::Connection, tx: i64) -> Result<Vec<WireRead>, Error> {
 /// The ops of commit `tx` in `{prefix}_ops` and its cell and delta tables:
 /// `_jazz_pending`'s or the retry store's `_jazz_rejected`.
 pub(crate) fn ops(
-    conn: &rusqlite::Connection,
+    conn: &crate::storage::Storage,
     prefix: &str,
     tx: u64,
 ) -> Result<Vec<WireOp>, Error> {
@@ -746,22 +746,42 @@ pub(crate) fn ops(
 
 type CellLists = (BTreeMap<String, Value>, BTreeMap<String, Value>);
 
-fn cells(conn: &rusqlite::Connection, prefix: &str, tx: i64, n: i64) -> Result<CellLists, Error> {
+fn cells(
+    conn: &crate::storage::Storage,
+    prefix: &str,
+    tx: i64,
+    n: i64,
+) -> Result<CellLists, Error> {
     let mut statement = conn
         .prepare_cached(&format!(
             "SELECT list, col, ty, nulls, value FROM {prefix}_cells WHERE tx = ?1 AND n = ?2"
         ))
         .map_err(storage)?;
     let rows = statement
-        .query_map([tx, n], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, i64>(3)?,
-                r.get::<_, SqlValue>(4)?,
-            ))
-        })
+        .query_map_typed(
+            [tx, n],
+            || {
+                use crate::storage::{ResultType as T, ResultTypes};
+                // All numeric pending-cell payloads are integers. F64 is stored
+                // as bytes to retain NaN/-0.0; other types stay text/blob/null.
+                ResultTypes::positional([
+                    T::Integer,
+                    T::NonNumeric,
+                    T::NonNumeric,
+                    T::Integer,
+                    T::Integer,
+                ])
+            },
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, SqlValue>(4)?,
+                ))
+            },
+        )
         .map_err(storage)?;
     let mut lists = (BTreeMap::new(), BTreeMap::new());
     for row in rows {
@@ -777,7 +797,7 @@ fn cells(conn: &rusqlite::Connection, prefix: &str, tx: i64, n: i64) -> Result<C
 }
 
 fn deltas(
-    conn: &rusqlite::Connection,
+    conn: &crate::storage::Storage,
     prefix: &str,
     tx: i64,
     n: i64,
@@ -811,8 +831,8 @@ mod tests {
     use super::*;
     use crate::ids::NodeUuid;
 
-    fn store() -> rusqlite::Connection {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
+    fn store() -> crate::storage::Storage {
+        let conn = crate::storage::Storage::open_in_memory().unwrap();
         conn.execute_batch(PENDING_DDL).unwrap();
         conn.execute_batch(SYNC_DDL).unwrap();
         conn

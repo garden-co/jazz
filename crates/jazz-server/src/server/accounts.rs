@@ -188,6 +188,21 @@ impl AccountRegistryOwner {
     }
 }
 
+impl crate::runtime::accounts::Registry for AccountRegistryOwner {
+    async fn login(&self, principal: Principal) -> Result<Assignment, RegistryError> {
+        AccountRegistryOwner::login(self, principal).await
+    }
+    async fn login_or_register(&self, principal: Principal) -> Result<Assignment, RegistryError> {
+        AccountRegistryOwner::login_or_register(self, principal).await
+    }
+    async fn execute(
+        &self,
+        command: AccountCommand,
+    ) -> Result<AccountCommandResult, RegistryError> {
+        AccountRegistryOwner::execute(self, command).await
+    }
+}
+
 impl Drop for AccountRegistryOwner {
     fn drop(&mut self) {
         let _ = self.close();

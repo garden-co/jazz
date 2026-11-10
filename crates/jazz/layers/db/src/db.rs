@@ -14,11 +14,11 @@ use crate::protocol::{
 use crate::query::Query;
 use crate::records::{Value, ValueType};
 use crate::schema::{JazzSchema, MergeStrategy};
+use crate::storage::{OptionalExtension, Storage, params_from_iter};
 use crate::tools::OpenTransactionId;
 use crate::tools::Operation;
 use crate::tx::DurabilityTier;
 use rusqlite::types::ValueRef;
-use rusqlite::{Connection, OptionalExtension, params_from_iter};
 
 pub use crate::options::{
     DbConfig, DbIdentity, DeleteOptions, Error, ErrorCode, ExactWriteTarget, InsertOptions,
@@ -50,9 +50,9 @@ pub use crate::options::REMOTE_LINK_ATTEMPT_WINDOW;
 use crate::result_tree::{ResultNode, ResultRelation, ResultTree};
 pub use crate::values::CurrentRow;
 use crate::values::{
-    AuthorKey, STATE_AS_SENT, STATE_DELETED, STATE_NO_CONTENT, Schema, Sql, Table, author_key,
-    begin_savepoint, cell_from_sql, column_from_sql, end_savepoint, in_savepoint, quote, storage,
-    to_sql, unsupported,
+    AuthorKey, STATE_AS_SENT, STATE_DELETED, STATE_NO_CONTENT, Schema, ScopeOutcome, Sql, Table,
+    author_key, begin_savepoint, cell_from_sql, column_from_sql, end_savepoint, in_savepoint,
+    quote, storage, to_sql, unsupported,
 };
 pub use sync::{
     ACCEPTED, AccessProof, Acting, BuiltOn, Cell as SyncCell, CellDelta, CorpusReader, FirstLoad,
@@ -524,7 +524,7 @@ pub struct SchemaPublication {
 }
 
 struct Inner {
-    conn: Connection,
+    conn: Storage,
     /// One-way, owner-wide fence for new application mutations during close.
     mutation_admission_closed: bool,
     /// Enum variants a write may hold though its schema does not declare
@@ -672,11 +672,9 @@ struct Inner {
     changed: RefCell<Vec<(String, RowUuid, Vec<u8>)>>,
     /// The write checks of the unit being applied, run at its end.
     deferred: RefCell<Option<Vec<DeferredCheck>>>,
-    /// Rows a unit's trusted writes (no write check) left behind, by stored
-    /// table: they need no evidence, so its grounding starts from them.
+    /// Compatibility routing for the Rust callback API, into an ordinary batch.
+    callback_batch: Option<OpenTransactionId>,
     trusted_rows: RefCell<BTreeMap<String, BTreeSet<[u8; 16]>>>,
-    /// The open transaction's seq and the tables it wrote.
-    tx: Option<(u64, BTreeSet<String>)>,
     publications: Vec<SchemaPublication>,
     /// Set once connected upstream: this store is a replica.
     client: Option<sync::Client>,
@@ -728,8 +726,6 @@ struct Inner {
     accepted: u64,
     /// Rows written since the last server tick (only while serving).
     since_tick: Vec<(String, RowUuid, Vec<u8>)>,
-    /// Ops of the open local transaction, for upload, by stored names.
-    pub(crate) capture: Vec<StagedOp>,
     /// Images a replica dropped since the last dispatch (evictions and
     /// rebases), for keyed invalidation.
     gone: RefCell<Vec<sync::Image>>,
@@ -884,7 +880,7 @@ impl Stamp {
 const STATEMENT_CACHE_CAPACITY: usize = 512;
 
 /// The application tables a store holds, by their stored columns.
-fn stored_schema(conn: &Connection, jazz: &JazzSchema) -> Result<Schema, Error> {
+fn stored_schema(conn: &Storage, jazz: &JazzSchema) -> Result<Schema, Error> {
     let names: Vec<String> = conn
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
         .and_then(|mut statement| {
@@ -941,7 +937,7 @@ fn stored_schema(conn: &Connection, jazz: &JazzSchema) -> Result<Schema, Error> 
 
 /// Each column of stored table `table` that its DDL gives a default, as
 /// the default's SQL text.
-fn ddl_defaults(conn: &Connection, table: &str) -> Result<BTreeMap<String, String>, Error> {
+fn ddl_defaults(conn: &Storage, table: &str) -> Result<BTreeMap<String, String>, Error> {
     let mut statement = conn
         .prepare(&format!("PRAGMA table_info({})", quote(table)))
         .map_err(storage)?;
@@ -961,7 +957,7 @@ fn ddl_defaults(conn: &Connection, table: &str) -> Result<BTreeMap<String, Strin
 
 /// The value of a DDL default's SQL text. It is this store's own DDL, as
 /// `Schema::union` and `Table::ddl` wrote it: a literal.
-fn ddl_literal(conn: &Connection, literal: &str) -> Result<Sql, Error> {
+fn ddl_literal(conn: &Storage, literal: &str) -> Result<Sql, Error> {
     conn.query_row(&format!("SELECT {literal}"), [], |row| row.get::<_, Sql>(0))
         .map_err(storage)
 }
@@ -1005,24 +1001,8 @@ fn default_fits(column: &crate::values::Column, value: &Value) -> bool {
 /// Run a script of statements one at a time. SQLite's statement length
 /// limit applies to the whole text handed to one prepare, and schema DDL
 /// outgrows Durable Object SQLite's 100 KB.
-pub(crate) fn execute_script(conn: &Connection, script: &str) -> Result<(), Error> {
-    let mut start = 0;
-    for (end, _) in script.match_indices(';') {
-        let statement = &script[start..=end];
-        let text = std::ffi::CString::new(statement)
-            .map_err(|_| Error::new(ErrorCode::Storage, "NUL in SQL"))?;
-        // SAFETY: a NUL-terminated string; `sqlite3_complete` only reads it.
-        // A `;` inside a trigger body or a literal leaves it incomplete.
-        if unsafe { rusqlite::ffi::sqlite3_complete(text.as_ptr()) } != 0 {
-            conn.execute_batch(statement).map_err(storage)?;
-            start = end + 1;
-        }
-    }
-    let rest = &script[start..];
-    if !rest.trim().is_empty() {
-        conn.execute_batch(rest).map_err(storage)?;
-    }
-    Ok(())
+pub(crate) fn execute_script(conn: &Storage, script: &str) -> Result<(), Error> {
+    conn.execute_script(script).map_err(storage)
 }
 
 pub(crate) fn rejected(message: impl Into<String>) -> Error {
@@ -1367,11 +1347,49 @@ impl Error {
     }
 }
 
+impl crate::storage::StorageContext for &Db {
+    fn with_storage<R>(&self, f: impl FnOnce(&crate::storage::Storage) -> R) -> R {
+        f(&self.inner.borrow().conn)
+    }
+}
+
+impl crate::storage::StorageContext for Inner {
+    fn with_storage<R>(&self, f: impl FnOnce(&crate::storage::Storage) -> R) -> R {
+        f(&self.conn)
+    }
+}
+
+impl Inner {
+    fn scope<T>(
+        &mut self,
+        name: &str,
+        f: impl FnOnce(&mut Self) -> Result<ScopeOutcome<T>, Error>,
+    ) -> Result<T, Error> {
+        crate::values::in_scope(self, name, f)
+    }
+}
+
+impl Db {
+    fn scope<T>(
+        &self,
+        name: &str,
+        f: impl FnOnce() -> Result<ScopeOutcome<T>, Error>,
+    ) -> Result<T, Error> {
+        crate::values::in_scope(&mut &*self, name, |_| f())
+    }
+}
+
 impl Db {
     pub async fn open(config: DbConfig) -> Result<Self, Error> {
-        let conn = Connection::open_in_memory().map_err(storage)?;
+        let conn = Storage::open_in_memory().map_err(storage)?;
         crate::format::admit(&conn)?;
         Self::open_on(config, conn, None)
+    }
+
+    /// Open an explicitly owned SQL backend. Its execution and transaction
+    /// methods remain together for the lifetime of this database.
+    pub async fn open_storage(config: DbConfig, conn: Storage) -> Result<Self, Error> {
+        Self::open_file(config, crate::host::StoreFile::from_storage(conn)?).await
     }
 
     /// A durable store in one SQLite file (WAL unless `options.journal`
@@ -1386,7 +1404,7 @@ impl Db {
         Self::open_file(config, crate::host::StoreFile::open(path, options)?).await
     }
 
-    /// Open on a file [`crate::host::StoreFile::open`] admitted, whose host
+    /// Open on an admitted store (a file or an owned backend), whose host
     /// tables may already have been read or written.
     pub async fn open_file(config: DbConfig, file: crate::host::StoreFile) -> Result<Self, Error> {
         let crate::host::StoreFile { conn, path } = file;
@@ -1401,7 +1419,7 @@ impl Db {
     /// overlay (see [`crate::host`]).
     pub(crate) fn with_host_connection<T>(
         &self,
-        f: impl FnOnce(&Connection) -> Result<T, Error>,
+        f: impl FnOnce(&Storage) -> Result<T, Error>,
     ) -> Result<T, Error> {
         let inner = self.inner.borrow_mut();
         f(&inner.conn)
@@ -1409,7 +1427,7 @@ impl Db {
 
     fn open_on(
         mut config: DbConfig,
-        conn: Connection,
+        conn: Storage,
         path: Option<(&std::path::Path, Option<&'static str>)>,
     ) -> Result<Self, Error> {
         // A schema this store has not admitted is reached along the lenses
@@ -1478,12 +1496,14 @@ impl Db {
 
     fn open_named(
         config: DbConfig,
-        conn: Connection,
+        conn: Storage,
         path: Option<(&std::path::Path, Option<&'static str>)>,
     ) -> Result<Self, Error> {
         // Before the first statement, so both see all of them.
         #[cfg(feature = "durable-object-limits")]
-        crate::durable_object_limits::apply(&conn);
+        if let Some(native) = conn.native() {
+            crate::durable_object_limits::apply(native);
+        }
         #[cfg(feature = "sql-trace")]
         crate::sql_trace::install(&conn);
         // A version this file admitted keeps its names; another one is
@@ -1499,6 +1519,8 @@ impl Db {
         // the names it was stored under.
         let mut admitted = crate::catalogue::admitted(&conn)?;
         let schema = names.resolve(&config.schema, &[], names.latest())?;
+        #[cfg(feature = "durable-object-limits")]
+        crate::durable_object_limits::validate_schema(&schema, None)?;
         names.check_branches(&schema)?;
         names.check_types(&schema)?;
         // Variants are tagged before any DDL: an enum default is its tag.
@@ -1677,8 +1699,8 @@ impl Db {
                 fan: fanout::Fanout::default(),
                 changed: RefCell::new(Vec::new()),
                 deferred: RefCell::new(None),
+                callback_batch: None,
                 trusted_rows: RefCell::new(BTreeMap::new()),
-                tx: None,
                 publications: Vec::new(),
                 client: None,
                 non_durable: false,
@@ -1696,7 +1718,6 @@ impl Db {
                 merge_fallbacks: RefCell::default(),
                 accepted: 0,
                 since_tick: Vec::new(),
-                capture: Vec::new(),
                 gone: RefCell::new(Vec::new()),
                 migrations: config.migrations,
                 withheld: std::cell::Cell::new(withheld > 0),
@@ -1850,7 +1871,7 @@ impl Db {
         let (node, tx) = (sync::origin_node(author, *key.node.as_bytes()), key.time.0);
         {
             let inner = self.inner.borrow();
-            if inner.tx.is_some() {
+            if inner.callback_batch.is_some() {
                 return Err(unsupported(
                     "a write as another writer's commit inside a transaction",
                 ));
@@ -2479,10 +2500,13 @@ impl Db {
 
     /// Roll back the open SQLite transaction behind the database's back, as
     /// SQLite itself does after some errors (a full disk, an I/O error).
-    #[cfg(feature = "testing")]
+    #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
     pub fn rollback_sqlite_transaction_for_test(&self) {
-        self.inner()
+        // Bypass the ordinary-reader gate: it would unwind the overlay
+        // before we inject SQLite's own full-transaction failure.
+        self.inner
+            .staging()
             .conn
             .execute_batch("ROLLBACK")
             .expect("an open SQLite transaction");
@@ -2665,8 +2689,7 @@ impl Db {
         opts: ReadOpts,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.fetching(|| {
-            let inner = self.inner();
-            inner.run(prepared, None, &ReadSpec::of(&opts, &inner)?)
+            self.callback_read(|inner| inner.run(prepared, None, &ReadSpec::of(&opts, inner)?))
         })
         .await
     }
@@ -2678,12 +2701,13 @@ impl Db {
         prepared: &PreparedQuery,
         roots: Vec<CurrentRow>,
     ) -> Result<Vec<CurrentRow>, Error> {
-        self.inner()
-            .nest_relations(prepared, None, &ReadSpec::default(), roots)
+        self.callback_read(|inner| {
+            inner.nest_relations(prepared, None, &ReadSpec::default(), roots)
+        })
     }
 
     pub fn read(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
-        self.inner().run(prepared, None, &ReadSpec::default())
+        self.callback_read(|inner| inner.run(prepared, None, &ReadSpec::default()))
     }
 
     pub async fn all_for_identity(
@@ -2692,8 +2716,9 @@ impl Db {
         opts: ReadOpts,
         identity: AuthorSubject,
     ) -> Result<Vec<CurrentRow>, Error> {
-        let inner = self.inner();
-        inner.run(prepared, Some(identity), &ReadSpec::of(&opts, &inner)?)
+        self.callback_read(|inner| {
+            inner.run(prepared, Some(identity), &ReadSpec::of(&opts, inner)?)
+        })
     }
 
     pub async fn all_result_tree(
@@ -2701,21 +2726,22 @@ impl Db {
         prepared: &PreparedQuery,
         opts: ReadOpts,
     ) -> Result<ResultTree, Error> {
-        let inner = self.inner();
-        let read = ReadSpec::of(&opts, &inner)?;
-        let roots = inner.run(prepared, None, &read)?;
-        let mut tree = Vec::with_capacity(roots.len());
-        for row in roots {
-            tree.push(inner.node(
-                prepared,
-                None,
-                &read,
-                &prepared.query.table,
-                &prepared.query.array_subqueries,
-                row,
-            )?);
-        }
-        Ok(ResultTree { roots: tree })
+        self.callback_read(|inner| {
+            let read = ReadSpec::of(&opts, inner)?;
+            let roots = inner.run(prepared, None, &read)?;
+            let mut tree = Vec::with_capacity(roots.len());
+            for row in roots {
+                tree.push(inner.node(
+                    prepared,
+                    None,
+                    &read,
+                    &prepared.query.table,
+                    &prepared.query.array_subqueries,
+                    row,
+                )?);
+            }
+            Ok(ResultTree { roots: tree })
+        })
     }
 
     // ---- subscriptions --------------------------------------------------
@@ -2922,7 +2948,7 @@ impl Db {
         mut opts: InsertOptions,
     ) -> Result<WriteHandle, Error> {
         if opts.row_id.is_none() {
-            opts.row_id = Some(self.inner().ids.next_row_id());
+            opts.row_id = Some(self.inner.staging().ids.next_row_id());
         }
         let who = who(opts.identity);
         let op = StagedOp::Insert(table.to_owned(), cells, opts);
@@ -2979,15 +3005,26 @@ impl Db {
     /// One write. On a client, a local (unauthenticated) write is also an
     /// upload: it is recorded for the authority, which decides its fate.
     fn write_op(&self, mut op: StagedOp, who: Who) -> Result<WriteHandle, Error> {
+        if let Some(id) = self.callback_batch() {
+            let row = op.row().expect("writes have a row id");
+            let edits = {
+                let mut inner = self.inner.staging();
+                LargeEdits {
+                    derived: std::mem::take(&mut inner.derived),
+                    pending_nodes: std::mem::take(&mut inner.pending_nodes),
+                }
+            };
+            self.stage_with_edits(id, op, edits)?;
+            return Ok(self.callback_write_handle(id, row));
+        }
         self.inner().require_mutation_admission()?;
-        self.with_upload(|| {
-            let table = op.table().to_owned();
+        let (notify, handle) = self.with_upload(|| {
             let (prior, mark) = {
                 let inner = self.inner();
                 let mark = inner.changed.borrow().len();
                 (inner.seq, mark)
             };
-            let (notify, handle) = self.write_unnotified(&table, |inner, seq| {
+            let (notify, handle) = self.write_unnotified(|inner, seq| {
                 let edits = inner.chunk_large_cells(&mut op)?;
                 inner.counter_deltas(&mut op)?;
                 inner.derived.extend(edits.derived);
@@ -3000,7 +3037,7 @@ impl Db {
             // handle names the row's current version, which may be the
             // newest commit's own seq, so recording it would upload a
             // second commit under that commit's transaction id.
-            let committed = notify || self.inner().tx.is_some();
+            let committed = notify;
             // The upload record joins the write's SQLite transaction: if it
             // fails, `with_upload` rolls both back, and nobody has been told.
             if let Err(error) = committed
@@ -3012,105 +3049,78 @@ impl Db {
                 inner.changed.borrow_mut().truncate(mark);
                 return Err(error);
             }
-            if notify {
-                self.notify();
-            }
-            Ok(handle)
-        })
+            Ok((notify, handle))
+        })?;
+        if notify {
+            self.notify();
+        }
+        Ok(handle)
     }
 
-    /// On a replica, a local commit and its upload record are one SQLite
-    /// transaction (outside an open Jazz transaction, which already is).
+    /// On a replica, a local commit and its upload record are one SQL scope.
     fn with_upload<R>(&self, f: impl FnOnce() -> Result<R, Error>) -> Result<R, Error> {
         let wrap = {
             let inner = self.inner.borrow();
-            inner.client.is_some() && inner.tx.is_none()
+            inner.client.is_some()
         };
         if !wrap {
             return f();
         }
-        begin_savepoint(&self.inner.borrow().conn, "upload_local")?;
-        let result = f();
-        end_savepoint(&self.inner.borrow().conn, "upload_local", result.is_ok())?;
-        result
+        self.scope("upload_local", || f().map(ScopeOutcome::Commit))
     }
 
-    /// Run one write atomically. Inside a transaction it joins the
-    /// transaction's seq; standalone it commits. Returns whether a
-    /// standalone commit happened, which the caller notifies subscribers of
-    /// once its upload record is in.
+    /// Run one standalone write atomically. Transaction writes use the batch
+    /// path instead. Notify subscribers only after its upload record is in.
     fn write_unnotified(
         &self,
-        table: &str,
         apply: impl FnOnce(&mut Inner, u64) -> Result<WriteHandle, Error>,
     ) -> Result<(bool, WriteHandle), Error> {
         let standalone = {
             let mut inner = self.inner();
-            let (seq, standalone) = match &inner.tx {
-                Some((seq, _)) => (*seq, false),
-                None => (inner.fresh_seq(), true),
-            };
-            begin_savepoint(&inner.conn, "w")?;
-            let mark = inner.changed.borrow().len();
-            // A standalone commit takes the writer id a thin client's write
-            // gave it (`Db::write_as_origin`), on every attempt of the write
-            // (`Db::fetching_with` runs one again). Its seq is not used up
-            // unless it commits, and the next commit takes it: what this one
-            // put in `own_order` for it goes back, so no other commit
-            // inherits its writer id, nor it another's (and `fresh_seq`
-            // drops whatever an exit after this one leaves).
-            let origin = if standalone { inner.next_origin } else { None };
-            let prior = standalone.then(|| inner.own_order.get(&seq).copied());
-            inner.commit_origin = origin;
-            let applied = apply(&mut inner, seq);
-            inner.commit_origin = None;
-            let restore = |inner: &mut Inner| match prior {
-                Some(Some(order)) => {
-                    inner.own_order.insert(seq, order);
+            let seq = inner.fresh_seq();
+            let origin = inner.next_origin;
+            let prior = inner.own_order.get(&seq).copied();
+            let result = inner.scope("w", |inner| {
+                let mark = inner.changed.borrow().len();
+                inner.commit_origin = origin;
+                let applied = apply(inner, seq);
+                inner.commit_origin = None;
+                let applied = applied.and_then(|handle| {
+                    let wrote = handle.seq == inner.own_pos(seq);
+                    if let (true, true, Some((node, tx))) =
+                        (wrote, inner.me == sync::ACCEPTED, origin)
+                    {
+                        inner.record_fate(node, tx, &Ok(()))?;
+                        inner.record_settled(node, tx, Some(Pos::at(seq)))?;
+                    }
+                    Ok((wrote, handle))
+                });
+                match applied {
+                    Ok(value) => Ok(ScopeOutcome::Commit(value)),
+                    Err(error) => {
+                        inner.changed.borrow_mut().truncate(mark);
+                        Err(error)
+                    }
                 }
-                Some(None) => {
-                    inner.own_order.remove(&seq);
-                }
-                None => {}
-            };
-            // The authority records the fate of a commit made under a
-            // client's id in the commit itself.
-            let applied = applied.and_then(|handle| {
-                let wrote = handle.seq == inner.own_pos(seq);
-                if let (true, true, Some((node, tx))) =
-                    (standalone && wrote, inner.me == sync::ACCEPTED, origin)
-                {
-                    inner.record_fate(node, tx, &Ok(()))?;
-                    inner.record_settled(node, tx, Some(Pos::at(seq)))?;
-                }
-                Ok((wrote, handle))
             });
-            match applied {
-                Ok((wrote, handle)) => {
-                    end_savepoint(&inner.conn, "w", true)?;
-                    if !wrote {
-                        restore(&mut inner);
-                    } else if origin.is_some() {
-                        // The client's write is made: no later commit of the
-                        // same call takes its id.
-                        inner.next_origin = None;
+            if !matches!(&result, Ok((true, _))) {
+                match prior {
+                    Some(order) => {
+                        inner.own_order.insert(seq, order);
                     }
-                    if wrote {
-                        if standalone {
-                            inner.seq = inner.seq.max(seq);
-                        } else if let Some((_, tables)) = &mut inner.tx {
-                            tables.insert(table.to_owned());
-                        }
+                    None => {
+                        inner.own_order.remove(&seq);
                     }
-                    (standalone && wrote, handle)
-                }
-                Err(error) => {
-                    inner.changed.borrow_mut().truncate(mark);
-                    restore(&mut inner);
-                    end_savepoint(&inner.conn, "w", false)?;
-                    return Err(error);
                 }
             }
+            let (wrote, handle) = result?;
+            if wrote {
+                if origin.is_some() {
+                    inner.next_origin = None;
+                }
+                inner.seq = inner.seq.max(seq);
+            }
+            (wrote, handle)
         };
         Ok(standalone)
     }
@@ -3121,7 +3131,8 @@ impl Db {
         &self,
         callback: impl AsyncFnOnce(&mut MergeableTx<'_>) -> Result<T, Error>,
     ) -> Result<(T, TxReceipt), Error> {
-        self.transaction_as(WriteIdentity::Database, callback).await
+        self.run_transaction(WriteIdentity::Database, callback)
+            .await
     }
 
     /// A transaction whose writes are attributed to `author`. Like every
@@ -3133,67 +3144,62 @@ impl Db {
         author: AuthorSubject,
         callback: impl AsyncFnOnce(&mut MergeableTx<'_>) -> Result<T, Error>,
     ) -> Result<(T, TxReceipt), Error> {
-        self.transaction_as(WriteIdentity::Attribution(author), callback)
+        self.run_transaction(WriteIdentity::Attribution(author), callback)
             .await
     }
 
     /// Run `callback` in one commit, its writes made as `identity`.
-    async fn transaction_as<T>(
+    async fn run_transaction<T>(
         &self,
         identity: WriteIdentity,
         callback: impl AsyncFnOnce(&mut MergeableTx<'_>) -> Result<T, Error>,
     ) -> Result<(T, TxReceipt), Error> {
+        if self.callback_batch().is_some() {
+            return Err(unsupported("nested transactions"));
+        }
+        let id = OpenTransactionId::new();
+        self.begin_mergeable(id).await?;
         {
-            let mut inner = self.inner();
+            let mut inner = self.inner.staging();
             inner.require_mutation_admission()?;
-            if inner.tx.is_some() {
-                return Err(unsupported("nested transactions"));
-            }
-            begin_savepoint(&inner.conn, "tx")?;
-            inner.changed.borrow_mut().clear();
             let seq = inner.fresh_seq();
-            inner.tx = Some((seq, BTreeSet::new()));
+            inner.batches.get_mut(&id).expect("opened").sequence = Some(seq);
+            inner.callback_batch = Some(id);
         }
+        // Errors, panics and cancellation all abandon the same staged batch.
+        let guard = CallbackBatch { db: self, id };
         let mut tx = MergeableTx { db: self, identity };
-        let result = callback(&mut tx).await.and_then(|value| {
-            self.inner().require_mutation_admission()?;
-            Ok(value)
-        });
-        let captured;
-        let prior;
-        let changed = {
-            let mut inner = self.inner();
-            let (seq, tables) = inner.tx.take().expect("open transaction");
-            captured = std::mem::take(&mut inner.capture);
-            prior = inner.seq;
-            match &result {
-                Ok(_) => {
-                    if !tables.is_empty() {
-                        // A hold or observe while the tx was open may have
-                        // moved seq past the one it drew.
-                        inner.seq = inner.seq.max(seq);
-                    }
-                    Some((seq, tables))
-                }
-                Err(_) => {
-                    inner.abandon_savepoint("tx")?;
-                    None
-                }
-            }
-        };
-        let value = result?;
-        let (seq, _) = changed.expect("committed");
-        // The upload record joins the transaction's SQLite savepoint.
-        let recorded = self.record_stored_upload(captured, seq, sync::Kind::Mergeable, None);
-        if let Err(error) = recorded {
-            let mut inner = self.inner();
-            inner.seq = prior;
-            inner.abandon_savepoint("tx")?;
-            return Err(error);
+        let value = callback(&mut tx).await?;
+        self.inner.staging().callback_batch = None;
+        let receipt = self.commit_mergeable_handle(id).await?;
+        drop(guard);
+        Ok((value, receipt))
+    }
+
+    fn callback_batch(&self) -> Option<OpenTransactionId> {
+        self.inner.staging().callback_batch
+    }
+
+    fn callback_write_handle(&self, id: OpenTransactionId, row: RowUuid) -> WriteHandle {
+        let inner = self.inner.staging();
+        let seq = inner.batches[&id].sequence.expect("callback sequence");
+        WriteHandle {
+            row,
+            seq: inner.own_pos(seq),
+            tx: seq,
         }
-        end_savepoint(&self.inner.borrow().conn, "tx", true)?;
-        self.notify();
-        Ok((value, TxReceipt(seq)))
+    }
+
+    /// Application reads in a Rust callback see its ordinary transaction overlay.
+    fn callback_read<R>(
+        &self,
+        read: impl FnOnce(&mut Inner) -> Result<R, Error>,
+    ) -> Result<R, Error> {
+        if let Some(id) = self.callback_batch() {
+            self.in_overlay(id, None, |inner, _| read(inner))
+        } else {
+            read(&mut self.inner())
+        }
     }
 
     // ---- schema evolution -------------------------------------------------
@@ -3304,8 +3310,7 @@ impl Db {
                 inner.owner_version,
             )
         };
-        begin_savepoint(&self.inner().conn, "jazz_catalogue")?;
-        let applied = (|| {
+        let result = self.scope("jazz_catalogue", || {
             crate::catalogue::put(&self.inner().conn, &change.put)?;
             for (schema, lenses) in change.admit {
                 self.admit(schema, &lenses, None)?;
@@ -3313,10 +3318,8 @@ impl Db {
             if let Some((revision, schema, lenses)) = change.activate {
                 self.admit(schema, &lenses, Some(Some(revision)))?;
             }
-            Ok(())
-        })();
-        let ended = end_savepoint(&self.inner().conn, "jazz_catalogue", applied.is_ok());
-        let result = applied.and(ended);
+            Ok(ScopeOutcome::Commit(()))
+        });
         if result.is_err() {
             let mut inner = self.inner();
             let (physical, names, admitted, owner, owner_version) = saved;
@@ -3559,10 +3562,12 @@ impl Inner {
             self.admitted.clone(),
         );
         let tags = self.names.tags().snapshot();
-        begin_savepoint(&self.conn, "jazz_mirror")?;
-        let mirrored = self.mirror_versions_steps(versions, cells, defaults);
-        let ended = end_savepoint(&self.conn, "jazz_mirror", mirrored.is_ok());
-        if let Err(error) = mirrored.and(ended) {
+        let mirrored = self.scope("jazz_mirror", |inner| {
+            inner
+                .mirror_versions_steps(versions, cells, defaults)
+                .map(ScopeOutcome::Commit)
+        });
+        if let Err(error) = mirrored {
             self.physical = physical;
             self.names = names;
             self.admitted = admitted;
@@ -3795,10 +3800,11 @@ impl Inner {
     ) -> Result<(), Error> {
         let (physical, names) = (self.physical.clone(), self.names.clone());
         let tags = self.names.tags().snapshot();
-        begin_savepoint(&self.conn, "jazz_admit")?;
-        let written = self.write_admission_steps(target, cells, current);
-        let ended = end_savepoint(&self.conn, "jazz_admit", written.is_ok());
-        let written = written.and(ended);
+        let written = self.scope("jazz_admit", |inner| {
+            inner
+                .write_admission_steps(target, cells, current)
+                .map(ScopeOutcome::Commit)
+        });
         if written.is_err() {
             self.physical = physical;
             self.names = names;
@@ -3976,6 +3982,22 @@ fn delta(
     }
 }
 
+struct CallbackBatch<'a> {
+    db: &'a Db,
+    id: OpenTransactionId,
+}
+impl Drop for CallbackBatch<'_> {
+    fn drop(&mut self) {
+        {
+            let mut inner = self.db.inner.staging();
+            if inner.callback_batch == Some(self.id) {
+                inner.callback_batch = None;
+            }
+        }
+        let _ = self.db.abandon_transaction_handle(self.id);
+    }
+}
+
 /// A mergeable transaction: writes join one commit, reads see them.
 pub struct MergeableTx<'a> {
     db: &'a Db,
@@ -4099,13 +4121,6 @@ impl Inner {
             ));
         }
         Ok(())
-    }
-
-    /// Undo everything since `SAVEPOINT name`. Its changes are forgotten
-    /// first, so no subscriber hears of them whatever happens next.
-    fn abandon_savepoint(&self, name: &str) -> Result<(), Error> {
-        self.changed.borrow_mut().clear();
-        end_savepoint(&self.conn, name, false)
     }
 
     /// Published bundle `id`, resolved: the write version it selects and
@@ -4410,7 +4425,7 @@ impl Inner {
     /// fire the large-value refcount triggers, so preparing one compiles
     /// those trigger programs too; re-preparing per row dominated bulk
     /// writes.
-    fn exec<P: rusqlite::Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize> {
+    fn exec<P: crate::storage::Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize> {
         self.conn.prepare_cached(sql)?.execute(params)
     }
 
@@ -4616,7 +4631,40 @@ impl Inner {
             .map(|(_, ty, _)| ty.clone())
             .collect();
         let mut rows = statement
-            .query(params_from_iter(compiled.params.iter()))
+            .query_typed(params_from_iter(compiled.params.iter()), || {
+                use crate::storage::{ResultType as T, ResultTypes};
+                let key = if compiled.aggregate {
+                    // Enum group identities are projected by name, while
+                    // other group keys use the first projected column's type.
+                    compiled
+                        .projection
+                        .first()
+                        .map(|(_, ty, _)| crate::values::result_type(ty))
+                        .unwrap_or(T::Integer)
+                } else {
+                    T::NonNumeric
+                };
+                let mut types = vec![key, T::Integer, T::Integer];
+                if compiled.versioned {
+                    types.push(T::NonNumeric);
+                }
+                for _ in 0..compiled.joined {
+                    types.extend([T::NonNumeric, T::NonNumeric]);
+                }
+                if compiled.union {
+                    types.push(T::NonNumeric);
+                }
+                types.extend(
+                    compiled
+                        .projection
+                        .iter()
+                        .map(|(_, ty, _)| crate::values::result_type(ty)),
+                );
+                if compiled.writer {
+                    types.push(T::NonNumeric);
+                }
+                ResultTypes::positional(types)
+            })
             .map_err(storage)?;
         let mut out = Vec::new();
         // A replica missing chunks reads on past the first blocked cell, so
@@ -5716,7 +5764,7 @@ impl Inner {
         }
         let (account, issuer, subject) = key;
         let account = account.as_bytes().to_vec();
-        let find = |conn: &rusqlite::Connection| {
+        let find = |conn: &crate::storage::Storage| {
             conn.cached_row(
                 "SELECT n FROM _jazz_authors WHERE account = ?1 AND issuer = ?2 AND subject = ?3",
                 rusqlite::params![account, issuer, subject],
@@ -5733,7 +5781,7 @@ impl Inner {
                     rusqlite::params![account, issuer, subject],
                 )
                 .map_err(storage)?;
-                self.conn.last_insert_rowid()
+                self.conn.last_insert_rowid().map_err(storage)?
             }
         };
         self.remember_author(key, code);
@@ -5810,7 +5858,7 @@ impl Inner {
     /// A pass runs only when one could find work: a row changed since the
     /// last pass that emptied the queue, or an upload was dropped.
     fn reclaim_large_values(&mut self, budget: usize) -> Result<usize, Error> {
-        if self.reclaimed_at == Some(self.conn.total_changes())
+        if self.reclaimed_at == Some(self.conn.total_changes().map_err(storage)?)
             && self.upload_cleanup.borrow().is_empty()
         {
             return Ok(0);
@@ -5824,7 +5872,7 @@ impl Inner {
         // A pass inside an open transaction may yet roll back, and one
         // that ran out of budget left work queued: both run again.
         if self.conn.is_autocommit() && !crate::large::reclaim_queued(&self.conn)? {
-            self.reclaimed_at = Some(self.conn.total_changes());
+            self.reclaimed_at = Some(self.conn.total_changes().map_err(storage)?);
         }
         Ok(deleted)
     }
@@ -7967,7 +8015,7 @@ impl MergeableTxHandle<'_> {
         let db = self.db;
         let identity = self.identity;
         let ((), receipt) = db
-            .transaction_as(identity, async |_tx| {
+            .run_transaction(identity, async |_tx| {
                 for op in ops {
                     match op {
                         StagedOp::Insert(t, c, o) => db
@@ -8334,6 +8382,8 @@ impl Store {
 }
 
 struct Batch {
+    /// The Rust callback API exposes write receipts before commit.
+    sequence: Option<u64>,
     kind: BatchKind,
     ops: Vec<(Rc<Schema>, StagedOp)>,
     /// The rows `ops` write, by stored table: a later staged write's
@@ -8604,7 +8654,7 @@ impl Inner {
         // A commit made under a thin client's id is kept under it: a relay
         // uploads it so, so a resend of it anywhere gets its fate (SPEC 8
         // §8.14).
-        let origin = self.commit_origin.filter(|_| self.tx.is_none());
+        let origin = self.commit_origin;
         if origin.is_some() || !self.own_order.contains_key(&seq) {
             let hlc = self.next_hlc();
             let (node, tx) = origin.unwrap_or((*self.identity.node.as_bytes(), seq));
@@ -8855,6 +8905,11 @@ impl Db {
 
     fn begin(&self, id: OpenTransactionId, kind: BatchKind) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
+        if !inner.conn.supports_open_scopes() {
+            return Err(unsupported(
+                "Persistent transaction overlays on managed SQL storage",
+            ));
+        }
         inner.require_mutation_admission()?;
         if inner.batches.contains_key(&id) {
             return Err(rejected(format!("transaction {id:?} is already open")));
@@ -8862,6 +8917,7 @@ impl Db {
         inner.batches.insert(
             id,
             Batch {
+                sequence: None,
                 kind,
                 ops: Vec::new(),
                 rows: BTreeMap::new(),
@@ -9071,7 +9127,9 @@ impl Db {
 
     fn commit_ops(&self, batch: &Batch, kind: sync::Kind) -> Result<TxReceipt, Error> {
         crate::db::large_ops::renew_upload_leases(&self.inner(), &batch.uploads)?;
-        self.with_upload(|| self.commit_ops_now(batch, kind))
+        let receipt = self.with_upload(|| self.commit_ops_now(batch, kind))?;
+        self.notify();
+        Ok(receipt)
     }
 
     fn commit_ops_now(&self, batch: &Batch, kind: sync::Kind) -> Result<TxReceipt, Error> {
@@ -9079,26 +9137,20 @@ impl Db {
         let ops = &batch.ops;
         let (seq, prior, mark) = {
             let mut inner = self.inner();
-            let seq = inner.fresh_seq();
-            begin_savepoint(&inner.conn, "commit_batch")?;
-            let mark = inner.changed.borrow().len();
-            // Each write passed its check as it was staged, with the rows
-            // staged before it as evidence. The commit grounds the unit's
-            // end state as the authority will on upload (SPEC 7), so a unit
-            // commits here exactly when the authority accepts it: a row the
-            // unit deleted is no evidence, and rows can't ground each other
-            // in a cycle.
-            inner.defer_checks();
-            let applied = inner
-                .apply_with_edits(ops, &batch.edits, 0, seq)
-                .and_then(|()| inner.finish_checks(seq).map_err(refused_at_commit));
-            if let Err(error) = applied {
-                inner.abandon_checks();
-                inner.changed.borrow_mut().truncate(mark);
-                end_savepoint(&inner.conn, "commit_batch", false)?;
-                return Err(error);
-            }
-            end_savepoint(&inner.conn, "commit_batch", true)?;
+            let seq = batch.sequence.unwrap_or_else(|| inner.fresh_seq());
+            let mark = inner.scope("commit_batch", |inner| {
+                let mark = inner.changed.borrow().len();
+                inner.defer_checks();
+                let applied = inner
+                    .apply_with_edits(ops, &batch.edits, 0, seq)
+                    .and_then(|()| inner.finish_checks(seq).map_err(refused_at_commit));
+                if let Err(error) = applied {
+                    inner.abandon_checks();
+                    inner.changed.borrow_mut().truncate(mark);
+                    return Err(error);
+                }
+                Ok(ScopeOutcome::Commit(mark))
+            })?;
             let prior = inner.seq;
             if !ops.is_empty() || kind.validates_reads() {
                 inner.seq = inner.seq.max(seq);
@@ -9120,7 +9172,6 @@ impl Db {
             inner.changed.borrow_mut().truncate(mark);
             return Err(error);
         }
-        self.notify();
         Ok(TxReceipt(seq))
     }
 
@@ -9194,44 +9245,44 @@ impl Db {
                 mark,
             });
         }
-        if let Err(error) = begin_savepoint(&inner.conn, "overlay_step") {
-            inner.clear_derived();
-            inner.settle_overlay();
-            return Err(error);
-        }
-        let mark = inner.changed.borrow().len();
         let joins = extra.is_some();
-        let applied = match extra {
-            Some(op) => inner.counter_deltas(op).and_then(|()| {
-                let schema = inner.schema.clone();
-                // The write continues the unit its batch staged so far:
-                // those writes passed their checks, so their rows are
-                // evidence for this one's (SPEC 7), as at the authority
-                // that receives the unit. The commit checks the whole unit.
-                inner.defer_checks();
-                let applied = inner
-                    .apply_all_checking(&[(schema, op.clone())], 0, own)
-                    .and_then(|()| inner.finish_checks_after(own, staged_rows));
-                if applied.is_err() {
-                    inner.abandon_checks();
-                }
-                applied
-            }),
-            None => Ok(()),
-        };
-        inner.clear_derived();
-        let result = applied.and_then(|()| {
-            let own = inner.own_rank(own);
-            read(&mut inner, snapshot.map(|cut| Cut { own, ..cut }))
+        let result = inner.scope("overlay_step", |inner| {
+            let mark = inner.changed.borrow().len();
+            let applied = match extra {
+                Some(op) => inner.counter_deltas(op).and_then(|()| {
+                    let schema = inner.schema.clone();
+                    inner.defer_checks();
+                    let applied = inner
+                        .apply_all_checking(&[(schema, op.clone())], 0, own)
+                        .and_then(|()| inner.finish_checks_after(own, staged_rows));
+                    if applied.is_err() {
+                        inner.abandon_checks();
+                    }
+                    applied
+                }),
+                None => Ok(()),
+            };
+            inner.clear_derived();
+            let result = applied.and_then(|()| {
+                let own = inner.own_rank(own);
+                read(inner, snapshot.map(|cut| Cut { own, ..cut }))
+            });
+            if joins && result.is_ok() {
+                Ok(ScopeOutcome::Commit(result))
+            } else {
+                inner.changed.borrow_mut().truncate(mark);
+                Ok(ScopeOutcome::Rollback(result))
+            }
         });
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                inner.clear_derived();
+                inner.settle_overlay();
+                return Err(error);
+            }
+        };
         let keep = joins && result.is_ok();
-        if !keep {
-            inner.changed.borrow_mut().truncate(mark);
-        }
-        if let Err(error) = end_savepoint(&inner.conn, "overlay_step", keep) {
-            inner.settle_overlay();
-            return Err(error);
-        }
         if keep && let Some(overlay) = inner.overlay.as_mut() {
             overlay.applied += 1;
         }
@@ -9297,17 +9348,17 @@ impl Db {
             }
         };
         let own = inner.seq + 1;
-        begin_savepoint(&inner.conn, "overlay")?;
-        let mark = inner.changed.borrow().len();
-        let result = inner
-            .apply_with_edits(&ops, &edits, ops.len(), own)
-            .and_then(|()| {
-                let own = inner.own_rank(own);
-                read(&mut inner, snapshot.map(|cut| Cut { own, ..cut }))
-            });
-        inner.changed.borrow_mut().truncate(mark);
-        end_savepoint(&inner.conn, "overlay", false)?;
-        result
+        inner.scope("overlay", |inner| {
+            let mark = inner.changed.borrow().len();
+            let result = inner
+                .apply_with_edits(&ops, &edits, ops.len(), own)
+                .and_then(|()| {
+                    let own = inner.own_rank(own);
+                    read(inner, snapshot.map(|cut| Cut { own, ..cut }))
+                });
+            inner.changed.borrow_mut().truncate(mark);
+            result.map(ScopeOutcome::Rollback)
+        })
     }
 
     fn stage(&self, id: OpenTransactionId, op: StagedOp) -> Result<(), Error> {
@@ -9930,3 +9981,7 @@ fn migration_path(
         _ => Vec::new(),
     }
 }
+
+#[cfg(any(test, feature = "testing"))]
+#[path = "scope_checks.rs"]
+mod scope_checks;

@@ -49,6 +49,8 @@ pub const FEATURE_SCOPE_ISOLATED_CLIENT_RELAY: WireFeatures = 1 << 9;
 /// The peer is a thin client, or serves thin clients: it exchanges
 /// [`WireFrame::ThinRequest`] and [`WireFrame::ThinResponse`] (SPEC 8.14).
 pub const FEATURE_THIN_RESULTS: WireFeatures = 1 << 10;
+/// Authenticated backends may send thin-backend-scope-v1 request envelopes.
+pub const FEATURE_THIN_BACKEND_SCOPE_V1: WireFeatures = 1 << 12;
 /// The peer keeps an idle link audible: a server sends
 /// [`WireFrame::Heartbeat`] on its keepalive cadence to a client that
 /// advertised this, so a client whose platform hides WebSocket pings (a

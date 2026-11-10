@@ -386,19 +386,7 @@ pub fn admit_local_first_jwt(
 /// Inject the trusted session vocabulary once after provider claims are
 /// admitted. Provider `sub` maps to the documented raw `user_id`; `user` is
 /// the distinct reserved canonical `[iss,sub]` logical identity.
-pub fn admitted_session_claims(
-    issuer: &str,
-    subject: &str,
-    author: AuthorSubject,
-    claims: BTreeMap<String, Value>,
-) -> BTreeMap<String, Value> {
-    let (author_issuer, author_subject) = author.principal_parts();
-    debug_assert_eq!(
-        (author_issuer, author_subject),
-        (issuer.to_owned(), subject.to_owned())
-    );
-    jazz::model::policy_claims::canonical_policy_binding_claims(&author, claims)
-}
+pub use super::session_admission::admitted_session_claims;
 
 fn jwt_decoding_key(verifier: &JwtVerifierConfig) -> Result<DecodingKey, AuthAdmissionError> {
     match &verifier.key {
@@ -430,24 +418,8 @@ fn jwt_error(error: jsonwebtoken::errors::Error) -> AuthAdmissionError {
 pub fn jwt_json_claims_to_policy_claims(
     extra: BTreeMap<String, serde_json::Value>,
 ) -> Result<BTreeMap<String, Value>, AuthAdmissionError> {
-    let mut claims = BTreeMap::new();
-    for (name, value) in extra {
-        if matches!(
-            name.as_str(),
-            "sub" | "exp" | "nbf" | "iat" | "iss" | "aud" | "jti"
-        ) {
-            continue;
-        }
-        if let Some(value) = jazz::model::policy_claims::json_value_to_policy_claim(
-            value,
-            jazz::model::policy_claims::NumericClaimOrigin::ExactJson,
-        )
-        .map_err(AuthAdmissionError::InvalidJwt)?
-        {
-            claims.insert(name, value);
-        }
-    }
-    Ok(claims)
+    super::session_admission::jwt_json_claims_to_policy_claims(extra)
+        .map_err(AuthAdmissionError::InvalidJwt)
 }
 
 /// Bind an exact issuer/subject pair into the logical Jazz author identity.

@@ -1,3 +1,4 @@
+import { ThinRuntime } from "../thin/thin-runtime.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WasmSchema } from "../drivers/types.js";
 import type { CompiledPermissions } from "../permissions/index.js";
@@ -204,6 +205,23 @@ const RELATION_LITERAL_PERMISSIONS: CompiledPermissions = {
 describe("backend/create-jazz-context", () => {
   beforeEach(() => {
     mocks.reset();
+  });
+
+  it("uses one thin runtime for backend and user facades without opening SQLite", () => {
+    const context = createJazzContext({
+      appId: "server-app",
+      app: { wasmSchema: SCHEMA_A },
+      permissions: {},
+      driver: { type: "memory" },
+      serverUrl: "https://jazz.example",
+      backendSecret: "test-backend",
+      thinBackend: true,
+    });
+    context.db();
+    context.forSession({ issuer: "https://issuer.example", user_id: "alice", claims: {} });
+    expect(mocks.nativeRuntimeCtor).not.toHaveBeenCalled();
+    expect(mocks.connectWithRuntime).toHaveBeenCalledTimes(1);
+    expect(mocks.connectWithRuntime.mock.calls[0]![0]).toBeInstanceOf(ThinRuntime);
   });
 
   it("BC-U01: lazily initializes runtime/client on first access", () => {

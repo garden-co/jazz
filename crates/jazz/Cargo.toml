@@ -10,6 +10,7 @@ autotests = false
 # Jazz is the common semantic library. Process and target shells select
 # transport and compression capabilities explicitly.
 default = []
+sqlite = ["jazz-db/sqlite"]
 runtime = ["dep:jsonwebtoken", "dep:tokio", "jazz-model/runtime"]
 # See jazz-db's `sql-trace`.
 sql-trace = ["jazz-db/sql-trace"]
@@ -111,3 +112,7 @@ path = "tests/durable_file.rs"
 [[test]]
 name = "maintained_differential"
 path = "tests/maintained_differential.rs"
+
+# Native shells retain SQLite; WASM shells select it explicitly.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+jazz-db = { workspace = true, features = ["sqlite"] }

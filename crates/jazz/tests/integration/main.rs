@@ -41,6 +41,8 @@ mod deferred_durability_acks;
 mod deleted_rows;
 #[path = "../deployment_preparation.rs"]
 mod deployment_preparation;
+#[path = "../durable_object_limits.rs"]
+mod durable_object_limits;
 #[path = "../dynamic_schema_views.rs"]
 mod dynamic_schema_views;
 #[path = "../enum_tags.rs"]
@@ -226,3 +228,6 @@ mod write_receipt_owner;
 
 #[path = "../transaction_read_prefix.rs"]
 mod transaction_read_prefix;
+
+#[path = "../transaction_callbacks.rs"]
+mod transaction_callbacks;

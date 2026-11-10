@@ -858,27 +858,31 @@ impl Inner {
             // its table gained a column names the old columns until a step
             // re-prepares it.
             let mut names: Vec<String> = Vec::new();
-            let rows = statement.query_map(params, |r| {
-                if names.is_empty() {
-                    let statement = r.as_ref();
-                    names = (0..statement.column_count())
-                        .map(|i| statement.column_name(i).map(str::to_owned))
-                        .collect::<Result<_, _>>()?;
-                }
-                let mut seq = 0i64;
-                let mut branch = Vec::new();
-                let mut out = Vec::new();
-                for (i, name) in names.iter().enumerate() {
-                    if name == "_clock" {
-                        seq = r.get(i)?;
-                    } else if name == "_branch" {
-                        branch = r.get(i)?;
-                    } else if columns.contains(name) {
-                        out.push((name.clone(), canon(&r.get::<_, Sql>(i)?)));
+            let rows = statement.query_map_typed(
+                params,
+                || self.names.result_types(table),
+                |r| {
+                    if names.is_empty() {
+                        let statement = r;
+                        names = (0..statement.column_count())
+                            .map(|i| statement.column_name(i).map(str::to_owned))
+                            .collect::<Result<_, _>>()?;
                     }
-                }
-                Ok((seq, branch, out))
-            });
+                    let mut seq = 0i64;
+                    let mut branch = Vec::new();
+                    let mut out = Vec::new();
+                    for (i, name) in names.iter().enumerate() {
+                        if name == "_clock" {
+                            seq = r.get(i)?;
+                        } else if name == "_branch" {
+                            branch = r.get(i)?;
+                        } else if columns.contains(name) {
+                            out.push((name.clone(), canon(&r.get::<_, Sql>(i)?)));
+                        }
+                    }
+                    Ok((seq, branch, out))
+                },
+            );
             rows.map(|rows| rows.filter_map(Result::ok).collect())
                 .unwrap_or_default()
         };
@@ -1193,13 +1197,33 @@ impl Inner {
         let ids = crate::compile::json_ids(rows.iter().map(|row| row.id.0.as_bytes().as_slice()));
         let read = || -> rusqlite::Result<HashMap<Vec<u8>, Vec<Sql>>> {
             let mut statement = self.conn.prepare_cached(&sql)?;
-            let found = statement.query_map([&ids], |r| {
-                let id: Vec<u8> = r.get(0)?;
-                let values = (1..=order.len())
-                    .map(|i| r.get::<_, Sql>(i))
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                Ok((id, values))
-            })?;
+            let found = statement.query_map_typed(
+                [&ids],
+                || {
+                    use crate::storage::{ResultType as T, ResultTypes};
+                    ResultTypes::positional(std::iter::once(T::NonNumeric).chain(order.iter().map(
+                        |by| {
+                            table
+                                .column(&by.column)
+                                .map(|column| {
+                                    if column.tags.is_some() {
+                                        T::Integer
+                                    } else {
+                                        crate::values::result_type(&column.ty)
+                                    }
+                                })
+                                .unwrap_or(T::NonNumeric)
+                        },
+                    )))
+                },
+                |r| {
+                    let id: Vec<u8> = r.get(0)?;
+                    let values = (1..=order.len())
+                        .map(|i| r.get::<_, Sql>(i))
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    Ok((id, values))
+                },
+            )?;
             found.collect()
         };
         let mut found = match read() {

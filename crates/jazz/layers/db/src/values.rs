@@ -27,15 +27,15 @@ pub(crate) fn query_error(what: impl std::fmt::Display) -> Error {
 pub(crate) trait CachedRow {
     fn cached_row<T, P, F>(&self, sql: &str, params: P, f: F) -> rusqlite::Result<T>
     where
-        P: rusqlite::Params,
-        F: FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>;
+        P: crate::storage::Params,
+        F: FnOnce(&crate::storage::Row<'_>) -> rusqlite::Result<T>;
 }
 
-impl CachedRow for rusqlite::Connection {
+impl CachedRow for crate::storage::Storage {
     fn cached_row<T, P, F>(&self, sql: &str, params: P, f: F) -> rusqlite::Result<T>
     where
-        P: rusqlite::Params,
-        F: FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+        P: crate::storage::Params,
+        F: FnOnce(&crate::storage::Row<'_>) -> rusqlite::Result<T>,
     {
         self.prepare_cached(sql)?.query_row(params, f)
     }
@@ -51,16 +51,25 @@ pub(crate) fn storage(error: rusqlite::Error) -> Error {
 }
 
 /// Open `SAVEPOINT name`; [`end_savepoint`] closes it.
-pub(crate) fn begin_savepoint(conn: &rusqlite::Connection, name: &str) -> Result<(), Error> {
+pub(crate) fn begin_savepoint(conn: &crate::storage::Storage, name: &str) -> Result<(), Error> {
+    if !conn.supports_open_scopes() {
+        return Err(unsupported(format!(
+            "SQL savepoint `{name}` outside a callback on managed SQL storage"
+        )));
+    }
     conn.execute_batch(&format!("SAVEPOINT {name}"))
         .map_err(storage)?;
+    open_tag_undo(conn);
+    Ok(())
+}
+
+pub(crate) fn open_tag_undo(conn: &crate::storage::Storage) {
     TAG_UNDO.with(|undo| {
         undo.borrow_mut()
             .entry(undo_key(conn))
             .or_default()
             .push(Vec::new())
     });
-    Ok(())
 }
 
 thread_local! {
@@ -70,16 +79,14 @@ thread_local! {
         RefCell::default();
 }
 
-/// A connection's key in [`TAG_UNDO`]: its SQLite handle, which moving the
-/// `Connection` keeps.
-fn undo_key(conn: &rusqlite::Connection) -> usize {
-    // SAFETY: the handle is only compared, never dereferenced.
-    unsafe { conn.handle() as usize }
+/// The stable identity of the storage owner, independent of native handles.
+fn undo_key(conn: &crate::storage::Storage) -> usize {
+    conn.identity()
 }
 
 /// Drop `conn`'s undo logs as it closes: a savepoint left open dies with
-/// it, and a later connection may get its handle's address.
-pub(crate) fn forget_tag_undo(conn: &rusqlite::Connection) {
+/// it. Storage identities are never reused.
+pub(crate) fn forget_tag_undo(conn: &crate::storage::Storage) {
     TAG_UNDO.with(|undo| undo.borrow_mut().remove(&undo_key(conn)));
     ROLLBACKS.with(|rollbacks| rollbacks.borrow_mut().remove(&undo_key(conn)));
 }
@@ -92,7 +99,7 @@ thread_local! {
 }
 
 /// How many rollbacks `conn` has seen (see [`ROLLBACKS`]).
-pub(crate) fn rollbacks(conn: &rusqlite::Connection) -> u64 {
+pub(crate) fn rollbacks(conn: &crate::storage::Storage) -> u64 {
     ROLLBACKS.with(|rollbacks| {
         rollbacks
             .borrow()
@@ -108,13 +115,13 @@ pub(crate) fn note_rollback(key: usize) {
 }
 
 /// `conn`'s key for [`note_rollback`], for a hook that cannot borrow it.
-pub(crate) fn rollback_key(conn: &rusqlite::Connection) -> usize {
+pub(crate) fn rollback_key(conn: &crate::storage::Storage) -> usize {
     undo_key(conn)
 }
 
 /// Stored enum column `tags` is about to change on `conn`: the innermost
 /// open savepoint logs how it was, once, to put back if it rolls back.
-pub(crate) fn tags_changing(conn: &rusqlite::Connection, tags: &ColumnTags) {
+pub(crate) fn tags_changing(conn: &crate::storage::Storage, tags: &ColumnTags) {
     TAG_UNDO.with(|undo| {
         if let Some(frame) = undo
             .borrow_mut()
@@ -131,7 +138,7 @@ pub(crate) fn tags_changing(conn: &rusqlite::Connection, tags: &ColumnTags) {
 /// the enclosing savepoint's (the outermost's are committed); rolled back,
 /// its columns' tags are put back. `all` closes every open log (SQLite
 /// rolled the whole transaction back).
-fn close_tag_undo(conn: &rusqlite::Connection, kept: bool, all: bool) {
+pub(crate) fn close_tag_undo(conn: &crate::storage::Storage, kept: bool, all: bool) {
     TAG_UNDO.with(|undo| {
         let mut undo = undo.borrow_mut();
         let key = undo_key(conn);
@@ -169,7 +176,7 @@ fn close_tag_undo(conn: &rusqlite::Connection, kept: bool, all: bool) {
 /// rolls a whole transaction back by itself after some errors (a full disk,
 /// an I/O error); then the savepoint is gone and there is nothing to undo.
 pub(crate) fn end_savepoint(
-    conn: &rusqlite::Connection,
+    conn: &crate::storage::Storage,
     name: &str,
     keep: bool,
 ) -> Result<(), Error> {
@@ -207,16 +214,24 @@ pub(crate) fn end_savepoint(
     }
 }
 
-/// Run `f` inside `SAVEPOINT name`: kept if it succeeds, undone if not.
+pub(crate) use crate::storage::ScopeOutcome;
+use crate::storage::StorageContext;
+
+pub(crate) fn in_scope<C: StorageContext, T>(
+    context: &mut C,
+    name: &str,
+    f: impl FnOnce(&mut C) -> Result<ScopeOutcome<T>, Error>,
+) -> Result<T, Error> {
+    crate::storage::Storage::transaction(context, name, f)
+}
+
+/// Run `f` inside a scope: kept if it succeeds, undone if not.
 pub(crate) fn in_savepoint<T>(
-    conn: &rusqlite::Connection,
+    conn: &crate::storage::Storage,
     name: &str,
     f: impl FnOnce() -> Result<T, Error>,
 ) -> Result<T, Error> {
-    begin_savepoint(conn, name)?;
-    let result = f();
-    end_savepoint(conn, name, result.is_ok())?;
-    result
+    in_scope(&mut &*conn, name, |_| f().map(ScopeOutcome::Commit))
 }
 
 /// One SQLite value, as bound or read. Text holds raw bytes, which SQLite
@@ -373,6 +388,28 @@ pub(crate) fn array_needle(sql: Sql) -> Sql {
             Err(_) => Sql::Blob(bytes),
         },
         sql => sql,
+    }
+}
+
+/// The physical numeric form of a schema value. Strings and bytes can hold
+/// integer enum tags/large-value epochs; pending-cell encodings are separate.
+pub(crate) fn result_type(ty: &ValueType) -> crate::storage::ResultType {
+    use crate::storage::ResultType as T;
+    match ty {
+        ValueType::Nullable(inner) => result_type(inner),
+        ValueType::F64 => T::Real,
+        ValueType::U8
+        | ValueType::U16
+        | ValueType::U32
+        | ValueType::U48
+        | ValueType::U64
+        | ValueType::I32
+        | ValueType::I64
+        | ValueType::Bool
+        | ValueType::EnumTag(_)
+        | ValueType::String
+        | ValueType::Bytes => T::Integer,
+        _ => T::NonNumeric,
     }
 }
 
@@ -1472,6 +1509,8 @@ impl Schema {
     /// `ADD COLUMN ... DEFAULT` for new columns (an O(1) schema change; old
     /// rows read the default without being rewritten) and new indexes.
     pub fn union(&mut self, other: &Schema) -> Result<String, Error> {
+        #[cfg(feature = "durable-object-limits")]
+        crate::durable_object_limits::validate_schema(other, Some(self))?;
         let mut ddl = String::new();
         for table in other.tables.values() {
             let name = &table.stored;
@@ -2249,5 +2288,93 @@ impl JsonCheck {
         let compiled = crate::tools::CompiledSchema::new(schema)
             .map_err(|error| crate::tools::json_schema_failure(error, path))?;
         Ok(Some(self.compiled.get_or_init(|| compiled)))
+    }
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Alice's failed inner write leaves her outer write intact; Bob sees it
+    /// only after the outer commit. This lower-level test observes SQLite's
+    /// commit hook, which the public API intentionally does not expose.
+    #[test]
+    fn nested_error_rolls_back_without_publishing_the_parent() {
+        let conn = crate::storage::Storage::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE writes (id INTEGER PRIMARY KEY)")
+            .unwrap();
+        let commits = Arc::new(AtomicUsize::new(0));
+        let seen = commits.clone();
+        conn.commit_hook(Some(move || {
+            seen.fetch_add(1, Ordering::SeqCst);
+            false
+        }))
+        .unwrap();
+        in_savepoint(&conn, "alice", || {
+            conn.execute("INSERT INTO writes VALUES (1)", [])
+                .map_err(storage)?;
+            let failed = in_savepoint(&conn, "failed", || {
+                conn.execute("INSERT INTO writes VALUES (2)", [])
+                    .map_err(storage)?;
+                conn.execute("INSERT INTO writes VALUES (1)", [])
+                    .map_err(storage)?;
+                Ok(())
+            });
+            assert!(failed.is_err());
+            assert_eq!(
+                conn.query_row("SELECT count(*) FROM writes", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+            in_savepoint(&conn, "kept", || {
+                conn.execute("INSERT INTO writes VALUES (3)", [])
+                    .map_err(storage)?;
+                Ok(())
+            })?;
+            assert_eq!(commits.load(Ordering::SeqCst), 0);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(commits.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            conn.query_row("SELECT sum(id) FROM writes", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            4
+        );
+        assert!(conn.is_autocommit());
+        forget_tag_undo(&conn);
+    }
+
+    /// Alice can return a preview while discarding even a successful nested
+    /// write; Bob sees no changes. This lower-level test checks the explicit
+    /// rollback outcome and cache rollback generation, absent from public APIs.
+    #[test]
+    fn rollback_returns_a_value_and_undoes_released_children() {
+        let conn = crate::storage::Storage::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE writes (id INTEGER PRIMARY KEY)")
+            .unwrap();
+        let before = rollbacks(&conn);
+        let preview = in_scope(&mut &conn, "preview", |_| {
+            in_savepoint(&conn, "child", || {
+                conn.execute("INSERT INTO writes VALUES (7)", [])
+                    .map_err(storage)?;
+                Ok(())
+            })?;
+            let value: i64 = conn
+                .query_row("SELECT id FROM writes", [], |r| r.get(0))
+                .map_err(storage)?;
+            Ok(ScopeOutcome::Rollback(value))
+        })
+        .unwrap();
+        assert_eq!(preview, 7);
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM writes", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert!(rollbacks(&conn) > before);
+        assert!(conn.is_autocommit());
+        forget_tag_undo(&conn);
     }
 }

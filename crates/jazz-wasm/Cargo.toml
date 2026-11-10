@@ -14,6 +14,8 @@ ed25519-dalek = "2"
 futures-util = "0.3.31"
 futures-channel = "0.3.31"
 jazz = { path = "../jazz", default-features = false }
+jazz-server = { path = "../jazz-server", default-features = false, optional = true }
+jazz-db = { path = "../jazz/layers/db", optional = true, default-features = false, features = ["testing"] }
 jazz-text = { path = "../jazz-text", features = ["serde"] }
 js-sys = "0.3.82"
 postcard = { version = "1.1.3", features = ["alloc"] }
@@ -32,21 +34,26 @@ web-time = "1.1"
 getrandom = { version = "0.3", features = ["wasm_js"] }
 getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
 talc = "5.0.4"
-sqlite-wasm-rs = { version = "0.5", default-features = false }
-# The IndexedDB VFS's (`src/idb_vfs.rs`) own dependencies.
-indexed_db_futures = "0.6.4"
-rsqlite-vfs = "0.1"
-thiserror = "2"
-tokio = { version = "1", default-features = false, features = ["sync"] }
+sqlite-wasm-rs = { version = "0.5", default-features = false, optional = true }
+indexed_db_futures = { version = "0.6.4", optional = true }
+rsqlite-vfs = { version = "0.1", optional = true }
+thiserror = { version = "2", optional = true }
+tokio = { version = "1", default-features = false, features = ["sync"], optional = true }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
 
 [features]
-default = ["console_error_panic_hook", "transport-compression-ruzstd"]
+default = ["browser", "console_error_panic_hook", "transport-compression-ruzstd"]
+# Browser stores select SQLite; Durable Objects inject their managed backend.
+browser = ["jazz/sqlite", "dep:sqlite-wasm-rs", "dep:indexed_db_futures", "dep:rsqlite-vfs", "dep:thiserror", "dep:tokio"]
+durable-object = []
+# Shared authority hosting without native threads, sockets or SQLite.
+server = ["dep:jazz-server", "dep:tokio"]
+durable-object-tests = ["durable-object", "dep:jazz-db"]
 bench-probes = []
 # Browser store probes (IndexedDB vs in memory); never in release builds.
-browser-bench = []
+browser-bench = ["browser"]
 transport-compression-lz4 = ["jazz/transport-compression-lz4"]
 transport-compression-zstd = ["jazz/transport-compression-zstd"]
 transport-compression-ruzstd = ["jazz/transport-compression-ruzstd"]
