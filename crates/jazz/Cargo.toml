@@ -16,6 +16,8 @@ runtime = ["dep:jsonwebtoken", "dep:tokio", "jazz-model/runtime"]
 sql-trace = ["jazz-db/sql-trace"]
 # See jazz-db's `durable-object-limits`.
 durable-object-limits = ["jazz-db/durable-object-limits"]
+# See jazz-db's `managed-storage-emulation`.
+managed-storage-emulation = ["jazz-db/managed-storage-emulation"]
 testing = [
   "runtime",
   "jazz-types/testing",
