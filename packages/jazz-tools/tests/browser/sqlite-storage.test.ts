@@ -19,7 +19,7 @@ import { encodeCellsForRow } from "../../src/runtime/native-runtime/native-runti
 import wasmUrl from "../../../../crates/jazz-wasm/pkg/jazz_wasm_bg.wasm?url";
 import type { WasmDb } from "jazz-wasm";
 
-const app = s.defineApp({ notes: s.table({ text: s.string() }, {}) });
+const app = s.defineApp({ notes: s.table({ text: s.string() }, {}) }, { migrations: "none" });
 const permissions = s.definePermissions(app, ({ policy }) => [
   policy.notes.allowRead.always(),
   policy.notes.allowInsert.always(),
