@@ -9,7 +9,6 @@ import AuthStatus from "../../tests/svelte/AuthStatus.svelte";
 import UserApp from "../../tests/svelte/UserApp.svelte";
 const factory = vi.hoisted(() => vi.fn());
 vi.mock("../session/create-jazz-session.js", () => ({ createJazzClient: factory }));
-vi.mock("../dev-tools/auto-attach.js", () => ({ startInspectorOnce: vi.fn() }));
 const settle = async () => {
   for (let i = 0; i < 30; i++) {
     await tick();
@@ -75,7 +74,6 @@ it("owns startup retry and keeps the hook context across fallback and ready chil
     target,
     props: {
       scope: "test",
-      autoAttachDevTools: false,
       children: status,
       signedOut: createRawSnippet(() => ({ render: () => "<p>SIGN IN</p>" })),
     },

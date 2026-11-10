@@ -68,10 +68,7 @@ describe("JazzProvider local-first auth", () => {
     const appId = "react-local-first";
     const account = makeFakeAccount(appId);
     const view = render(
-      <JazzProvider
-        config={{ appId, serverUrl: "https://jazz.example.com", account }}
-        autoAttachDevTools={false}
-      >
+      <JazzProvider config={{ appId, serverUrl: "https://jazz.example.com", account }}>
         <IdentityProbe />
       </JazzProvider>,
     );

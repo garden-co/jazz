@@ -224,7 +224,7 @@ const TEMPLATE = `
  * changes when the host recreates its Db on login/logout, which must repoint
  * the handle at the new Db instead of leaving the overlay bound to a shut-down
  * one forever. The iframe window is captured by connectedCallback. Binding is
- * idempotent: providers call startInspectorOnce(db) on every effect run
+ * idempotent: an app may call mountInspector(db) on every effect run
  * (StrictMode remounts included), and repeat calls with an unchanged pair must
  * not tear down and reinstall the handle they just installed. Keeping the
  * bound pair and its disposer in one object makes the invariant structural:
