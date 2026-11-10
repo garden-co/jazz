@@ -15,7 +15,7 @@ afterEach(() => {
 it("starts signed out by default and supplies built-in loading and safe retry UI", async () => {
   host.create.mockRejectedValue(new Error("unavailable"));
   const view = render(
-    <JazzProvider scope="app" serverUrl="https://sync.example.test" autoAttachDevTools={false}>
+    <JazzProvider scope="app" serverUrl="https://sync.example.test">
       <p>data</p>
     </JazzProvider>,
   );
@@ -54,12 +54,7 @@ it("provides logout in the data tree without an application auth context", async
     return <p>{status}</p>;
   }
   const view = render(
-    <JazzProvider
-      scope="app"
-      serverUrl="https://sync.example.test"
-      autoAttachDevTools={false}
-      signedOut={<SignedOut />}
-    >
+    <JazzProvider scope="app" serverUrl="https://sync.example.test" signedOut={<SignedOut />}>
       <Data />
     </JazzProvider>,
   );
@@ -118,7 +113,6 @@ it("starts signed out with `initial`, then follows the backend's user on reauthe
       scope="app"
       serverUrl="https://sync.example.test"
       initial="signed-out"
-      autoAttachDevTools={false}
       signedOut={<SignedOut />}
     >
       <Data />
@@ -146,12 +140,7 @@ it("refuses a `fallback` prop by name instead of handing it to the client config
   vi.spyOn(console, "error").mockImplementation(() => {});
   expect(() =>
     render(
-      <JazzProvider
-        scope="app"
-        serverUrl="https://sync.example.test"
-        autoAttachDevTools={false}
-        {...props}
-      >
+      <JazzProvider scope="app" serverUrl="https://sync.example.test" {...props}>
         <p>data</p>
       </JazzProvider>,
     ),
@@ -167,12 +156,7 @@ it("points useJazzSession under <JazzProvider> to useJazzAuth", async () => {
   vi.spyOn(console, "error").mockImplementation(() => {});
   expect(() =>
     render(
-      <JazzProvider
-        scope="app"
-        serverUrl="https://sync.example.test"
-        autoAttachDevTools={false}
-        loading={<Status />}
-      >
+      <JazzProvider scope="app" serverUrl="https://sync.example.test" loading={<Status />}>
         <p>data</p>
       </JazzProvider>,
     ),

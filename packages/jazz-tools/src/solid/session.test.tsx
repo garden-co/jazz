@@ -8,7 +8,6 @@ import { useJazzClient } from "./provider.js";
 import { attachSubscriptionStore, getSubscriptionStore } from "../subscription-store-internal.js";
 import type { JazzClient } from "../web/create-jazz-client.js";
 vi.mock("../web/create-jazz-client.js", () => ({ openJazzClient: vi.fn() }));
-vi.mock("../dev-tools/auto-attach.js", () => ({ startInspectorOnce: vi.fn() }));
 const account = Object.freeze({
   id: "local",
   identity: { issuer: "test", subject: "local" },
@@ -64,7 +63,7 @@ describe("Solid session provider", () => {
     const node = document.createElement("div");
     const dispose = render(
       () => (
-        <JazzSessionProvider session={session} fallback={<Fallback />} autoAttachDevTools={false}>
+        <JazzSessionProvider session={session} fallback={<Fallback />}>
           <Child />
         </JazzSessionProvider>
       ),
@@ -87,7 +86,7 @@ describe("Solid session provider", () => {
     const { session, client } = await fixture();
     const dispose = render(
       () => (
-        <JazzSessionProvider session={session} autoAttachDevTools={false}>
+        <JazzSessionProvider session={session}>
           <p>active</p>
         </JazzSessionProvider>
       ),
