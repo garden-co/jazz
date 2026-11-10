@@ -1,6 +1,6 @@
 //! Draft-restack boundaries: unported E2EE contracts must fail explicitly.
 
-mod common;
+use crate::common;
 
 use std::collections::BTreeMap;
 

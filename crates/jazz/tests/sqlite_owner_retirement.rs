@@ -1,5 +1,5 @@
 //! An external storage lease must outlive every writer, including retained handles.
-mod common;
+use crate::common;
 use jazz::db::{Db, DbConfig, DbIdentity, FileOptions, ReadOpts, block_on};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::Query;
