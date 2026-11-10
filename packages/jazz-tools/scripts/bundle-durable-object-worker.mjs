@@ -18,11 +18,11 @@ const args = [
   "--out-dir",
   "../server-pkg",
 ];
-// Local iteration only. prepack uses the optimized release build by default.
+// FAST is only for local iteration; release workflows explicitly disable it.
+if (process.env.FAST === "1") args.push("--no-opt");
+args.push("--", "--locked");
 if (process.env.FAST === "1")
   args.push(
-    "--no-opt",
-    "--",
     "--config",
     'profile.release.lto="off"',
     "--config",

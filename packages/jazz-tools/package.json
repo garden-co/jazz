@@ -217,7 +217,7 @@
     "stage:inspector-overlay": "node scripts/stage-inspector-overlay.mjs",
     "pack:dry-run": "npm pack --dry-run",
     "build:durable-objects": "node scripts/bundle-durable-object-worker.mjs",
-    "prepack": "pnpm build:durable-objects",
+    "prepack": "node scripts/verify-durable-object-artifact.mjs",
     "test:durable-objects": "node scripts/prepare-durable-object-tests.mjs && node ../../dev/gates/run-correctness-consumer.mjs -- pnpm exec vitest run --config vitest.config.durable-objects.ts"
   },
   "dependencies": {

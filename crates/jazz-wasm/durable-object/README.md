@@ -85,3 +85,16 @@ No durable or wire encoding changes are introduced by this host extraction.
 
 Worker integration coverage runs through `pnpm --filter jazz-tools test:durable-objects`.
 These local checks do not establish deployed application-Worker behavior or performance.
+
+## Release packaging
+
+The release WASM job runs the optimized, locked DO build and uploads its two
+generated files. Package assembly includes them in `pkg-jazz-tools`; publishing
+reuses that artifact, including when promoting a release preview. Release
+candidates pass their version into the build before the manifest is generated.
+
+`prepack` only verifies presence, package version and decompressed content hashes.
+For local packaging, run `pnpm --filter jazz-tools build:durable-objects` first.
+Release and candidate packaging run `dev/artifacts/verify-packed-durable-object.mjs`
+on the npm tarball: its embedded host must initialize in local workerd and serve
+`createJazz` readiness and a read/write. No Cloudflare deployment is involved.
