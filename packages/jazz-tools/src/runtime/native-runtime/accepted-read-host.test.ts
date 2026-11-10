@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { mergePermissionsIntoWasmSchema } from "../../schema-permissions.js";
 import { schema as s } from "../../index.js";
 import { JazzClient, createOpenTransactionId } from "../client.js";
-import { startLocalJazzServer } from "../../testing/index.js";
+import { deploy, startLocalJazzServer } from "../../testing/index.js";
 import { allowAll } from "../testing/allow-all.js";
 import { testAuthorBytes } from "../testing/account-fixtures.js";
 import { loadNapiModule } from "../testing/napi-runtime-test-utils.js";
@@ -44,6 +44,29 @@ const app = s.defineApp({ notes: s.table({ body: s.string() }, {}) }, { migratio
 const author = testAuthorBytes("accepted-read-host:alice");
 const node = new Uint8Array(16).fill(7);
 const query = queryFromTable("notes");
+
+async function pinnedTestServer() {
+  const permissions = allowAll(app.wasmSchema);
+  const server = await startLocalJazzServer({
+    inMemory: true,
+    schema: app.wasmSchema,
+    permissions,
+  });
+  try {
+    const { bundle } = await deploy({
+      serverUrl: server.url,
+      appId: server.appId,
+      adminSecret: server.adminSecret,
+      schema: app.wasmSchema,
+      permissions,
+    });
+    if (!bundle) throw new Error("test deployment did not return its permissions bundle");
+    return { ...server, bundle };
+  } catch (error) {
+    await server.stop();
+    throw error;
+  }
+}
 
 async function open(
   host: "NAPI" | "WASM",
@@ -390,11 +413,7 @@ for (const host of ["NAPI", "WASM"] as const) {
   });
 
   it(`${host} decodes real paired evidence through the authority and commits a read-only explicit session`, async () => {
-    const server = await startLocalJazzServer({
-      inMemory: true,
-      schema: app.wasmSchema,
-      permissions: allowAll(app.wasmSchema),
-    });
+    const server = await pinnedTestServer();
     const adapter = runtime(await open(host));
     const client = await JazzClient.connectWithRuntime(adapter, {
       appId: server.appId,
@@ -402,7 +421,10 @@ for (const host of ["NAPI", "WASM"] as const) {
       serverUrl: server.url,
     });
     try {
-      client.connectTransport(server.url, { admin_secret: server.adminSecret });
+      client.connectTransport(server.url, {
+        admin_secret: server.adminSecret,
+        bundle: server.bundle,
+      });
       const inserted = client.insert("notes", {
         body: { type: "Text", value: "paired authority row" },
       });
@@ -495,11 +517,7 @@ for (const host of ["NAPI", "WASM"] as const) {
   });
 
   it(`${host} never reinstalls stale explicit claims during accepted queries`, async () => {
-    const server = await startLocalJazzServer({
-      inMemory: true,
-      schema: app.wasmSchema,
-      permissions: allowAll(app.wasmSchema),
-    });
+    const server = await pinnedTestServer();
     const raw = await open(host);
     let registrations = 0;
     const adapter = runtime(
@@ -519,7 +537,10 @@ for (const host of ["NAPI", "WASM"] as const) {
     const session = JSON.stringify({ account_id, issuer, user_id, claims: { team: "before" } });
     const id = createOpenTransactionId();
     try {
-      client.connectTransport(server.url, { admin_secret: server.adminSecret });
+      client.connectTransport(server.url, {
+        admin_secret: server.adminSecret,
+        bundle: server.bundle,
+      });
       await client
         .insert("notes", { body: { type: "Text", value: "scope admission" } })
         .wait({ tier: "global", timeoutMs: 5000 });
@@ -554,11 +575,7 @@ for (const host of ["NAPI", "WASM"] as const) {
   for (const operation of ["insert", "restore", "update", "upsert", "delete", "partial"] as const) {
     for (const mode of ["same-peer", "drift", "empty-drift"] as const) {
       it(`${host} accepted ${operation} preserves ${mode} identity and live claims`, async () => {
-        const server = await startLocalJazzServer({
-          inMemory: true,
-          schema: app.wasmSchema,
-          permissions: allowAll(app.wasmSchema),
-        });
+        const server = await pinnedTestServer();
         const raw = await open(
           host,
           false,
@@ -584,7 +601,10 @@ for (const host of ["NAPI", "WASM"] as const) {
         const scope = { account_id, issuer, user_id, claims: { team: "before" } };
         const id = createOpenTransactionId();
         try {
-          client.connectTransport(server.url, { admin_secret: server.adminSecret });
+          client.connectTransport(server.url, {
+            admin_secret: server.adminSecret,
+            bundle: server.bundle,
+          });
           const row = await client
             .insert("notes", { body: { type: "Text", value: "seed" } })
             .wait({ tier: "global", timeoutMs: 5000 });
@@ -641,11 +661,7 @@ for (const host of ["NAPI", "WASM"] as const) {
     for (const explicit of [false, true]) {
       for (const readMode of ["omitted", "cached-client", "cached-serving"] as const) {
         it(`${host} stable mixed reads inherit live claims (${retained ? "view" : "owner"}/${explicit ? "explicit" : "implicit"}/${readMode})`, async () => {
-          const server = await startLocalJazzServer({
-            inMemory: true,
-            schema: app.wasmSchema,
-            permissions: allowAll(app.wasmSchema),
-          });
+          const server = await pinnedTestServer();
           const owner = await open(
             host,
             false,
@@ -673,7 +689,10 @@ for (const host of ["NAPI", "WASM"] as const) {
           const scope = { account_id, issuer, user_id, claims: { team: "before" } };
           const id = createOpenTransactionId();
           try {
-            client.connectTransport(server.url, { admin_secret: server.adminSecret });
+            client.connectTransport(server.url, {
+              admin_secret: server.adminSecret,
+              bundle: server.bundle,
+            });
             await client
               .insert("notes", { body: { type: "Text", value: "settle session" } })
               .wait({ tier: "global", timeoutMs: 5000 });

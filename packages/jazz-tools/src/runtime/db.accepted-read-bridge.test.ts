@@ -4,7 +4,7 @@ import { definePermissions } from "../permissions/index.js";
 import { createDb } from "./default-create-db.js";
 import { beginDbTransactionAfter, readAcceptedTransactionRows } from "./db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
-import { deploy, startLocalJazzServer, startTestJazz } from "../testing/index.js";
+import { startTestJazz } from "../testing/index.js";
 import { createAccountDbWithRuntimeSource } from "../accounts/context.js";
 import { DefaultRuntimeSource } from "./default-runtime-source.js";
 import type { RuntimeClientContext } from "./runtime-source.js";
@@ -25,17 +25,14 @@ class PreparationSource extends DefaultRuntimeSource {
 }
 
 it("opts in before opening, drains an immediate SDK commit and preserves paired typed evidence", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  const server = await startTestJazz({
+    app,
+    permissions,
+    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+  });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
   let release!: () => void;
   try {
-    await deploy({
-      serverUrl: server.url,
-      appId: server.appId,
-      adminSecret: server.adminSecret,
-      schema: app,
-      permissions,
-    });
     const source = new PreparationSource();
     db = await createAccountDbWithRuntimeSource(
       await localAccountConfig(server.appId, server.url),
@@ -96,16 +93,13 @@ it("opts in before opening, drains an immediate SDK commit and preserves paired 
 }, 60000);
 
 it("records an empty accepted predicate and refuses a phantom at Global commit", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  const server = await startTestJazz({
+    app,
+    permissions,
+    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+  });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
   try {
-    await deploy({
-      serverUrl: server.url,
-      appId: server.appId,
-      adminSecret: server.adminSecret,
-      schema: app,
-      permissions,
-    });
     db = await createDb(await localAccountConfig(server.appId, server.url));
     await db.all(app.notes, { tier: "remote" });
     const tx = beginDbTransactionAfter(db, async () => {}, "accepted-evidence");
