@@ -66,8 +66,7 @@ const CURRENT_METADATA_KEY = "current";
 const MIN_PAGE_SIZE = 1024;
 const MAX_PAGE_SIZE = 0x8000_0000;
 export const INDEXEDDB_BTREE_PAGE_SIZE = 16 * 1024;
-export const INDEXEDDB_STORAGE_EPOCH = 2;
-export const INDEXEDDB_STORAGE_ADMISSION_KEY = "admission-v1";
+export const INDEXEDDB_STORAGE_EPOCH = 1;
 export const INDEXEDDB_PAGE_CHECKSUM = "xxh3-64-le";
 export const INDEXEDDB_PAGE_FORMAT_MAGIC = "IDBTREE\0";
 
@@ -81,20 +80,15 @@ export const INDEXEDDB_PAGE_FORMAT_MAGIC = "IDBTREE\0";
  */
 export const JAZZ_EPOCH_1_STORAGE_CODEC_IDS = ["jazz.sqlite-storage.v1"] as const;
 
-export const JAZZ_EPOCH_2_STORAGE_CODEC_IDS = [
-  ...JAZZ_EPOCH_1_STORAGE_CODEC_IDS.filter((codec) => codec !== "jazz.node-storage.v2"),
-  "jazz.node-storage.v3",
-].sort();
-
 /**
  * The entire browser physical-open contract. Keep this exact shape pinned:
  * unknown fields are decode-relevant until a later storage epoch says otherwise.
  */
 export interface IndexedDbStorageManifest {
-  storageEpoch: 1 | 2;
+  storageEpoch: typeof INDEXEDDB_STORAGE_EPOCH;
   adapterId: "jazz-idb-tree";
   adapterFormatVersion: typeof INDEXEDDB_BTREE_FORMAT_VERSION;
-  requiredCodecIds: readonly string[];
+  requiredCodecIds: typeof JAZZ_EPOCH_1_STORAGE_CODEC_IDS;
   pageSize: typeof INDEXEDDB_BTREE_PAGE_SIZE;
   pageChecksum: typeof INDEXEDDB_PAGE_CHECKSUM;
   pageFormatMagic: typeof INDEXEDDB_PAGE_FORMAT_MAGIC;
@@ -105,24 +99,12 @@ export const INDEXEDDB_STORAGE_MANIFEST: IndexedDbStorageManifest = {
   storageEpoch: INDEXEDDB_STORAGE_EPOCH,
   adapterId: "jazz-idb-tree",
   adapterFormatVersion: INDEXEDDB_BTREE_FORMAT_VERSION,
-  requiredCodecIds: JAZZ_EPOCH_2_STORAGE_CODEC_IDS,
+  requiredCodecIds: JAZZ_EPOCH_1_STORAGE_CODEC_IDS,
   pageSize: INDEXEDDB_BTREE_PAGE_SIZE,
   pageChecksum: INDEXEDDB_PAGE_CHECKSUM,
   pageFormatMagic: INDEXEDDB_PAGE_FORMAT_MAGIC,
   pageFormatVersion: INDEXEDDB_BTREE_FORMAT_VERSION,
 };
-
-export const INDEXEDDB_EPOCH_1_STORAGE_MANIFEST: IndexedDbStorageManifest = {
-  ...INDEXEDDB_STORAGE_MANIFEST,
-  storageEpoch: 1,
-  requiredCodecIds: JAZZ_EPOCH_1_STORAGE_CODEC_IDS,
-};
-
-/** The only handle crossing into Jazz during legacy admission. No writes or ownership claims. */
-export interface IndexedDbAdmissionView {
-  metadata(): Promise<IndexedDbBtreeMetadata | null>;
-  readPage(pageId: number): Promise<Uint8Array | null>;
-}
 
 export interface IndexedDbBtreeMetadata {
   formatMagic: typeof INDEXEDDB_BTREE_FORMAT_MAGIC;
@@ -193,7 +175,6 @@ export class IndexedDbPageStore {
   private nextTreeToken = 0;
   private readonly treeTransactions = new Set<Promise<unknown>>();
   private ownershipRevision = 0;
-  private storageReceipt: Uint8Array | null = null;
   private admissionLive: (() => boolean) | null = null;
   private ownedEpoch: BrowserPhysicalDatabaseEpoch | null = null;
   private borrowedEpoch: BrowserPhysicalDatabaseEpoch | null = null;
@@ -346,7 +327,6 @@ export class IndexedDbPageStore {
         const manifest = db.createObjectStore(INDEXEDDB_STORAGE_MANIFEST_STORE);
         if (request.transaction) {
           manifest.put(INDEXEDDB_STORAGE_MANIFEST, INDEXEDDB_STORAGE_MANIFEST_KEY);
-          manifest.put(encodeAdmissionReceipt(false), INDEXEDDB_STORAGE_ADMISSION_KEY);
           manifest.put(randomReplicaNodeBytes().buffer, INDEXEDDB_REPLICA_NODE_KEY);
         }
       }
@@ -381,7 +361,7 @@ export class IndexedDbPageStore {
         }
       }
       if (options.format === "sqlite") await store.admitSqliteStorage(options.owner!);
-      else await store.admitStorage(options.runtimeSources);
+      else await store.admitStorage();
       if (options.owner) await store.claimBrowserRuntimeOwner(options.owner);
       return store;
     } catch (error) {
@@ -679,88 +659,16 @@ export class IndexedDbPageStore {
   }
 
   /** Read-only physical-open gate. It always runs before a caller gets a handle. */
-  private async admitStorage(runtimeSources?: RuntimeSourcesConfig): Promise<void> {
+  private async admitStorage(): Promise<void> {
+    this.assertValid();
     const tx = this.db.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readonly");
     const done = transactionDone(tx);
-    const plane = tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE);
-    const [value, receipt] = await Promise.all([
-      requestResult(plane.get(INDEXEDDB_STORAGE_MANIFEST_KEY)),
-      requestResult(plane.get(INDEXEDDB_STORAGE_ADMISSION_KEY)),
-    ]);
-    await done;
-    const legacy = (value as Partial<IndexedDbStorageManifest> | null)?.storageEpoch === 1;
-    assertStorageManifest(
-      value,
-      legacy ? INDEXEDDB_EPOCH_1_STORAGE_MANIFEST : INDEXEDDB_STORAGE_MANIFEST,
+    const value = await requestResult(
+      tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE).get(INDEXEDDB_STORAGE_MANIFEST_KEY),
     );
-    this.replicaNodeBytes = await this.readReplicaNodeBytes();
-    if (!legacy) {
-      this.storageReceipt = validateAdmissionReceipt(receipt);
-      return;
-    }
-    if (receipt !== undefined) throw new Error("Unexpected epoch-one admission receipt");
-    const root = await this.metadata();
-    if (root?.rootPageId == null) {
-      const pages = this.db.transaction(INDEXEDDB_BTREE_PAGES_STORE, "readonly");
-      const counted = transactionDone(pages);
-      const count = await requestResult(pages.objectStore(INDEXEDDB_BTREE_PAGES_STORE).count());
-      await counted;
-      if (count !== 0) throw new Error("IndexedDB legacy tree has pages but no root");
-    }
-    let active = true;
-    const assertPhase = () => {
-      this.assertValid();
-      if (!active) throw new Error("IndexedDB admission view has expired");
-    };
-    const view: IndexedDbAdmissionView = Object.freeze({
-      metadata: () => {
-        assertPhase();
-        return this.metadata();
-      },
-      readPage: (id: number) => {
-        assertPhase();
-        return this.readPage(id);
-      },
-    });
-    try {
-      const wasm = await loadWasmModule(runtimeSources);
-      await wasm.WasmDb.preflightBrowserEpochOne(view);
-    } finally {
-      active = false;
-    }
+    await done;
     this.assertValid();
-    const completion = this.db.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readwrite");
-    const completed = transactionDone(completion);
-    const metadata = completion.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE);
-    try {
-      const [current, currentReceipt] = await Promise.all([
-        requestResult(metadata.get(INDEXEDDB_STORAGE_MANIFEST_KEY)),
-        requestResult(metadata.get(INDEXEDDB_STORAGE_ADMISSION_KEY)),
-      ]);
-      assertStorageManifest(current, INDEXEDDB_EPOCH_1_STORAGE_MANIFEST);
-      if (currentReceipt !== undefined) throw new Error("Unexpected epoch-one admission receipt");
-      this.assertValid();
-      const admitted = encodeAdmissionReceipt(true);
-      metadata.put(INDEXEDDB_STORAGE_MANIFEST, INDEXEDDB_STORAGE_MANIFEST_KEY);
-      metadata.put(admitted, INDEXEDDB_STORAGE_ADMISSION_KEY);
-      await completed;
-      this.storageReceipt = admitted;
-    } catch (error) {
-      try {
-        completion.abort();
-      } catch {
-        /* Already settled. */
-      }
-      await completed.catch(() => undefined);
-      throw error;
-    }
-  }
-
-  /** Actual admitted durable profile and binary JSA1 receipt for the shared Rust gate. */
-  storageAdmission(): Uint8Array[] {
-    this.assertValid();
-    if (!this.storageReceipt) throw new Error("IndexedDB storage is not admitted");
-    return [encodeStorageManifest(INDEXEDDB_STORAGE_MANIFEST), this.storageReceipt.slice()];
+    assertStorageManifest(value);
   }
 
   /**
@@ -1378,66 +1286,6 @@ function assertStorageManifest(
         `required by this build and declares ${JSON.stringify(unknown)} that this build does not read`,
     );
   }
-}
-
-// JSM1/JSA1 are shared with Groove's explicit binary manifest codec, not serde.
-function encodeStorageManifest(manifest: IndexedDbStorageManifest): Uint8Array {
-  const out: number[] = [...new TextEncoder().encode("JSM1")];
-  const u16 = (value: number) => out.push(value >>> 8, value & 255);
-  const string = (value: string) => {
-    const bytes = new TextEncoder().encode(value);
-    out.push(bytes.length, ...bytes);
-  };
-  u16(manifest.storageEpoch);
-  u16(manifest.adapterFormatVersion);
-  string(manifest.adapterId);
-  out.push(manifest.requiredCodecIds.length);
-  for (const codec of manifest.requiredCodecIds) string(codec);
-  const parameters: [string, Uint8Array][] = [
-    ["page-checksum", new TextEncoder().encode(manifest.pageChecksum)],
-    ["page-format-magic", new TextEncoder().encode(manifest.pageFormatMagic)],
-    ["page-format-version", new Uint8Array([0, manifest.pageFormatVersion])],
-    ["page-size", new Uint8Array([0, 0, 64, 0])],
-  ];
-  out.push(parameters.length);
-  for (const [key, value] of parameters) {
-    string(key);
-    u16(value.length);
-    out.push(...value);
-  }
-  return new Uint8Array(out);
-}
-
-function encodeAdmissionReceipt(completed: boolean): Uint8Array {
-  const out = [...new TextEncoder().encode("JSA1"), completed ? 1 : 0];
-  for (const manifest of completed
-    ? [INDEXEDDB_EPOCH_1_STORAGE_MANIFEST, INDEXEDDB_STORAGE_MANIFEST]
-    : [INDEXEDDB_STORAGE_MANIFEST]) {
-    const bytes = encodeStorageManifest(manifest);
-    out.push(
-      bytes.length >>> 24,
-      (bytes.length >>> 16) & 255,
-      (bytes.length >>> 8) & 255,
-      bytes.length & 255,
-      ...bytes,
-    );
-  }
-  return new Uint8Array(out);
-}
-
-function validateAdmissionReceipt(value: unknown): Uint8Array {
-  if (value instanceof Uint8Array) {
-    for (const completed of [false, true]) {
-      const expected = encodeAdmissionReceipt(completed);
-      if (
-        value.length === expected.length &&
-        value.every((byte, index) => byte === expected[index])
-      ) {
-        return value.slice();
-      }
-    }
-  }
-  throw new Error("Missing or invalid IndexedDB storage admission receipt");
 }
 
 function isPageSize(value: unknown): value is number {

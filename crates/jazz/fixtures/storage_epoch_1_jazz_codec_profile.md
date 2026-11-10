@@ -86,13 +86,9 @@ production-adapter producers. Node, catalogue and account reopen tests cover
 their independent current profiles. The browser's replica identity and lease
 metadata remain independent physical metadata and are unchanged.
 
-## Epoch two node proof retention
+## Current SQLite port
 
-The target profile replaces only `jazz.node-storage.v2` with
-`jazz.node-storage.v3`. Groove dictionary, durable-index and chunk codec IDs
-are unchanged. The layout remains `groove.jazz-physical-class.v3`.
-`jazz_pending_transactions` keeps exclusive proof after acceptance or rejection;
-its slots 2–5 retain the existing `jazz.exclusive-read-evidence.v2` bytes.
-The upgrade scans the source under the backend guard and atomically publishes
-the epoch-two manifest and `groove.storage-admission-receipt.v1` receipt.
-See `dev/proofs/exclusive-read-evidence-storage-compatibility.md`.
+The historical epoch-two proof-retention proposal is omitted. This port adds no
+node-storage v3 profile, permanent post-settlement proof or JSA1 migration.
+Historical codec bytes remain immutable; they are not an admission guarantee
+for current SQLite stores. See `dev/proofs/exclusive-read-evidence-storage-compatibility.md`.

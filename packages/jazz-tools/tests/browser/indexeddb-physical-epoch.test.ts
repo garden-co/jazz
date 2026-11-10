@@ -1,3 +1,4 @@
+/// <reference types="vite/client" />
 import { acquireBrowserPhysicalDatabaseEpoch } from "../../src/runtime/browser-physical-database-epoch.js";
 /**
  * Real-browser physical epoch receipts for the raw IndexedDB page store.
@@ -15,8 +16,6 @@ import {
   INDEXEDDB_BTREE_PAGE_SIZE,
   INDEXEDDB_BTREE_PAGES_STORE,
   INDEXEDDB_STORAGE_MANIFEST,
-  INDEXEDDB_EPOCH_1_STORAGE_MANIFEST,
-  INDEXEDDB_STORAGE_ADMISSION_KEY,
   INDEXEDDB_STORAGE_MANIFEST_KEY,
   INDEXEDDB_STORAGE_MANIFEST_STORE,
   INDEXEDDB_REPLICA_NODE_BYTES,
@@ -101,12 +100,12 @@ describe("IndexedDB physical epoch", () => {
     }
   });
 
-  it("migrates an empty exact E1 root through WASM without creating tree metadata", async () => {
+  it("opens the current empty root without migration and preserves its identity on reopen", async () => {
     const name = databaseName();
     const raw = await createRawEpochDatabase(name);
     const tx = raw.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readwrite");
     tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE).put(
-      INDEXEDDB_EPOCH_1_STORAGE_MANIFEST,
+      INDEXEDDB_STORAGE_MANIFEST,
       INDEXEDDB_STORAGE_MANIFEST_KEY,
     );
     tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE).put(
@@ -117,32 +116,44 @@ describe("IndexedDB physical epoch", () => {
     raw.close();
     const store = await IndexedDbPageStore.open(name);
     expect(await store.metadata()).toBeNull();
-    expect(store.storageAdmission()[1]?.slice(0, 5)).toEqual(new Uint8Array([74, 83, 65, 49, 1]));
     await store.close();
     const reopened = await IndexedDbPageStore.open(name);
     expect(await reopened.metadata()).toBeNull();
     expect(reopened.replicaNode).toEqual(epochOneReplicaNode());
     await reopened.close();
+    const verify = await openRawDatabase(name);
+    const planeTx = verify.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readonly");
+    const plane = planeTx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE);
+    expect(await requestResult(plane.get(INDEXEDDB_STORAGE_MANIFEST_KEY))).toEqual(
+      INDEXEDDB_STORAGE_MANIFEST,
+    );
+    expect(await requestResult(plane.get("admission-v1"))).toBeUndefined();
+    await transactionDone(planeTx);
+    verify.close();
   });
 
-  it("rejects non-Jazz legacy pages through WASM without publishing admission", async () => {
+  it("refuses a legacy page root on the SQLite route without rewriting its data", async () => {
     const name = databaseName();
     const page = hexBytes(pageV1LeafHex);
-    await installEpochOneFixture(name, INDEXEDDB_EPOCH_1_STORAGE_MANIFEST, page);
-    await expect(IndexedDbPageStore.open(name)).rejects.toThrow();
+    await installEpochOneFixture(name, INDEXEDDB_STORAGE_MANIFEST, page);
+    await expect(
+      IndexedDbPageStore.open(name, { format: "sqlite", owner: "physical-test-owner" }),
+    ).rejects.toThrow();
     expect(await rawPage(name, 1)).toEqual(page);
     const raw = await openRawDatabase(name);
     const tx = raw.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readonly");
     const plane = tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE);
     expect(await requestResult(plane.get(INDEXEDDB_STORAGE_MANIFEST_KEY))).toEqual(
-      INDEXEDDB_EPOCH_1_STORAGE_MANIFEST,
+      INDEXEDDB_STORAGE_MANIFEST,
     );
-    expect(await requestResult(plane.get(INDEXEDDB_STORAGE_ADMISSION_KEY))).toBeUndefined();
+    expect(await requestResult(plane.get("admission-v1"))).toBeUndefined();
     await transactionDone(tx);
     raw.close();
-    // A failed preflight relinquishes the lock; the same root reaches the
+    // A refused legacy root relinquishes the lock; the same root reaches the
     // same corruption rejection, not a stranded physical-owner conflict.
-    await expect(IndexedDbPageStore.open(name)).rejects.not.toThrow("active in another");
+    await expect(
+      IndexedDbPageStore.open(name, { format: "sqlite", owner: "physical-test-owner" }),
+    ).rejects.not.toThrow("active in another");
   });
 
   it("rejects corrupt, unknown, and extra epoch-manifest fields before a page mutation", async () => {

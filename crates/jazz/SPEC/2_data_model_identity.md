@@ -492,9 +492,10 @@ whatever the write count.
 `jazz_pending_transactions` record keyed like its transaction record:
 `(time, node_id, base_snapshot, row_read_set, absent_read_set,
 predicate_read_set)`, the last four nullable bytes holding its exclusive read
-evidence. In node-storage v3 this immutable proof remains after acceptance or
-rejection. Entirely absent or redacted evidence has no record. An upgrade
-cannot reconstruct proof already deleted by an older node.
+evidence in the historical Groove layout. The current SQLite port retains
+pending proof through reopen and first validation, then may release it at
+settlement while retaining terminal fate. This port does not introduce
+node-storage v3 or reconstruct proof already deleted by an older node.
 
 **History horizon.** `jazz_history_horizon` holds at most one record, `(id: U8
 = 0, horizon: U64)`: the seq at or below which this store's history was

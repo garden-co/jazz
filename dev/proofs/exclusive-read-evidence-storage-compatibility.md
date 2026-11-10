@@ -1,72 +1,42 @@
-# Retained exclusive proof and epoch-two node admission
+# Pending read evidence on the current SQLite runtime
 
 ## Decision
 
-E13 retains an exclusive transaction's captured read proof for its whole
-stored lifetime, including acceptance and rejection. Joe approved preserving
-this requirement while updating main's conflicting deletion test on
-2026-10-17 (garden-co/jazz#4152).
+The current port preserves proof while an exclusive transaction is pending,
+including reopen before its first terminal decision. It preserves validation,
+transaction identity, terminal fate, idempotence and rejected-operation handling.
+It does not add permanent post-settlement read-proof retention.
 
-The source is epoch 1 with `jazz.node-storage.v2`. The target is epoch 2 with
-`jazz.node-storage.v3`. Exactly one Jazz root marker is selected. Both retain
-Groove dictionary v1, durable-index v2, ordered-kv v1, large-value v2 and
-ordered-chunk-storage v2. Physical class layout remains v3 and row history
-remains linear; no parent DAG is reintroduced.
-
-The historical `jazz_pending_transactions` table is retained. Its primary
-key is `(time: U64, node_id: U64)`. Nullable byte slots 2–5 are base snapshot,
-row reads, absent reads and predicate reads. They use the explicitly specified
-`jazz.exclusive-read-evidence.v2` codec in the protocol layer. Snapshot, row
-and absent records retain format byte 1; predicate records use format byte 2
-and canonical aggregate-result v1 bytes. Query/binding representations keep
-their existing canonical, byte-pinned codecs. No default serializer encoding
-is added. The permanent transaction header and provenance layout are unchanged.
-
-Settlement writes status and retains the proof in the same batch. Touched-row
-lists are still released independently. A complete view redaction carries no
-proof; replay must never overwrite captured observations with different proof.
-Entirely absent proof remains absent. New partial evidence is refused, while
-an older absent proof is not synthesized.
+The historical #4152/#4156 proposal retained proof after settlement and introduced
+a Groove epoch-two admission protocol. The bounded current-consumer assessment
+found no demonstrated consumer or causal failure requiring that contract. The
+user chose to omit it. The old proposal remains in Git history; it is not the
+current implementation or a tested compatibility guarantee.
 
 ## Mixed versions
 
-Opening an exact source root acquires the backend's exclusive admission guard,
-scans transaction headers and evidence read-only, validates canonical evidence
-and its exclusive owner, then atomically publishes the target manifest and
-`JSA1` receipt. Payload bytes are unchanged. Failure leaves source metadata and
-rows unchanged. An old reader refuses the newer epoch/profile before decoding.
-A target reader rejects mismatched profiles/receipts and unadmitted durable
-handles before a Groove constructor can mutate layout state. Browser admission
-uses the same Rust-owned scanner and byte contract.
-
-For example, a pending exclusive read of an absent row retains its complete
-proof through upgrade, relay, acceptance and reopen. An accepted source
-transaction whose proof main already deleted has no recoverable observations:
-it remains absent, and any path requiring complete proof fails closed. The
-upgrade cannot restore historical deleted data. A malformed slot or a proof
-owned by a mergeable transaction fails admission without publishing epoch two.
+This port introduces no SQLite storage-format change, epoch-two manifest,
+JSA1 admission receipt or legacy-writer migration. It uses the current SQLite
+pending-proof and terminal-fate paths. Historical Groove images are not silently
+admitted as current SQLite stores. An incompatible image must refuse without
+publishing replacement metadata; already missing proof is not reconstructed
+from a resend or from later observations.
 
 ## Security and correctness
 
-Creation-aware policy support remains limited to independently authorised
-same-transaction inserts with absence evidence and empty linear row bases.
-It does not relax ordinary exists, update/delete permissions or authority
-receipt checks. Canonical evidence comparison preserves signed-zero and NaN
-bit distinctions. Durable proof is distinct from permission identity.
+Pending evidence remains bound to the original transaction and is validated
+before acceptance. A retry must not replace stale reads with fresh observations,
+convert the transaction into a mergeable write, or overwrite a known terminal
+fate. Missing evidence is distinct from an empty read set. A settled transaction
+is not promised a permanently queryable copy of its original read proof.
 
-## Limits and non-goals
-
-This upgrade changes proof lifetime, not wire framing, row ordering, history
-retention or auxiliary root formats. There is no new automatic proof GC;
-retained proof lives as long as its transaction. Already deleted proof cannot
-be reconstructed. Native/WASM artifacts must still be built in their own
-checkout with existing provenance checks enabled.
+Creation-aware policy admission is the separately owned current-core prerequisite
+#4374. Its authenticated governing schema, same-unit witness qualification,
+read-set validation and atomic rejection do not depend on permanent proof history.
 
 ## Evidence
 
-Byte corpus and malformed-version receipts live beside the protocol evidence
-and aggregate codecs. Root manifest bytes and JSA1 receipt bindings are pinned
-in storage codec/profile and Groove manifest tests. Node reopen tests exercise
-exact evidence before and after settlement; backend admission tests exercise
-atomic receipts and payload preservation. The registry links these concrete
-receipts and does not give each incidental byte family its own root marker.
+The current E13 qualification packet records actual pending/reopen and fate
+controls at their execution heads. Historical codec fixtures and original test
+bodies remain preserved source evidence, not claims that removed Groove modules
+execute in the current SQLite workspace. No format migration is claimed.
