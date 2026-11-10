@@ -137,3 +137,11 @@ impl SharedConfig {
         }
     }
 }
+
+/// A fault an engine step cannot return where it met it was noted for the
+/// run's end ([`crate::fanout`]): the fault suite counts it as handled.
+pub(crate) fn deferred(error: &Error) {
+    debug_assert!(is_fault(error));
+    #[cfg(feature = "testing")]
+    crate::fault_vfs::acknowledge();
+}

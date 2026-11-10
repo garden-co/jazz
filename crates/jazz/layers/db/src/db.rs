@@ -1460,7 +1460,14 @@ impl Db {
         };
         source.begin_op();
         let result = loop {
+            // What fan-out left for an earlier run's fault goes first; a
+            // fault fan-out met ends the run ([`crate::pages`]).
+            self.inner().retry_fan_faults();
             let run = op();
+            let run = match (run, self.inner().take_fan_fault()) {
+                (Ok(_), Some(fault)) => Err(fault),
+                (run, _) => run,
+            };
             #[cfg(feature = "testing")]
             crate::fault_vfs::check_run(matches!(&run, Err(error) if crate::pages::is_fault(error)));
             match run {

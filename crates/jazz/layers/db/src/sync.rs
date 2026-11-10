@@ -4068,7 +4068,7 @@ impl Inner {
                 let columns = BTreeSet::from([column.clone()]);
                 let mut seen = BTreeSet::new();
                 for ((t, row, branch), _) in written.iter().filter(|((t, ..), _)| t == *dep) {
-                    for image in self.images(t, *row, branch, &columns) {
+                    for image in self.images(t, *row, branch, &columns)? {
                         seen.extend(
                             image
                                 .into_iter()

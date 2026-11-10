@@ -48,6 +48,9 @@ struct State {
     /// Faults raised since the last [`check_run`]. A run stops at its
     /// first fault, so more than one means one was swallowed.
     in_run: u32,
+    /// Of those, faults the engine noted to end the run with later
+    /// ([`crate::pages::deferred`]).
+    deferred: u32,
     faults: u64,
     loads: u64,
     never_evict: bool,
@@ -145,12 +148,18 @@ impl PageSource for FaultSource {
 /// with the fault ([`crate::pages`]: a fault is never an answer). Panics
 /// with where the swallowed fault was raised.
 pub(crate) fn check_run(faulted: bool) {
-    let (outstanding, raised) = STATE.with(|s| {
+    let (outstanding, raised, deferred) = STATE.with(|s| {
         let mut s = s.borrow_mut();
-        (s.outstanding.take(), std::mem::take(&mut s.in_run))
+        (
+            s.outstanding.take(),
+            std::mem::take(&mut s.in_run),
+            std::mem::take(&mut s.deferred),
+        )
     });
+    // Each fault is returned (one, which ends the run) or deferred to the
+    // run's end; a run that met any ends with a fault.
     if let Some(at) = outstanding
-        && (!faulted || raised > 1)
+        && (!faulted || raised > deferred + 1)
     {
         panic!(
             "a page fault was swallowed ({raised} raised, the run ended {}). \
@@ -158,6 +167,11 @@ pub(crate) fn check_run(faulted: bool) {
             if faulted { "with a later one" } else { "without it" }
         );
     }
+}
+
+/// A fault was deferred to the end of the run ([`crate::pages::deferred`]).
+pub(crate) fn acknowledge() {
+    STATE.with(|s| s.borrow_mut().deferred += 1);
 }
 
 /// `JAZZ_PAGE_FAULTS`, when set: the seed for this thread's evictions.
