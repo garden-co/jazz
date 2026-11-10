@@ -31,6 +31,9 @@ use crate::tools::{CmpOp, PolicyExpr};
 
 #[path = "candidates.rs"]
 mod candidates;
+#[path = "catalogue_cache.rs"]
+mod catalogue_cache;
+pub use catalogue_cache::{AuthenticatedCatalogueState, validate_catalogue_capture_replacement};
 #[path = "fanout.rs"]
 mod fanout;
 #[path = "read_policy_literals.rs"]
@@ -495,6 +498,8 @@ pub struct SchemaPublication {
 }
 
 struct Inner {
+    catalogue_cache_required: bool,
+    catalogue_capture_pending: std::cell::Cell<bool>,
     conn: Connection,
     retired: bool,
     scheduler: Option<Rc<dyn TickScheduler>>,
@@ -1416,6 +1421,13 @@ impl Db {
         conn.execute_batch(candidates::TEMP_DDL).map_err(storage)?;
         names.admit(&conn, &schema)?;
         conn.execute_batch(sync::SYNC_DDL).map_err(storage)?;
+        let catalogue_cache_required = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM _jazz_meta WHERE k=?1)",
+                [catalogue_cache::MODE_KEY],
+                |r| r.get(0),
+            )
+            .map_err(storage)?;
         let withheld: i64 = conn
             .query_row(
                 "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = '_jazz_withheld'",
@@ -1458,6 +1470,8 @@ impl Db {
             governance: Governance::CurrentOwner,
             inner: Rc::new(Store::new(Inner {
                 conn,
+                catalogue_cache_required,
+                catalogue_capture_pending: std::cell::Cell::new(true),
                 retired: false,
                 scheduler: None,
                 read_deadlines: Vec::new(),
@@ -1646,7 +1660,9 @@ impl Db {
     /// its own and its subscribers', report `DurabilityTier::Global`. A
     /// store without the role (a relay with no upstream) settles at `Local`.
     pub fn set_authority(&self) {
-        self.inner.borrow_mut().authority = true;
+        let mut inner = self.inner.borrow_mut();
+        inner.authority = true;
+        inner.catalogue_capture_pending.set(true);
     }
 
     /// Refuse every session but SYSTEM's that is not pinned to a published
@@ -2304,6 +2320,7 @@ impl Db {
         binding: BTreeMap<String, Value>,
     ) -> Result<PreparedQuery, Error> {
         let inner = self.inner();
+        inner.require_cached_catalogue_schema(&inner.schema)?;
         let normalized = normalize_relation(query, &inner.schema)?;
         let query = normalized.as_ref().unwrap_or(query);
         // Validate: tables, columns, parameters, supported forms. Read
@@ -3135,6 +3152,7 @@ impl Db {
         }
         let mut inner = self.inner();
         inner.reset_everything();
+        inner.catalogue_capture_pending.set(true);
         // Clients store rows by these names: they learn the new version
         // before its rows.
         for session in &mut inner.sessions {
@@ -3694,6 +3712,11 @@ impl Inner {
     }
 
     fn require_mutation_admission(&self) -> Result<(), Error> {
+        self.require_cached_catalogue_schema(&self.schema)?;
+        self.require_mutation_lifetime()
+    }
+
+    fn require_mutation_lifetime(&self) -> Result<(), Error> {
         if self.mutation_admission_closed {
             return Err(Error::new(
                 ErrorCode::Storage,
@@ -4027,6 +4050,7 @@ impl Inner {
     ) -> Result<Compiled, Error> {
         let (policy, claims) = self.read_sessions(prepared, identity);
         let schema = self.read_schema(prepared, read);
+        self.require_cached_catalogue_schema(&schema)?;
         let compiled = self
             .read_ctx(prepared, &schema, policy.as_ref(), &claims, read)
             .compile_query(&prepared.query, read.include_deleted)?;
@@ -4112,6 +4136,7 @@ impl Inner {
     ) -> Result<BTreeSet<String>, Error> {
         let (policy, claims) = self.read_sessions(prepared, identity);
         let schema = self.read_schema(prepared, read);
+        self.require_cached_catalogue_schema(&schema)?;
         let mut pending: Vec<_> = prepared
             .query
             .array_subqueries
@@ -4439,6 +4464,7 @@ impl Inner {
         for array in arrays {
             let (policy, claims) = self.read_sessions(prepared, identity);
             let schema = self.read_schema(prepared, read);
+            self.require_cached_catalogue_schema(&schema)?;
             let ctx = || self.read_ctx(prepared, &schema, policy.as_ref(), &claims, read);
             let parent = if array.outer_column == "id" {
                 Value::Uuid(row.id.0)
@@ -7559,6 +7585,7 @@ impl Db {
             if !inner.admitted.iter().any(|(id, _)| *id == version) {
                 inner.admitted.push((version, schema.clone()));
             }
+            inner.catalogue_capture_pending.set(true);
             inner
                 .views
                 .entry(SchemaViewId::for_schema(&schema))
@@ -8312,7 +8339,9 @@ impl Db {
 
     fn begin(&self, id: OpenTransactionId, kind: BatchKind) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
-        inner.require_mutation_admission()?;
+        // Opening owns a live handle, not permission to read or mutate an
+        // unpublished requested schema. Each actual operation checks admission.
+        inner.require_mutation_lifetime()?;
         if inner.batches.contains_key(&id) {
             return Err(rejected(format!("transaction {id:?} is already open")));
         }

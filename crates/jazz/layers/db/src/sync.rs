@@ -8362,6 +8362,7 @@ impl Db {
                                 let client = inner.client.as_mut().expect("client");
                                 client.catalogued = true;
                                 client.uncatalogued = None;
+                                inner.catalogue_capture_pending.set(true);
                             }
                             // This store cannot store rows as its upstream
                             // does: it stops syncing with it, nothing that

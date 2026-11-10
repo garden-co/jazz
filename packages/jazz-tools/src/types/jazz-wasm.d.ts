@@ -111,6 +111,38 @@ declare module "jazz-wasm" {
 
   export class WasmDb {
     static openMemory(schema: Uint8Array, config: Uint8Array): WasmDb;
+    /** Trusted same-app metadata restore, before replica admission. */
+    static openMemoryWithCatalogue(
+      schema: Uint8Array,
+      config: Uint8Array,
+      capture: Uint8Array,
+    ): WasmDb;
+    static openMemoryWithSelfSignedProofAndCatalogue(
+      schema: Uint8Array,
+      config: Uint8Array,
+      token: string,
+      appId: string,
+      claimedAuthor: string,
+      capture: Uint8Array,
+    ): WasmDb;
+    static openBrowserWithCatalogue(
+      pageStore: unknown,
+      schema: Uint8Array,
+      config: Uint8Array,
+      database: string,
+      capture: Uint8Array,
+    ): Promise<WasmDb>;
+    static openBrowserWithSelfSignedProofAndCatalogue(
+      pageStore: unknown,
+      schema: Uint8Array,
+      config: Uint8Array,
+      token: string,
+      appId: string,
+      claimedAuthor: string,
+      database: string,
+      capture: Uint8Array,
+    ): Promise<WasmDb>;
+
     /** Explicit trusted-backend ABI; raw open config cannot select SYSTEM. */
     static openMemoryAsBackend(schema: Uint8Array, config: Uint8Array): WasmDb;
     static openMemoryWithSelfSignedProof(
@@ -169,6 +201,10 @@ declare module "jazz-wasm" {
       author?: Uint8Array,
       claims?: unknown,
     ): Uint8Array | PendingNativeRead;
+    /** Trusted host metadata only; never row or authority coverage. */
+    hasAuthenticatedCatalogue(): boolean;
+    takeAuthenticatedCatalogueState(): { capture?: Uint8Array; ready: boolean };
+    validateCatalogueCaptureReplacement(previous: Uint8Array, next: Uint8Array): void;
     tableIdentity(table: string): Uint8Array;
     columnIdentity(table: string, column: string): Uint8Array;
 

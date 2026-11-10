@@ -1131,6 +1131,9 @@ pub struct NapiDb {
     owns_runtime: bool,
 }
 
+// napi-rs factories require the exported class to be registered before their impl.
+mod catalogue_cache;
+
 impl Drop for NapiDb {
     fn drop(&mut self) {
         // Release the tick callback so it no longer keeps Node's event loop
@@ -1165,6 +1168,16 @@ impl NapiDb {
         data_path: Option<&str>,
         how: OpenAs<'_>,
     ) -> napi::Result<Self> {
+        Self::open_as_with_catalogue(schema, config, data_path, how, None)
+    }
+
+    fn open_as_with_catalogue(
+        schema: &[u8],
+        config: &[u8],
+        data_path: Option<&str>,
+        how: OpenAs<'_>,
+        cached: Option<&[u8]>,
+    ) -> napi::Result<Self> {
         let (schema, mut config) = binding_host::decode_open(schema, config).map_err(host_error)?;
         let (identity, trusted) =
             binding_host::open_identity(&mut config, how).map_err(host_error)?;
@@ -1182,6 +1195,11 @@ impl NapiDb {
             )),
         }
         .map_err(|error| napi_core_error(&error))?;
+        if let Some(bytes) = cached {
+            // SAFETY: only the explicit trusted-host cached constructors call
+            // this, before Binding starts replica/session state.
+            unsafe { db.install_cached_catalogue(bytes) }.map_err(|e| napi_core_error(&e))?;
+        }
         Ok(Self::runtime_owner(Binding::new(db, identity, trusted)))
     }
 
