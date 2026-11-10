@@ -19,11 +19,15 @@ import type { JazzSessionActions } from "../session/state.js";
 import type { AccountDbConfig } from "../accounts/context.js";
 import type { JazzClient } from "./create-jazz-client.js";
 import { JazzClientProvider, LegacyJazzProvider } from "./provider.js";
-import { refuseAutoAttachDevTools } from "../runtime/removed-provider-props.js";
+import {
+  refuseAutoAttachDevTools,
+  type NoAutoAttachDevTools,
+} from "../runtime/removed-provider-props.js";
 
-export type JazzProviderProps = Partial<JazzClientConfig> & {
-  config?: AccountDbConfig;
-};
+export type JazzProviderProps = Partial<JazzClientConfig> &
+  NoAutoAttachDevTools & {
+    config?: AccountDbConfig;
+  };
 export type UseJazzAuth = {
   readonly snapshot: Readonly<ShallowRef<JazzAppSnapshot<JazzClient>>>;
   readonly sessionActions: JazzSessionActions;

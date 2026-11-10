@@ -15,7 +15,10 @@ import type { JazzClient } from "../web/create-jazz-client.js";
 import type { JazzSession, JazzSessionActions, JazzSessionSnapshot } from "../session/state.js";
 import { attachJazzSessionConsumer } from "../session/consumer.js";
 import { JazzClientProvider } from "./provider.js";
-import { refuseAutoAttachDevTools } from "../runtime/removed-provider-props.js";
+import {
+  refuseAutoAttachDevTools,
+  type NoAutoAttachDevTools,
+} from "../runtime/removed-provider-props.js";
 
 const SessionKey: InjectionKey<JazzSession<JazzClient>> = Symbol("JazzSession");
 export type UseJazzSession = JazzSessionActions & {
@@ -33,7 +36,7 @@ export function useJazzSession(session = inject(SessionKey)): UseJazzSession {
   );
   return { ...session, snapshot: shallowReadonly(snapshot) };
 }
-export interface JazzSessionProviderProps {
+export interface JazzSessionProviderProps extends NoAutoAttachDevTools {
   session: JazzSession<JazzClient>;
 }
 /** Provides a caller-owned session to both active children and the fallback slot. */

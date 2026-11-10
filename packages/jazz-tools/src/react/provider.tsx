@@ -11,7 +11,10 @@ import {
 import { ConfiguredJazzAppProvider, type JazzAppViewProps } from "../react-core/app.js";
 import { createJazzClient, type JazzClientConfig } from "../session/create-jazz-session.js";
 import type { JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
-import { refuseAutoAttachDevTools } from "../runtime/removed-provider-props.js";
+import {
+  refuseAutoAttachDevTools,
+  type NoAutoAttachDevTools,
+} from "../runtime/removed-provider-props.js";
 
 export { JazzClientProvider, type JazzClientProviderProps } from "../react-core/provider.js";
 
@@ -34,9 +37,11 @@ type JazzProviderCommonProps = {
 };
 
 export type JazzAppProviderProps = JazzClientConfig & JazzAppViewProps<CreatedJazzClient>;
-export type JazzProviderProps =
+export type JazzProviderProps = (
   | (JazzProviderCommonProps & { config: DbConfig })
-  | JazzAppProviderProps;
+  | JazzAppProviderProps
+) &
+  NoAutoAttachDevTools;
 
 type ConfiguredJazzProviderProps = JazzProviderCommonProps & {
   config: DbConfig;

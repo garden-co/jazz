@@ -16,7 +16,10 @@ import type { JazzSessionActions } from "../session/state.js";
 import type { JazzClient } from "../web/create-jazz-client.js";
 import { ActiveClient } from "./session.js";
 import { LegacyJazzProvider, type LegacyJazzProviderProps } from "./provider.js";
-import { refuseAutoAttachDevTools } from "../runtime/removed-provider-props.js";
+import {
+  refuseAutoAttachDevTools,
+  type NoAutoAttachDevTools,
+} from "../runtime/removed-provider-props.js";
 
 export interface UseJazzAuth {
   snapshot: Accessor<JazzAppSnapshot<JazzClient>>;
@@ -42,7 +45,8 @@ export type JazzAppProviderProps = JazzAppConfig & {
   loading?: JSX.Element;
   error?: (error: Error, retry: () => Promise<void>) => JSX.Element;
 };
-export type JazzProviderProps = JazzAppProviderProps | LegacyJazzProviderProps;
+export type JazzProviderProps = (JazzAppProviderProps | LegacyJazzProviderProps) &
+  NoAutoAttachDevTools;
 /** Own the common auth/session lifecycle; JSX getters preserve Solid reactivity. */
 export function JazzProvider(props: JazzProviderProps) {
   refuseAutoAttachDevTools("JazzProvider", props);

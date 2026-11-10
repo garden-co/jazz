@@ -6,7 +6,10 @@ import {
 } from "../react-core/session.js";
 import { createJazzClient, type JazzClientConfig } from "../session/create-jazz-session.js";
 import type { JazzClient } from "./create-jazz-client.js";
-import { refuseAutoAttachDevTools } from "../runtime/removed-provider-props.js";
+import {
+  refuseAutoAttachDevTools,
+  type NoAutoAttachDevTools,
+} from "../runtime/removed-provider-props.js";
 export { createJazzClient, type JazzClientConfig } from "../session/create-jazz-session.js";
 import {
   useJazzSession as useCoreJazzSession,
@@ -18,9 +21,11 @@ export function useJazzSession(): UseJazzSessionResult {
 }
 export type { JazzSession, JazzSessionSnapshot, JazzSessionActions } from "../session/state.js";
 
-export type JazzSessionProviderProps =
+export type JazzSessionProviderProps = (
   | ExternalProps<JazzClient>
-  | ConfiguredJazzSessionProviderProps<JazzClientConfig>;
+  | ConfiguredJazzSessionProviderProps<JazzClientConfig>
+) &
+  NoAutoAttachDevTools;
 
 export function JazzSessionProvider(props: JazzSessionProviderProps) {
   refuseAutoAttachDevTools("JazzSessionProvider", props);

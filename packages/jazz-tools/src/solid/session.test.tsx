@@ -100,4 +100,29 @@ describe("Solid session provider", () => {
     expect(session.getSnapshot().status).toBe("signed-out");
     await session.close();
   });
+  it("refuses the removed autoAttachDevTools prop and accepts it left undefined", async () => {
+    const { session } = await fixture();
+    const node = document.createElement("div");
+    const removed = { autoAttachDevTools: false } as Record<string, unknown>;
+    expect(() =>
+      render(
+        () => (
+          <JazzSessionProvider session={session} {...removed}>
+            <p>ready</p>
+          </JazzSessionProvider>
+        ),
+        node,
+      ),
+    ).toThrow(/JazzSessionProvider takes no autoAttachDevTools.*mountInspector/);
+    const unset = { autoAttachDevTools: undefined } as Record<string, unknown>;
+    const dispose = render(
+      () => (
+        <JazzSessionProvider session={session} {...unset}>
+          <p>ready</p>
+        </JazzSessionProvider>
+      ),
+      node,
+    );
+    dispose();
+  });
 });

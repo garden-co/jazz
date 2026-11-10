@@ -14,7 +14,10 @@ import { attachJazzSessionConsumer } from "../session/consumer.js";
 import { attachSubscriptionStore, getSubscriptionStore } from "../subscription-store-internal.js";
 import { createSolidJazzClientStore } from "./solid-jazz-client-store.js";
 import { JazzClientProvider } from "./provider.js";
-import { refuseAutoAttachDevTools } from "../runtime/removed-provider-props.js";
+import {
+  refuseAutoAttachDevTools,
+  type NoAutoAttachDevTools,
+} from "../runtime/removed-provider-props.js";
 import type { SolidJazzClient } from "./create-solid-jazz-client.js";
 
 const SessionContext = createContext<JazzSession<JazzClient>>();
@@ -29,7 +32,7 @@ export function useJazzSession(session = useContext(SessionContext)): UseJazzSes
   return { ...session, snapshot };
 }
 export const createJazzSessionState = useJazzSession;
-export interface JazzSessionProviderProps {
+export interface JazzSessionProviderProps extends NoAutoAttachDevTools {
   session: JazzSession<JazzClient>;
   children: JSX.Element;
   fallback?: JSX.Element;

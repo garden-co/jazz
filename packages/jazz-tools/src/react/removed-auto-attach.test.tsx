@@ -46,7 +46,7 @@ describe("React providers without dev auto-attach", () => {
     }
   });
 
-  it("refuse the removed autoAttachDevTools prop and say what to use instead", () => {
+  it("refuse the removed autoAttachDevTools prop, say what to use instead, and accept it left undefined", () => {
     const props = { autoAttachDevTools: false } as Record<string, unknown>;
     const quiet = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
@@ -64,6 +64,12 @@ describe("React providers without dev auto-attach", () => {
           </JazzSessionProvider>,
         ),
       ).toThrow(/JazzSessionProvider takes no autoAttachDevTools/);
+      const unset = { autoAttachDevTools: undefined } as Record<string, unknown>;
+      render(
+        <JazzProvider config={{} as never} {...unset}>
+          <div />
+        </JazzProvider>,
+      );
     } finally {
       quiet.mockRestore();
     }

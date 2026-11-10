@@ -8,13 +8,16 @@ import {
 } from "./create-solid-jazz-client.js";
 import type { Db } from "../runtime/db.js";
 import type { AccountDbConfig as DbConfig } from "../accounts/context.js";
-import { refuseAutoAttachDevTools } from "../runtime/removed-provider-props.js";
+import {
+  refuseAutoAttachDevTools,
+  type NoAutoAttachDevTools,
+} from "../runtime/removed-provider-props.js";
 
 type JazzClientContextValue = SolidJazzClient;
 
 export const JazzClientContext = createContext<JazzClientContextValue | undefined>(undefined);
 
-export type JazzClientProviderProps = {
+export type JazzClientProviderProps = NoAutoAttachDevTools & {
   client: PendingSolidJazzClient;
   fallback?: JSX.Element;
   children: JSX.Element;

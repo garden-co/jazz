@@ -4,9 +4,9 @@
   import { createJazzApp, type JazzAppConfig } from "../session/create-jazz-app.js";
   import JazzSvelteClientProvider from "./JazzSvelteClientProvider.svelte";
   import { setJazzAuth } from "./auth-state.js";
-  import { refuseAutoAttachDevTools } from "../runtime/removed-provider-props.js";
+  import { refuseAutoAttachDevTools, type NoAutoAttachDevTools } from "../runtime/removed-provider-props.js";
 
-  type Props = JazzAppConfig & {
+  type Props = JazzAppConfig & NoAutoAttachDevTools & {
     children: Snippet;
     signedOut?: Snippet;
     loading?: Snippet;

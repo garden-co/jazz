@@ -10,10 +10,10 @@ serialises shutdown before starting a replacement.
 	import JazzSvelteClientProvider from './JazzSvelteClientProvider.svelte';
 	import { openJazzClient, type JazzClient } from './create-jazz-client.js';
 	import { assertNoClassicProviderProps } from '../classic-api.js';
-	import { refuseAutoAttachDevTools } from '../runtime/removed-provider-props.js';
+	import { refuseAutoAttachDevTools, type NoAutoAttachDevTools } from '../runtime/removed-provider-props.js';
 	import { toError } from '../runtime/util.js';
 
-	interface Props {
+	interface Props extends NoAutoAttachDevTools {
 		config: DbConfig;
 		children: import('svelte').Snippet<[{ db: Db }]>;
 		fallback?: import('svelte').Snippet;
