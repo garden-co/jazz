@@ -34,7 +34,8 @@ description: "Learn the mental model behind Jazz, how backends and clients talk 
 
 ## How frontends talk to Jazz
 
-- The thin client sends queries and writes to your backend through the same API your server code uses. Your backend authenticates the user and applies your permission policies
+Frontends use the same query and write API as your server code. Your backend authenticates the user and applies your permission policies.
+
 - **Thin client:** sends queries and writes to your backend without a local database, keeping the bundle small
 - **Opt-in local-first client:** creates an embedded database on the device, so reads and writes work offline and sync when connected
 
