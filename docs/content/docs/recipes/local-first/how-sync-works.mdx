@@ -1,6 +1,6 @@
 ---
 title: How Sync Works
-description: "How query subscriptions, local replicas, tiers, merges and text merges work under the hood."
+description: "Look under the hood at subscriptions, local replicas, tiers and merges."
 ---
 
 <Callout type="info">
@@ -130,8 +130,10 @@ merge the edits inside the string.
 </Accordion>
 <Accordion id="text-merges" title="How are concurrent edits to a text column merged?">
 A string column declared with `.merge("text")`, `.merge("markdown")` or `.merge("html")` still
-stores a plain string. Only Core merges. Your app writes the value it has, as usual. Until Core's
-result arrives, a client shows its own edit, then switches to the merged value.
+stores a plain string. Your app writes the whole value, as an edit of the value its editor last
+showed (`editedFrom`): if a newer merged value reached the device first, the device merges the edit
+over it before sending, so the keystroke does not undo it. Concurrent writes are merged only by
+Core. Until Core's result arrives, a client shows its own edit, then switches to the merged value.
 
 When Core receives an edit to such a column, it checks whether someone else changed that column
 since the version the writer saw. If not (the usual case), the edit is applied as is, with no
@@ -143,6 +145,10 @@ same way: each edit is compared with what that device had seen, including its ow
 When someone **moves** a paragraph, list item or sentence (cuts it and pastes it elsewhere) while
 someone else edits inside it, the edit moves with it. In HTML columns the merge never leaves an
 unmatched tag behind.
+
+When both people **type into the same word**, both keep their letters: the word is merged
+character by character (in scripts that join letters with vowel signs, such as Devanagari, the
+word merges whole, as below).
 
 Where both people **replaced the same words**, Core cannot keep both. The edit it receives later wins
 that part of the text. Note that this is the opposite of an ordinary field, where the first edit

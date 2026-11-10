@@ -36,9 +36,9 @@ use http::{
 };
 use utils::parse_app_id_param;
 pub(crate) use websocket::WebSocketAdmissionState;
-#[cfg(feature = "embedded-server")]
-pub(crate) use websocket::handle_ws_connection;
 use websocket::ws_handler;
+#[cfg(feature = "embedded-server")]
+pub(crate) use websocket::{Handshake, handle_ws_connection};
 
 async fn app_id_gate(
     State(state): State<Arc<ServerState>>,

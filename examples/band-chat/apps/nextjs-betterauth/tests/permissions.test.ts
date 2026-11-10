@@ -254,9 +254,10 @@ describe("BandChat room admission and authorship", () => {
       .insert(app.readMarkers, { roomId: room.id, reader: guestAuthor, lastReadAt: new Date() })
       .wait({ tier: "global" });
     expect(await owner.all(app.readMarkers)).toEqual([]);
-    // Someone else's marker is not even visible, so the update fails up front.
-    expect(() => owner.update(app.readMarkers, marker.id, { lastReadAt: new Date() })).toThrow(
-      /read policy denied/,
+    // Someone else's marker is not even visible, so the server refuses the
+    // update: an update needs read permission on the existing row.
+    await owner.expectDenied((db) =>
+      db.update(app.readMarkers, marker.id, { lastReadAt: new Date() }),
     );
     await stranger.expectDenied((db) =>
       db.insert(app.readMarkers, {

@@ -22,13 +22,13 @@ const permissions = s.definePermissions(app, ({ policy, session, allOf }) => {
     table.allowDelete.never();
   }
   policy.users.allowRead.always();
-  policy.users.allowInsert.where({ accountId: session.user.account });
+  policy.users.allowInsert.where({ accountId: session.user });
   policy.topics.allowInsert.always();
   policy.topics.allowRead.where(session.where({ "claims.role": "editor" }));
   policy.notes.allowRead.always();
   policy.notes.allowInsert.where((row) =>
     allOf([
-      policy.users.exists.where({ id: row.userId, accountId: session.user.account }),
+      policy.users.exists.where({ id: row.userId, accountId: session.user }),
       policy.topics.exists.where({ id: row.topicId }),
     ]),
   );
@@ -46,6 +46,7 @@ describe("deployed permissions with claims in referenced read policies", () => {
     // Each user is a request scope the app's `authenticate` names, carrying
     // the claims the policies compare.
     const connect = async (subject: string, claims: Record<string, unknown>) => {
+      await server.jazz.createAccountFor(subject);
       const db = await server.jazz.forReqUser(
         new Request("http://app.example/", {
           headers: { authorization: `Bearer ${server.bearer(subject, claims)}` },

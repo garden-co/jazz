@@ -28,7 +28,7 @@ fn open(node: u8, author: AuthorSubject) -> Db {
                     .column("title", ColumnType::Text)
                     .policies(read_and_allow_all_writes(session_eq(
                         "$createdBy.account",
-                        &["user", "account"],
+                        &["user"],
                     ))),
             )
             .build(),

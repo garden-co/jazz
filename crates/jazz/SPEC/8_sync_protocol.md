@@ -70,6 +70,7 @@ source of truth and names each invariant's tests):
 - `INV-SYNC-52`: A replica MUST upload each commit's ops by stored names, as the schema view that wrote them stores them, keeping it pending while offline; a server MUST refuse a commit naming a stored table or column of a version it has not deployed, at once, with reason `schema_version_not_deployed`.
 - `INV-SYNC-53`: The authority MUST NOT name a writer's own row as written (instead of shipping it) unless the commit applied unmerged over the very version the writer built on and that version is still current (§8.3); every other row ships, and a writer whose image differs from the digest asks for the row whole.
 - `INV-SYNC-54`: An authority MUST mint its namespace when it is opened as the authority and keep it in its store. A replica that keeps another namespace than its upstream's MUST refuse that link with `AuthorityChanged`, upload nothing to it, fail its remote reads and its `Global` waits on writes still pending with that error, and keep its local rows and pending writes; only a new link tries again (§8.10).
+- `INV-SYNC-55`: A store whose file writes complete after its commits return MUST NOT tell a session a commit is in the store (`Stored`, or its own acceptance) until a persist covering that commit succeeded.
 - `INV-TX-2`, `INV-TX-11`, `INV-TX-23`: commit, seq and relay rules (ch. 3).
 - `INV-WIRE-1`, `INV-WIRE-2`: exact postcard frames and Hello version negotiation (§8.1.1).
 
@@ -153,7 +154,7 @@ Messages, with their postcard variant tags:
 | 14  | `SchemaAdmission`    | server → client | That version's admission changed (§8.9)                           |
 | 15  | `Stored`             | relay → session | A relay holds the session's commit and uploads it (§8.3)          |
 | 16  | `Join`               | client → server | Open: the session's version and the catalogue it keeps (§8.9)     |
-| 17  | `Catalogue`          | server → client | Admitted versions, stored names and lens cells (§8.10)            |
+| 17  | `Catalogue`          | server → client | Admitted versions, stored names, lens cells, defaults (§8.10)     |
 | 18  | `Welcome`            | server → client | The answer to `Join`: admission and catalogue (§8.9, §8.10)       |
 | 19  | `ConnectionSettled`  | server → client | The position the whole connection is settled through (§8.4)       |
 | 20  | `Holds`              | server → client | Rows a live read holds: all with its opening, then changes (§8.4) |
@@ -183,6 +184,19 @@ The sync frames are pinned by `crates/jazz/fixtures/sqlite_sync_wire_v1.json`,
 which every shipped artifact (native, NAPI, WASM) validates
 (`jazz::sync_wire_corpus`). The corpus may be re-pinned until alpha.60 ships;
 after that, a layout change needs a compatibility write-up.
+
+A server pings every link every 20 s and drops one that sent nothing for
+60 s. The WebSocket API shows neither pings nor partial messages, so a
+client that advertises `FEATURE_HEARTBEAT` also gets a `WireFrame::Heartbeat`
+(tag 7, no body, no answer) with each ping. Such a client gives a link up,
+and reconnects, once nothing at all, heartbeat included, arrived for 120 s:
+a half-open TCP link or a stalled proxy then ends instead of showing
+`connected` while nothing moves. A heartbeat queues behind the message being
+sent, so 120 s also bounds the slowest link a whole 2 MiB message survives
+(about 18 KB/s). The TypeScript carrier (browsers, Node, workers) asks for
+it on every link and drops the frame before the runtime sees it. The native
+Rust transport (NAPI `remote()`, React Native) does not ask yet and has no
+silence timeout of its own.
 
 In-process links (a worker and its tab, tests) carry `SyncMessage` values
 directly (`sync::duplex`); a byte link frames them with postcard
@@ -744,7 +758,8 @@ keep and retry pending writes but cannot accept them or make them `Global`.
 
 A replica's `Join` lists in `known` the schema versions whose stored names it
 keeps, each with `names_digest` of those names. The server answers in its
-`Welcome` with the catalogue `{ namespace, versions, cells, confirmed }`,
+`Welcome` with the catalogue `{ namespace, versions, cells, defaults,
+confirmed }` (in that order: the wire is positional),
 carrying every admitted version the replica lacks or names otherwise, in
 admission order, ahead of any row; and again, as a `Catalogue` of the same
 fields, whenever its store admits a version or learns more of its authority's
@@ -754,6 +769,14 @@ catalogue.
   table, its name and stored name and, per column, its name and stored name.
 - A `CatalogueCell` is a stored column a lens fills: a copy of stored column
   `source`, or a dropped column's backwards default, from version `since` on.
+- A `CatalogueDefault` is the default a stored column of the versions sent
+  was added with (`ADD COLUMN ... DEFAULT`, read from the sender's DDL), which
+  rows written before it read. A lens's default for a column it adds is in no
+  schema, so a replica that mirrors the version adds a column it lacks with
+  this one and reads old rows as the authority does. It is a value, an enum
+  default by its variant's name (tags are each store's own, §10.8). A default
+  that is not of the column's type, or not one of its variants, is left out:
+  the column is added as it would be without it, and the catalogue applies.
 - `namespace` is the authority's, once the sender knows it. Table and column
   identities are UUIDs derived from it and the stored names, so the authority
   mints them and replicas only mirror them. An authority mints its namespace
@@ -938,6 +961,50 @@ channels. The server answers a thin connection with no sync session: a thin
 connection that sends any other frame after its `Hello` ends with
 `MalformedFrame`.
 
+A request or response whose frame is over a wire frame (2 MiB, less the
+carrier batch's prefixes; a row holding a large value, or a write of one)
+travels as `WireFrame::ThinPart`s (tag 6): its encoded frame cut into
+consecutive pieces, each naming the whole frame's length (`total`), sent
+back to back with no other thin frame between. The receiver joins them and
+decodes the frame once it has `total` bytes. Every part but the last
+carries a full part's bytes (a wire frame, less room for its own header);
+any other frame inside a split one, a part naming another length, an empty
+or short part, or one past its frame's end ends the connection with
+`MalformedFrame`. A frame over
+`MAX_THIN_MESSAGE_BYTES` (32 MiB) is not sent: the client refuses such a
+write or subscription itself, and the server answers such a result with a
+`TooLarge` error for that request alone (ending a live query), keeping the
+session; a result whose rows alone are past it is refused before it is
+encoded.
+
+The server admits each thin request before it keeps its bytes: a whole
+request on arrival, a split one at its first part, by `total`. Every
+request needs room in its session's budget (the most one request takes,
+32 MiB); a split one also needs room in the server's
+(`THIN_INGRESS_SERVER_BUDGET`, 256 MiB across every thin session), so
+requests that fit one frame never queue behind other sessions' large
+writes. The room is held until the request has run. Without room the
+connection reads nothing more of its socket, so the client's sends back up
+and a burst of large writes slows down instead of ending the session; it
+goes on writing answers, pinging and closing on shutdown meanwhile, and the
+wait does not count as the peer idling. Because the connection reads nothing
+while one request waits, that session's later requests wait behind it too,
+even small ones that would have room. A split whose next part does not
+arrive within `THIN_PART_TIMEOUT` (90 s) ends its connection with a
+retryable `Backpressure` error, releasing its room. These budgets bound
+what the server holds of incoming requests; answers waiting for a client
+that does not read are not bounded yet (#4865).
+
+A read or row write that needs large-value bytes held only in a network
+chunk store (`s3()`, Vercel Blob; after a restart, say) never fetches them
+on the store thread, which serves every session. The request is parked: the
+store's fetch lane reads the bytes beside the store thread, with its
+backoff, and the parked request runs again on the tick after they land.
+Until then it keeps its admitted room, so that session's later requests wait
+behind it, in order, while other sessions are served as usual. A fetch that
+fails answers the request with its `Storage` error, and later reads of
+those bytes are refused with it at once until the fetch backoff ends.
+
 - A thin session is served as its admitted identity and claims, exactly as a
   sync session with that admission is (§8.6): reads see what its policies let
   it see, and writes are admitted and authorized as `WriteIdentity::Session`.
@@ -964,6 +1031,33 @@ connection that sends any other frame after its `Hello` ends with
   row and the server seq of the version they left; the write is globally
   durable when the answer arrives. A client-chosen row id is honored on
   insert.
+- A standalone `Insert`, `Update`, `Upsert`, `Delete` or `Restore` may name a
+  `writeKey` option, `{ node: <32 hex digits>, seq }`: the client's own id
+  for it, a node the client picks and that node's counter, in the order the
+  client makes its writes. The server makes the write as a commit whose
+  writer is derived from the session's author and the client's node
+  (`origin_node`, an RFC 9562 version-8 node with a fixed tag), at the client's counter
+  (`Db::write_as_origin`): every server derives the same writer, and no
+  other author can name it. No session commits as such a node. The
+  authority records the commit's fate under it; a replica uploads it under
+  it, which the authority dedups like any resent commit (§8.2), and never
+  infers from pruned entries (a client's commits reach it through any
+  server, so out of order). A write that fails, or makes no commit, records
+  nothing, and the next commit does not inherit its id. A write whose key
+  the store already knows for the same author is not made again: it answers
+  `Written` with seq 0, or the first one's refusal as uploaded through a
+  replica. In .60 the authority keeps these dedupe entries and never prunes them;
+  a bounded resend window is planned for .61 (#4961). The authority does not record its own refusal: a resend of a
+  write it refused runs again, against current state. On a replica, seq 0
+  can answer a write still pending upstream. An insert with a key names its
+  `rowId`; a staged write names no key. So a client resends a keyed write
+  its connection left unanswered, in order, on its next connection, through
+  whichever server of the authority it reaches, under the same credential.
+  The TypeScript thin client does, with one node per runtime; a write left
+  unanswered when the credential changes ends with its outcome unknown, as
+  the new one may name another user. `UpdateLargeValues` and streams take
+  no key: one their connection left unanswered ends with its outcome
+  unknown.
 - `Begin` opens a mergeable or serializable transaction under a
   client-chosen open-transaction id, owned by that session. A write naming it
   is staged and answered `Staged`; a refusal while staging is kept and

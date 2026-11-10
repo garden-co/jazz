@@ -92,7 +92,7 @@ function ShopperProvider({ children }: { children: ReactNode }) {
   const session = useSession();
   const { sessionActions: actions, account: handle } = useJazzAuth();
   const { data: auth, isPending, error: authError } = authClient.useSession();
-  const account = session?.user.account ?? handle?.id ?? "";
+  const account = session?.user ?? handle?.id ?? "";
   // Signed in: an account the backend names, not this browser's guest.
   const isSignedIn = !!handle && handle.identity.issuer !== "urn:jazz:local-first";
 

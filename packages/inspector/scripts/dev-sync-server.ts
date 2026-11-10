@@ -10,6 +10,8 @@ import { app, permissions } from "../tests/browser/schema.ts";
 import { createJazz, remote, type Jazz } from "jazz-tools/backend";
 
 const SEED_BATCH_SIZE = 50;
+/** "First seeded todo" and "Second seeded todo", which tests look for by name. */
+const NAMED_SEED_COUNT = 2;
 
 export default async function runServer({
   port = TEST_PORT,
@@ -44,7 +46,15 @@ export default async function runServer({
     const sessionedClient = jazz.db;
 
     const seedTitles = buildSeedTodoTitles(SEEDED_TODO_COUNT);
-    for (let offset = 0; offset < seedTitles.length; offset += SEED_BATCH_SIZE) {
+    // The grid's default order is by id, and the tests expect the named rows
+    // on its first page. Concurrent inserts get ids in no particular order, so
+    // insert the named rows one at a time, before any batch.
+    for (const [seedIndex, title] of seedTitles.slice(0, NAMED_SEED_COUNT).entries()) {
+      await sessionedClient
+        .insert(app.todos, { title, done: seedIndex % 2 === 1 })
+        .wait({ tier: "global" });
+    }
+    for (let offset = NAMED_SEED_COUNT; offset < seedTitles.length; offset += SEED_BATCH_SIZE) {
       const batch = seedTitles.slice(offset, offset + SEED_BATCH_SIZE);
       await Promise.all(
         batch.map((title, indexWithinBatch) => {

@@ -35,6 +35,8 @@ mod column_defaults;
 mod commit_atomicity_frames;
 #[path = "../composite_indexes.rs"]
 mod composite_indexes;
+#[path = "../deferred_durability_acks.rs"]
+mod deferred_durability_acks;
 #[path = "../deleted_rows.rs"]
 mod deleted_rows;
 #[path = "../deployment_preparation.rs"]
@@ -75,6 +77,8 @@ mod large_value_sync;
 mod large_value_tx_update;
 #[path = "../large_values.rs"]
 mod large_values;
+#[path = "../latest_only_tables.rs"]
+mod latest_only_tables;
 #[path = "../link_identities.rs"]
 mod link_identities;
 #[path = "../local_first_first_load_gate.rs"]
@@ -83,6 +87,8 @@ mod local_first_first_load_gate;
 mod local_first_server_wait;
 #[path = "../maybe_conflicting.rs"]
 mod maybe_conflicting;
+#[path = "../mirrored_lens_defaults.rs"]
+mod mirrored_lens_defaults;
 #[path = "../mutation_admission.rs"]
 mod mutation_admission;
 #[path = "../order_by_unselected_column.rs"]
@@ -91,6 +97,8 @@ mod order_by_unselected_column;
 mod parameterized_subscription_routing;
 #[path = "../pending_commit_reopen.rs"]
 mod pending_commit_reopen;
+#[path = "../pending_rebase_scope.rs"]
+mod pending_rebase_scope;
 #[path = "../permission_advice.rs"]
 mod permission_advice;
 #[path = "../policy_activation.rs"]
@@ -107,6 +115,8 @@ mod recheck_policies;
 mod recheck_queries;
 #[path = "../recheck_sync.rs"]
 mod recheck_sync;
+#[path = "../reconnect_fanout.rs"]
+mod reconnect_fanout;
 #[path = "../rejected_retry_store.rs"]
 mod rejected_retry_store;
 #[path = "../relation_policies.rs"]
@@ -193,10 +203,16 @@ mod sync_untrusted_clients;
 mod sync_wire_corpus;
 #[path = "../text_merge.rs"]
 mod text_merge;
+#[path = "../text_splices.rs"]
+mod text_splices;
+#[path = "../thin_origin_writes.rs"]
+mod thin_origin_writes;
 #[path = "../transaction_commit_kind.rs"]
 mod transaction_commit_kind;
 #[path = "../transaction_handles.rs"]
 mod transaction_handles;
+#[path = "../transaction_policy_exists.rs"]
+mod transaction_policy_exists;
 #[path = "../transaction_read_tiers.rs"]
 mod transaction_read_tiers;
 #[path = "../union_queries.rs"]

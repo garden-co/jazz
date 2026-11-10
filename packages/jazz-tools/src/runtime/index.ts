@@ -25,6 +25,11 @@ export {
   isUnsupportedStorageCodecsError,
 } from "./unsupported-storage-codecs-error.js";
 export { AuthorityChangedError, isAuthorityChangedError } from "./authority-changed-error.js";
+export {
+  StoreHeldByAnotherTabError,
+  isStoreHeldByAnotherTabError,
+} from "./store-held-by-another-tab-error.js";
+export { DbReplacedError, type DbReplacedReason } from "./db-replaced-error.js";
 export { createDb } from "./default-create-db.js";
 export {
   type SnapshotRef,
@@ -35,7 +40,7 @@ export {
 } from "./snapshot-ref.js";
 export type { PublicSession, RuntimeSourcesConfig } from "./context.js";
 export type { ValueSplices } from "./subscription-manager.js";
-/** Encode the opaque logical identity exposed as `session.user` by bindings. */
+/** Encode a login (`session.identity`) as its canonical opaque `[issuer, subject]` string. */
 export { canonicalAuthorSubject as userIdentity } from "./author-id.js";
 export {
   Db,
@@ -57,6 +62,7 @@ export {
   type StreamingInsertOptions,
   type RestoreOptions,
   type UpdateOptions,
+  type UpdateEditOptions,
   type DeleteOptions,
   type TableProxy,
 } from "./db.js";

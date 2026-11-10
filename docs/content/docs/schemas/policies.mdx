@@ -1,10 +1,12 @@
 ---
-title: Permissions
-description: Jazz's approach to row-level security using relationship-based access controls, and how to build policies of varying complexity.
+title: Declarative Permissions
+description: "Learn how to write declarative permissions, from simple ownership to relationship-based access, and how to test them."
 reviewedAt: "b29b48d1a"
 ---
 
-Permissions control who can read, insert, update, and delete rows. Jazz enforces them server-side using row-level policies defined in `permissions.ts`. Clients that fail a policy check have their writes rejected and their reads filtered.
+Declarative permissions control who can read, insert, update, and delete rows. You declare them as policies in `permissions.ts`, and Jazz enforces them server-side. Clients that fail a policy check have their writes rejected and their reads filtered.
+
+If you know Postgres row-level security (RLS), declarative permissions are similar: rules over rows and the signed-in user. In Jazz they are typed TypeScript next to your schema, every operation is denied until a policy grants it, and you test them like the rest of your app.
 
 Jazz decides permissions per table:
 
@@ -35,7 +37,7 @@ We can define permissions in `permissions.ts`:
 <Callout type="info">
   Write your permissions policies in `permissions.ts` next to `schema.ts`. By default Jazz looks for both files at your project root — except in SvelteKit projects, where they should live in `src/lib/` (the standard location for shared app code).
 
-Run `pnpm dlx jazz-tools@alpha validate` before publishing to surface missing table or operation grants that will deny access. You do not need to write a schema migration to update permissions policies. Push the updated policies by running `pnpm dlx jazz-tools@alpha deploy <appId>`.
+Run `npx jazz-tools validate` before publishing to surface missing table or operation grants that will deny access. You do not need to write a schema migration to update permissions policies. Updated policies go live when your main backend restarts or deploys with them.
 
 </Callout>
 
@@ -94,13 +96,19 @@ definePermissions(app, ({ policy, raw }) => {
 });
 ```
 
-### JWT session claims
+### Session claims
 
-When external auth JWTs carry claims, `session.where(...)` lets you check them directly in permissions without mapping them onto row columns first.
+When your backend's `authenticate` returns claims, `session.where(...)` lets you check them directly in permissions without mapping them onto row columns first.
 
 <include cwd lang="ts" meta='title="permissions.ts"'>
   ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-session-claims-ts
 </include>
+
+A claim can also be the value a row is compared with, for example rows of the user's organization:
+
+```ts
+policy.projects.allowRead.where({ orgId: session.claims["org"] });
+```
 
 ### Inherited access (`allowedTo.*`)
 
@@ -137,6 +145,13 @@ Sometimes access isn't determined by ownership or a parent relationship, but by 
 </include>
 
 The callback form `(todo) => ...` gives you access to the current row, so you can correlate it with rows in other tables.
+
+A column you correlate on must be declared as a relation with `s.rel` in your schema. Correlating on
+a plain UUID column fails validation with `JoinNotRefCompatible`.
+
+To match the `userId` your `authenticate` returned (for example an `assignee` text column holding
+your auth's user ids), compare with `session.identity.subject`: `session.user` is the Jazz account,
+not your user id.
 
 Inside a transaction, `exists` also sees the transaction's own writes, so a row can be written in
 the same transaction as the row that grants it access, such as a task inserted together with its
@@ -211,7 +226,7 @@ Every policy is evaluated against a session. On the frontend, this is the authen
   </Tab>
 </Tabs>
 
-See [Backend](/docs/setup/backend) for creating your app's Jazz with `createJazz`.
+See [Main Backend](/docs/setup/deployment/own-server) for setting up your backend.
 
 <Callout type="info">
   Structural-only client runtimes stay permissive locally so offline reads and writes keep working.
@@ -256,17 +271,21 @@ Jazz also tracks row authorship and timestamps automatically:
 - `$updatedBy`&hairsp;—&hairsp;the Jazz principal that last updated the row
 - `$updatedAt`&hairsp;—&hairsp;when the row was last updated
 
-Jazz always tracks this metadata; select the columns explicitly to include them in query results. Backend writes that are not attributed to a user use the reserved system account and an internal system identity. See [System-authored rows](/docs/setup/auth/sessions#system-authored-rows) for their account, issuer, and originating-node subject.
+Jazz always tracks this metadata; select the columns explicitly to include them in query results. Backend writes that are not attributed to a user use the reserved system account and an internal system identity. See [System-authored rows](/docs/setup/auth/backend#system-authored-rows) for their account, issuer, and originating-node subject.
 
 ### Authorship-based policies
 
 You can use these edit metadata magic columns directly in `permissions.ts`. This is useful for simple
 "creator can read/edit/delete their own rows" policies without adding explicit `owner_id` columns.
 
-Compare `$createdBy` with `session.user` to scope a rule to the row's creator. `session.user` is the
-structured `{ account, identity: { issuer, subject } }` author. Public `session.claims` also exposes the complete verified
-JWT payload, including the raw `iss` and `sub`, but those inspectable fields never replace the
-canonical author identity. To share ownership across linked identities, compare `$createdBy.account` with `session.user.account` instead; whole-author equality distinguishes the identities.
+Compare `$createdBy` with `session.user` to scope a rule to the row's creator. `session.user` is
+the account, so the rule matches rows written through any identity linked to it, including
+alpha.59 rows whose author was imported with an account. To match only the exact login that wrote the row, compare
+`$createdBy.identity` with `session.identity` (its `{ issuer, subject }`). `session.claims`
+holds the claims your `authenticate` returned, not a raw JWT payload; with
+[`fromJWT()`](/docs/setup/auth/custom#tokens-from-your-identity-provider), `session.identity` is
+`{ issuer: "jazz:backend", subject }`, not your provider's `iss`. Claims never replace the
+canonical author identity.
 
 <include cwd lang="ts" meta='title="permissions.ts"'>
   ../examples/docs/todo-server-ts/src/permissions-snippets.ts#permissions-created-by-ts
@@ -295,21 +314,41 @@ See [Testing permissions](/docs/tooling/testing#testing-permissions).
 ## Troubleshooting denied access
 
 If a write appears locally but does not persist, wait for
-[server durability](/docs/writing/writing-data#write-durability-tiers) and handle
-`PersistedWriteRejectedError` with code `permission_denied`. Use
+[server durability](/docs/writing/writing-data#write-durability-tiers) and handle the rejection.
+The local-first client rejects with `PersistedWriteRejectedError`, code `permission_denied`. The
+thin client rejects with a `ThinRemoteError` whose `code` is `WriteRejected` and whose message
+starts with the reason, such as `authorization_denied: …`. Use
 `db.onMutationError(...)` as a fallback for rejections without an active wait;
 see [Handling mutation errors](/docs/writing/writing-data#handling-mutation-errors).
+A backend connected to Jazz Cloud doesn't refuse a session's write up front either: the cloud
+decides it, and a denial arrives through `wait(...)` with the same `permission_denied` code. A store
+with no authority above it, such as a client with `serverUrl: null` or a backend on its own
+storage, refuses some denied writes at once (the write call throws), and accepts others, such as a
+denied update of a row it holds, then rejects them through `wait(...)`. So in backend code, await every write
+and handle both:
+
+```ts
+try {
+  await db.update(app.deals, dealId, { stage: "won" }).wait({ tier: "global" });
+} catch (error) {
+  // permission_denied, thrown by update() or by wait()
+}
+```
+
+In Node, a write's rejected `wait()` that nothing awaits or catches is an unhandled rejection, which
+ends the process.
+
 An empty query result can also mean that read permissions filtered out rows.
 
 As the app developer, check your own configuration:
 
-1. Run `pnpm dlx jazz-tools@alpha validate` and check that every required table
+1. Run `npx jazz-tools validate` and check that every required table
    and operation has an explicit grant. For updates and upserts that update an
    existing row, also check the required read permission.
 2. Check that the grants match the authenticated session and the relevant row
    values, including both old and new values for updates. Test these cases with
    [permission tests](/docs/tooling/testing#testing-permissions).
-3. Deploy the intended policies with `pnpm dlx jazz-tools@alpha deploy <appId>`
+3. Deploy your main backend with the intended policies
    and verify the app ID and deployed configuration. Editing `permissions.ts`
    locally does not update the server's policies.
 

@@ -49,7 +49,7 @@ import { schema as s } from ${JSON.stringify(new URL(indexImportPath, import.met
 import { app } from "./schema.ts";
 
 export default s.definePermissions(app, ({ policy, session }) => [
-  policy.todos.allowRead.where({ ownerId: session.user.identity.subject }),
+  policy.todos.allowRead.where({ ownerId: session.identity.subject }),
 ]);
 `;
 }
@@ -193,7 +193,7 @@ describe("dev catalogue push behavior", () => {
       { migrations: "none" },
     );
     const permissions = s.definePermissions(oldApp, ({ policy, session }) => {
-      policy.todos.allowRead.where({ owner: session.user.identity.subject });
+      policy.todos.allowRead.where({ owner: session.identity.subject });
     });
     const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) }, { migrations: "none" });
     const fetchMock = vi.fn();

@@ -37,7 +37,7 @@ function clearInviteHash() {
 
 export function FileBrowser() {
   const showToast = useToast();
-  const userId = useSession()?.user.account ?? undefined;
+  const userId = useSession()?.user ?? undefined;
   const profile = useEnsureProfile(userId);
   const isWide = useMediaQuery("(min-width: 1100px)");
 

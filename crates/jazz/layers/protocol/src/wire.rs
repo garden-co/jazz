@@ -49,6 +49,11 @@ pub const FEATURE_SCOPE_ISOLATED_CLIENT_RELAY: WireFeatures = 1 << 9;
 /// The peer is a thin client, or serves thin clients: it exchanges
 /// [`WireFrame::ThinRequest`] and [`WireFrame::ThinResponse`] (SPEC 8.14).
 pub const FEATURE_THIN_RESULTS: WireFeatures = 1 << 10;
+/// The peer keeps an idle link audible: a server sends
+/// [`WireFrame::Heartbeat`] on its keepalive cadence to a client that
+/// advertised this, so a client whose platform hides WebSocket pings (a
+/// browser) can tell a link that went silently dead from a quiet one.
+pub const FEATURE_HEARTBEAT: WireFeatures = 1 << 11;
 
 /// Bitset of optional protocol features advertised by one peer.
 pub type WireFeatures = u64;
@@ -70,6 +75,14 @@ pub enum WireFrame {
     /// The server's answer to a thin request. Postcard-v1 enum tag 5 within
     /// wire v6; only after both peers negotiated [`FEATURE_THIN_RESULTS`].
     ThinResponse(crate::thin::ThinResponse),
+    /// A piece of a thin request or response too large for one frame.
+    /// Postcard-v1 enum tag 6 within wire v6; only after both peers
+    /// negotiated [`FEATURE_THIN_RESULTS`].
+    ThinPart(crate::thin::ThinPart),
+    /// Proof of life on an otherwise quiet link, server to client. Carries
+    /// nothing and needs no answer. Postcard-v1 enum tag 7 within wire v6;
+    /// only after both peers negotiated [`FEATURE_HEARTBEAT`].
+    Heartbeat,
 }
 
 /// Which independently bounded transport resource this grant releases.
@@ -492,6 +505,15 @@ pub fn is_channel_credit_frame(bytes: &[u8]) -> bool {
     bytes.first() == Some(&3)
 }
 
+/// Decode a thin frame joined from [`crate::thin::ThinPart`]s, which may be
+/// over a wire frame but not over [`crate::thin::MAX_THIN_MESSAGE_BYTES`].
+pub fn decode_postcard_frame(bytes: &[u8]) -> Result<WireFrame, postcard::Error> {
+    if bytes.len() > crate::thin::MAX_THIN_MESSAGE_BYTES {
+        return Err(postcard::Error::DeserializeUnexpectedEnd);
+    }
+    decode_postcard_exact(bytes)
+}
+
 /// Decode a wire frame serialized by [`encode_frame`].
 pub fn decode_frame(bytes: &[u8]) -> Result<WireFrame, postcard::Error> {
     if validate_wire_frame_len(bytes.len()).is_err() {
@@ -553,9 +575,14 @@ pub fn validate_frames_for_artifact_corpus(
             WireFrame::ChannelCredit(_) => {
                 return Err("credit frames require a persistent admitted endpoint".to_owned());
             }
-            WireFrame::ThinRequest(_) | WireFrame::ThinResponse(_) => {
+            WireFrame::ThinRequest(_) | WireFrame::ThinResponse(_) | WireFrame::ThinPart(_) => {
                 if negotiated_features & FEATURE_THIN_RESULTS == 0 {
                     return Err("thin frames require the thin results feature".to_owned());
+                }
+            }
+            WireFrame::Heartbeat => {
+                if negotiated_features & FEATURE_HEARTBEAT == 0 {
+                    return Err("heartbeat frames require the heartbeat feature".to_owned());
                 }
             }
         }

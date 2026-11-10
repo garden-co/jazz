@@ -1,6 +1,6 @@
 ---
 title: Defining Tables
-description: Define tables and relationships in schema.ts using the TypeScript DSL.
+description: "Learn how to define tables and the relations between them in schema.ts."
 reviewedAt: "b29b48d1a"
 ---
 
@@ -73,11 +73,32 @@ Targets and local columns must exist, forward columns must have supported UUID s
 reverse declarations must resolve to a forward relation pointing back to their table.
 Relation names must not collide with stored column names.
 
+## Latest-only tables
+
+By default a table keeps every version of every row, for [history](/docs/reading/history) reads,
+snapshots and branches. A table whose rows are overwritten often and whose past is worth nothing,
+such as editor presence or cursors, can keep only each row's latest version instead:
+
+```ts
+const presence = s.table({ doc: s.string(), cursor: s.string() }, {}).history("latest");
+```
+
+A latest-only table can't be read through `history`, at a snapshot or in a serializable
+transaction, and can't use `branchBy`, text-merging columns or values too large to store inline.
+Its writes are never reported as conflicts. On a client, live queries over it show what the client
+holds now, which can be newer than what the query has otherwise settled at.
+
+Switching an existing table to latest-only drops its history for good, so the first deployment that
+does it must pass `allowDroppingHistory: true` to `createJazz`. A row that already holds a value
+too large to store inline keeps it, but can't be written with such a value again. Each write prunes
+by the schema its client runs, so rolling back to a version that keeps full history stops the
+pruning, but the table still can't be read through `history`.
+
 ## Validate locally
 
 <SchemaSetup />
 
-When you change your schema on a shared app, prepare any required migration and run `jazz-tools deploy <appId>`. See [Migrations](/docs/schemas/migrations) for details.
+When you change your schema on a shared app, prepare any required migration and deploy your main backend: `createJazz` publishes the schema, permissions and migrations when it starts. See [Migrations](/docs/schemas/migrations) for details.
 
 ## Exporting the app
 
@@ -85,7 +106,7 @@ When you change your schema on a shared app, prepare any required migration and 
 This is what you pass to queries, mutations, and subscriptions throughout your application code.
 
 `migrations` comes from `migrations/index.ts` beside your `schema.ts`. `jazz-tools` writes that
-file on every `validate` and `deploy` of an app that imports it, even while your app has a single
+file on every `validate` and `migrations create` of an app that imports it, even while your app has a single
 schema version, so the import always looks the same:
 
 ```ts title="schema.ts"

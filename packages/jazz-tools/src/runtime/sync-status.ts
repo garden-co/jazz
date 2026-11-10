@@ -1,5 +1,11 @@
 /** Why a {@link LinkStatus} is `offline`. */
-export type OfflineReason = "disconnected" | "network" | "auth" | "stopped" | "authority-changed";
+export type OfflineReason =
+  | "disconnected"
+  | "network"
+  | "auth"
+  | "stopped"
+  | "authority-changed"
+  | "held-by-another-tab";
 
 /**
  * The upstream connection as an app should show it.
@@ -24,6 +30,11 @@ export type OfflineReason = "disconnected" | "network" | "auth" | "stopped" | "a
  *     store (`db.deleteClientStorage()` in the browser). Nothing is reset
  *     automatically, so unsynced writes are never discarded behind the
  *     app's back.
+ *   - `held-by-another-tab` (browser): another tab holds this account's
+ *     local store under another sign-in (it was still the guest when this
+ *     tab signed up) and has not let go for a while. The tab keeps trying
+ *     (`retrying: true`) and joins once the other tab follows or closes;
+ *     waits fail meanwhile with a `StoreHeldByAnotherTabError`.
  */
 export type LinkStatus =
   | { state: "local-only" }

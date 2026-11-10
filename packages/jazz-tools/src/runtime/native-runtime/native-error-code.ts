@@ -101,3 +101,19 @@ export function nativeCoreErrorReason(error: unknown): NativeCoreErrorReason | u
     ? (reason as NativeCoreErrorReason)
     : undefined;
 }
+
+/**
+ * The core's refusal of a session's update or upsert of a row it may not
+ * read or that does not exist, as a synchronous write throws it. A caller
+ * that decides the same refusal itself (no row came back from the read
+ * before an update) throws this, so the two read alike.
+ */
+export function unreadableTargetError(operation: "Update" | "Upsert", table: string): Error {
+  const verb = operation.toUpperCase();
+  return Object.assign(
+    new Error(
+      `${operation} failed: WriteError("authorization_denied: read policy denied ${verb} on table ${table}: the row does not exist or the session may not read it")`,
+    ),
+    { code: "permission_denied" },
+  );
+}

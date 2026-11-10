@@ -96,6 +96,10 @@ export function structuralSchemaBytes(schema: WasmSchema): Uint8Array {
       writer.stringBytes(JSON.stringify(table.branchBy));
       writer.byte(0);
     }
+    // Full history is not hashed, as in Rust's `SchemaHash::compute`.
+    if (table.history === "latest") {
+      writer.stringBytes("history\0latest\0");
+    }
   }
 
   return writer.bytes();
@@ -388,6 +392,9 @@ export function tableSchemasEqual(
     return false;
   }
   if (!indexedColumnsEqual(left.branchBy, right.branchBy)) {
+    return false;
+  }
+  if (left.history !== right.history) {
     return false;
   }
 

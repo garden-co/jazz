@@ -21,7 +21,7 @@ Account preparation happens outside the database context. The app creates or res
 - Physical devices: either reach the backend on your machine's LAN IP (plain HTTP; the device must be on
   the same network and allow cleartext traffic), or deploy the backend behind a device-trusted HTTPS endpoint.
 - `JazzSessionProvider` from `jazz-tools/expo` owns secure account preparation and the native client, with app/server-scoped Expo SecureStore persistence.
-- Todos carry `owner_id`, and mutations are authorized against `session.user.account`; ownership columns use UUIDs.
+- Todos carry `owner_id`, and mutations are authorized against `session.user`; ownership columns use UUIDs.
 
 ## Commands
 

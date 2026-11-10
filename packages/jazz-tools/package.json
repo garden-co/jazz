@@ -1,6 +1,6 @@
 {
   "name": "jazz-tools",
-  "version": "2.0.0-alpha.59",
+  "version": "2.0.0-alpha.60",
   "description": "Jazz TypeScript SDK, React/Vue/Svelte bindings, and CLI tools",
   "license": "MIT",
   "bin": {
@@ -90,6 +90,10 @@
       "types": "./dist/prosemirror/index.d.ts",
       "default": "./dist/prosemirror/index.js"
     },
+    "./text-field": {
+      "types": "./dist/text-field/index.d.ts",
+      "default": "./dist/text-field/index.js"
+    },
     "./react-core": {
       "types": "./dist/react-core/index.d.ts",
       "default": "./dist/react-core/index.js"
@@ -171,7 +175,8 @@
     "build:test": "node dist/cli.js validate --schema-dir tests/ts-dsl/fixtures/basic && tsc --project tsconfig.tests.json --incremental --tsBuildInfoFile node_modules/.cache/tsc/tests.tsbuildinfo && pnpm typecheck:public-api",
     "typecheck:public-api": "tsc --project tsconfig.public-api.json",
     "typecheck:react-native": "tsc --project tsconfig.react-native-tests.json",
-    "test:browser": "node ../../dev/gates/run-correctness-consumer.mjs -- pnpm exec vitest run --config vitest.config.browser.ts && pnpm test:browser:transport",
+    "test:browser": "node ../../dev/gates/run-correctness-consumer.mjs -- pnpm exec vitest run --config vitest.config.browser.ts && pnpm test:browser:storage-quota && pnpm test:browser:transport",
+    "test:browser:storage-quota": "node ../../dev/gates/run-correctness-consumer.mjs -- pnpm exec vitest run --config vitest.config.browser.ts tests/browser/db.storage-quota.test.ts && node ../../dev/gates/run-correctness-consumer.mjs -- pnpm exec vitest run --config vitest.config.browser.ts tests/browser/db.storage-quota-retry.test.ts",
     "test:browser:focused": "node scripts/test-browser-focused.mjs",
     "typecheck:browser-helpers": "tsc --project tests/browser/tsconfig.browser-helpers.json",
     "test:browser:transport": "node --test scripts/evaluate-harness.test.mjs",

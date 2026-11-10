@@ -53,7 +53,7 @@ function ensureProfileOnce(accountId: string, displayName: string) {
 
 /** The profile only labels presence avatars: create it in the background. */
 function ProfileSetup() {
-  const account = useSession()?.user.account;
+  const account = useSession()?.user;
   const { data } = authClient.useSession();
   const displayName = data?.user.name;
   useEffect(() => {

@@ -11,14 +11,8 @@ const columns = [
       { label: "Docs", href: "/docs" },
       { label: "Quickstart", href: "/docs/setup/run-locally" },
       { label: "Examples & benches", href: "/examples" },
-      { label: "Roadmap", href: "https://github.com/garden-co/jazz/milestones" },
-    ],
-  },
-  {
-    title: "Jazz Cloud",
-    links: [
       { label: "Pricing", href: "/#pricing" },
-      { label: "Dashboard", href: "https://v2.dashboard.jazz.tools" },
+      { label: "Roadmap", href: "https://github.com/garden-co/jazz/milestones" },
     ],
   },
   {
@@ -45,10 +39,10 @@ export function SiteFooter() {
   return (
     <footer className="site-footer w-full">
       <div className="mx-auto grid w-full max-w-(--fd-layout-width) grid-cols-2 gap-x-6 gap-y-12 px-4 py-14 md:grid-cols-12">
-        <div className="col-span-2 flex flex-col gap-4 md:col-span-4">
+        <div className="col-span-2 flex flex-col gap-4 md:col-span-6">
           <JazzLogo label="Jazz" className="h-7 self-start" />
           <Text as="p" display="block" color="secondary" className="max-w-[22rem]">
-            The local-first relational database that syncs across your frontend, backend and cloud.
+            The data layer that you own.
           </Text>
         </div>
         {columns.map((column) => (
@@ -69,16 +63,20 @@ export function SiteFooter() {
         ))}
       </div>
       <div className="site-footer-base">
-        <div className="mx-auto flex w-full max-w-(--fd-layout-width) flex-col gap-4 px-4 py-6 sm:flex-row sm:items-center sm:justify-between">
-          <a
-            href="https://garden.co"
-            className="site-footer-maker"
-            aria-label="Made with love by Garden Computing"
-          >
-            <span>Made with love by</span>
+        <div className="mx-auto grid w-full max-w-(--fd-layout-width) grid-cols-1 items-center gap-2 px-4 py-6 sm:grid-cols-3 sm:gap-4">
+          <a href="https://garden.co" className="site-footer-maker" aria-label="Garden Computing">
             <GardenComputingLogo aria-hidden className="h-10" label="" role="presentation" />
           </a>
-          <Text as="p" display="block" type="supporting" color="secondary">
+          <Text as="p" display="block" color="secondary" className="sm:text-center">
+            Made with love and LLMs
+          </Text>
+          <Text
+            as="p"
+            display="block"
+            type="supporting"
+            color="secondary"
+            className="mt-4 sm:mt-0 sm:text-right"
+          >
             © {new Date().getFullYear()} Garden Computing
           </Text>
         </div>

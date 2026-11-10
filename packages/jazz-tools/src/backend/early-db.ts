@@ -31,6 +31,8 @@ const WAITS = new Set([
   "captureSnapshot",
   "waitForSync",
   "refreshAccountAuth",
+  "refreshOwnAccountAuth",
+  "stopOwnRuntime",
   "openInspectorControlPort",
   "disconnect",
   "reconnect",

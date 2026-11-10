@@ -1,9 +1,9 @@
 ---
 title: React Native
-description: "Use Jazz from React Native and Expo apps."
+description: "Learn how to use Jazz from React Native and Expo apps."
 ---
 
-React Native and Expo are supported as an alpha through `jazz-tools/react-native` and the direct `jazz-rn` native dependency. Use a matching development or release build: Expo Go is unsupported.
+React Native and Expo are supported as an alpha through `jazz-tools/react-native` and the direct `jazz-rn` native dependency. Use a matching development or release build: Expo Go is unsupported, and so is Expo web (it renders a blank page). For the web, build a separate app with the [web client](/docs/setup/web-client/thin-client).
 
 ## Setup
 
@@ -21,13 +21,89 @@ function App() {
 }
 ```
 
-Install `jazz-rn` directly in the application alongside `jazz-tools`, add its
-Expo config plugin, and build the native app. Expo Go cannot load the relay. A
-bare React Native host uses the same direct dependency and New Architecture,
-with an OS-protected account store. The [canonical Expo
-scaffold](https://github.com/garden-co/jazz/tree/main/examples/todo-client-localfirst-expo)
-shows the complete lifecycle and platform configuration. The alpha has not yet
-proven two physical JSI runtimes attached to one relay.
+### Install
+
+Use Expo SDK 54 or later (SDK 58 included). Install Jazz with the Expo modules it uses for crypto and
+the OS-protected account store, plus `babel-preset-expo`:
+
+```bash title="Terminal"
+npm install jazz-tools jazz-rn
+npx expo install expo-crypto expo-secure-store babel-preset-expo
+```
+
+`npx expo install` picks the `babel-preset-expo` version that matches your SDK.
+
+`jazz-rn` ships Jazz's engine prebuilt for Android and iOS, so you don't need a Rust toolchain, but
+both platforms' native libraries are always installed: about 500 MB in `node_modules`. Building the
+app needs the usual native toolchains: for Android, the Android SDK (min SDK 24), NDK 27.1.12297006
+and CMake 3.22.1 or later, which Android Studio's SDK Manager installs; for iOS, Xcode and
+CocoaPods.
+
+Jazz doesn't need `jazz-tools/expo/polyfills`. It only installs a global `ReadableStream`, which
+Hermes lacks, for code of your own that uses web streams; streaming writes such as
+`insertStreaming` also take an async iterable.
+
+Add the `jazz-rn` config plugin to `app.json`:
+
+```json title="app.json"
+{
+  "expo": {
+    "plugins": ["jazz-rn"]
+  }
+}
+```
+
+Let Babel transform `import.meta`, which Jazz uses:
+
+```js title="babel.config.js"
+module.exports = function (api) {
+  api.cache(true);
+  return {
+    presets: [["babel-preset-expo", { unstable_transformImportMeta: true }]],
+  };
+};
+```
+
+Jazz needs the New Architecture, which is the default from SDK 54. Then build the native app with
+`npx expo prebuild` and `npx expo run:android` or `npx expo run:ios`, or with EAS Build. Expo Go
+can't load Jazz's native module. After changing the Babel config, start Metro with
+`npx expo start --clear`.
+
+To reach a backend on your computer, the Android emulator uses `http://10.0.2.2:<port>` instead of
+`localhost`, and Android blocks plain `http://` unless you allow cleartext traffic for development.
+
+A bare React Native host uses the same direct dependency and New Architecture, with an OS-protected
+account store. The [canonical Expo
+scaffold](https://github.com/garden-co/jazz/tree/v2.0.0-alpha.60/examples/todo-client-localfirst-expo)
+shows the complete lifecycle and platform configuration. The alpha has not yet proven two physical JSI
+runtimes attached to one relay.
+
+### Loading and errors
+
+`JazzSessionProvider` renders `fallback` until the session is ready. Inside it, `useJazzSession()`
+gives the session's `status` (`"transitioning"`, `"signed-out"`, `"error"`, `"ready"` or
+`"closed"`), its `error` and `retry()`:
+
+```tsx
+import { JazzSessionProvider, useJazzSession } from "jazz-tools/expo";
+
+function Startup() {
+  const { status, error, retry } = useJazzSession();
+  if (status === "error") return <Button title={`${error?.message}: retry`} onPress={retry} />;
+  return <ActivityIndicator />;
+}
+
+<JazzSessionProvider config={{ serverUrl, initial: "local-first" }} fallback={<Startup />}>
+  <TodoApp />
+</JazzSessionProvider>;
+```
+
+## Which entry exports what
+
+Import from `jazz-tools/expo` in an Expo app and `jazz-tools/react-native` in a bare one. Both
+export the providers, `useJazzSession`, `useJazzAuth`, `useDb`, `useSession`, `useAll`, `useOne`
+and `createAccountManager`. `useSyncStatus` and `useAccountState` are only in
+`jazz-tools/react-native` for now; an Expo app imports those two from there.
 
 <Callout type="info">
   `serverUrl` is your backend's Jazz endpoint (where `createJazz` is mounted); the app names no app
@@ -49,8 +125,33 @@ Some bundlers and runtimes cannot automatically resolve Jazz's Wasm and worker a
 </Accordion>
 </Accordions>
 
+## Sign in through your backend
+
+An app has no cookie for your backend, so it hands Jazz its own token instead. Pass `bearer`, a
+function that returns the token your app holds for its backend (or `null` when signed out), next
+to `serverUrl` in `createAccountManager` from `jazz-tools/react-native` (or `jazz-tools/expo`). Jazz sends it as `Authorization: Bearer …` when it signs in and on the device's sync
+connection, so your backend's `authenticate` reads that header instead of a cookie.
+
+After your own sign-in, call `loginWithBackend()` for the user's own account, or
+`linkWithBackend()` to keep a local-first guest's data under the new user, both from
+`useJazzAuth().sessionActions`; `useJazzAuth().logout()` signs out. Linking a user who already has an account
+fails with an `AccountAuthError` whose code is `link_refused`; sign them in with
+`loginWithBackend()` instead.
+
+To reach a development backend over plain `http://` on Android, allow cleartext traffic, for
+example with `expo-build-properties` (`android.usesCleartextTraffic: true`) in a development build
+only.
+
+## Testing without a device
+
+Test your schema, permissions and backend logic in Node against your app's backend, as in
+[Testing](/docs/tooling/testing#testing-with-your-apps-backend). A Node client stands in for the
+device: give `createJazzClient` from `jazz-tools/client` a `store` to keep its account in (the
+testing page shows an in-memory one), since outside the browser and the app there is no default.
+Use `bearer: () => testJazz.bearer(userId)` to sign in the way the app does. The React Native UI
+itself needs an emulator or a device.
+
 ## Coming next
 
 - Expo vs bare React Native setup, step by step
-- User auth integration
-- Today React Native clients are local-first only; a thin client follows the web thin client
+- Today React Native clients run the local-first engine on the device; a thin client follows the web thin client

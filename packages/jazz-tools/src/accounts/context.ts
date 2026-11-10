@@ -142,7 +142,11 @@ export async function createAccountDbWithRuntimeSource(
     // the account's credential resolves.
     const { account: _account, ...scope } = config;
     lease = startBrowserWorkerLease(
-      { ...scope, accountId: account.id, accountRegistryAuthority: accountRegistry(account) },
+      {
+        ...scope,
+        accountId: account.id,
+        accountRegistryAuthority: accountRegistry(account),
+      },
       runtimeSource,
     );
     const resolved = await resolveAccountRuntimeConfig(config);
@@ -191,7 +195,8 @@ export async function createAccountDbWithRuntimeSource(
       if (refreshing || stopped) return;
       refreshing = true;
       try {
-        const token = await opened.refreshAccountAuth(account);
+        // Its own runtime's credential, even after an upgrade forwards the Db.
+        const token = await opened.refreshOwnAccountAuth(account);
         failedRefreshes = 0;
         if (!stopped) schedule(token);
       } catch (error) {
@@ -204,14 +209,20 @@ export async function createAccountDbWithRuntimeSource(
         refreshing = false;
       }
     };
-    // The refresh cycle below renews every refusal a new token can fix.
+    // The refresh cycle below renews every refusal a new token can fix. A
+    // user the backend signed in is held too, as a browser's cookie renews:
+    // createJazzClient's backend watch reconnects or signs them in again.
+    // With createAccountManager and createDb alone, nothing does, and Global
+    // waits outlast the refusal until the app reconnects.
     const releaseRenewal = holdCredentialRenewal(opened);
-    const stopAuth = opened.onAuthChanged((state) => {
+    const stopAuth = opened.onOwnAuthChanged((state) => {
       // A refused credential renews whatever the server called it: a
       // rotated signing key reads as "invalid" until a new token is issued.
       // A new token cannot fix an auth mode the app has turned off or a
-      // revoked account identity.
-      if (state.error && isRenewableAuthFailure(state.error)) renew();
+      // revoked account identity. A user the backend signed in has no token
+      // to renew: a new cookie is the backend's to set, and under
+      // createJazzClient its backend watch asks the backend again.
+      if (jwtToken && state.error && isRenewableAuthFailure(state.error)) renew();
     });
     opened.onShutdown(() => {
       stopped = true;

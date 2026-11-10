@@ -43,7 +43,7 @@ export function TodoList() {
 
   const { data: todos = [], db } = useAll(todosQuery);
   const session = useSession();
-  const sessionUserId = session?.user.account ?? null;
+  const sessionUserId = session?.user ?? null;
 
   const addTodo = () => {
     const trimmed = normalizeText(title).trim();

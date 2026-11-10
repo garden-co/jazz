@@ -61,7 +61,7 @@ export async function startApp(
   const db = config?.account
     ? await createDb({ ...config, appId: config.appId!, account: config.account })
     : session!.getSnapshot().client!.db;
-  let sessionUserId = db.getAuthState().session?.user.account ?? null;
+  let sessionUserId = db.getAuthState().session?.user ?? null;
 
   // Build DOM
   const h1 = document.createElement("h1");
@@ -159,7 +159,7 @@ export async function startApp(
     list.replaceChildren(items);
   });
   const stopAuthSync = db.onAuthChanged(({ session }) => {
-    syncAuthState(session?.user.account ?? null);
+    syncAuthState(session?.user ?? null);
   });
 
   // Add todo form

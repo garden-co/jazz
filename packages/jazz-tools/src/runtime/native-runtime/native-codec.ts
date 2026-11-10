@@ -582,11 +582,37 @@ export function rowCount(batches: NativeRowBatch[]): number {
   return batches.reduce((sum, batch) => sum + batch.rows.length, 0);
 }
 
+/** Byte strings at least this long are copied whole, not byte by byte. */
+const POSTCARD_WHOLE_BYTES = 64;
+
 export class PostcardWriter {
+  /** Single bytes written since the last part. */
   private chunks: number[] = [];
+  /** What was written before `chunks`, in order. */
+  private parts: Uint8Array[] = [];
+  private partsBytes = 0;
 
   finish(): Uint8Array {
-    return Uint8Array.from(this.chunks);
+    if (this.parts.length === 0) return Uint8Array.from(this.chunks);
+    this.flushChunks();
+    const out = new Uint8Array(this.partsBytes);
+    let offset = 0;
+    for (const part of this.parts) {
+      out.set(part, offset);
+      offset += part.byteLength;
+    }
+    return out;
+  }
+
+  private flushChunks(): void {
+    if (this.chunks.length === 0) return;
+    this.pushPart(Uint8Array.from(this.chunks));
+    this.chunks = [];
+  }
+
+  private pushPart(part: Uint8Array): void {
+    this.parts.push(part);
+    this.partsBytes += part.byteLength;
   }
 
   u64(value: number | bigint): void {
@@ -653,9 +679,15 @@ export class PostcardWriter {
 
   bytes(value: Uint8Array, withLength = true): void {
     if (withLength) this.u64(value.length);
-    for (let offset = 0; offset < value.length; offset += 16_384) {
-      this.chunks.push(...value.subarray(offset, offset + 16_384));
+    if (value.length < POSTCARD_WHOLE_BYTES) {
+      for (const byte of value) this.chunks.push(byte);
+      return;
     }
+    // A large value (a large-value leaf, a frame in a batch) is copied
+    // whole: pushing it byte by byte took ~80 ms per MB. `new Uint8Array`
+    // copies even a Node Buffer, whose slice() would share its memory.
+    this.flushChunks();
+    this.pushPart(new Uint8Array(value));
   }
 
   vec(writeItem: (writer: PostcardWriter, index: number) => void, length: number): void {

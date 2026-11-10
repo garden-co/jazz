@@ -61,6 +61,50 @@ describe("Vue ergonomic app", () => {
     expect(await renderToString(app)).toContain("Loading Jazz");
     expect(mocks.factory).not.toHaveBeenCalled();
   });
+  it("passes kebab-case options to the session as its own options", async () => {
+    // rc.4 adopter finding R68: `:clear-on-sign-out="true"` reached the
+    // session as "clear-on-sign-out", so sign-out kept the account's replica.
+    const { session } = await fixture();
+    mocks.factory.mockReset().mockResolvedValue(session);
+    const node = document.createElement("div");
+    const app = createApp({
+      render: () =>
+        h(JazzProvider, {
+          scope: "test",
+          autoAttachDevTools: false,
+          "clear-on-sign-out": true,
+          "link-guest-on-sign-up": false,
+          "log-level": "debug",
+        }),
+    });
+    app.mount(node);
+    await flush();
+    expect(mocks.factory).toHaveBeenCalledTimes(1);
+    const config = mocks.factory.mock.calls[0]![0] as Record<string, unknown>;
+    expect(config).toMatchObject({
+      scope: "test",
+      clearOnSignOut: true,
+      linkGuestOnSignUp: false,
+      logLevel: "debug",
+    });
+    expect(Object.keys(config).filter((key) => key.includes("-"))).toEqual([]);
+    app.unmount();
+  });
+
+  it("leaves the session's defaults alone for the options it isn't given", async () => {
+    const { session } = await fixture();
+    mocks.factory.mockReset().mockResolvedValue(session);
+    const app = createApp({
+      render: () => h(JazzProvider, { scope: "test", autoAttachDevTools: false }),
+    });
+    app.mount(document.createElement("div"));
+    await flush();
+    const config = mocks.factory.mock.calls[0]![0] as Record<string, unknown>;
+    expect(config).not.toHaveProperty("clearOnSignOut");
+    expect(config).not.toHaveProperty("linkGuestOnSignUp");
+    app.unmount();
+  });
+
   it("retries startup failures with the default error button and starts signed out by default", async () => {
     const { session } = await fixture();
     mocks.factory

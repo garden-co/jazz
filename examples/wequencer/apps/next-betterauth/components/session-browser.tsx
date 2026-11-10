@@ -17,7 +17,7 @@ import { NewSessionDialog } from "@/components/new-session-dialog";
 
 export function SessionBrowser() {
   const router = useRouter();
-  const author = useSession()?.user.account;
+  const author = useSession()?.user;
   const { data: sessions = [], isLoading } = useAll(app.sessions.orderBy("$createdAt", "desc"));
   const [isCreating, setIsCreating] = useState(false);
 
