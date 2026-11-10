@@ -53,6 +53,38 @@ connection on every check.
 already merges them into one user. As long as `authenticate` returns that user's id, Jazz sees the
 same account whichever method was used.
 
+### Re-checking open connections
+
+A re-check is not a request. Jazz calls `authenticate` again from a timer, outside your framework's
+request scope, with the request that opened the connection and the cookies it had then. So
+`authenticate` must decide from `request` alone:
+
+- **Read the session from `request.headers`**, as in the example above. Don't use helpers that
+  find the current request on their own: in Next.js, `cookies()` and `headers()` throw outside a
+  request, and so do the auth helpers built on them (AuthKit's `withAuth()`, NextAuth's `auth()`,
+  Clerk's `auth()`).
+- **Read the long-lived session, not a short-lived token.** If your auth rotates a cookie (say a
+  five-minute access token next to a longer session), a re-check still sees the one the connection
+  opened with. Name the user from the session it belongs to, or re-checks refuse them once the
+  token expires and the connection reconnects each time it does.
+- **A re-check only sees a sign-out your auth keeps on the server** (a deleted session row, a
+  revoked token). A stateless cookie, signed or sealed with nothing behind it, stays valid until it
+  expires, so the opening one still names the user after they sign out. Check it against your
+  session store, or a sign-out reaches open connections only when they end
+  (`sessionTtlSeconds`).
+
+When a re-check throws Next.js's "called outside a request scope" error (or another framework's),
+`authenticate` will fail the same way on every re-check, so Jazz ends the connection at once and
+logs an error. The client reconnects, and its next re-check ends it again: with that mistake, every
+signed-in user reconnects every `recheckSeconds`, and a sign-out still reaches them within it. Read
+the session from `request` to fix it.
+
+Any other error is logged and asked again next time, so a brief outage of your auth database ends
+nothing. Three failed re-checks in a row end the connection, as a refusal does: the client
+reconnects, and if the user signed out in the meantime that reconnect is refused. An outage longer
+than that ends every open connection within about one `recheckSeconds` of each other, and their
+clients reconnect together once your auth answers again (until then, reconnects fail and retry).
+
 ## In the browser
 
 ```tsx title="App.tsx"

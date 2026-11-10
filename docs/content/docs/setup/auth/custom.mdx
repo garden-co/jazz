@@ -29,6 +29,11 @@ export const jazz = createJazz({
 });
 ```
 
+Read the user from `request` itself, never from a helper that finds the current request on its own
+(Next.js's `cookies()`, `withAuth()`, Clerk's or NextAuth's `auth()`): Jazz also calls
+`authenticate` again for open connections, outside any request. See
+[Re-checking open connections](/docs/setup/auth/backend#re-checking-open-connections).
+
 Mount it under `/jazz` (see [Main Backend](/docs/setup/deployment/own-server)). The browser talks only to your
 backend; the core behind `remote()` trusts your backend to say who the user is, and never sees your
 users' credentials.

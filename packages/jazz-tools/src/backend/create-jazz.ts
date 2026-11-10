@@ -83,7 +83,15 @@ export {
   type S3BlobStore,
   type VercelBlobStore,
 } from "./blobs.js";
-import { isSameAdmission, recheckEvery } from "./session-recheck.js";
+import {
+  isOutsideRequestScope,
+  isSameAdmission,
+  RECHECK_FAILURES_BEFORE_END,
+  recheckEvery,
+  recheckFailedWarning,
+  type RecheckEnd,
+  type RecheckFailures,
+} from "./session-recheck.js";
 import { NoJazzAccountError } from "./no-account-error.js";
 import { RequestAuthenticationError } from "./request-auth.js";
 import { optionalPeerImportError } from "./optional-peer.js";
@@ -339,6 +347,24 @@ export interface CreateJazzOptions {
    * header). Return null for a signed-out request. Jazz calls it when a
    * browser signs in or opens a sync session, and in `forReqUser`.
    *
+   * Decide from `request` alone. Jazz also calls it again later for each
+   * open sync session (every `recheckSeconds`), from a timer: outside your
+   * framework's request scope, with the request that opened the session and
+   * its cookies from then. Helpers that read the current request from
+   * context throw there; in Next.js that is `cookies()`, `headers()` and the
+   * auth helpers built on them (AuthKit's `withAuth()`, NextAuth's `auth()`,
+   * Clerk's `auth()`). Pass `request.headers` to your auth library instead,
+   * as in the example below. A cookie your auth rotates (a short-lived
+   * access token) is the opening one on a re-check: read the user from the
+   * longer-lived session it belongs to.
+   *
+   * ```ts
+   * authenticate: async (request) => {
+   *   const session = await auth.api.getSession({ headers: request.headers });
+   *   return session ? { userId: session.user.id } : null;
+   * },
+   * ```
+   *
    * Local-first guests are refused unless it returns
    * `acceptLocalFirstAuth(request)` for them; an app with no sign-in passes
    * `authenticate: acceptLocalFirstAuth`. Without `authenticate`, only
@@ -375,6 +401,14 @@ export interface CreateJazzOptions {
    * the new claims, so this bounds how long a claims change takes to reach
    * an open session. Defaults to 60 seconds; 0 turns it off, and changes
    * then wait for the session to end (`sessionTtlSeconds`).
+   *
+   * A re-check calls `authenticate` from a timer, outside your framework's
+   * request scope, with the request that opened the session (see
+   * `authenticate`). One that throws a request-scope error (Next.js's
+   * "called outside a request scope") ends the session at once, as a
+   * refusal does, with an error logged. Other errors are logged and asked
+   * again next time, and 3 in a row end the session, so an `authenticate`
+   * that can't answer there fails closed.
    */
   recheckSeconds?: number;
   /**
@@ -1760,6 +1794,10 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     readonly trusted: boolean;
   }
 
+  // What a failed re-check means is explained once per process; each
+  // session then says only what happened to it.
+  let explainedRecheckFailure = false;
+
   /** The sessions this instance serves, for the Inspector's `sessions`. */
   const liveSessions = new Set<{
     session: ClientSession;
@@ -1831,17 +1869,52 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         onEvent(null, { kind: "close", code: 1008, reason: "authenticate again" });
         end();
       };
+      // A re-check whose `authenticate` throws ends the session at once
+      // when it can't run outside a request (Next.js's `cookies()`), and
+      // after enough failures in a row otherwise: either would keep the
+      // session open past a sign-out, silently.
+      let warnedFailure = false;
+      const failures: RecheckFailures = {
+        endAfter: RECHECK_FAILURES_BEFORE_END,
+        endsAtOnce: isOutsideRequestScope,
+        failed: (error) => {
+          if (!explainedRecheckFailure) {
+            explainedRecheckFailure = true;
+            (isOutsideRequestScope(error) ? console.error : console.warn)(
+              recheckFailedWarning(error),
+            );
+          }
+          if (!warnedFailure && !isOutsideRequestScope(error)) {
+            warnedFailure = true;
+            console.warn("createJazz: a sync session's re-check failed; asking again.", error);
+          }
+        },
+      };
+      const recheckEnded = (end: RecheckEnd) => {
+        authenticateAgain();
+        if (end.kind !== "failed") return;
+        if (isOutsideRequestScope(end.error))
+          console.error(
+            "createJazz: ended a sync session: authenticate can't run outside a request scope; the client reconnects.",
+          );
+        else
+          console.warn(
+            `createJazz: ended a sync session after ${end.inARow} failed re-checks in a row; the client reconnects.`,
+            end.error,
+          );
+      };
       const admittedUser = admitted.user;
       if (admittedUser && every > 0) {
         // Signed out, someone else, or the same user with other claims.
         recheck = recheckEvery(
           every,
           async () => isSameAdmission(admittedUser, await authenticate(request)),
-          authenticateAgain,
+          recheckEnded,
+          failures,
         );
       } else if (admitted.guest && every > 0) {
         // The app may stop letting guests in (or this one): ask again, as for users.
-        recheck = recheckEvery(every, () => acceptsGuest(request), authenticateAgain);
+        recheck = recheckEvery(every, () => acceptsGuest(request), recheckEnded, failures);
       }
       socket = core.openSocket(headerPairs(request.headers), onEvent, admitted.access);
       return socket.send(admitted.prelude);
