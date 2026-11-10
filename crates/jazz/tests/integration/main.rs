@@ -53,6 +53,8 @@ mod deleted_rows;
 mod deployment_preparation;
 #[path = "../dynamic_schema_views.rs"]
 mod dynamic_schema_views;
+#[path = "../e2ee_sqlite_blockers.rs"]
+mod e2ee_sqlite_blockers;
 #[path = "../enum_tags.rs"]
 mod enum_tags;
 #[path = "../error_code_strings.rs"]
@@ -169,6 +171,8 @@ mod sqlite_candidate_relations;
 mod sqlite_candidate_uuid_correlations;
 #[path = "../sqlite_candidates.rs"]
 mod sqlite_candidates;
+#[path = "../sqlite_owner_retirement.rs"]
+mod sqlite_owner_retirement;
 #[path = "../sqlite_read_policy_literals.rs"]
 mod sqlite_read_policy_literals;
 #[path = "../sqlite_sync_ingress.rs"]

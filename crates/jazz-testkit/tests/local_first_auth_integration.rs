@@ -77,7 +77,6 @@ fn local_first_context(
     ctx.jwt_token = Some(token);
     ctx.admin_secret = None;
     ctx.storage = storage;
-    if storage == ClientStorage::Persistent {}
     ctx
 }
 

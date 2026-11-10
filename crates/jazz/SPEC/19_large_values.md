@@ -189,6 +189,14 @@ Any store may materialize; trees are deterministic, so stores that
 materialize the same value agree on its nodes. Materialization is local and
 never synced.
 
+A serializable upload still awaiting its terminal decision preserves its original
+read proof across pending reopen and retry; it must not refresh stale reads or
+be silently converted to a mergeable write. After settlement, SQLite retains the
+transaction fate for idempotent retries and may release pending read proof.
+Rejected-operation payloads remain until their normal acknowledgement/discard.
+This port does not promise permanent post-settlement proof or change the SQLite
+storage format; already missing historical proof is not reconstructed.
+
 A new value, or one edit that inserts more than `INLINE_VALUE_MAX_BYTES`, is
 prepared into nodes before the write (streaming for `insert_streaming_value`
 and the binding upload APIs). Those nodes are held by an upload lease

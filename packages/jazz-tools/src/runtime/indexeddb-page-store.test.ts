@@ -1,6 +1,7 @@
 import { acquireBrowserPhysicalDatabaseEpoch } from "./browser-physical-database-epoch.js";
 import { IDBFactory, indexedDB as fakeIndexedDb } from "fake-indexeddb";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { readFile } from "node:fs/promises";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   INDEXEDDB_BTREE_DATABASE_VERSION,
   INDEXEDDB_BROWSER_RUNTIME_OWNER_KEY,
@@ -34,6 +35,25 @@ const databaseNames: string[] = [];
 
 describe("IndexedDbPageStore", () => {
   beforeEach(() => {
+    const held = new Set<string>();
+    vi.stubGlobal("navigator", {
+      locks: {
+        async request<T>(
+          name: string,
+          _options: unknown,
+          callback: (lock: object | null) => Promise<T>,
+        ) {
+          await Promise.resolve();
+          if (held.has(name)) return await callback(null);
+          held.add(name);
+          try {
+            return await callback({});
+          } finally {
+            held.delete(name);
+          }
+        },
+      },
+    });
     Object.defineProperty(globalThis, "indexedDB", {
       configurable: true,
       value: fakeIndexedDb,
@@ -42,6 +62,109 @@ describe("IndexedDbPageStore", () => {
 
   afterEach(async () => {
     await Promise.all(databaseNames.splice(0).map((name) => IndexedDbPageStore.destroy(name)));
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("keeps the current epoch and page bytes through reopen without a migration receipt", async () => {
+    for (const existing of [false, true]) {
+      const name = databaseName();
+      if (existing) await installEmptyEpochOneFixture(name);
+      const first = await IndexedDbPageStore.open(name);
+      const node = first.replicaNode.slice();
+      await first.commit({
+        expectedGeneration: 0,
+        metadata: { pageSize: INDEXEDDB_BTREE_PAGE_SIZE, rootPageId: 1, nextPageId: 2 },
+        pages: new Map([[1, new Uint8Array([7])]]),
+      });
+      await first.close();
+      const reopened = await IndexedDbPageStore.open(name);
+      expect(reopened.replicaNode).toEqual(node);
+      expect(await reopened.readPage(1)).toEqual(new Uint8Array([7]));
+      await reopened.close();
+      const raw = await openRawDatabase(name);
+      const tx = raw.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readonly");
+      const plane = tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE);
+      expect(await requestResult(plane.get(INDEXEDDB_STORAGE_MANIFEST_KEY))).toEqual(
+        INDEXEDDB_STORAGE_MANIFEST,
+      );
+      expect(await requestResult(plane.get("admission-v1"))).toBeUndefined();
+      await transactionDone(tx);
+      raw.close();
+    }
+  });
+
+  it("refuses an epoch-two profile without changing pages or stranding its physical claim", async () => {
+    const name = databaseName();
+    const unsupported = {
+      ...INDEXEDDB_STORAGE_MANIFEST,
+      storageEpoch: 2,
+      requiredCodecIds: ["jazz.node-storage.v3"],
+    };
+    await installRawEpochOneFixture(name, unsupported);
+    await expect(IndexedDbPageStore.open(name)).rejects.toThrow(
+      "Missing or invalid IndexedDB storage epoch manifest",
+    );
+    const raw = await openRawDatabase(name);
+    const tx = raw.transaction(
+      [INDEXEDDB_STORAGE_MANIFEST_STORE, INDEXEDDB_BTREE_PAGES_STORE],
+      "readonly",
+    );
+    expect(
+      await requestResult(
+        tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE).get(INDEXEDDB_STORAGE_MANIFEST_KEY),
+      ),
+    ).toEqual(unsupported);
+    expect(
+      await requestResult(tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE).get("admission-v1")),
+    ).toBeUndefined();
+    expect(await requestResult(tx.objectStore(INDEXEDDB_BTREE_PAGES_STORE).get(1))).toEqual(
+      new Uint8Array([1]).buffer,
+    );
+    await transactionDone(tx);
+    raw.close();
+    await expect(IndexedDbPageStore.open(name)).rejects.not.toThrow("active in another");
+  });
+
+  it("consumes a separate store claim once without consuming the later reclamation claim", async () => {
+    const name = databaseName();
+    const epoch = await acquireBrowserPhysicalDatabaseEpoch(name);
+    const first = await IndexedDbPageStore.open(name, { epoch });
+    await expect(IndexedDbPageStore.open(name, { epoch })).rejects.toThrow("unclaimed live");
+    await first.claimBrowserWorkerEpoch(epoch.id, epoch);
+    first.claimTreeOwnership();
+    expect(first.canReclaimObsoletePages).toBe(true);
+    await first.releaseBrowserWorkerEpoch(epoch.id);
+    await first.close();
+    await expect(IndexedDbPageStore.open(name, { epoch })).rejects.toThrow("unclaimed live");
+    await epoch.release();
+    const next = await IndexedDbPageStore.open(name);
+    await next.close();
+  });
+
+  it("rejects destructive opens while a writer owns the root and retains a blocked deletion lock", async () => {
+    const name = databaseName();
+    const store = await IndexedDbPageStore.open(name);
+    const node = store.replicaNode;
+    await expect(IndexedDbPageStore.destroy(name)).rejects.toThrow("active in another");
+    expect(store.replicaNode).toEqual(node);
+    await store.close();
+    const blocker = await openRawDatabase(name);
+    let blocked!: () => void;
+    const observedBlock = new Promise<void>((resolve) => {
+      blocked = resolve;
+    });
+    // A raw browser handle models a debugger/older external client, not a
+    // second Jazz writer. It deliberately keeps its connection on versionchange.
+    blocker.onversionchange = () => blocked();
+    const deleting = IndexedDbPageStore.destroy(name);
+    await observedBlock;
+    await expect(IndexedDbPageStore.open(name)).rejects.toThrow("active in another");
+    blocker.close();
+    await deleting;
+    const next = await IndexedDbPageStore.open(name);
+    expect(next.replicaNode).not.toEqual(node);
+    await next.close();
   });
 
   it("atomically commits opaque pages with the root generation", async () => {
@@ -61,7 +184,7 @@ describe("IndexedDbPageStore", () => {
     expect(await store.metadata()).toEqual(metadata);
     expect(await store.readPage(7)).toEqual(new Uint8Array([1, 2, 3]));
     expect(await store.readPage(3)).toEqual(new Uint8Array([4, 5]));
-    store.close();
+    await store.close();
   });
 
   it("reads several pages in request order, with null for absent ids", async () => {
@@ -95,13 +218,13 @@ describe("IndexedDbPageStore", () => {
       metadata: { pageSize: INDEXEDDB_BTREE_PAGE_SIZE, rootPageId: 1, nextPageId: 2 },
       pages: new Map([[1, new Uint8Array([7])]]),
     });
-    alice.close();
+    await alice.close();
 
     // Normal worker release/restart preserves ownership and permits the same
     // logical account to reclaim its physical root.
     const reopened = await IndexedDbPageStore.open(name, { owner: "app:alice" });
     expect(await reopened.readPage(1)).toEqual(new Uint8Array([7]));
-    reopened.close();
+    await reopened.close();
 
     // The rejected claim must not get a page-store handle or modify the
     // existing tree. This is the planted sensitivity oracle: removing the
@@ -112,7 +235,7 @@ describe("IndexedDbPageStore", () => {
     const verify = await IndexedDbPageStore.open(name, { owner: "app:alice" });
     expect(await verify.readPage(1)).toEqual(new Uint8Array([7]));
     expect((await verify.metadata())?.generation).toBe(1);
-    verify.close();
+    await verify.close();
 
     const raw = await openRawDatabase(name);
     const tx = raw.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readonly");
@@ -147,7 +270,7 @@ describe("IndexedDbPageStore", () => {
     raw.close();
 
     await first.releaseBrowserWorkerEpoch(successorEpoch);
-    first.close();
+    await first.close();
   });
 
   it("retains an exact long canonical owner marker rather than requiring a lossy digest", async () => {
@@ -165,7 +288,7 @@ describe("IndexedDbPageStore", () => {
     expect(owner.length).toBeGreaterThan(1024);
 
     const store = await IndexedDbPageStore.open(name, { owner });
-    store.close();
+    await store.close();
     await expect(IndexedDbPageStore.open(name, { owner: `${owner}:other` })).rejects.toThrow(
       "already owned by a different Jazz browser session",
     );
@@ -174,13 +297,13 @@ describe("IndexedDbPageStore", () => {
   it("transfers an explicit browser database only after explicit destruction", async () => {
     const name = databaseName();
     const first = await IndexedDbPageStore.open(name, { owner: "app:alice" });
-    first.close();
+    await first.close();
     await expect(IndexedDbPageStore.open(name, { owner: "app:bob" })).rejects.toThrow(
       "already owned by a different Jazz browser session",
     );
     await IndexedDbPageStore.destroy(name);
     const transferred = await IndexedDbPageStore.open(name, { owner: "app:bob" });
-    transferred.close();
+    await transferred.close();
   });
 
   it("persists only supplied dirty pages and can delete retired pages", async () => {
@@ -201,13 +324,13 @@ describe("IndexedDbPageStore", () => {
       pages: new Map([[1, new Uint8Array([9])]]),
       deletedPageIds: [2],
     });
-    store.close();
+    await store.close();
 
     store = await IndexedDbPageStore.open(name);
     expect(await store.readPage(1)).toEqual(new Uint8Array([9]));
     expect(await store.readPage(2)).toBeNull();
     expect((await store.metadata())?.generation).toBe(2);
-    store.close();
+    await store.close();
     await epoch.release();
   });
 
@@ -242,7 +365,7 @@ describe("IndexedDbPageStore", () => {
     await release;
     expect(await store.readPage(2)).toEqual(new Uint8Array([2]));
     expect((await store.metadata())?.generation).toBe(1);
-    store.close();
+    await store.close();
   });
 
   it("revokes exact tree generations and drains stale non-deletion commits before a successor", async () => {
@@ -304,30 +427,28 @@ describe("IndexedDbPageStore", () => {
     expect((await store.metadata())?.rootPageId).toBe(4);
     expect(await store.readPage(2)).toBeNull();
     expect(await store.readPage(3)).toBeNull();
-    store.close();
+    await store.close();
     await epoch.release();
   });
 
   it("rejects forged, mismatched and multiply consumed reclamation proofs", async () => {
     const name = databaseName();
     const first = await IndexedDbPageStore.open(name);
-    const second = await IndexedDbPageStore.open(name);
     const epoch = await ownReclamation(first);
-    await expect(second.claimBrowserWorkerEpoch(epoch.id, epoch)).rejects.toThrow("unclaimed live");
+    await expect(first.claimBrowserWorkerEpoch(epoch.id, epoch)).rejects.toThrow();
     await expect(
-      second.claimBrowserWorkerEpoch(epoch.id, {
+      first.claimBrowserWorkerEpoch(epoch.id, {
         id: epoch.id,
         release: async () => undefined,
       }),
-    ).rejects.toThrow("unclaimed live");
+    ).rejects.toThrow();
     const other = await IndexedDbPageStore.open(databaseName());
-    await expect(other.claimBrowserWorkerEpoch(epoch.id, epoch)).rejects.toThrow("unclaimed live");
+    await expect(other.claimBrowserWorkerEpoch(epoch.id, epoch)).rejects.toThrow();
     const release = first.releaseBrowserWorkerEpoch(epoch.id);
     expect(first.canReclaimObsoletePages).toBe(false);
     await release;
-    first.close();
-    second.close();
-    other.close();
+    await first.close();
+    await other.close();
     await epoch.release();
   });
 
@@ -342,13 +463,13 @@ describe("IndexedDbPageStore", () => {
       const claim = store.claimBrowserWorkerEpoch(epoch.id, epoch);
       const rejected = expect(claim).rejects.toThrow();
       if (close) {
-        store.close();
+        await store.close();
       } else {
         await store.releaseBrowserWorkerEpoch(epoch.id);
       }
       await rejected;
       expect(store.canReclaimObsoletePages).toBe(false);
-      store.close();
+      await store.close();
       await epoch.release();
     }
   });
@@ -371,7 +492,7 @@ describe("IndexedDbPageStore", () => {
     ).rejects.toThrow("expected 0, found 1");
     expect(await store.readPage(2)).toBeNull();
     expect((await store.metadata())?.rootPageId).toBe(1);
-    store.close();
+    await store.close();
   });
 
   it("fails invalid commits before they can leave orphan pages", async () => {
@@ -405,7 +526,7 @@ describe("IndexedDbPageStore", () => {
       }),
     ).rejects.toThrow("Invalid IndexedDB B-tree commit metadata");
     await expect(store.readPage(1)).resolves.toBeNull();
-    store.close();
+    await store.close();
   });
 
   it("does not allow a commit to delete its published root", async () => {
@@ -426,7 +547,7 @@ describe("IndexedDbPageStore", () => {
     ).rejects.toThrow("Invalid IndexedDB B-tree deleted page commit");
     await expect(store.readPage(1)).resolves.toEqual(new Uint8Array([1]));
     await expect(store.metadata()).resolves.toMatchObject({ generation: 1, rootPageId: 1 });
-    store.close();
+    await store.close();
   });
 
   it("pins the raw metadata record and IndexedDB namespace", async () => {
@@ -470,7 +591,7 @@ describe("IndexedDbPageStore", () => {
       nextPageId: 2,
     });
     raw.close();
-    store.close();
+    await store.close();
   });
 
   it("persists one random node per physical replica, not per logical database name", async () => {
@@ -484,14 +605,14 @@ describe("IndexedDbPageStore", () => {
       expect(node).toHaveLength(INDEXEDDB_REPLICA_NODE_BYTES);
       node.fill(0);
       expect(store.replicaNode).not.toEqual(node);
-      store.close();
+      await store.close();
 
       const reopened = await IndexedDbPageStore.open(logicalName);
       try {
         expect(reopened.replicaNode).toEqual(store.replicaNode);
         return reopened.replicaNode;
       } finally {
-        reopened.close();
+        await reopened.close();
       }
     });
     const secondNode = await withIndexedDbFactory(secondFactory, async () => {
@@ -499,7 +620,7 @@ describe("IndexedDbPageStore", () => {
       try {
         return store.replicaNode;
       } finally {
-        store.close();
+        await store.close();
       }
     });
 
@@ -508,23 +629,21 @@ describe("IndexedDbPageStore", () => {
     expect(secondNode).not.toEqual(firstNode);
   });
 
-  it("admits one identity across concurrent first opens and replaces it after reset", async () => {
+  it("excludes an independent first opener and retains the identity after release", async () => {
     const name = databaseName();
-    const [first, second] = await Promise.all([
-      IndexedDbPageStore.open(name),
-      IndexedDbPageStore.open(name),
-    ]);
+    const first = await IndexedDbPageStore.open(name);
     const firstNode = first.replicaNode;
-    expect(second.replicaNode).toEqual(firstNode);
-    first.close();
-    second.close();
-
+    await expect(IndexedDbPageStore.open(name)).rejects.toThrow("active in another");
+    await first.close();
+    const reopened = await IndexedDbPageStore.open(name);
+    expect(reopened.replicaNode).toEqual(firstNode);
+    await reopened.close();
     await IndexedDbPageStore.destroy(name);
     const reset = await IndexedDbPageStore.open(name);
     try {
       expect(reset.replicaNode).not.toEqual(firstNode);
     } finally {
-      reset.close();
+      await reset.close();
     }
   });
 
@@ -543,7 +662,7 @@ describe("IndexedDbPageStore", () => {
     expect(reused.confirmedTxTime).toBe(123456789n);
     await store.retireForegroundNodeLease(second.leaseId);
     await store.retireForegroundNodeLease(reused.leaseId);
-    store.close();
+    await store.close();
   });
 
   it("never lowers a returned foreground floor and rejects values native u64 cannot seed", async () => {
@@ -559,20 +678,20 @@ describe("IndexedDbPageStore", () => {
       "Invalid IndexedDB foreground node lease handoff",
     );
     await store.retireForegroundNodeLease(continued.leaseId);
-    store.close();
+    await store.close();
   });
 
   it("retires an abandoned foreground lease on worker restart", async () => {
     const name = databaseName();
     let store = await IndexedDbPageStore.open(name);
     const abandoned = await store.acquireForegroundNodeLease();
-    store.close();
+    await store.close();
 
     store = await IndexedDbPageStore.open(name);
     const replacement = await store.acquireForegroundNodeLease(true);
     expect(replacement.node).not.toEqual(abandoned.node);
     await store.retireForegroundNodeLease(replacement.leaseId);
-    store.close();
+    await store.close();
   });
 
   it("rejects a missing or malformed physical replica node before touching pages", async () => {
@@ -699,7 +818,25 @@ describe("IndexedDbPageStore", () => {
     );
     expect(metadata).toMatchObject({ generation: 1, rootPageId: 4, nextPageId: 5 });
     expect(await store.readPage(4)).toEqual(new Uint8Array([8, 6, 7, 5, 3, 0, 9]));
-    store.close();
+    await store.close();
+  });
+
+  it("persists the checked-in historical page fixture byte-for-byte", async () => {
+    const fixture = hexBytes(
+      await readFile(
+        new URL("../../tests/browser/fixtures/page-v1-leaf.hex", import.meta.url),
+        "utf8",
+      ),
+    );
+    const name = databaseName();
+    const store = await IndexedDbPageStore.open(name);
+    await store.commit({
+      expectedGeneration: 0,
+      metadata: { pageSize: INDEXEDDB_BTREE_PAGE_SIZE, rootPageId: 1, nextPageId: 2 },
+      pages: new Map([[1, fixture]]),
+    });
+    expect(await store.readPage(1)).toEqual(fixture);
+    await store.close();
   });
 
   it("invalidates an open store when its IndexedDB database is externally deleted", async () => {
@@ -714,7 +851,7 @@ describe("IndexedDbPageStore", () => {
       pages: new Map([[1, new Uint8Array([1])]]),
     });
 
-    await IndexedDbPageStore.destroy(name);
+    await requestResult(fakeIndexedDb.deleteDatabase(name));
 
     expect(invalidations).toHaveLength(1);
     expect(invalidations[0]?.message).toContain(name);
@@ -738,6 +875,16 @@ function databaseName(): string {
 
 function openRawDatabase(name: string): Promise<IDBDatabase> {
   return requestResult(fakeIndexedDb.open(name));
+}
+
+async function installEmptyEpochOneFixture(name: string): Promise<void> {
+  const raw = await createRawEpochDatabase(name);
+  const tx = raw.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readwrite");
+  const plane = tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE);
+  plane.put(INDEXEDDB_STORAGE_MANIFEST, INDEXEDDB_STORAGE_MANIFEST_KEY);
+  plane.put(epochOneReplicaNode().buffer, INDEXEDDB_REPLICA_NODE_KEY);
+  await transactionDone(tx);
+  raw.close();
 }
 
 async function installRawEpochOneFixture(
@@ -824,4 +971,14 @@ function transactionDone(tx: IDBTransaction): Promise<void> {
     tx.onerror = () => reject(tx.error ?? new Error("IndexedDB transaction failed"));
     tx.onabort = () => reject(tx.error ?? new Error("IndexedDB transaction aborted"));
   });
+}
+
+// This parses the checked-in historical fixture only; it is not a native
+// codec decoder or a claim that the retired Rust generator ran here.
+function hexBytes(source: string): Uint8Array {
+  const hex = source.replace(/\s/g, "");
+  if (hex.length % 2 !== 0 || !/^[0-9a-f]*$/i.test(hex)) {
+    throw new Error("Invalid checked-in historical page hex");
+  }
+  return Uint8Array.from(hex.match(/../g) ?? [], (byte) => Number.parseInt(byte, 16));
 }

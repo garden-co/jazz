@@ -7,7 +7,8 @@ import type { WasmSchema } from "../../drivers/types.js";
 import { onTestFinished } from "vitest";
 import { NativeRuntimeAdapter } from "../native-runtime/native-runtime-adapter.js";
 import { testAuthorBytes } from "./account-fixtures.js";
-import { assertNativeArtifactCompatibility } from "../native-artifact-compatibility.js";
+import { assertArtifactCompatibility } from "../artifact-compatibility.js";
+import { EXPECTED_WASM_ARTIFACT_FINGERPRINT } from "../native-artifact-fingerprint-wasm.js";
 import { installJsonSchemaValidator } from "../json-schema-validator.js";
 import { readCorrectnessArtifactSnapshot } from "../../../../../dev/artifacts/test-artifact-store.mjs";
 import { deterministicBytes } from "../deterministic-bytes.js";
@@ -110,7 +111,7 @@ export function loadWasmModuleForTest(): Promise<any> {
 
       const wasmModule: any = await import(pathToFileURL(paths.modulePath).href);
       wasmModule.initSync({ module: readFileSync(paths.wasmPath) });
-      assertNativeArtifactCompatibility(wasmModule, "WASM", [
+      assertArtifactCompatibility(wasmModule, "WASM", EXPECTED_WASM_ARTIFACT_FINGERPRINT, [
         "initSync",
         "WasmDb",
         "setJsonSchemaValidator",

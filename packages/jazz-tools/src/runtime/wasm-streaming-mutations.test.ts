@@ -126,6 +126,29 @@ describe.skipIf(!hasJazzWasmBuild())("WASM streaming mutations", () => {
     write.close();
   });
 
+  it("rejects an unsupported SQLite backend before resolving its file", async () => {
+    const wasm = await loadWasmModuleForTest();
+    let pathReads = 0;
+    const storage = {
+      backend: "unsupported-browser-store",
+      get path() {
+        pathReads += 1;
+        return "/unsupported-browser-store.sqlite";
+      },
+    };
+    const node = new Uint8Array(16);
+    node[0] = 1;
+    await expect(
+      wasm.WasmDb.openBrowser(
+        storage,
+        encodeSchema(streamingApp.wasmSchema),
+        openConfig(node, testAuthorBytes("unsupported-browser-store"), 1, true),
+        "unsupported-browser-store",
+      ),
+    ).rejects.toThrow(/storage backend.*not supported/);
+    expect(pathReads).toBe(0);
+  });
+
   it("answers real WASM reads and subscriptions while a push is in flight", async () => {
     const { db, runtime, author } = await createStreamingWasmFixture();
     const upload = db.beginStreamingMutation(

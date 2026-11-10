@@ -2,7 +2,8 @@
 
 ## Independent root profiles
 
-The physical storage epoch remains 1. Each independently persisted root
+The source physical storage epoch is 1. Node admission upgrades it to epoch 2
+with `jazz.node-storage.v3`; auxiliary catalogue and account roots remain epoch 1. Each independently persisted root
 requires exactly one Jazz-owned format marker in addition to Groove's base:
 `groove.large-value.v2`, `groove.ordered-chunk-storage.v2`, and
 `groove.ordered-kv.v1`.
@@ -84,3 +85,10 @@ evidence. Current native and browser fixtures are regenerated through their
 production-adapter producers. Node, catalogue and account reopen tests cover
 their independent current profiles. The browser's replica identity and lease
 metadata remain independent physical metadata and are unchanged.
+
+## Current SQLite port
+
+The historical epoch-two proof-retention proposal is omitted. This port adds no
+node-storage v3 profile, permanent post-settlement proof or JSA1 migration.
+Historical codec bytes remain immutable; they are not an admission guarantee
+for current SQLite stores. See `dev/proofs/exclusive-read-evidence-storage-compatibility.md`.

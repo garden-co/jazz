@@ -594,8 +594,12 @@
       },
       "evidence": [
         {
-          "path": "packages/jazz-tools/tests/browser/indexeddb-physical-epoch.test.ts",
-          "anchor": "opens a manually committed epoch-one page-v1 fixture read-only, writes current data, and reopens"
+          "path": "crates/idb-tree/src/page.rs",
+          "anchor": "page_v1_encoding_has_golden_bytes_for_every_variant"
+        },
+        {
+          "path": "packages/jazz-tools/tests/browser/indexeddb-jazz-compat.test.ts",
+          "anchor": "refuses the pre-linear catalogue/history/branch/large-value corpus through public WasmDb"
         }
       ]
     },

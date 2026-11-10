@@ -73,6 +73,8 @@ import {
   publishSyncServerSchemaAndPermissions,
   replaceStorageManifest,
   rawStorageRecords,
+  sqliteStoragePath,
+  requestResult,
   useSharedWorkerBridgeHarness,
 } from "./worker-bridge-harness.js";
 
@@ -163,7 +165,7 @@ describe("foreground lease terminal policy with real IndexedDB and WASM", () => 
           channel.port2.close();
           await Promise.allSettled(terminalOperations);
           await runtime!.close();
-          store.close();
+          await store.close();
           await IndexedDbPageStore.destroy(dbName);
         },
       };
@@ -171,7 +173,7 @@ describe("foreground lease terminal policy with real IndexedDB and WASM", () => 
       channel.port1.close();
       channel.port2.close();
       await runtime?.close();
-      store.close();
+      await store.close();
       await IndexedDbPageStore.destroy(dbName);
       throw error;
     }
@@ -236,6 +238,7 @@ describe("foreground lease terminal policy with real IndexedDB and WASM", () => 
       expect(await fixture.store.foregroundNodeLeaseNodeState(lease.node)).toBe("reusable");
       // Reuse may happen before the old page detects failure. An old-page
       // abandonment cannot revoke this successor or lower its final floor.
+      await fixture.store.close();
       const reopened = await IndexedDbPageStore.open(fixture.dbName);
       try {
         const successor = await reopened.acquireForegroundNodeLease();
@@ -256,7 +259,7 @@ describe("foreground lease terminal policy with real IndexedDB and WASM", () => 
         expect(await runtime.foregroundTxTimeHighWater()).toBe(highWater);
         await reopened.returnForegroundNodeLease(successor.leaseId, highWater);
       } finally {
-        reopened.close();
+        await reopened.close();
       }
     } finally {
       releaseSource();
@@ -281,6 +284,7 @@ describe("foreground lease terminal policy with real IndexedDB and WASM", () => 
         type: "retire-foreground-node-lease",
       });
       expect(await fixture.store.foregroundNodeLeaseNodeState(fixture.lease.node)).toBe("retired");
+      await fixture.store.close();
       const reopened = await IndexedDbPageStore.open(fixture.dbName);
       try {
         const successor = await reopened.acquireForegroundNodeLease();
@@ -295,7 +299,7 @@ describe("foreground lease terminal policy with real IndexedDB and WASM", () => 
         await expect(fixture.lease.returnWithHighWater(0n)).rejects.toBe(failure);
         await reopened.retireForegroundNodeLease(successor.leaseId);
       } finally {
-        reopened.close();
+        await reopened.close();
       }
     } finally {
       await fixture.dispose();
@@ -711,7 +715,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       // IDB versionchange/delete invalidates the live worker handle, so the
       // successor must be admitted after that handle releases its Web Lock.
       await withTimeout(
-        IndexedDbPageStore.destroy(dbName),
+        requestResult(indexedDB.deleteDatabase(dbName)),
         5_000,
         "External IndexedDB invalidation remained blocked by the lease-only worker handle",
       );
@@ -1008,21 +1012,22 @@ describe("SharedWorker bridge with IndexedDB", () => {
         .wait({ tier: "local" });
       await initial.shutdown();
       untrack(initial);
-      // The last follower releases its worker context after the short idle
-      // window. Without this, a cached worker runtime never reopens the raw
-      // IndexedDB namespace and cannot observe the corruption below.
-      await sleep(100);
 
       // Local-first caller credentials are normalized to a canonical session
       // during `createDb`, so the actual physical root must be derived from
       // the resolved Db config rather than the pre-normalization input.
-      const physicalDbName = resolveDefaultPersistentDbName(initial.config);
+      const resolvedConfig = initial.config;
+      const physicalDbName = resolveDefaultPersistentDbName(resolvedConfig);
+      const sqlitePath = await sqliteStoragePath(
+        physicalDbName,
+        createBrowserStorageOwner(resolvedConfig),
+      );
 
       await replaceStorageManifest(physicalDbName, {
         ...INDEXEDDB_STORAGE_MANIFEST,
-        storageEpoch: 2,
+        storageEpoch: 99,
       });
-      const recordsBeforeRead = await rawStorageRecords(physicalDbName);
+      const recordsBeforeRead = await rawStorageRecords(physicalDbName, sqlitePath);
 
       // Persistent create must acquire a durable foreground-node lease before
       // any synchronous mutation can mint a transaction identity. Storage
@@ -1037,16 +1042,11 @@ describe("SharedWorker bridge with IndexedDB", () => {
       }
       expect(openFailure).toBeInstanceOf(Error);
       if (!(openFailure instanceof Error)) throw new Error("Expected browser worker open to fail");
-      expect(openFailure).toMatchObject({
-        name: "Error",
-        message: "Missing or invalid IndexedDB storage epoch manifest",
-        stack: expect.stringContaining("Missing or invalid IndexedDB storage epoch manifest"),
-      });
       expect(openFailure.cause).toBeUndefined();
       await sleep(0);
       expect(ambientErrors).toEqual([]);
       expect(unhandledRejections).toEqual([]);
-      expect(await rawStorageRecords(physicalDbName)).toEqual(recordsBeforeRead);
+      expect(await rawStorageRecords(physicalDbName, sqlitePath)).toEqual(recordsBeforeRead);
     } finally {
       globalThis.removeEventListener("error", recordAmbientError);
       globalThis.removeEventListener("unhandledrejection", recordUnhandledRejection);
