@@ -38,7 +38,7 @@
     "@types/node": "catalog:default",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
-    "playwright": "1.58.2",
+    "playwright": "1.61.0",
     "postcss": "^8.5.6",
     "tailwindcss": "^4.1.18",
     "tsx": "^4.21.0",
