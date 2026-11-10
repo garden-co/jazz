@@ -104,7 +104,14 @@ class SocketEvents {
 /** The most one send request carries, unless a single record is larger. */
 const MAX_SEND_BYTES = 4 * 1024 * 1024;
 
-/** One sync session over the HTTP stream transport. */
+/** The global `fetch`, looked up at each call (tests stub it). */
+const globalFetch: typeof fetch = (input, init) => fetch(input, init);
+
+/**
+ * One sync session over the HTTP stream transport. Its requests go through
+ * `request`: a backend client's sends its credential (see
+ * `credentialedTransport`).
+ */
 export class HttpStreamSocket extends SocketEvents implements BrowserWebSocket {
   binaryType: "arraybuffer" | "blob" = "arraybuffer";
   readyState = 0;
@@ -114,7 +121,10 @@ export class HttpStreamSocket extends SocketEvents implements BrowserWebSocket {
   private queued: Uint8Array[] = [];
   private sending = false;
 
-  constructor(url: string) {
+  constructor(
+    url: string,
+    private readonly request: typeof fetch = globalFetch,
+  ) {
     super();
     this.streamUrl = streamUrlForSocketUrl(url);
     void this.run();
@@ -132,7 +142,7 @@ export class HttpStreamSocket extends SocketEvents implements BrowserWebSocket {
     const session = this.session;
     this.finish(1000, "client closed");
     if (session) {
-      void fetch(`${this.streamUrl}/${encodeURIComponent(session.id)}`, {
+      void this.request(`${this.streamUrl}/${encodeURIComponent(session.id)}`, {
         method: "DELETE",
         credentials: "same-origin",
         headers: { [STREAM_KEY_HEADER]: session.key },
@@ -142,7 +152,7 @@ export class HttpStreamSocket extends SocketEvents implements BrowserWebSocket {
 
   private async run(): Promise<void> {
     try {
-      const response = await fetch(this.streamUrl, {
+      const response = await this.request(this.streamUrl, {
         method: "POST",
         credentials: "same-origin",
         signal: this.abort.signal,
@@ -205,15 +215,18 @@ export class HttpStreamSocket extends SocketEvents implements BrowserWebSocket {
           take += 1;
         }
         const body = concatBytes(this.queued.splice(0, take));
-        const response = await fetch(`${this.streamUrl}/${encodeURIComponent(this.session.id)}`, {
-          method: "POST",
-          credentials: "same-origin",
-          headers: {
-            "Content-Type": "application/octet-stream",
-            [STREAM_KEY_HEADER]: this.session.key,
+        const response = await this.request(
+          `${this.streamUrl}/${encodeURIComponent(this.session.id)}`,
+          {
+            method: "POST",
+            credentials: "same-origin",
+            headers: {
+              "Content-Type": "application/octet-stream",
+              [STREAM_KEY_HEADER]: this.session.key,
+            },
+            body: body as BodyInit,
           },
-          body: body as BodyInit,
-        });
+        );
         if (!response.ok) throw new Error(`HTTP stream send refused (${response.status})`);
       }
     } catch (error) {
@@ -237,7 +250,7 @@ export class HttpStreamSocket extends SocketEvents implements BrowserWebSocket {
 }
 
 /**
- * Endpoints on this page that sync over the HTTP stream instead of a
+ * Endpoints in this process (page) that sync over the HTTP stream instead of a
  * socket. Two answers to a plain request for the socket path, after a socket
  * failed before it opened, switch an endpoint:
  * - a createJazz backend that can't upgrade sockets: 426 with the stream marker;
@@ -293,9 +306,10 @@ const refusedOrigins = new Set<string>();
  */
 async function probeSocketPath(
   url: string,
+  request: typeof fetch,
 ): Promise<"stream" | "upgrades" | "refused" | "unknown"> {
   try {
-    const response = await fetch(url.replace(/^ws/, "http"), {
+    const response = await request(url.replace(/^ws/, "http"), {
       method: "POST",
       credentials: "same-origin",
       // A stall that holds plain requests too must not keep the socket
@@ -315,8 +329,12 @@ async function probeSocketPath(
  * Upgrades that got no answer at all (`hung`) count on their own: a backend
  * that restarts or drains refuses a socket, it doesn't leave one hanging,
  * so fewer of them in a row ({@link UPGRADE_HANGS_BEFORE_STREAM}) switch. */
-async function servesStreamInstead(url: string, hung = false): Promise<boolean> {
-  const answer = await probeSocketPath(url);
+async function servesStreamInstead(
+  url: string,
+  hung: boolean,
+  request: typeof fetch,
+): Promise<boolean> {
+  const answer = await probeSocketPath(url, request);
   if (answer === "stream") return true;
   if (answer !== "upgrades") {
     // Not a backend that answered and upgrades (down, restarting, or
@@ -342,24 +360,41 @@ async function servesStreamInstead(url: string, hung = false): Promise<boolean> 
   hungUpgrades.delete(url);
   if (hangsSwitch) {
     console.warn(
-      `jazz: ${hangs} WebSockets in a row to ${url} got no answer in ${SOCKET_OPEN_DEADLINE_MS / 1000} s, although the backend answers and upgrades them: something in between (a proxy or dev server) doesn't pass WebSocket upgrades on. Syncing over the HTTP stream instead, for as long as this page is open.`,
+      `jazz: ${hangs} WebSockets in a row to ${url} got no answer in ${SOCKET_OPEN_DEADLINE_MS / 1000} s, although the backend answers and upgrades them: something in between (a proxy or dev server) doesn't pass WebSocket upgrades on. Syncing over the HTTP stream instead, for as long as this client runs.`,
     );
     return true;
   }
   console.warn(
-    `jazz: ${failures} WebSockets in a row to ${url} failed, although the backend answers and upgrades them: something in between (a proxy or dev server) doesn't pass WebSocket upgrades on. Syncing over the HTTP stream instead, for as long as this page is open.`,
+    `jazz: ${failures} WebSockets in a row to ${url} failed, although the backend answers and upgrades them: something in between (a proxy or dev server) doesn't pass WebSocket upgrades on. Syncing over the HTTP stream instead, for as long as this client runs.`,
   );
   return true;
 }
 
+export type HttpStreamFallbackOptions = {
+  /** How the probe and the stream's requests go out (default: the global `fetch`). */
+  fetch?: typeof fetch;
+  /**
+   * Why a socket that failed before opening, and doesn't give way to the
+   * stream, failed: its error and close then say so. On Node, the HTTP
+   * status its upgrade got, which a WebSocket doesn't show.
+   */
+  describeFailedUpgrade?: (url: string) => Promise<string | undefined>;
+};
+
 /**
- * A WebSocket constructor for a same-origin Jazz endpoint: a native socket
- * when the host upgrades it, else, on a createJazz backend that can't, the
- * HTTP stream transport. The switch happens before the session opens, so the
- * carrier never sees it.
+ * A WebSocket constructor for a Jazz endpoint the client can reach with
+ * plain requests too (same-origin in a browser, a backend client's main
+ * backend): a native socket when the host upgrades it, else, on a
+ * createJazz backend that can't, the HTTP stream transport. The switch
+ * happens before the session opens, so the carrier never sees it.
  */
-export function sameOriginWebSocketConstructor(native: WebSocketConstructor): WebSocketConstructor {
-  return class SameOriginSocket extends SocketEvents implements BrowserWebSocket {
+export function httpStreamFallbackWebSocket(
+  native: WebSocketConstructor,
+  options: HttpStreamFallbackOptions = {},
+): WebSocketConstructor {
+  const request = options.fetch ?? globalFetch;
+  const describeFailedUpgrade = options.describeFailedUpgrade;
+  return class StreamFallbackSocket extends SocketEvents implements BrowserWebSocket {
     binaryType: "arraybuffer" | "blob" = "arraybuffer";
     private inner: BrowserWebSocket;
     private settled = false;
@@ -371,7 +406,7 @@ export function sameOriginWebSocketConstructor(native: WebSocketConstructor): We
     constructor(private readonly url: string) {
       super();
       const stream = streamEndpoints.has(url);
-      this.inner = stream ? new HttpStreamSocket(url) : this.openNative();
+      this.inner = stream ? new HttpStreamSocket(url, request) : this.openNative();
       if (stream) this.forward(this.inner);
     }
 
@@ -405,14 +440,23 @@ export function sameOriginWebSocketConstructor(native: WebSocketConstructor): We
         }
         failure = { [kind]: event };
         this.probing = true;
-        void servesStreamInstead(this.url, hung).then((stream) => {
+        void servesStreamInstead(this.url, hung, request).then(async (stream) => {
+          const why =
+            stream || this.settled
+              ? undefined
+              : await describeFailedUpgrade?.(this.url).catch(() => undefined);
           this.probing = false;
           if (this.settled) return;
           this.settled = true;
           if (stream) {
             streamEndpoints.add(this.url);
-            this.inner = new HttpStreamSocket(this.url);
+            this.inner = new HttpStreamSocket(this.url, request);
             this.forward(this.inner);
+            return;
+          }
+          if (why) {
+            this.emit("error", new Error(why));
+            this.emit("close", { code: 1006, reason: why });
             return;
           }
           if (failure?.error !== undefined) this.emit("error", failure.error);

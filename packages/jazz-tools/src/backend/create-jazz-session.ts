@@ -2,6 +2,7 @@ import { textAnchorsFrom, type TextAnchors } from "../runtime/text-anchors.js";
 import { createHash, randomUUID } from "node:crypto";
 import { clientScope } from "../runtime/client-scope.js";
 import { admitBackendSecret } from "./admission.js";
+import { describeFailedUpgrade } from "./upgrade-status.js";
 import {
   credentialedTransport,
   type BackendClientCredential,
@@ -394,7 +395,7 @@ export async function openJazzSession(
   const transport =
     input.credential === undefined
       ? undefined
-      : credentialedTransport(input.serverUrl, input.credential);
+      : credentialedTransport(input.serverUrl, input.credential, globalThis, describeFailedUpgrade);
   const config: OpenJazzSessionConfig & { webSocket?: WebSocketConstructor } = {
     ...input,
     webSocket: transport?.WebSocket,
