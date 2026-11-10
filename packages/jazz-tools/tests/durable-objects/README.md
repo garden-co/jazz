@@ -20,6 +20,8 @@ Use `RUSTC_WRAPPER= CC=cc CXX=c++` if local compiler wrappers are unavailable.
 
 - `test-create-jazz`, `test-worker-backend`, `test-accounts`: publication,
   admission, policy-scoped reads/writes, account/guest/revocation, Worker sockets.
+- `test-thin-parts`: fragmented requests, malformed/interleaved parts, per-session
+  and aggregate budgets, disconnect cleanup and the production inactivity timeout.
 - `test-lifecycle`, `test-crash`: local reconstruction, lost uploads/acknowledgements,
   retry/idempotency and atomicity after process termination.
 - `test-catalogue`, `test-scopes`, `test-values`, `test-server-core`: catalogue
@@ -38,13 +40,15 @@ The scope check currently fails because it expects an empty staged transaction
 to succeed, but managed storage now rejects transaction begin until persistent
 overlays are implemented. The crash test also stops at `beginTransaction()`
 because the backend now uses a thin client, whose transactions are unsupported.
-The migration retains both tests and their expectations.
+Both tests are temporarily skipped in Vitest; their assertions remain unchanged.
 Do not interpret a subset passing as a full conformance pass.
 
 Transaction overlays, durable chunk storage and hibernation remain deferred;
 see the [existing plan](../../../../crates/jazz-wasm/durable-object/PLAN.md).
 DO integers are limited to ±(2^53−1); REAL values retain IEEE-754 behavior.
-Backend transactions and split thin requests are unsupported. Worker applications
+Thin requests may span frames, within 8 MiB per session and 16 MiB aggregate
+DO ingress reservations. Incomplete requests expire after 90 seconds without a
+part; over-budget input is refused. Backend transactions remain unsupported. Worker applications
 use `jazz-tools/backend/worker` with `nodejs_compat`, request-owned clients and
 WebSockets; their HTTP-stream fallback and text-anchor helpers are unsupported.
 Keep deployed behavior and performance claims separate from local results.

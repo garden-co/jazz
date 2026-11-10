@@ -47,6 +47,7 @@ export function createJazzDurableObject({
       this.pendingBytes = 0;
       this.tickScheduled = false;
       this.failed = false;
+      this.thinTimer = undefined;
       this.sessions = new Set();
       this.socketQueuedBytes = 0;
     }
@@ -67,9 +68,14 @@ export function createJazzDurableObject({
           if (this.core && !this.failed) {
             await this.core.tick();
             this.flushSockets();
+            clearTimeout(this.thinTimer);
+            const delay = this.core.thinInputTimeout();
+            this.thinTimer =
+              delay === undefined ? undefined : setTimeout(() => this.schedule(), Math.ceil(delay));
           }
         }).catch((error) => {
           this.failed = true;
+          clearTimeout(this.thinTimer);
           for (const session of this.sessions) session.close(1011, "authority failed");
           console.error("Jazz authority tick failed", error);
         });

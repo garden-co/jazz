@@ -189,6 +189,8 @@ type RequestFuture = Pin<Box<dyn Future<Output = (ThinState, Option<ThinBody>)>>
 pub(super) struct ThinSession {
     pub(super) input: super::SessionInput,
     ingress: Arc<tokio::sync::Semaphore>,
+    assembly: super::thin_input::ThinRequestInput,
+    part_deadline: Option<web_time::Instant>,
     // A running request owns the state; cancellation drops it and its resources.
     task: Option<(u64, RequestFuture)>,
     state: Option<ThinState>,
@@ -467,6 +469,8 @@ impl Owner {
                     requested: Rc::clone(&self.input_requested),
                 },
                 ingress: Arc::new(tokio::sync::Semaphore::new(SESSION_QUEUE_BUDGET)),
+                assembly: Default::default(),
+                part_deadline: None,
                 held: Rc::clone(&state.held),
                 egress,
                 task: None,
@@ -528,6 +532,19 @@ impl Owner {
     pub(super) fn drain_thin_input(&mut self) {
         let mut closed = Vec::new();
         for (id, thin) in &mut self.thin {
+            if thin
+                .part_deadline
+                .is_some_and(|deadline| deadline <= web_time::Instant::now())
+            {
+                let _ = thin.output.send((
+                    Err(super::thin_input::malformed(
+                        "a split thin request stalled before its next part",
+                    )),
+                    0,
+                ));
+                closed.push(*id);
+                continue;
+            }
             let frames = {
                 let mut inbox = thin.input.inbox.borrow_mut();
                 if inbox.closed {
@@ -539,27 +556,39 @@ impl Owner {
             };
             for bytes in frames {
                 let admitted = (|| {
-                    let room = Arc::clone(&thin.ingress)
-                        .try_acquire_many_owned(bytes.len().max(1) as u32)
-                        .map_err(|_| "thin request ingress budget exceeded")?;
-                    match jazz::wire::decode_frame(&bytes).map_err(|_| "invalid thin frame")? {
-                        jazz::wire::WireFrame::ThinRequest(request) => {
-                            thin.queued
-                                .push_back((request, ThinIngress::from_permits(room, None)));
-                            Ok(())
-                        }
-                        _ => Err("Only whole thin requests are supported by this host input yet"),
+                    use super::thin_input::{THIN_PART_TIMEOUT, malformed};
+                    let frame = jazz::wire::decode_frame(&bytes)
+                        .map_err(|_| malformed("invalid thin frame"))?;
+                    let room =
+                        if let Some((size, _)) = thin.assembly.reservation(&frame, bytes.len())? {
+                            let backpressure = |_| {
+                                jazz::wire::WireError::new(
+                                    jazz::wire::WireErrorCode::Backpressure,
+                                    jazz::wire::WireRetry::Later,
+                                    "thin request ingress budget exceeded",
+                                )
+                            };
+                            let session = Arc::clone(&thin.ingress)
+                                .try_acquire_many_owned(size.max(1) as u32)
+                                .map_err(backpressure)?;
+                            let server = Arc::clone(&self.thin_input_budget)
+                                .try_acquire_many_owned(size.max(1) as u32)
+                                .map_err(backpressure)?;
+                            Some(ThinIngress::from_permits(session, Some(server)))
+                        } else {
+                            None
+                        };
+                    if let Some(request) = thin.assembly.push(frame, room)? {
+                        thin.queued.push_back(request);
                     }
+                    thin.part_deadline = thin
+                        .assembly
+                        .is_joining()
+                        .then(|| web_time::Instant::now() + THIN_PART_TIMEOUT);
+                    Ok::<_, jazz::wire::WireError>(())
                 })();
                 if let Err(message) = admitted {
-                    let _ = thin.output.send((
-                        Err(jazz::wire::WireError::new(
-                            jazz::wire::WireErrorCode::UnsupportedFeature,
-                            jazz::wire::WireRetry::Never,
-                            message,
-                        )),
-                        0,
-                    ));
+                    let _ = thin.output.send((Err(message), 0));
                     closed.push(*id);
                     break;
                 }
@@ -568,6 +597,24 @@ impl Owner {
         for id in closed {
             self.close_thin_session(id);
         }
+    }
+
+    /// Configure aggregate room for hosts feeding SessionInput directly, before admission.
+    pub fn set_thin_input_budget(&mut self, bytes: usize) {
+        assert!(
+            self.thin.is_empty(),
+            "configure ingress before admitting sessions"
+        );
+        self.thin_input_budget = Arc::new(tokio::sync::Semaphore::new(bytes));
+    }
+
+    /// Host timer deadline; partial input alone must not cause a busy tick loop.
+    pub fn thin_input_timeout(&self) -> Option<std::time::Duration> {
+        self.thin
+            .values()
+            .filter_map(|thin| thin.part_deadline)
+            .min()
+            .map(|deadline| deadline.saturating_duration_since(web_time::Instant::now()))
     }
 
     pub(super) fn thin_pending(&self) -> bool {
@@ -642,7 +689,9 @@ async fn serve_thin(owner: &Db, thin: &mut ThinState, id: u64, op: ThinOp) -> Op
                 "backend scope requires an authenticated SYSTEM connection",
             ));
         }
-        let request = match jazz::wire::decode_frame(&request) {
+        // The outer envelope was already admitted/reassembled within the thin
+        // message budget; its inner request may exceed a single wire frame.
+        let request = match jazz::wire::decode_postcard_frame(&request) {
             Ok(WireFrame::ThinRequest(request)) if request.id == id => request,
             _ => return Some(argument("invalid backend-scoped request")),
         };

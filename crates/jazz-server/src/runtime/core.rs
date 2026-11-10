@@ -123,6 +123,7 @@ pub struct Owner {
     pub(super) sessions: HashMap<ServerSession, OwnerSession>,
     /// Thin client connections (SPEC 8.14), which are not sync sessions.
     pub(super) thin: HashMap<ServerSession, thin::ThinSession>,
+    pub(super) thin_input_budget: Arc<tokio::sync::Semaphore>,
     /// The tick in progress's time slice, shared with every session's queues.
     pub(super) slice: Rc<TickSlice>,
     pub(super) catalogue: Catalogue,
@@ -592,6 +593,7 @@ impl Owner {
             input_requested: Rc::default(),
             sessions: HashMap::new(),
             thin: HashMap::new(),
+            thin_input_budget: Arc::new(tokio::sync::Semaphore::new(THIN_INGRESS_SERVER_BUDGET)),
             slice: Rc::default(),
             catalogue,
             app,

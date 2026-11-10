@@ -92,7 +92,8 @@ impl WasmServerCore {
         schedule: js_sys::Function,
     ) -> Result<Self, JsValue> {
         let wake = scheduler(schedule);
-        let core = ServerCore::from_db(db, app.clone(), wake.clone()).map_err(error)?;
+        let mut core = ServerCore::from_db(db, app.clone(), wake.clone()).map_err(error)?;
+        core.set_thin_input_budget(16 * 1024 * 1024);
         core.accounts().initialize().map_err(error)?;
         Ok(Self {
             app,
@@ -131,6 +132,16 @@ impl WasmServerCore {
 
 #[wasm_bindgen]
 impl WasmServerCore {
+    /// Milliseconds until the next incomplete request expires, or no timer.
+    #[wasm_bindgen(js_name = thinInputTimeout)]
+    pub fn thin_input_timeout(&self) -> Option<f64> {
+        self.core
+            .borrow()
+            .as_ref()?
+            .thin_input_timeout()
+            .map(|delay| delay.as_secs_f64() * 1000.0)
+    }
+
     /// Catalogue reads for an authenticated host adapter. These methods do not
     /// authenticate HTTP requests: the host must enforce its admin credential.
     #[wasm_bindgen(js_name = catalogueSnapshot)]

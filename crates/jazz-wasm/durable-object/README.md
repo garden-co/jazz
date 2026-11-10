@@ -54,8 +54,8 @@ Jazz admission/protocol path. A successful upgrade retains its client until
 socket close/error and schedules cleanup with `ctx.waitUntil`. Ordinary HTTP
 requests and custom database handlers await their work and close before returning.
 The HTTP-stream fallback needs state across requests and is explicitly refused
-(501); WebSocket capability probes do not advertise it. Backend transactions,
-DO split thin requests and durable large values retain their existing limitations.
+(501); WebSocket capability probes do not advertise it. Backend transactions
+and durable large values retain their existing limitations.
 Worker text-anchor helpers are unsupported. Node attachment APIs remain available
 only from the Node entry.
 

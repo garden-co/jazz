@@ -6,6 +6,7 @@ pub mod deployment;
 mod permissions_validation;
 pub mod session_admission;
 mod thin;
+pub(crate) mod thin_input;
 pub mod websocket;
 
 #[cfg(feature = "native")]

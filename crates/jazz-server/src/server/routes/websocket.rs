@@ -1096,14 +1096,7 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
     }
 }
 
-/// How long a split thin request may go without its next part before its
-/// connection ends, so a stalled upload does not keep the server's room
-/// for splits. Every part but the last is full, so this is also the
-/// slowest a split may arrive (one wire frame per timeout).
-#[cfg(not(test))]
-const THIN_PART_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
-#[cfg(test)]
-const THIN_PART_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+use crate::runtime::thin_input::{THIN_PART_TIMEOUT, ThinRequestInput};
 
 /// The wait for room for a sync batch in its session's ingress budget.
 type WireAdmission = std::pin::Pin<
@@ -1123,9 +1116,7 @@ type ThinAdmission = std::pin::Pin<
 struct ThinReader {
     /// Frames read and not yet handed on, oldest first, with their length.
     queue: VecDeque<(WireFrame, usize)>,
-    assembler: jazz::thin::ThinAssembler,
-    /// The room of the split being joined.
-    joining: Option<crate::runtime::ThinIngress>,
+    assembler: ThinRequestInput,
     /// Room granted for the frame at the head of `queue`.
     granted: Option<crate::runtime::ThinIngress>,
     /// The wait for that room.
@@ -1199,16 +1190,7 @@ impl ThinReader {
     ) -> Result<(), WireError> {
         while let Some((frame, len)) = self.queue.front() {
             // A request too large for one frame arrives in parts, back to back.
-            let needs = match frame {
-                WireFrame::ThinPart(part) if !self.assembler.is_joining() => {
-                    Some((part.total().map_err(thin_malformed)?, true))
-                }
-                WireFrame::ThinPart(_) => None,
-                _ if self.assembler.is_joining() => {
-                    return Err(thin_malformed("a thin frame arrived inside a split one"));
-                }
-                _ => Some((*len, false)),
-            };
+            let needs = self.assembler.reservation(frame, *len)?;
             if let Some((bytes, split)) = needs
                 && self.granted.is_none()
             {
@@ -1219,31 +1201,15 @@ impl ThinReader {
                 return Ok(());
             }
             let (frame, _) = self.queue.pop_front().expect("a frame at the head");
-            let (frame, room) = match frame {
-                WireFrame::ThinPart(part) => {
-                    if !self.assembler.is_joining() {
-                        self.joining = self.granted.take();
-                    }
-                    let Some(joined) = self.assembler.push(part).map_err(thin_malformed)? else {
-                        self.part_deadline = Some(tokio::time::Instant::now() + THIN_PART_TIMEOUT);
-                        continue;
-                    };
-                    self.part_deadline = None;
-                    let room = self.joining.take().expect("a joined frame was admitted");
-                    let frame = jazz::wire::decode_postcard_frame(&joined)
-                        .map_err(|_| thin_malformed("a split thin frame does not decode"))?;
-                    (frame, room)
-                }
-                frame => (
-                    frame,
-                    self.granted.take().expect("a whole frame was admitted"),
-                ),
-            };
-            match frame {
-                WireFrame::ThinRequest(request) => runtime
+            let request = self.assembler.push(frame, self.granted.take())?;
+            self.part_deadline = self
+                .assembler
+                .is_joining()
+                .then(|| tokio::time::Instant::now() + THIN_PART_TIMEOUT);
+            if let Some((request, room)) = request {
+                runtime
                     .receive_thin_request(session, request, room)
-                    .map_err(thin_stopped)?,
-                _ => return Err(thin_malformed("a thin connection sends only thin requests")),
+                    .map_err(thin_stopped)?;
             }
         }
         Ok(())
