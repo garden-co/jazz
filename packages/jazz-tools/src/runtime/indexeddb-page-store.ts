@@ -292,14 +292,49 @@ export class IndexedDbPageStore {
       throw error;
     }
     let rejectedPreSettlementDatabase = false;
+    let preSettlementRejection: Error | undefined;
     request.onupgradeneeded = (event) => {
       if (event.oldVersion !== 0) {
         // Do not commit even an auxiliary store into an alpha namespace. The
         // aborted upgrade leaves the prior version and every ordinary page
         // unchanged before the caller observes the unsupported-epoch error.
         rejectedPreSettlementDatabase = true;
-        request.result.close();
-        request.transaction?.abort();
+        const database = request.result;
+        const transaction = request.transaction;
+        const refuse = () => {
+          database.close();
+          transaction?.abort();
+        };
+        if (
+          options.format === "sqlite" &&
+          event.oldVersion === INDEXEDDB_BTREE_DATABASE_VERSION &&
+          transaction &&
+          database.objectStoreNames.contains(INDEXEDDB_STORAGE_MANIFEST_STORE)
+        ) {
+          // Inspect only the legacy admission header in the aborting upgrade.
+          // No legacy page is decoded and no version or record is committed.
+          const plane = transaction.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE);
+          const owner = plane.get(INDEXEDDB_BROWSER_RUNTIME_OWNER_KEY);
+          const manifest = plane.get(INDEXEDDB_STORAGE_MANIFEST_KEY);
+          let remaining = 2;
+          const read = () => {
+            if (--remaining !== 0) return;
+            try {
+              live();
+              if (owner.result !== undefined && owner.result !== options.owner) {
+                throw new Error(
+                  `IndexedDB database ${name} is already owned by a different Jazz browser session`,
+                );
+              }
+              assertStorageManifest(manifest.result);
+            } catch (error) {
+              if (error instanceof Error) preSettlementRejection = error;
+            }
+            refuse();
+          };
+          owner.onsuccess = read;
+          manifest.onsuccess = read;
+        } else refuse();
         return;
       }
       const db = request.result;
@@ -337,7 +372,9 @@ export class IndexedDbPageStore {
     } catch (error) {
       if (!options.epoch) await epoch.release();
       if (rejectedPreSettlementDatabase) {
-        throw new Error("Missing or invalid IndexedDB storage epoch manifest");
+        throw (
+          preSettlementRejection ?? new Error("Missing or invalid IndexedDB storage epoch manifest")
+        );
       }
       throw error;
     }

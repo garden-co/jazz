@@ -33,6 +33,7 @@ import { createBrowserPhysicalDatabaseName } from "../../src/runtime/browser-wor
 import { type Db } from "../../src/runtime/db.js";
 import {
   INDEXEDDB_BROWSER_RUNTIME_OWNER_KEY,
+  INDEXEDDB_REPLICA_NODE_KEY,
   INDEXEDDB_BTREE_DATABASE_VERSION,
   INDEXEDDB_BTREE_METADATA_STORE,
   INDEXEDDB_BTREE_PAGES_STORE,
@@ -41,6 +42,11 @@ import {
   INDEXEDDB_STORAGE_MANIFEST_STORE,
   IndexedDbPageStore,
 } from "../../src/runtime/indexeddb-page-store.js";
+import {
+  decodeSqliteBrowserRoot,
+  sqliteBrowserDescriptor,
+  SQLITE_BROWSER_DATABASE_VERSION,
+} from "../../src/runtime/browser-sqlite-storage.js";
 import {
   createJazzServerTransportControl,
   getJazzServerInfo,
@@ -184,8 +190,9 @@ describe("browser Jazz storage compatibility corpus", () => {
     receipt(`cleanup:dbs-done; pinned-phase=${pinnedCorpusPhase}`);
     await Promise.all(
       [...databaseNames].map(async (name) => {
+        const path = await sqliteFilePath(name);
         await IndexedDbPageStore.destroy(name);
-        await deleteSqliteBlocks(await sqliteFilePath(name));
+        await deleteSqliteBlocks(path);
       }),
     );
     databaseNames.clear();
@@ -272,9 +279,9 @@ describe("browser Jazz storage compatibility corpus", () => {
     await shutdownTrackedDb(db, "producer");
     await sleep(100);
     const candidate = await rawBrowserStore(physicalDbName);
-    expect(
-      rawManifest(candidate).find(([key]) => key === INDEXEDDB_STORAGE_MANIFEST_KEY)?.[1],
-    ).toEqual(INDEXEDDB_STORAGE_MANIFEST);
+    const root = sqliteRootFromRecords(candidate, physicalDbName);
+    expect(root.state).toBe("ready");
+    expect(root.name).toBe(physicalDbName);
     expect(JSON.parse(candidate[SQLITE_BLOCKS]!)).not.toHaveLength(0);
     // Validate the raw candidate through a real offline reopen before export.
     await transport.block();
@@ -523,6 +530,10 @@ describe("browser Jazz storage compatibility corpus", () => {
     cleanup.untrack(db);
     await sleep(100);
 
+    const validRecords = await rawRecords(physicalDbName);
+    const validManifest = rawManifest(validRecords).find(
+      ([key]) => key === INDEXEDDB_STORAGE_MANIFEST_KEY,
+    )![1];
     await replaceManifest(physicalDbName, { ...INDEXEDDB_STORAGE_MANIFEST, storageEpoch: 2 });
     const rawBeforeRejectedRead = await rawBrowserStore(physicalDbName);
     // Schema selection is lazy, but persistent construction must first obtain
@@ -533,9 +544,10 @@ describe("browser Jazz storage compatibility corpus", () => {
     try {
       await expect(
         withTimeout(createDb(config), 5_000, "corrupt epoch open did not reject"),
-      ).rejects.toThrow("Missing or invalid IndexedDB storage epoch manifest");
+      ).rejects.toThrow("Missing or invalid SQLite browser storage manifest");
       expect(await rawBrowserStore(physicalDbName)).toEqual(rawBeforeRejectedRead);
     } finally {
+      await replaceManifest(physicalDbName, restoreStructuredCloneValue(validManifest, true));
       await cleanup.cleanup();
     }
   }, 90_000);
@@ -570,7 +582,15 @@ describe("browser Jazz storage compatibility corpus", () => {
     });
     const account = accounts.restoreLocalFirst(CORPUS_SECRET);
     expect(account.id).toBe(owner.auth.account);
-    const base = uniqueDbName(dbName);
+    const epoch = rawManifest(records).find(([key]) => key === INDEXEDDB_STORAGE_MANIFEST_KEY)?.[1];
+    const boundName = Array.isArray(epoch)
+      ? (JSON.parse(
+          new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(epoch)),
+        )[1] as string)
+      : undefined;
+    const base = boundName
+      ? boundName.slice(0, boundName.lastIndexOf("::jazz-browser-v1::"))
+      : uniqueDbName(dbName);
     const config: DbConfig = {
       appId: owner.appId,
       account,
@@ -582,6 +602,10 @@ describe("browser Jazz storage compatibility corpus", () => {
       { ...config, accountId: owner.auth.account, accountRegistryAuthority: owner.auth.registry },
       base,
     );
+    if (boundName) {
+      expect(physicalDbName).toBe(boundName);
+      sqliteRootFromRecords(records, physicalDbName);
+    }
     databaseNames.add(physicalDbName);
     return { config, physicalDbName, dbName: base };
   }
@@ -639,7 +663,38 @@ const SQLITE_BLOCKS = "jazz-idb/blocks";
  * The SQLite file the worker keeps for a physical root: named by a hash of
  * the root's name (see `StoreSpec::from_js` in crates/jazz-wasm/src/browser.rs).
  */
+function sqliteRootFromRecords(records: Record<string, string>, name: string) {
+  const manifest = rawManifest(records);
+  const owner = manifest.find(([key]) => key === INDEXEDDB_BROWSER_RUNTIME_OWNER_KEY)?.[1];
+  const node = manifest.find(([key]) => key === INDEXEDDB_REPLICA_NODE_KEY)?.[1];
+  const epoch = manifest.find(([key]) => key === INDEXEDDB_STORAGE_MANIFEST_KEY)?.[1];
+  if (typeof owner !== "string" || !Array.isArray(node) || !Array.isArray(epoch)) {
+    throw new Error("Missing canonical SQLite corpus root");
+  }
+  return decodeSqliteBrowserRoot(Uint8Array.from(epoch), name, owner, Uint8Array.from(node));
+}
+
 async function sqliteFilePath(physicalDbName: string): Promise<string> {
+  const database = await requestResult(indexedDB.open(physicalDbName));
+  try {
+    if (database.version === SQLITE_BROWSER_DATABASE_VERSION) {
+      const transaction = database.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readonly");
+      const done = transactionDone(transaction);
+      const node = await requestResult(
+        transaction.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE).get(INDEXEDDB_REPLICA_NODE_KEY),
+      );
+      await done;
+      if (!(node instanceof ArrayBuffer) || node.byteLength !== 16)
+        throw new Error("Missing fixture replica identity");
+      const hex = Array.from(new Uint8Array(node), (byte) =>
+        byte.toString(16).padStart(2, "0"),
+      ).join("");
+      return `/jazz-sqlite-v1-${hex}.sqlite`;
+    }
+  } finally {
+    database.close();
+  }
+  // Historical fixtures retain their exact historical filename rule.
   const digest = new Uint8Array(
     await crypto.subtle.digest("SHA-256", new TextEncoder().encode(physicalDbName)),
   );
@@ -734,11 +789,7 @@ async function sha256Hex(text: string): Promise<string> {
  */
 async function rawRecords(name: string): Promise<Record<string, string>> {
   const database = await requestResult(indexedDB.open(name));
-  const storeNames = [
-    INDEXEDDB_BTREE_PAGES_STORE,
-    INDEXEDDB_BTREE_METADATA_STORE,
-    INDEXEDDB_STORAGE_MANIFEST_STORE,
-  ];
+  const storeNames = Array.from(database.objectStoreNames);
   const transaction = database.transaction(storeNames, "readonly");
   const records = Object.fromEntries(
     await Promise.all(
@@ -898,19 +949,19 @@ async function replaceManifest(name: string, manifest: unknown): Promise<void> {
 }
 
 async function installRawRecords(name: string, records: Record<string, string>): Promise<void> {
-  const request = indexedDB.open(name, INDEXEDDB_BTREE_DATABASE_VERSION);
+  const epoch = rawManifest(records).find(([key]) => key === INDEXEDDB_STORAGE_MANIFEST_KEY)?.[1];
+  const sqlite = Array.isArray(epoch);
+  if (sqlite) sqliteRootFromRecords(records, name);
+  const names = Object.keys(records).filter((name) => name !== SQLITE_BLOCKS);
+  const request = indexedDB.open(
+    name,
+    sqlite ? SQLITE_BROWSER_DATABASE_VERSION : INDEXEDDB_BTREE_DATABASE_VERSION,
+  );
   request.onupgradeneeded = () => {
     const database = request.result;
-    database.createObjectStore(INDEXEDDB_BTREE_PAGES_STORE);
-    database.createObjectStore(INDEXEDDB_BTREE_METADATA_STORE);
-    database.createObjectStore(INDEXEDDB_STORAGE_MANIFEST_STORE);
+    for (const storeName of names) database.createObjectStore(storeName);
   };
   const database = await requestResult(request);
-  const names = [
-    INDEXEDDB_BTREE_PAGES_STORE,
-    INDEXEDDB_BTREE_METADATA_STORE,
-    INDEXEDDB_STORAGE_MANIFEST_STORE,
-  ];
   const transaction = database.transaction(names, "readwrite");
   for (const storeName of names) {
     // Exact fixture replacement, not a merge with an earlier bootstrap root.
@@ -921,7 +972,9 @@ async function installRawRecords(name: string, records: Record<string, string>):
         .put(
           restoreStructuredCloneValue(
             value,
-            storeName === INDEXEDDB_BTREE_PAGES_STORE || key === "replica-node-v1",
+            storeName === INDEXEDDB_BTREE_PAGES_STORE ||
+              key === INDEXEDDB_REPLICA_NODE_KEY ||
+              (key === INDEXEDDB_STORAGE_MANIFEST_KEY && Array.isArray(value)),
           ),
           key,
         );
