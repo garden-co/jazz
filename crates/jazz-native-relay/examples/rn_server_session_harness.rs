@@ -1,5 +1,7 @@
 //! Local-only Core harness for Android/iOS installed-artifact acceptance.
 //! The device retains its own accounts; the host supplies only endpoint/control metadata.
+//! Devices reach this Core through the app's backend (`scripts/device-backend.mjs`),
+//! which the host driver starts with the admin secret it gives both.
 
 use std::{
     collections::HashMap,
@@ -12,9 +14,9 @@ mod device_fixture;
 
 use jazz::query::Query;
 
-use jazz::tools::{AppContext, AppId, ClientStorage, DurabilityTier, Value};
+use jazz::tools::{AppContext, AppId, ClientStorage, DurabilityTier, Session, Value};
 use jazz_native_relay as _;
-use jazz_server::{JazzServer, TestJwtIssuer};
+use jazz_server::JazzServer;
 use jazz_testkit::{connect, wait_for_query};
 
 fn main() {
@@ -36,16 +38,17 @@ fn main() {
 async fn run() {
     let run_nonce = std::env::var("JAZZ_DEVICE_RUN_NONCE").expect("host run nonce is required");
     let title = format!("high-level-foreground-row:{run_nonce}");
-    let issuer = TestJwtIssuer::start().await;
     let app_id = AppId::from_name("jazz-device-acceptance");
     let schema = device_fixture::schema();
+    let admin_secret =
+        std::env::var("JAZZ_DEVICE_ADMIN_SECRET").expect("host admin secret is required");
     let server_storage = tempfile::tempdir().expect("persistent Core storage");
     let core = JazzServer::builder()
         .with_app_id(app_id)
         .with_data_dir(server_storage.path())
         .with_persistent_storage()
         .with_schema(schema.clone())
-        .with_jwks_url(issuer.endpoint())
+        .with_admin_secret(admin_secret.clone())
         .start()
         .await
         .expect("start test server");
@@ -60,9 +63,12 @@ async fn run() {
         data_dir: observer_storage.path().to_owned(),
         storage: ClientStorage::Memory,
         account_id: None,
-        jwt_token: Some(TestJwtIssuer::jwt_for_user("rn-device-core-observer")),
-        backend_secret: None,
-        admin_secret: Some(core.admin_secret().to_owned()),
+        jwt_token: None,
+        // A user the app's backend opens a session for, as createJazz does.
+        backend_secret: Some(core.backend_secret().to_owned()),
+        backend_session: Some(Session::new("jazz:backend", "rn-device-core-observer")),
+        bundle: core.latest_bundle(),
+        admin_secret: None,
         migrations: Default::default(),
     })
     .await
@@ -73,6 +79,7 @@ async fn run() {
     // process means the same harness remains usable by non-Android hosts.
     let receipt = serde_json::json!({
         "server_port": core.port(),
+        "app_id": core.app_id().to_string(),
     });
     println!("JAZZ_RN_SERVER_SESSION {receipt}");
     std::io::stdout().flush().expect("flush harness receipt");
@@ -110,7 +117,6 @@ async fn run() {
     .expect("join control reader");
     assert_eq!(line.trim(), "interrupt-server");
     let server_port = core.port();
-    let admin_secret = core.admin_secret().to_owned();
     assert_eq!(
         core.shutdown().await,
         jazz_server::ShutdownPhase::StorageClosed
@@ -133,7 +139,6 @@ async fn run() {
         .with_data_dir(server_storage.path())
         .with_persistent_storage()
         .with_schema(schema.clone())
-        .with_jwks_url(issuer.endpoint())
         .with_admin_secret(admin_secret)
         .start()
         .await
@@ -147,11 +152,15 @@ async fn run() {
         data_dir: writer_storage.path().to_owned(),
         storage: ClientStorage::Memory,
         account_id: None,
-        jwt_token: Some(TestJwtIssuer::jwt_for_user(
+        jwt_token: None,
+        // A user the app's backend opens a session for, as createJazz does.
+        backend_secret: Some(core.backend_secret().to_owned()),
+        backend_session: Some(Session::new(
+            "jazz:backend",
             "rn-device-core-recovery-writer",
         )),
-        backend_secret: None,
-        admin_secret: Some(core.admin_secret().to_owned()),
+        bundle: core.latest_bundle(),
+        admin_secret: None,
         migrations: Default::default(),
     })
     .await

@@ -1203,7 +1203,6 @@ it.each([
       ["missing_required", "missing required field `title` in `todos`"],
       ["branch_move", "invalid mergeable commit: branch column does not match exact branch key"],
       ["missing_chunks", "large-value chunks are not available locally yet"],
-      ["permissions_head_missing", "permissions_head_missing: no published permissions head"],
     ] satisfies [NativeCoreErrorReason, string][]
   ).map(
     ([coreReason, detail]) =>

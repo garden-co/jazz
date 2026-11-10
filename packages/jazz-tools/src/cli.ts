@@ -3,17 +3,14 @@
 // CLI for jazz-tools schema tooling
 
 import { existsSync, readFileSync, realpathSync } from "fs";
-import { readFile } from "fs/promises";
-import { basename, join, resolve } from "path";
+import { join, resolve } from "path";
 import { fileURLToPath } from "url";
 import {
   createMigration as createCatalogueMigration,
   getMigrationGraph,
-  deploy as deployCatalogue,
   compileSchema as compileCatalogueSchema,
   requireAppId,
   requireServerValue,
-  shortSchemaHash,
   validateProject,
 } from "./dev/catalogue-project.js";
 import { renderMigrationGraph } from "./dev/migration-graph.js";
@@ -22,12 +19,37 @@ import { isCloudCommand, runCloudCommand } from "./cloud/commands.js";
 export interface BuildOptions {
   schemaDir: string;
   strictProvenance?: boolean;
+  /** Move nothing; fail if migrations or snapshots still need moving or renaming. */
+  check?: boolean;
 }
 
 export interface SchemaCompileOptions {
   schemaDir: string;
   migrationsDir?: string;
 }
+
+// createJazz publishes the app's bundle when the backend starts, so there is
+// no separate deploy step.
+const DEPLOY_NOTE =
+  "Deploy your backend to publish them: createJazz publishes the schema, its permissions and its migrations when it starts.";
+
+const DEPLOY_REMOVED =
+  "`jazz-tools deploy` was removed. " +
+  "createJazz publishes your schema, its permissions and its migrations when your backend starts, " +
+  "so deploying the backend is the deployment.";
+
+const SERVER_REMOVED =
+  "`jazz-tools server` was removed. Jazz runs inside your backend: " +
+  "`createJazz({ store: sqlite({ path }) })` serves sync from your own server, and " +
+  "`createJazz({ store: remote({ url, appId, secret }) })` uses Jazz Cloud.";
+
+const CREATE_REMOVED = "`jazz-tools create` was removed. Start a project with `npm create jazz`.";
+
+const MIGRATE_ALPHA59_MOVED =
+  "`jazz-tools migrate-alpha59` moved to `jazz-alpha59-alpha60-import`, a native binary attached to each " +
+  "GitHub release next to `jazz-alpha59-alpha60-export`. Download both for your platform from " +
+  "https://github.com/garden-co/jazz/releases and run `jazz-alpha59-alpha60-import import --dump <dump> " +
+  "--data-dir <dir> --app-id <app id>`.";
 
 const PERMISSIONS_LIFECYCLE_NOTE =
   "Permission-only changes do not create schema hashes or require migrations.";
@@ -36,8 +58,9 @@ function parseArgs(args: string[]): { command: string; options: BuildOptions } {
   const command = args[0] || "";
   const schemaDir = getFlagValue(args, "--schema-dir", "last") ?? process.cwd();
   const strictProvenance = args.includes("--strict-provenance");
+  const check = args.includes("--check");
 
-  return { command, options: { schemaDir, strictProvenance } };
+  return { command, options: { schemaDir, strictProvenance, check } };
 }
 
 export async function validate(options: BuildOptions): Promise<void> {
@@ -51,9 +74,25 @@ export async function validate(options: BuildOptions): Promise<void> {
   console.log(`Loaded schema from ${result.schemaFile}.`);
   if (result.permissionsFile) {
     console.log(`Loaded current permissions from ${result.permissionsFile}.`);
-    console.log(PERMISSIONS_LIFECYCLE_NOTE);
-    console.log("Use `jazz-tools deploy <appId>` to publish schema, permissions, and migrations.");
   }
+  switch (result.schema.status) {
+    case "changed":
+      console.log(
+        `schema.ts (${result.schema.hash.slice(0, 12)}) changed since the latest snapshot in migrations/snapshots. ` +
+          "Run `jazz-tools migrations create --name <name>` before you deploy it.",
+      );
+      break;
+    case "unsnapshotted":
+      console.log(
+        "This project has no schema snapshot yet: before you change schema.ts, run `jazz-tools migrations create` " +
+          "on the version your backend runs, so later migrations start from it.",
+      );
+      break;
+    case "snapshotted":
+      console.log(PERMISSIONS_LIFECYCLE_NOTE);
+      break;
+  }
+  if (result.schema.status !== "changed") console.log(DEPLOY_NOTE);
   for (const warning of result.warnings) {
     console.warn(`\x1b[33m${warning}\x1b[0m`);
   }
@@ -80,14 +119,6 @@ export interface CreateMigrationOptions extends MigrationCommandOptions {
   fromHash?: string;
   toHash?: string;
   name?: string;
-}
-
-export interface DeployOptions {
-  appId: string;
-  serverUrl: string;
-  adminSecret: string;
-  schemaDir: string;
-  migrationsDir?: string;
 }
 
 // Framework bundlers (Vite, SvelteKit, Next.js, Expo) expose public env vars
@@ -281,13 +312,6 @@ function requireMigrationServerOptions(options: MigrationCommandOptions): {
   };
 }
 
-async function packageVersion(): Promise<string> {
-  const packageJson = JSON.parse(
-    await readFile(new URL("../package.json", import.meta.url), "utf8"),
-  ) as { version?: string };
-  return packageJson.version ?? "unknown";
-}
-
 export async function createMigration(options: CreateMigrationOptions): Promise<string | null> {
   const result = await createCatalogueMigration(options);
 
@@ -295,18 +319,22 @@ export async function createMigration(options: CreateMigrationOptions): Promise<
     case "unchanged":
       console.log("No schema changes detected.");
       return null;
+    case "initial-snapshot":
+      console.log(
+        `Snapshotted schema.ts (${result.hash.slice(0, 12)}) as this project's first schema version: ${result.snapshotPath}`,
+      );
+      console.log(
+        "No migration was created: there is no earlier version to migrate from. Change schema.ts, then run `jazz-tools migrations create --name <name>`.",
+      );
+      return null;
     case "migration-not-required": {
-      const version = await packageVersion();
       console.log(
         "No reviewed migration file needed because this schema change does not require row transformations.",
       );
-      console.log(
-        "Next step: Run npx jazz-tools@" + version + " deploy " + (options.appId ?? "<appId>"),
-      );
+      console.log(`Next step: ${DEPLOY_NOTE}`);
       return null;
     }
     case "generated": {
-      const version = await packageVersion();
       console.log("Generated: " + result.filePath);
       console.log("");
       console.log("Migration stubs are only for schema changes.");
@@ -317,81 +345,10 @@ export async function createMigration(options: CreateMigrationOptions): Promise<
       if (result.needsRename) {
         console.log("2. Rename the file by replacing 'unnamed'.");
       }
-      console.log(
-        (result.needsRename ? "3" : "2") +
-          ". Run npx jazz-tools@" +
-          version +
-          " deploy " +
-          (options.appId ?? "<appId>"),
-      );
+      console.log(`${result.needsRename ? "3" : "2"}. ${DEPLOY_NOTE}`);
       return result.filePath;
     }
   }
-}
-
-function logDeployWarning(message: string): void {
-  if (message.startsWith("Warning: table ")) {
-    console.warn(`\x1b[33m${message}\x1b[0m`);
-    return;
-  }
-
-  if (message.startsWith("Warning: ")) {
-    console.warn(message);
-    return;
-  }
-
-  console.warn(`Warning: ${message}`);
-}
-
-export async function deploy(options: DeployOptions): Promise<void> {
-  const result = await deployCatalogue({
-    ...options,
-    onEvent: (event) => {
-      switch (event.type) {
-        case "schema-loaded":
-          console.log(`Loaded current schema from ${event.schemaFile}.`);
-          break;
-        case "warning":
-          logDeployWarning(event.message);
-          break;
-        case "schema-published":
-          console.log(`Published schema ${shortSchemaHash(event.hash)}.`);
-          break;
-        case "schema-skipped":
-          console.log(
-            `The current schema is already stored in the server as ${shortSchemaHash(event.hash)}; skipping publish.`,
-          );
-          break;
-        case "permissions-loaded":
-          console.log(`Loaded current permissions from ${event.permissionsFile}.`);
-          break;
-        case "migration-published":
-          if (event.filePath) {
-            console.log(
-              `Pushed migration ${shortSchemaHash(event.fromHash)} -> ${shortSchemaHash(event.toHash)} from ${basename(event.filePath)}.`,
-            );
-          } else {
-            console.log(
-              `Published migration ${shortSchemaHash(event.fromHash)} -> ${shortSchemaHash(event.toHash)}.`,
-            );
-          }
-          break;
-        case "migration-skipped":
-          console.log(
-            `Migration ${shortSchemaHash(event.fromHash)} -> ${shortSchemaHash(event.toHash)} is already connected; skipping migration publish.`,
-          );
-          break;
-        case "permissions-published":
-          break;
-      }
-    },
-  });
-
-  console.log(
-    result.changed
-      ? `Deployed schema ${shortSchemaHash(result.schema.hash)} and its permissions.`
-      : "Deployment is already up to date.",
-  );
 }
 
 function realpathOrSelf(path: string): string {
@@ -416,8 +373,8 @@ function printHelp(): void {
   console.log("Usage: node <path-to-jazz-tools>/dist/cli.js <command> [options]");
   console.log("\nCommands:");
   console.log("  validate              Validate root schema.ts and permissions.ts");
+  console.log("                        (--check: move nothing, fail if legacy migrations remain)");
   console.log("  schema compile        Print the compiled schema as JSON");
-  console.log("  deploy <appId>        Publish schema, permissions, and required migrations");
   console.log("  migrations create     Generate a migration stub between two schema versions");
   console.log("  migrations graph      Visualize the full migration graph");
   console.log("  login | logout | whoami");
@@ -431,7 +388,7 @@ function printHelp(): void {
   console.log("  --migrations-dir <p>  Path to migrations directory (default: ./migrations)");
   console.log("\nMigration options:");
   console.log(
-    "  <appId>               Required for migrations graph, remote migration creation, and deploy (or set JAZZ_APP_ID / {VITE,PUBLIC,NEXT_PUBLIC,EXPO_PUBLIC}_JAZZ_APP_ID)",
+    "  <appId>               Required for migrations graph and remote migration creation (or set JAZZ_APP_ID / {VITE,PUBLIC,NEXT_PUBLIC,EXPO_PUBLIC}_JAZZ_APP_ID)",
   );
   console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
   console.log(
@@ -542,28 +499,24 @@ if (isMainModule()) {
     } else {
       task = Promise.reject(
         new Error(
-          "Use `jazz-tools migrations create` to prepare migrations, `jazz-tools migrations graph <appId>` to inspect the migration graph, and `jazz-tools deploy <appId>` to publish them.",
+          `Use \`jazz-tools migrations create\` to prepare migrations and \`jazz-tools migrations graph <appId>\` to inspect the migration graph. ${DEPLOY_NOTE}`,
         ),
       );
     }
 
     exitOnError(task);
   } else if (command === "deploy") {
-    if (args.includes("--no-verify")) {
-      console.error(
-        "--no-verify is no longer supported; deploy requires a complete migration path.",
-      );
-      process.exit(1);
-    }
-    const { appId, args: commandArgs } = splitLeadingAppId(args.slice(1));
-    const options = { ...resolveMigrationOptions(commandArgs), appId };
-    exitOnError(
-      deploy({
-        ...requireMigrationServerOptions(options),
-        schemaDir: options.schemaDir ?? process.cwd(),
-        migrationsDir: options.migrationsDir,
-      }),
-    );
+    console.error(DEPLOY_REMOVED);
+    process.exit(1);
+  } else if (command === "server") {
+    console.error(SERVER_REMOVED);
+    process.exit(1);
+  } else if (command === "create") {
+    console.error(CREATE_REMOVED);
+    process.exit(1);
+  } else if (command === "migrate-alpha59") {
+    console.error(MIGRATE_ALPHA59_MOVED);
+    process.exit(1);
   } else {
     printHelp();
     process.exit(command ? 1 : 0);

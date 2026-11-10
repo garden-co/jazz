@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, vi } from "vitest";
 import { structuralSchemaHash } from "../../src/dev/schema-utils.js";
-import { createMigration as rawCreateMigration, deploy as rawDeploy } from "../../src/cli.js";
+import { createMigration as rawCreateMigration } from "../../src/cli.js";
 
 export function createCliFixtures(moduleUrl: string) {
   const dslPath = fileURLToPath(new URL("./dsl.ts", moduleUrl));
@@ -15,9 +15,6 @@ export function createCliFixtures(moduleUrl: string) {
   const distIndexPath = fileURLToPath(new URL("../dist/index.js", moduleUrl));
   const distCliPath = fileURLToPath(new URL("../dist/cli.js", moduleUrl));
   const binPath = fileURLToPath(new URL("../bin/jazz-tools.js", moduleUrl));
-  const bootstrapVerifierPath = fileURLToPath(
-    new URL("../scripts/verify-packed-runtime-bootstrap.mjs", moduleUrl),
-  );
 
   const packageRoot = dirname(fileURLToPath(new URL(moduleUrl)));
   const tmpBase = mkdtempSync(join(tmpdir(), "jazz-tools-cli-tests-"));
@@ -31,8 +28,6 @@ export function createCliFixtures(moduleUrl: string) {
 
   const createMigration = (options: Parameters<typeof rawCreateMigration>[0]) =>
     rawCreateMigration(withAppId(options));
-  const deploy = (options: Omit<Parameters<typeof rawDeploy>[0], "appId"> & { appId?: string }) =>
-    rawDeploy(withAppId(options));
 
   afterEach(async () => {
     vi.unstubAllGlobals();
@@ -338,7 +333,7 @@ import { schema as s } from ${JSON.stringify(importPath)};
 import { app } from ${JSON.stringify(appImportPath)};
 
 export default s.definePermissions(app, ({ policy, session }) => [
-  policy.todos.allowRead.where({ ownerId: session.user.identity.subject }),
+  policy.todos.allowRead.where({ ownerId: session.identity.subject }),
 ]);
 `;
   }
@@ -399,11 +394,11 @@ import { schema as s } from ${JSON.stringify(importPath)};
 import { app } from ${JSON.stringify(appImportPath)};
 
 export default s.definePermissions(app, ({ policy, session }) => [
-  policy.todos.allowRead.where({ ownerId: session.user.identity.subject }),
-  policy.todos.allowInsert.where({ ownerId: session.user.identity.subject }),
+  policy.todos.allowRead.where({ ownerId: session.identity.subject }),
+  policy.todos.allowInsert.where({ ownerId: session.identity.subject }),
   policy.todos.allowUpdate
-    .whereOld({ ownerId: session.user.identity.subject })
-    .whereNew({ ownerId: session.user.identity.subject }),
+    .whereOld({ ownerId: session.identity.subject })
+    .whereNew({ ownerId: session.identity.subject }),
 ]);
 `;
   }
@@ -435,7 +430,7 @@ import { schema as s } from ${JSON.stringify(importPath)};
 import { app } from ${JSON.stringify(appImportPath)};
 
 export const permissions = s.definePermissions(app, ({ policy, session }) => [
-  policy.todos.allowRead.where({ ownerId: session.user.identity.subject }),
+  policy.todos.allowRead.where({ ownerId: session.identity.subject }),
 ]);
 `;
   }
@@ -653,32 +648,15 @@ export default {
     return { server, url: `http://127.0.0.1:${address.port}` };
   }
 
-  function hostNativeBinaryName(): string | null {
-    switch (`${process.platform}-${process.arch}`) {
-      case "darwin-arm64":
-        return "jazz-tools-darwin-arm64";
-      case "darwin-x64":
-        return "jazz-tools-darwin-x64";
-      case "linux-arm64":
-        return "jazz-tools-linux-arm64";
-      case "linux-x64":
-        return "jazz-tools-linux-x64";
-      default:
-        return null;
-    }
-  }
-
   return {
     indexPath,
     distIndexPath,
     distCliPath,
     binPath,
-    bootstrapVerifierPath,
     tmpBase,
     tempRoots,
     APP_ID,
     createMigration,
-    deploy,
     withAppId,
     createWorkspace,
     fileExists,
@@ -722,6 +700,5 @@ export default {
     runBin,
     runCli,
     listenForDeployRequest,
-    hostNativeBinaryName,
   };
 }

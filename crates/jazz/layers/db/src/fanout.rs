@@ -361,8 +361,10 @@ impl Inner {
             self.fan.stats.shared_joins += 1;
             return Ok((queue, Rc::downgrade(&handle)));
         }
-        // A replica missing chunks the result needs opens it once they arrive.
-        let visible = self.visible_read(&read, &compiled.tables);
+        // A replica missing chunks the result needs opens it once they
+        // arrive. Its cut is decided over its relations' tables too.
+        let tables = self.with_relation_tables(prepared, &compiled.tables)?;
+        let visible = self.visible_read(&read, &tables);
         let applied = cut_of(&visible);
         let run = match &visible {
             Cow::Borrowed(_) => self.execute(&compiled, &prepared.query.table),
@@ -427,7 +429,7 @@ impl Inner {
             opened: !awaiting,
             branches,
             masks,
-            tables: compiled.tables.clone(),
+            tables,
             applied,
         }));
         self.read_keys(&mut handle.borrow_mut());
@@ -501,10 +503,14 @@ impl Inner {
             }
         }
         if let Some(author) = identity {
+            let policies = prepared
+                .schema
+                .as_ref()
+                .map_or(&*self.owner, |schema| schema.policy_schema());
             for table in tables.clone() {
                 // Internal tables (history, branches) carry no policy.
-                if self.owner.by_stored(&table).is_some() {
-                    tables.extend(self.read_policy_tables(&table, author)?);
+                if policies.by_stored(&table).is_some() {
+                    tables.extend(self.read_policy_tables(policies, &table, author)?);
                 }
             }
         }
@@ -521,6 +527,7 @@ impl Inner {
         let compiled = self
             .read_ctx(prepared, policy.as_ref(), &claims, read)
             .compile_query(&prepared.query, read.include_deleted)?;
+        self.refuse_latest_only_cut(&compiled, read)?;
         let used = claims.used.get() || policy.as_ref().is_some_and(|p| p.used.get());
         Ok((compiled, used))
     }
@@ -802,12 +809,13 @@ impl Inner {
             .collect();
         for (gid, group) in groups {
             let mut group = group.borrow_mut();
-            // A schema the current one governs (a sync session's) takes the
-            // policies of whichever schema is current now.
+            // A sync session's schema is renamed for the new version and
+            // keeps whoever governs it: its bundle's policies when it is
+            // pinned to one, else whichever schema is current now.
             if reset
                 && let Some(pinned) = &group.prepared.schema
-                && pinned.policies_from.is_some()
-                && let Some(governed) = self.governed(pinned.jazz.version_id())
+                && let Some(policies) = &pinned.policies_from
+                && let Some(governed) = self.regoverned(pinned.jazz.version_id(), policies)
             {
                 group.prepared.schema = Some(governed);
             }
@@ -842,7 +850,7 @@ impl Inner {
     ) -> Vec<Vec<(String, String)>> {
         let read = |sql: String,
                     params: &[&dyn rusqlite::ToSql]|
-         -> Vec<((i64, i64), Vec<u8>, Vec<(String, String)>)> {
+         -> Vec<(i64, Vec<u8>, Vec<(String, String)>)> {
             let Ok(mut statement) = self.conn.prepare_cached(&sql) else {
                 return Vec::new();
             };
@@ -857,15 +865,13 @@ impl Inner {
                         .map(|i| statement.column_name(i).map(str::to_owned))
                         .collect::<Result<_, _>>()?;
                 }
-                let mut seq = (0, 0);
+                let mut seq = 0i64;
                 let mut branch = Vec::new();
                 let mut out = Vec::new();
                 for (i, name) in names.iter().enumerate() {
-                    if name == "_n" {
-                        seq.0 = r.get(i)?;
-                    } else if name == "_seq" {
-                        seq.1 = r.get(i)?;
-                    } else if name == "_b" {
+                    if name == "_clock" {
+                        seq = r.get(i)?;
+                    } else if name == "_branch" {
                         branch = r.get(i)?;
                     } else if columns.contains(name) {
                         out.push((name.clone(), canon(&r.get::<_, Sql>(i)?)));
@@ -884,15 +890,15 @@ impl Inner {
         let seq = current
             .iter()
             .find(|(_, branch, _)| branch.as_slice() == key)
-            .map_or((i64::MAX, i64::MAX), |(seq, _, _)| *seq);
+            .map_or(i64::MAX, |(seq, _, _)| *seq);
         let old = read(
             format!(
-                "SELECT * FROM {} WHERE id = ?1 AND _b = ?2 AND (_n, _seq) < (?3, ?4) \
-                 AND (_st & {}) = 0 ORDER BY _n DESC, _seq DESC LIMIT 1",
+                "SELECT * FROM {} WHERE id = ?1 AND _branch = ?2 AND _clock < ?3 \
+                 AND (_state & {}) = 0 ORDER BY _clock DESC LIMIT 1",
                 quote(&format!("{table}__h")),
                 crate::values::STATE_AS_SENT
             ),
-            &[&id, &key, &seq.0, &seq.1],
+            &[&id, &key, &seq],
         );
         current
             .into_iter()
@@ -936,8 +942,13 @@ impl Inner {
         ));
         prepared.query.order_by.clear();
         prepared.query.limit = None;
-        // Under a cut, a row changed past it still reads as it was.
+        // Under a cut, a row changed past it still reads as it was. The
+        // other rows were read through the cut the last run applied: under
+        // another, only a full run (which records it) keeps them one state.
         let read = self.visible_read(&group.read, &group.tables);
+        if cut_of(&read) != group.applied {
+            return None;
+        }
         let narrowed = match self.compile(&prepared, group.identity, &read) {
             Ok(compiled) => compiled,
             Err(error) => return Some(Err(error)),
@@ -1133,7 +1144,10 @@ impl Inner {
                             {
                                 Sql::Text(bytes) | Sql::Blob(bytes)
                                     if bytes.len()
-                                        > jazz_types::large_values::INLINE_VALUE_MAX_BYTES =>
+                                        > root.column(&by.column).map_or(
+                                            jazz_types::large_values::INLINE_VALUE_MAX_BYTES,
+                                            crate::large::inline_max,
+                                        ) =>
                                 {
                                     return None;
                                 }
@@ -1289,6 +1303,8 @@ impl Inner {
                 self.read_keys(group);
             }
             Err(error) => group.push(SubscriptionEvent::Rejected {
+                code: error.code,
+                message: error.message.clone(),
                 reason: error.to_string(),
             }),
         }
@@ -1338,8 +1354,15 @@ impl Inner {
             let Some(before) = prior.get(&out.row.id) else {
                 continue;
             };
-            let from = before.seq;
-            if from == out.row.seq {
+            // Two writers' pending versions can share a position.
+            let rank = |row: &CurrentRow| {
+                (
+                    row.seq,
+                    row.writer.as_deref().and_then(sync::writer_of_bytes),
+                )
+            };
+            let (from, to) = (rank(before), rank(&out.row));
+            if from == to {
                 continue;
             }
             for column in &group.key.splices {
@@ -1362,12 +1385,20 @@ impl Inner {
                     }
                     continue;
                 }
+                // Read access is by the group's own policies: a pinned
+                // session's bundle, not the current schema.
+                let policies = group
+                    .prepared
+                    .schema
+                    .as_ref()
+                    .map_or(&*self.owner, |schema| schema.policy_schema());
                 if let Ok(splices) = self.value_delta(
                     &group.prepared.query.table,
                     out.row.id,
                     column,
-                    (from, out.row.seq),
+                    (from, to),
                     group.identity,
+                    policies,
                 ) {
                     out.splices.push((column.clone(), splices));
                 }
@@ -1395,6 +1426,8 @@ impl Inner {
                 Some(Err(error)) if crate::large::is_missing(&error) => {}
                 Some(Err(error)) => {
                     group.push(SubscriptionEvent::Rejected {
+                        code: error.code,
+                        message: error.message.clone(),
                         reason: error.to_string(),
                     });
                     return false;
@@ -1410,6 +1443,8 @@ impl Inner {
             }
             Err(error) => {
                 let event = SubscriptionEvent::Rejected {
+                    code: error.code,
+                    message: error.message.clone(),
                     reason: error.to_string(),
                 };
                 group.push(event);

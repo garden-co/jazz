@@ -5,39 +5,43 @@ Linking adds a fresh identity to that account; it never merges existing accounts
 A context receives an opaque `AccountHandle`, and its acting identity stays fixed.
 
 ```ts
-import { createAccountManager, createJazzClient } from "jazz-tools/client";
+// Internal: `openJazzClient` is what `createJazzClient` opens for each account.
+import { createAccountManager } from "jazz-tools/client";
+import { openJazzClient } from "../web/create-jazz-client.js";
 
 const config = { appId: "my-app", serverUrl: "https://core.example" };
 const accounts = await createAccountManager(config);
 const account = accounts.getLoggedIn() ?? accounts.createLocalFirst();
-let client: Awaited<ReturnType<typeof createJazzClient>> | undefined = await createJazzClient({
+let client: Awaited<ReturnType<typeof openJazzClient>> | undefined = await openJazzClient({
   ...config,
   account,
 });
 
-async function signIn(getToken: () => Promise<string>) {
+async function signIn() {
   // General graceful shutdown, before linking and outside the next context.
   // A sync-barrier failure leaves the existing context usable; a later
   // teardown failure does not. Release other shared holders first.
   await client?.shutdown({ waitForSync: true });
   client = undefined;
   try {
-    await accounts.linkJWT({ getToken });
+    // The app's backend (`createJazz`) names the signed-in user; the guest's
+    // account and data carry over to them.
+    await accounts.linkWithBackend(account);
   } finally {
     // A failed link preserves selection unless another action logged out.
     const selected = accounts.getLoggedIn();
-    if (selected) client = await createJazzClient({ ...config, account: selected });
+    if (selected) client = await openJazzClient({ ...config, account: selected });
   }
 }
 ```
 
-`registerJWT` explicitly creates an account for an unassigned external identity.
-`loginJWT` requires an existing active assignment. Merely obtaining or decoding a
-JWT does neither. Refresh callbacks must keep the exact issuer and subject.
-Supply `getToken` on the account operation; the shared account context refreshes
-credentials on expiry across every framework. There is no provider-level
-`onJWTExpired` callback. A callback that takes longer than 30 seconds fails the
-attempt; a later refresh may retry, and a late result cannot replace credentials.
+Clients hold no Jazz credential for signed-in users. `loginWithBackend()` asks
+the app's own backend, same-origin with the app's cookies: its `authenticate`
+decides who is signed in, and the answer carries the account, identity and
+claims but no token. `linkWithBackend(guest)` does the same for a local-first
+guest who just signed up, and the backend links the guest to that user. The
+sync connection is admitted the same way, on each connect. A core verifies no
+user JWTs.
 
 For passphrase/passkey backup, explicitly call `exportLocalFirstSecret(handle)`.
 Restore with `accounts.restoreLocalFirst(secret)` outside a context after normal
@@ -74,7 +78,7 @@ pretending that the new identity authored earlier rows.
 `AccountStore.update` must perform an atomic read/transform/write across all
 managers using that store. Browser defaults use Web Locks with localStorage;
 server/native hosts supply the equivalent transaction or process-wide lock.
-Automatic `createJazzSession({ initial: "local-first" })` startup performs its
+Automatic `createJazzClient({ initial: "local-first" })` startup performs its
 first-root ensure inside that transaction, then adopts the durable winner before
 opening a client. Explicit `createLocalFirst`, recovery, and logout operations
 keep their existing selection semantics.
@@ -94,9 +98,8 @@ whenever it is set, rather than inferring sign-in from the account's identity.
 In development builds, a write to such an account that is not followed by a
 login within a few seconds logs a console warning. In a shared browser worker, another tab's credential
 for the same account may sync this tab's writes sooner. Logging in again as the
-same identity (`loginJWT`, `loginOrRegisterJWT`, or the auth provider
-connection) revalidates that account in place, without closing the context:
-`AccountManager.loginJWT` then resolves to the very handle already open, and
+same identity (`loginWithBackend` or the auth provider connection) revalidates that account in place, without closing the context:
+`AccountManager.loginWithBackend` then resolves to the very handle already open, and
 the first credential starts the context's sync connection. A
 different provider subject is detected before any registry call and switches
 accounts as before, reusing the provider token already fetched; a provider that

@@ -1,7 +1,7 @@
 "use client";
 
 import { Banner, Button, HStack, IconButton, Toolbar, VStack } from "@astryxdesign/core";
-import { useAll, useDb } from "jazz-tools/react";
+import { useAll } from "jazz-tools/react";
 import { ArrowDownToLine, ArrowUpToLine, Circle, Copy, Square, Trash2, Type } from "lucide-react";
 import {
   memo,
@@ -82,10 +82,9 @@ export function CanvasSurface({
   previewCheckpointId: string | null;
   onExitPreview: () => void;
 }) {
-  const db = useDb();
   // The shape renderer owns exactly these two subscriptions. Cursors live in
   // <CursorLayer>, so presence traffic never re-runs this query.
-  const { data: shapes = [] } = useAll(app.shapes.where({ canvasId }).orderBy("zIndex", "asc"));
+  const { data: shapes = [], db } = useAll(app.shapes.where({ canvasId }).orderBy("zIndex", "asc"));
   const { data: layers = [] } = useAll(app.layers.where({ canvasId }).orderBy("zIndex", "asc"));
   const { data: preview } = useAll(
     previewCheckpointId

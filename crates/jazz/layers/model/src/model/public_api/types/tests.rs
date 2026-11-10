@@ -2,7 +2,7 @@ use super::*;
 use uuid::Uuid;
 
 fn descriptor_hash(descriptor: &RowDescriptor) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new();
+    let mut hasher = jazz_types::sha256::Hasher::new();
     hash_row_descriptor(&mut hasher, descriptor);
     *hasher.finalize().as_bytes()
 }
@@ -649,7 +649,7 @@ fn schema_hash_matches_v9_default_index_fixture() {
 
     assert_eq!(
         SchemaHash::compute(&schema).to_string(),
-        "ca27c6e72893cc1819ea2583bd2c450cda8dc6498b2b06dc882c06e5fcf9bc1e",
+        "0a458c0de89c376d9c4ba504f853340705ffe05de9233494417f11c61ad26c3f",
     );
 }
 
@@ -965,6 +965,85 @@ fn schema_hash_matches_composite_index_cross_runtime_fixture() {
     assert_eq!(
         hashes["composite-two-declared-sorted"], hashes["composite-two-declared-reversed"],
         "declaration order of distinct composite indexes is not identity"
+    );
+}
+
+// Full history must hash as schemas did before retention existed, so no
+// deployed schema changes identity; latest-only is a distinct schema.
+#[test]
+fn schema_hash_matches_history_retention_cross_runtime_fixture() {
+    #[derive(serde::Deserialize)]
+    struct HistoryHashFixture {
+        #[serde(rename = "historyCases")]
+        cases: Vec<HistoryHashCase>,
+    }
+    #[derive(serde::Deserialize)]
+    struct HistoryHashCase {
+        name: String,
+        history: Option<String>,
+        hash: String,
+    }
+
+    let fixture: HistoryHashFixture = serde_json::from_str(include_str!(
+        "../../../../../../../../packages/jazz-tools/src/testing/fixtures/structural-schema-hashes.json"
+    ))
+    .expect("history hash fixture is valid JSON");
+
+    let mut hashes = std::collections::BTreeMap::new();
+    for case in &fixture.cases {
+        let mut table = TableSchema::builder("values").column("value", ColumnType::Text);
+        match case.history.as_deref() {
+            None => {}
+            Some("latest") => table = table.latest_only(),
+            Some(other) => panic!("unknown retention {other:?} in {}", case.name),
+        }
+        let schema = SchemaBuilder::new().table(table).build();
+        let hash = SchemaHash::compute(&schema).to_hex();
+        assert_eq!(hash, case.hash, "fixture hash for {}", case.name);
+        hashes.insert(case.name.as_str(), hash);
+    }
+
+    let column_type_case = SchemaHash::compute(
+        &SchemaBuilder::new()
+            .table(TableSchema::builder("values").column("value", ColumnType::Text))
+            .build(),
+    )
+    .to_hex();
+    assert_eq!(
+        hashes["full"], column_type_case,
+        "full history hashes like a schema written before retention existed"
+    );
+    assert_ne!(
+        hashes["latest"], hashes["full"],
+        "latest-only is a distinct schema identity"
+    );
+}
+
+#[test]
+fn history_retention_json_omits_full_and_names_latest() {
+    let full = TableSchema::builder("values")
+        .column("value", ColumnType::Text)
+        .build();
+    let latest = TableSchema::builder("values")
+        .column("value", ColumnType::Text)
+        .latest_only()
+        .build();
+
+    let full_json = serde_json::to_value(&full).unwrap();
+    let latest_json = serde_json::to_value(&latest).unwrap();
+    assert!(full_json.get("history").is_none());
+    assert_eq!(latest_json["history"], "latest");
+
+    let decoded: TableSchema = serde_json::from_value(latest_json).unwrap();
+    assert_eq!(decoded.history, HistoryRetention::Latest);
+    let decoded: TableSchema = serde_json::from_value(full_json).unwrap();
+    assert_eq!(decoded.history, HistoryRetention::Full);
+
+    let mut unknown = serde_json::to_value(&full).unwrap();
+    unknown["history"] = "30d".into();
+    assert!(
+        serde_json::from_value::<TableSchema>(unknown).is_err(),
+        "a retention this version does not know is refused, not read as full"
     );
 }
 

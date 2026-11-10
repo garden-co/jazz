@@ -1,8 +1,5 @@
-import { accountRegistryUrl } from "jazz-tools";
-import { resolveRequestSession } from "jazz-tools/backend";
 import { auth } from "@/src/lib/auth";
-import { backendJazzClient } from "@/src/lib/auth-jazz-client";
-import { appOrigin, jazzAppId, jazzServerUrl } from "@/src/lib/config";
+import { jazz } from "@/src/lib/jazz.server";
 import { ensureOperator, ensureSeed } from "@/src/seed";
 
 export const runtime = "nodejs";
@@ -16,23 +13,17 @@ export const runtime = "nodejs";
 export async function POST(request: Request) {
   const session = await auth.api.getSession({ headers: request.headers });
   if (!session?.user) return Response.json({ error: "sign in required" }, { status: 401 });
-  const jazzSession = await resolveRequestSession(request, {
-    appId: jazzAppId,
-    accountRegistry: accountRegistryUrl(jazzServerUrl, jazzAppId),
-    jwksUrl: `${appOrigin}/api/auth/jwks`,
-    jwtIssuer: appOrigin,
-    jwtAudience: appOrigin,
-  });
-  if (jazzSession.user_id !== session.user.id)
-    return Response.json({ error: "session identity mismatch" }, { status: 401 });
-  if (!jazzSession.account_id) return Response.json({ error: "account required" }, { status: 401 });
+  // The same session cookie names the operator's Jazz account.
+  const backend = await jazz();
+  const accountId = await backend.accountFor(request);
+  if (!accountId) return Response.json({ error: "account required" }, { status: 401 });
 
   const body = (await request.json().catch(() => ({}))) as { warehouseId?: unknown };
-  const db = (await backendJazzClient()).db;
+  const db = backend.db;
   await ensureSeed(db);
   if (typeof body.warehouseId !== "string") return Response.json({ ok: true });
   const membership = await ensureOperator(db, {
-    accountId: jazzSession.account_id,
+    accountId,
     name: session.user.name,
     warehouseId: body.warehouseId,
   });

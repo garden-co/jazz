@@ -38,7 +38,7 @@ pub fn session_eq(column: &str, path: &[&str]) -> PolicyExpr {
 
 /// `column` equals the reading user's subject.
 pub fn is_me(column: &str) -> PolicyExpr {
-    session_eq(column, &["user", "identity", "subject"])
+    session_eq(column, &["identity", "subject"])
 }
 
 /// `column` equals `outer_column` of the row the policy is evaluated for.
@@ -106,6 +106,9 @@ pub fn config(schema: JazzSchema, node: u32, author: AuthorSubject) -> DbConfig 
             author,
         },
     )
+    // A clock stopped at the hybrid-clock epoch numbers 1, 2, 3, so a
+    // scenario runs the same every time.
+    .with_clock(|| jazz::db::shard::HLC_EPOCH_MS)
 }
 
 /// Insert a row with a known id.

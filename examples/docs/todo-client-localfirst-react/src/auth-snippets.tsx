@@ -4,7 +4,7 @@ import { RecoveryPhrase } from "jazz-tools/passphrase";
 import {
   JazzSessionProvider,
   useJazzSession,
-  type JazzSessionConfig,
+  type JazzClientConfig,
   type JazzSessionActions,
 } from "jazz-tools/react";
 
@@ -13,7 +13,7 @@ function TodoApp() {
 }
 
 // #region auth-localfirst-react
-export function LocalFirstAuthApp({ config }: { config: JazzSessionConfig }) {
+export function LocalFirstAuthApp({ config }: { config: JazzClientConfig }) {
   return (
     <JazzSessionProvider config={{ ...config, initial: "local-first" }}>
       <TodoApp />
@@ -22,33 +22,28 @@ export function LocalFirstAuthApp({ config }: { config: JazzSessionConfig }) {
 }
 // #endregion auth-localfirst-react
 
-// #region auth-jwt-react
-export function JwtAuthApp({
-  getToken,
-  config,
-}: {
-  getToken: () => Promise<string>;
-  config: JazzSessionConfig;
-}) {
+// #region auth-backend-react
+export function BackendAuthApp({ config }: { config: JazzClientConfig }) {
   return (
-    <JazzSessionProvider config={config} fallback={<SignIn getToken={getToken} />}>
+    <JazzSessionProvider config={config} fallback={<SignIn />}>
       <TodoApp />
     </JazzSessionProvider>
   );
 }
 
-function SignIn({ getToken }: { getToken: () => Promise<string> }) {
-  const { loginJWT, pending, error } = useJazzSession();
+// After your own sign-in has set its session cookie, ask your backend who is signed in.
+function SignIn() {
+  const { loginWithBackend, pending, error } = useJazzSession();
   return (
     <>
-      <button disabled={!!pending} onClick={() => void loginJWT({ getToken }).catch(() => {})}>
-        Sign in
+      <button disabled={!!pending} onClick={() => void loginWithBackend().catch(() => {})}>
+        Continue
       </button>
       {error && <p role="alert">{error.message}</p>}
     </>
   );
 }
-// #endregion auth-jwt-react
+// #endregion auth-backend-react
 
 // #region auth-localfirst-react-backup
 export function getRecoveryPhrase(account: AccountHandle): string {

@@ -64,6 +64,12 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
     "scope-isolation-assert-failed",
     "auth-switch-failed",
     "foreground-write-failed",
+    "foreground-write-insert-failed",
+    "foreground-write-mutation-failed",
+    "foreground-write-commit-failed",
+    "foreground-write-retire-failed",
+    "foreground-write-rollback-failed",
+    "foreground-write-alias-failed",
     "same-runtime-subscription-failed",
     "same-runtime-open-failed",
     "same-runtime-subscribe-failed",
@@ -323,6 +329,14 @@ class JazzDeviceFixtureModule(context: ReactApplicationContext) : ReactContextBa
     try {
       require(Regex("^scope-isolation-writer-read-detail:last-(none|pending|subscription|rejected|closed|rows)-wakes-[0-9]{1,6}-polls-[0-9]{1,6}-row-responses-[0-9]{1,6}-ready-(yes|no)$").matches(detail)) { "invalid scope writer read diagnostic" }
       Log.e("JazzScopeWriterRead", detail)
+      promise.resolve(null)
+    } catch (error: Throwable) { promise.reject("E_JAZZ_DEVICE_DIAGNOSTIC", error) }
+  }
+
+  @ReactMethod fun recordPublicClientWriteDiagnostic(detail: String, promise: Promise) {
+    try {
+      require(Regex("^public-client-write-detail:[A-Za-z][A-Za-z0-9]{0,47}-(none|[a-z0-9_]{1,40})(:[A-Za-z0-9_.]{1,96})?$").matches(detail)) { "invalid public client write diagnostic" }
+      Log.e("JazzPublicClientWrite", detail)
       promise.resolve(null)
     } catch (error: Throwable) { promise.reject("E_JAZZ_DEVICE_DIAGNOSTIC", error) }
   }

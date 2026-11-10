@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { useAll, useDb } from "jazz-tools/react";
+import { useAll } from "jazz-tools/react";
 import {
   Avatar,
   Badge,
@@ -45,11 +45,10 @@ export function IssuesDatabase({
   databaseId: string;
   editable: boolean;
 }) {
-  const db = useDb();
   const { workspace, tree, members, me, openPage } = useWorkspace();
   const [view, setView] = useState<"table" | "board">("table");
   // Newest first. Titles come from the issue pages the workspace already holds.
-  const { data } = useAll(
+  const { data, db } = useAll(
     app.issues.where({ databaseId }).select("*", "$createdAt").orderBy("$createdAt", "desc"),
   );
 

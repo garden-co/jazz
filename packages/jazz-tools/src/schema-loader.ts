@@ -96,7 +96,15 @@ async function loadTsModule(filePath: string): Promise<LoadedTsModule> {
     const outFile = await bundleToTempFile(filePath, tempDir);
     // The output path is unique per load, so runtime import caching cannot
     // cross-contaminate concurrent schema loads.
-    const loaded = (await import(pathToFileURL(outFile).href)) as Record<string, unknown>;
+    let loaded: Record<string, unknown>;
+    try {
+      loaded = (await import(pathToFileURL(outFile).href)) as Record<string, unknown>;
+    } catch (error) {
+      // The bundle runs schema.ts and the files it imports together: say
+      // which file was being loaded, as Node would name the failing one.
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Loading ${basename(filePath)} failed: ${message}`, { cause: error });
+    }
     const envelope = loaded[schemaLoaderEnvelopeExport];
     if (typeof envelope !== "object" || envelope === null) {
       throw new Error("Schema loader bundle did not return its private result envelope.");
@@ -320,6 +328,7 @@ function wasmTableToAst(name: string, table: TableSchema): Schema["tables"][numb
     indexedColumns: table.indexed_columns ? [...table.indexed_columns] : undefined,
     compositeIndexes: table.composite_indexes?.map((columns) => [...columns]),
     branchBy: table.branchBy ? [...table.branchBy] : undefined,
+    history: table.history,
     policies: table.policies as TablePolicies | undefined,
   };
 }

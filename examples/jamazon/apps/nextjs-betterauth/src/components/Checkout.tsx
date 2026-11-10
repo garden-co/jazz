@@ -19,7 +19,6 @@ import NextLink from "next/link";
 import { useRouter } from "next/navigation";
 import { Fragment, useEffect, useRef, useState } from "react";
 import { app, type Cart, type ShippingMethod } from "@/schema";
-import { requireBetterAuthToken } from "@/src/lib/auth-client";
 import { useCart } from "@/src/store/cart";
 import { SHIPPING, formatMoney, shippingCents } from "@/src/store/pricing";
 import { OrderSummary } from "./OrderSummary";
@@ -313,7 +312,6 @@ async function submitOrder(db: Db, cartId: string, idempotencyKey: string): Prom
         credentials: "same-origin",
         headers: {
           "content-type": "application/json",
-          authorization: `Bearer ${await requireBetterAuthToken()}`,
         },
         body: JSON.stringify({ idempotencyKey }),
       });

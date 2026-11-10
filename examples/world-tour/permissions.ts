@@ -5,7 +5,7 @@ import { app } from "./schema.js";
 type BandScoped = RowContext<{ bandId: string }>;
 
 export default s.definePermissions(app, ({ policy, session, anyOf, allOf }) => {
-  const me = session.user.account;
+  const me = session.user;
   const isMemberOf = (bandId: BandScoped["bandId"]) =>
     policy.members.exists.where({ bandId, userId: me });
   const isOwnerOf = (bandId: BandScoped["bandId"]) =>

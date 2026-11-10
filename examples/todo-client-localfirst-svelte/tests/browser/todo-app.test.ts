@@ -8,7 +8,7 @@ import { todoCrudTest } from "../../../testing/todo-app-scenarios.js";
 
 import { describe, it, expect, afterEach } from "vitest";
 import { mount, unmount, type Component } from "svelte";
-import { TEST_PORT, APP_ID } from "./test-constants.js";
+import { SCOPE, SERVER_URL } from "./test-constants.js";
 import { createAccountManager, type DbConfig } from "jazz-tools";
 import { prepareTestAccount } from "../../../testing/accounts.js";
 
@@ -49,7 +49,7 @@ describe("Svelte Todo App E2E", () => {
       (await prepareTestAccount(
         createAccountManager,
         config.appId ?? "test-app",
-        config.serverUrl ?? `http://127.0.0.1:${TEST_PORT}`,
+        config.serverUrl ?? SERVER_URL,
       ));
     const resolvedConfig: Partial<DbConfig> = {
       appId: config.appId ?? "test-app",
@@ -106,11 +106,7 @@ describe("Svelte Todo App E2E", () => {
 
   it("persists todos across app unmount and remount (IndexedDB)", async () => {
     const dbName = crypto.randomUUID();
-    const account = await prepareTestAccount(
-      createAccountManager,
-      "test-app",
-      `http://127.0.0.1:${TEST_PORT}`,
-    );
+    const account = await prepareTestAccount(createAccountManager, "test-app", SERVER_URL);
 
     // First session: mount app, add a todo via the form
     const el1 = await mountApp({ account, driver: { type: "persistent", dbName } });
@@ -144,15 +140,15 @@ describe("Svelte Todo App E2E", () => {
 
   // Longer timeout: sync can take up to 20s under full-suite load.
   it("syncs a todo between two app instances through the server", async () => {
-    const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
+    const serverUrl = SERVER_URL;
 
     // Mount two independent app instances connected to the same server
     const el1 = await mountApp({
-      appId: APP_ID,
+      appId: SCOPE,
       serverUrl,
     });
     const el2 = await mountApp({
-      appId: APP_ID,
+      appId: SCOPE,
       serverUrl,
     });
 

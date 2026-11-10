@@ -135,7 +135,7 @@ describe("React Native account preparation", () => {
     expect(manager.getLoggedIn()).toBe(account);
   });
 
-  it("neither retains an external assignment nor revalidates it in place", async () => {
+  it("remembers the backend-signed-in user without a credential, never as an assignment", async () => {
     const identity = { issuer: "https://issuer.example", subject: "alice" };
     const account = "00000000-0000-4000-8000-00000000000a";
     vi.stubGlobal(
@@ -155,13 +155,19 @@ describe("React Native account preparation", () => {
       store: accountStore,
     };
     const manager = await createAccountManager(config);
-    expect(manager.revalidatesInPlace).toBe(false);
-    const exp = Math.floor(Date.now() / 1000) + 3600;
-    await manager.loginJWT(
-      `e30.${btoa(JSON.stringify({ iss: identity.issuer, sub: identity.subject, exp }))}.sig`,
-    );
+    await manager.loginWithBackend();
     await vi.waitFor(async () => expect(await accountStore.read()).not.toBeNull());
-    expect(JSON.parse((await accountStore.read())!).assignment).toBeNull();
-    expect((await createAccountManager(config)).getLoggedIn()).toBeUndefined();
+    const stored = JSON.parse((await accountStore.read())!);
+    expect(stored.assignment).toBeUndefined();
+    // Remembered so a reload reopens the user; the backend's first answer re-verifies it.
+    expect(stored.backendUser).toEqual({
+      format: "jazz-backend-user-v1",
+      account,
+      identity,
+      claims: {},
+    });
+    const reopened = (await createAccountManager(config)).getLoggedIn();
+    expect(reopened?.id).toBe(account);
+    expect(reopened?.identity).toEqual(identity);
   });
 });

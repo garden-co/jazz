@@ -1,19 +1,9 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { mintLocalFirstToken } from "jazz-napi";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createAccountManager } from "jazz-tools";
-import {
-  deploy,
-  startLocalJazzServer,
-  startTestJwtIssuer,
-  type LocalJazzServerHandle,
-  type TestJwtIssuerHandle,
-} from "jazz-tools/testing";
-import { app } from "../schema.js";
-import permissions from "../permissions.js";
+import { startTestJwtIssuer, type TestJwtIssuerHandle } from "jazz-tools/testing";
 import {
   createServer,
   startServer,
@@ -23,50 +13,6 @@ import {
 } from "../src/main.ts";
 
 const EXTERNAL_ISSUER = "https://todo-server.example.test";
-
-afterEach(() => vi.unstubAllEnvs());
-
-it.each([true, false])(
-  "accepts demo local-first tokens in production only when the sync server allows them: %s",
-  async (upstreamAllows) => {
-    vi.stubEnv("NODE_ENV", "production");
-    const upstream = await startLocalJazzServer({
-      inMemory: true,
-      allowLocalFirstAuth: upstreamAllows,
-      schema: app,
-      permissions,
-    });
-    let server: RunningServer | undefined;
-    try {
-      server = await startServer(
-        await createServer(
-          { type: "memory" },
-          {
-            appId: upstream.appId,
-            serverUrl: upstream.url,
-            backendSecret: upstream.backendSecret,
-          },
-        ),
-        0,
-      );
-      const token = mintLocalFirstToken(
-        Buffer.alloc(32, 7).toString("base64url"),
-        upstream.appId,
-        3600,
-      );
-      const response = await fetch(`${server.baseUrl}/todos`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      expect(response.status).toBe(upstreamAllows ? 200 : 401);
-      await expect(response.json()).resolves.toEqual(
-        upstreamAllows ? [] : { error: "Unauthorized" },
-      );
-    } finally {
-      if (server) await stopServer(server);
-      await upstream.stop();
-    }
-  },
-);
 
 type Identity = {
   token: string;
@@ -80,28 +26,20 @@ type OwnedTodo = Todo & {
 
 async function createIdentity(
   jwtIssuer: TestJwtIssuerHandle,
-  upstream: LocalJazzServerHandle,
+  baseUrl: string,
   userId: string,
 ): Promise<Identity> {
-  const token = jwtIssuer.jwtForUser(userId, {}, { issuer: EXTERNAL_ISSUER });
+  const token = await jwtIssuer.jwtForUser(userId, {}, { issuer: EXTERNAL_ISSUER });
   const payload = JSON.parse(Buffer.from(token.split(".")[1]!, "base64url").toString("utf8"));
   expect(payload).toMatchObject({ iss: EXTERNAL_ISSUER, sub: userId });
-  let stored: string | null = null;
-  const accounts = await createAccountManager({
-    appId: upstream.appId,
-    serverUrl: upstream.url,
-    env: `todo-server-auth-${crypto.randomUUID()}`,
-    store: {
-      async read() {
-        return stored;
-      },
-      async update(transform) {
-        stored = transform(stored);
-      },
-    },
+  // Signing in returns the account Jazz made for the identity.
+  const response = await fetch(`${baseUrl}/sign-in`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
   });
-  const account = await accounts.registerJWT(token);
-  return { token, userId, user: account.id };
+  expect(response.status).toBe(200);
+  const { account } = (await response.json()) as { account: string };
+  return { token, userId, user: account };
 }
 
 function authorization(identity: Identity): Record<string, string> {
@@ -112,43 +50,24 @@ describe("Todo Server request authentication", () => {
   let server: RunningServer;
   let baseUrl: string;
   let jwtIssuer: TestJwtIssuerHandle;
-  let upstream: LocalJazzServerHandle;
   let alice: Identity;
   let bob: Identity;
 
   beforeAll(async () => {
     jwtIssuer = await startTestJwtIssuer();
-    upstream = await startLocalJazzServer({
-      jwksUrl: jwtIssuer.jwksUrl,
-      jwtIssuer: EXTERNAL_ISSUER,
-      jwtAudience: jwtIssuer.audience,
-    });
-    await deploy({
-      serverUrl: upstream.url,
-      appId: upstream.appId,
-      adminSecret: upstream.adminSecret,
-      schema: app,
-      permissions,
-    });
-    alice = await createIdentity(jwtIssuer, upstream, "todo-rest-auth-alice");
-    bob = await createIdentity(jwtIssuer, upstream, "todo-rest-auth-bob");
     server = await startServer(
       await createServer(
         {
           type: "persistent",
           dataPath: join(mkdtempSync(join(tmpdir(), "jazz-auth-")), "jazz.db"),
         },
-        {
-          jwksUrl: jwtIssuer.jwksUrl,
-          appId: upstream.appId,
-          serverUrl: upstream.url,
-          backendSecret: upstream.backendSecret,
-          adminSecret: upstream.adminSecret,
-        },
+        { jwksUrl: jwtIssuer.jwksUrl, jwtIssuer: EXTERNAL_ISSUER },
       ),
       0,
     );
     baseUrl = server.baseUrl;
+    alice = await createIdentity(jwtIssuer, baseUrl, "todo-rest-auth-alice");
+    bob = await createIdentity(jwtIssuer, baseUrl, "todo-rest-auth-bob");
   });
 
   afterAll(async () => {
@@ -156,7 +75,6 @@ describe("Todo Server request authentication", () => {
       await stopServer(server);
     }
     await jwtIssuer?.stop();
-    await upstream?.stop();
   });
 
   const protectedRequests: Array<[string, string, RequestInit]> = [
@@ -202,13 +120,18 @@ describe("Todo Server request authentication", () => {
     await response.body?.cancel();
   });
 
-  it("rejects a valid external JWT until its identity is registered with this app", async () => {
-    const token = jwtIssuer.jwtForUser("todo-rest-unregistered", {}, { issuer: EXTERNAL_ISSUER });
-    const response = await fetch(`${baseUrl}/todos`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    expect(response.status).toBe(401);
-    await response.body?.cancel();
+  it("rejects a JWT from another issuer's keys", async () => {
+    const other = await startTestJwtIssuer();
+    try {
+      const token = await other.jwtForUser("todo-rest-foreign", {}, { issuer: EXTERNAL_ISSUER });
+      const response = await fetch(`${baseUrl}/todos`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      expect(response.status).toBe(401);
+      await response.body?.cancel();
+    } finally {
+      await other.stop();
+    }
   });
 
   it("derives ownership from the credential and enforces it across CRUD", async () => {

@@ -11,7 +11,7 @@ import {
   Text,
   VStack,
 } from "@astryxdesign/core";
-import { useAll, useDb, useOne } from "jazz-tools/react";
+import { useAll, useOne } from "jazz-tools/react";
 import { app } from "../../schema";
 import { ArtistDialog, ReleaseDialog } from "../components/forms";
 import {
@@ -124,12 +124,13 @@ export function ArtistPage({ id }: { id: string }) {
   const organization = useOrganization();
   const canEdit = useCan("editCatalogue");
   const canDelete = useCan("deleteCatalogue");
-  const db = useDb();
   const write = useWrite();
   const [dialog, setDialog] = useState<"edit" | "release" | null>(null);
-  const { data: artist, isLoading } = useOne(
-    app.artists.where({ id, organizationId: organization.id }),
-  );
+  const {
+    data: artist,
+    isLoading,
+    db,
+  } = useOne(app.artists.where({ id, organizationId: organization.id }));
   // The benchmark's artist_load: one artist's releases, newest first.
   const { data: releases = [] } = useAll(
     app.releases

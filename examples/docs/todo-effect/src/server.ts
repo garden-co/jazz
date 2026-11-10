@@ -1,28 +1,25 @@
 // #region quickstart-server-setup-effect
 import { serve } from "@hono/node-server";
-import { Config, Effect, Layer, ManagedRuntime, Option, Schema } from "effect";
+import { Effect, Layer, ManagedRuntime, Schema } from "effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
+import { sqlite } from "jazz-tools/backend";
 import { Jazz, JazzBackend } from "jazz-tools/effect/backend";
 import { app as schemaApp } from "../schema.js";
 import permissions from "../permissions.js";
 
-// One backend session for the whole server, closed when the server stops.
-const JazzLive = Layer.unwrap(
-  Effect.gen(function* () {
-    return JazzBackend.layer({
-      appId: yield* Config.String("JAZZ_APP_ID").pipe(Config.withDefault("todo-server-effect")),
-      app: schemaApp,
-      permissions,
-      driver: { type: "persistent", dataPath: "./data/jazz.db" },
-      serverUrl: yield* Config.String("JAZZ_SERVER_URL"),
-      initial: { backendSecret: yield* Config.String("JAZZ_BACKEND_SECRET") },
-      jwksUrl: Option.getOrUndefined(yield* Config.option(Config.String("JAZZ_JWKS_URL"))),
-      allowLocalFirstAuth: Option.getOrUndefined(
-        yield* Config.option(Config.Boolean("JAZZ_ALLOW_LOCAL_FIRST_AUTH")),
-      ),
-    });
-  }),
-);
+// Your own auth decides who a request is (a session cookie, a header).
+declare function currentUser(request: Request): Promise<{ id: string } | null>;
+
+// The app's Jazz for the whole server, closed when the server stops.
+const JazzLive = JazzBackend.layer({
+  app: schemaApp,
+  permissions,
+  store: sqlite({ path: "./data/jazz" }),
+  async authenticate(request) {
+    const user = await currentUser(request);
+    return user ? { userId: user.id } : null;
+  },
+});
 
 const TodoInput = Schema.Struct({ title: Schema.String });
 const TodoPatch = Schema.Struct({ done: Schema.Boolean });
@@ -30,16 +27,16 @@ const TodoParams = Schema.Struct({ id: Schema.String });
 // #endregion quickstart-server-setup-effect
 
 // #region quickstart-server-write-effect
-// Each handler reads `Jazz`; `forCurrentRequest` provides it as the user who
+// Each handler reads `Jazz`; `forCurrentReqUser` provides it as the user who
 // sent the request, with that user's permissions.
 const createTodo = HttpRouter.add(
   "POST",
   "/api/todos",
   Effect.gen(function* () {
     const jazz = yield* Jazz;
-    // A missing or invalid bearer token fails `forCurrentRequest` before this
-    // runs, and currently surfaces as a 500 (typed auth errors: #3655).
-    const account = jazz.db.getAuthState().session?.user.account;
+    // A request without a signed-in user fails `forCurrentReqUser` before
+    // this runs.
+    const account = jazz.db.getAuthState().session?.user;
     if (!account) {
       return yield* HttpServerResponse.json({ error: "Account required" }, { status: 401 });
     }
@@ -48,7 +45,7 @@ const createTodo = HttpRouter.add(
     const todo = yield* jazz.insert(schemaApp.todos, { title, done: false, owner_id: account });
 
     return yield* HttpServerResponse.json(todo, { status: 201 });
-  }).pipe(JazzBackend.forCurrentRequest()),
+  }).pipe(JazzBackend.forCurrentReqUser()),
 );
 // #endregion quickstart-server-write-effect
 
@@ -62,7 +59,7 @@ const listTodos = HttpRouter.add(
       schemaApp.todos.where({ done: false }).orderBy("title", "asc").limit(100),
     );
     return yield* HttpServerResponse.json(todos);
-  }).pipe(JazzBackend.forCurrentRequest()),
+  }).pipe(JazzBackend.forCurrentReqUser()),
 );
 // #endregion quickstart-server-read-effect
 
@@ -76,7 +73,7 @@ const updateTodo = HttpRouter.add(
     const { done } = yield* HttpServerRequest.schemaBodyJson(TodoPatch);
     yield* jazz.update(schemaApp.todos, id, { done });
     return yield* HttpServerResponse.json({ ok: true });
-  }).pipe(JazzBackend.forCurrentRequest()),
+  }).pipe(JazzBackend.forCurrentReqUser()),
 );
 
 const deleteTodo = HttpRouter.add(
@@ -87,7 +84,7 @@ const deleteTodo = HttpRouter.add(
     const { id } = yield* HttpRouter.schemaPathParams(TodoParams);
     yield* jazz.delete(schemaApp.todos, id);
     return yield* HttpServerResponse.json({ ok: true });
-  }).pipe(JazzBackend.forCurrentRequest()),
+  }).pipe(JazzBackend.forCurrentReqUser()),
 );
 // #endregion quickstart-server-update-effect
 
@@ -105,7 +102,7 @@ export const listDoneTodosRoute = HttpRouter.add(
   "/api/todos/done",
   listDoneTodos.pipe(
     Effect.flatMap((rows) => HttpServerResponse.json(rows)),
-    JazzBackend.forCurrentRequest(),
+    JazzBackend.forCurrentReqUser(),
     Effect.catchTag("JazzError", () =>
       HttpServerResponse.json({ error: "Failed to query todos" }, { status: 500 }),
     ),
@@ -117,7 +114,7 @@ export const listDoneTodosRoute = HttpRouter.add(
 const Routes = Layer.mergeAll(createTodo, listTodos, updateTodo, deleteTodo);
 
 // `toWebHandler` turns the routes into a fetch handler that any Node or edge
-// server can host. The Jazz session is opened once and shared by every request.
+// server can host. Jazz is opened once and shared by every request.
 const jazzRuntime = ManagedRuntime.make(JazzLive);
 const services = await jazzRuntime.context();
 const { handler, dispose } = HttpRouter.toWebHandler(Routes);
@@ -125,5 +122,10 @@ const { handler, dispose } = HttpRouter.toWebHandler(Routes);
 const server = serve({ fetch: (request) => handler(request, services), port: 3000 }, (info) => {
   console.log(`Server running on http://localhost:${info.port}`);
 });
-process.on("SIGTERM", () => server.close(() => void dispose().then(() => jazzRuntime.dispose())));
+// Close Jazz first: it ends the sync connections that server.close() waits for.
+process.on("SIGTERM", () => {
+  void dispose()
+    .then(() => jazzRuntime.dispose())
+    .then(() => server.close());
+});
 // #endregion quickstart-server-listen-effect

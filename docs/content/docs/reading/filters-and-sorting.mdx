@@ -1,6 +1,6 @@
 ---
 title: Filters, Sorting & Pagination
-description: Filter rows with where(), sort with orderBy(), and paginate with limit/offset.
+description: "Learn how to filter rows with where(), sort them with orderBy() and page through them with limit and offset."
 reviewedAt: "b29b48d1a"
 ---
 
@@ -12,7 +12,7 @@ Use `where(...)` to filter rows. Pass the columns you want to match on&hairsp;â€
 
 <WhereOperatorsTable />
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-filters-ts
@@ -33,11 +33,6 @@ Use `where(...)` to filter rows. Pass the columns you want to match on&hairsp;â€
     </include>
 
   </Tab>
-  <Tab value="Rust">
-    <include cwd lang="rs">
-      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-filters-rust
-    </include>
-  </Tab>
 </Tabs>
 
 ## Sorting
@@ -49,7 +44,7 @@ Sort results with `orderBy(...)`. Pass a column name and optionally `"asc"` or `
   queries.
 </Callout>
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-sorting-ts
@@ -58,11 +53,6 @@ Sort results with `orderBy(...)`. Pass a column name and optionally `"asc"` or `
   <Tab value="Effect">
     <include cwd lang="ts">
       ../examples/docs/todo-effect/src/docs-snippets.ts#reading-sorting-effect
-    </include>
-  </Tab>
-  <Tab value="Rust">
-    <include cwd lang="rs">
-      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-sorting-rust
     </include>
   </Tab>
 </Tabs>
@@ -80,7 +70,7 @@ declaration order. `min`, `max` and range filters such as `gt` follow the same o
 deterministic order. If the first sort column is not unique, add `orderBy("id")` as the final
 tie-breaker so page boundaries are stable.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-pagination-ts
@@ -91,17 +81,29 @@ tie-breaker so page boundaries are stable.
       ../examples/docs/todo-effect/src/docs-snippets.ts#reading-pagination-effect
     </include>
   </Tab>
-  <Tab value="Rust">
-    <include cwd lang="rs">
-      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-pagination-rust
-    </include>
-  </Tab>
 </Tabs>
+
+A deep `offset` still reads every skipped row: page 100 of 50 rows scans 5,050. For long lists, page
+by a cursor instead, the last value of the sort column you showed:
+
+```ts
+const page = await db.all(
+  app.messages
+    .where({ sentAt: { lt: lastSentAt } })
+    .orderBy("sentAt", "desc")
+    .limit(50),
+);
+```
+
+Each page then reads only the rows it returns. For now, also prefer a cursor on the backend: a large
+`offset` with `orderBy` can fail on `jazz.db`.
 
 ## Values over 64 KB
 
 A `string`, `bytes` or `json` value over 64 KB is stored in chunks, and filters and sorting
-never read those chunks. Shorter values filter and sort as described above. A value over
+never read those chunks. A text column with a `text`, `markdown` or `html` merge strategy
+is chunked from 4 KB, so typing into a long document stays cheap; everything below applies
+to its values over 4 KB. Shorter values filter and sort as described above. A value over
 64 KB is compared by identity instead of by content:
 
 - A filter literal over 64 KB in `eq`, `ne` or `in` is rejected with a "not supported yet"

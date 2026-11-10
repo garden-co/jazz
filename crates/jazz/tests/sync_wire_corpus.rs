@@ -54,7 +54,7 @@ const FORMAT: &str = "jazz-sqlite-sync-wire-corpus-v1";
 /// Every `SyncMessage` variant, in declaration order. A message too
 /// large for one frame travels in parts below the message layer
 /// (binding_host's frame-split test covers it).
-const VARIANTS: [&str; 20] = [
+const VARIANTS: [&str; 21] = [
     "Read",
     "Unsubscribe",
     "ResendWhole",
@@ -75,6 +75,7 @@ const VARIANTS: [&str; 20] = [
     "Catalogue",
     "Welcome",
     "ConnectionSettled",
+    "Holds",
 ];
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -375,7 +376,7 @@ impl Transport for Recording {
 /// `AccessLost` (a branch view's row whose head version the reader may not
 /// read), and serializable `Commit`s with a snapshot the authority served
 /// and one a worker with no server numbered.
-const SHAPES: [&str; 13] = [
+const SHAPES: [&str; 15] = [
     "Read/once",
     "Rows/tx_ids",
     "Catalogue/versions",
@@ -386,28 +387,41 @@ const SHAPES: [&str; 13] = [
     "Read/live-branch-head",
     "AccessLost/hidden",
     "Commit/serializable",
-    "Commit/serializable-by",
+    "Rows/pending",
     "Read/once-resumed",
     "Read/once-historical",
+    "Read/live-resumed-pinned",
+    "Welcome/pinned",
 ];
 
 fn shape(message: &SyncMessage) -> Option<&'static str> {
     match message {
         SyncMessage::Read {
+            since: Some(since),
+            span: ReadSpan::Live,
+            ..
+        } if since.context.is_some() => Some(SHAPES[13]),
+        SyncMessage::Welcome {
+            context: Some(_), ..
+        } => Some(SHAPES[14]),
+        SyncMessage::Read {
             since,
             span: ReadSpan::Once { at },
             ..
-        } if !since.is_empty() && at.is_empty() => Some(SHAPES[11]),
+        } if since.is_some() && at.is_none() => Some(SHAPES[11]),
         SyncMessage::Read {
             span: ReadSpan::Once { at },
             ..
-        } if !at.is_empty() => Some(SHAPES[12]),
+        } if at.is_some() => Some(SHAPES[12]),
         SyncMessage::Read {
             since,
             span: ReadSpan::Once { at },
             ..
-        } if since.is_empty() && at.is_empty() => Some(SHAPES[0]),
+        } if since.is_none() && at.is_none() => Some(SHAPES[0]),
         SyncMessage::Rows { tx_ids, .. } if !tx_ids.is_empty() => Some(SHAPES[1]),
+        SyncMessage::Rows { images, .. } if images.iter().any(|image| !image.at.accepted()) => {
+            Some(SHAPES[10])
+        }
         SyncMessage::Catalogue(catalogue)
             if !catalogue.versions.is_empty() && !catalogue.cells.is_empty() =>
         {
@@ -449,13 +463,9 @@ fn shape(message: &SyncMessage) -> Option<&'static str> {
         },
         SyncMessage::AccessLost { hidden: true, .. } => Some(SHAPES[8]),
         SyncMessage::Commit {
-            kind: WireKind::Serializable { snapshot, .. },
+            kind: WireKind::Serializable { .. },
             ..
-        } => match snapshot.as_slice() {
-            [(None, _)] => Some(SHAPES[9]),
-            [(Some(_), _)] => Some(SHAPES[10]),
-            _ => None,
-        },
+        } => Some(SHAPES[9]),
         _ => None,
     }
 }
@@ -503,7 +513,7 @@ fn subject(n: u8) -> Value {
     Value::String(user(n).principal_parts().1)
 }
 
-const ME: [&str; 3] = ["user", "identity", "subject"];
+const ME: [&str; 2] = ["identity", "subject"];
 
 /// `notes.kind`: an enum, which rows carry by variant name whatever tags a
 /// store keeps it as.
@@ -540,6 +550,7 @@ fn schema_with_copy() -> JazzSchema {
                     .column("body", ColumnType::Bytea)
                     .column("kind", kind())
                     .column("first_owner", ColumnType::Text)
+                    .nullable_column("label", ColumnType::Text)
                     .policies(read_and_allow_all_writes(session_eq("owner", &ME))),
             )
             .build(),
@@ -554,14 +565,21 @@ fn note(owner: u8, body: Vec<u8>) -> BTreeMap<String, Value> {
     ])
 }
 
+/// Every store in the scenario reads this wall clock, so commit clocks and
+/// the frames that carry them are the same on every run.
+const CORPUS_NOW_MS: u64 = 1_800_000_000_000;
+
 fn open(node: u8, author: AuthorSubject, draft: bool) -> Db {
-    block_on(Db::open(DbConfig::new(
-        schema(draft),
-        DbIdentity {
-            node: NodeUuid::from_bytes([node; 16]),
-            author,
-        },
-    )))
+    block_on(Db::open(
+        DbConfig::new(
+            schema(draft),
+            DbIdentity {
+                node: NodeUuid::from_bytes([node; 16]),
+                author,
+            },
+        )
+        .with_clock(|| CORPUS_NOW_MS),
+    ))
     .unwrap()
 }
 
@@ -596,13 +614,16 @@ fn large(seed: u8) -> Vec<u8> {
 /// A scenario that sends every `SyncMessage` variant at least once.
 fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     let recorded: Recorded = Rc::default();
-    let server = block_on(Db::open_history_complete(DbConfig::new(
-        schema(false),
-        DbIdentity {
-            node: NodeUuid::from_bytes([1; 16]),
-            author: AuthorSubject::SYSTEM,
-        },
-    )))
+    let server = block_on(Db::open_history_complete(
+        DbConfig::new(
+            schema(false),
+            DbIdentity {
+                node: NodeUuid::from_bytes([1; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        )
+        .with_clock(|| CORPUS_NOW_MS),
+    ))
     .unwrap();
     let shared = RowUuid::from_bytes([0x11; 16]);
     block_on(server.insert(
@@ -732,8 +753,8 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     .unwrap();
     pump(&[&alice, &server, &alice]);
 
-    // Commit (serializable, at a snapshot a worker numbered): a tab of a
-    // worker with no server pins at the worker's position.
+    // Rows (a relay's unsettled version): a worker with no server keeps
+    // its own write pending, and ships it to its tab in its own band.
     let wendy = open(0x57, user(1), false);
     wendy.set_remote_link_hint(RemoteLinkHint::NoServer);
     let tab = open(0x58, user(1), false);
@@ -741,23 +762,17 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     tab.set_remote_link_hint(RemoteLinkHint::Live);
     connect(&tab, &wendy, user(1), &recorded);
     let tab_notes = tab.prepare_query(&Query::from("notes")).unwrap();
+    // Read (once, fresh): the tab's first read has no checkpoint to resume.
     let open_tx = OpenTransactionId::new();
     block_on(tab.begin_serializable(open_tx)).unwrap();
     let _ = drive(
         &[&tab, &wendy, &tab],
         tab.tx_ref(open_tx).all_prepared(&tab_notes),
     );
-    drive(
-        &[&tab, &wendy, &tab],
-        tab.tx_ref(open_tx)
-            .insert("notes", note(1, vec![10]), InsertOptions::default()),
-    )
-    .unwrap();
-    drive(
-        &[&tab, &wendy, &tab],
-        tab.commit_serializable_handle(open_tx),
-    )
-    .unwrap();
+    tab.abandon_transaction_handle(open_tx).unwrap();
+    let _tab_stream = block_on(tab.subscribe(&tab_notes, ReadOpts::default())).unwrap();
+    pump(&[&tab, &wendy, &tab]);
+    block_on(wendy.insert("notes", note(1, vec![10]), InsertOptions::default())).unwrap();
     pump(&[&tab, &wendy, &tab]);
 
     // A history subscription ships superseded versions, with the commits
@@ -825,10 +840,7 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
 
     // Fate rejected with a reason: alice stamps a write further ahead of
     // the server's clock than the skew tolerance allows.
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64;
+    let now = CORPUS_NOW_MS;
     block_on(alice.insert(
         "notes",
         note(1, vec![6]),
@@ -846,8 +858,9 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     block_on(mallory.insert("notes", note(2, vec![7]), InsertOptions::default())).unwrap();
     pump(&[&mallory, &server, &mallory]);
 
-    // Catalogue with versions and cells: the server admits a version whose
-    // lens copies a column while alice is connected.
+    // Catalogue with versions, cells and defaults: the server admits a
+    // version whose lens copies a column and adds one with a default while
+    // alice is connected.
     let copied = schema_with_copy();
     let lens = MigrationLens::new(
         schema(false).version_id(),
@@ -855,10 +868,16 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
         vec![TableLens {
             source_table: "notes".into(),
             target_table: "notes".into(),
-            ops: vec![LensOp::CopyColumn {
-                from: "owner".into(),
-                to: "first_owner".into(),
-            }],
+            ops: vec![
+                LensOp::CopyColumn {
+                    from: "owner".into(),
+                    to: "first_owner".into(),
+                },
+                LensOp::AddColumn {
+                    column: "label".into(),
+                    default: Value::Nullable(Some(Box::new(Value::String("inbox".into())))),
+                },
+            ],
         }],
     )
     .unwrap();
@@ -905,7 +924,7 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
             tier: ReadTier::LocalFirst,
             wait: None,
             view: Box::new(ReadViewSourceSpec::Current),
-            since: Vec::new(),
+            since: None,
             span: ReadSpan::Live,
         },
     ])));
@@ -932,6 +951,72 @@ fn record() -> BTreeMap<String, (String, Vec<u8>)> {
     recorded
         .borrow_mut()
         .insert("ResendWhole".to_owned(), ("server".to_owned(), frame));
+
+    // A session pinned to a permissions bundle: its Welcome names the
+    // bundle, and a reconnecting replica resumes a live read from the seq
+    // it settled through under that bundle. Pinned as a server and a
+    // replica encode them, from the frames recorded above.
+    let bundle = [0xb1; 32];
+    let pinned = {
+        let recorded = recorded.borrow();
+        let decode = |name: &str| postcard::from_bytes::<SyncMessage>(&recorded[name].1).unwrap();
+        let SyncMessage::Welcome {
+            admitted,
+            catalogue,
+            ..
+        } = decode("Welcome")
+        else {
+            unreachable!()
+        };
+        let SyncMessage::Read {
+            id,
+            query,
+            binding,
+            include_deleted,
+            tier,
+            wait,
+            view,
+            ..
+        } = decode("Read")
+        else {
+            unreachable!()
+        };
+        [
+            (
+                "Welcome/pinned",
+                "client",
+                SyncMessage::Welcome {
+                    admitted,
+                    catalogue,
+                    context: Some(bundle),
+                },
+            ),
+            (
+                "Read/live-resumed-pinned",
+                "server",
+                SyncMessage::Read {
+                    id,
+                    query,
+                    binding,
+                    include_deleted,
+                    tier,
+                    wait,
+                    view,
+                    since: Some(jazz::db::Since {
+                        through: 7,
+                        context: Some(bundle),
+                    }),
+                    span: ReadSpan::Live,
+                },
+            ),
+        ]
+    };
+    for (name, reader, message) in pinned {
+        let [frame] = encode_frames(message).unwrap().try_into().unwrap();
+        recorded
+            .borrow_mut()
+            .insert(name.to_owned(), (reader.to_owned(), frame));
+    }
 
     hidden_in_a_view(&recorded);
 
@@ -972,6 +1057,7 @@ fn hidden_in_a_view(recorded: &Recorded) {
                 author,
             },
         )
+        .with_clock(|| CORPUS_NOW_MS)
     };
     let server = block_on(Db::open(config(0x61, AuthorSubject::SYSTEM))).unwrap();
     server.set_authority();

@@ -1,9 +1,8 @@
 import { For, createSignal } from "solid-js";
-import { useAll, useDb } from "jazz-tools/solid";
+import { useAll } from "jazz-tools/solid";
 import { app } from "../schema.js";
 
 export function TodoList() {
-  const db = useDb();
   const todos = useAll(() => ({ query: app.todos }));
   const incompleteTodos = useAll(() => ({
     query: app.todos.where({ done: false }).orderBy("title", "asc").limit(50),
@@ -11,23 +10,23 @@ export function TodoList() {
   const [title, setTitle] = createSignal("");
 
   function addTodo(todoTitle: string) {
-    db().insert(app.todos, { title: todoTitle, done: false });
+    todos.db.insert(app.todos, { title: todoTitle, done: false });
   }
 
   function toggleTodo(todo: { id: string; done: boolean }) {
-    db().update(app.todos, todo.id, { done: !todo.done });
+    todos.db.update(app.todos, todo.id, { done: !todo.done });
   }
 
   function removeTodo(id: string) {
-    db().delete(app.todos, id);
+    todos.db.delete(app.todos, id);
   }
 
   async function addImportantTodo(todoTitle: string) {
-    const { id } = await db()
+    const { id } = await todos.db
       .insert(app.todos, { title: todoTitle, done: false })
       .wait({ tier: "global" });
-    await db().update(app.todos, id, { done: true }).wait({ tier: "global" });
-    await db().delete(app.todos, id).wait({ tier: "global" });
+    await todos.db.update(app.todos, id, { done: true }).wait({ tier: "global" });
+    await todos.db.delete(app.todos, id).wait({ tier: "global" });
   }
 
   function handleSubmit(event: SubmitEvent) {

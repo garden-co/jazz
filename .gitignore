@@ -41,6 +41,9 @@ examples/wequencer/walkthrough/*.html
 # Local data
 # Runtime-owned process identity locks/receipts, not application source.
 **/.jazz/foreground-node-leases/
+# Local Jazz data of examples and stress apps whose backend runs in their dev server.
+examples/**/.jazz/
+dev/stress-tests/**/.jazz/
 data/
 
 # Sync server data
@@ -60,7 +63,6 @@ data-multi/
 .turbo
 
 # Benchmark scratch data
-/crates/opfs-btree/wasm-bench/bench-data/
 /bench-out/
 /dev/benchmarks/profiles/
 

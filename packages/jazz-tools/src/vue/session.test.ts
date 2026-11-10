@@ -6,7 +6,7 @@ import { createJazzSessionOwner } from "../session/state.js";
 import { JazzSessionProvider, useJazzSession } from "./session.js";
 import { useJazzClient } from "./provider.js";
 import type { JazzClient } from "../web/create-jazz-client.js";
-vi.mock("../web/create-jazz-client.js", () => ({ createJazzClient: vi.fn() }));
+vi.mock("../web/create-jazz-client.js", () => ({ openJazzClient: vi.fn() }));
 vi.mock("../dev-tools/auto-attach.js", () => ({ startInspectorOnce: vi.fn() }));
 const account = Object.freeze({
   id: "local",
@@ -17,10 +17,7 @@ async function fixture() {
   const accounts = new AccountManager(
     {
       createLocalFirst: () => account,
-      registerJWT: async () => account,
-      loginJWT: async () => account,
-      loginOrRegisterJWT: async () => account,
-      linkJWT: async () => account,
+      loginWithBackend: async () => account,
     },
     account,
   );

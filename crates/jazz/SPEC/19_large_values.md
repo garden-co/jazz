@@ -3,8 +3,10 @@
 ## Overview
 
 `string`, `json` and `bytes` columns hold values of any size through one API.
-A value up to `INLINE_VALUE_MAX_BYTES` (64 KiB) is stored in its cell as
-ordinary SQLite TEXT or BLOB. A larger value is a content-defined chunk tree
+A value up to its column's inline threshold is stored in its cell as
+ordinary SQLite TEXT or BLOB: `INLINE_VALUE_MAX_BYTES` (64 KiB), or
+`TEXT_MERGE_INLINE_MAX_BYTES` (4 KiB) for a column with a text, markdown or
+html merge strategy, which editors write on every keystroke. A larger value is a content-defined chunk tree
 plus an **epoch**: a growing list of edits on top of that tree. A row version's
 cell names an epoch and how many of its edits apply. That prefix never changes,
 so the version's value is immutable while the epoch grows.
@@ -64,9 +66,17 @@ triggers and queries read both in plain SQL. There are no tag bytes, every
 TEXT cell is valid UTF-8, and no cell carries a hash, root or descriptor.
 
 The inline/chunked choice is canonical: a value is chunked exactly when its
-logical length exceeds `INLINE_VALUE_MAX_BYTES`. So an inline cell never equals
+logical length exceeds its column's inline threshold (`INLINE_VALUE_MAX_BYTES`,
+or `TEXT_MERGE_INLINE_MAX_BYTES` for a text-merge column). So an inline cell never equals
 a chunked one, and a write that brings a chunked value back under the limit
 stores it inline.
+
+One exception: a cell received from upstream always keeps the descriptor it
+came with, chunked, since receiving a descriptor never pulls nodes (19.8). On
+a replica whose schema or threshold differs from its upstream's, a received
+value at or under the column's threshold therefore stays chunked until its
+next local write. Until then it compares by identity and sorts as chunked in
+SQL (`=`, `contains`, `ORDER BY`), while fanout sorts it by its logical value.
 
 A large-capable column has no other stored column: its indexes are on the
 cell itself, and no query reads a chunked value's bytes (19.5).
@@ -80,9 +90,12 @@ Chunking depends only on content, so two stores that build a tree over the
 same bytes build the same nodes, and an edit changes only the leaves around
 it and the path above them.
 
-A node is identified by its hash: BLAKE3 over its canonical encoding, in a
-domain fixed by the format version and the column kind (bytes, string, JSON).
-A JSON tree therefore never reads as a string tree. A leaf encodes its bytes;
+A node is identified by its hash: plain SHA-256 over its canonical encoding,
+which opens with the node tag, the format version and the column kind (bytes,
+string, JSON). A JSON tree therefore never reads as a string tree. The encoding is
+also exactly the object a chunk store holds, so an object store that checks
+a SHA-256 checksum on upload (a presigned PUT that signs
+`x-amz-checksum-sha256`) verifies the node hash itself. A leaf encodes its bytes;
 a branch encodes, per child, the child's hash, byte length and (for strings)
 UTF-16 length. A node has no locator and no second identity.
 
@@ -166,7 +179,8 @@ that page. An edit that would cross either limit, or that inserts more than
 
 A write of a large-capable column produces the new value's cell:
 
-1. **Inline result** (≤ 64 KiB): the cell is the TEXT or BLOB.
+1. **Inline result** (up to the column's threshold): the cell is the TEXT or
+   BLOB.
 2. **Edits on the newest version.** When the write's base is `(E, n)` with
    `n = E.count`, and its edits fit the epoch limits, the edits are appended to
    E and the cell is `(E, n + k)`.
@@ -181,6 +195,14 @@ A write of a large-capable column produces the new value's cell:
    A new epoch with that root and no edits holds it, and the cell is
    `(E″, 0)`.
 
+A whole value written over a chunked one on the root branch is written as
+the edit that makes it: the one splice between the held value and the new
+one (their common prefix and suffix kept), so an editor that writes its
+document whole on every change costs case 2, not case 4. A text merge on the
+authority (SPEC 4 §4.3) whose held value is chunked is written the same way,
+as that value plus the splice to the merged text. A held value this store
+cannot read (chunks not fetched) leaves the write whole.
+
 Any store may materialize; trees are deterministic, so stores that
 materialize the same value agree on its nodes. Materialization is local and
 never synced.
@@ -190,7 +212,10 @@ prepared into nodes before the write (streaming for `insert_streaming_value`
 and the binding upload APIs). Those nodes are held by an upload lease
 (`_jazz_lv_upload`) or, when pushed by a client, by a receipt
 (`_jazz_lv_receipt`) until the commit referencing them lands or the staging
-maximum age passes.
+maximum age passes. A streamed value staged in an open transaction keeps its
+upload lease in the transaction until the transaction commits or is
+abandoned; a commit whose lease expired meanwhile is refused, since its nodes
+may be gone.
 
 `INV-CONTENT-4`: staged nodes are unreachable from any row; staging needs no
 write permission and grants none, and an expired lease or receipt releases
@@ -274,18 +299,18 @@ read needs. Partial reads (byte, UTF-8 and UTF-16 ranges, JSON pointers) map
 their range through the edits and read only the leaves it covers.
 
 Queries compare cells, in plain SQL. An inline cell compares as its value,
-exactly as any other string or bytes value. A chunked cell (a value over
-`INLINE_VALUE_MAX_BYTES`, 64 KiB) is compared by identity, never by content:
+exactly as any other string or bytes value. A chunked cell (a value over its
+column's inline threshold, §19.1) is compared by identity, never by content:
 
-| Operation on a value over 64 KiB          | Result                                                                                                            |
-| ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `=`, `!=`, `IN` against an inline literal | never equal: an inline literal is under the threshold, a chunked value over it                                    |
-| `=`, `!=`, `IN` against a longer literal  | refused when the query compiles: "comparing `t.c` with a literal over 65536 bytes is not supported yet"           |
-| `=`, `!=` between two columns, joins      | equal only when both name the same cell                                                                           |
-| GROUP BY, DISTINCT                        | one group per cell                                                                                                |
-| `<`, `<=`, `>`, `>=`                      | never matches, against a literal or another column                                                                |
-| `contains`                                | never matches                                                                                                     |
-| ORDER BY                                  | after NULL and before every inline value ascending (reversed descending), among themselves in no meaningful order |
+| Operation on a chunked value              | Result                                                                                                                                |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `=`, `!=`, `IN` against an inline literal | never equal: an inline literal is under the threshold, a chunked value over it                                                        |
+| `=`, `!=`, `IN` against a longer literal  | refused when the query compiles: "comparing `t.c` with a literal over 65536 bytes is not supported yet" (4096 for text-merge columns) |
+| `=`, `!=` between two columns, joins      | equal only when both name the same cell                                                                                               |
+| GROUP BY, DISTINCT                        | one group per cell                                                                                                                    |
+| `<`, `<=`, `>`, `>=`                      | never matches, against a literal or another column                                                                                    |
+| `contains`                                | never matches                                                                                                                         |
+| ORDER BY                                  | after NULL and before every inline value ascending (reversed descending), among themselves in no meaningful order                     |
 
 Equal cells always hold equal values (`INV-CONTENT-2`), so cell equality can
 under-report equality but never over-report it. Two cells of one value are
@@ -295,8 +320,8 @@ it. A value written with an edit tail, or interned into a different epoch on
 another replica, is a different cell; equality between such values depends on
 how they were written. Cells are store-local: a client and the server may
 hold one value as different cells, so a policy that compares two
-large-capable columns can decide a row over 64 KiB differently on each.
-Values up to 64 KiB, the common case, have none of these limits.
+large-capable columns can decide a row over the threshold differently on
+each. Values up to the threshold, the common case, have none of these limits.
 
 These are limits, not a design commitment. A column flag that consolidates
 every write to a tail-free tree (making equality on that column exact, at the
@@ -594,6 +619,17 @@ edits when the column is text-merging (ch. 4 §4.3, `INV-HIST-24`). Branch views
 reject `applyDiffs` explicitly, as do React Native transactions until its
 foreground codec carries the descriptor.
 
+`update` also takes `editedFrom`, the value each text-merge column was
+edited from, lowered to a `text_edit` descriptor (`kind: "text_edit"`,
+`column`, `text`, `edited_from`) that the store merges over the value it
+holds (ch. 4 §4.3). It needs no coordinates, but travels the same
+partial-value path, with the same limits: branch views refuse it, as do
+React Native transactions and, in the native runtime, a session or
+attributed write outside a transaction, each explicitly as not supported
+yet. TypeScript refuses `editedFrom` on a column with its own transform,
+and `upsert` and the streaming writes do not take it. A column left
+`undefined` in `editedFrom` is written as a plain value.
+
 `Db` exposes `value_delta(table, row, column, from_version, to_version)`,
 returning `delta` (§19.6) as splices for callers allowed to read both
 versions: each replaces `delete` bytes at `at` with `insert`, applied in
@@ -633,7 +669,10 @@ admission and ordinary row-write admission. TypeScript exposes
 `Db.insertStreaming`, `Db.updateStreaming` and `Db.upsertStreaming` with one
 column replaced by a `ReadableStream` or `AsyncIterable` source; NAPI and
 Browser/WASM feed the same leased upload in bounded windows without
-collecting the whole value or holding a transaction open. Explicit abort and
+collecting the whole value. A transaction's `insertStreaming`,
+`updateStreaming` and `upsertStreaming` stage the finished row write in the
+transaction instead (native Rust: `TxRef::finish_streaming_value_upload`);
+its commit waits for the stream and fails if the stream did. Explicit abort and
 terminal validation failure release the lease at once; the staging maximum
 age bounds abandoned uploads.
 

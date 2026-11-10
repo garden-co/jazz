@@ -1,5 +1,5 @@
 import { sessionConfig } from "./account.js";
-import { createJazzSession } from "jazz-tools/client";
+import { createJazzClient } from "jazz-tools/client";
 import { createDb, type DbConfig, type Db } from "jazz-tools";
 import { app, type Todo } from "../schema.js";
 
@@ -46,7 +46,7 @@ function orderTodosWithDepth(todos: Todo[]): { todo: Todo; depth: number }[] {
 
 // #region context-setup-ts-client
 async function openLocalFirst(config?: Partial<DbConfig>) {
-  const session = await createJazzSession(sessionConfig(config));
+  const session = await createJazzClient(sessionConfig(config));
   // Read the current client from session.getSnapshot(); close the session on teardown.
   return session;
 }
@@ -61,7 +61,7 @@ export async function startApp(
   const db = config?.account
     ? await createDb({ ...config, appId: config.appId!, account: config.account })
     : session!.getSnapshot().client!.db;
-  let sessionUserId = db.getAuthState().session?.user.account ?? null;
+  let sessionUserId = db.getAuthState().session?.user ?? null;
 
   // Build DOM
   const h1 = document.createElement("h1");
@@ -159,7 +159,7 @@ export async function startApp(
     list.replaceChildren(items);
   });
   const stopAuthSync = db.onAuthChanged(({ session }) => {
-    syncAuthState(session?.user.account ?? null);
+    syncAuthState(session?.user ?? null);
   });
 
   // Add todo form

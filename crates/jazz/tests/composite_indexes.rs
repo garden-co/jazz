@@ -261,10 +261,10 @@ fn composite_index_definition_in_the_store_file_is_pinned() {
     assert_eq!(
         composite,
         [(
-            "tasks__ix(owner~971790,rank~0ee2f7)".to_owned(),
+            "tasks__ix(owner~0e84cb,rank~6c58ea)".to_owned(),
             concat!(
-                "CREATE INDEX \"tasks__ix(owner~971790,rank~0ee2f7)\" ON \"tasks\"(",
-                "\"owner~971790\", \"rank~0ee2f7\", id)"
+                "CREATE INDEX \"tasks__ix(owner~0e84cb,rank~6c58ea)\" ON \"tasks\"(",
+                "\"owner~0e84cb\", \"rank~6c58ea\", id)"
             )
             .to_owned()
         )]
@@ -679,7 +679,7 @@ fn composite_indexes_subsume_their_prefixes_and_id_reads_seek_by_id() {
         .prepare_query(&ada().filter(eq(col("id"), lit(Value::Uuid(row(5).0)))))
         .unwrap();
     let (_, plan) = db.explain_query_plan(&point, None).unwrap();
-    assert!(plan.contains("(id=? AND _b=?)"), "{plan}");
+    assert!(plan.contains("(id=? AND _branch=?)"), "{plan}");
     let rows = block_on(db.all(&point, ReadOpts::default())).unwrap();
     assert_eq!(rows.len(), 1);
 }

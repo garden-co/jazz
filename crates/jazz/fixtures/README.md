@@ -18,6 +18,8 @@ code that defines its format.
 - `snapshot_ref_v1.json`: snapshot reference codec.
 - `sqlite_sync_wire_v1.json`: the sync wire corpus (`sync_wire_corpus.rs`,
   `wire-frame-artifact-corpus.test.ts`).
+- `thin_wire_v1.json`: thin client request and response frames (`jazz-protocol`
+  `thin.rs`, `thin/wire.test.ts`).
 - `websocket_prelude_v1.json`: WebSocket v1 admission preludes (the one JSON
   message before binary wire frames).
 - `wire_frame_artifact_corpus_v6.json`, `wire_hello_frames_v6.json`,

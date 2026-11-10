@@ -232,7 +232,7 @@ fn resource_policy(access_table: &str) -> PolicyExpr {
         &[("administrator", PublicValue::Boolean(false))],
         GROUP_ACCESS,
         "user_id",
-        &["user", "account"],
+        &["user"],
         "group_id",
     )
 }
@@ -554,7 +554,7 @@ fn apply_event(rows: &mut BTreeSet<RowUuid>, event: SubscriptionEvent) {
                 rows.insert(row.row.row_uuid());
             }
         }
-        SubscriptionEvent::Rejected { reason } => {
+        SubscriptionEvent::Rejected { reason, .. } => {
             panic!("subscription rejected unexpectedly: {reason:?}")
         }
         SubscriptionEvent::Closed => {}

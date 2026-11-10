@@ -68,7 +68,13 @@ async fn http(router: &Router, method: &str, path: &str, body: Value) -> (Status
     (status, value)
 }
 async fn deploy_ok(router: &Router, request: Value) -> Value {
-    let (status, body) = http(router, "POST", "/deploy", request).await;
+    let (status, body) = http(router, "POST", "/bundles", request).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    body
+}
+/// Publish a deployment as a bundle, activating nothing (createJazz).
+async fn publish_ok(router: &Router, request: Value) -> Value {
+    let (status, body) = http(router, "POST", "/bundles", request).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     body
 }
@@ -89,7 +95,7 @@ async fn deploy_initial_permission_only_and_unchanged_requests() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/apps/{}/admin/deploy", app_id()))
+                .uri(format!("/apps/{}/admin/bundles", app_id()))
                 .header("Content-Type", "application/json")
                 .body(Body::from(initial.to_string()))
                 .unwrap(),
@@ -100,7 +106,7 @@ async fn deploy_initial_permission_only_and_unchanged_requests() {
     let mut missing = initial.clone();
     missing.as_object_mut().unwrap().remove("permissions");
     assert_eq!(
-        http(&router, "POST", "/deploy", missing).await.0,
+        http(&router, "POST", "/bundles", missing).await.0,
         StatusCode::BAD_REQUEST
     );
     assert_eq!(graph(&router).await["schemas"], json!([]));
@@ -110,12 +116,10 @@ async fn deploy_initial_permission_only_and_unchanged_requests() {
         result["published"]["schemas"],
         json!([SchemaHash::compute(&base).to_string()])
     );
-    let head = http(&router, "GET", "/permissions", Value::Null).await.1;
-    assert_eq!(deploy_ok(&router, initial).await["changed"], false);
-    assert_eq!(
-        http(&router, "GET", "/permissions", Value::Null).await.1,
-        head
-    );
+    let first = result["bundle"].clone();
+    let again = deploy_ok(&router, initial).await;
+    assert_eq!(again["changed"], false);
+    assert_eq!(again["bundle"], first);
     let mut allow_read = request(&base, &[], vec![]);
     allow_read["permissions"] = serde_json::to_value(HashMap::from([(
         TableName::new("notes"),
@@ -123,18 +127,21 @@ async fn deploy_initial_permission_only_and_unchanged_requests() {
     )]))
     .unwrap();
     let result = deploy_ok(&router, allow_read.clone()).await;
+    assert_eq!(result["changed"], true);
     assert_eq!(
-        result,
-        json!({"changed":true,"published":{"schemas":[],"migrations":[]}})
+        result["published"],
+        json!({"schemas":[],"migrations":[]}),
+        "a permission-only change publishes only its bundle"
     );
-    assert_eq!(deploy_ok(&router, allow_read).await["changed"], false);
-    let stored = http(&router, "GET", "/permissions", Value::Null).await.1;
-    assert!(stored["permissions"]["notes"].is_object(), "{stored}");
+    assert_ne!(result["bundle"], first);
+    let again = deploy_ok(&router, allow_read).await;
+    assert_eq!(again["changed"], false);
+    assert_eq!(again["bundle"], result["bundle"]);
     server.shutdown().await;
 }
 
 #[tokio::test]
-async fn deploy_complete_diamond_reopens_and_rejects_incomplete_history() {
+async fn deploy_complete_diamond_reopens_and_rejects_lossy_history() {
     let dir = tempfile::tempdir().unwrap();
     let server = builder(Some(dir.path())).build().await.unwrap();
     let router = create_router(server.state.clone());
@@ -148,16 +155,11 @@ async fn deploy_complete_diamond_reopens_and_rejects_incomplete_history() {
     // Publish B first, then merge C and D in one deployment using the stored A/B.
     deploy_ok(&router, request(&b, &[&b], vec![migration(&a, &b, &["a"])])).await;
     let before = graph(&router).await;
-    // The sibling-detour case must fail: B has no forward migration to D.
     let incomplete = request(
         &d,
         &[&c, &d],
         vec![migration(&a, &c, &["b"]), migration(&c, &d, &["a"])],
     );
-    let (status, error) = http(&router, "POST", "/deploy", incomplete.clone()).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
-    assert_eq!(error["code"], "unreachable_deployment_target");
-    assert_eq!(graph(&router).await, before);
     // Completing it with B -> D introducing `b` leaves the two lenses into D
     // disagreeing on `a` (C's introduces it, B's keeps B's): not supported yet.
     let mut lossy = incomplete;
@@ -165,7 +167,7 @@ async fn deploy_complete_diamond_reopens_and_rejects_incomplete_history() {
         .as_array_mut()
         .unwrap()
         .push(migration(&b, &d, &["b"]));
-    let (status, error) = http(&router, "POST", "/deploy", lossy).await;
+    let (status, error) = http(&router, "POST", "/bundles", lossy).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
     assert!(
         error["error"]
@@ -198,31 +200,24 @@ async fn deploy_complete_diamond_reopens_and_rejects_incomplete_history() {
         3
     );
     let expected = graph(&router).await;
-    assert_eq!(
-        expected["activeSchemaHash"],
-        SchemaHash::compute(&d).to_string()
-    );
     assert_eq!(expected["schemas"].as_array().unwrap().len(), 4);
+    // D is admitted, reached by both branches of the diamond.
     let catalogue = server.state.runtime().unwrap().catalogue().await.unwrap();
-    let head = catalogue.head().unwrap();
-    assert_eq!(
-        catalogue.schema(&head.schema).unwrap().version,
-        Some(JazzSchema::new(&d).unwrap().version_id())
-    );
+    let merged = catalogue
+        .schemas
+        .iter()
+        .find(|schema| schema.version == Some(JazzSchema::new(&d).unwrap().version_id()))
+        .expect("D is admitted");
     assert_eq!(
         catalogue
             .lenses
             .iter()
-            .filter(|lens| lens.target == head.schema)
+            .filter(|lens| lens.target == merged.hash)
             .count(),
         2
     );
+    // Publishing B's bundle again (a rollback) leaves the graph as it is.
     deploy_ok(&router, request(&b, &[], vec![])).await;
-    assert_eq!(
-        graph(&router).await["activeSchemaHash"],
-        SchemaHash::compute(&b).to_string()
-    );
-    deploy_ok(&router, request(&d, &[], vec![])).await;
     server.shutdown().await;
     drop(router);
     drop(server);
@@ -273,7 +268,7 @@ async fn deploy_validation_failure_leaves_no_durable_partial_catalogue() {
             "disconnected_migration_graph",
         ),
     ] {
-        let (status, error) = http(&router, "POST", "/deploy", body).await;
+        let (status, error) = http(&router, "POST", "/bundles", body).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
         assert_eq!(error["code"], code, "{error}");
         assert_eq!(graph(&router).await["schemas"], json!([]));
@@ -289,7 +284,7 @@ async fn deploy_validation_failure_leaves_no_durable_partial_catalogue() {
 }
 
 #[tokio::test]
-async fn deploy_concurrent_branches_revalidate_against_the_committed_graph() {
+async fn deploy_concurrent_branches_both_publish() {
     let server = builder(None).build().await.unwrap();
     let router = create_router(server.state.clone());
     let (a, b, c) = (schema(&[]), schema(&["a"]), schema(&["b"]));
@@ -298,35 +293,32 @@ async fn deploy_concurrent_branches_revalidate_against_the_committed_graph() {
         http(
             &router,
             "POST",
-            "/deploy",
+            "/bundles",
             request(&b, &[&b], vec![migration(&a, &b, &["a"])])
         ),
         http(
             &router,
             "POST",
-            "/deploy",
+            "/bundles",
             request(&c, &[&c], vec![migration(&a, &c, &["b"])])
         ),
     );
-    let (accepted, rejected) = if left.0 == StatusCode::OK {
-        (b, right)
-    } else {
-        assert_eq!(right.0, StatusCode::OK, "{}", right.1);
-        (c, left)
-    };
-    assert_eq!(
-        rejected.0,
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "{}",
-        rejected.1
-    );
-    assert_eq!(rejected.1["code"], "unreachable_deployment_target");
+    // Two backends publishing sibling branches of A serve side by side.
+    assert_eq!(left.0, StatusCode::OK, "{}", left.1);
+    assert_eq!(right.0, StatusCode::OK, "{}", right.1);
     let graph = graph(&router).await;
-    assert_eq!(
-        graph["activeSchemaHash"],
-        SchemaHash::compute(&accepted).to_string()
-    );
-    assert_eq!(graph["schemas"].as_array().unwrap().len(), 2);
+    let mut schemas = graph["schemas"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|schema| schema.as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    schemas.sort();
+    let mut expected = [&a, &b, &c]
+        .map(|schema| SchemaHash::compute(schema).to_string())
+        .to_vec();
+    expected.sort();
+    assert_eq!(schemas, expected);
     server.shutdown().await;
 }
 
@@ -343,8 +335,9 @@ async fn deploy_explicit_empty_schema_is_not_a_legacy_initialization_sentinel() 
     let reopened = builder(Some(dir.path())).build().await.unwrap();
     let router = create_router(reopened.state.clone());
     assert_eq!(
-        graph(&router).await["activeSchemaHash"],
-        SchemaHash::compute(&empty).to_string()
+        graph(&router).await["schemas"].as_array().unwrap().len(),
+        1,
+        "the empty schema outlives a restart"
     );
     assert_eq!(
         deploy_ok(&router, request(&empty, &[], vec![])).await["changed"],
@@ -378,7 +371,7 @@ async fn deploy_runtime_predecessor_validation_precedes_storage_writes() {
     let (status, error) = http(
         &router,
         "POST",
-        "/deploy",
+        "/bundles",
         request(
             &d,
             &[&c],
@@ -456,7 +449,7 @@ async fn deploy_refuses_a_different_lens_from_an_equivalent_predecessor_hash() {
     let (status, error) = http(
         &router,
         "POST",
-        "/deploy",
+        "/bundles",
         request(&b, &[&indexed], vec![different]),
     )
     .await;
@@ -508,10 +501,6 @@ async fn compatible_deployment_preserves_hashes_and_history() {
         .build();
     deploy_ok(&router, request(&c, &[&historical], vec![])).await;
     let inventory = graph(&router).await;
-    assert_eq!(
-        inventory["activeSchemaHash"],
-        SchemaHash::compute(&c).to_string()
-    );
     assert_eq!(inventory["schemas"].as_array().unwrap().len(), 4);
     let edges = inventory["migrations"].as_array().unwrap();
     assert_eq!(
@@ -574,7 +563,7 @@ async fn compatible_defaults_and_indexes_share_runtime_identity() {
     let c = schema(&["extra"]);
     let before = graph(&router).await;
     assert_eq!(
-        http(&router, "POST", "/deploy", request(&c, &[&c], vec![]))
+        http(&router, "POST", "/bundles", request(&c, &[&c], vec![]))
             .await
             .0,
         StatusCode::UNPROCESSABLE_ENTITY
@@ -610,7 +599,7 @@ async fn compatible_connections_preserve_branch_and_convergence_validation() {
     deploy_ok(&router, request(&a, &[&a], vec![])).await;
     let before = graph(&router).await;
     assert_eq!(
-        http(&router, "POST", "/deploy", request(&b, &[&b], vec![]))
+        http(&router, "POST", "/bundles", request(&b, &[&b], vec![]))
             .await
             .0,
         StatusCode::UNPROCESSABLE_ENTITY
@@ -635,7 +624,7 @@ async fn compatible_connections_preserve_branch_and_convergence_validation() {
     let (status, error) = http(
         &router,
         "POST",
-        "/deploy",
+        "/bundles",
         request(
             &c,
             &[&a, &b, &c],
@@ -649,52 +638,344 @@ async fn compatible_connections_preserve_branch_and_convergence_validation() {
     server.shutdown().await;
 }
 
-/// Alice reverts B to A, then deploys C; Bob cannot directly switch C to sibling B.
-/// A -> B; B -> A (activation only); A -> C; reopen -> C.
+/// Switching `notes` to latest-only over HTTP is refused with
+/// `drops_history` naming the table, and nothing changes; the same request
+/// with `allowDroppingHistory` deploys it.
 #[tokio::test]
-async fn deploy_revert_then_new_branch_reopens_and_rejects_stored_sibling() {
-    let dir = tempfile::tempdir().unwrap();
-    let server = builder(Some(dir.path())).build().await.unwrap();
+async fn switching_a_table_to_latest_only_needs_allow_dropping_history() {
+    let server = builder(None).build().await.unwrap();
     let router = create_router(server.state.clone());
-    let (a, b, c) = (schema(&[]), schema(&["a"]), schema(&["b"]));
-    deploy_ok(&router, request(&a, &[&a], vec![])).await;
-    deploy_ok(&router, request(&b, &[&b], vec![migration(&a, &b, &["a"])])).await;
-    let reverted = deploy_ok(&router, request(&a, &[], vec![])).await;
-    assert_eq!(
-        reverted["published"],
-        json!({"schemas":[], "migrations":[]})
-    );
-    deploy_ok(&router, request(&c, &[&c], vec![migration(&a, &c, &["b"])])).await;
-    let expected = graph(&router).await;
-    assert_eq!(
-        expected["activeSchemaHash"],
-        SchemaHash::compute(&c).to_string()
-    );
-    let (status, error) = http(&router, "POST", "/deploy", request(&b, &[], vec![])).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(error["code"], "unreachable_deployment_target");
-    assert_eq!(
-        error["details"]["active"],
-        SchemaHash::compute(&c).to_string()
-    );
-    assert_eq!(
-        error["details"]["target"],
-        SchemaHash::compute(&b).to_string()
-    );
-    assert!(
-        error["error"]
-            .as_str()
-            .unwrap()
-            .contains("no forward migration path exists")
-    );
-    assert_eq!(graph(&router).await, expected);
+    let full = schema(&[]);
+    let mut latest = full.clone();
+    latest.get_mut(&TableName::new("notes")).unwrap().history =
+        jazz::tools::HistoryRetention::Latest;
+    deploy_ok(&router, request(&full, &[&full], vec![])).await;
+    let before = graph(&router).await;
+
+    let switch = request(&latest, &[&latest], vec![]);
+    let (status, error) = http(&router, "POST", "/bundles", switch.clone()).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+    assert_eq!(error["code"], "drops_history", "{error}");
+    assert_eq!(error["details"]["tables"], json!(["notes"]));
+    assert_eq!(graph(&router).await, before);
+
+    let mut confirmed = switch;
+    confirmed["allowDroppingHistory"] = json!(true);
+    assert_eq!(deploy_ok(&router, confirmed).await["changed"], true);
     server.shutdown().await;
-    drop(router);
-    drop(server);
+}
+
+/// A server started with a schema keeps the data written under it: the
+/// first deploy that makes one of its tables latest-only needs the flag
+/// too, though nothing was deployed before.
+#[tokio::test]
+async fn the_initial_schema_counts_for_the_latest_only_guard() {
+    let full = schema(&[]);
+    let mut latest = full.clone();
+    latest.get_mut(&TableName::new("notes")).unwrap().history =
+        jazz::tools::HistoryRetention::Latest;
+    let server = builder(None)
+        .with_schema(full.clone())
+        .build()
+        .await
+        .unwrap();
+    let router = create_router(server.state.clone());
+
+    let switch = request(&latest, &[&latest], vec![]);
+    let (status, error) = http(&router, "POST", "/bundles", switch.clone()).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+    assert_eq!(error["code"], "drops_history", "{error}");
+
+    let mut confirmed = switch;
+    confirmed["allowDroppingHistory"] = json!(true);
+    deploy_ok(&router, confirmed).await;
+    server.shutdown().await;
+}
+
+/// A deployment published to `/bundles` publishes its permissions as a
+/// bundle, by content: the same bundle again (a rollback) changes nothing,
+/// and the current permissions stay as they were.
+/// `GET /bundles` lists both bundles, each with its write schema and
+/// permissions; a rollback adds no third.
+async fn assert_published_bundles(
+    router: &Router,
+    open: &str,
+    closed: &str,
+    base: &Schema,
+    next: &Schema,
+) {
+    let (status, body) = http(router, "GET", "/bundles", Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let mut listed = body["bundles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|bundle| {
+            (
+                bundle["bundle"].as_str().unwrap().to_owned(),
+                bundle["schemaHash"].as_str().unwrap().to_owned(),
+                bundle["permissions"]["notes"]["select"]["using"].to_string(),
+            )
+        })
+        .collect::<Vec<_>>();
+    listed.sort();
+    let mut expected = vec![
+        (
+            open.to_owned(),
+            SchemaHash::compute(base).to_string(),
+            serde_json::to_value(PolicyExpr::True).unwrap().to_string(),
+        ),
+        (
+            closed.to_owned(),
+            SchemaHash::compute(next).to_string(),
+            serde_json::to_value(PolicyExpr::False).unwrap().to_string(),
+        ),
+    ];
+    expected.sort();
+    assert_eq!(listed, expected, "{body}");
+}
+
+#[tokio::test]
+async fn publish_only_deployments_publish_content_addressed_bundles() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store");
+    let base = schema(&[]);
+    let next = schema(&["body"]);
+    let with = |mut request: Value, read: PolicyExpr| {
+        request["permissions"] = serde_json::to_value(HashMap::from([(
+            TableName::new("notes"),
+            TablePolicies::new().with_select(read),
+        )]))
+        .unwrap();
+        request
+    };
+    let (open, closed) = {
+        let server = builder(Some(&path)).build().await.unwrap();
+        let router = create_router(server.state.clone());
+        let first = publish_ok(
+            &router,
+            with(request(&base, &[&base], vec![]), PolicyExpr::True),
+        )
+        .await;
+        assert_eq!(first["changed"], true);
+        let open = first["bundle"].as_str().unwrap().to_owned();
+        let again = publish_ok(&router, with(request(&base, &[], vec![]), PolicyExpr::True)).await;
+        assert_eq!(again["changed"], false);
+        assert_eq!(again["bundle"], json!(open));
+
+        // A newer deployment with another schema and policies.
+        let upgraded = publish_ok(
+            &router,
+            with(
+                request(&next, &[&next], vec![migration(&base, &next, &["body"])]),
+                PolicyExpr::False,
+            ),
+        )
+        .await;
+        assert_eq!(upgraded["changed"], true);
+        let closed = upgraded["bundle"].as_str().unwrap().to_owned();
+        assert_ne!(closed, open);
+
+        // Rolling back to the first deployment publishes its bundle again.
+        let rollback =
+            publish_ok(&router, with(request(&base, &[], vec![]), PolicyExpr::True)).await;
+        assert_eq!(rollback["changed"], false, "{rollback}");
+        assert_eq!(rollback["bundle"], json!(open));
+
+        assert_published_bundles(&router, &open, &closed, &base, &next).await;
+        server.shutdown().await;
+        (open, closed)
+    };
+    // Both bundles, and both write schemas, outlive a restart.
+    let server = builder(Some(&path)).build().await.unwrap();
+    let router = create_router(server.state.clone());
+    assert_published_bundles(&router, &open, &closed, &base, &next).await;
+    let rows = server.state.runtime().unwrap().catalogue().await.unwrap();
+    let mut bundles = rows
+        .bundles
+        .iter()
+        .map(|bundle| bundle.id.to_hex())
+        .collect::<Vec<_>>();
+    bundles.sort();
+    let mut expected = vec![open, closed];
+    expected.sort();
+    assert_eq!(bundles, expected);
+    assert!(
+        rows.schemas
+            .iter()
+            .filter(|schema| schema.version.is_some())
+            .count()
+            >= 2,
+        "the upgraded write schema is admitted"
+    );
+    server.shutdown().await;
+}
+
+/// A deployment publishes a bundle and admits its schemas, but no schema or
+/// permissions become current, before or after the core reopens: sessions
+/// write by the bundle they pin to.
+#[tokio::test]
+async fn deployments_never_make_a_schema_current() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = (schema(&[]), schema(&["body"]));
+    {
+        let server = builder(Some(dir.path())).build().await.unwrap();
+        let router = create_router(server.state.clone());
+        deploy_ok(&router, request(&a, &[&a], vec![])).await;
+        deploy_ok(
+            &router,
+            request(&b, &[&a, &b], vec![migration(&a, &b, &["body"])]),
+        )
+        .await;
+        let catalogue = server.state.runtime().unwrap().catalogue().await.unwrap();
+        assert!(catalogue.head().is_none());
+        assert!(catalogue.permissions.is_empty());
+        assert_eq!(catalogue.bundles.len(), 2);
+        assert_eq!(
+            graph(&router).await["latestBundleSchemaHash"],
+            json!(SchemaHash::compute(&b).to_string())
+        );
+        server.shutdown().await;
+    }
     let reopened = builder(Some(dir.path())).build().await.unwrap();
-    let router = create_router(reopened.state.clone());
-    assert_eq!(graph(&router).await, expected);
-    deploy_ok(&router, request(&a, &[], vec![])).await;
-    deploy_ok(&router, request(&b, &[], vec![])).await;
+    let catalogue = reopened.state.runtime().unwrap().catalogue().await.unwrap();
+    assert!(catalogue.head().is_none());
+    assert_eq!(catalogue.bundles.len(), 2);
     reopened.shutdown().await;
+}
+
+/// The migration graph's latest bundle is the one published last, not the
+/// newest schema: a bundle for an older schema published after a newer one
+/// is the latest. Publishing an existing bundle again moves nothing.
+#[tokio::test]
+async fn the_latest_bundle_is_the_last_one_published() {
+    let server = builder(None).build().await.unwrap();
+    let router = create_router(server.state.clone());
+    let (base, next) = (schema(&[]), schema(&["body"]));
+    let with = |mut request: Value, read: PolicyExpr| {
+        request["permissions"] = serde_json::to_value(HashMap::from([(
+            TableName::new("notes"),
+            TablePolicies::new().with_select(read),
+        )]))
+        .unwrap();
+        request
+    };
+    let latest = |router: Router| async move {
+        graph(&router).await["latestBundleSchemaHash"]
+            .as_str()
+            .map(str::to_owned)
+    };
+    let hash = |schema: &Schema| Some(SchemaHash::compute(schema).to_string());
+
+    publish_ok(
+        &router,
+        with(request(&base, &[&base], vec![]), PolicyExpr::True),
+    )
+    .await;
+    assert_eq!(latest(router.clone()).await, hash(&base));
+    let upgrade = with(
+        request(&next, &[&next], vec![migration(&base, &next, &["body"])]),
+        PolicyExpr::False,
+    );
+    publish_ok(&router, upgrade.clone()).await;
+    assert_eq!(latest(router.clone()).await, hash(&next));
+    // New policies for the older schema, published right after: within the
+    // same millisecond or not, this bundle is the latest.
+    let older = publish_ok(
+        &router,
+        with(request(&base, &[], vec![]), PolicyExpr::False),
+    )
+    .await;
+    assert_eq!(older["changed"], true, "{older}");
+    assert_eq!(latest(router.clone()).await, hash(&base));
+    let again = publish_ok(&router, upgrade).await;
+    assert_eq!(again["changed"], false, "{again}");
+    assert_eq!(latest(router.clone()).await, hash(&base));
+    server.shutdown().await;
+}
+
+/// A deployment that only adds an index publishes a new bundle for the
+/// version the core admitted already (an index does not change it). The
+/// core builds the index, and a session pinned to either deployment's
+/// bundle opens, before and after the core restarts: publishing the new
+/// bundle ends the old one's sessions, which reconnect pinned to it, so
+/// refusing that pin locked every user out.
+///
+/// ```text
+/// deploy {notes(title)}                -> bundle A
+/// deploy {notes(title) + index(title)} -> bundle B (same version), index built
+/// pin A, pin B: ok;  restart;  pin A, pin B: ok
+/// ```
+#[tokio::test]
+async fn an_index_only_deployment_pins_both_bundles_across_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let plain = schema(&[]);
+    let indexed = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("notes")
+                .column("title", ColumnType::Text)
+                .index_only(["title"]),
+        )
+        .build();
+    let with_read = |mut request: Value| {
+        request["permissions"] = serde_json::to_value(HashMap::from([(
+            TableName::new("notes"),
+            TablePolicies::new().with_select(PolicyExpr::True),
+        )]))
+        .unwrap();
+        request
+    };
+    let pins = |server: &super::super::builder::BuiltServer, bundles: [String; 2]| {
+        let runtime = server.state.runtime().unwrap();
+        async move {
+            runtime
+                .with_db_for_test(move |db| {
+                    Ok(bundles
+                        .iter()
+                        .map(|bundle| {
+                            let bundle = jazz::catalogue::BundleId::from_hex(bundle).unwrap();
+                            db.check_session_pin(
+                                jazz::ids::AuthorSubject::for_test_bytes([0xa1; 16]),
+                                Some(&bundle),
+                            )
+                            .map_err(|error| error.to_string())
+                        })
+                        .collect::<Vec<_>>())
+                })
+                .await
+                .unwrap()
+        }
+    };
+    let bundles = {
+        let server = builder(Some(dir.path())).build().await.unwrap();
+        let router = create_router(server.state.clone());
+        let a = publish_ok(&router, with_read(request(&plain, &[&plain], vec![]))).await;
+        let b = publish_ok(&router, with_read(request(&indexed, &[&indexed], vec![]))).await;
+        assert_eq!(b["changed"], true, "{b}");
+        let bundles = [
+            a["bundle"].as_str().unwrap().to_owned(),
+            b["bundle"].as_str().unwrap().to_owned(),
+        ];
+        assert_ne!(bundles[0], bundles[1]);
+        assert_eq!(pins(&server, bundles.clone()).await, vec![Ok(()), Ok(())]);
+        server.shutdown().await;
+        bundles
+    };
+    let conn = rusqlite::Connection::open(dir.path().join("jazz.sqlite")).unwrap();
+    let indexes: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'index' \
+             AND name LIKE 'notes\\_\\_ix(%' ESCAPE '\\'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    drop(conn);
+    assert_eq!(
+        indexes, 1,
+        "the core built the index-only deployment's index"
+    );
+    let server = builder(Some(dir.path())).build().await.unwrap();
+    assert_eq!(pins(&server, bundles).await, vec![Ok(()), Ok(())]);
+    server.shutdown().await;
 }

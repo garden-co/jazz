@@ -1,55 +1,82 @@
 /**
  * Jazz permission-DSL tests for auth-betterauth-chat.
  *
- * Mints role-tagged JWTs against a local JWKS and asserts that only an
- * `admin` may insert, update, or delete Announcements while generic-chat
- * updates and deletes remain bound to the message creator.
+ * Signs test users in through the app's backend with a role claim and asserts
+ * that only an `admin` may insert, update, or delete Announcements while
+ * generic-chat updates and deletes remain bound to the message creator.
  *
  * The server suite separately exercises the actual Better Auth handler,
- * session cookies and JWT signing; these browser tests exercise Jazz policies.
+ * session cookies and sign-in; these browser tests exercise Jazz policies.
  */
-import { afterEach, describe, expect, it } from "vitest";
-import { type JazzClient, createJazzSession } from "jazz-tools/react";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import type { Db } from "../../../../packages/jazz-tools/src/runtime/db.js";
+import {
+  acquireBrowserTestAccount,
+  createBrowserTestDb,
+} from "../../../../packages/jazz-tools/tests/browser/account-fixtures.js";
+import { deploy } from "../../../../packages/jazz-tools/src/dev/catalogue.js";
+import {
+  getJazzServerInfo,
+  jazzAppUserUrl,
+  loginAtJazzAppUser,
+  startJazzApp,
+  type JazzServerInfo,
+} from "../../../../packages/jazz-tools/tests/browser/testing-server.js";
 import { app } from "../../schema.js";
 import permissions from "../../permissions.js";
 import { schema as betterAuthSchema } from "../../schema-better-auth/schema.js";
 
-const sessions: Awaited<ReturnType<typeof createJazzSession>>[] = [];
-const registered = new Set<string>();
+/** A test user's client: its Db, and how to close it. */
+type JazzClient = { db: Db; shutdown(): Promise<void> };
 
-afterEach(async () => {
-  while (sessions.length > 0) await sessions.pop()!.close();
+const clients: JazzClient[] = [];
+const userUrls = new Map<Role, Promise<string>>();
+let server: JazzServerInfo;
+
+type Role = "admin" | "member";
+
+// The app's backend (createJazz) in front of a test core, as the app runs
+// it. Its `authenticate` names each test user with their role claim.
+beforeAll(async () => {
+  const core = await getJazzServerInfo(__APP_ID__);
+  await deploy({ ...core, schema: app, permissions });
+  server = await startJazzApp(core, { schema: app, permissions });
 });
 
-async function makeClient(jwt?: string): Promise<JazzClient> {
-  let stored: string | null = null;
-  const session = await createJazzSession({
-    appId: __APP_ID__,
-    serverUrl: __JAZZ_SERVER_URL__,
-    driver: { type: "memory" },
-    initial: jwt ? undefined : "local-first",
-    store: {
-      async read() {
-        return stored;
-      },
-      async update(transform) {
-        stored = transform(stored);
-      },
-    },
-  });
-  sessions.push(session);
-  if (jwt) {
-    if (registered.has(jwt)) await session.loginJWT(jwt);
-    else {
-      await session.registerJWT(jwt);
-      registered.add(jwt);
+afterEach(async () => {
+  while (clients.length > 0) await clients.pop()!.shutdown();
+});
+
+/** A client signed in with `role`, or a local-first guest without one. */
+async function makeClient(role?: Role): Promise<JazzClient> {
+  let serverUrl = server.serverUrl;
+  let account;
+  if (role) {
+    // A user signs in through the app's backend on their own origin; each
+    // sign-in there names the same user, so the same account.
+    let userUrl = userUrls.get(role);
+    if (!userUrl) {
+      userUrl = jazzAppUserUrl(server, `test-${role}`, { role });
+      userUrls.set(role, userUrl);
     }
+    serverUrl = await userUrl;
+    account = await loginAtJazzAppUser(server.appId, serverUrl);
+  } else {
+    account = await acquireBrowserTestAccount({
+      appId: server.appId,
+      serverUrl,
+      key: crypto.randomUUID(),
+    });
   }
-  const snapshot = session.getSnapshot();
-  if (snapshot.status !== "ready" || !snapshot.client) {
-    throw snapshot.error ?? new Error("Test session is not ready");
-  }
-  return snapshot.client;
+  const db = await createBrowserTestDb({
+    appId: server.appId,
+    serverUrl,
+    driver: { type: "memory" },
+    account,
+  });
+  const client = { db, shutdown: () => db.shutdown() };
+  clients.push(client);
+  return client;
 }
 
 async function send(client: JazzClient, chat_id: string, text: string): Promise<string> {
@@ -97,8 +124,8 @@ describe("auth-betterauth-chat permissions", () => {
   });
 
   it("allows only admins to mutate Announcements", async () => {
-    const admin = await makeClient(__ADMIN_JWT__);
-    const member = await makeClient(__MEMBER_JWT__);
+    const admin = await makeClient("admin");
+    const member = await makeClient("member");
 
     await expect(send(member, __ANNOUNCEMENTS_CHAT_ID__, "member-ann")).rejects.toThrow();
 
@@ -110,8 +137,8 @@ describe("auth-betterauth-chat permissions", () => {
   });
 
   it("keeps generic-chat updates and deletes bound to the creator", async () => {
-    const admin = await makeClient(__ADMIN_JWT__);
-    const member = await makeClient(__MEMBER_JWT__);
+    const admin = await makeClient("admin");
+    const member = await makeClient("member");
 
     const messageId = await send(member, __CHAT_ID__, "member-gen");
     await expect(update(member, messageId, "member edit")).resolves.toBeUndefined();
@@ -121,7 +148,7 @@ describe("auth-betterauth-chat permissions", () => {
     await expect(remove(member, messageId)).resolves.toBeUndefined();
   });
 
-  it("anonymous can post to General but is denied for Announcements", async () => {
+  it("a guest can post to General but is denied for Announcements", async () => {
     const client = await makeClient();
     await expect(send(client, __ANNOUNCEMENTS_CHAT_ID__, "anon-ann")).rejects.toThrow();
     await expect(send(client, __CHAT_ID__, "anon-gen")).resolves.toEqual(expect.any(String));

@@ -155,9 +155,14 @@ fn synced(client: &Db, txs: &[u64]) -> Vec<String> {
     labels(&server)
 }
 
-/// The tables a pending upload is stored in (SPEC 8.3): its header, its
-/// ops and lists, and the local rows it wrote.
-const UPLOAD_TABLES: [&str; 3] = ["_jazz_pending", "_jazz_pending_items", "_jazz_pending_rows"];
+/// The tables a pending upload is stored in (SPEC 8.3): the commit, its
+/// ops and their cells, and the local rows it wrote.
+const UPLOAD_TABLES: [&str; 4] = [
+    "_jazz_pending",
+    "_jazz_pending_ops",
+    "_jazz_pending_cells",
+    "_jazz_pending_rows",
+];
 
 #[test]
 fn a_write_whose_upload_record_cannot_be_stored_is_rolled_back_whole() {
@@ -348,11 +353,11 @@ fn a_reopened_replica_resumes_its_subscription_from_its_stored_watermark() {
             since,
             span: ReadSpan::Live,
             ..
-        } => Some(since.clone()),
+        } => Some(*since),
         _ => None,
     });
     assert!(
-        matches!(since.as_deref(), Some([(None, seq)]) if *seq > 0),
+        matches!(since, Some(Some(since)) if since.through > 0),
         "the subscription resumes from its stored watermark: {since:?}"
     );
     assert_eq!(labels(&client), ["held"]);

@@ -31,11 +31,10 @@ const GRANT_OPTIONS = (Object.keys(GRANT_LABELS) as GrantRole[]).map((role) => (
  * song and nothing else.
  */
 export function ShareDialog({ pageId, onClose }: { pageId: string; onClose: () => void }) {
-  const db = useDb();
   const { workspace, tree, members } = useWorkspace();
   const page = tree.byId.get(pageId)!;
   const chain = [...tree.ancestors(pageId), page];
-  const { data: grants } = useAll(
+  const { data: grants, db } = useAll(
     app.pageGrants.where({ pageId: { in: chain.map((node) => node.id) } }),
   );
   const { data: invites } = useAll(app.invites.where({ pageId }));

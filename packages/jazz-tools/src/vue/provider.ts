@@ -19,7 +19,7 @@ import type { PublicSession } from "../runtime/context.js";
 import type { Db } from "../runtime/db.js";
 import type { AccountDbConfig as DbConfig } from "../accounts/context.js";
 import { serializeClientConfig } from "../runtime/client-config-key.js";
-import { createJazzClient, type JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
+import { openJazzClient, type JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
 import { startInspectorOnce } from "../dev-tools/auto-attach.js";
 import { assertNoClassicProviderProps } from "../classic-api.js";
 import { toError } from "../runtime/util.js";
@@ -215,7 +215,7 @@ export const LegacyJazzProvider = defineComponent({
           // Record the request before changing lifecycle state so a re-entrant
           // watcher observes this request as the latest one.
           lastRequestedConfigKey = configKey;
-          queueConfigRequest(() => createJazzClient(configSnapshot));
+          queueConfigRequest(() => openJazzClient(configSnapshot));
         },
         { deep: true, immediate: true },
       );

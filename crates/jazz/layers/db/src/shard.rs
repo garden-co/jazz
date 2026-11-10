@@ -1,10 +1,12 @@
 //! The shard role: what a sharded deployment's gateway needs of a jazz
-//! store serving one shard (SPEC 15 §15.6). It is an engine API, with no
+//! store serving one shard (SPEC 15 §15.3). It is an engine API, with no
 //! wire of its own: the gateway↔shard protocol that drives it lives with
 //! the gateway.
 //!
-//! A shard draws commit positions from a hybrid clock ([`hlc`]), so the
-//! positions of every shard compare by time. The gateway closes a quiet
+//! Every authority is a shard: an unsharded server is the one shard of its
+//! deployment, running the same code. A shard draws commit positions from
+//! a hybrid clock ([`hlc`]), so the positions of every shard compare by
+//! time. The gateway closes a quiet
 //! shard at a position by having it [`ShardRole::observe`] that position,
 //! and lands each part of a cross-shard commit at the one position all its
 //! parts share: it [`ShardRole::hold`]s a position on every shard the
@@ -28,9 +30,9 @@
 //! is the commit's recorded fate there, kept like every fate, and
 //! [`ShardRole::resolution`] reads it back.
 //!
-//! A store opened without [`crate::options::DbConfig::with_clock`] takes
-//! none of this: unsharded, it counts positions up by one and holds
-//! nothing, so every call below except `served_through` is refused.
+//! Only a replica of an upstream takes no shard role: its upstream numbers
+//! what it commits, so every call below except `served_through` is
+//! refused there.
 
 use std::collections::{BTreeMap, HashMap};
 use std::task::{Poll, Waker};
@@ -42,20 +44,26 @@ use crate::values::storage;
 /// Commit positions are hybrid-clock timestamps: the wall clock in ms since
 /// [`HLC_EPOCH_MS`] above [`HLC_COUNTER_BITS`] bits of counter, so every
 /// position fits a JS number (Durable Object SQLite returns integers as
-/// one): 42 bits of ms last 139 years, and a node handing out more than
-/// 2,048 in a millisecond runs ahead of its clock until the clock catches
-/// up. Positions of different nodes then compare by time, and every part
-/// of a cross-shard commit can land at one.
+/// one, and a pending `_clock` holds one below its pending bit): 42 bits of
+/// ms last 139 years, and a node handing out more than 1,024 in a
+/// millisecond runs ahead of its clock until the clock catches up.
+/// Positions of different nodes then compare by time, and every part of a
+/// cross-shard commit can land at one.
 pub const HLC_EPOCH_MS: u64 = 1_735_689_600_000;
 /// The counter bits below the ms of an [`hlc`] position.
-pub const HLC_COUNTER_BITS: u32 = 11;
+pub const HLC_COUNTER_BITS: u32 = 10;
 /// How far ahead of this node's clock an observed position may be (ms):
 /// further is a peer whose clock (or claim) cannot be trusted.
 pub const HLC_MAX_OFFSET_MS: u64 = 500;
 
-/// The first position at wall-clock time `ms` (Unix ms).
+/// The latest ms an [`hlc`] position can name: positions stay under 2^52,
+/// the accepted kind of `_clock`.
+const HLC_MAX_MS: u64 = (1 << (52 - HLC_COUNTER_BITS)) - 1;
+
+/// The first position at wall-clock time `ms` (Unix ms). A reading past
+/// what positions can name is taken as the last ms they can.
 pub fn hlc(ms: u64) -> u64 {
-    ms.saturating_sub(HLC_EPOCH_MS) << HLC_COUNTER_BITS
+    ms.saturating_sub(HLC_EPOCH_MS).min(HLC_MAX_MS) << HLC_COUNTER_BITS
 }
 
 /// The wall-clock ms (Unix) a position was handed out at, or, for a node
@@ -135,11 +143,9 @@ pub enum Resolution {
 
 /// A store's shard state: its clock, and the positions it holds for
 /// cross-shard parts still to land.
-#[derive(Default)]
 pub(crate) struct ShardState {
-    /// The wall clock (Unix ms) positions are drawn from; `None` (an
-    /// unsharded store) counts them up by one.
-    pub(crate) clock: Option<Box<dyn Fn() -> u64>>,
+    /// The wall clock (Unix ms) positions are drawn from.
+    pub(crate) clock: Box<dyn Fn() -> u64>,
     /// Held position → the part it is held for.
     holds: BTreeMap<u64, CommitRef>,
     /// Parts to land at a fixed position when they arrive.
@@ -169,7 +175,7 @@ const SHARD_OBSERVED: &str = "shard_observed";
 /// The durable record of holds: one row per held part, with its data and
 /// its fixed position once fixed, and one per row it writes; and of queued
 /// holds, in the order asked, with their data and rows. Created by the
-/// first hold, so an unsharded store's file never holds them.
+/// first hold, so the file of a store that never held a part has none.
 const HOLDS_DDL: &str = "\
     CREATE TABLE IF NOT EXISTS _jazz_shard_holds (at INTEGER PRIMARY KEY, node BLOB NOT NULL, tx INTEGER NOT NULL, fixed INTEGER, part BLOB NOT NULL, UNIQUE (node, tx));\
     CREATE TABLE IF NOT EXISTS _jazz_shard_held_rows (node BLOB NOT NULL, tx INTEGER NOT NULL, tbl TEXT NOT NULL, id BLOB NOT NULL, PRIMARY KEY (tbl, id));\
@@ -177,10 +183,17 @@ const HOLDS_DDL: &str = "\
     CREATE TABLE IF NOT EXISTS _jazz_shard_queued_rows (node BLOB NOT NULL, tx INTEGER NOT NULL, tbl TEXT NOT NULL, id BLOB NOT NULL);";
 
 impl ShardState {
-    pub(crate) fn new(clock: Option<Box<dyn Fn() -> u64>>) -> Self {
+    pub(crate) fn new(clock: Box<dyn Fn() -> u64>) -> Self {
         Self {
             clock,
-            ..Self::default()
+            holds: BTreeMap::new(),
+            fixed: HashMap::new(),
+            rows: HashMap::new(),
+            queued: Vec::new(),
+            waiters: Vec::new(),
+            resumes_after: None,
+            observed: false,
+            pinned: None,
         }
     }
 
@@ -192,6 +205,12 @@ impl ShardState {
     /// The position the part `commit` lands at, when one was fixed.
     pub(crate) fn fixed(&self, commit: CommitRef) -> Option<u64> {
         self.fixed.get(&commit).copied()
+    }
+
+    /// Whether `commit` is a cross-shard part this shard holds or fixed a
+    /// position for: it has not landed here yet.
+    pub(crate) fn awaits(&self, commit: CommitRef) -> bool {
+        self.fixed.contains_key(&commit) || self.held(commit).is_some()
     }
 
     /// The part `commit` landed (or was refused): it holds nothing more.
@@ -245,34 +264,47 @@ impl Inner {
     /// out or observed, and on a shard no earlier than its clock (past the
     /// offset bound it waits out after a reopen, for a write that does not
     /// wait).
+    /// A replica numbers its own commits locally: their versions sit at
+    /// their commit HLCs (see [`Inner::stamp_commit`]). Its transaction ids
+    /// are `(seq, node)`, and the authority deduplicates uploads by them
+    /// (INV-EDGE-16). A replica in a file numbers no lower than its wall
+    /// clock's first position ([`hlc`]): the file may reopen without commits
+    /// it already uploaded (a lost tail, a restored backup), and its counter
+    /// then resumes below them, but its clock has moved past every id it
+    /// handed out before (INV-EDGE-28). An in-memory replica never reopens:
+    /// a host that gives its node to a fresh one seeds the floor instead
+    /// ([`crate::db::Db::seed_seq_floor`]).
     pub(crate) fn next_seq(&self) -> u64 {
         if let Some(pinned) = self.shard.pinned
             && pinned > self.seq
         {
             return pinned;
         }
-        match &self.shard.clock {
-            Some(clock) => {
-                let floor = self.waits_out().map_or(0, |after| hlc(after) + 1);
-                (self.seq + 1).max(hlc(clock())).max(floor)
+        if self.me != crate::db::sync::ACCEPTED {
+            let next = self.seq + 1;
+            if !self.reopenable {
+                return next;
             }
-            None => self.seq + 1,
+            return next.max(hlc(self.hlc_clock_ms()));
         }
+        let floor = self.waits_out().map_or(0, |after| hlc(after) + 1);
+        (self.seq + 1).max(hlc((self.shard.clock)())).max(floor)
     }
 
     /// While a reopened shard waits out its offset bound: the clock reading
     /// (ms) it waits to pass.
     pub(crate) fn waits_out(&self) -> Option<u64> {
-        let clock = self.shard.clock.as_ref()?;
+        let clock = &self.shard.clock;
         self.shard.resumes_after.filter(|&after| clock() <= after)
     }
 
-    /// Whether the session commit `by` writing `rows` waits: another part
-    /// holds one of them, or the shard is waiting out its offset bound
+    /// Whether the session commit `by` writing `ops` waits: another part
+    /// holds one of the rows they write, or the shard is waiting out its offset bound
     /// after a reopen and `by` is neither a part fixed at a position nor a
     /// resend of a commit that landed.
-    pub(crate) fn commit_waits(&self, by: CommitRef, rows: &[HeldRow]) -> Result<bool, Error> {
-        if self.shard.blocks(by, rows) {
+    pub(crate) fn commit_waits(&self, by: CommitRef, ops: &[super::WireOp]) -> Result<bool, Error> {
+        // Most stores hold nothing: they skip naming the rows.
+        if !self.shard.rows.is_empty() && self.shard.blocks(by, &HeldRow::of(ops)) {
             return Ok(true);
         }
         if self.waits_out().is_none() || self.shard.fixed(by).is_some() {
@@ -289,9 +321,7 @@ impl Inner {
     /// at once) keeps its positions no further ahead of its peers' clocks
     /// than its own clock is. A hold whose part already landed is dropped.
     pub(crate) fn load_shard(&mut self) -> Result<(), Error> {
-        let Some(clock) = &self.shard.clock else {
-            return Ok(());
-        };
+        let clock = &self.shard.clock;
         // A reopened shard that observed positions past what it numbered
         // may have served them, up to its clock plus the offset bound,
         // before it stopped; it waits that bound out. (What it numbered or
@@ -500,16 +530,8 @@ impl Inner {
         if fate.is_err() {
             return Ok(Some(Resolution::Aborted));
         }
-        let at: Option<i64> = self
-            .conn
-            .query_row(
-                "SELECT t.seq FROM _jazz_transactions AS t JOIN _jazz_nodes AS n ON n.n = t.n \
-                 WHERE n.node = ?1 AND t.tx = ?2",
-                rusqlite::params![commit.node.to_vec(), commit.tx as i64],
-                |r| r.get(0),
-            )
-            .map_err(storage)?;
-        Ok(at.map(|at| Resolution::Committed(at as u64)))
+        let at = self.settled(commit.node, commit.tx)?.flatten();
+        Ok(at.map(|at| Resolution::Committed(at.seq)))
     }
 
     /// Whether a part holds one of `rows`: a local write of them waits (or,
@@ -531,7 +553,7 @@ impl Inner {
             .conn
             .query_row(
                 "SELECT 1 FROM _jazz_transactions AS t JOIN _jazz_nodes AS n ON n.n = t.n \
-                 WHERE n.node = ?1 AND t.tx = ?2 AND t.seq IS NOT NULL",
+                 WHERE n.node = ?1 AND t.tx = ?2 AND t.t IS NOT NULL",
                 rusqlite::params![commit.node.to_vec(), commit.tx as i64],
                 |r| r.get(0),
             )
@@ -543,7 +565,9 @@ impl Inner {
     /// Drop the durable record of `commit`'s hold. Run inside the savepoint
     /// that lands its part, so the two go together.
     pub(crate) fn forget_hold(&self, commit: CommitRef) -> Result<(), Error> {
-        if self.shard.clock.is_none() {
+        // Every durable hold is loaded on reopen, so a store holding
+        // nothing in memory has none on disk either.
+        if self.shard.holds.is_empty() && self.shard.fixed.is_empty() {
             return Ok(());
         }
         let kept: bool = self
@@ -574,13 +598,6 @@ impl Inner {
 
 use rusqlite::OptionalExtension;
 
-fn unsharded() -> Error {
-    Error::new(
-        ErrorCode::Protocol,
-        "not supported: this store takes no shard role (open it with DbConfig::with_clock)",
-    )
-}
-
 /// The shard role of a store (see the module docs), from [`Db::shard`].
 pub struct ShardRole<'a> {
     db: &'a Db,
@@ -595,18 +612,14 @@ impl Db {
 }
 
 impl ShardRole<'_> {
-    /// Whether the store draws positions from a hybrid clock, and so takes
-    /// the shard role.
+    /// Whether the store takes the shard role: it is the last word on what
+    /// it commits (an authority, not a replica of an upstream).
     pub fn is_shard(&self) -> bool {
-        self.db.inner.borrow().shard.clock.is_some()
+        self.db.inner.borrow().client.is_none()
     }
 
-    /// The store must be a shard: clocked, and the last word on what it
-    /// commits (an authority, not a replica of an upstream).
+    /// The store must be a shard (see [`Self::is_shard`]).
     fn require(&self, inner: &Inner) -> Result<(), Error> {
-        if inner.shard.clock.is_none() {
-            return Err(unsharded());
-        }
         if inner.client.is_some() {
             return Err(Error::new(
                 ErrorCode::Protocol,
@@ -626,10 +639,7 @@ impl ShardRole<'_> {
     pub fn observe(&self, position: u64) -> Result<u64, Error> {
         let mut inner = self.db.inner.borrow_mut();
         self.require(&inner)?;
-        let observed = match &inner.shard.clock {
-            Some(clock) => position.min(hlc(clock().saturating_add(HLC_MAX_OFFSET_MS))),
-            None => position,
-        };
+        let observed = position.min(hlc((inner.shard.clock)().saturating_add(HLC_MAX_OFFSET_MS)));
         observe(&mut inner, observed)?;
         Ok(observed)
     }
@@ -875,6 +885,7 @@ impl ShardRole<'_> {
     /// neither held nor queued does nothing.
     pub fn release(&self, commit: CommitRef) -> Result<(), Error> {
         let mut inner = self.db.inner.borrow_mut();
+        self.require(&inner)?;
         let queued = inner
             .shard
             .queued
@@ -893,9 +904,8 @@ impl ShardRole<'_> {
 /// or below it. One further ahead of the clock than [`HLC_MAX_OFFSET_MS`]
 /// is refused, unless the store already numbered or held past it.
 fn observe(inner: &mut Inner, position: u64) -> Result<(), Error> {
-    if let Some(clock) = &inner.shard.clock
-        && position > inner.seq
-        && position > hlc(clock().saturating_add(HLC_MAX_OFFSET_MS))
+    if position > inner.seq
+        && position > hlc((inner.shard.clock)().saturating_add(HLC_MAX_OFFSET_MS))
     {
         return Err(Error::new(
             ErrorCode::Protocol,
@@ -904,7 +914,7 @@ fn observe(inner: &mut Inner, position: u64) -> Result<(), Error> {
             ),
         ));
     }
-    if position > inner.seq && !inner.shard.observed && inner.shard.clock.is_some() {
+    if position > inner.seq && !inner.shard.observed {
         inner.persist_meta(SHARD_OBSERVED, 1)?;
         inner.shard.observed = true;
     }
