@@ -597,6 +597,32 @@ describe("Browser configuration admission retries", () => {
     }
   });
 
+  it("keeps reporting a held store when a retry meets an unresponsive worker", async () => {
+    vi.useFakeTimers();
+    const { manager, host, connections, refuseOtherwise } = admissionManager(true, true);
+    const status = () =>
+      (manager as unknown as { transportLinkStatus(): unknown }).transportLinkStatus();
+    try {
+      const failed = expect(manager.ensureReady("runtime")).rejects.toSatisfy(
+        isStoreHeldByAnotherTabError,
+      );
+      await vi.advanceTimersByTimeAsync(
+        BrowserConnectionManager.HELD_BY_ANOTHER_TAB_PATIENCE_MS + 1_000,
+      );
+      await failed;
+      // A dead worker says nothing about whether the other tab let go.
+      refuseOtherwise(new BrowserWorkerUnresponsiveError("worker stopped responding"));
+      const attempts = connections.length;
+      await vi.advanceTimersByTimeAsync(31_000);
+      expect(connections.length).toBeGreaterThan(attempts);
+      expect(status()).toEqual({ state: "offline", reason: "held-by-another-tab", retrying: true });
+    } finally {
+      host.isShuttingDown = true;
+      await manager.shutdown().catch(() => undefined);
+      vi.useRealTimers();
+    }
+  });
+
   it("tries again on its own with the inspector attached too", async () => {
     vi.useFakeTimers();
     const { manager, host, connections, unpin } = admissionManager(true, true, {
@@ -706,7 +732,9 @@ describe("BrowserConnectionManager.shutdown", () => {
         expect(outcome).toBe(error);
         expect(fixture.liveClientAtRetirement()).toBe(false);
         expect(fixture.connection.flushLocal).not.toHaveBeenCalled();
-        expect(fixture.connection.shutdown).toHaveBeenCalledOnce();
+        // Once when its failure was observed (releasing its page lock), once
+        // by teardown; a connection's shutdown is idempotent.
+        expect(fixture.connection.shutdown).toHaveBeenCalledTimes(2);
         expect(fixture.disposeTelemetry).toHaveBeenCalledOnce();
         expect(fixture.messages).not.toContain("return-foreground-node-lease");
         expect(() => fixture.manager.getClient({})).toThrow("shut down");
@@ -1361,6 +1389,23 @@ describe("BrowserConnectionManager explicit transport transitions", () => {
 
     await expect(manager.disconnect()).rejects.toBe(failure);
     expect(manager.isExplicitlyOffline()).toBe(false);
+  });
+
+  it("lets go of a failed follower's page lock even if the tab never reconnects", async () => {
+    const fixture = await leasedManagerFixture();
+    try {
+      expect(fixture.connection.shutdown).not.toHaveBeenCalled();
+      fixture.fail(new Error("Protocol: follower port closed"));
+      await Promise.resolve();
+      // Shut down at once (closing its port and releasing its liveness lock),
+      // with no reconnect and no replacement connection.
+      expect(fixture.connection.shutdown).toHaveBeenCalledOnce();
+      expect(fixture.createConnection).toHaveBeenCalledOnce();
+    } finally {
+      fixture.allowFinish();
+      fixture.host.isShuttingDown = true;
+      await fixture.manager.shutdown().catch(() => undefined);
+    }
   });
 
   it("reacquires a fresh follower after a terminal follower failure", async () => {

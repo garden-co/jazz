@@ -2,6 +2,7 @@ import { signChallenge } from "../local-first-auth/index.js";
 import { parseAuthSecret } from "../runtime/auth-secret-codec.js";
 import {
   AccountAuthError,
+  LINK_GUEST_KEY_MISSING_MESSAGE,
   LINK_NEEDS_GUEST_MESSAGE,
   requestBackendLinkChallenge,
   requestBackendSignIn,
@@ -345,7 +346,11 @@ export function createAccountManagerWithRuntime(options: {
           );
         const material = credentials.get(account);
         if (!material || material.registry !== registry || !material.localFirstSecret)
-          throw new AccountAuthError("local_first_account_required");
+          throw new AccountAuthError(
+            "local_first_account_required",
+            undefined,
+            LINK_GUEST_KEY_MISSING_MESSAGE,
+          );
         const secret = material.localFirstSecret;
         // The namespace the guest's account was founded in (its token's
         // audience: the app id, or the endpoint for an app-less client), so
