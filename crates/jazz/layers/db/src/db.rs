@@ -1419,12 +1419,22 @@ impl Db {
     #[cfg(feature = "testing")]
     async fn open_with_page_faults(mut config: DbConfig) -> Result<Self, Error> {
         use std::sync::atomic::{AtomicU64, Ordering};
-        static FILES: AtomicU64 = AtomicU64::new(0);
+        // Unique per thread, numbered within it: a seed's faults (which
+        // follow the files' names) are the same each run of a test.
+        static THREADS: AtomicU64 = AtomicU64::new(0);
+        thread_local! {
+            static FILES: std::cell::Cell<(u64, u64)> =
+                std::cell::Cell::new((THREADS.fetch_add(1, Ordering::Relaxed), 0));
+        }
         crate::fault_vfs::register();
+        let (thread, file) = FILES.with(|files| {
+            let (thread, file) = files.get();
+            files.set((thread, file + 1));
+            (thread, file)
+        });
         let path = std::env::temp_dir().join(format!(
-            "jazz-page-faults-{}-{}.sqlite",
+            "jazz-page-faults-{}-{thread:06}-{file:06}.sqlite",
             std::process::id(),
-            FILES.fetch_add(1, Ordering::Relaxed)
         ));
         let _ = std::fs::remove_file(&path);
         config.page_source = Some(crate::fault_vfs::source());

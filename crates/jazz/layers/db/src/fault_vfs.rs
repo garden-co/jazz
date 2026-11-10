@@ -16,7 +16,7 @@
 //! runs with faults.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::future::Future;
 use std::pin::Pin;
@@ -36,10 +36,11 @@ const BLOCK: i64 = 4096;
 struct State {
     /// Operations open (they do not nest; a nested begin is counted).
     depth: u32,
-    /// By file: the blocks loaded.
-    loaded: HashMap<String, HashSet<i64>>,
+    /// By file: the blocks loaded (ordered, so a seed evicts the same
+    /// blocks every run).
+    loaded: BTreeMap<String, BTreeSet<i64>>,
     /// Blocks a read faulted on since the last load.
-    pending: HashSet<(String, i64)>,
+    pending: BTreeSet<(String, i64)>,
     rng: u64,
     faults: u64,
     loads: u64,

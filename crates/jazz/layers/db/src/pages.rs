@@ -17,6 +17,29 @@
 //! it read stay resident, so every run gets further, and an operation
 //! larger than the source's budget still ends.
 //!
+//! # The rule for engine code: a fault is a crash of one step
+//!
+//! A fault can surface from any statement. Code that runs inside a unit
+//! keeps two promises, so that running the unit again is safe:
+//!
+//! 1. **A fault is never an answer.** It is not turned into a refusal, a
+//!    rejected commit, a closed session, a "not found", a cached
+//!    "unknown" or a default (`.ok()`, `.unwrap_or_default()`, `Err(_) =>
+//!    refuse`). Wherever errors are classified, [`is_fault`] goes first and
+//!    propagates.
+//! 2. **Inputs are consumed with their effects.** A step that takes work
+//!    off a queue (frames from a transport, a session's backlog, rows
+//!    written since the last tick, parked pulls) puts back what it has not
+//!    finished when it faults, in order, ahead of anything newer. Its
+//!    partial effects are undone the way a failed step's are (its
+//!    savepoint rolls back; in-memory state it changed is restored).
+//!    Steps that finished stay finished: the next run resumes after them,
+//!    so it does not repeat their side effects (frames sent, fates
+//!    recorded).
+//!
+//! The fault suite (`JAZZ_PAGE_FAULTS=<seed>`, [`crate::fault_vfs`]) runs
+//! every engine test with faults at random reads and checks both.
+//!
 //! A store without a page source never faults, and runs each unit once.
 //!
 //! [`Db::open`]: crate::db::Db::open_at

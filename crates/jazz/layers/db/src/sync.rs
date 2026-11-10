@@ -10568,11 +10568,23 @@ impl Db {
             )
             .then(|| message.clone());
             // A message served while the chunk store fetches the nodes it
-            // needs is served again once they arrive.
-            let again = (fetch.is_none() && self.inner.borrow().chunks.store().is_some())
-                .then(|| message.clone());
+            // needs is served again once they arrive, and one that faulted
+            // on a page once it is loaded.
+            let again = (fetch.is_none() && {
+                let inner = self.inner.borrow();
+                inner.chunks.store().is_some() || inner.page_source.is_some()
+            })
+            .then(|| message.clone());
             match (self.serve(index, message), read) {
                 (Ok(()), _) => {}
+                // A page it read is not loaded: it is served again, ahead
+                // of the rest, once it is ([`crate::pages`]).
+                (Err(error), _) if crate::pages::is_fault(&error) => {
+                    held.push_back(again.or(fetch).expect("a copy"));
+                    held.extend(inbound);
+                    self.inner.borrow_mut().sessions[index].backlog = held;
+                    return Err(error);
+                }
                 (Err(error), _)
                     if crate::large::is_missing(&error)
                         && again.is_some()
@@ -10744,6 +10756,11 @@ impl Db {
             // storage failure serving it) ends that session alone: the
             // others are still served and fanned out this tick.
             if let Err(error) = self.serve_session(index) {
+                // A page a message needed is not loaded: the session kept
+                // it, and the tick runs again once it is ([`crate::pages`]).
+                if crate::pages::is_fault(&error) {
+                    return Err(error);
+                }
                 let subscriber = self.subscriber_at(index);
                 self.disconnect_subscriber(subscriber);
                 if let Some(closed) = self.inner.borrow_mut().closed.as_mut() {
@@ -12572,7 +12589,13 @@ impl Db {
                                     .map(from_wire)
                                     .collect::<Result<Vec<_>, _>>()
                                     .and_then(|ops| self.inner.borrow().resent_rows(&ops, at))
-                                    .unwrap_or_default(),
+                                    .or_else(|error| {
+                                        if crate::pages::is_fault(&error) {
+                                            Err(error)
+                                        } else {
+                                            Ok(Vec::new())
+                                        }
+                                    })?,
                                 None => Vec::new(),
                             };
                             (result, rows, Vec::new())
@@ -12612,6 +12635,11 @@ impl Db {
                             }) {
                             // The accepted commit recorded its fate atomically.
                             Ok((rows, echoable)) => (Ok(()), rows, echoable),
+                            // A page it read is not loaded: it is applied
+                            // again once it is ([`crate::pages`]).
+                            Err((error, _)) if crate::pages::is_fault(&error) => {
+                                return Err(error);
+                            }
                             // Its large values need nodes the chunk store is
                             // still fetching: it is applied again once they
                             // arrive, not refused.
