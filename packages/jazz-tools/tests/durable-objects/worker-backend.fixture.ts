@@ -1,4 +1,4 @@
-import { createJazz, remote, schema as s } from "jazz-tools/backend/worker";
+import { createJazz, remote, schema as s } from "jazz-tools/backend";
 const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) }, { migrations: "none" });
 const permissions = s.definePermissions(app, ({ policy }) => {
   policy.notes.allowRead.never();

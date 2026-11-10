@@ -207,3 +207,21 @@ it("also bounds readiness retries when an active object stays on old code", asyn
   expect(c.hostCalls()).toBe(56);
   expect(c.uploads).toHaveLength(1);
 });
+
+it("does not follow provisioning redirects with account credentials", async () => {
+  const fetch = vi.fn(
+    async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      new Response(null, {
+        status: 302,
+        headers: { location: "https://unrelated.example/" },
+      }),
+  );
+  await expect(
+    openDurableObjectsCore(options, {
+      loadArtifact: async () => artifact(),
+      fetch,
+    }),
+  ).rejects.toThrow("HTTP 302");
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(fetch.mock.calls[0]?.[1]).toMatchObject({ redirect: "manual" });
+});

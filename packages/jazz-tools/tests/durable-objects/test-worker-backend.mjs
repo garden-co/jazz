@@ -27,7 +27,6 @@ try {
   const built = await build({
     entryPoints: [fileURLToPath(new URL("./worker-backend.fixture.ts", import.meta.url))],
     bundle: true,
-    alias: { "jazz-tools/backend/worker": require.resolve("jazz-tools/backend/worker") },
     platform: "neutral",
     mainFields: ["browser", "module", "main"],
     conditions: ["workerd", "worker", "browser", "import"],
@@ -39,7 +38,10 @@ try {
   for (const output of Object.values(built.metafile.outputs)) {
     for (const [path, input] of Object.entries(output.inputs))
       if (input.bytesInOutput)
-        assert.doesNotMatch(path, /jazz-napi|wasm-loader|@vercel|node_modules\/ws\//);
+        assert.doesNotMatch(
+          path,
+          /jazz-napi|wasm-loader|@vercel|node_modules\/ws\/|runtime\/node-(host|socket|artifact)|durable-object-worker\/artifact/,
+        );
     for (const item of output.imports)
       if (item.kind !== "dynamic-import") assert.equal(item.path, "node:crypto");
   }

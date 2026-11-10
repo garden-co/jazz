@@ -1,3 +1,4 @@
+import { openWebSocket } from "#jazz/backend-socket";
 import type {
   JazzCore,
   JazzCoreSocket as CoreSocket,
@@ -75,14 +76,6 @@ export function openRemoteCore(
   },
 ): JazzCore {
   const socketUrl = `${target.url.replace(/^http/, "ws")}/apps/${encodeURIComponent(appId)}/ws`;
-  if (!globalThis.WebSocket && !target.openWebSocket) {
-    throw new Error("remote() needs a global WebSocket (Node 22 or newer)");
-  }
-  // Node's WebSocket (undici) takes upgrade headers as a second argument.
-  const NativeWebSocket = globalThis.WebSocket as unknown as new (
-    url: string,
-    options?: { headers?: Record<string, string> },
-  ) => WebSocket;
   const credentialHeaders = async (access: BackendAccess): Promise<string[][]> => {
     const credential = await target.backendCredential();
     if (typeof credential !== "string" || !credential) {
@@ -161,7 +154,7 @@ export function openRemoteCore(
         if (ended) return;
         ws = target.openWebSocket
           ? await target.openWebSocket(url, headers, abort.signal)
-          : new NativeWebSocket(url, { headers: Object.fromEntries(headers) });
+          : await openWebSocket(url, headers, abort.signal);
         if (ended) {
           ws.close();
           return;

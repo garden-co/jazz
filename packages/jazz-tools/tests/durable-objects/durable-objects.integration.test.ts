@@ -9,6 +9,7 @@ const execute = promisify(execFile);
 for (const [name, args, packaged] of [
   ["create-jazz", [], true],
   ["worker-backend", [], true],
+  ["worker-provider", [], true],
   ["accounts", [], true],
   ["thin-parts", [], true],
   ["lifecycle", [], true],

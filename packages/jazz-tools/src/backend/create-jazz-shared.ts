@@ -247,7 +247,7 @@ export interface JazzServiceApi {
    * and permissions: to fail at startup instead of on the first request, or
    * to read `appId`. Resolves to this Jazz.
    */
-  ready(): Promise<JazzServiceApi>;
+  ready(): Promise<this>;
   /** Answer one request under `basePath` (sync, sign-in, the HTTP stream). */
   handle(request: Request): Promise<Response>;
   /** Bridge an upgraded socket (the `ws` package's shape) to a sync session. */

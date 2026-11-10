@@ -57,3 +57,5 @@ export type {
   JazzCoreEvent,
   JazzCoreSocket,
 } from "./core-providers/core-provider.js";
+
+export { schema } from "../schema-namespace.js";

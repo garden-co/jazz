@@ -5,23 +5,37 @@ Local tests and commands live in the [integration test README](../../../packages
 
 ## Worker-hosted createJazz
 
-`jazz-tools/backend/worker` exports `createJazz`, `remote`, `schema` and the
+`jazz-tools/backend` exports `createJazz`, `durableObjects`, `remote`, `schema` and the
 shared authentication helpers. Enable Cloudflare's `nodejs_compat` flag; this
 entry uses supported Node crypto and Buffer APIs, but no NAPI, local database,
 Node listener or Vercel SDK. Import the schema DSL from this entry as well to
 avoid pulling browser-runtime initialization from the general package entry.
 
-Provision the core separately with the Node `durableObjects()` provider. Inside
-the application Worker, `remote({ url, appId, secret })` connects to that existing
-core. Its authenticated socket upgrade uses Worker `fetch()` and the returned
-WebSocket. Cloudflare provisioning credentials are not needed in this Worker.
-This implementation uses the core's URL, not a namespace/service binding.
+The package's `workerd` condition selects internal socket, artifact and lifecycle
+adapters; Node selects its native adapters by default. Wrangler resolves this
+automatically. With another bundler, enable the `workerd` condition. Set TypeScript
+`compilerOptions.customConditions` to `["workerd"]` in the Worker application to
+select matching types. Node-only `attach()` and `nodeHandler()` are absent there.
+The previous `jazz-tools/backend/worker` entry is replaced by this common import.
+
+`durableObjects({ name, credentials, secret })` provisions or reuses the core
+from the application Worker, using the same provisioning checks as Node.
+Pass credentials from Worker bindings; the API token deploys the host, while
+the separate stable core secret authenticates database requests and sockets.
+The application Worker itself is deployed by your normal application tooling.
+
+The package bundles a compressed copy of the release host for upload, verifies
+its hashes and package version, and uses Worker `fetch()` for HTTP and socket
+upgrades. This increases application bundle size; `remote({ url, appId, secret })`
+remains available when provisioning happens elsewhere and does not need those
+host bytes or account credentials. Connections use the core's URL, not a
+namespace/service binding.
 
 Create and close the client within each invocation. Share schema/configuration,
 not a live Jazz client or its sockets across requests:
 
 ```ts
-import { createJazz, remote } from "jazz-tools/backend/worker";
+import { createJazz, durableObjects } from "jazz-tools/backend";
 import { app, permissions } from "./app.js";
 
 export default {
@@ -29,9 +43,12 @@ export default {
     const jazz = createJazz({
       app,
       permissions,
-      store: remote({
-        url: env.JAZZ_CORE_URL,
-        appId: env.JAZZ_APP_ID,
+      store: durableObjects({
+        name: "my-jazz-core",
+        credentials: {
+          accountId: env.CLOUDFLARE_ACCOUNT_ID,
+          apiToken: env.CLOUDFLARE_API_TOKEN,
+        },
         secret: env.JAZZ_CORE_SECRET,
       }),
       // Supply your application's authentication callback here.

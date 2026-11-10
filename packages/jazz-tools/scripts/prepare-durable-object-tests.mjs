@@ -44,3 +44,9 @@ await run("cargo", [
   "doc-shelf-do-ceiling-ws",
 ]);
 await run("pnpm", ["exec", "tsc"], join(root, "packages/jazz-tools"));
+
+await run(
+  "pnpm",
+  ["exec", "tsc", "--project", "tsconfig.worker-backend.json"],
+  join(root, "packages/jazz-tools"),
+);

@@ -1,8 +1,11 @@
+import { loadArtifact } from "#jazz/backend-artifact";
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
 import { accountAppId } from "../../accounts/local-first.js";
 import type { JazzCoreProvider } from "./core-provider.js";
 import { openRemoteCore } from "./remote.js";
+
+const environment = (name: string) =>
+  typeof process === "undefined" ? undefined : process.env[name];
 
 export interface DurableObjectsOptions {
   /** Stable Worker name. Changing this creates a different authority. */
@@ -35,20 +38,6 @@ export function verifyDurableObjectArtifact(artifact: DurableObjectArtifact): vo
   )
     throw new Error("Invalid packaged Jazz Durable Object host");
 }
-async function loadArtifact(): Promise<DurableObjectArtifact> {
-  const base = new URL("../../../durable-object-worker/", import.meta.url);
-  const [manifest, worker, wasm] = await Promise.all([
-    readFile(new URL("manifest.json", base), "utf8"),
-    readFile(new URL("worker.mjs", base)),
-    readFile(new URL("jazz.wasm", base)),
-  ]);
-  const artifact = { manifest: JSON.parse(manifest) as Manifest, worker, wasm };
-  verifyDurableObjectArtifact(artifact);
-  const pkg = JSON.parse(await readFile(new URL("../../../package.json", import.meta.url), "utf8"));
-  if (pkg.version !== artifact.manifest.version)
-    throw new Error("Jazz DO host/package version mismatch");
-  return artifact;
-}
 interface Binding {
   name: string;
   type: string;
@@ -79,20 +68,20 @@ function compareVersions(a: string, b: string): number {
   for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return x[i] > y[i] ? 1 : -1;
   return 0;
 }
-interface Dependencies {
+export interface DurableObjectsDependencies {
   fetch?: typeof globalThis.fetch;
-  loadArtifact?: () => Promise<DurableObjectArtifact>;
+  loadArtifact: () => Promise<DurableObjectArtifact>;
   openRemote?: typeof openRemoteCore;
   sleep?: (ms: number) => Promise<void>;
 }
 /** Internal injection boundary: tests exercise the real HTTP provisioning protocol. */
 export async function openDurableObjectsCore(
   options: DurableObjectsOptions,
-  deps: Dependencies = {},
+  deps: Partial<DurableObjectsDependencies> = {},
 ) {
-  const account = options.credentials?.accountId ?? process.env.CLOUDFLARE_ACCOUNT_ID;
-  const token = options.credentials?.apiToken ?? process.env.CLOUDFLARE_API_TOKEN;
-  const secret = options.secret ?? process.env.JAZZ_CORE_SECRET;
+  const account = options.credentials?.accountId ?? environment("CLOUDFLARE_ACCOUNT_ID");
+  const token = options.credentials?.apiToken ?? environment("CLOUDFLARE_API_TOKEN");
+  const secret = options.secret ?? environment("JAZZ_CORE_SECRET");
   if (!account || !/^[a-f0-9]{32}$/.test(account) || !token)
     throw new Error("durableObjects requires Cloudflare account ID and API token");
   if (!/^[a-z][a-z0-9-]{0,61}[a-z0-9]$/.test(options.name))
@@ -119,7 +108,8 @@ export async function openDurableObjectsCore(
   async function api(path: string, init: RequestInit = {}, missing = false): Promise<any> {
     const response = await fetcher(base + path, {
       ...init,
-      redirect: "error",
+      // Never forward credentials through redirects; Workers supports manual mode.
+      redirect: "manual",
       signal: AbortSignal.timeout(30_000),
       headers: { ...init.headers, Authorization: `Bearer ${token}` },
     });
@@ -237,7 +227,8 @@ export async function openDurableObjectsCore(
     let response: Response | undefined;
     try {
       response = await fetcher(`${url}/apps/${appId}/admin/host`, {
-        redirect: "error",
+        // Never forward credentials through redirects; Workers supports manual mode.
+        redirect: "manual",
         signal: AbortSignal.timeout(Math.max(1, Math.min(10_000, readinessDeadline - Date.now()))),
         headers: { "X-Jazz-Backend-Credential": secret, "X-Jazz-Backend-Access": "admin" },
       });
@@ -274,7 +265,7 @@ export async function openDurableObjectsCore(
 export function durableObjects(options: DurableObjectsOptions): JazzCoreProvider {
   return {
     reuse: {
-      key: `durable-objects:${options.credentials?.accountId ?? process.env.CLOUDFLARE_ACCOUNT_ID}:${options.name}`,
+      key: `durable-objects:${options.credentials?.accountId ?? environment("CLOUDFLARE_ACCOUNT_ID")}:${options.name}`,
       settings: options,
     },
     open() {

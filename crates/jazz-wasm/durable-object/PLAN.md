@@ -56,8 +56,10 @@ deferred overlay and chunk-storage implementations land.
 
 ## Delivery order
 
-Node and Worker `createJazz()` now use the shared thin client; local Worker
-HTTP/WebSocket integration is validated (see README). Deployment of the
+Node and Worker `createJazz()` share the `jazz-tools/backend` entry, with internal
+conditional runtime adapters and the shared thin client; local Worker
+HTTP/WebSocket integration and Worker-side provisioning against a local Cloudflare
+API double are validated (see README). Deployment of the
 application Worker is not yet validated.
 Transaction overlays (section 5) and durable chunks (section 7) remain deferred.
 Keep current integration tests as regression coverage; further lifecycle

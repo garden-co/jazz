@@ -2,6 +2,10 @@
 
 Local workerd coverage for the production Jazz DO host and Worker backend.
 These tests never deploy Cloudflare resources or require account credentials.
+Worker fixtures import `jazz-tools/backend` using the package's `workerd` condition,
+without entry-point aliases. Bundle checks reject native dependencies; the
+remote-only fixture also excludes the deployable host artifact.
+`tsconfig.worker-backend.json` checks the matching Worker API types.
 
 ```sh
 pnpm --filter jazz-tools test:durable-objects
@@ -20,6 +24,9 @@ Use `RUSTC_WRAPPER= CC=cc CXX=c++` if local compiler wrappers are unavailable.
 
 - `test-create-jazz`, `test-worker-backend`, `test-accounts`: publication,
   admission, policy-scoped reads/writes, account/guest/revocation, Worker sockets.
+- `test-worker-provider`: the public Worker provisioning provider uploads the
+  exact packaged host through a local Cloudflare API double, then publishes,
+  reads/writes and reuses the real local DO core across Worker invocations.
 - `test-thin-parts`: fragmented requests, malformed/interleaved parts, per-session
   and aggregate budgets, disconnect cleanup and the production inactivity timeout.
 - `test-lifecycle`, `test-crash`: local reconstruction, lost uploads/acknowledgements,
@@ -49,7 +56,7 @@ DO integers are limited to ±(2^53−1); REAL values retain IEEE-754 behavior.
 Thin requests may span frames, within 8 MiB per session and 16 MiB aggregate
 DO ingress reservations. Incomplete requests expire after 90 seconds without a
 part; over-budget input is refused. Backend transactions remain unsupported. Worker applications
-use `jazz-tools/backend/worker` with `nodejs_compat`, request-owned clients and
+use `jazz-tools/backend` with `nodejs_compat`, request-owned clients and
 WebSockets; their HTTP-stream fallback and text-anchor helpers are unsupported.
 Keep deployed behavior and performance claims separate from local results.
 

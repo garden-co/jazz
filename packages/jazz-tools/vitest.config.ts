@@ -11,6 +11,11 @@ export default defineConfig({
   plugins: [svelte()],
   resolve: {
     alias: [
+      // Source tests must not mix source auth sentinels/classes with dist copies.
+      ...["host", "socket", "artifact"].map((name) => ({
+        find: `#jazz/backend-${name}`,
+        replacement: resolve(__dirname, `src/backend/runtime/node-${name}.ts`),
+      })),
       { find: /^react-native$/, replacement: resolve(__dirname, "tests/react-native/ui-host.ts") },
       ...(sealedWasmPackage
         ? [{ find: "jazz-wasm", replacement: resolve(sealedWasmPackage, "jazz_wasm.js") }]

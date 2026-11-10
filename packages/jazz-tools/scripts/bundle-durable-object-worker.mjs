@@ -1,4 +1,5 @@
 // Package the production DO host, never the development fixture crate.
+import { gzipSync } from "node:zlib";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
@@ -69,9 +70,21 @@ try {
   await writeFile(join(staging, "worker.mjs"), worker);
   await writeFile(join(staging, "jazz.wasm"), wasm);
   await writeFile(join(staging, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
+  // Compressed strings are upload data, not an executable WASM import. Worker
+  // bundlers can include them without custom module rules or filesystem access.
+  await writeFile(
+    join(staging, "artifact.js"),
+    `export const manifest = ${JSON.stringify(manifest)};\n` +
+      `export const workerGzip = ${JSON.stringify(gzipSync(worker, { level: 9 }).toString("base64"))};\n` +
+      `export const wasmGzip = ${JSON.stringify(gzipSync(wasm, { level: 9 }).toString("base64"))};\n`,
+  );
+  await writeFile(
+    join(staging, "artifact.d.ts"),
+    "export const manifest: { format: string; version: string; workerSha256: string; wasmSha256: string; digest: string };\nexport const workerGzip: string;\nexport const wasmGzip: string;\n",
+  );
   await mkdir(output, { recursive: true });
   // Manifest last: readers verify both hashes and fail closed if racing a build.
-  for (const file of ["worker.mjs", "jazz.wasm", "manifest.json"])
+  for (const file of ["worker.mjs", "jazz.wasm", "artifact.js", "artifact.d.ts", "manifest.json"])
     await rename(join(staging, file), join(output, file));
   console.log(`Packaged Durable Object host ${version} (${manifest.digest.slice(0, 12)})`);
 } finally {
