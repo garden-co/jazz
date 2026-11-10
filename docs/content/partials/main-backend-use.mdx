@@ -1,7 +1,7 @@
 ## Connect the browser
 
-The browser talks to `/jazz` on the same origin by default, so there's no `serverUrl` to set, and your
-app's own session cookie is all it needs. It needs no Jazz API key or token:
+The browser talks to `/jazz` on the same origin by default and signs in with your app's own
+session cookie:
 
 ```tsx title="App.tsx"
 <JazzProvider signedOut={<SignIn />}>
@@ -33,6 +33,11 @@ await jazz.db.insert(app.auditLog, { event: "invoice.paid" });
 `await jazz.forReqUser(request)` runs your `authenticate` and returns a database with that user's
 policies and authorship. It's the default for anything a user triggers: route handlers, server
 actions, server components. Concurrent requests stay isolated.
+
+<Callout type="info" title="One handle per request">
+  Call `jazz.forReqUser(request)` in each request that needs it. Don't keep the handle it returns in
+  module-level state: it belongs to that request's user.
+</Callout>
 
 ```ts title="app/api/todos/route.ts"
 import { jazz } from "@/jazz.server";

@@ -6,8 +6,7 @@ description: "Learn how your backend decides who a user is, how the browser foll
 Auth in Jazz has three parts:
 
 1. **Your main backend decides.** One `authenticate` function maps a request to a user.
-2. **The browser says who is signed in.** It passes the user your auth library already knows, and
-   never holds a Jazz API key or token.
+2. **The browser says who is signed in.** It passes the user your auth library already knows.
 3. **The session is what Jazz enforces.** Every read and write runs as a session: the user's
    account, the identity acting for it, and the claims your policies see.
 
@@ -48,8 +47,7 @@ claims change therefore reaches an open connection within `recheckSeconds`; `jaz
 it on the next request. With `recheckSeconds: 0` it waits until the connection's sign-in expires
 (after an hour by default, `sessionTtlSeconds`). Return claims that only change when the user's
 access does: a claim that changes on every call (a timestamp, a request id) would end the
-connection on every check. There are no JWKS, issuer or audience settings, and no Jazz token in the
-browser.
+connection on every check.
 
 **Several sign-in methods.** Email, Google, passkeys and the rest belong to your auth library, which
 already merges them into one user. As long as `authenticate` returns that user's id, Jazz sees the
@@ -147,7 +145,7 @@ Once signed in, every context has a read-only session. `session.user` is the acc
 ```ts
 const session = db.getAuthState().session;
 session?.user; // "00000000-0000-4000-8000-000000000001", the account
-session?.identity; // { issuer: "https://issuer.example", subject: "alice" }
+session?.identity; // { issuer: "jazz:backend", subject: "alice" }, subject = the userId from authenticate
 ```
 
 - **Ownership** compares `session.user`. Linked identities share one account, so this is
