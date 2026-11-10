@@ -669,6 +669,9 @@ export class IndexedDbPageStore {
     await done;
     this.assertValid();
     assertStorageManifest(value);
+    const node = await this.readReplicaNodeBytes();
+    this.assertValid();
+    this.replicaNodeBytes = node;
   }
 
   /**
