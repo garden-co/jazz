@@ -75,6 +75,8 @@ pub const SUPERSEDED_WRITES_STORE: &str = "jazz_superseded_writes_v1";
 pub struct JazzSchema {
     public_schema: PublicSchema,
     runtime: RuntimeSchema,
+    /// Conservative, schema-owned dispatch metadata; never a policy decision.
+    has_authorized_created_insert_sources: bool,
 }
 
 impl PartialEq for JazzSchema {
@@ -104,6 +106,7 @@ impl JazzSchema {
             table.read_policy = None;
             table.write_policies = Default::default();
         }
+        schema.has_authorized_created_insert_sources = false;
         schema
     }
 
@@ -150,6 +153,8 @@ impl JazzSchema {
             table.read_policy = selected.read_policy.clone();
             table.write_policies = selected.write_policies.clone();
         }
+        schema.has_authorized_created_insert_sources =
+            selected.has_authorized_created_insert_sources;
         schema
     }
 
@@ -165,10 +170,23 @@ impl JazzSchema {
 
     #[doc(hidden)]
     pub fn from_runtime(public_schema: PublicSchema, runtime: RuntimeSchema) -> Self {
+        let has_authorized_created_insert_sources = runtime.tables.iter().any(|table| {
+            table
+                .write_policies
+                .insert_check
+                .as_ref()
+                .is_some_and(Query::uses_authorized_created_sources)
+        });
         Self {
             public_schema,
             runtime,
+            has_authorized_created_insert_sources,
         }
+    }
+
+    #[doc(hidden)]
+    pub fn may_have_authorized_created_insert_sources(&self) -> bool {
+        self.has_authorized_created_insert_sources
     }
 
     #[doc(hidden)]
@@ -179,6 +197,9 @@ impl JazzSchema {
     #[cfg(any(test, feature = "testing"))]
     #[doc(hidden)]
     pub fn runtime_mut_for_testing(&mut self) -> &mut RuntimeSchema {
+        // Tests may replace a policy through this mutable escape hatch. A
+        // conservative positive only requests exact operation selection.
+        self.has_authorized_created_insert_sources = true;
         &mut self.runtime
     }
 

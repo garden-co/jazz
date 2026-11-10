@@ -867,4 +867,80 @@ mod tests {
             assert!(store.active_schema().expect("read permissions").is_none());
         }
     }
+    /// Alice's opt-in policy survives the current catalogue's canonical JSON
+    /// boundary. Codec inspection is needed to pin bytes rather than row effects.
+    #[test]
+    fn created_policy_current_catalogue_json_roundtrips_and_refuses_bad_bytes() {
+        let expression = PolicyExpr::exists_including_created("p", PolicyExpr::True);
+        let canonical =
+            br#"{"condition":{"type":"True"},"table":"p","type":"ExistsIncludingCreated"}"#;
+        assert_eq!(
+            jazz::catalogue::canonical_json(&expression)
+                .unwrap()
+                .as_bytes(),
+            canonical
+        );
+        assert_eq!(
+            serde_json::from_slice::<PolicyExpr>(canonical).unwrap(),
+            expression
+        );
+        for length in 0..canonical.len() {
+            assert!(
+                serde_json::from_slice::<PolicyExpr>(&canonical[..length]).is_err(),
+                "truncated at {length}"
+            );
+        }
+        for malformed in [
+            br#"{"condition":{"type":"True"},"table":"p","type":"UnknownCreatedSource"}"#.as_slice(),
+            br#"{"condition":{"type":"UnknownPolicy"},"table":"p","type":"ExistsIncludingCreated"}"#.as_slice(),
+            br#"{"condition":{"type":"True"},"table":7,"type":"ExistsIncludingCreated"}"#.as_slice(),
+        ] {
+            assert!(serde_json::from_slice::<PolicyExpr>(malformed).is_err());
+        }
+    }
+
+    /// Mallory cannot hide unsupported relation operators beneath the new
+    /// marker. Direct validator inspection distinguishes this publication
+    /// contract from unrelated schema/table validation failures.
+    #[test]
+    fn created_policy_preserves_current_relation_admission_checks() {
+        let leaf = || RelationExpr::TableScan {
+            table: "p".into(),
+            alias: None,
+        };
+        for created in [false, true] {
+            let limited = PolicyExpr::ExistsRel {
+                rel: RelationExpr::Limit {
+                    input: Box::new(leaf()),
+                    limit: 1,
+                },
+            };
+            let expression = if created {
+                PolicyExpr::exists_including_created("p", limited)
+            } else {
+                PolicyExpr::Exists {
+                    table: "p".into(),
+                    condition: Box::new(limited),
+                }
+            };
+            let permissions = std::collections::HashMap::from([(
+                TableName::new("p"),
+                TablePolicies::new().with_insert(expression),
+            )]);
+            let error =
+                crate::server::permissions_validation::validate_permissions_relations(&permissions)
+                    .unwrap_err();
+            assert!(error.contains("Limit"), "{error}");
+        }
+        let expression =
+            PolicyExpr::exists_including_created("p", PolicyExpr::ExistsRel { rel: leaf() });
+        let permissions = std::collections::HashMap::from([(
+            TableName::new("p"),
+            TablePolicies::new().with_insert(expression),
+        )]);
+        assert!(
+            crate::server::permissions_validation::validate_permissions_relations(&permissions)
+                .is_ok()
+        );
+    }
 }

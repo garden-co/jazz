@@ -34,9 +34,9 @@ pub(crate) fn validate_permissions_relations(
 fn validate_policy_relations(policy: &PolicyExpr) -> Result<(), String> {
     match policy {
         PolicyExpr::ExistsRel { rel } => validate_relation_policy(rel),
-        PolicyExpr::Exists { condition, .. } | PolicyExpr::Not(condition) => {
-            validate_policy_relations(condition)
-        }
+        PolicyExpr::Exists { condition, .. }
+        | PolicyExpr::ExistsIncludingCreated { condition, .. }
+        | PolicyExpr::Not(condition) => validate_policy_relations(condition),
         PolicyExpr::And(expressions) | PolicyExpr::Or(expressions) => {
             for expression in expressions {
                 validate_policy_relations(expression)?;

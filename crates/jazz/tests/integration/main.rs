@@ -3,9 +3,6 @@
 //! Tests that need a process of their own (durable_file re-executes and
 //! measures its binary) stay separate targets.
 
-#[path = "../sqlite_read_policy_literals.rs"]
-mod sqlite_read_policy_literals;
-
 #[allow(dead_code)]
 #[path = "../common/mod.rs"]
 mod common;
@@ -166,6 +163,14 @@ mod shard_role;
 mod slow_queries;
 #[path = "../snapshots.rs"]
 mod snapshots;
+#[path = "../sqlite_candidate_relations.rs"]
+mod sqlite_candidate_relations;
+#[path = "../sqlite_candidate_uuid_correlations.rs"]
+mod sqlite_candidate_uuid_correlations;
+#[path = "../sqlite_candidates.rs"]
+mod sqlite_candidates;
+#[path = "../sqlite_read_policy_literals.rs"]
+mod sqlite_read_policy_literals;
 #[path = "../sqlite_sync_ingress.rs"]
 mod sqlite_sync_ingress;
 #[path = "../storage_corpus.rs"]

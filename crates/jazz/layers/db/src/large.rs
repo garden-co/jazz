@@ -3127,3 +3127,51 @@ mod tests {
         assert!(!begin_offload(&o.conn, 1_000).unwrap().is_empty());
     }
 }
+
+/// Answer only the exact cells supplied by the opt-in candidate dependency
+/// walk. This never enumerates a table or changes ordinary query comparison.
+pub(crate) fn answer_candidate_cells(
+    conn: &Connection,
+    chunks: &Chunks,
+    prep: &crate::compile::Prep,
+    cells: &BTreeSet<i64>,
+) -> Result<bool, Error> {
+    use crate::compile::{MatchTest, Prep};
+    let mut insert = conn
+        .prepare_cached(
+            "INSERT OR REPLACE INTO _jazz_candidate_lv_v2(slot,cell,v) VALUES(?1,?2,?3)",
+        )
+        .map_err(storage)?;
+    for cell in cells {
+        let bytes = chunks.materialize(ValueRef::Integer(*cell))?;
+        let value = match prep {
+            Prep::Class { .. } => Some(jazz_types::sha256::hash(&bytes).as_bytes().to_vec()),
+            Prep::Match { test, .. } => {
+                let pass = match test {
+                    MatchTest::Contains(needle) => {
+                        needle.is_empty() || bytes.windows(needle.len()).any(|part| part == needle)
+                    }
+                    MatchTest::Cmp(op, literal) => {
+                        let ordering = bytes.cmp(literal);
+                        match op {
+                            crate::tools::CmpOp::Eq => ordering.is_eq(),
+                            crate::tools::CmpOp::Ne => ordering.is_ne(),
+                            crate::tools::CmpOp::Lt => ordering.is_lt(),
+                            crate::tools::CmpOp::Le => ordering.is_le(),
+                            crate::tools::CmpOp::Gt => ordering.is_gt(),
+                            crate::tools::CmpOp::Ge => ordering.is_ge(),
+                        }
+                    }
+                };
+                if !pass {
+                    continue;
+                }
+                None
+            }
+        };
+        insert
+            .execute(rusqlite::params![prep.slot(), cell, value])
+            .map_err(storage)?;
+    }
+    Ok(false)
+}

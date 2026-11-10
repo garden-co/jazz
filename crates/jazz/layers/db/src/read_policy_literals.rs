@@ -70,6 +70,11 @@ impl Inner {
         author: AuthorSubject,
         cut: Option<Cut>,
     ) -> Result<Option<bool>, Error> {
+        if self.candidate_read_evidence.is_some() {
+            return Err(unsupported(
+                "ordinary SELECT point check in a candidate read scope",
+            ));
+        }
         let session = self.session(author);
         let binding = BTreeMap::new();
         // Governance is passed explicitly by the trusted point-check caller
@@ -149,6 +154,11 @@ impl Inner {
         if compiled.policy_literals.is_empty() {
             return self.execute(compiled, &prepared.query.table);
         }
+        if self.candidate_read_evidence.is_some() || !compiled.preps.is_empty() {
+            return Err(unsupported(
+                "mixing ordinary long-literal reads with candidate evidence",
+            ));
+        }
         let query = &prepared.query;
         if !query.joins.is_empty()
             || query.flat_join.is_some()
@@ -193,7 +203,7 @@ impl Inner {
         let raw = self
             .read_ctx(prepared, &schema, None, &claims, read)
             .compile_query(&discovery, read.include_deleted)?;
-        if !raw.policy_literals.is_empty() {
+        if !raw.policy_literals.is_empty() || !raw.preps.is_empty() {
             return Err(unsupported(
                 "recursive preparation of ordinary policy dependency roots",
             ));
@@ -445,7 +455,7 @@ impl Inner {
                     .ok_or_else(|| unsupported("ordinary long-literal policy EXISTS without a mandatory indexed UUID correlation"))?;
                 (target, column, parent, condition.as_ref(), depth)
             }
-            PolicyExpr::ExistsRel { .. } => {
+            PolicyExpr::ExistsRel { .. } | PolicyExpr::ExistsIncludingCreated { .. } => {
                 return Err(unsupported(
                     "relation or created-row evidence in ordinary long-literal read policies",
                 ));

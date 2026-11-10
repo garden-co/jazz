@@ -118,6 +118,7 @@ impl Ctx<'_> {
         };
         Ok(Compiled {
             sql: statement(&order),
+            preps: self.preps,
             policy_literals: self.policy_literals,
             params: self.params,
             projection,

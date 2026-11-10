@@ -666,3 +666,120 @@ fn ordinary_read_policy_partial_projection_refuses_then_full_read_works() {
     assert!(error.message.contains("partial projections"), "{error}");
     assert_eq!(visible(&db, Query::from("items")).unwrap(), vec![id(1)]);
 }
+
+// The ordinary compiler inherits USING-or-CHECK for UPDATE. A CHECK-only
+// parent's further dependency must be discovered before evaluating the row;
+// candidate-specific USING defaults must not suppress that ordinary walk.
+fn check_only_update_nested_inheritance(reverse: bool) {
+    use jazz::tools::Operation;
+    let literal = "a".repeat(70 * 1024);
+    let parent_check = PolicyExpr::Exists {
+        table: "grants".into(),
+        condition: Box::new(PolicyExpr::and(vec![
+            PolicyExpr::Cmp {
+                column: "id".into(),
+                op: jazz::tools::CmpOp::Eq,
+                value: jazz::tools::PolicyValue::SessionRef(vec![
+                    "__jazz_outer_row".into(),
+                    "grant".into(),
+                ]),
+            },
+            equality(&literal),
+        ])),
+    };
+    let root_policy = if reverse {
+        PolicyExpr::InheritsReferencing {
+            operation: Operation::Update,
+            source_table: "parents".into(),
+            via_column: "item".into(),
+            max_depth: Some(3),
+        }
+    } else {
+        PolicyExpr::Inherits {
+            operation: Operation::Update,
+            via_column: "parent".into(),
+            max_depth: Some(3),
+        }
+    };
+    let mut items = TableSchemaBuilder::new("items").policies(
+        TablePolicies::new()
+            .with_select(root_policy)
+            .with_insert(PolicyExpr::True),
+    );
+    let mut parents = TableSchemaBuilder::new("parents")
+        .fk_column("grant", "grants")
+        .policies(
+            TablePolicies::new()
+                .with_select(PolicyExpr::True)
+                .with_insert(PolicyExpr::True)
+                .with_update(None, parent_check),
+        );
+    if reverse {
+        parents = parents
+            .fk_column("item", "items")
+            .index_only(["item", "grant"]);
+    } else {
+        items = items.fk_column("parent", "parents");
+    }
+    let public = SchemaBuilder::new()
+        .table(items)
+        .table(parents)
+        .table(
+            TableSchemaBuilder::new("grants")
+                .column("body", ColumnType::Text)
+                .policies(
+                    TablePolicies::new()
+                        .with_select(equality(&literal))
+                        .with_insert(PolicyExpr::True)
+                        .with_update(Some(PolicyExpr::True), PolicyExpr::True),
+                ),
+        )
+        .build();
+    let db = block_on(Db::open(DbConfig::new(
+        common::compile_schema(&public),
+        DbIdentity {
+            node: NodeUuid::from_bytes([96; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .unwrap();
+    db.set_authority();
+    assert!(db.table_identity("items").unwrap().is_some());
+    let put_grant = |n, body: &str| {
+        block_on(db.upsert(
+            "grants",
+            id(n),
+            BTreeMap::from([("body".into(), Value::String(body.to_owned()))]),
+            Default::default(),
+        ))
+        .unwrap();
+    };
+    for n in 1..=2 {
+        put_grant(n + 20, if n == 1 { &literal } else { "nonmatching" });
+        let mut parent = BTreeMap::from([("grant".into(), Value::Uuid(id(n + 20).0))]);
+        let mut item = BTreeMap::new();
+        if reverse {
+            parent.insert("item".into(), Value::Uuid(id(n).0));
+        } else {
+            item.insert("parent".into(), Value::Uuid(id(n + 10).0));
+        }
+        block_on(db.upsert("parents", id(n + 10), parent, Default::default())).unwrap();
+        block_on(db.upsert("items", id(n), item, Default::default())).unwrap();
+    }
+    // All visibility uses the real ordinary Alice subject, not backend setup.
+    assert_eq!(visible(&db, Query::from("items")).unwrap(), vec![id(1)]);
+    put_grant(21, "no longer matches");
+    assert!(visible(&db, Query::from("items")).unwrap().is_empty());
+    put_grant(22, &literal);
+    assert_eq!(visible(&db, Query::from("items")).unwrap(), vec![id(2)]);
+}
+
+#[test]
+fn ordinary_read_policy_check_only_update_nested_forward() {
+    check_only_update_nested_inheritance(false);
+}
+
+#[test]
+fn ordinary_read_policy_check_only_update_nested_reverse() {
+    check_only_update_nested_inheritance(true);
+}

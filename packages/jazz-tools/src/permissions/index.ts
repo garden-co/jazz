@@ -79,6 +79,7 @@ const POLICY_EXPRESSION_DISCRIMINATORS: Record<PolicyExpr["type"], true> = {
   InList: true,
   SessionInList: true,
   Exists: true,
+  ExistsIncludingCreated: true,
   ExistsRel: true,
   Inherits: true,
   InheritsReferencing: true,
@@ -152,7 +153,7 @@ export interface RowRefValue {
 }
 
 interface ExistsCondition extends PermissionExpressionInput {
-  readonly __jazzPermissionKind: "exists";
+  readonly __jazzPermissionKind: "exists" | "exists-including-created";
   readonly table: string;
   readonly where: Record<string, unknown>;
 }
@@ -847,6 +848,8 @@ interface TablePolicyBuilder<WhereInput, Row> extends TableRelationBuilder<Where
   allowUpdate: UpdateRuleBuilder<WhereInput, Row>;
   allowUpdates: UpdateRuleBuilder<WhereInput, Row>;
   exists: ExistsBuilder<WhereInput>;
+  /** Include independently authorised root inserts from the same serializable commit. */
+  existsIncludingCreated: ExistsBuilder<WhereInput>;
 }
 
 export type PolicyContext<TApp extends AppLike> = {
@@ -1175,6 +1178,14 @@ function buildTablePolicyBuilder(
         where: normalizeWhereObject(input, hasTypeColumn),
       }),
   };
+  const existsIncludingCreated: ExistsBuilder<unknown> = {
+    where: (input) =>
+      brandPermissionExpression({
+        __jazzPermissionKind: "exists-including-created",
+        table,
+        where: normalizeWhereObject(input, hasTypeColumn),
+      }),
+  };
 
   return {
     __jazzPermissionKind: "table-builder",
@@ -1192,6 +1203,7 @@ function buildTablePolicyBuilder(
       return updateFactory();
     },
     exists,
+    existsIncludingCreated,
     where: (input: unknown) => relation().where(input),
     select: (columns: Record<string, string>) => relation().select(columns),
     hopTo: (name: string) => relation().hopTo(name),
@@ -1997,7 +2009,7 @@ function validateComputedPermissionReferences(
       validateComputedPermissionReferences(child, table, transforms);
   } else if (expression.type === "Not") {
     validateComputedPermissionReferences(expression.expr, table, transforms);
-  } else if (expression.type === "Exists") {
+  } else if (expression.type === "Exists" || expression.type === "ExistsIncludingCreated") {
     validateComputedPermissionReferences(expression.condition, expression.table, transforms);
   } else if (expression.type === "ExistsRel" && transforms[table]) {
     const value = (ref: RelValueRef) => {
@@ -2664,6 +2676,11 @@ function compileCondition(
       relationsByTable,
     );
     if (analysis.hasQualifiedFilters) {
+      if (condition.__jazzPermissionKind === "exists-including-created") {
+        throw new Error(
+          "existsIncludingCreated supports scalar correlated conditions, not relation traversal.",
+        );
+      }
       return {
         type: "ExistsRel",
         rel: compileQualifiedWhereRelation(condition.table, condition.where, relationsByTable, {
@@ -2676,7 +2693,10 @@ function compileCondition(
     });
     resolveAndAssertInheritsColumns(compiledCondition, condition.table, fkReferencesByTable);
     return {
-      type: "Exists",
+      type:
+        condition.__jazzPermissionKind === "exists-including-created"
+          ? "ExistsIncludingCreated"
+          : "Exists",
       table: condition.table,
       condition: compiledCondition,
     };
@@ -2771,6 +2791,7 @@ function resolveAndAssertInheritsColumns(
         check(node.expr, currentTable);
         break;
       case "Exists":
+      case "ExistsIncludingCreated":
         check(node.condition, node.table);
         break;
       default:
@@ -2832,11 +2853,15 @@ const isRowRefValue = kindGuard<RowRefValue>(
   (value) => typeof value.column === "string",
 );
 
-const isExistsCondition = kindGuard<ExistsCondition>(
-  "exists",
-  true,
-  (value) => typeof value.table === "string" && isPlainObject(value.where),
-);
+function isExistsCondition(input: unknown): input is ExistsCondition {
+  return (
+    isBrandedPermissionExpression(input) &&
+    (input.__jazzPermissionKind === "exists" ||
+      input.__jazzPermissionKind === "exists-including-created") &&
+    typeof input.table === "string" &&
+    isPlainObject(input.where)
+  );
+}
 
 const isExistsRelationCondition = kindGuard<ExistsRelationCondition>(
   "exists-relation",
