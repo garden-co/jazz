@@ -162,6 +162,9 @@ pub(crate) struct ShardState {
     resumes_after: Option<u64>,
     /// Whether [`SHARD_OBSERVED`] is set.
     observed: bool,
+    /// On a replica applying its leader's log, the position the next thing
+    /// it numbers takes ([`ShardRole::number_at`]), while above `seq`.
+    pinned: Option<u64>,
 }
 
 /// The `_jazz_meta` key a clocked store sets the first time it observes a
@@ -190,6 +193,7 @@ impl ShardState {
             waiters: Vec::new(),
             resumes_after: None,
             observed: false,
+            pinned: None,
         }
     }
 
@@ -271,6 +275,11 @@ impl Inner {
     /// a host that gives its node to a fresh one seeds the floor instead
     /// ([`crate::db::Db::seed_seq_floor`]).
     pub(crate) fn next_seq(&self) -> u64 {
+        if let Some(pinned) = self.shard.pinned
+            && pinned > self.seq
+        {
+            return pinned;
+        }
         if self.me != crate::db::sync::ACCEPTED {
             let next = self.seq + 1;
             if !self.reopenable {
@@ -794,6 +803,80 @@ impl ShardRole<'_> {
             )
             .map_err(storage)?;
         inner.shard.fixed.insert(commit, position);
+        Ok(())
+    }
+
+    /// The highest position the store numbered, held, fixed or observed:
+    /// nothing it numbers later lands at or below it.
+    pub fn numbered(&self) -> u64 {
+        self.db.inner.borrow().seq
+    }
+
+    /// A replica applies its leader's log (SPEC 15 §15.6, replicas): the
+    /// next position it numbers (a commit, a local write or a hold) is
+    /// `position`, where its leader numbered the same entry. `position`
+    /// must be above everything the store numbered or observed. A replica
+    /// that follows numbers nothing of its own, so it does not wait out an
+    /// offset bound after a reopen (see [`Self::lead`]).
+    pub fn number_at(&self, position: u64) -> Result<(), Error> {
+        let mut inner = self.db.inner.borrow_mut();
+        self.require(&inner)?;
+        if position <= inner.seq {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                format!(
+                    "position {position} is not above {}, which the store numbered or observed",
+                    inner.seq
+                ),
+            ));
+        }
+        inner.shard.pinned = Some(position);
+        inner.shard.resumes_after = None;
+        Ok(())
+    }
+
+    /// The time (Unix ms) the store stamped the writes it made at
+    /// `position` with (their `$createdAt`/`$updatedAt`), if its last
+    /// writes were made there.
+    pub fn stamp_of(&self, position: u64) -> Option<i64> {
+        let inner = self.db.inner.borrow();
+        (inner.last_stamp.0 == position).then_some(inner.last_stamp.1)
+    }
+
+    /// A replica applies its leader's writes at `position`: they are
+    /// stamped at `ms`, as the leader stamped them ([`Self::stamp_of`]),
+    /// not at the replica's own clock.
+    pub fn stamp(&self, position: u64, ms: i64) {
+        self.db.inner.borrow_mut().last_stamp = (position, ms);
+    }
+
+    /// A replica applies a position its leader fixed or observed: nothing
+    /// it numbers later lands at or below `position`. Unlike
+    /// [`Self::observe`] it is not capped by the replica's clock: its
+    /// leader checked it against its own.
+    pub fn follow(&self, position: u64) -> Result<(), Error> {
+        let mut inner = self.db.inner.borrow_mut();
+        self.require(&inner)?;
+        if position > inner.seq && !inner.shard.observed {
+            inner.persist_meta(SHARD_OBSERVED, 1)?;
+            inner.shard.observed = true;
+        }
+        inner.seq = inner.seq.max(position);
+        inner.shard.resumes_after = None;
+        Ok(())
+    }
+
+    /// A replica takes over as its shard's leader: before it numbers, it
+    /// waits until its clock passes the highest position it applied plus
+    /// [`HLC_MAX_OFFSET_MS`] (INV-SHARD-21), as a reopened shard does
+    /// ([`Self::waits_out`]), so it numbers above anything its old leader
+    /// may have handed out.
+    pub fn lead(&self) -> Result<(), Error> {
+        let mut inner = self.db.inner.borrow_mut();
+        self.require(&inner)?;
+        inner.shard.pinned = None;
+        let after = hlc_ms(inner.seq).saturating_add(HLC_MAX_OFFSET_MS);
+        inner.shard.resumes_after = Some(after);
         Ok(())
     }
 
