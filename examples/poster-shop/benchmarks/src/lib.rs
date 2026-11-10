@@ -296,7 +296,7 @@ impl Fixture {
             .expect("open PosterShop subscription")
     }
     fn read(&self, query: &PreparedQuery) -> Vec<CurrentRow> {
-        self.db.read(query).expect("PosterShop benchmark read")
+        jazz::db::block_on(self.db.read(query)).expect("PosterShop benchmark read")
     }
 }
 

@@ -189,7 +189,7 @@ fn registered_schema_views_share_one_open_batch() {
         owner.commit_mergeable_handle(batch).await.unwrap();
 
         let query = owner.prepare_query(&owner.table("items")).unwrap();
-        let rows = owner.read(&query).unwrap();
+        let rows = owner.read(&query).await.unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(
             rows[0].cell("label"),
@@ -500,7 +500,7 @@ fn ordinary_view_write_does_not_enter_open_owner_snapshot() {
                 .is_empty()
         );
         owner.abandon_transaction_handle(batch).unwrap();
-        assert_eq!(view.read(&prepared).unwrap().len(), 1);
+        assert_eq!(jazz::db::block_on(view.read(&prepared)).unwrap().len(), 1);
     });
 }
 

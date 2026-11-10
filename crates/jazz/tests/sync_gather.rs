@@ -132,9 +132,7 @@ fn connect(server: &Db) -> Db {
     let client = open(1);
     let (client_side, server_side) = duplex();
     let _ = block_on(client.connect_upstream(client_side));
-    server
-        .accept_subscriber(server_side, AuthorSubject::SYSTEM)
-        .unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, AuthorSubject::SYSTEM)).unwrap();
     client
 }
 
@@ -396,9 +394,7 @@ fn a_synced_gather_seeded_through_a_hop_ships_its_seed_rows() {
     .unwrap();
     let (client_side, server_side) = duplex();
     let _ = block_on(client.connect_upstream(client_side));
-    server
-        .accept_subscriber(server_side, AuthorSubject::SYSTEM)
-        .unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, AuthorSubject::SYSTEM)).unwrap();
 
     let query = targets_reached_from(source, 1);
     let filtered = targets_reached_from(source, 1).filter(eq(col("rank"), lit(8i32)));

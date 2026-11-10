@@ -229,7 +229,7 @@ fn authors_are_interned_once_and_read_back_by_identity() {
         block_on(db.update("notes", row(n), body("y"), Default::default())).unwrap();
     }
     assert_eq!(
-        db.interned_authors_for_test(),
+        jazz::db::block_on(db.interned_authors_for_test()),
         3,
         "two writers and the database"
     );
@@ -282,7 +282,7 @@ fn author_codes_never_leave_their_database() {
     block_on(server.insert("notes", body("from 5"), as_user(5, row(1)))).unwrap();
     let (up, down) = duplex();
     let _upstream = block_on(client.connect_upstream(up));
-    server.accept_subscriber(down, user(7)).unwrap();
+    jazz::db::block_on(server.accept_subscriber(down, user(7))).unwrap();
     block_on(client.insert(
         "notes",
         body("from 7"),
@@ -416,7 +416,7 @@ fn author_provenance_carries_the_account() {
         ))),
         1
     );
-    assert_eq!(db.interned_authors_for_test(), 2);
+    assert_eq!(jazz::db::block_on(db.interned_authors_for_test()), 2);
 }
 
 /// A live query filtered by a provenance part (`$createdBy...`) sees the
@@ -593,7 +593,7 @@ fn a_first_sync_of_many_rows_keeps_every_body_and_author() {
     }
     let (up, down) = duplex();
     let _upstream = block_on(client.connect_upstream(up));
-    server.accept_subscriber(down, user(7)).unwrap();
+    jazz::db::block_on(server.accept_subscriber(down, user(7))).unwrap();
     let select = Query::from("notes").select(["body", "$createdBy.identity.subject"]);
     let prepared = client.prepare_query(&select).unwrap();
     let _live = block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap();

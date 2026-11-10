@@ -119,12 +119,11 @@ fn connect(db: Db, server: &Db) -> Device {
         sent: down.clone(),
     };
     let upstream = block_on(db.connect_upstream(Box::new(WireTransportAdapter::current(device))));
-    let subscriber = server
-        .accept_subscriber(
-            Box::new(WireTransportAdapter::current(authority)),
-            AuthorSubject::SYSTEM,
-        )
-        .unwrap();
+    let subscriber = jazz::db::block_on(server.accept_subscriber(
+        Box::new(WireTransportAdapter::current(authority)),
+        AuthorSubject::SYSTEM,
+    ))
+    .unwrap();
     let query = db
         .prepare_query(&Query::from("docs").filter(eq(col("id"), lit(row().0))))
         .unwrap();
@@ -408,7 +407,7 @@ fn text_merge_columns_chunk_over_four_kib() {
 }
 
 fn nodes(db: &Db) -> (u64, u64) {
-    db.large_value_nodes_for_test().unwrap()
+    jazz::db::block_on(db.large_value_nodes_for_test()).unwrap()
 }
 
 fn open_file(dir: &Path, node: u8) -> Db {

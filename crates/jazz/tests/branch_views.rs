@@ -3016,11 +3016,11 @@ fn a_tab_over_its_worker_edits_a_draft_frozen_at_its_capture() {
         .unwrap()
     };
     let worker = open(0x70);
-    worker.set_remote_link_hint(jazz::db::RemoteLinkHint::NoServer);
+    jazz::db::block_on(worker.set_remote_link_hint(jazz::db::RemoteLinkHint::NoServer));
     let tab = open(0x71);
-    tab.set_non_durable_client();
+    jazz::db::block_on(tab.set_non_durable_client());
     // As its worker's: no server to wait for.
-    tab.set_remote_link_hint(jazz::db::RemoteLinkHint::NoServer);
+    jazz::db::block_on(tab.set_remote_link_hint(jazz::db::RemoteLinkHint::NoServer));
     let (client_side, server_side) = duplex_transport::duplex();
     block_on(tab.connect_upstream(client_side));
     worker
@@ -3114,11 +3114,11 @@ fn a_tab_edits_a_draft_frozen_at_a_capture_it_awaits_after_updating_and_a_new_ta
         .unwrap()
     };
     let worker = open(0x70);
-    worker.set_remote_link_hint(jazz::db::RemoteLinkHint::NoServer);
+    jazz::db::block_on(worker.set_remote_link_hint(jazz::db::RemoteLinkHint::NoServer));
     let tab = open(0x71);
-    tab.set_non_durable_client();
+    jazz::db::block_on(tab.set_non_durable_client());
     // As its worker's: no server to wait for.
-    tab.set_remote_link_hint(jazz::db::RemoteLinkHint::NoServer);
+    jazz::db::block_on(tab.set_remote_link_hint(jazz::db::RemoteLinkHint::NoServer));
     let (client_side, server_side) = duplex_transport::duplex();
     block_on(tab.connect_upstream(client_side));
     worker
@@ -3224,8 +3224,8 @@ fn a_tab_edits_a_draft_frozen_at_a_capture_it_awaits_after_updating_and_a_new_ta
     // A reopened tab is a new, empty foreground over the same worker: the
     // worker holds what the capture names, and reads it as of the capture.
     let tab = open(0x72);
-    tab.set_non_durable_client();
-    tab.set_remote_link_hint(jazz::db::RemoteLinkHint::NoServer);
+    jazz::db::block_on(tab.set_non_durable_client());
+    jazz::db::block_on(tab.set_remote_link_hint(jazz::db::RemoteLinkHint::NoServer));
     let (client_side, server_side) = duplex_transport::duplex();
     block_on(tab.connect_upstream(client_side));
     worker
@@ -3390,7 +3390,7 @@ fn synced_head_deletion_restores(schedule: u32) {
     let (client_side, server_side) = jazz::db::duplex();
     let _upstream = block_on(client.connect_upstream(client_side));
     server.accept_subscriber(server_side, author).unwrap();
-    client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+    jazz::db::block_on(client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live));
     // Step `n` of the schedule: 0 no sync, 1 one exchange, 2 a full pump.
     let sync = |step: u32| match schedule / 3u32.pow(step) % 3 {
         0 => {}
@@ -3491,19 +3491,19 @@ fn a_remote_branch_read_keeps_the_rows_of_other_branches() {
     };
     let author = AuthorSubject::for_test_bytes([0x63; 16]);
     let server = open(0x01, AuthorSubject::SYSTEM);
-    server.set_authority();
+    jazz::db::block_on(server.set_authority());
     // A tab over its storage owner, as in a browser.
     let worker = open(0x02, author);
     let (worker_side, server_side) = jazz::db::duplex();
     let _upstream = block_on(worker.connect_upstream(worker_side));
     server.accept_subscriber(server_side, author).unwrap();
-    worker.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+    jazz::db::block_on(worker.set_remote_link_hint(jazz::db::RemoteLinkHint::Live));
     let client = open(0x03, author);
-    client.set_non_durable_client();
+    jazz::db::block_on(client.set_non_durable_client());
     let (tab_side, owner_side) = jazz::db::duplex();
     let _owner = block_on(client.connect_upstream(tab_side));
     worker.accept_subscriber(owner_side, author).unwrap();
-    client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
+    jazz::db::block_on(client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live));
     let tick = || {
         block_on(client.tick()).unwrap();
         block_on(worker.tick()).unwrap();

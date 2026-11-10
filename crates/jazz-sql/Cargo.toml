@@ -1,0 +1,16 @@
+[package]
+name = "jazz-sql"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[features]
+default = []
+native = ["dep:rusqlite"]
+
+[dependencies]
+rusqlite = { version = "0.40", optional = true, features = ["limits"] }
+
+[[example]]
+name = "native_probe"
+required-features = ["native"]

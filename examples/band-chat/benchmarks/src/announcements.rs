@@ -107,8 +107,8 @@ fn open_db() -> Db {
         },
     )))
     .expect("open announcements benchmark database");
-    db.set_identity_claims(admin(), role_claims(admin(), "admin"));
-    db.set_identity_claims(member(), role_claims(member(), "member"));
+    jazz::db::block_on(db.set_identity_claims(admin(), role_claims(admin(), "admin")));
+    jazz::db::block_on(db.set_identity_claims(member(), role_claims(member(), "member")));
     db
 }
 

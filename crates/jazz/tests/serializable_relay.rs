@@ -115,7 +115,7 @@ impl Net {
     fn with_worker_hint(tabs: usize, hint: RemoteLinkHint) -> Self {
         let core = open(0xc0, AuthorSubject::SYSTEM);
         let worker = open(WORKER, author(WORKER));
-        worker.set_remote_link_hint(hint);
+        jazz::db::block_on(worker.set_remote_link_hint(hint));
         let direct = open(DIRECT, author(DIRECT));
         let mut net = Net {
             core,
@@ -129,18 +129,14 @@ impl Net {
         }
         let (client_side, server_side) = duplex();
         block_on(net.direct.connect_upstream(client_side));
-        net.core
-            .accept_subscriber(server_side, author(DIRECT))
-            .unwrap();
+        jazz::db::block_on(net.core.accept_subscriber(server_side, author(DIRECT))).unwrap();
         for i in 0..tabs {
             let tab = open(WORKER + 1 + i as u8, author(WORKER));
-            tab.set_non_durable_client();
-            tab.set_remote_link_hint(RemoteLinkHint::Live);
+            jazz::db::block_on(tab.set_non_durable_client());
+            jazz::db::block_on(tab.set_remote_link_hint(RemoteLinkHint::Live));
             let (client_side, server_side) = duplex();
             block_on(tab.connect_upstream(client_side));
-            net.worker
-                .accept_subscriber(server_side, author(WORKER))
-                .unwrap();
+            jazz::db::block_on(net.worker.accept_subscriber(server_side, author(WORKER))).unwrap();
             net.tabs.push(tab);
         }
         net
@@ -149,20 +145,18 @@ impl Net {
     fn connect_worker(&mut self) {
         let (client_side, server_side) = duplex();
         self.worker_up = Some(block_on(self.worker.connect_upstream(client_side)));
-        self.core
-            .accept_subscriber(server_side, author(WORKER))
-            .unwrap();
+        jazz::db::block_on(self.core.accept_subscriber(server_side, author(WORKER))).unwrap();
     }
 
     fn worker_offline(&mut self) {
         let upstream = self.worker_up.take().expect("online");
         assert!(self.worker.detach_connection(&upstream));
-        self.worker.set_remote_link_hint(RemoteLinkHint::Failed);
+        jazz::db::block_on(self.worker.set_remote_link_hint(RemoteLinkHint::Failed));
     }
 
     fn worker_online(&mut self) {
         self.connect_worker();
-        self.worker.set_remote_link_hint(RemoteLinkHint::Live);
+        jazz::db::block_on(self.worker.set_remote_link_hint(RemoteLinkHint::Live));
     }
 
     fn tab(&self, i: usize) -> &Db {
@@ -660,7 +654,7 @@ fn a_snapshot_pinned_before_the_workers_server_was_removed_misses_an_authority_u
         net.pump();
     }
     net.worker_offline();
-    net.worker.set_remote_link_hint(RemoteLinkHint::NoServer);
+    jazz::db::block_on(net.worker.set_remote_link_hint(RemoteLinkHint::NoServer));
     let tab = net.tab(1);
     net.drive(tab.tx_ref(open).delete("seats", seat, Default::default()))
         .unwrap();
@@ -707,7 +701,7 @@ fn a_snapshot_pinned_before_the_workers_server_was_removed_misses_another_tabs_w
     }
     let open = net.begin_pinned(net.tab(1));
     net.worker_offline();
-    net.worker.set_remote_link_hint(RemoteLinkHint::NoServer);
+    jazz::db::block_on(net.worker.set_remote_link_hint(RemoteLinkHint::NoServer));
     for _ in 0..3 {
         net.pump();
     }
@@ -806,7 +800,7 @@ fn a_serverless_workers_own_serializable_update_of_a_synced_row_holds() {
         net.pump();
     }
     net.worker_offline();
-    net.worker.set_remote_link_hint(RemoteLinkHint::NoServer);
+    jazz::db::block_on(net.worker.set_remote_link_hint(RemoteLinkHint::NoServer));
     for _ in 0..3 {
         net.pump();
     }
@@ -854,7 +848,7 @@ fn a_tab_of_a_worker_whose_server_was_removed_updates_a_synced_row() {
         net.pump();
     }
     net.worker_offline();
-    net.worker.set_remote_link_hint(RemoteLinkHint::NoServer);
+    jazz::db::block_on(net.worker.set_remote_link_hint(RemoteLinkHint::NoServer));
     for _ in 0..3 {
         net.pump();
     }
@@ -888,20 +882,20 @@ fn a_tab_of_a_worker_whose_server_was_removed_updates_a_synced_row() {
 fn a_snapshot_stays_at_the_authority_position_after_the_workers_server_is_removed() {
     let core = open(0xc0, AuthorSubject::SYSTEM);
     let worker = open(WORKER, author(WORKER));
-    worker.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(worker.set_remote_link_hint(RemoteLinkHint::Live));
     let (c, s) = duplex();
     let worker_up = block_on(worker.connect_upstream(c));
-    core.accept_subscriber(s, author(WORKER)).unwrap();
+    jazz::db::block_on(core.accept_subscriber(s, author(WORKER))).unwrap();
     let direct = open(DIRECT, author(DIRECT));
     let (c, s) = duplex();
     let _direct_up = block_on(direct.connect_upstream(c));
-    core.accept_subscriber(s, author(DIRECT)).unwrap();
+    jazz::db::block_on(core.accept_subscriber(s, author(DIRECT))).unwrap();
     let tab = open(WORKER + 1, author(WORKER));
-    tab.set_non_durable_client();
-    tab.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(tab.set_non_durable_client());
+    jazz::db::block_on(tab.set_remote_link_hint(RemoteLinkHint::Live));
     let (c, s) = duplex();
     let _tab_up = block_on(tab.connect_upstream(c));
-    worker.accept_subscriber(s, author(WORKER)).unwrap();
+    jazz::db::block_on(worker.accept_subscriber(s, author(WORKER))).unwrap();
     let pump = |n: usize| {
         for _ in 0..n {
             block_on(tab.tick()).unwrap();
@@ -942,7 +936,7 @@ fn a_snapshot_stays_at_the_authority_position_after_the_workers_server_is_remove
         pump(10);
         // The worker's server is removed.
         assert!(worker.detach_connection(&worker_up));
-        worker.set_remote_link_hint(RemoteLinkHint::NoServer);
+        jazz::db::block_on(worker.set_remote_link_hint(RemoteLinkHint::NoServer));
         // A write of the tab's, which the worker now keeps pending.
         block_on(tab.insert("invites", code("x"), Default::default())).unwrap();
         pump(5);
@@ -984,8 +978,8 @@ fn a_snapshot_stays_at_the_authority_position_after_the_workers_server_is_remove
     assert!(fate.is_none(), "no server decides it");
     let (c, s) = duplex();
     let _worker_up = block_on(worker.connect_upstream(c));
-    core.accept_subscriber(s, author(WORKER)).unwrap();
-    worker.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(core.accept_subscriber(s, author(WORKER))).unwrap();
+    jazz::db::block_on(worker.set_remote_link_hint(RemoteLinkHint::Live));
     for _ in 0..MAX_TURNS {
         if let Poll::Ready(f) = wait.as_mut().poll(&mut context) {
             fate = Some(f);
@@ -1034,16 +1028,16 @@ fn a_fresh_tab_of_a_serverless_worker_inserts_serializably() {
 fn a_resend_of_a_settled_commit_is_not_parked_on_an_unrelated_pending_commit() {
     let core = open(0xc0, AuthorSubject::SYSTEM);
     let worker = open(WORKER, author(WORKER));
-    worker.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(worker.set_remote_link_hint(RemoteLinkHint::Live));
     let (c, s) = duplex();
     let worker_up = block_on(worker.connect_upstream(c));
-    core.accept_subscriber(s, author(WORKER)).unwrap();
+    jazz::db::block_on(core.accept_subscriber(s, author(WORKER))).unwrap();
     let tab = open(WORKER + 1, author(WORKER));
-    tab.set_non_durable_client();
-    tab.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(tab.set_non_durable_client());
+    jazz::db::block_on(tab.set_remote_link_hint(RemoteLinkHint::Live));
     let (c, s) = duplex();
     let tab_up = block_on(tab.connect_upstream(c));
-    worker.accept_subscriber(s, author(WORKER)).unwrap();
+    jazz::db::block_on(worker.accept_subscriber(s, author(WORKER))).unwrap();
     let pump = |n: usize| {
         for _ in 0..n {
             block_on(tab.tick()).unwrap();
@@ -1071,7 +1065,7 @@ fn a_resend_of_a_settled_commit_is_not_parked_on_an_unrelated_pending_commit() {
     block_on(tab.tick()).unwrap();
     block_on(worker.tick()).unwrap();
     assert!(tab.detach_connection(&tab_up));
-    tab.set_remote_link_hint(RemoteLinkHint::Failed);
+    jazz::db::block_on(tab.set_remote_link_hint(RemoteLinkHint::Failed));
     for _ in 0..10 {
         block_on(worker.tick()).unwrap();
         block_on(core.tick()).unwrap();
@@ -1079,7 +1073,7 @@ fn a_resend_of_a_settled_commit_is_not_parked_on_an_unrelated_pending_commit() {
     }
     // The worker goes offline and writes commits of its own, still pending.
     assert!(worker.detach_connection(&worker_up));
-    worker.set_remote_link_hint(RemoteLinkHint::Failed);
+    jazz::db::block_on(worker.set_remote_link_hint(RemoteLinkHint::Failed));
     for i in 0..30 {
         let note = BTreeMap::from([("note".to_owned(), Value::String(format!("w{i}")))]);
         block_on(worker.insert("audit", note, Default::default())).unwrap();
@@ -1088,8 +1082,8 @@ fn a_resend_of_a_settled_commit_is_not_parked_on_an_unrelated_pending_commit() {
     // The tab reconnects and resends.
     let (c, s) = duplex();
     let _tab_up = block_on(tab.connect_upstream(c));
-    tab.set_remote_link_hint(RemoteLinkHint::Live);
-    worker.accept_subscriber(s, author(WORKER)).unwrap();
+    jazz::db::block_on(tab.set_remote_link_hint(RemoteLinkHint::Live));
+    jazz::db::block_on(worker.accept_subscriber(s, author(WORKER))).unwrap();
     let mut wait = pin!(tab.wait_for_transaction(tx, DurabilityTier::Global));
     let mut context = Context::from_waker(Waker::noop());
     let mut fate = None;
@@ -1116,16 +1110,16 @@ fn a_resend_of_a_settled_commit_is_not_parked_on_an_unrelated_pending_commit() {
 fn a_resent_commit_settled_upstream_reaches_global_and_the_tab_commits_on() {
     let core = open(0xc0, AuthorSubject::SYSTEM);
     let worker = open(WORKER, author(WORKER));
-    worker.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(worker.set_remote_link_hint(RemoteLinkHint::Live));
     let (c, s) = duplex();
     let _worker_up = block_on(worker.connect_upstream(c));
-    core.accept_subscriber(s, author(WORKER)).unwrap();
+    jazz::db::block_on(core.accept_subscriber(s, author(WORKER))).unwrap();
     let tab = open(WORKER + 1, author(WORKER));
-    tab.set_non_durable_client();
-    tab.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(tab.set_non_durable_client());
+    jazz::db::block_on(tab.set_remote_link_hint(RemoteLinkHint::Live));
     let (c, s) = duplex();
     let tab_up = block_on(tab.connect_upstream(c));
-    worker.accept_subscriber(s, author(WORKER)).unwrap();
+    jazz::db::block_on(worker.accept_subscriber(s, author(WORKER))).unwrap();
     let pump = |n: usize| {
         for _ in 0..n {
             block_on(tab.tick()).unwrap();
@@ -1151,7 +1145,7 @@ fn a_resent_commit_settled_upstream_reaches_global_and_the_tab_commits_on() {
     block_on(worker.tick()).unwrap();
     // The tab's link drops before any fate comes back.
     assert!(tab.detach_connection(&tab_up));
-    tab.set_remote_link_hint(RemoteLinkHint::Failed);
+    jazz::db::block_on(tab.set_remote_link_hint(RemoteLinkHint::Failed));
     for _ in 0..10 {
         block_on(worker.tick()).unwrap();
         block_on(core.tick()).unwrap();
@@ -1160,8 +1154,8 @@ fn a_resent_commit_settled_upstream_reaches_global_and_the_tab_commits_on() {
     // Reconnect: the tab resends its pending commit.
     let (c, s) = duplex();
     let _tab_up = block_on(tab.connect_upstream(c));
-    tab.set_remote_link_hint(RemoteLinkHint::Live);
-    worker.accept_subscriber(s, author(WORKER)).unwrap();
+    jazz::db::block_on(tab.set_remote_link_hint(RemoteLinkHint::Live));
+    jazz::db::block_on(worker.accept_subscriber(s, author(WORKER))).unwrap();
     let mut wait = pin!(tab.wait_for_transaction(tx, DurabilityTier::Global));
     let mut context = Context::from_waker(Waker::noop());
     let mut fate = None;
@@ -1248,7 +1242,7 @@ fn a_serverless_workers_own_snapshot_misses_an_update_synced_after_a_server_is_a
     let _watch = net.watch_seats(&net.worker);
     let seat = synced_seat(&net);
     net.worker_offline();
-    net.worker.set_remote_link_hint(RemoteLinkHint::NoServer);
+    jazz::db::block_on(net.worker.set_remote_link_hint(RemoteLinkHint::NoServer));
     for _ in 0..3 {
         net.pump();
     }
@@ -1288,7 +1282,7 @@ fn a_serverless_workers_own_blind_delete_over_an_update_it_never_synced_is_refus
     let _watch = net.watch_seats(&net.worker);
     let seat = synced_seat(&net);
     net.worker_offline();
-    net.worker.set_remote_link_hint(RemoteLinkHint::NoServer);
+    jazz::db::block_on(net.worker.set_remote_link_hint(RemoteLinkHint::NoServer));
     for _ in 0..3 {
         net.pump();
     }

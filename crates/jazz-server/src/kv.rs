@@ -8,15 +8,20 @@
 //! rows use too, and wait for it (at most the one runtime job or tick slice
 //! in progress). The store commits with `synchronous = FULL`, so a returned
 //! write is durable and `flush` has nothing left to do. Reads see what was
-//! committed when they begin, on a connection of their own: they never wait
-//! for the runtime.
+//! committed when they begin. Native storage uses a separate reader; worker
+//! storage queues reads on the same owner as writes and core operations.
 
 use std::sync::{Arc, mpsc};
 
-use jazz::host::HostReader;
+#[cfg(feature = "native")]
+pub(crate) use jazz::host::HostReader as NativeReader;
+#[cfg(not(feature = "native"))]
+pub(crate) enum NativeReader {}
+use NativeReader as HostReader;
+use jazz::host::ConnectionSql;
+use jazz::host::HostTables;
 #[cfg(test)]
-use jazz::host::{HostPair, HostTable, HostTables};
-use rusqlite::Connection;
+use jazz::host::{HostPair, HostTable};
 
 /// Errors are reported as text: callers wrap them in their own error types.
 pub(crate) type KvResult<T> = Result<T, String>;
@@ -24,7 +29,7 @@ pub(crate) type KvResult<T> = Result<T, String>;
 #[cfg(test)]
 pub(crate) struct HostKv {
     table: HostTable,
-    reader: Arc<HostReader>,
+    reader: Option<Arc<HostReader>>,
     store: crate::runtime::HostSender,
 }
 
@@ -32,7 +37,7 @@ pub(crate) struct HostKv {
 impl HostKv {
     pub(crate) fn new(
         table: HostTable,
-        reader: Arc<HostReader>,
+        reader: Option<Arc<HostReader>>,
         store: crate::runtime::HostSender,
     ) -> Self {
         Self {
@@ -45,12 +50,20 @@ impl HostKv {
     /// Run `f` on the store's thread and wait for its answer.
     fn call<T: Send + 'static>(
         &self,
-        f: impl FnOnce(&dyn HostTables, HostTable) -> Result<T, jazz::db::Error> + Send + 'static,
+        f: impl for<'a> FnOnce(
+            crate::runtime::HostAccess<'a>,
+            HostTable,
+        )
+            -> futures::future::LocalBoxFuture<'a, Result<T, jazz::db::Error>>
+        + Send
+        + 'static,
     ) -> KvResult<T> {
         let (reply, answer) = mpsc::sync_channel(1);
         let table = self.table;
         self.store.send(Box::new(move |tables| {
-            let _ = reply.send(f(tables, table).map_err(|error| error.to_string()));
+            Box::pin(async move {
+                let _ = reply.send(f(tables, table).await.map_err(|error| error.to_string()));
+            })
         }))?;
         answer
             .recv()
@@ -58,22 +71,42 @@ impl HostKv {
     }
 
     pub(crate) fn get(&self, key: &[u8]) -> KvResult<Option<Vec<u8>>> {
-        self.reader
-            .get(self.table, key)
-            .map_err(|error| error.to_string())
+        match &self.reader {
+            #[cfg(feature = "native")]
+            Some(reader) => reader
+                .get(self.table, key)
+                .map_err(|error| error.to_string()),
+            _ => {
+                let key = key.to_vec();
+                self.call(move |tables, table| {
+                    Box::pin(async move { tables.host_get(table, &key).await })
+                })
+            }
+        }
     }
 
     /// Write every pair in one transaction: all or none.
     pub(crate) fn write_many(&self, pairs: &[HostPair]) -> KvResult<()> {
         let pairs = pairs.to_vec();
-        self.call(move |tables, table| tables.host_put_many(table, &pairs))
+        self.call(move |tables, table| {
+            Box::pin(async move { tables.host_put_many(table, &pairs).await })
+        })
     }
 
     /// Every pair whose key starts with `prefix`, in key order.
     pub(crate) fn prefix(&self, prefix: &[u8]) -> KvResult<Vec<HostPair>> {
-        self.reader
-            .prefix(self.table, prefix)
-            .map_err(|error| error.to_string())
+        match &self.reader {
+            #[cfg(feature = "native")]
+            Some(reader) => reader
+                .prefix(self.table, prefix)
+                .map_err(|error| error.to_string()),
+            _ => {
+                let prefix = prefix.to_vec();
+                self.call(move |tables, table| {
+                    Box::pin(async move { tables.host_prefix(table, &prefix).await })
+                })
+            }
+        }
     }
 }
 
@@ -81,7 +114,7 @@ impl HostKv {
 /// [`HostKv`] writes: on the store's thread, in one savepoint, durable when
 /// they return. Reads run on the read-only connection.
 pub(crate) struct HostSql {
-    reader: Arc<HostReader>,
+    reader: Option<Arc<HostReader>>,
     store: crate::runtime::HostSender,
     /// Tests: the next write commits and then reports an error, the
     /// ambiguous outcome a failed flush has.
@@ -93,7 +126,7 @@ pub(crate) struct HostSql {
 }
 
 impl HostSql {
-    pub(crate) fn new(reader: Arc<HostReader>, store: crate::runtime::HostSender) -> Self {
+    pub(crate) fn new(reader: Option<Arc<HostReader>>, store: crate::runtime::HostSender) -> Self {
         Self {
             reader,
             store,
@@ -106,9 +139,9 @@ impl HostSql {
 
     /// Run `f` on the read-only connection: it sees what was committed
     /// when it began.
-    pub(crate) fn read<T>(
+    pub(crate) fn read<T: Send + 'static>(
         &self,
-        f: impl FnOnce(&Connection) -> Result<T, jazz::db::Error>,
+        f: impl FnOnce(ConnectionSql<'_>) -> Result<T, jazz::db::Error> + Send + 'static,
     ) -> KvResult<T> {
         #[cfg(test)]
         if self
@@ -117,7 +150,12 @@ impl HostSql {
         {
             return Err("injected read failure".to_owned());
         }
-        self.reader.sql(f).map_err(|error| error.to_string())
+        match &self.reader {
+            #[cfg(feature = "native")]
+            Some(reader) => reader.with_sql(f).map_err(|error| error.to_string()),
+            // Run between owner jobs, after the prior transaction completed.
+            _ => self.call(false, f),
+        }
     }
 
     /// Run `f` on the store's thread in one savepoint and wait: what it
@@ -125,30 +163,35 @@ impl HostSql {
     /// `f` fails.
     pub(crate) fn write<T: Send + 'static>(
         &self,
-        f: impl FnOnce(&Connection) -> Result<T, jazz::db::Error> + Send + 'static,
+        f: impl FnOnce(ConnectionSql<'_>) -> Result<T, jazz::db::Error> + Send + 'static,
+    ) -> KvResult<T> {
+        self.call(true, f)
+    }
+
+    fn call<T: Send + 'static>(
+        &self,
+        write: bool,
+        f: impl FnOnce(ConnectionSql<'_>) -> Result<T, jazz::db::Error> + Send + 'static,
     ) -> KvResult<T> {
         let (reply, answer) = mpsc::sync_channel(1);
         self.store.send(Box::new(move |tables| {
-            let mut f = Some(f);
-            let mut out = None;
-            let committed = tables.host_sql(&mut |conn| {
-                let f = f.take().expect("a host write runs once");
-                out = Some(f(conn)?);
-                Ok(())
-            });
-            let _ = reply.send(
-                committed
-                    .map(|()| out.expect("a committed write answered"))
-                    .map_err(|error| error.to_string()),
-            );
+            Box::pin(async move {
+                let _ = reply.send(
+                    tables
+                        .with_sql(write, f)
+                        .await
+                        .map_err(|error| error.to_string()),
+                );
+            })
         }))?;
         let written = answer
             .recv()
             .map_err(|_| "server store closed before answering".to_owned())??;
         #[cfg(test)]
-        if self
-            .fail_next_write
-            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        if write
+            && self
+                .fail_next_write
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
         {
             return Err("injected failure after the write committed".to_owned());
         }

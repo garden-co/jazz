@@ -296,6 +296,42 @@ pub(super) async fn health_handler(State(state): State<Arc<ServerState>>) -> imp
     )
         .into_response()
 }
+/// `/bundles`: publish a complete, validated deployment as a permissions
+/// bundle that sessions are pinned to. Nothing becomes current. Detached
+/// execution makes request cancellation independent of the durable commit.
+pub(super) async fn publish_bundle_handler(
+    State(state): State<Arc<ServerState>>,
+    headers: HeaderMap,
+    body: Result<
+        Json<crate::server::deployment::DeployRequest>,
+        axum::extract::rejection::JsonRejection,
+    >,
+) -> Response {
+    if let Err(response) = require_admin(&state, &headers) {
+        return response;
+    }
+    let request = match body {
+        Ok(Json(request)) => request,
+        Err(error) => {
+            let status = if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
+                error.status()
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            return (status, Json(ErrorResponse::bad_request(error.body_text()))).into_response();
+        }
+    };
+    match tokio::spawn(crate::server::deployment::deploy(state, request)).await {
+        Ok(Ok(response)) => (StatusCode::OK, Json(response)).into_response(),
+        Ok(Err(error)) => (error.status, Json(error.body)).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse::internal(error.to_string())),
+        )
+            .into_response(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::create_router;
@@ -386,41 +422,5 @@ mod tests {
         assert_eq!(json["status"], "unhealthy");
         let reason = json["reason"].as_str().expect("a reason");
         assert!(reason.contains("injected runtime failure"), "{reason}");
-    }
-}
-
-/// `/bundles`: publish a complete, validated deployment as a permissions
-/// bundle that sessions are pinned to. Nothing becomes current. Detached
-/// execution makes request cancellation independent of the durable commit.
-pub(super) async fn publish_bundle_handler(
-    State(state): State<Arc<ServerState>>,
-    headers: HeaderMap,
-    body: Result<
-        Json<crate::server::deployment::DeployRequest>,
-        axum::extract::rejection::JsonRejection,
-    >,
-) -> Response {
-    if let Err(response) = require_admin(&state, &headers) {
-        return response;
-    }
-    let request = match body {
-        Ok(Json(request)) => request,
-        Err(error) => {
-            let status = if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
-                error.status()
-            } else {
-                StatusCode::BAD_REQUEST
-            };
-            return (status, Json(ErrorResponse::bad_request(error.body_text()))).into_response();
-        }
-    };
-    match tokio::spawn(crate::server::deployment::deploy(state, request)).await {
-        Ok(Ok(response)) => (StatusCode::OK, Json(response)).into_response(),
-        Ok(Err(error)) => (error.status, Json(error.body)).into_response(),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse::internal(error.to_string())),
-        )
-            .into_response(),
     }
 }

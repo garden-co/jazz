@@ -23,10 +23,10 @@
 
 use std::path::Path;
 
-use rusqlite::Connection;
+use jazz_sql::Row as _;
 
 use crate::options::{Error, ErrorCode};
-use crate::values::storage;
+use crate::values::{Sql, provider_error as storage};
 
 /// The storage format this build writes and reads.
 pub const STORAGE_FORMAT: i64 = 1;
@@ -47,28 +47,36 @@ pub(crate) fn unsupported(detail: impl std::fmt::Display) -> Error {
 /// Admit the file `conn` opened: stamp a new one, accept one in
 /// [`STORAGE_FORMAT`], refuse anything else. Reads only, unless the file is
 /// new.
-pub(crate) fn admit(conn: &Connection) -> Result<(), Error> {
+pub(crate) async fn admit<S: jazz_sql::Sql>(conn: &mut S) -> Result<(), Error>
+where
+    S::Error: std::fmt::Display,
+{
     // A damaged header fails here (`file is not a database`), as a storage
     // error, before any write.
     let tables: Vec<String> = conn
-        .prepare(
+        .query_rows(
             // Durable Object SQLite keeps its own `_cf_*` tables in the file.
             "SELECT name FROM sqlite_master WHERE type = 'table' \
-             AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\'",
+         AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\'",
+            &[],
+            |row| row.get(0),
         )
-        .and_then(|mut statement| {
-            statement
-                .query_map([], |row| row.get(0))?
-                .collect::<Result<_, _>>()
-        })
+        .await
         .map_err(storage)?;
     if tables.is_empty() {
-        return conn
-            .execute_batch(&format!(
-                "CREATE TABLE {STAMP_TABLE} (version INTEGER NOT NULL); \
-                 INSERT INTO {STAMP_TABLE} (version) VALUES ({STORAGE_FORMAT});"
-            ))
-            .map_err(storage);
+        conn.execute(
+            &format!("CREATE TABLE {STAMP_TABLE} (version INTEGER NOT NULL)"),
+            &[],
+        )
+        .await
+        .map_err(storage)?;
+        conn.execute(
+            &format!("INSERT INTO {STAMP_TABLE} (version) VALUES (?1)"),
+            &[jazz_sql::Param::Integer(STORAGE_FORMAT)],
+        )
+        .await
+        .map_err(storage)?;
+        return Ok(());
     }
     if !tables.iter().any(|name| name == STAMP_TABLE) {
         return Err(unsupported(
@@ -76,17 +84,15 @@ pub(crate) fn admit(conn: &Connection) -> Result<(), Error> {
              (it was not written by Jazz's SQLite engine)",
         ));
     }
-    let versions: Vec<rusqlite::types::Value> = conn
-        .prepare(&format!("SELECT version FROM {STAMP_TABLE}"))
-        .and_then(|mut statement| {
-            statement
-                .query_map([], |row| row.get(0))?
-                .collect::<Result<_, _>>()
+    let versions: Vec<Sql> = conn
+        .query_rows(&format!("SELECT version FROM {STAMP_TABLE}"), &[], |row| {
+            row.get(0)
         })
+        .await
         .map_err(storage)?;
     match versions.as_slice() {
-        [rusqlite::types::Value::Integer(STORAGE_FORMAT)] => Ok(()),
-        [rusqlite::types::Value::Integer(version)] => Err(unsupported(format!(
+        [Sql::Integer(STORAGE_FORMAT)] => Ok(()),
+        [Sql::Integer(version)] => Err(unsupported(format!(
             "this store was written in Jazz SQLite storage format {version}"
         ))),
         other => Err(Error::new(

@@ -209,7 +209,8 @@ pub fn run(cfg: &Config) -> WireReport {
         let client = open(node, user(u));
         let (client_side, server_side, down) = duplex();
         let _upstream = db::block_on(client.connect_upstream(client_side));
-        let _subscriber = server.accept_subscriber(server_side, user(u)).unwrap();
+        let _subscriber =
+            jazz::db::block_on(server.accept_subscriber(server_side, user(u))).unwrap();
         downs.push(down);
         clients.push(client);
     }

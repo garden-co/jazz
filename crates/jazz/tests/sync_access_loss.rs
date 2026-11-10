@@ -107,7 +107,7 @@ fn seed(server: &Db, table: &str, row: RowUuid, values: BTreeMap<String, Value>)
 fn connect(server: &Db, client: &Db, who: AuthorSubject) -> Upstream {
     let (client_side, server_side) = duplex();
     let upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, who).unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, who)).unwrap();
     upstream
 }
 

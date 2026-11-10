@@ -126,7 +126,7 @@ fn large_values_are_chunked_and_read_back_whole() {
     insert(&db, 1, &body, &blob);
     insert(&db, 2, "small", b"\x00\xff");
 
-    let (nodes, roots) = db.large_value_nodes_for_test().unwrap();
+    let (nodes, roots) = jazz::db::block_on(db.large_value_nodes_for_test()).unwrap();
     assert!(nodes > 4, "both values span several nodes: {nodes}");
     assert_eq!(roots, 2, "one chunked root per large cell");
 
@@ -374,10 +374,10 @@ fn history_versions_keep_their_own_roots() {
         Default::default(),
     ))
     .unwrap();
-    let (_, roots) = db.large_value_nodes_for_test().unwrap();
+    let (_, roots) = jazz::db::block_on(db.large_value_nodes_for_test()).unwrap();
     assert_eq!(roots, 2, "the superseded version still references its root");
     block_on(db.tick()).unwrap();
-    let (_, roots) = db.large_value_nodes_for_test().unwrap();
+    let (_, roots) = jazz::db::block_on(db.large_value_nodes_for_test()).unwrap();
     assert_eq!(roots, 2, "nothing referenced is reclaimed");
     // Shrinking a large value to an inline one releases only the current
     // cell's reference.
@@ -388,7 +388,7 @@ fn history_versions_keep_their_own_roots() {
         Default::default(),
     ))
     .unwrap();
-    let (_, roots) = db.large_value_nodes_for_test().unwrap();
+    let (_, roots) = jazz::db::block_on(db.large_value_nodes_for_test()).unwrap();
     assert_eq!(roots, 2, "both large versions are history now");
     let prepared = db.prepare_query(&Query::from("docs")).unwrap();
     let rows = block_on(db.all(&prepared, ReadOpts::default())).unwrap();
@@ -459,7 +459,11 @@ fn a_plain_sqlite_connection_runs_the_schema_queries_and_triggers() {
             Query::from("docs").order_by("body", OrderDirection::Desc),
         ] {
             let prepared = db.prepare_query(&query).unwrap();
-            statements.push(db.explain_query_plan(&prepared, None).unwrap().0);
+            statements.push(
+                jazz::db::block_on(db.explain_query_plan(&prepared, None))
+                    .unwrap()
+                    .0,
+            );
         }
         block_on(db.close()).unwrap();
         statements
@@ -559,13 +563,13 @@ fn appends_extend_the_edit_tail_until_consolidation() {
     let mut expected = text(32, LARGE);
     insert(&db, 1, &expected, b"");
     block_on(db.tick()).unwrap();
-    let (nodes, _) = db.large_value_nodes_for_test().unwrap();
+    let (nodes, _) = jazz::db::block_on(db.large_value_nodes_for_test()).unwrap();
     for n in 0..8 {
         let suffix = format!("<{n}>");
         block_on(db.append_value("docs", row(1), "body", suffix.clone().into_bytes())).unwrap();
         expected.push_str(&suffix);
     }
-    let (after, _) = db.large_value_nodes_for_test().unwrap();
+    let (after, _) = jazz::db::block_on(db.large_value_nodes_for_test()).unwrap();
     assert_eq!(after, nodes, "a tail append writes no chunks");
     assert_eq!(body(&db, 1), expected);
     // Past an epoch's edit bytes the value is consolidated into new nodes.
@@ -574,7 +578,7 @@ fn appends_extend_the_edit_tail_until_consolidation() {
         block_on(db.append_value("docs", row(1), "body", suffix.clone().into_bytes())).unwrap();
         expected.push_str(&suffix);
     }
-    let (after, _) = db.large_value_nodes_for_test().unwrap();
+    let (after, _) = jazz::db::block_on(db.large_value_nodes_for_test()).unwrap();
     assert!(
         after > nodes,
         "consolidation wrote new nodes: {nodes} -> {after}"
@@ -587,22 +591,27 @@ fn many_versions_with_small_edits_share_one_epoch() {
     let db = db();
     let mut expected = text(33, LARGE);
     insert(&db, 1, &expected, b"");
-    let (nodes, _) = db.large_value_nodes_for_test().unwrap();
+    let (nodes, _) = jazz::db::block_on(db.large_value_nodes_for_test()).unwrap();
     // Each append is its own commit, so its own version in history.
     for n in 0..300 {
         let suffix = if n % 2 == 0 { "a" } else { "é" };
         block_on(db.append_value("docs", row(1), "body", suffix.as_bytes().to_vec())).unwrap();
         expected.push_str(suffix);
     }
-    let (after, _) = db.large_value_nodes_for_test().unwrap();
+    let (after, _) = jazz::db::block_on(db.large_value_nodes_for_test()).unwrap();
     assert_eq!(after, nodes, "no version wrote a node");
-    let (epochs, edit_bytes) = db.large_value_epochs_for_test().unwrap();
+    let (epochs, edit_bytes) = jazz::db::block_on(db.large_value_epochs_for_test()).unwrap();
     assert_eq!(epochs, 1, "every version names a prefix of one epoch");
     // A one-character append costs two or three bytes of edits.
     assert!(edit_bytes <= 300 * 3, "{edit_bytes} edit bytes");
     assert_eq!(body(&db, 1), expected);
     block_on(db.tick()).unwrap();
-    assert_eq!(db.large_value_epochs_for_test().unwrap().0, 1);
+    assert_eq!(
+        jazz::db::block_on(db.large_value_epochs_for_test())
+            .unwrap()
+            .0,
+        1
+    );
 }
 
 #[test]
@@ -610,10 +619,20 @@ fn an_inline_value_grown_past_the_threshold_is_chunked() {
     let db = db();
     let start = text(33, 60 * 1024);
     insert(&db, 1, &start, b"");
-    assert_eq!(db.large_value_nodes_for_test().unwrap().1, 0);
+    assert_eq!(
+        jazz::db::block_on(db.large_value_nodes_for_test())
+            .unwrap()
+            .1,
+        0
+    );
     let more = text(34, 10 * 1024);
     block_on(db.append_value("docs", row(1), "body", more.clone().into_bytes())).unwrap();
-    assert_eq!(db.large_value_nodes_for_test().unwrap().1, 1);
+    assert_eq!(
+        jazz::db::block_on(db.large_value_nodes_for_test())
+            .unwrap()
+            .1,
+        1
+    );
     assert_eq!(body(&db, 1), format!("{start}{more}"));
 }
 
@@ -770,7 +789,7 @@ fn streaming_inserts_chunk_as_they_read() {
         std::io::Cursor::new(blob.clone()),
     ))
     .unwrap();
-    let (nodes, roots) = db.large_value_nodes_for_test().unwrap();
+    let (nodes, roots) = jazz::db::block_on(db.large_value_nodes_for_test()).unwrap();
     assert!(nodes > 4);
     assert_eq!(roots, 1);
     assert_eq!(
@@ -792,7 +811,10 @@ fn streaming_inserts_chunk_as_they_read() {
     for _ in 0..8 {
         block_on(db.tick()).unwrap();
     }
-    assert_eq!(db.large_value_nodes_for_test().unwrap(), (nodes, roots));
+    assert_eq!(
+        jazz::db::block_on(db.large_value_nodes_for_test()).unwrap(),
+        (nodes, roots)
+    );
 }
 
 #[test]
@@ -951,7 +973,7 @@ fn idle_ticks_run_no_reclaim_pass_until_something_is_released() {
     let db = db();
     insert(&db, 1, &text(50, LARGE), b"");
     block_on(db.tick()).unwrap();
-    let kept = db.large_value_nodes_for_test().unwrap();
+    let kept = jazz::db::block_on(db.large_value_nodes_for_test()).unwrap();
     let passes = db.large_value_reclaim_passes_for_test();
     for _ in 0..20 {
         block_on(db.tick()).unwrap();
@@ -975,13 +997,13 @@ fn idle_ticks_run_no_reclaim_pass_until_something_is_released() {
         ))
         .is_err()
     );
-    let (released, _) = db.large_value_nodes_for_test().unwrap();
+    let (released, _) = jazz::db::block_on(db.large_value_nodes_for_test()).unwrap();
     assert!(
         released - kept.0 > 256,
         "the tree outlasts one pass: {released} nodes"
     );
     let mut ticks = 0;
-    while db.large_value_nodes_for_test().unwrap() != kept {
+    while jazz::db::block_on(db.large_value_nodes_for_test()).unwrap() != kept {
         block_on(db.tick()).unwrap();
         ticks += 1;
         assert!(ticks < 100, "reclaim stalled");

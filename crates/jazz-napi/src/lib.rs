@@ -1202,7 +1202,9 @@ impl NapiDb {
             )),
         }
         .map_err(|error| napi_core_error(&error))?;
-        Ok(Self::runtime_owner(Binding::new(db, identity, trusted)))
+        Ok(Self::runtime_owner(jazz::db::block_on(Binding::new(
+            db, identity, trusted,
+        ))))
     }
 
     fn request_permission_advice(
@@ -1851,8 +1853,7 @@ impl NapiDb {
             JsonValue,
         >,
     ) -> js::Result<()> {
-        self.binding()?
-            .set_session_claims(json_or_null(claims))
+        jazz::db::block_on(self.binding()?.set_session_claims(json_or_null(claims)))
             .map_err(host_error)?;
         settle_promises();
         Ok(())
@@ -1867,9 +1868,11 @@ impl NapiDb {
             JsonValue,
         >,
     ) -> js::Result<()> {
-        self.binding()?
-            .set_identity_claims(&author, json_or_null(claims))
-            .map_err(host_error)?;
+        jazz::db::block_on(
+            self.binding()?
+                .set_identity_claims(&author, json_or_null(claims)),
+        )
+        .map_err(host_error)?;
         settle_promises();
         Ok(())
     }
@@ -1971,7 +1974,7 @@ impl NapiDb {
     /// subscriptions open with the worker's answer.
     #[napi(js_name = "setNonDurableClient")]
     pub fn set_non_durable_client(&self) -> js::Result<()> {
-        self.binding()?.set_non_durable_client();
+        jazz::db::block_on(self.binding()?.set_non_durable_client());
         Ok(())
     }
 
@@ -1981,9 +1984,7 @@ impl NapiDb {
     /// Drives only local-first reads that wait for the server on first load.
     #[napi(js_name = "setRemoteLinkHint")]
     pub fn set_remote_link_hint(&self, state: String) -> js::Result<()> {
-        self.binding()?
-            .set_remote_link_hint(&state)
-            .map_err(host_error)?;
+        jazz::db::block_on(self.binding()?.set_remote_link_hint(&state)).map_err(host_error)?;
         settle_promises();
         Ok(())
     }

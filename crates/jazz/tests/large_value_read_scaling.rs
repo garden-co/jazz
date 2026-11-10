@@ -166,7 +166,7 @@ fn projected_listing_leaves_excluded_large_columns_unread() {
     let listing = db
         .prepare_query(&Query::from(FILES).select(["name"]))
         .expect("prepare listing");
-    let (rows, rebuilds) = counting(|| db.read(&listing).expect("listing"));
+    let (rows, rebuilds) = counting(|| jazz::db::block_on(db.read(&listing)).expect("listing"));
     assert_eq!(rows.len(), files.len());
     assert_eq!(
         rebuilds, 0,
@@ -180,7 +180,8 @@ fn projected_listing_leaves_excluded_large_columns_unread() {
     let with_contents = db
         .prepare_query(&Query::from(FILES).select(["name", "contents"]))
         .expect("prepare contents listing");
-    let (rows, rebuilds) = counting(|| db.read(&with_contents).expect("contents listing"));
+    let (rows, rebuilds) =
+        counting(|| jazz::db::block_on(db.read(&with_contents)).expect("contents listing"));
     assert!(
         rebuilds >= 1,
         "selecting the chunked contents rebuilds them on this thread"
@@ -198,7 +199,7 @@ fn projected_listing_leaves_excluded_large_columns_unread() {
     let whole = db
         .prepare_query(&Query::from(FILES))
         .expect("prepare whole rows");
-    let rows = db.read(&whole).expect("whole rows");
+    let rows = jazz::db::block_on(db.read(&whole)).expect("whole rows");
     for (id, _, notes, bytes) in &files {
         let row = rows
             .iter()
@@ -247,7 +248,7 @@ fn projected_listing_orders_by_a_large_column() {
                 .order_by("notes", OrderDirection::Asc),
         )
         .expect("prepare ordered listing");
-    let rows = db.read(&listing).expect("ordered listing");
+    let rows = jazz::db::block_on(db.read(&listing)).expect("ordered listing");
     let names = rows.iter().map(|row| row.cell("name")).collect::<Vec<_>>();
     assert_eq!(
         names,
@@ -362,7 +363,7 @@ fn projected_listing_does_not_confuse_public_and_storage_names() {
     let query = db
         .prepare_query(&Query::from(FILES).select(["_app_notes"]))
         .expect("prepare listing");
-    let rows = db.read(&query).expect("listing");
+    let rows = jazz::db::block_on(db.read(&query)).expect("listing");
     assert_eq!(rows.len(), 1);
     assert_eq!(
         rows[0].cell("_app_notes"),

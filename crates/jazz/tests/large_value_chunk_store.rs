@@ -413,15 +413,14 @@ fn a_server_serves_chunk_requests_from_an_asynchronous_chunk_store() {
         out: up.clone(),
         inbound: down.clone(),
     })));
-    server
-        .accept_subscriber(
-            Box::new(Pipe {
-                out: down,
-                inbound: up,
-            }),
-            user(1),
-        )
-        .unwrap();
+    jazz::db::block_on(server.accept_subscriber(
+        Box::new(Pipe {
+            out: down,
+            inbound: up,
+        }),
+        user(1),
+    ))
+    .unwrap();
     let _stream = block_on(alice.subscribe(
         &alice.prepare_query(&Query::from("docs")).unwrap(),
         ReadOpts::default(),
@@ -472,20 +471,28 @@ fn a_host_runs_the_chunk_io_one_batch_at_a_time() {
     insert(&db, 1, &value);
     block_on(db.tick()).unwrap();
     assert_eq!(remote.objects().puts, 0, "the tick ran no I/O");
-    let io = db.take_chunk_io().unwrap().expect("a batch");
+    let io = jazz::db::block_on(db.take_chunk_io())
+        .unwrap()
+        .expect("a batch");
     let (_, puts, _) = io.counts();
     assert!(puts > 2, "{puts}");
-    assert!(db.take_chunk_io().unwrap().is_none(), "one batch is out");
+    assert!(
+        jazz::db::block_on(db.take_chunk_io()).unwrap().is_none(),
+        "one batch is out"
+    );
     // Writes and reads go on while the batch is out.
     insert(&db, 2, &text(56, LARGE));
     assert_eq!(body(&db, 1), value);
     let done = run_elsewhere(io, store.clone());
     assert_eq!(file_node_bytes(&path).1, 0, "nothing moves before finish");
-    db.finish_chunk_io(done).unwrap();
+    jazz::db::block_on(db.finish_chunk_io(done)).unwrap();
     assert_eq!(file_node_bytes(&path).1 as usize, puts);
     // The next batch moves the second value.
-    let done = run_elsewhere(db.take_chunk_io().unwrap().unwrap(), store.clone());
-    db.finish_chunk_io(done).unwrap();
+    let done = run_elsewhere(
+        jazz::db::block_on(db.take_chunk_io()).unwrap().unwrap(),
+        store.clone(),
+    );
+    jazz::db::block_on(db.finish_chunk_io(done)).unwrap();
     assert_eq!(
         file_node_bytes(&path).1 as usize,
         remote.objects().map.len()
@@ -508,13 +515,21 @@ fn a_host_batch_that_fails_is_retried_by_the_next() {
     let db = open_host_io(&path, store.clone());
     insert(&db, 1, &value);
     remote.objects().failing = true;
-    let done = run_elsewhere(db.take_chunk_io().unwrap().unwrap(), store.clone());
-    let error = db.finish_chunk_io(done).err().expect("reported");
+    let done = run_elsewhere(
+        jazz::db::block_on(db.take_chunk_io()).unwrap().unwrap(),
+        store.clone(),
+    );
+    let error = jazz::db::block_on(db.finish_chunk_io(done))
+        .err()
+        .expect("reported");
     assert_eq!(error.code, ErrorCode::Storage);
     assert_eq!(file_node_bytes(&path).1, 0);
     remote.objects().failing = false;
-    let done = run_elsewhere(db.take_chunk_io().unwrap().unwrap(), store.clone());
-    db.finish_chunk_io(done).unwrap();
+    let done = run_elsewhere(
+        jazz::db::block_on(db.take_chunk_io()).unwrap().unwrap(),
+        store.clone(),
+    );
+    jazz::db::block_on(db.finish_chunk_io(done)).unwrap();
     assert!(file_node_bytes(&path).1 > 2);
     drop(db);
     let db = open_host_io(&path, store);
@@ -539,15 +554,14 @@ fn connect_to(server: &Db) -> Subscriber {
         out: up.clone(),
         inbound: down.clone(),
     })));
-    server
-        .accept_subscriber(
-            Box::new(Pipe {
-                out: down.clone(),
-                inbound: up.clone(),
-            }),
-            user(1),
-        )
-        .unwrap();
+    jazz::db::block_on(server.accept_subscriber(
+        Box::new(Pipe {
+            out: down.clone(),
+            inbound: up.clone(),
+        }),
+        user(1),
+    ))
+    .unwrap();
     for _ in 0..4 {
         block_on(alice.tick()).unwrap();
         block_on(server.tick()).unwrap();
@@ -575,10 +589,8 @@ fn pull_of_row_1(path: &Path, store: &Arc<dyn ChunkStore>) -> jazz::db::WirePull
             })
         });
         block_on(server.tick()).unwrap();
-        if let Some(io) = server.take_chunk_io().unwrap() {
-            server
-                .finish_chunk_io(run_elsewhere(io, store.clone()))
-                .unwrap();
+        if let Some(io) = jazz::db::block_on(server.take_chunk_io()).unwrap() {
+            jazz::db::block_on(server.finish_chunk_io(run_elsewhere(io, store.clone()))).unwrap();
         }
     }
     pull.expect("the replica pulled the value")
@@ -592,15 +604,14 @@ fn subscribe_to(server: &Db) -> Subscriber {
         out: up.clone(),
         inbound: down.clone(),
     })));
-    server
-        .accept_subscriber(
-            Box::new(Pipe {
-                out: down.clone(),
-                inbound: up.clone(),
-            }),
-            user(1),
-        )
-        .unwrap();
+    jazz::db::block_on(server.accept_subscriber(
+        Box::new(Pipe {
+            out: down.clone(),
+            inbound: up.clone(),
+        }),
+        user(1),
+    ))
+    .unwrap();
     let stream = block_on(alice.subscribe(
         &alice.prepare_query(&Query::from("docs")).unwrap(),
         ReadOpts::default(),
@@ -637,13 +648,11 @@ fn a_server_with_host_io_serves_chunk_requests_once_a_batch_fetched_them() {
     for _ in 0..16 {
         block_on(sub.alice.tick()).unwrap();
         block_on(server.tick()).unwrap();
-        if let Some(io) = server.take_chunk_io().unwrap() {
+        if let Some(io) = jazz::db::block_on(server.take_chunk_io()).unwrap() {
             let fetches = io.counts().0;
             fetched += fetches;
             let served = sub.down.borrow().len();
-            server
-                .finish_chunk_io(run_elsewhere(io, store.clone()))
-                .unwrap();
+            jazz::db::block_on(server.finish_chunk_io(run_elsewhere(io, store.clone()))).unwrap();
             if fetches > 0 {
                 assert!(sub.down.borrow().len() > served, "served by the finish");
             }
@@ -669,12 +678,13 @@ fn a_dropped_batch_ends_and_the_next_one_redoes_it() {
     let value = text(59, LARGE);
     let db = open_host_io(&path, store.clone());
     insert(&db, 1, &value);
-    let first = db.take_chunk_io().unwrap().expect("a batch");
+    let first = jazz::db::block_on(db.take_chunk_io())
+        .unwrap()
+        .expect("a batch");
     let puts = first.counts().1;
     assert!(puts > 2, "{puts}");
     drop(first);
-    let second = db
-        .take_chunk_io()
+    let second = jazz::db::block_on(db.take_chunk_io())
         .unwrap()
         .expect("the dropped batch ended");
     assert_eq!(second.counts().1, puts, "its puts are picked again");
@@ -684,8 +694,11 @@ fn a_dropped_batch_ends_and_the_next_one_redoes_it() {
         0,
         "a dropped outcome moves nothing"
     );
-    let done = run_elsewhere(db.take_chunk_io().unwrap().unwrap(), store.clone());
-    db.finish_chunk_io(done).unwrap();
+    let done = run_elsewhere(
+        jazz::db::block_on(db.take_chunk_io()).unwrap().unwrap(),
+        store.clone(),
+    );
+    jazz::db::block_on(db.finish_chunk_io(done)).unwrap();
     assert_eq!(file_node_bytes(&path).1 as usize, puts);
 
     // A dropped batch's fetches go to the next one.
@@ -696,22 +709,19 @@ fn a_dropped_batch_ends_and_the_next_one_redoes_it() {
     for _ in 0..16 {
         block_on(sub.alice.tick()).unwrap();
         block_on(server.tick()).unwrap();
-        let Some(io) = server.take_chunk_io().unwrap() else {
+        let Some(io) = jazz::db::block_on(server.take_chunk_io()).unwrap() else {
             continue;
         };
         if dropped == 0 && io.counts().0 > 0 {
             dropped = io.counts().0;
             drop(io);
-            let again = server.take_chunk_io().unwrap().unwrap();
+            let again = jazz::db::block_on(server.take_chunk_io()).unwrap().unwrap();
             assert!(again.counts().0 >= dropped, "{:?}", again.counts());
-            server
-                .finish_chunk_io(run_elsewhere(again, store.clone()))
+            jazz::db::block_on(server.finish_chunk_io(run_elsewhere(again, store.clone())))
                 .unwrap();
             continue;
         }
-        server
-            .finish_chunk_io(run_elsewhere(io, store.clone()))
-            .unwrap();
+        jazz::db::block_on(server.finish_chunk_io(run_elsewhere(io, store.clone()))).unwrap();
     }
     block_on(sub.alice.tick()).unwrap();
     assert!(dropped > 0);
@@ -736,35 +746,44 @@ fn a_batch_is_finished_only_by_the_store_that_handed_it_out() {
         assert!(error.message.contains(says), "{}", error.message);
     };
 
-    let from_a = run_elsewhere(a.take_chunk_io().unwrap().unwrap(), store.clone());
-    protocol(b.finish_chunk_io(from_a).unwrap_err(), "no batch is out");
     let from_a = run_elsewhere(
-        a.take_chunk_io().unwrap().expect("the refused batch ended"),
+        jazz::db::block_on(a.take_chunk_io()).unwrap().unwrap(),
         store.clone(),
     );
-    let out_at_b = b.take_chunk_io().unwrap().unwrap();
     protocol(
-        b.finish_chunk_io(from_a).unwrap_err(),
+        jazz::db::block_on(b.finish_chunk_io(from_a)).unwrap_err(),
+        "no batch is out",
+    );
+    let from_a = run_elsewhere(
+        jazz::db::block_on(a.take_chunk_io())
+            .unwrap()
+            .expect("the refused batch ended"),
+        store.clone(),
+    );
+    let out_at_b = jazz::db::block_on(b.take_chunk_io()).unwrap().unwrap();
+    protocol(
+        jazz::db::block_on(b.finish_chunk_io(from_a)).unwrap_err(),
         "not the batch that is out",
     );
-    b.finish_chunk_io(run_elsewhere(out_at_b, store.clone()))
-        .unwrap();
+    jazz::db::block_on(b.finish_chunk_io(run_elsewhere(out_at_b, store.clone()))).unwrap();
     assert!(file_node_bytes(&path_b).1 > 2);
 
-    let io = a.take_chunk_io().unwrap().unwrap();
+    let io = jazz::db::block_on(a.take_chunk_io()).unwrap().unwrap();
     let counts = io.counts();
     protocol(
         io.done(Vec::new(), Vec::new(), Vec::new()).unwrap_err(),
         &format!("{counts:?}"),
     );
-    let io = a.take_chunk_io().unwrap().expect("that batch ended too");
-    a.finish_chunk_io(run_elsewhere(io, store.clone())).unwrap();
+    let io = jazz::db::block_on(a.take_chunk_io())
+        .unwrap()
+        .expect("that batch ended too");
+    jazz::db::block_on(a.finish_chunk_io(run_elsewhere(io, store.clone()))).unwrap();
     assert!(file_node_bytes(&path_a).1 > 2);
 
     let (_dir_c, path_c) = scratch();
     let ticked = open(&path_c, Some(store)).unwrap();
     protocol(
-        ticked.take_chunk_io().unwrap_err(),
+        jazz::db::block_on(ticked.take_chunk_io()).unwrap_err(),
         "runs its chunk I/O itself",
     );
 }
@@ -779,7 +798,7 @@ fn a_host_may_run_a_batch_op_by_op() {
     let value = text(62, LARGE);
     let db = open_host_io(&path, store.clone());
     insert(&db, 1, &value);
-    let io = db.take_chunk_io().unwrap().unwrap();
+    let io = jazz::db::block_on(db.take_chunk_io()).unwrap().unwrap();
     assert_eq!(io.fetches().len(), 0);
     let put: Vec<_> = io
         .puts()
@@ -791,8 +810,7 @@ fn a_host_may_run_a_batch_op_by_op() {
         .iter()
         .map(|key| block_on(store.delete(key)))
         .collect();
-    db.finish_chunk_io(io.done(Vec::new(), put, deleted).unwrap())
-        .unwrap();
+    jazz::db::block_on(db.finish_chunk_io(io.done(Vec::new(), put, deleted).unwrap())).unwrap();
     assert!(file_node_bytes(&path).1 > 2);
     drop(db);
     let db = open_host_io(&path, store);
@@ -828,7 +846,7 @@ fn a_host_deletes_reclaimed_leaves_even_while_their_put_is_out() {
     let store: Arc<dyn ChunkStore> = Arc::new(remote.clone());
     let db = open_host_io(&path, store.clone());
     insert(&db, 1, &text(63, LARGE));
-    let out = db.take_chunk_io().unwrap().unwrap();
+    let out = jazz::db::block_on(db.take_chunk_io()).unwrap().unwrap();
     let puts = out.counts().1;
     assert!(puts > 2);
     unreference_all(&path);
@@ -836,31 +854,33 @@ fn a_host_deletes_reclaimed_leaves_even_while_their_put_is_out() {
     insert(&db, 2, "small");
     block_on(db.tick()).unwrap();
     assert_eq!(leaves_in(&path), 0, "reclaimed while the puts are out");
-    db.finish_chunk_io(run_elsewhere(out, store.clone()))
-        .unwrap();
+    jazz::db::block_on(db.finish_chunk_io(run_elsewhere(out, store.clone()))).unwrap();
     assert_eq!(remote.objects().map.len(), puts, "the puts landed");
-    let io = db.take_chunk_io().unwrap().unwrap();
+    let io = jazz::db::block_on(db.take_chunk_io()).unwrap().unwrap();
     assert_eq!(io.counts(), (0, 0, puts));
-    db.finish_chunk_io(run_elsewhere(io, store.clone()))
-        .unwrap();
+    jazz::db::block_on(db.finish_chunk_io(run_elsewhere(io, store.clone()))).unwrap();
     assert!(remote.objects().map.is_empty(), "and were deleted after");
 
     // Leaves that had moved are deleted the same way.
     insert(&db, 3, &text(64, LARGE));
-    let io = db.take_chunk_io().unwrap().unwrap();
+    let io = jazz::db::block_on(db.take_chunk_io()).unwrap().unwrap();
     let moved = io.counts().1;
-    db.finish_chunk_io(run_elsewhere(io, store.clone()))
-        .unwrap();
+    jazz::db::block_on(db.finish_chunk_io(run_elsewhere(io, store.clone()))).unwrap();
     assert_eq!(remote.objects().map.len(), moved);
     drop(db);
     unreference_all(&path);
     let db = open_host_io(&path, store.clone());
     block_on(db.tick()).unwrap();
-    let io = db.take_chunk_io().unwrap().unwrap();
+    let io = jazz::db::block_on(db.take_chunk_io()).unwrap().unwrap();
     assert_eq!(io.counts(), (0, 0, moved));
-    db.finish_chunk_io(run_elsewhere(io, store)).unwrap();
+    jazz::db::block_on(db.finish_chunk_io(run_elsewhere(io, store))).unwrap();
     assert!(remote.objects().map.is_empty());
-    assert!(db.take_chunk_io().unwrap().unwrap().is_empty());
+    assert!(
+        jazz::db::block_on(db.take_chunk_io())
+            .unwrap()
+            .unwrap()
+            .is_empty()
+    );
 }
 
 /// A fetch that fails is reported by the finish, and what waited on it is
@@ -902,10 +922,12 @@ fn a_host_fetch_that_fails_refuses_what_waits_on_it() {
             .any(|(_, error)| error.message.contains("bucket unreachable"));
         block_on(sub.alice.tick()).unwrap();
         block_on(server.tick()).unwrap();
-        let Some(io) = server.take_chunk_io().unwrap() else {
+        let Some(io) = jazz::db::block_on(server.take_chunk_io()).unwrap() else {
             continue;
         };
-        if let Err(error) = server.finish_chunk_io(run_elsewhere(io, store.clone())) {
+        if let Err(error) =
+            jazz::db::block_on(server.finish_chunk_io(run_elsewhere(io, store.clone())))
+        {
             assert_eq!(error.code, ErrorCode::Storage);
             failed += 1;
         }
@@ -919,10 +941,8 @@ fn a_host_fetch_that_fails_refuses_what_waits_on_it() {
     for _ in 0..16 {
         block_on(sub.alice.tick()).unwrap();
         block_on(server.tick()).unwrap();
-        if let Some(io) = server.take_chunk_io().unwrap() {
-            server
-                .finish_chunk_io(run_elsewhere(io, store.clone()))
-                .unwrap();
+        if let Some(io) = jazz::db::block_on(server.take_chunk_io()).unwrap() {
+            jazz::db::block_on(server.finish_chunk_io(run_elsewhere(io, store.clone()))).unwrap();
         }
     }
     block_on(sub.alice.tick()).unwrap();
@@ -974,10 +994,8 @@ fn a_pull_the_store_failed_is_answered_once_it_is_back() {
     let mut failed = 0;
     for _ in 0..8 {
         block_on(server.tick()).unwrap();
-        if let Some(io) = server.take_chunk_io().unwrap()
-            && server
-                .finish_chunk_io(run_elsewhere(io, store.clone()))
-                .is_err()
+        if let Some(io) = jazz::db::block_on(server.take_chunk_io()).unwrap()
+            && jazz::db::block_on(server.finish_chunk_io(run_elsewhere(io, store.clone()))).is_err()
         {
             failed += 1;
         }
@@ -990,10 +1008,8 @@ fn a_pull_the_store_failed_is_answered_once_it_is_back() {
     remote.objects().failing_gets = false;
     for _ in 0..8 {
         block_on(server.tick()).unwrap();
-        if let Some(io) = server.take_chunk_io().unwrap() {
-            server
-                .finish_chunk_io(run_elsewhere(io, store.clone()))
-                .unwrap();
+        if let Some(io) = jazz::db::block_on(server.take_chunk_io()).unwrap() {
+            jazz::db::block_on(server.finish_chunk_io(run_elsewhere(io, store.clone()))).unwrap();
         }
     }
     assert!(answered(&sub), "the pull is answered once the store is");
@@ -1044,8 +1060,10 @@ fn fetched_chunks_are_served_even_when_the_puts_beside_them_fail() {
             block_on(sub.alice.tick()).unwrap();
             let gets = remote.objects().gets;
             let ticked = block_on(server.tick());
-            let finished = match server.take_chunk_io() {
-                Ok(Some(io)) => server.finish_chunk_io(run_elsewhere(io, store.clone())),
+            let finished = match jazz::db::block_on(server.take_chunk_io()) {
+                Ok(Some(io)) => {
+                    jazz::db::block_on(server.finish_chunk_io(run_elsewhere(io, store.clone())))
+                }
                 _ => Ok(()),
             };
             let fetched = remote.objects().gets > gets;
@@ -1097,34 +1115,33 @@ fn a_leaf_is_fetched_once_while_both_lanes_are_busy() {
         for tick in 0..32 {
             block_on(server.tick()).unwrap();
             match batch.take() {
-                Some(io) if (tick + offset) % 2 == 0 => server
-                    .finish_chunk_io(run_elsewhere(io, store.clone()))
-                    .unwrap(),
+                Some(io) if (tick + offset) % 2 == 0 => {
+                    jazz::db::block_on(server.finish_chunk_io(run_elsewhere(io, store.clone())))
+                        .unwrap()
+                }
                 Some(io) => batch = Some(io),
                 None => {
-                    batch = server.take_chunk_io().unwrap();
+                    batch = jazz::db::block_on(server.take_chunk_io()).unwrap();
                     by_lane[0] += batch.as_ref().map_or(0, |io| io.counts().0);
                 }
             }
             match fetches.take() {
-                Some(io) if (tick + offset) % 2 == 1 => server
-                    .finish_chunk_fetches(run_elsewhere(io, store.clone()))
-                    .unwrap(),
+                Some(io) if (tick + offset) % 2 == 1 => jazz::db::block_on(
+                    server.finish_chunk_fetches(run_elsewhere(io, store.clone())),
+                )
+                .unwrap(),
                 Some(io) => fetches = Some(io),
                 None => {
-                    fetches = server.take_chunk_fetches().unwrap();
+                    fetches = jazz::db::block_on(server.take_chunk_fetches()).unwrap();
                     by_lane[1] += fetches.as_ref().map_or(0, |io| io.counts().0);
                 }
             }
         }
         if let Some(io) = batch {
-            server
-                .finish_chunk_io(run_elsewhere(io, store.clone()))
-                .unwrap();
+            jazz::db::block_on(server.finish_chunk_io(run_elsewhere(io, store.clone()))).unwrap();
         }
         if let Some(io) = fetches {
-            server
-                .finish_chunk_fetches(run_elsewhere(io, store.clone()))
+            jazz::db::block_on(server.finish_chunk_fetches(run_elsewhere(io, store.clone())))
                 .unwrap();
         }
         block_on(server.tick()).unwrap();
@@ -1173,10 +1190,10 @@ fn a_batch_reports_the_fetches_it_failed() {
     for _ in 0..16 {
         block_on(sub.alice.tick()).unwrap();
         block_on(server.tick()).unwrap();
-        if let Some(io) = server.take_chunk_io().unwrap() {
+        if let Some(io) = jazz::db::block_on(server.take_chunk_io()).unwrap() {
             let done = run_elsewhere(io, store.clone());
             let failed = done.fetches_failed();
-            let finished = server.finish_chunk_io(done);
+            let finished = jazz::db::block_on(server.finish_chunk_io(done));
             if failed.is_some() {
                 assert!(finished.is_err());
                 reported = failed;
@@ -1188,7 +1205,9 @@ fn a_batch_reports_the_fetches_it_failed() {
     remote.objects().failing_gets = false;
     insert(&server, 2, &text(75, LARGE));
     block_on(server.tick()).unwrap();
-    let uploads = server.take_chunk_io_holding_fetches().unwrap().unwrap();
+    let uploads = jazz::db::block_on(server.take_chunk_io_holding_fetches())
+        .unwrap()
+        .unwrap();
     assert_eq!(run_elsewhere(uploads, store.clone()).fetches_failed(), None);
 }
 
@@ -1210,10 +1229,10 @@ fn a_batch_counts_the_wrong_object_as_a_failed_fetch() {
     for _ in 0..16 {
         block_on(sub.alice.tick()).unwrap();
         block_on(server.tick()).unwrap();
-        if let Some(io) = server.take_chunk_io().unwrap() {
+        if let Some(io) = jazz::db::block_on(server.take_chunk_io()).unwrap() {
             let done = run_elsewhere(io, store.clone());
             reported = done.fetches_failed();
-            let _ = server.finish_chunk_io(done);
+            let _ = jazz::db::block_on(server.finish_chunk_io(done));
             if reported.is_some() {
                 break;
             }
@@ -1239,10 +1258,11 @@ fn a_batch_holding_fetches_back_asks_nothing_again() {
     for _ in 0..16 {
         block_on(sub.alice.tick()).unwrap();
         block_on(server.tick()).unwrap();
-        if let Some(fetches) = server.take_chunk_fetches().unwrap() {
-            failed |= server
-                .finish_chunk_fetches(run_elsewhere(fetches, store.clone()))
-                .is_err();
+        if let Some(fetches) = jazz::db::block_on(server.take_chunk_fetches()).unwrap() {
+            failed |= jazz::db::block_on(
+                server.finish_chunk_fetches(run_elsewhere(fetches, store.clone())),
+            )
+            .is_err();
             break;
         }
     }
@@ -1251,22 +1271,17 @@ fn a_batch_holding_fetches_back_asks_nothing_again() {
     insert(&server, 2, &text(73, LARGE));
     for _ in 0..4 {
         block_on(server.tick()).unwrap();
-        if let Some(io) = server.take_chunk_io_holding_fetches().unwrap() {
+        if let Some(io) = jazz::db::block_on(server.take_chunk_io_holding_fetches()).unwrap() {
             assert_eq!(io.counts().0, 0, "no fetches");
-            server
-                .finish_chunk_io(run_elsewhere(io, store.clone()))
-                .unwrap();
+            jazz::db::block_on(server.finish_chunk_io(run_elsewhere(io, store.clone()))).unwrap();
         }
     }
     assert_eq!(remote.objects().gets, gets, "the store was not asked again");
     remote.objects().failing_gets = false;
-    let fetches = server
-        .take_chunk_fetches()
+    let fetches = jazz::db::block_on(server.take_chunk_fetches())
         .unwrap()
         .expect("the failed fetches are asked again");
-    server
-        .finish_chunk_fetches(run_elsewhere(fetches, store.clone()))
-        .unwrap();
+    jazz::db::block_on(server.finish_chunk_fetches(run_elsewhere(fetches, store.clone()))).unwrap();
 }
 
 /// While a batch of uploads is out, the leaves a replica waits on are
@@ -1281,7 +1296,9 @@ fn reads_are_fetched_beside_a_batch_that_is_out() {
     moved_to(&path, &store, &value);
     let server = open_host_io(&path, store.clone());
     insert(&server, 2, &text(70, LARGE));
-    let uploads = server.take_chunk_io().unwrap().expect("a batch");
+    let uploads = jazz::db::block_on(server.take_chunk_io())
+        .unwrap()
+        .expect("a batch");
     assert!(uploads.counts().1 > 2, "{:?}", uploads.counts());
     let sub = subscribe_to(&server);
     let mut dropped = false;
@@ -1290,10 +1307,12 @@ fn reads_are_fetched_beside_a_batch_that_is_out() {
         block_on(sub.alice.tick()).unwrap();
         block_on(server.tick()).unwrap();
         assert!(
-            server.take_chunk_io().unwrap().is_none(),
+            jazz::db::block_on(server.take_chunk_io())
+                .unwrap()
+                .is_none(),
             "the uploads are out"
         );
-        let Some(fetches) = server.take_chunk_fetches().unwrap() else {
+        let Some(fetches) = jazz::db::block_on(server.take_chunk_fetches()).unwrap() else {
             continue;
         };
         assert_eq!(fetches.counts().1, 0, "no uploads among them");
@@ -1303,8 +1322,7 @@ fn reads_are_fetched_beside_a_batch_that_is_out() {
             continue;
         }
         fetched += fetches.counts().0;
-        server
-            .finish_chunk_fetches(run_elsewhere(fetches, store.clone()))
+        jazz::db::block_on(server.finish_chunk_fetches(run_elsewhere(fetches, store.clone())))
             .unwrap();
     }
     block_on(sub.alice.tick()).unwrap();
@@ -1314,7 +1332,5 @@ fn reads_are_fetched_beside_a_batch_that_is_out() {
         value,
         "served with the uploads still out"
     );
-    server
-        .finish_chunk_io(run_elsewhere(uploads, store.clone()))
-        .unwrap();
+    jazz::db::block_on(server.finish_chunk_io(run_elsewhere(uploads, store.clone()))).unwrap();
 }

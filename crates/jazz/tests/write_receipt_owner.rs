@@ -39,8 +39,8 @@ fn open(node: u8, path: Option<&Path>) -> Binding {
         None => block_on(Db::open(config)),
     }
     .unwrap();
-    db.set_authority();
-    Binding::new(db, identity, true)
+    jazz::db::block_on(db.set_authority());
+    jazz::db::block_on(Binding::new(db, identity, true))
 }
 
 fn title(value: &str) -> Vec<u8> {
@@ -131,7 +131,7 @@ fn the_original_node_can_wait_through_a_schema_view_and_after_reopen() {
         let alice = open(1, Some(&path));
         let receipt = insert(&alice, "retained");
         let view = block_on(alice.db.register_schema_view(schema())).unwrap();
-        let sibling = Binding::new(view, identity(1), true);
+        let sibling = jazz::db::block_on(Binding::new(view, identity(1), true));
         let cloned = receipt.clone();
         block_on(sibling.wait_for_write(&cloned, "global", None).unwrap()).unwrap();
         receipt
@@ -139,7 +139,7 @@ fn the_original_node_can_wait_through_a_schema_view_and_after_reopen() {
     let reopened = open(1, Some(&path));
     block_on(reopened.wait_for_write(&receipt, "global", None).unwrap()).unwrap();
     let query = reopened.db.prepare_query(&Query::from("notes")).unwrap();
-    let rows = reopened.db.read(&query).unwrap();
+    let rows = jazz::db::block_on(reopened.db.read(&query)).unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(
         rows[0].cell("title"),

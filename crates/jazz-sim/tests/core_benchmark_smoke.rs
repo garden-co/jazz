@@ -165,7 +165,7 @@ fn sync_correctness_smoke() {
     let me = user(3);
     let other = user(4);
     let ui = open(owned_todos(), 3, me);
-    ui.set_non_durable_client();
+    jazz::db::block_on(ui.set_non_durable_client());
     sim.add("ui", ui);
     sim.connect("worker", "core", AuthorSubject::SYSTEM, link());
     sim.connect("ui", "worker", me, link());

@@ -6,11 +6,13 @@
 //! that is durable before the command answers. Opening reads nothing, and a
 //! second owner of the same file cannot decide from stale state.
 
+use crate::runtime::block_on;
 use jazz::account_registry::{
     self, AccountCommand, AccountCommandResult, AccountError, AccountId, AccountState, Assignment,
     LinkIntent, Principal,
 };
-use rusqlite::{Connection, OptionalExtension, params};
+use jazz::host::ConnectionSql;
+use jazz_sql::{Row as _, Sql as _, params};
 use uuid::Uuid;
 
 use crate::kv::HostSql;
@@ -72,15 +74,16 @@ impl StoredAccountRegistry {
     /// Open the registry in `storage`, creating its tables in a new file.
     pub(crate) fn open(storage: HostSql) -> Result<Self, RegistryError> {
         storage
-            .write(|conn| conn.execute_batch(CREATE).map_err(storage_error))
+            .write(|mut conn| block_on(conn.execute_script(CREATE)))
             .map_err(unavailable)?;
         Ok(Self { storage })
     }
 
     /// Resolve current admission from committed state.
     pub(crate) fn login(&mut self, principal: &Principal) -> Result<Assignment, RegistryError> {
+        let principal = principal.clone();
         self.storage
-            .read(|conn| Ok(account_registry::login(&mut Sql(conn), principal)))
+            .read(move |conn| Ok(account_registry::login(&mut Sql(conn), &principal)))
             .map_err(unavailable)?
     }
 
@@ -133,151 +136,60 @@ impl StoredAccountRegistry {
 }
 
 /// The registry state in the store, inside one read or write.
-struct Sql<'a>(&'a Connection);
+struct Sql<'a>(ConnectionSql<'a>);
 
+// AccountState is synchronous, but only runs inside the server's dedicated
+// connection owner (or an inline native read). Park that thread while Rivet's
+// worker finishes; request cancellation never drops this admitted operation.
 impl AccountState for Sql<'_> {
     type Error = RegistryError;
-
     fn assignment(&mut self, principal: &Principal) -> Result<Option<Assignment>, RegistryError> {
-        self.0
-            .prepare_cached(
-                "SELECT account, active, manage_identities, generation \
-                 FROM _jazz_host_account_identities WHERE issuer = ?1 AND subject = ?2",
-            )
-            .and_then(|mut statement| {
-                statement
-                    .query_row(params![principal.issuer, principal.subject], |row| {
-                        Ok((
-                            row.get::<_, Vec<u8>>(0)?,
-                            row.get::<_, bool>(1)?,
-                            row.get::<_, bool>(2)?,
-                            row.get::<_, i64>(3)?,
-                        ))
-                    })
-                    .optional()
-            })
-            .map_err(unavailable)?
-            .map(|(account, active, manage_identities, generation)| {
-                Ok(Assignment {
-                    account: AccountId(uuid(&account)?),
-                    active,
-                    manage_identities,
-                    generation: unsigned(generation)?,
-                })
-            })
-            .transpose()
+        block_on(self.0.query_optional(
+            "SELECT account, active, manage_identities, generation FROM _jazz_host_account_identities WHERE issuer = ?1 AND subject = ?2",
+            params![principal.issuer, principal.subject],
+            |row| Ok((row.get::<Vec<u8>>(0)?, row.get::<bool>(1)?, row.get::<bool>(2)?, row.get::<i64>(3)?)),
+        )).map_err(unavailable)?.map(|(account, active, manage_identities, generation)| Ok(Assignment {
+            account: AccountId(uuid(&account)?), active, manage_identities, generation: unsigned(generation)?,
+        })).transpose()
     }
-
     fn account_assigned(&mut self, account: AccountId) -> Result<bool, RegistryError> {
-        self.0
-            .prepare_cached(
-                "SELECT EXISTS (SELECT 1 FROM _jazz_host_account_identities WHERE account = ?1)",
-            )
-            .and_then(|mut statement| statement.query_row([account.0.as_bytes()], |row| row.get(0)))
-            .map_err(unavailable)
+        block_on(self.0.query_one(
+            "SELECT EXISTS (SELECT 1 FROM _jazz_host_account_identities WHERE account = ?1)",
+            params![account.0.as_bytes().as_slice()],
+            |row| row.get(0),
+        ))
+        .map_err(unavailable)
     }
-
     fn link(&mut self, nonce: Uuid) -> Result<Option<LinkIntent>, RegistryError> {
-        self.0
-            .prepare_cached(
-                "SELECT account, approver_issuer, approver_subject, approver_generation, \
-                 candidate_issuer, candidate_subject, expires_at, completed \
-                 FROM _jazz_host_account_links WHERE nonce = ?1",
-            )
-            .and_then(|mut statement| {
-                statement
-                    .query_row([nonce.as_bytes()], |row| {
-                        Ok((
-                            row.get::<_, Vec<u8>>(0)?,
-                            Principal {
-                                issuer: row.get(1)?,
-                                subject: row.get(2)?,
-                            },
-                            row.get::<_, i64>(3)?,
-                            Principal {
-                                issuer: row.get(4)?,
-                                subject: row.get(5)?,
-                            },
-                            row.get::<_, i64>(6)?,
-                            row.get::<_, bool>(7)?,
-                        ))
-                    })
-                    .optional()
-            })
-            .map_err(unavailable)?
-            .map(
-                |(account, approver, approver_generation, candidate, expires_at, completed)| {
-                    Ok(LinkIntent {
-                        account: AccountId(uuid(&account)?),
-                        approver,
-                        approver_generation: unsigned(approver_generation)?,
-                        candidate,
-                        expires_at: unsigned(expires_at)?,
-                        completed,
-                    })
-                },
-            )
-            .transpose()
+        block_on(self.0.query_optional(
+            "SELECT account, approver_issuer, approver_subject, approver_generation, candidate_issuer, candidate_subject, expires_at, completed FROM _jazz_host_account_links WHERE nonce = ?1",
+            params![nonce.as_bytes().as_slice()],
+            |row| Ok((row.get::<Vec<u8>>(0)?, Principal { issuer: row.get(1)?, subject: row.get(2)? }, row.get::<i64>(3)?, Principal { issuer: row.get(4)?, subject: row.get(5)? }, row.get::<i64>(6)?, row.get::<bool>(7)?)),
+        )).map_err(unavailable)?.map(|(account, approver, approver_generation, candidate, expires_at, completed)| Ok(LinkIntent {
+            account: AccountId(uuid(&account)?), approver, approver_generation: unsigned(approver_generation)?, candidate, expires_at: unsigned(expires_at)?, completed,
+        })).transpose()
     }
-
     fn put_assignment(
         &mut self,
         principal: &Principal,
         assignment: &Assignment,
     ) -> Result<(), RegistryError> {
-        self.0
-            .prepare_cached(
-                "INSERT OR REPLACE INTO _jazz_host_account_identities \
-                 (issuer, subject, account, active, manage_identities, generation) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            )
-            .and_then(|mut statement| {
-                statement.execute(params![
-                    principal.issuer,
-                    principal.subject,
-                    assignment.account.0.as_bytes(),
-                    assignment.active,
-                    assignment.manage_identities,
-                    signed(assignment.generation)?,
-                ])
-            })
-            .map(|_| ())
-            .map_err(unavailable)
+        block_on(self.0.execute("INSERT OR REPLACE INTO _jazz_host_account_identities (issuer, subject, account, active, manage_identities, generation) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![principal.issuer, principal.subject, assignment.account.0.as_bytes().as_slice(), assignment.active, assignment.manage_identities, signed(assignment.generation)?],
+        )).map(|_| ()).map_err(unavailable)
     }
-
     fn put_link(&mut self, nonce: Uuid, link: &LinkIntent) -> Result<(), RegistryError> {
-        self.0
-            .prepare_cached(
-                "INSERT OR REPLACE INTO _jazz_host_account_links \
-                 (nonce, account, approver_issuer, approver_subject, approver_generation, \
-                 candidate_issuer, candidate_subject, expires_at, completed) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            )
-            .and_then(|mut statement| {
-                statement.execute(params![
-                    nonce.as_bytes(),
-                    link.account.0.as_bytes(),
-                    link.approver.issuer,
-                    link.approver.subject,
-                    signed(link.approver_generation)?,
-                    link.candidate.issuer,
-                    link.candidate.subject,
-                    signed(link.expires_at)?,
-                    link.completed,
-                ])
-            })
-            .map(|_| ())
-            .map_err(unavailable)
+        block_on(self.0.execute("INSERT OR REPLACE INTO _jazz_host_account_links (nonce, account, approver_issuer, approver_subject, approver_generation, candidate_issuer, candidate_subject, expires_at, completed) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![nonce.as_bytes().as_slice(), link.account.0.as_bytes().as_slice(), link.approver.issuer, link.approver.subject, signed(link.approver_generation)?, link.candidate.issuer, link.candidate.subject, signed(link.expires_at)?, link.completed],
+        )).map(|_| ()).map_err(unavailable)
     }
-
     fn prune_links(&mut self, now: u64) -> Result<(), RegistryError> {
-        self.0
-            .prepare_cached(
-                "DELETE FROM _jazz_host_account_links WHERE completed = 0 AND expires_at <= ?1",
-            )
-            .and_then(|mut statement| statement.execute([signed(now)?]))
-            .map(|_| ())
-            .map_err(unavailable)
+        block_on(self.0.execute(
+            "DELETE FROM _jazz_host_account_links WHERE completed = 0 AND expires_at <= ?1",
+            params![signed(now)?],
+        ))
+        .map(|_| ())
+        .map_err(unavailable)
     }
 }
 
@@ -290,8 +202,8 @@ fn unsigned(value: i64) -> Result<u64, RegistryError> {
     u64::try_from(value).map_err(unavailable)
 }
 
-fn signed(value: u64) -> rusqlite::Result<i64> {
-    i64::try_from(value).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
+fn signed(value: u64) -> Result<i64, RegistryError> {
+    i64::try_from(value).map_err(unavailable)
 }
 
 fn storage_error(error: impl std::fmt::Display) -> jazz::db::Error {
@@ -382,11 +294,12 @@ mod tests {
             store
                 .sql()
                 .unwrap()
-                .read(|conn| {
-                    conn.query_row("SELECT count(*) FROM _jazz_host_account_links", [], |row| {
-                        row.get::<_, i64>(0)
-                    })
-                    .map_err(storage_error)
+                .read(|mut conn| {
+                    block_on(conn.query_one(
+                        "SELECT count(*) FROM _jazz_host_account_links",
+                        &[],
+                        |row| row.get::<i64>(0),
+                    ))
                 })
                 .unwrap()
         };

@@ -319,7 +319,7 @@ impl Fanout {
 
 impl Inner {
     /// Open a subscription: join the group with identical SQL, or start one.
-    pub(super) fn subscribe_member(
+    pub(super) async fn subscribe_member(
         &mut self,
         prepared: &PreparedQuery,
         identity: Option<AuthorSubject>,
@@ -382,17 +382,24 @@ impl Inner {
         let visible = self.visible_read(&read, &tables);
         let applied = cut_of(&visible);
         let run = match &visible {
-            Cow::Borrowed(_) => self.execute(&compiled, &prepared.query.table),
-            Cow::Owned(visible) => self
-                .compile(prepared, identity, visible)
-                .and_then(|compiled| self.execute(&compiled, &prepared.query.table)),
+            Cow::Borrowed(_) => self.execute(&compiled, &prepared.query.table).await,
+            Cow::Owned(visible) => {
+                let compiled = self.compile(prepared, identity, visible)?;
+                self.execute(&compiled, &prepared.query.table).await
+            }
         };
-        let (rows, awaiting) =
-            match run.and_then(|rows| self.nest_relations(prepared, identity, &visible, rows)) {
-                Ok(rows) => (rows, false),
-                Err(error) if crate::large::is_missing(&error) => (Vec::new(), true),
-                Err(error) => return Err(error),
-            };
+        let run = match run {
+            Ok(rows) => {
+                self.nest_relations(prepared, identity, &visible, rows)
+                    .await
+            }
+            Err(error) => Err(error),
+        };
+        let (rows, awaiting) = match run {
+            Ok(rows) => (rows, false),
+            Err(error) if crate::large::is_missing(&error) => (Vec::new(), true),
+            Err(error) => return Err(error),
+        };
         let watches = self.watches(prepared, identity, &read, &compiled)?;
         let root = prepared
             .schema
@@ -447,7 +454,7 @@ impl Inner {
             tables,
             applied,
         }));
-        self.read_keys(&mut handle.borrow_mut());
+        self.read_keys(&mut handle.borrow_mut()).await;
         let weak = Rc::downgrade(&handle);
         self.fan.groups.insert(gid, handle);
         Ok((queue, weak))
@@ -690,7 +697,7 @@ impl Inner {
     }
 
     /// Wake the groups a commit's changed rows hit, re-run and diff them.
-    pub(super) fn dispatch(&mut self, mut changes: Vec<(String, RowUuid, Vec<u8>)>) {
+    pub(super) async fn dispatch(&mut self, mut changes: Vec<(String, RowUuid, Vec<u8>)>) {
         changes.sort();
         changes.dedup();
         // Per woken group: the root rows that woke it, or `None` once any
@@ -740,7 +747,7 @@ impl Inner {
             let Some(columns) = self.fan.key_columns.get(table) else {
                 continue;
             };
-            for image in self.images(table, *row, key, columns) {
+            for image in self.images(table, *row, key, columns).await {
                 for (column, value) in image {
                     if let Some(groups) = self.fan.keys.get(&(table.clone(), column, value)) {
                         wake(groups, table, *row, key);
@@ -778,7 +785,7 @@ impl Inner {
             let mut group = group.borrow_mut();
             // Only include targets changed: the result's rows are as before.
             if ids.as_ref().is_none_or(|ids| !ids.is_empty()) {
-                if self.refresh_group(&mut group, ids.as_ref()) {
+                if self.refresh_group(&mut group, ids.as_ref()).await {
                     self.fan.stats.reran += 1;
                 } else {
                     self.fan.stats.rechecked += 1;
@@ -794,15 +801,15 @@ impl Inner {
     /// they can depend on session values.
     /// The active schema changed: every subscription re-runs and restates
     /// its rows (a reset), since their shape may have changed.
-    pub(super) fn reset_everything(&mut self) {
-        self.refresh_where(|_| true, true);
+    pub(super) async fn reset_everything(&mut self) {
+        self.refresh_where(|_| true, true).await;
     }
 
     /// `author`'s claims changed: re-run only the groups whose policy or
     /// claim operands read them. A group with no policy identity takes its
     /// claims from this node's own author; one with request claims carries
     /// its own and is unaffected.
-    pub(super) fn refresh_identity(&mut self, author: AuthorSubject) {
+    pub(super) async fn refresh_identity(&mut self, author: AuthorSubject) {
         let own = self.identity.author;
         self.refresh_where(
             |group| {
@@ -811,10 +818,11 @@ impl Inner {
                         || (group.identity.is_none() && author == own))
             },
             false,
-        );
+        )
+        .await;
     }
 
-    fn refresh_where(&mut self, affected: impl Fn(&Group) -> bool, reset: bool) {
+    async fn refresh_where(&mut self, affected: impl Fn(&Group) -> bool, reset: bool) {
         let groups: Vec<(u64, Rc<RefCell<Group>>)> = self
             .fan
             .groups
@@ -845,9 +853,9 @@ impl Inner {
             self.fan.index(gid, &watches);
             group.watches = watches;
             if reset {
-                self.reset_group(&mut group);
+                self.reset_group(&mut group).await;
             } else {
-                self.refresh_group(&mut group, None);
+                self.refresh_group(&mut group, None).await;
             }
         }
     }
@@ -856,52 +864,63 @@ impl Inner {
     /// watched key columns of one changed row. "New" covers the row on every
     /// branch: a copy-on-write head row replaces, in a branch view, the base
     /// row a subscription saw, so the base image must wake it too.
-    pub(super) fn images(
+    pub(super) async fn images(
         &self,
         table: &str,
         row: RowUuid,
         key: &[u8],
         columns: &BTreeSet<String>,
     ) -> Vec<Vec<(String, String)>> {
-        let read = |sql: String,
-                    params: &[&dyn rusqlite::ToSql]|
-         -> Vec<(i64, Vec<u8>, Vec<(String, String)>)> {
-            let Ok(mut statement) = self.conn.prepare_cached(&sql) else {
-                return Vec::new();
-            };
+        let read = async |sql: String,
+                          params: &[jazz_sql::Param<'_>]|
+               -> Vec<(i64, Vec<u8>, Vec<(String, String)>)> {
             // Names from the first row: a cached `SELECT *` prepared before
             // its table gained a column names the old columns until a step
             // re-prepares it.
             let mut names: Vec<String> = Vec::new();
-            let rows = statement.query_map(params, |r| {
-                if names.is_empty() {
-                    let statement = r.as_ref();
-                    names = (0..statement.column_count())
-                        .map(|i| statement.column_name(i).map(str::to_owned))
-                        .collect::<Result<_, _>>()?;
-                }
-                let mut seq = 0i64;
-                let mut branch = Vec::new();
-                let mut out = Vec::new();
-                for (i, name) in names.iter().enumerate() {
-                    if name == "_clock" {
-                        seq = r.get(i)?;
-                    } else if name == "_branch" {
-                        branch = r.get(i)?;
-                    } else if columns.contains(name) {
-                        out.push((name.clone(), canon(&r.get::<_, Sql>(i)?)));
+            let mut rows = Vec::new();
+            let _ = self
+                .conn
+                .sql()
+                .query(&sql, params, |r| {
+                    let decoded = (|| -> Result<_, jazz_sql::CellError> {
+                        if names.is_empty() {
+                            names = (0..r.len())
+                                .map(|i| {
+                                    r.column_name(i)
+                                        .map(str::to_owned)
+                                        .ok_or(jazz_sql::CellError("missing SQL column name"))
+                                })
+                                .collect::<Result<_, _>>()?;
+                        }
+                        let mut seq = 0i64;
+                        let mut branch = Vec::new();
+                        let mut out = Vec::new();
+                        for (i, name) in names.iter().enumerate() {
+                            if name == "_clock" {
+                                seq = r.get(i)?;
+                            } else if name == "_branch" {
+                                branch = r.get(i)?;
+                            } else if columns.contains(name) {
+                                out.push((name.clone(), canon(&r.get::<Sql>(i)?)));
+                            }
+                        }
+                        Ok((seq, branch, out))
+                    })();
+                    if let Ok(row) = decoded {
+                        rows.push(row);
                     }
-                }
-                Ok((seq, branch, out))
-            });
-            rows.map(|rows| rows.filter_map(Result::ok).collect())
-                .unwrap_or_default()
+                    Ok(std::ops::ControlFlow::Continue(()))
+                })
+                .await;
+            rows
         };
         let id = row.0.as_bytes().to_vec();
         let current = read(
             format!("SELECT * FROM {} WHERE id = ?1", quote(table)),
-            &[&id],
-        );
+            jazz_sql::params![id],
+        )
+        .await;
         let seq = current
             .iter()
             .find(|(_, branch, _)| branch.as_slice() == key)
@@ -913,8 +932,9 @@ impl Inner {
                 quote(&format!("{table}__h")),
                 crate::values::STATE_AS_SENT
             ),
-            &[&id, &key, &seq],
-        );
+            jazz_sql::params![id, key, seq],
+        )
+        .await;
         current
             .into_iter()
             .chain(old)
@@ -930,7 +950,7 @@ impl Inner {
     /// rows; one that was full and shrank re-runs, since it never held the
     /// rows after it. `None` when the order cannot be compared from the
     /// rows (then the caller re-runs).
-    fn recheck_rows(
+    async fn recheck_rows(
         &self,
         group: &mut Group,
         ids: &BTreeSet<RowUuid>,
@@ -941,7 +961,10 @@ impl Inner {
             if !projected {
                 return None;
             }
-            group.keys = match self.sort_keys(group, &order, projected, &group.rows)? {
+            group.keys = match self
+                .sort_keys(group, &order, projected, &group.rows)
+                .await?
+            {
                 Ok(keys) => keys,
                 Err(error) => return Some(Err(error)),
             };
@@ -968,11 +991,11 @@ impl Inner {
             Ok(compiled) => compiled,
             Err(error) => return Some(Err(error)),
         };
-        let fresh = match self.execute(&narrowed, &group.prepared.query.table) {
+        let fresh = match self.execute(&narrowed, &group.prepared.query.table).await {
             Ok(rows) => rows,
             Err(error) => return Some(Err(error)),
         };
-        let fresh_keys = match self.sort_keys(group, &order, projected, &fresh)? {
+        let fresh_keys = match self.sort_keys(group, &order, projected, &fresh).await? {
             Ok(keys) => keys,
             Err(error) => return Some(Err(error)),
         };
@@ -1115,7 +1138,7 @@ impl Inner {
     /// The sort keys of `rows` in the query's order (ties broken by id):
     /// from their cells when every order column is projected, else read
     /// back by id. `None` when a value cannot be compared from SQL.
-    fn sort_keys(
+    async fn sort_keys(
         &self,
         group: &Group,
         order: &[crate::query::OrderBy],
@@ -1206,19 +1229,19 @@ impl Inner {
             quote(&table.stored)
         );
         let ids = crate::compile::json_ids(rows.iter().map(|row| row.id.0.as_bytes().as_slice()));
-        let read = || -> rusqlite::Result<HashMap<Vec<u8>, Vec<Sql>>> {
-            let mut statement = self.conn.prepare_cached(&sql)?;
-            let found = statement.query_map([&ids], |r| {
+        let found = self
+            .conn
+            .sql()
+            .query_rows(&sql, jazz_sql::params![ids], |r| {
                 let id: Vec<u8> = r.get(0)?;
                 let values = (1..=order.len())
-                    .map(|i| r.get::<_, Sql>(i))
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                    .map(|i| r.get::<Sql>(i))
+                    .collect::<Result<Vec<_>, _>>()?;
                 Ok((id, values))
-            })?;
-            found.collect()
-        };
-        let mut found = match read() {
-            Ok(found) => found,
+            })
+            .await;
+        let mut found: HashMap<_, _> = match found {
+            Ok(found) => found.into_iter().collect(),
             Err(error) => return Some(Err(storage(error))),
         };
         let mut keys = Vec::with_capacity(rows.len());
@@ -1243,32 +1266,33 @@ impl Inner {
     }
 
     /// Re-run every result that waited for large-value chunks.
-    pub(super) fn retry_awaiting(&self) {
+    pub(super) async fn retry_awaiting(&self) {
         for handle in self.fan.groups.values() {
             let mut group = handle.borrow_mut();
             if !group.awaiting {
                 continue;
             }
             if group.opened {
-                self.refresh_group(&mut group, None);
+                self.refresh_group(&mut group, None).await;
             } else {
-                self.reset_group(&mut group);
+                self.reset_group(&mut group).await;
             }
         }
     }
 
     /// A group's rows, with array relations nested in their cells.
-    fn group_rows(&self, group: &mut Group) -> Result<Vec<CurrentRow>, Error> {
+    async fn group_rows(&self, group: &mut Group) -> Result<Vec<CurrentRow>, Error> {
         let read = self.visible_read(&group.read, &group.tables);
         group.applied = cut_of(&read);
-        let rows = self.run(&group.prepared, group.identity, &read)?;
+        let rows = self.run(&group.prepared, group.identity, &read).await?;
         self.nest_relations(&group.prepared, group.identity, &read, rows)
+            .await
     }
 
     /// Re-run the live results whose cut moved: their read's settle rose,
     /// the connection's position did, or an own commit was accepted past
     /// them.
-    pub(super) fn refresh_visibility(&mut self) -> Result<(), Error> {
+    pub(super) async fn refresh_visibility(&mut self) -> Result<(), Error> {
         let groups: Vec<Rc<RefCell<Group>>> = self.fan.groups.values().cloned().collect();
         for group in groups {
             let mut group = group.borrow_mut();
@@ -1277,13 +1301,13 @@ impl Inner {
             {
                 continue;
             }
-            self.refresh_group(&mut group, None);
+            self.refresh_group(&mut group, None).await;
         }
         Ok(())
     }
 
-    fn reset_group(&self, group: &mut Group) {
-        match self.group_rows(group) {
+    async fn reset_group(&self, group: &mut Group) {
+        match self.group_rows(group).await {
             Err(error) if crate::large::is_missing(&error) => group.awaiting = true,
             Ok(rows) => {
                 group.awaiting = false;
@@ -1315,7 +1339,7 @@ impl Inner {
                 group.push(opening(&rows));
                 group.rows = rows;
                 group.keys.clear();
-                self.read_keys(group);
+                self.read_keys(group).await;
             }
             Err(error) => group.push(SubscriptionEvent::Rejected {
                 code: error.code,
@@ -1355,7 +1379,7 @@ impl Inner {
     /// the version the result showed (`prior`). A change that cannot be
     /// computed here (a version no longer held, chunks still to arrive) is
     /// left out, and the reader takes the column whole.
-    fn add_splices(
+    async fn add_splices(
         &self,
         group: &Group,
         prior: &HashMap<RowUuid, CurrentRow>,
@@ -1407,14 +1431,17 @@ impl Inner {
                     .schema
                     .as_ref()
                     .map_or(&*self.owner, |schema| schema.policy_schema());
-                if let Ok(splices) = self.value_delta(
-                    &group.prepared.query.table,
-                    out.row.id,
-                    column,
-                    (from, to),
-                    group.identity,
-                    policies,
-                ) {
+                if let Ok(splices) = self
+                    .value_delta(
+                        &group.prepared.query.table,
+                        out.row.id,
+                        column,
+                        (from, to),
+                        group.identity,
+                        policies,
+                    )
+                    .await
+                {
                     out.splices.push((column.clone(), splices));
                 }
             }
@@ -1422,7 +1449,7 @@ impl Inner {
     }
 
     /// Bring a group's result up to date; true when it re-ran the query.
-    fn refresh_group(&self, group: &mut Group, ids: Option<&BTreeSet<RowUuid>>) -> bool {
+    async fn refresh_group(&self, group: &mut Group, ids: Option<&BTreeSet<RowUuid>>) -> bool {
         // The versions the result showed, which splices start from.
         let prior: HashMap<RowUuid, CurrentRow> = if group.key.splices.is_empty() {
             HashMap::new()
@@ -1430,9 +1457,9 @@ impl Inner {
             group.rows.iter().map(|row| (row.id, row.clone())).collect()
         };
         if let Some(ids) = ids.filter(|_| group.recheck) {
-            match self.recheck_rows(group, ids) {
+            match self.recheck_rows(group, ids).await {
                 Some(Ok(Some(mut event))) => {
-                    self.add_splices(group, &prior, &mut event);
+                    self.add_splices(group, &prior, &mut event).await;
                     group.push(event);
                     return false;
                 }
@@ -1450,7 +1477,7 @@ impl Inner {
                 None => {}
             }
         }
-        let rows = match self.group_rows(group) {
+        let rows = match self.group_rows(group).await {
             Ok(rows) => rows,
             Err(error) if crate::large::is_missing(&error) => {
                 group.awaiting = true;
@@ -1468,7 +1495,7 @@ impl Inner {
         };
         let was_awaiting = std::mem::take(&mut group.awaiting);
         if let Some(mut event) = diff(&group.rows, &rows) {
-            self.add_splices(group, &prior, &mut event);
+            self.add_splices(group, &prior, &mut event).await;
             group.push(event);
         } else if was_awaiting {
             // Settlement withheld while waiting is published now.
@@ -1478,18 +1505,18 @@ impl Inner {
         // did: read them again with the rows.
         group.rows = rows;
         group.keys.clear();
-        self.read_keys(group);
+        self.read_keys(group).await;
         true
     }
 
     /// Reads the sort keys of a re-checkable group whose order is not
     /// shown, so they describe its rows as read (not after a later write).
-    fn read_keys(&self, group: &mut Group) {
+    async fn read_keys(&self, group: &mut Group) {
         if !group.recheck || group.projected {
             return;
         }
         let order = group.prepared.query.order_by.clone();
-        if let Some(Ok(keys)) = self.sort_keys(group, &order, false, &group.rows) {
+        if let Some(Ok(keys)) = self.sort_keys(group, &order, false, &group.rows).await {
             group.keys = keys;
         }
     }

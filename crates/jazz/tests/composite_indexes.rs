@@ -320,7 +320,7 @@ fn assert_page_uses_composite_index(db: &Db, owner: &str) {
                 .limit(2),
         )
         .unwrap();
-    let (_, plan) = db.explain_query_plan(&page, None).unwrap();
+    let (_, plan) = jazz::db::block_on(db.explain_query_plan(&page, None)).unwrap();
     assert!(unhashed(&plan).contains("tasks__ix(owner,rank)"), "{plan}");
     assert!(!plan.contains("TEMP B-TREE FOR ORDER BY"), "{plan}");
 }
@@ -616,7 +616,7 @@ fn composite_indexes_can_order_by_provenance_timestamps() {
                     .limit(3),
             )
             .unwrap();
-        let (_, plan) = db.explain_query_plan(&page, None).unwrap();
+        let (_, plan) = jazz::db::block_on(db.explain_query_plan(&page, None)).unwrap();
         assert!(plan.contains("tasks__ix"), "{stamp}: {plan}");
         assert!(
             !plan.contains("TEMP B-TREE FOR ORDER BY"),
@@ -670,15 +670,15 @@ fn composite_indexes_subsume_their_prefixes_and_id_reads_seek_by_id() {
     }
     let ada =
         || Query::from("tasks").filter(eq(col("owner"), lit(Value::String("ada".to_owned()))));
-    let (_, plan) = db
-        .explain_query_plan(&db.prepare_query(&ada()).unwrap(), None)
-        .unwrap();
+    let (_, plan) =
+        jazz::db::block_on(db.explain_query_plan(&db.prepare_query(&ada()).unwrap(), None))
+            .unwrap();
     assert!(unhashed(&plan).contains("tasks__ix(owner,rank)"), "{plan}");
 
     let point = db
         .prepare_query(&ada().filter(eq(col("id"), lit(Value::Uuid(row(5).0)))))
         .unwrap();
-    let (_, plan) = db.explain_query_plan(&point, None).unwrap();
+    let (_, plan) = jazz::db::block_on(db.explain_query_plan(&point, None)).unwrap();
     assert!(plan.contains("(id=? AND _branch=?)"), "{plan}");
     let rows = block_on(db.all(&point, ReadOpts::default())).unwrap();
     assert_eq!(rows.len(), 1);

@@ -1,6 +1,6 @@
 //! Validate a complete deployment before publishing its artifacts and activating it.
 use super::{ServerRuntimeHandle, ServerState, catalogue::DeploymentResponse};
-use crate::runtime::{CatalogueApplyError, StorageConfig};
+use crate::runtime::CatalogueApplyError;
 use axum::http::StatusCode;
 use jazz::schema::JazzSchema;
 use jazz::tools::deployment::published::{PublishMigrationRequest, lower_migration};
@@ -210,9 +210,15 @@ pub(crate) async fn deploy(
             // starts as empty as the scratch one, so the same change
             // applies there; only a storage failure can still fail it, and
             // then leaves an empty store that the next deployment reuses.
-            let probe =
-                ServerRuntimeHandle::start_with_storage(genesis.clone(), StorageConfig::InMemory)
-                    .map_err(DeployError::internal)?;
+            let probe = ServerRuntimeHandle::start_with_storage(
+                genesis.clone(),
+                state
+                    .store
+                    .as_ref()
+                    .ok_or_else(|| DeployError::internal("server store unavailable"))?
+                    .scratch_storage(),
+            )
+            .map_err(DeployError::internal)?;
             let applied = match change(&probe, &prepared, staged.put.clone()).await {
                 Ok(change) => probe
                     .apply_catalogue(change, None)

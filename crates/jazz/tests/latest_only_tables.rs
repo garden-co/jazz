@@ -73,7 +73,7 @@ fn open_with(node: u8, path: &Path, schema: JazzSchema) -> Db {
 
 fn authority_at(path: &Path) -> Db {
     let db = open_at(0, path);
-    db.set_authority();
+    jazz::db::block_on(db.set_authority());
     db
 }
 
@@ -100,15 +100,14 @@ fn link(client: &Db, server: &Db) -> jazz::db::Upstream {
         out: up.clone(),
         inbound: down.clone(),
     })));
-    server
-        .accept_subscriber(
-            Box::new(Pipe {
-                out: down,
-                inbound: up,
-            }),
-            AuthorSubject::SYSTEM,
-        )
-        .unwrap();
+    jazz::db::block_on(server.accept_subscriber(
+        Box::new(Pipe {
+            out: down,
+            inbound: up,
+        }),
+        AuthorSubject::SYSTEM,
+    ))
+    .unwrap();
     link
 }
 
@@ -231,7 +230,7 @@ fn each_write_prunes_by_the_version_its_writer_runs() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("authority.sqlite");
     let server = open_with(0, &path, schema_with(false));
-    server.set_authority();
+    jazz::db::block_on(server.set_authority());
     block_on(server.admit_schema_with_lenses(schema(), &[])).unwrap();
     let lena = open_with(1, &dir.path().join("lena.sqlite"), schema());
     let fran = open_with(2, &dir.path().join("fran.sqlite"), schema_with(false));
@@ -274,7 +273,7 @@ fn each_write_prunes_by_the_version_its_writer_runs() {
     );
     drop(server);
     let server = open_with(0, &path, schema_with(false));
-    server.set_authority();
+    jazz::db::block_on(server.set_authority());
     update(&server, "presence", row(1), "a", "9");
     drop(server);
     assert_eq!(history_rows(&path, "presence"), 6);
@@ -437,7 +436,7 @@ fn a_write_to_a_latest_only_table_is_never_maybe_conflicting() {
         update(&alice, table, row(1), "a", "alice");
         pump(&server, &[&alice, &bob]);
 
-        let conflicts = server.write_conflicts(table, row(1), None).unwrap();
+        let conflicts = jazz::db::block_on(server.write_conflicts(table, row(1), None)).unwrap();
         let last = conflicts.last().unwrap();
         assert_eq!(last.maybe_conflicting, expected, "{table}: {conflicts:?}");
         assert_eq!(read(&server, table, None), [("a".into(), "alice".into())]);
@@ -573,15 +572,14 @@ fn lossy_link(
         out: up.clone(),
         inbound: down.clone(),
     })));
-    server
-        .accept_subscriber(
-            Box::new(Pipe {
-                out: down.clone(),
-                inbound: up,
-            }),
-            AuthorSubject::SYSTEM,
-        )
-        .unwrap();
+    jazz::db::block_on(server.accept_subscriber(
+        Box::new(Pipe {
+            out: down.clone(),
+            inbound: up,
+        }),
+        AuthorSubject::SYSTEM,
+    ))
+    .unwrap();
     (link, down)
 }
 
@@ -788,7 +786,7 @@ fn a_late_cross_shard_part_is_applied_not_taken_for_a_dropped_resend() {
         FileOptions::default(),
     ))
     .unwrap();
-    shard.set_authority();
+    jazz::db::block_on(shard.set_authority());
     assert!(shard.shard().is_shard());
     let alice = open_at(1, &dir.path().join("alice.sqlite"));
     let up = Rc::new(RefCell::new(VecDeque::new()));
@@ -797,15 +795,14 @@ fn a_late_cross_shard_part_is_applied_not_taken_for_a_dropped_resend() {
         out: up.clone(),
         inbound: down.clone(),
     })));
-    shard
-        .accept_subscriber(
-            Box::new(Pipe {
-                out: down,
-                inbound: up.clone(),
-            }),
-            AuthorSubject::SYSTEM,
-        )
-        .unwrap();
+    jazz::db::block_on(shard.accept_subscriber(
+        Box::new(Pipe {
+            out: down,
+            inbound: up.clone(),
+        }),
+        AuthorSubject::SYSTEM,
+    ))
+    .unwrap();
     insert(&alice, "presence", row(1), "a", "0");
     pump(&shard, &[&alice]);
 
@@ -822,8 +819,8 @@ fn a_late_cross_shard_part_is_applied_not_taken_for_a_dropped_resend() {
         unreachable!()
     };
     let part = jazz::db::shard::CommitRef::from(id);
-    let held = shard.shard().hold(part, &[]).unwrap();
-    shard.shard().fix(part, held).unwrap();
+    let held = jazz::db::block_on(shard.shard().hold(part, &[])).unwrap();
+    jazz::db::block_on(shard.shard().fix(part, held)).unwrap();
 
     for step in 1..3 {
         update(&alice, "presence", row(1), "a", &step.to_string());

@@ -19,75 +19,160 @@
 //! [`FileOptions::synchronous_full`]: crate::db::FileOptions::synchronous_full
 //! [`Db`]: crate::db::Db
 
-use std::path::{Path, PathBuf};
+#[cfg(feature = "native")]
+use std::path::Path;
+use std::path::PathBuf;
+#[cfg(feature = "native")]
 use std::sync::Mutex;
+#[cfg(feature = "native")]
 use std::time::Duration;
 
-use rusqlite::{Connection, OptionalExtension, params};
+#[cfg(feature = "native")]
+use rusqlite::Connection;
+#[cfg(any(test, feature = "testing"))]
+#[cfg(feature = "native")]
+use rusqlite::params;
 
 use crate::catalogue::{CataloguePut, CatalogueRows};
-use crate::db::{Db, FileOptions, Journal};
-use crate::options::{Error, ErrorCode};
-use crate::values::{in_savepoint, storage};
+use crate::db::Db;
+#[cfg(feature = "native")]
+use crate::db::{FileOptions, Journal};
+use crate::options::Error;
+#[cfg(feature = "native")]
+use crate::options::ErrorCode;
+#[cfg(feature = "native")]
+use crate::values::in_savepoint;
+#[cfg(feature = "native")]
+use crate::values::storage;
 
-/// One host table: `_jazz_host_<name>`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub struct HostTable(&'static str);
+#[cfg(not(any(test, feature = "testing")))]
+#[cfg(feature = "native")]
+type NativeConnectionSql<'a> = jazz_sql::native::Native<'a>;
+#[cfg(any(test, feature = "testing"))]
+#[cfg(feature = "native")]
+type NativeConnectionSql<'a> = crate::sql_test::ObservedSql<'a>;
 
-impl HostTable {
-    /// `name` is lowercase ASCII letters, digits and `_`.
-    pub const fn new(name: &'static str) -> Self {
-        let bytes = name.as_bytes();
-        assert!(!bytes.is_empty(), "host table name is empty");
-        let mut i = 0;
-        while i < bytes.len() {
-            let b = bytes[i];
-            assert!(
-                b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_',
-                "host table names are lowercase ASCII letters, digits and _"
-            );
-            i += 1;
+#[cfg(feature = "native")]
+pub(crate) struct OwnedConnection {
+    conn: Connection,
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) sql_suspensions: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
+}
+
+#[cfg(feature = "native")]
+impl From<Connection> for OwnedConnection {
+    fn from(conn: Connection) -> Self {
+        Self {
+            conn,
+            #[cfg(any(test, feature = "testing"))]
+            sql_suspensions: None,
         }
-        Self(name)
-    }
-
-    /// The SQLite table's name.
-    pub fn sql_name(self) -> String {
-        format!("_jazz_host_{}", self.0)
     }
 }
+
+#[cfg(feature = "native")]
+impl std::ops::Deref for OwnedConnection {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        &self.conn
+    }
+}
+
+#[cfg(feature = "native")]
+impl std::ops::DerefMut for OwnedConnection {
+    fn deref_mut(&mut self) -> &mut Connection {
+        &mut self.conn
+    }
+}
+
+#[cfg(feature = "native")]
+impl OwnedConnection {
+    pub(crate) fn sql(&self) -> NativeConnectionSql<'_> {
+        #[cfg(not(any(test, feature = "testing")))]
+        {
+            jazz_sql::native::Native(&self.conn)
+        }
+        #[cfg(any(test, feature = "testing"))]
+        {
+            crate::sql_test::ObservedSql {
+                native: jazz_sql::native::Native(&self.conn),
+                suspensions: self.sql_suspensions.as_deref(),
+            }
+        }
+    }
+}
+
+pub use crate::backend::ConnectionSql;
+pub(crate) use crate::backend::DbConnection;
+
+#[cfg(feature = "native")]
+impl crate::values::TransactionConnection for OwnedConnection {
+    fn transaction_open(&self) -> bool {
+        use jazz_sql::Connection as _;
+        self.sql().transaction_open()
+    }
+    async fn transaction_sql(&self, sql: &str) -> Result<(), Error> {
+        use jazz_sql::Sql as _;
+        self.sql().execute_script(sql).await.map_err(storage)
+    }
+    fn abandon_savepoint(&self, name: &str) {
+        let _ = crate::values::end_savepoint_inline(self, name, false);
+    }
+}
+#[cfg(feature = "native")]
+impl crate::values::NativeTransactionConnection for OwnedConnection {
+    fn sqlite(&self) -> &Connection {
+        self
+    }
+}
+
+/// One host table: `_jazz_host_<name>`.
+pub use jazz_sql::HostTable;
 
 /// An ordered key-value pair.
 pub type HostPair = (Vec<u8>, Vec<u8>);
 
 /// Reads and writes of host tables, on whatever holds the store's
 /// connection.
+#[allow(async_fn_in_trait)]
 pub trait HostTables {
+    /// Execute one complete host operation, optionally in a write savepoint.
+    /// The callback runs only on the connection's owner lane.
+    async fn with_sql<T>(
+        &self,
+        write: bool,
+        f: impl FnOnce(crate::backend::ConnectionSql<'_>) -> Result<T, Error>,
+    ) -> Result<T, Error>;
+
     /// The value at `key`.
-    fn host_get(&self, table: HostTable, key: &[u8]) -> Result<Option<Vec<u8>>, Error>;
+    async fn host_get(&self, table: HostTable, key: &[u8]) -> Result<Option<Vec<u8>>, Error>;
     /// Every pair whose key starts with `prefix`, in key order.
-    fn host_prefix(&self, table: HostTable, prefix: &[u8]) -> Result<Vec<HostPair>, Error>;
+    async fn host_prefix(&self, table: HostTable, prefix: &[u8]) -> Result<Vec<HostPair>, Error>;
     /// Write every pair (replacing what is there) in one commit: all or none.
-    fn host_put_many(&self, table: HostTable, pairs: &[HostPair]) -> Result<(), Error>;
+    async fn host_put_many(&self, table: HostTable, pairs: &[HostPair]) -> Result<(), Error>;
     /// Write `value` unless `key` exists; returns the existing value if so.
-    fn host_put_if_absent(
+    async fn host_put_if_absent(
         &self,
         table: HostTable,
         key: &[u8],
         value: &[u8],
     ) -> Result<Option<Vec<u8>>, Error>;
     /// Remove `key`.
-    fn host_delete(&self, table: HostTable, key: &[u8]) -> Result<(), Error>;
+    async fn host_delete(&self, table: HostTable, key: &[u8]) -> Result<(), Error>;
     /// The store's catalogue (see [`crate::catalogue`]).
-    fn catalogue(&self) -> Result<CatalogueRows, Error>;
+    async fn catalogue(&self) -> Result<CatalogueRows, Error>;
     /// Publish `put` into the store's catalogue in one commit: all or none.
-    fn catalogue_put(&self, put: &CataloguePut) -> Result<(), Error>;
+    async fn catalogue_put(&self, put: &CataloguePut) -> Result<(), Error>;
     /// Run `f` on the store's connection inside one `host_write` savepoint:
     /// what it wrote commits when it returns `Ok`, nothing does otherwise.
     /// For host tables with columns of their own (`_jazz_host_<name>`,
     /// created by `f` itself), which plain key-value pairs would hide from
     /// SQL.
-    fn host_sql(&self, f: &mut dyn FnMut(&Connection) -> Result<(), Error>) -> Result<(), Error>;
+    #[cfg(feature = "native")]
+    async fn host_sql(
+        &self,
+        f: &mut dyn FnMut(&Connection) -> Result<(), Error>,
+    ) -> Result<(), Error>;
 }
 
 /// Turn on SQLite's query planner stability guarantee
@@ -102,6 +187,7 @@ pub trait HostTables {
 /// (thousands of reprepares per write on a busy client). The engine never
 /// runs `ANALYZE`, uses no `LIKE` on bound patterns and no partial indexes,
 /// so the guarantee costs no plan it would otherwise pick.
+#[cfg(feature = "native")]
 pub(crate) fn stable_plans(conn: &Connection) -> Result<(), Error> {
     conn.set_db_config(
         rusqlite::config::DbConfig::SQLITE_DBCONFIG_ENABLE_QPSG,
@@ -114,14 +200,33 @@ pub(crate) fn stable_plans(conn: &Connection) -> Result<(), Error> {
 /// A store's file opened and admitted, before a [`Db`] is opened on it:
 /// [`StoreFile::open`] then [`Db::open_file`] is [`Db::open_at`].
 pub struct StoreFile {
-    pub(crate) conn: Connection,
+    pub(crate) conn: DbConnection,
     pub(crate) path: Option<(PathBuf, Option<&'static str>)>,
 }
 
 impl StoreFile {
+    async fn with_connection<T>(
+        &self,
+        f: impl AsyncFnOnce(&DbConnection) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        f(&self.conn).await
+    }
+
+    /// Admit an exclusively owned worker before schema/catalogue initialization.
+    pub async fn worker(worker: impl crate::backend::WorkerSql + 'static) -> Result<Self, Error> {
+        let conn = DbConnection::worker(worker);
+        crate::format::admit(&mut conn.sql()).await?;
+        Ok(Self { conn, path: None })
+    }
+    /// Wait for the worker to drain and close before releasing its actor generation.
+    pub async fn close_worker(&self) -> Result<(), Error> {
+        self.conn.close_worker().await
+    }
+
     /// Open (creating) the file at `path` with `options`, and admit its
     /// storage format (see [`crate::format`]); a refused file is left as it
     /// was.
+    #[cfg(feature = "native")]
     pub fn open(path: &Path, options: FileOptions) -> Result<Self, Error> {
         // SQLite cannot open a directory; one the Groove engine wrote gets
         // the typed refusal.
@@ -156,7 +261,7 @@ impl StoreFile {
         }
         // Before the journal mode, which rewrites the header: a refused file
         // is left as it was.
-        crate::format::admit(&conn)?;
+        jazz_sql::inline(crate::format::admit(&mut NativeSql(&conn)))?;
         // `journal_mode` answers with a row, so it is queried, not batched.
         let mode: String = conn
             .query_row(&format!("PRAGMA journal_mode = {journal}"), [], |r| {
@@ -175,26 +280,34 @@ impl StoreFile {
         ))
         .map_err(storage)?;
         Ok(Self {
-            conn,
+            conn: conn.into(),
             path: Some((path.to_path_buf(), options.vfs)),
         })
     }
 
     /// A store that lives only as long as what is opened on it.
+    #[cfg(feature = "native")]
     pub fn memory() -> Result<Self, Error> {
         let conn = Connection::open_in_memory().map_err(storage)?;
-        crate::format::admit(&conn)?;
-        Ok(Self { conn, path: None })
+        jazz_sql::inline(crate::format::admit(&mut NativeSql(&conn)))?;
+        Ok(Self {
+            conn: conn.into(),
+            path: None,
+        })
     }
 
     /// An in-memory store this process shares by `name`: it lives while any
     /// connection to it is open, so a host keeping one can reopen the store
     /// (or read it with a [`HostReader`]) without losing it.
+    #[cfg(feature = "native")]
     pub fn shared_memory(name: &str) -> Result<Self, Error> {
         let conn =
             Connection::open_with_flags(shared_memory_uri(name), uri_flags()).map_err(storage)?;
-        crate::format::admit(&conn)?;
-        Ok(Self { conn, path: None })
+        jazz_sql::inline(crate::format::admit(&mut NativeSql(&conn)))?;
+        Ok(Self {
+            conn: conn.into(),
+            path: None,
+        })
     }
 }
 
@@ -202,12 +315,23 @@ impl StoreFile {
 /// another thread never waits for work on the store's connection (a WAL
 /// file serves readers beside its writer). It sees every write that
 /// returned before the read began.
+#[cfg(feature = "native")]
 pub struct HostReader {
     conn: Mutex<Option<Connection>>,
 }
 
+#[cfg(feature = "native")]
 impl HostReader {
+    /// Read through the portable SQL interface on the native read-only connection.
+    pub fn with_sql<T>(
+        &self,
+        f: impl FnOnce(crate::backend::ConnectionSql<'_>) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        self.read(|conn| f(crate::backend::ConnectionSql::reader(conn)))
+    }
+
     /// Read the file at `path`, which a [`StoreFile`] opened already.
+    #[cfg(feature = "native")]
     pub fn open(path: &Path, vfs: Option<&'static str>) -> Result<Self, Error> {
         let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
             | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX
@@ -221,6 +345,7 @@ impl HostReader {
     }
 
     /// Read the store [`StoreFile::shared_memory`] opened by `name`.
+    #[cfg(feature = "native")]
     pub fn shared_memory(name: &str) -> Result<Self, Error> {
         Self::with(
             Connection::open_with_flags(shared_memory_uri(name), uri_flags()).map_err(storage)?,
@@ -249,17 +374,17 @@ impl HostReader {
 
     /// The value at `key`.
     pub fn get(&self, table: HostTable, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {
-        self.read(|conn| get(conn, table, key))
+        self.read(|conn| jazz_sql::inline(get(conn, table, key)))
     }
 
     /// Every pair whose key starts with `prefix`, in key order.
     pub fn prefix(&self, table: HostTable, prefix: &[u8]) -> Result<Vec<HostPair>, Error> {
-        self.read(|conn| prefix_scan(conn, table, prefix))
+        self.read(|conn| jazz_sql::inline(prefix_scan(conn, table, prefix)))
     }
 
     /// The store's catalogue as committed (see [`crate::catalogue`]).
     pub fn catalogue(&self) -> Result<CatalogueRows, Error> {
-        self.read(crate::catalogue::read)
+        self.read(|conn| jazz_sql::inline(crate::catalogue::read(&mut NativeSql(conn))))
     }
 
     /// Run `f` on the read-only connection, for host tables that
@@ -281,98 +406,212 @@ impl HostReader {
 
 /// SQLite's `memdb` VFS shares a database whose name starts with `/`
 /// between the process's connections.
+#[cfg(feature = "native")]
 fn shared_memory_uri(name: &str) -> String {
     format!("file:/{name}?vfs=memdb")
 }
 
+#[cfg(feature = "native")]
 fn uri_flags() -> rusqlite::OpenFlags {
     rusqlite::OpenFlags::default() | rusqlite::OpenFlags::SQLITE_OPEN_URI
 }
 
 impl HostTables for StoreFile {
-    fn host_get(&self, table: HostTable, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {
-        get(&self.conn, table, key)
+    async fn with_sql<T>(
+        &self,
+        write: bool,
+        f: impl FnOnce(crate::backend::ConnectionSql<'_>) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        self.with_connection(async |conn| {
+            if write {
+                crate::values::in_savepoint_async(conn, "host_write", async || f(conn.sql())).await
+            } else {
+                f(conn.sql())
+            }
+        })
+        .await
     }
 
-    fn host_prefix(&self, table: HostTable, prefix: &[u8]) -> Result<Vec<HostPair>, Error> {
-        prefix_scan(&self.conn, table, prefix)
+    async fn host_get(&self, table: HostTable, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {
+        self.with_connection(async |conn| jazz_sql::get(&mut conn.sql(), table, key).await)
+            .await
     }
 
-    fn host_put_many(&self, table: HostTable, pairs: &[HostPair]) -> Result<(), Error> {
-        put_many(&self.conn, table, pairs)
+    async fn host_prefix(&self, table: HostTable, prefix: &[u8]) -> Result<Vec<HostPair>, Error> {
+        self.with_connection(async |conn| jazz_sql::prefix(&mut conn.sql(), table, prefix).await)
+            .await
     }
 
-    fn host_put_if_absent(
+    async fn host_put_many(&self, table: HostTable, pairs: &[HostPair]) -> Result<(), Error> {
+        self.with_connection(async |conn| {
+            crate::values::in_savepoint_async(conn, "host_write", async || {
+                jazz_sql::put_many_in_transaction(&mut conn.sql(), table, pairs).await
+            })
+            .await
+        })
+        .await
+    }
+
+    async fn host_put_if_absent(
         &self,
         table: HostTable,
         key: &[u8],
         value: &[u8],
     ) -> Result<Option<Vec<u8>>, Error> {
-        put_if_absent(&self.conn, table, key, value)
-    }
-
-    fn host_delete(&self, table: HostTable, key: &[u8]) -> Result<(), Error> {
-        delete(&self.conn, table, key)
-    }
-
-    fn catalogue(&self) -> Result<CatalogueRows, Error> {
-        crate::catalogue::read(&self.conn)
-    }
-
-    fn catalogue_put(&self, put: &CataloguePut) -> Result<(), Error> {
-        in_savepoint(&self.conn, "host_write", || {
-            crate::catalogue::put(&self.conn, put)
+        self.with_connection(async |conn| {
+            crate::values::in_savepoint_async(conn, "host_write", async || {
+                jazz_sql::put_if_absent_in_transaction(&mut conn.sql(), table, key, value).await
+            })
+            .await
         })
+        .await
     }
 
-    fn host_sql(&self, f: &mut dyn FnMut(&Connection) -> Result<(), Error>) -> Result<(), Error> {
-        in_savepoint(&self.conn, "host_write", || f(&self.conn))
+    async fn host_delete(&self, table: HostTable, key: &[u8]) -> Result<(), Error> {
+        self.with_connection(async |conn| jazz_sql::delete(&mut conn.sql(), table, key).await)
+            .await
+    }
+
+    async fn catalogue(&self) -> Result<CatalogueRows, Error> {
+        self.with_connection(async |conn| crate::catalogue::read(&mut conn.sql()).await)
+            .await
+    }
+
+    async fn catalogue_put(&self, put: &CataloguePut) -> Result<(), Error> {
+        self.with_connection(async |conn| {
+            crate::values::in_savepoint_async(conn, "host_write", async || {
+                crate::catalogue::put(&mut conn.sql(), put).await
+            })
+            .await
+        })
+        .await
+    }
+
+    #[cfg(feature = "native")]
+    async fn host_sql(
+        &self,
+        f: &mut dyn FnMut(&Connection) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        self.with_connection(async |conn| {
+            let native = conn.native()?;
+            in_savepoint(conn, "host_write", || f(native))
+        })
+        .await
     }
 }
 
 impl HostTables for Db {
-    fn host_get(&self, table: HostTable, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {
-        self.with_host_connection(|conn| get(conn, table, key))
+    async fn with_sql<T>(
+        &self,
+        write: bool,
+        f: impl FnOnce(crate::backend::ConnectionSql<'_>) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        self.with_host_connection(async |conn| {
+            if write {
+                crate::values::in_savepoint_async(conn, "host_write", async || f(conn.sql())).await
+            } else {
+                f(conn.sql())
+            }
+        })
+        .await
     }
 
-    fn host_prefix(&self, table: HostTable, prefix: &[u8]) -> Result<Vec<HostPair>, Error> {
-        self.with_host_connection(|conn| prefix_scan(conn, table, prefix))
+    async fn host_get(&self, table: HostTable, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {
+        self.with_host_connection(async |conn| jazz_sql::get(&mut conn.sql(), table, key).await)
+            .await
     }
 
-    fn host_put_many(&self, table: HostTable, pairs: &[HostPair]) -> Result<(), Error> {
-        self.with_host_connection(|conn| put_many(conn, table, pairs))
+    async fn host_prefix(&self, table: HostTable, prefix: &[u8]) -> Result<Vec<HostPair>, Error> {
+        self.with_host_connection(async |conn| {
+            jazz_sql::prefix(&mut conn.sql(), table, prefix).await
+        })
+        .await
     }
 
-    fn host_put_if_absent(
+    async fn host_put_many(&self, table: HostTable, pairs: &[HostPair]) -> Result<(), Error> {
+        self.with_host_connection(async |conn| {
+            crate::values::in_savepoint_async(conn, "host_write", async || {
+                jazz_sql::put_many_in_transaction(&mut conn.sql(), table, pairs).await
+            })
+            .await
+        })
+        .await
+    }
+
+    async fn host_put_if_absent(
         &self,
         table: HostTable,
         key: &[u8],
         value: &[u8],
     ) -> Result<Option<Vec<u8>>, Error> {
-        self.with_host_connection(|conn| put_if_absent(conn, table, key, value))
-    }
-
-    fn host_delete(&self, table: HostTable, key: &[u8]) -> Result<(), Error> {
-        self.with_host_connection(|conn| delete(conn, table, key))
-    }
-
-    fn catalogue(&self) -> Result<CatalogueRows, Error> {
-        self.with_host_connection(crate::catalogue::read)
-    }
-
-    fn catalogue_put(&self, put: &CataloguePut) -> Result<(), Error> {
-        self.with_host_connection(|conn| {
-            in_savepoint(conn, "host_write", || crate::catalogue::put(conn, put))
+        self.with_host_connection(async |conn| {
+            crate::values::in_savepoint_async(conn, "host_write", async || {
+                jazz_sql::put_if_absent_in_transaction(&mut conn.sql(), table, key, value).await
+            })
+            .await
         })
+        .await
     }
 
-    fn host_sql(&self, f: &mut dyn FnMut(&Connection) -> Result<(), Error>) -> Result<(), Error> {
-        self.with_host_connection(|conn| in_savepoint(conn, "host_write", || f(conn)))
+    async fn host_delete(&self, table: HostTable, key: &[u8]) -> Result<(), Error> {
+        self.with_host_connection(async |conn| jazz_sql::delete(&mut conn.sql(), table, key).await)
+            .await
+    }
+
+    async fn catalogue(&self) -> Result<CatalogueRows, Error> {
+        self.with_host_connection(async |conn| crate::catalogue::read(&mut conn.sql()).await)
+            .await
+    }
+
+    async fn catalogue_put(&self, put: &CataloguePut) -> Result<(), Error> {
+        self.with_host_connection(async |conn| {
+            crate::values::in_savepoint_async(conn, "host_write", async || {
+                crate::catalogue::put(&mut conn.sql(), put).await
+            })
+            .await
+        })
+        .await
+    }
+
+    #[cfg(feature = "native")]
+    async fn host_sql(
+        &self,
+        f: &mut dyn FnMut(&Connection) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        self.with_host_connection(async |conn| {
+            let native = conn.native()?;
+            in_savepoint(conn, "host_write", || f(native))
+        })
+        .await
     }
 }
 
 #[cfg(any(test, feature = "testing"))]
+#[cfg(feature = "native")]
 impl Db {
+    /// Tests: suspend a host write while it owns its SQL savepoint and store
+    /// lease. Dropping this future must undo the write before another operation
+    /// can acquire that lease.
+    pub async fn host_put_then_wait_for_test(
+        &self,
+        table: HostTable,
+        key: &[u8],
+        value: &[u8],
+        wait: impl std::future::Future<Output = ()>,
+    ) -> Result<(), Error> {
+        self.with_host_connection(async |conn| {
+            crate::values::in_savepoint_async(conn, "host_write", async || {
+                jazz_sql::put_if_absent_in_transaction(&mut NativeSql(conn), table, key, value)
+                    .await
+                    .map_err(storage)?;
+                wait.await;
+                Ok(())
+            })
+            .await
+        })
+        .await
+    }
+
     /// Tests: a host write that fails half done. Writes `pairs` inside the
     /// write's savepoint, then panics before releasing it.
     pub fn host_put_many_then_panic_for_test(
@@ -380,8 +619,8 @@ impl Db {
         table: HostTable,
         pairs: &[HostPair],
     ) -> Result<(), Error> {
-        self.with_host_connection(|conn| {
-            crate::values::begin_savepoint(conn, "host_write")?;
+        jazz_sql::inline(self.with_host_connection(async |conn| {
+            crate::values::begin_savepoint(conn, "host_write").await?;
             create(conn, table)?;
             for (key, value) in pairs {
                 conn.execute(
@@ -394,17 +633,12 @@ impl Db {
                 .map_err(storage)?;
             }
             panic!("injected failure mid host write")
-        })
+        }))
     }
 }
 
-/// Whether `table` exists yet; reads of one that does not find nothing.
-fn exists(conn: &Connection, table: HostTable) -> Result<bool, Error> {
-    conn.prepare_cached("SELECT count(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = ?1")
-        .and_then(|mut statement| statement.query_row([table.sql_name()], |row| row.get(0)))
-        .map_err(storage)
-}
-
+#[cfg(any(test, feature = "testing"))]
+#[cfg(feature = "native")]
 fn create(conn: &Connection, table: HostTable) -> Result<(), Error> {
     conn.execute_batch(&format!(
         "CREATE TABLE IF NOT EXISTS {} (k BLOB PRIMARY KEY, v BLOB NOT NULL) WITHOUT ROWID",
@@ -413,89 +647,24 @@ fn create(conn: &Connection, table: HostTable) -> Result<(), Error> {
     .map_err(storage)
 }
 
-fn get(conn: &Connection, table: HostTable, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {
-    if !exists(conn, table)? {
-        return Ok(None);
-    }
-    conn.prepare_cached(&format!("SELECT v FROM {} WHERE k = ?1", table.sql_name()))
-        .and_then(|mut statement| statement.query_row([key], |row| row.get(0)).optional())
+#[cfg(feature = "native")]
+async fn get(conn: &Connection, table: HostTable, key: &[u8]) -> Result<Option<Vec<u8>>, Error> {
+    jazz_sql::get(&mut NativeSql(conn), table, key)
+        .await
         .map_err(storage)
 }
 
-fn prefix_scan(conn: &Connection, table: HostTable, prefix: &[u8]) -> Result<Vec<HostPair>, Error> {
-    if !exists(conn, table)? {
-        return Ok(Vec::new());
-    }
-    let mut statement = conn
-        .prepare_cached(&format!(
-            "SELECT k, v FROM {} WHERE k >= ?1 ORDER BY k",
-            table.sql_name()
-        ))
-        .map_err(storage)?;
-    let rows = statement
-        .query_map([prefix], |row| Ok((row.get(0)?, row.get(1)?)))
-        .map_err(storage)?;
-    let mut out = Vec::new();
-    for row in rows {
-        let (key, value): HostPair = row.map_err(storage)?;
-        if !key.starts_with(prefix) {
-            break;
-        }
-        out.push((key, value));
-    }
-    Ok(out)
-}
+#[cfg(feature = "native")]
+use jazz_sql::native::Native as NativeSql;
 
-fn put_many(conn: &Connection, table: HostTable, pairs: &[HostPair]) -> Result<(), Error> {
-    if pairs.is_empty() {
-        return Ok(());
-    }
-    in_savepoint(conn, "host_write", || {
-        create(conn, table)?;
-        let mut statement = conn
-            .prepare_cached(&format!(
-                "INSERT OR REPLACE INTO {} (k, v) VALUES (?1, ?2)",
-                table.sql_name()
-            ))
-            .map_err(storage)?;
-        for (key, value) in pairs {
-            statement.execute(params![key, value]).map_err(storage)?;
-        }
-        Ok(())
-    })
-}
-
-fn put_if_absent(
+#[cfg(feature = "native")]
+async fn prefix_scan(
     conn: &Connection,
     table: HostTable,
-    key: &[u8],
-    value: &[u8],
-) -> Result<Option<Vec<u8>>, Error> {
-    in_savepoint(conn, "host_write", || {
-        create(conn, table)?;
-        let existing: Option<Vec<u8>> = conn
-            .prepare_cached(&format!("SELECT v FROM {} WHERE k = ?1", table.sql_name()))
-            .and_then(|mut statement| statement.query_row([key], |row| row.get(0)).optional())
-            .map_err(storage)?;
-        if existing.is_none() {
-            conn.prepare_cached(&format!(
-                "INSERT INTO {} (k, v) VALUES (?1, ?2)",
-                table.sql_name()
-            ))
-            .and_then(|mut statement| statement.execute(params![key, value]))
-            .map_err(storage)?;
-        }
-        Ok(existing)
-    })
-}
-
-fn delete(conn: &Connection, table: HostTable, key: &[u8]) -> Result<(), Error> {
-    if !exists(conn, table)? {
-        return Ok(());
-    }
-    conn.prepare_cached(&format!("DELETE FROM {} WHERE k = ?1", table.sql_name()))
-        .and_then(|mut statement| statement.execute([key]))
-        .map(|_| ())
+    prefix: &[u8],
+) -> Result<Vec<HostPair>, Error> {
+    jazz_sql::prefix(&mut NativeSql(conn), table, prefix)
+        .await
         .map_err(storage)
 }
 

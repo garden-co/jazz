@@ -560,13 +560,13 @@ fn local_bindings_of_one_shape_share_one_prepared_source() {
 fn local_bindings_bind_query_claims_from_the_readers_session() {
     let reader = AuthorSubject::for_test_uuid(uuid::uuid!("71000000-0000-0000-0000-0000000000a1"));
     let db = open_db_as(reader);
-    db.set_identity_claims(
+    jazz::db::block_on(db.set_identity_claims(
         reader,
         BTreeMap::from([(
             provider_claim_key("owner"),
             Value::String("alice".to_owned()),
         )]),
-    );
+    ));
     let insert = |document: u64, team: u64, owner: &str| {
         block_on(db.insert(
             "owned_documents",
@@ -643,7 +643,7 @@ fn local_bindings_keep_request_and_session_claim_scopes_apart() {
     let owner_claims = |owner: &str| {
         BTreeMap::from([(provider_claim_key("owner"), Value::String(owner.to_owned()))])
     };
-    db.set_identity_claims(reader, owner_claims("carol"));
+    jazz::db::block_on(db.set_identity_claims(reader, owner_claims("carol")));
     let insert = |document: u64, team: u64, owner: &str| {
         block_on(db.insert(
             "owned_documents",

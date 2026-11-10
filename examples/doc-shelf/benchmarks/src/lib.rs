@@ -456,10 +456,11 @@ impl SyncFixture {
         let db = block_on(Db::open(config(0x80 | (node & 0x7f)))).expect("open device");
         let (client_side, server_side, sent) = byte_duplex();
         let upstream = block_on(db.connect_upstream(client_side));
-        let subscriber = self
-            .server
-            .accept_subscriber(server_side, AuthorSubject::SYSTEM)
-            .unwrap();
+        let subscriber = jazz::db::block_on(
+            self.server
+                .accept_subscriber(server_side, AuthorSubject::SYSTEM),
+        )
+        .unwrap();
         let prepared = db
             .prepare_query(&Query::from("docs"))
             .expect("prepare shelf");

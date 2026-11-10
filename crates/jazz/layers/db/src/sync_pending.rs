@@ -34,6 +34,7 @@
 //! `_jazz_rejected_cells` and `_jazz_rejected_deltas`, in the same layout.
 
 use super::*;
+use jazz_sql::Row;
 
 // The columns of the op tables, which the retry store shares.
 macro_rules! ops_columns {
@@ -159,6 +160,17 @@ fn op_name(write: &WireWrite) -> &'static str {
 const CELLS: i64 = 0;
 const CREATED: i64 = 1;
 
+// Pending cells own UTF-8 text after validation. This is an in-memory Rust
+// representation only: the existing ty/nulls/SQLite-value encoding is unchanged.
+#[derive(Clone, Debug, PartialEq)]
+enum SqlValue {
+    Null,
+    Integer(i64),
+    Real(f64),
+    Text(String),
+    Blob(Vec<u8>),
+}
+
 /// A cell as `(ty, nulls, value)`: its kind, how many present-nullable
 /// wrappers it sits in, and the value itself as SQLite keeps it.
 fn cell_sql(value: &Value) -> Result<(&'static str, i64, SqlValue), Error> {
@@ -250,12 +262,15 @@ fn sql_cell(ty: &str, nulls: i64, sql: SqlValue) -> Result<Value, Error> {
 }
 
 /// Store pending commit `tx`: `commit` and the local rows it wrote.
-pub(crate) fn write(
-    conn: &rusqlite::Connection,
+pub(crate) async fn write<S: jazz_sql::Sql>(
+    conn: &mut S,
     tx: u64,
     commit: &SyncMessage,
     rows: &[RowKey],
-) -> Result<(), Error> {
+) -> Result<(), Error>
+where
+    S::Error: std::fmt::Display,
+{
     let SyncMessage::Commit {
         id,
         clock,
@@ -288,12 +303,10 @@ pub(crate) fn write(
             Some(exact_json("claims", claims)?),
         ),
     };
-    conn.prepare_cached(
+    conn.execute(
         "INSERT INTO _jazz_pending (tx, node, seq, clock, snapshot, own, acting, author, claims) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-    )
-    .and_then(|mut statement| {
-        statement.execute(rusqlite::params![
+        jazz_sql::params![
             tx,
             id.node.as_bytes().as_slice(),
             id.time.0 as i64,
@@ -303,68 +316,63 @@ pub(crate) fn write(
             acting,
             author,
             claims,
-        ])
-    })
-    .map_err(storage)?;
+        ],
+    )
+    .await
+    .map_err(crate::values::provider_error)?;
     for (n, op) in ops.iter().enumerate() {
-        write_op(conn, tx, n as i64, op)?;
+        write_op(conn, tx, n as i64, op).await?;
     }
     for (n, read) in reads.iter().enumerate() {
         let n = n as i64;
         let query = exact_json("a read's query", &read.query)?;
         let binding = exact_json("a read's binding", &read.binding)?;
-        conn.prepare_cached(
+        conn.execute(
             "INSERT INTO _jazz_pending_reads (tx, n, version, query, binding, include_deleted) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        )
-        .and_then(|mut statement| {
-            statement.execute(rusqlite::params![
+            jazz_sql::params![
                 tx,
                 n,
                 read.version.as_slice(),
                 query,
                 binding,
                 read.include_deleted,
-            ])
-        })
-        .map_err(storage)?;
+            ],
+        )
+        .await
+        .map_err(crate::values::provider_error)?;
         for (i, (id, node, t)) in read.rows.iter().enumerate() {
-            conn.prepare_cached(
+            conn.execute(
                 "INSERT INTO _jazz_pending_read_rows (tx, n, i, id, node, t) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            )
-            .and_then(|mut statement| {
-                statement.execute(rusqlite::params![
+                jazz_sql::params![
                     tx,
                     n,
                     i as i64,
                     id.as_slice(),
                     node.as_ref().map(|node| node.as_slice()),
                     *t as i64,
-                ])
-            })
-            .map_err(storage)?;
+                ],
+            )
+            .await
+            .map_err(crate::values::provider_error)?;
         }
     }
     for (n, (table, row, key)) in rows.iter().enumerate() {
-        conn.prepare_cached(
+        conn.execute(
             "INSERT INTO _jazz_pending_rows (tx, n, tbl, id, key) VALUES (?1, ?2, ?3, ?4, ?5)",
+            jazz_sql::params![tx, n as i64, table, row.0.as_bytes().as_slice(), key],
         )
-        .and_then(|mut statement| {
-            statement.execute(rusqlite::params![
-                tx,
-                n as i64,
-                table,
-                row.0.as_bytes().as_slice(),
-                key
-            ])
-        })
-        .map_err(storage)?;
+        .await
+        .map_err(crate::values::provider_error)?;
     }
     Ok(())
 }
 
-fn write_op(conn: &rusqlite::Connection, tx: i64, n: i64, op: &WireOp) -> Result<(), Error> {
+async fn write_op<S: jazz_sql::Sql>(conn: &mut S, tx: i64, n: i64, op: &WireOp) -> Result<(), Error>
+where
+    S::Error: std::fmt::Display,
+{
     let none = || None::<&BTreeMap<String, Value>>;
     let (target, moved, at, cells, created) = match &op.write {
         WireWrite::Insert {
@@ -396,13 +404,9 @@ fn write_op(conn: &rusqlite::Connection, tx: i64, n: i64, op: &WireOp) -> Result
         Some(proof) => (Some(proof.key.as_slice()), Some(proof.seq as i64)),
         None => (None, None),
     };
-    conn.prepare_cached(
-        "INSERT INTO _jazz_pending_ops \
+    conn.execute("INSERT INTO _jazz_pending_ops \
          (tx, n, op, tbl, id, target, move_from, move_to, at, has_cells, bases, proof_key, proof_seq) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-    )
-    .and_then(|mut statement| {
-        statement.execute(rusqlite::params![
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)", jazz_sql::params![
             tx,
             n,
             op_name(&op.write),
@@ -416,29 +420,32 @@ fn write_op(conn: &rusqlite::Connection, tx: i64, n: i64, op: &WireOp) -> Result
             bases,
             proof_key,
             proof_seq,
-        ])
-    })
-    .map_err(storage)?;
+        ]).await
+    .map_err(crate::values::provider_error)?;
     for (list, cells) in [(CELLS, cells), (CREATED, created)] {
         for (column, value) in cells.into_iter().flatten() {
             let (ty, nulls, value) = cell_sql(value)?;
-            conn.prepare_cached(
+            let value = match &value {
+                SqlValue::Null => jazz_sql::Param::Null,
+                SqlValue::Integer(v) => jazz_sql::Param::Integer(*v),
+                SqlValue::Real(v) => jazz_sql::Param::Real(*v),
+                SqlValue::Text(v) => jazz_sql::Param::Text(v),
+                SqlValue::Blob(v) => jazz_sql::Param::Blob(v),
+            };
+            conn.execute(
                 "INSERT INTO _jazz_pending_cells (tx, n, list, col, ty, nulls, value) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                jazz_sql::params![tx, n, list, column, ty, nulls, value],
             )
-            .and_then(|mut statement| {
-                statement.execute(rusqlite::params![tx, n, list, column, ty, nulls, value])
-            })
-            .map_err(storage)?;
+            .await
+            .map_err(crate::values::provider_error)?;
         }
     }
     for (i, delta) in op.deltas.iter().enumerate() {
-        conn.prepare_cached(
+        conn.execute(
             "INSERT INTO _jazz_pending_deltas (tx, n, i, col, depth, key, seq, base, edits) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-        )
-        .and_then(|mut statement| {
-            statement.execute(rusqlite::params![
+            jazz_sql::params![
                 tx,
                 n,
                 i as i64,
@@ -448,27 +455,31 @@ fn write_op(conn: &rusqlite::Connection, tx: i64, n: i64, op: &WireOp) -> Result
                 delta.delta.seq as i64,
                 delta.delta.base,
                 delta.delta.edits,
-            ])
-        })
-        .map_err(storage)?;
+            ],
+        )
+        .await
+        .map_err(crate::values::provider_error)?;
     }
     Ok(())
 }
 
 /// The txs of the pending commits, oldest first.
-pub(crate) fn txs(conn: &rusqlite::Connection) -> Result<Vec<u64>, Error> {
-    let mut statement = conn
-        .prepare_cached("SELECT tx FROM _jazz_pending ORDER BY tx")
-        .map_err(storage)?;
-    statement
-        .query_map([], |r| r.get::<_, i64>(0))
-        .map_err(storage)?
-        .map(|tx| tx.map(|tx| tx as u64).map_err(storage))
-        .collect()
+pub(crate) async fn txs<S: jazz_sql::Sql>(conn: &mut S) -> Result<Vec<u64>, Error>
+where
+    S::Error: std::fmt::Display,
+{
+    conn.query_rows("SELECT tx FROM _jazz_pending ORDER BY tx", &[], |r| {
+        Ok(r.get::<i64>(0)? as u64)
+    })
+    .await
+    .map_err(crate::values::provider_error)
 }
 
 /// Pending commit `tx` as [`write`] stored it.
-pub(crate) fn read(conn: &rusqlite::Connection, tx: u64) -> Result<SyncMessage, Error> {
+pub(crate) async fn read<S: jazz_sql::Sql>(sql: &mut S, tx: u64) -> Result<SyncMessage, Error>
+where
+    S::Error: std::fmt::Display,
+{
     type Header = (
         Vec<u8>,
         i64,
@@ -479,28 +490,15 @@ pub(crate) fn read(conn: &rusqlite::Connection, tx: u64) -> Result<SyncMessage, 
         Option<String>,
         Option<String>,
     );
-    let (node, seq, clock, snapshot, own, acting, author, claims): Header = conn
-        .cached_row(
-            "SELECT node, seq, clock, snapshot, own, acting, author, claims \
-             FROM _jazz_pending WHERE tx = ?1",
-            [tx as i64],
-            |r| {
-                Ok((
-                    r.get(0)?,
-                    r.get(1)?,
-                    r.get(2)?,
-                    r.get(3)?,
-                    r.get(4)?,
-                    r.get(5)?,
-                    r.get(6)?,
-                    r.get(7)?,
-                ))
-            },
-        )
-        .map_err(|error| match error {
-            rusqlite::Error::InvalidColumnType(..) => bad(format_args!("has a malformed header")),
-            error => storage(error),
-        })?;
+    let headers: Vec<Header> = read_rows(sql,
+        "SELECT node, seq, clock, snapshot, own, acting, author, claims FROM _jazz_pending WHERE tx = ?1",
+        jazz_sql::params![tx as i64], "has a malformed header",
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)),
+    ).await?;
+    let (node, seq, clock, snapshot, own, acting, author, claims) = headers
+        .into_iter()
+        .next()
+        .ok_or_else(|| Error::new(ErrorCode::Storage, "pending commit header is missing"))?;
     let acting = match (acting.as_str(), author, claims) {
         ("own", None, None) => Acting::Own,
         ("attributed", Some(author), None) => Acting::Attributed { author },
@@ -510,17 +508,24 @@ pub(crate) fn read(conn: &rusqlite::Connection, tx: u64) -> Result<SyncMessage, 
         },
         (acting, ..) => return Err(bad(format_args!("acts as {acting:?}"))),
     };
-    let tx = tx as i64;
     let kind = match (snapshot, own) {
         (None, None) => {
-            if count(conn, "_jazz_pending_reads", tx)? > 0 {
+            let count: i64 = sql
+                .query_one(
+                    "SELECT count(*) FROM _jazz_pending_reads WHERE tx = ?1",
+                    jazz_sql::params![tx as i64],
+                    |r| r.get(0),
+                )
+                .await
+                .map_err(crate::values::provider_error)?;
+            if count > 0 {
                 return Err(bad("is mergeable but has reads"));
             }
             WireKind::Mergeable
         }
         (Some(snapshot), Some(own)) => WireKind::Serializable {
             snapshot: snapshot as u64,
-            reads: reads(conn, tx)?,
+            reads: reads(sql, tx as i64).await?,
             own: from_json("own list", &own)?,
         },
         _ => return Err(bad("has half a serializable snapshot")),
@@ -529,86 +534,67 @@ pub(crate) fn read(conn: &rusqlite::Connection, tx: u64) -> Result<SyncMessage, 
         id: tx_id(blob("node", node)?, seq as u64),
         clock: clock as u64,
         kind,
-        ops: ops(conn, "_jazz_pending", tx as u64)?,
+        ops: ops(sql, "_jazz_pending", tx).await?,
         acting,
     })
 }
 
-fn count(conn: &rusqlite::Connection, table: &str, tx: i64) -> Result<i64, Error> {
-    conn.cached_row(
-        &format!("SELECT count(*) FROM {table} WHERE tx = ?1"),
-        [tx],
-        |r| r.get(0),
-    )
-    .map_err(storage)
-}
-
-fn reads(conn: &rusqlite::Connection, tx: i64) -> Result<Vec<WireRead>, Error> {
-    let mut statement = conn
-        .prepare_cached(
-            "SELECT n, version, query, binding, include_deleted \
-             FROM _jazz_pending_reads WHERE tx = ?1 ORDER BY n",
+async fn reads<S: jazz_sql::Sql>(sql: &mut S, tx: i64) -> Result<Vec<WireRead>, Error>
+where
+    S::Error: std::fmt::Display,
+{
+    let stored = read_rows(sql,
+        "SELECT n, version, query, binding, include_deleted FROM _jazz_pending_reads WHERE tx = ?1 ORDER BY n",
+        jazz_sql::params![tx], "has a malformed read",
+        |r| Ok((r.get::<i64>(0)?, r.get::<Vec<u8>>(1)?, r.get::<String>(2)?, r.get::<String>(3)?, r.get::<bool>(4)?)),
+    ).await?;
+    let mut out = Vec::with_capacity(stored.len());
+    for (n, version, query, binding, include_deleted) in stored {
+        let stored_rows = read_rows(
+            sql,
+            "SELECT id, node, t FROM _jazz_pending_read_rows WHERE tx = ?1 AND n = ?2 ORDER BY i",
+            jazz_sql::params![tx, n],
+            "has a malformed read row",
+            |r| {
+                Ok((
+                    r.get::<Vec<u8>>(0)?,
+                    r.get::<Option<Vec<u8>>>(1)?,
+                    r.get::<i64>(2)?,
+                ))
+            },
         )
-        .map_err(storage)?;
-    let stored = statement
-        .query_map([tx], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, Vec<u8>>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
-                r.get::<_, bool>(4)?,
-            ))
-        })
-        .map_err(storage)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| bad("has a malformed read"))?;
-    drop(statement);
-    stored
-        .into_iter()
-        .map(|(n, version, query, binding, include_deleted)| {
-            let mut statement = conn
-                .prepare_cached(
-                    "SELECT id, node, t FROM _jazz_pending_read_rows \
-                     WHERE tx = ?1 AND n = ?2 ORDER BY i",
-                )
-                .map_err(storage)?;
-            let rows = statement
-                .query_map([tx, n], |r| {
-                    Ok((
-                        r.get::<_, Vec<u8>>(0)?,
-                        r.get::<_, Option<Vec<u8>>>(1)?,
-                        r.get::<_, i64>(2)?,
-                    ))
-                })
-                .map_err(storage)?
-                .map(|row| {
-                    let (id, node, t) = row.map_err(|_| bad("has a malformed read row"))?;
-                    Ok((
-                        blob("read row id", id)?,
-                        node.map(|node| blob("read row node", node)).transpose()?,
-                        t as u64,
-                    ))
-                })
-                .collect::<Result<Vec<_>, Error>>()?;
-            Ok(WireRead {
-                version: blob("schema version", version)?,
-                query: from_json("read query", &query)?,
-                binding: from_json("read binding", &binding)?,
-                include_deleted,
-                rows,
+        .await?;
+        let rows = stored_rows
+            .into_iter()
+            .map(|(id, node, t)| {
+                Ok((
+                    blob("read row id", id)?,
+                    node.map(|node| blob("read row node", node)).transpose()?,
+                    t as u64,
+                ))
             })
-        })
-        .collect()
+            .collect::<Result<_, Error>>()?;
+        out.push(WireRead {
+            version: blob("schema version", version)?,
+            query: from_json("read query", &query)?,
+            binding: from_json("read binding", &binding)?,
+            include_deleted,
+            rows,
+        });
+    }
+    Ok(out)
 }
 
 /// The ops of commit `tx` in `{prefix}_ops` and its cell and delta tables:
 /// `_jazz_pending`'s or the retry store's `_jazz_rejected`.
-pub(crate) fn ops(
-    conn: &rusqlite::Connection,
+pub(crate) async fn ops<S: jazz_sql::Sql>(
+    conn: &mut S,
     prefix: &str,
     tx: u64,
-) -> Result<Vec<WireOp>, Error> {
+) -> Result<Vec<WireOp>, Error>
+where
+    S::Error: std::fmt::Display,
+{
     let tx = tx as i64;
     type Stored = (
         i64,
@@ -624,14 +610,9 @@ pub(crate) fn ops(
         Option<Vec<u8>>,
         Option<i64>,
     );
-    let mut statement = conn
-        .prepare_cached(&format!(
-            "SELECT n, op, tbl, id, target, move_from, move_to, at, has_cells, bases, proof_key, proof_seq \
-             FROM {prefix}_ops WHERE tx = ?1 ORDER BY n"
-        ))
-        .map_err(storage)?;
-    let stored: Vec<Stored> = statement
-        .query_map([tx], |r| {
+    let stored: Vec<Stored> = read_rows(conn,
+        &format!("SELECT n, op, tbl, id, target, move_from, move_to, at, has_cells, bases, proof_key, proof_seq FROM {prefix}_ops WHERE tx = ?1 ORDER BY n"),
+        &[jazz_sql::Param::Integer(tx)], "has a malformed op", |r| {
             Ok((
                 r.get(0)?,
                 r.get(1)?,
@@ -647,125 +628,128 @@ pub(crate) fn ops(
                 r.get(11)?,
             ))
         })
-        .map_err(storage)?
-        .collect::<Result<_, _>>()
-        .map_err(|_| bad("has a malformed op"))?;
-    drop(statement);
-    stored
-        .into_iter()
-        .enumerate()
-        .map(|(position, stored)| {
-            let (n, op, table, row, target, from, to, at, has_cells, bases, key, seq) = stored;
-            if n != position as i64 {
-                return Err(bad(format_args!("is missing op {position}")));
-            }
-            let row = blob("row id", row)?;
-            let at = at.map(|at| at as u64);
-            let (mut cells, mut created) = cells(conn, prefix, tx, n)?;
-            if !has_cells && !cells.is_empty() {
-                return Err(bad(format_args!("has cells on op {n}, which takes none")));
-            }
-            let target = || match &target {
-                Some(target) => from_json::<WireTarget>("branch target", target),
-                None => Err(bad(format_args!("has no branch target on op {n}"))),
-            };
-            let cells_of = |cells: &mut BTreeMap<String, Value>| std::mem::take(cells);
-            let write = match op.as_str() {
-                "insert" => WireWrite::Insert {
+        .await?;
+    let mut out = Vec::with_capacity(stored.len());
+    for (position, stored) in stored.into_iter().enumerate() {
+        let (n, op, table, row, target, from, to, at, has_cells, bases, key, seq) = stored;
+        if n != position as i64 {
+            return Err(bad(format_args!("is missing op {position}")));
+        }
+        let row = blob("row id", row)?;
+        let at = at.map(|at| at as u64);
+        let (mut cells, mut created) = cells(conn, prefix, tx, n).await?;
+        if !has_cells && !cells.is_empty() {
+            return Err(bad(format_args!("has cells on op {n}, which takes none")));
+        }
+        let target = || match &target {
+            Some(target) => from_json::<WireTarget>("branch target", target),
+            None => Err(bad(format_args!("has no branch target on op {n}"))),
+        };
+        let cells_of = |cells: &mut BTreeMap<String, Value>| std::mem::take(cells);
+        let write = match op.as_str() {
+            "insert" => WireWrite::Insert {
+                table,
+                row,
+                cells: cells_of(&mut cells),
+                target: target()?,
+                at,
+            },
+            "update" => WireWrite::Update {
+                table,
+                row,
+                cells: cells_of(&mut cells),
+                target: target()?,
+                at,
+            },
+            "upsert" => WireWrite::Upsert {
+                table,
+                row,
+                cells: cells_of(&mut cells),
+                created: cells_of(&mut created),
+                target: target()?,
+                at,
+            },
+            "delete" => WireWrite::Delete {
+                table,
+                row,
+                target: target()?,
+                at,
+            },
+            "restore" => WireWrite::Restore {
+                table,
+                row,
+                cells: has_cells.then(|| cells_of(&mut cells)),
+                target: target()?,
+                at,
+            },
+            "move" => match (&from, &to) {
+                (Some(from), Some(to)) => WireWrite::Move {
                     table,
                     row,
-                    cells: cells_of(&mut cells),
-                    target: target()?,
-                    at,
+                    from: from_json("move source", from)?,
+                    to: from_json("move destination", to)?,
                 },
-                "update" => WireWrite::Update {
-                    table,
-                    row,
-                    cells: cells_of(&mut cells),
-                    target: target()?,
-                    at,
-                },
-                "upsert" => WireWrite::Upsert {
-                    table,
-                    row,
-                    cells: cells_of(&mut cells),
-                    created: cells_of(&mut created),
-                    target: target()?,
-                    at,
-                },
-                "delete" => WireWrite::Delete {
-                    table,
-                    row,
-                    target: target()?,
-                    at,
-                },
-                "restore" => WireWrite::Restore {
-                    table,
-                    row,
-                    cells: has_cells.then(|| cells_of(&mut cells)),
-                    target: target()?,
-                    at,
-                },
-                "move" => match (&from, &to) {
-                    (Some(from), Some(to)) => WireWrite::Move {
-                        table,
-                        row,
-                        from: from_json("move source", from)?,
-                        to: from_json("move destination", to)?,
-                    },
-                    _ => {
-                        return Err(bad(format_args!(
-                            "has a move without its branches on op {n}"
-                        )));
-                    }
-                },
-                op => return Err(bad(format_args!("has an op {op:?}"))),
-            };
-            if !created.is_empty() {
-                return Err(bad(format_args!(
-                    "has created cells on op {n}, which is no upsert"
-                )));
-            }
-            let access_proof = match (key, seq) {
-                (Some(key), Some(seq)) => Some(AccessProof {
-                    key,
-                    seq: seq as u64,
-                }),
-                (None, None) => None,
-                _ => return Err(bad(format_args!("has half an access proof on op {n}"))),
-            };
-            Ok(WireOp {
-                write,
-                bases: from_json("bases", &bases)?,
-                access_proof,
-                deltas: deltas(conn, prefix, tx, n)?,
-            })
-        })
-        .collect()
+                _ => {
+                    return Err(bad(format_args!(
+                        "has a move without its branches on op {n}"
+                    )));
+                }
+            },
+            op => return Err(bad(format_args!("has an op {op:?}"))),
+        };
+        if !created.is_empty() {
+            return Err(bad(format_args!(
+                "has created cells on op {n}, which is no upsert"
+            )));
+        }
+        let access_proof = match (key, seq) {
+            (Some(key), Some(seq)) => Some(AccessProof {
+                key,
+                seq: seq as u64,
+            }),
+            (None, None) => None,
+            _ => return Err(bad(format_args!("has half an access proof on op {n}"))),
+        };
+        out.push(WireOp {
+            write,
+            bases: from_json("bases", &bases)?,
+            access_proof,
+            deltas: deltas(conn, prefix, tx, n).await?,
+        });
+    }
+    Ok(out)
 }
 
 type CellLists = (BTreeMap<String, Value>, BTreeMap<String, Value>);
 
-fn cells(conn: &rusqlite::Connection, prefix: &str, tx: i64, n: i64) -> Result<CellLists, Error> {
-    let mut statement = conn
-        .prepare_cached(&format!(
-            "SELECT list, col, ty, nulls, value FROM {prefix}_cells WHERE tx = ?1 AND n = ?2"
-        ))
-        .map_err(storage)?;
-    let rows = statement
-        .query_map([tx, n], |r| {
+async fn cells<S: jazz_sql::Sql>(
+    conn: &mut S,
+    prefix: &str,
+    tx: i64,
+    n: i64,
+) -> Result<CellLists, Error>
+where
+    S::Error: std::fmt::Display,
+{
+    let rows = read_rows(
+        conn,
+        &format!("SELECT list, col, ty, nulls, value FROM {prefix}_cells WHERE tx = ?1 AND n = ?2"),
+        &[jazz_sql::Param::Integer(tx), jazz_sql::Param::Integer(n)],
+        "has a malformed cell",
+        |r| {
             Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, i64>(3)?,
-                r.get::<_, SqlValue>(4)?,
+                r.get::<i64>(0)?,
+                r.get::<String>(1)?,
+                r.get::<String>(2)?,
+                r.get::<i64>(3)?,
+                sql_value(&r, 4)?,
             ))
-        })
-        .map_err(storage)?;
+        },
+    )
+    .await?;
     let mut lists = (BTreeMap::new(), BTreeMap::new());
     for row in rows {
-        let (list, column, ty, nulls, value) = row.map_err(|_| bad("has a malformed cell"))?;
+        let (list, column, ty, nulls, value) = row;
         let value = sql_cell(&ty, nulls, value)?;
         match list {
             CELLS => lists.0.insert(column, value),
@@ -776,37 +760,86 @@ fn cells(conn: &rusqlite::Connection, prefix: &str, tx: i64, n: i64) -> Result<C
     Ok(lists)
 }
 
-fn deltas(
-    conn: &rusqlite::Connection,
+async fn deltas<S: jazz_sql::Sql>(
+    conn: &mut S,
     prefix: &str,
     tx: i64,
     n: i64,
-) -> Result<Vec<CellDelta>, Error> {
-    let mut statement = conn
-        .prepare_cached(&format!(
-            "SELECT col, depth, key, seq, base, edits FROM {prefix}_deltas \
-             WHERE tx = ?1 AND n = ?2 ORDER BY i"
-        ))
-        .map_err(storage)?;
-    statement
-        .query_map([tx, n], |r| {
+) -> Result<Vec<CellDelta>, Error>
+where
+    S::Error: std::fmt::Display,
+{
+    read_rows(conn,
+        &format!("SELECT col, depth, key, seq, base, edits FROM {prefix}_deltas WHERE tx = ?1 AND n = ?2 ORDER BY i"),
+        &[jazz_sql::Param::Integer(tx), jazz_sql::Param::Integer(n)],
+        "has a malformed delta", |r| {
             Ok(CellDelta {
                 column: r.get(0)?,
                 depth: r.get(1)?,
                 key: r.get(2)?,
                 delta: WireDelta {
-                    seq: r.get::<_, i64>(3)? as u64,
+                    seq: r.get::<i64>(3)? as u64,
                     base: r.get(4)?,
                     edits: r.get(5)?,
                 },
             })
-        })
-        .map_err(storage)?
-        .map(|delta| delta.map_err(|_| bad("has a malformed delta")))
-        .collect()
+        }).await
 }
 
-#[cfg(test)]
+/// Keep malformed stored rows distinct from execution failures, without
+/// copying borrowed rows into an intermediate SQL-value collection.
+async fn read_rows<S: jazz_sql::Sql, T>(
+    sql: &mut S,
+    statement: &str,
+    params: &[jazz_sql::Param<'_>],
+    malformed: &str,
+    mut decode: impl FnMut(S::Row<'_>) -> Result<T, jazz_sql::CellError>,
+) -> Result<Vec<T>, Error>
+where
+    S::Error: std::fmt::Display,
+{
+    let mut out = Vec::new();
+    let mut invalid = false;
+    sql.query(statement, params, |row| match decode(row) {
+        Ok(value) => {
+            out.push(value);
+            Ok(std::ops::ControlFlow::Continue(()))
+        }
+        Err(_) => {
+            invalid = true;
+            Ok(std::ops::ControlFlow::Break(()))
+        }
+    })
+    .await
+    .map_err(|error| Error::new(ErrorCode::Storage, error.to_string()))?;
+    if invalid {
+        Err(bad(malformed))
+    } else {
+        Ok(out)
+    }
+}
+
+fn sql_value(row: &impl jazz_sql::Row, index: usize) -> Result<SqlValue, jazz_sql::CellError> {
+    use jazz_sql::{Cell, CellError};
+    Ok(
+        match row
+            .cell(index)
+            .ok_or(CellError("column index out of bounds"))?
+        {
+            Cell::Null => SqlValue::Null,
+            Cell::Integer(value) => SqlValue::Integer(value),
+            Cell::Real(value) => SqlValue::Real(value),
+            Cell::Text(value) => SqlValue::Text(
+                std::str::from_utf8(value)
+                    .map_err(|_| CellError("TEXT is not valid UTF-8"))?
+                    .to_owned(),
+            ),
+            Cell::Blob(value) => SqlValue::Blob(value.to_vec()),
+        },
+    )
+}
+
+#[cfg(all(test, feature = "native"))]
 mod tests {
     use super::*;
     use crate::ids::NodeUuid;
@@ -1025,11 +1058,26 @@ mod tests {
             ),
         ];
         for (tx, commit) in &commits {
-            write(&conn, *tx, commit, &[]).unwrap();
+            crate::db::block_on(write(
+                &mut jazz_sql::native::Native(&conn),
+                *tx,
+                commit,
+                &[],
+            ))
+            .unwrap();
         }
-        assert_eq!(txs(&conn).unwrap(), [1, 2, 3]);
+        assert_eq!(
+            crate::db::block_on(txs(&mut jazz_sql::native::Native(&conn))).unwrap(),
+            [1, 2, 3]
+        );
         for (tx, commit) in &commits {
-            assert_eq!(bytes(&read(&conn, *tx).unwrap()), bytes(commit), "tx {tx}");
+            assert_eq!(
+                bytes(
+                    &crate::db::block_on(read(&mut jazz_sql::native::Native(&conn), *tx)).unwrap()
+                ),
+                bytes(commit),
+                "tx {tx}"
+            );
         }
     }
 
@@ -1098,13 +1146,123 @@ mod tests {
             ops: vec![op],
             acting: Acting::Own,
         };
-        assert_eq!(bytes(&read(&conn, 4).unwrap()), bytes(&expected));
+        assert_eq!(
+            bytes(&crate::db::block_on(read(&mut jazz_sql::native::Native(&conn), 4)).unwrap()),
+            bytes(&expected)
+        );
+    }
+
+    /// Alice's persisted operation payload survives suspension at every query.
+    /// This lower-level test injects Pending into the SQL provider: public Db
+    /// construction still selects native SQLite and cannot exercise that boundary.
+    #[test]
+    fn operation_payload_reads_can_suspend() {
+        use jazz_sql::{Param, Sql, native::Native};
+        use std::ops::ControlFlow;
+        use std::task::Poll;
+
+        struct Suspends<'a> {
+            native: Native<'a>,
+            queries: usize,
+        }
+        impl Sql for Suspends<'_> {
+            type Error = rusqlite::Error;
+            type Row<'a> = <Native<'a> as Sql>::Row<'a>;
+
+            fn invalid_data(message: &'static str) -> Self::Error {
+                Native::invalid_data(message)
+            }
+
+            async fn execute_script(&mut self, script: &str) -> Result<(), Self::Error> {
+                self.native.execute_script(script).await
+            }
+            async fn execute(
+                &mut self,
+                sql: &str,
+                params: &[Param<'_>],
+            ) -> Result<usize, Self::Error> {
+                let mut suspended = false;
+                std::future::poll_fn(|cx| {
+                    if suspended {
+                        Poll::Ready(())
+                    } else {
+                        suspended = true;
+                        cx.waker().wake_by_ref();
+                        Poll::Pending
+                    }
+                })
+                .await;
+                self.native.execute(sql, params).await
+            }
+
+            async fn query<F>(
+                &mut self,
+                sql: &str,
+                params: &[Param<'_>],
+                visit: F,
+            ) -> Result<(), Self::Error>
+            where
+                F: FnMut(Self::Row<'_>) -> Result<ControlFlow<()>, Self::Error>,
+            {
+                let mut suspended = false;
+                std::future::poll_fn(|cx| {
+                    if suspended {
+                        Poll::Ready(())
+                    } else {
+                        suspended = true;
+                        self.queries += 1;
+                        cx.waker().wake_by_ref();
+                        Poll::Pending
+                    }
+                })
+                .await;
+                self.native.query(sql, params, visit).await
+            }
+
+            async fn optional_blob(
+                &mut self,
+                sql: &str,
+                params: &[Param<'_>],
+            ) -> Result<Option<Vec<u8>>, Self::Error> {
+                self.native.optional_blob(sql, params).await
+            }
+        }
+
+        let conn = store();
+        let commit = serializable_commit();
+        crate::db::block_on(write(&mut jazz_sql::native::Native(&conn), 1, &commit, &[])).unwrap();
+        let SyncMessage::Commit { ops: expected, .. } = &commit else {
+            unreachable!()
+        };
+        let mut sql = Suspends {
+            native: Native(&conn),
+            queries: 0,
+        };
+        let actual = futures::executor::block_on(ops(&mut sql, "_jazz_pending", 1)).unwrap();
+        assert_eq!(
+            postcard::to_allocvec(&actual).unwrap(),
+            postcard::to_allocvec(&expected).unwrap()
+        );
+        assert_eq!(sql.queries, 1 + 2 * expected.len());
+        // Also exercise the complete loader, including the header and
+        // serializable read evidence, against the suspending provider.
+        let actual = futures::executor::block_on(read(&mut sql, 1)).unwrap();
+        assert_eq!(bytes(&actual), bytes(&commit));
+        futures::executor::block_on(write(&mut sql, 2, &commit, &[])).unwrap();
+        let actual = futures::executor::block_on(read(&mut sql, 2)).unwrap();
+        assert_eq!(bytes(&actual), bytes(&commit));
     }
 
     #[test]
     fn a_refused_commit_keeps_its_ops_in_the_same_layout() {
         let conn = store();
-        write(&conn, 1, &serializable_commit(), &[]).unwrap();
+        crate::db::block_on(write(
+            &mut jazz_sql::native::Native(&conn),
+            1,
+            &serializable_commit(),
+            &[],
+        ))
+        .unwrap();
         for ddl in REJECTED_OPS_DDL {
             conn.execute(ddl, []).unwrap();
         }
@@ -1135,7 +1293,12 @@ mod tests {
         let SyncMessage::Commit { ops: expected, .. } = serializable_commit() else {
             unreachable!()
         };
-        let ops = ops(&conn, "_jazz_rejected", 1).unwrap();
+        let ops = jazz_sql::inline(ops(
+            &mut jazz_sql::native::Native(&conn),
+            "_jazz_rejected",
+            1,
+        ))
+        .unwrap();
         assert_eq!(
             postcard::to_allocvec(&ops).unwrap(),
             postcard::to_allocvec(&expected).unwrap()
@@ -1158,9 +1321,16 @@ mod tests {
             "UPDATE _jazz_pending SET node = x'0102'",
         ] {
             let conn = store();
-            write(&conn, 1, &serializable_commit(), &[]).unwrap();
+            crate::db::block_on(write(
+                &mut jazz_sql::native::Native(&conn),
+                1,
+                &serializable_commit(),
+                &[],
+            ))
+            .unwrap();
             conn.execute_batch(edit).unwrap();
-            let error = read(&conn, 1).expect_err(edit);
+            let error =
+                crate::db::block_on(read(&mut jazz_sql::native::Native(&conn), 1)).expect_err(edit);
             assert_eq!(
                 error.code,
                 ErrorCode::UnsupportedStorageCodecs,
@@ -1182,7 +1352,9 @@ mod tests {
                 claims: BTreeMap::from([("score".to_owned(), Value::F64(f64::NAN))]),
             },
         };
-        let error = write(&conn, 1, &commit, &[]).expect_err("NaN has no JSON");
+        let error =
+            crate::db::block_on(write(&mut jazz_sql::native::Native(&conn), 1, &commit, &[]))
+                .expect_err("NaN has no JSON");
         assert!(error.message.contains("not supported yet"), "{error}");
     }
 }

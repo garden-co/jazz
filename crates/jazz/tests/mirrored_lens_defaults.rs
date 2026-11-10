@@ -107,7 +107,7 @@ fn config(schema: JazzSchema, node: u8) -> DbConfig {
 
 fn authority_at(path: &Path) -> Db {
     let db = block_on(Db::open_at(config(v1(), 0), path, FileOptions::default())).unwrap();
-    db.set_authority();
+    jazz::db::block_on(db.set_authority());
     db
 }
 
@@ -149,15 +149,14 @@ fn link(client: &Db, server: &Db) -> jazz::db::Upstream {
         out: up.clone(),
         inbound: down.clone(),
     })));
-    server
-        .accept_subscriber(
-            Box::new(Pipe {
-                out: down,
-                inbound: up,
-            }),
-            AuthorSubject::SYSTEM,
-        )
-        .unwrap();
+    jazz::db::block_on(server.accept_subscriber(
+        Box::new(Pipe {
+            out: down,
+            inbound: up,
+        }),
+        AuthorSubject::SYSTEM,
+    ))
+    .unwrap();
     link
 }
 

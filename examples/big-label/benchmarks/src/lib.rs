@@ -70,15 +70,13 @@ impl Fixture {
     }
 
     fn read_count(&self, query: &PreparedQuery) -> usize {
-        self.db
-            .read(query)
+        jazz::db::block_on(self.db.read(query))
             .expect("BigLabel benchmark read succeeds")
             .len()
     }
 
     fn release_order(&self, query: &PreparedQuery) -> Vec<u64> {
-        self.db
-            .read(query)
+        jazz::db::block_on(self.db.read(query))
             .expect("BigLabel benchmark read succeeds")
             .into_iter()
             .map(|row| match row.cell("released_at") {
@@ -113,8 +111,7 @@ impl IngestFixture {
             .db
             .prepare_query(&Query::from("releases"))
             .expect("prepare all BigLabel releases");
-        self.db
-            .read(&query)
+        jazz::db::block_on(self.db.read(&query))
             .expect("read all BigLabel releases")
             .len()
     }
@@ -124,8 +121,7 @@ impl IngestFixture {
     /// ingest benchmarks, not part of the measured closure.
     pub fn label_release_titles_and_order(&self, label: usize) -> Vec<(String, u64)> {
         let query = prepare_release_load(&self.db, "label", row_id(1, label));
-        self.db
-            .read(&query)
+        jazz::db::block_on(self.db.read(&query))
             .expect("read imported releases by label")
             .into_iter()
             .map(|row| {

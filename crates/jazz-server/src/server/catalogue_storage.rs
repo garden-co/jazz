@@ -1,10 +1,11 @@
 //! The server catalogue's durable home: the store's own catalogue tables
 //! (see [`jazz::catalogue`]), beside the admissions they describe.
 
+use jazz::host::HostTables;
 use std::sync::Arc;
 
+use crate::kv::NativeReader as HostReader;
 use jazz::catalogue::CatalogueRows;
-use jazz::host::HostReader;
 
 pub(crate) type CatalogueStorageResult<T> = Result<T, CatalogueStorageError>;
 
@@ -23,20 +24,36 @@ impl std::error::Error for CatalogueStorageError {}
 /// own; writes run on the store's thread, on the connection the runtime's
 /// rows use too, and wait for it.
 pub(crate) struct CatalogueStorage {
-    reader: Arc<HostReader>,
+    #[cfg_attr(not(feature = "native"), allow(dead_code))]
+    reader: Option<Arc<HostReader>>,
     #[cfg_attr(not(any(test, feature = "embedded-server")), allow(dead_code))]
     store: crate::runtime::HostSender,
 }
 
 impl CatalogueStorage {
-    pub(crate) fn new(reader: Arc<HostReader>, store: crate::runtime::HostSender) -> Self {
+    pub(crate) fn new(reader: Option<Arc<HostReader>>, store: crate::runtime::HostSender) -> Self {
         Self { reader, store }
     }
 
     pub(crate) fn read(&self) -> CatalogueStorageResult<CatalogueRows> {
-        self.reader
-            .catalogue()
-            .map_err(|error| CatalogueStorageError(format!("read catalogue: {error}")))
+        #[cfg(feature = "native")]
+        if let Some(reader) = &self.reader {
+            return reader
+                .catalogue()
+                .map_err(|error| CatalogueStorageError(format!("read catalogue: {error}")));
+        }
+        let (reply, answer) = std::sync::mpsc::sync_channel(1);
+        self.store
+            .send(Box::new(move |tables| {
+                Box::pin(async move {
+                    let _ = reply.send(tables.catalogue().await.map_err(|error| error.to_string()));
+                })
+            }))
+            .map_err(CatalogueStorageError)?;
+        answer
+            .recv()
+            .map_err(|_| CatalogueStorageError("store closed before catalogue read".into()))?
+            .map_err(CatalogueStorageError)
     }
 
     /// Write `put` in one commit: all or none. A deploy instead writes its
@@ -46,11 +63,14 @@ impl CatalogueStorage {
         let (reply, answer) = std::sync::mpsc::sync_channel(1);
         self.store
             .send(Box::new(move |tables| {
-                let _ = reply.send(
-                    tables
-                        .catalogue_put(&put)
-                        .map_err(|error| error.to_string()),
-                );
+                Box::pin(async move {
+                    let _ = reply.send(
+                        tables
+                            .catalogue_put(&put)
+                            .await
+                            .map_err(|error| error.to_string()),
+                    );
+                })
             }))
             .map_err(CatalogueStorageError)?;
         answer

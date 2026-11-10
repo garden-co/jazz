@@ -134,10 +134,7 @@ fn explain_says_which_clause_of_the_read_policy_holds_for_each_row() {
     );
     let rows = [alices, bobs];
     let explain = |table: &str, rows: &[RowUuid], author, claims| {
-        sorted(
-            db.explain_read_clauses(table, rows, author, claims)
-                .unwrap(),
-        )
+        sorted(block_on(db.explain_read_clauses(table, rows, author, claims)).unwrap())
     };
 
     // Alice, no claims: her own row by clause 0; bob's by none of the two.
@@ -178,10 +175,7 @@ fn explain_says_which_clause_of_the_read_policy_holds_for_each_row() {
         explain("notes", &[RowUuid::from_bytes([9; 16])], alice, none()),
         (2, vec![]),
     );
-    assert!(
-        db.explain_read_clauses("nope", &rows, alice, none())
-            .is_err()
-    );
+    assert!(block_on(db.explain_read_clauses("nope", &rows, alice, none())).is_err());
 
     // An inherited clause holds when the parent row's own policy does.
     let comment = |id, note: RowUuid, pinned| {

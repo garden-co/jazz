@@ -105,7 +105,7 @@ fn open_at(schema: JazzSchema, path: &std::path::Path) -> Db {
         FileOptions::default(),
     ))
     .unwrap();
-    db.set_authority();
+    jazz::db::block_on(db.set_authority());
     db
 }
 
@@ -145,7 +145,7 @@ fn a_deploy_reads_back_as_it_was_published() {
     let db = open_at(compile_schema(&v1), &path);
     block_on(db.apply_catalogue(deploy(&v1, &v2, subject_policies(), 1))).unwrap();
 
-    let rows = db.catalogue().unwrap();
+    let rows = jazz::db::block_on(db.catalogue()).unwrap();
     let v1_row = rows.schema(&SchemaHash::compute(&v1)).unwrap();
     let v2_row = rows.schema(&SchemaHash::compute(&v2)).unwrap();
     assert_eq!(v1_row.schema, v1);
@@ -219,7 +219,7 @@ fn a_reopened_store_admits_its_versions_from_its_own_rows() {
         ..CatalogueChange::default()
     }))
     .unwrap();
-    let rows = db.catalogue().unwrap();
+    let rows = jazz::db::block_on(db.catalogue()).unwrap();
     assert_eq!(
         rows.schemas
             .iter()
@@ -237,7 +237,7 @@ fn a_failed_change_leaves_the_catalogue_and_schema_as_they_were() {
     let path = dir.path().join("store.sqlite");
     let (v1, v2) = (notes("text"), notes("body"));
     let db = open_at(compile_schema(&v1), &path);
-    let before = db.catalogue().unwrap();
+    let before = jazz::db::block_on(db.catalogue()).unwrap();
     // A required column added without a default cannot be admitted: the
     // rows published before the admission roll back with it.
     let required = SchemaBuilder::new()
@@ -255,7 +255,7 @@ fn a_failed_change_leaves_the_catalogue_and_schema_as_they_were() {
         Vec::new(),
     ));
     assert!(block_on(db.apply_catalogue(change)).is_err());
-    assert_eq!(db.catalogue().unwrap(), before);
+    assert_eq!(jazz::db::block_on(db.catalogue()).unwrap(), before);
     assert_eq!(
         db.current_schema().version_id(),
         compile_schema(&v1).version_id()
@@ -263,9 +263,16 @@ fn a_failed_change_leaves_the_catalogue_and_schema_as_they_were() {
     drop(db);
 
     let db = open_at(compile_schema(&v1), &path);
-    assert_eq!(db.catalogue().unwrap(), before);
+    assert_eq!(jazz::db::block_on(db.catalogue()).unwrap(), before);
     block_on(db.apply_catalogue(deploy(&v1, &v2, allow_all_policies(), 1))).unwrap();
-    assert_eq!(db.catalogue().unwrap().head().unwrap().revision, 1);
+    assert_eq!(
+        jazz::db::block_on(db.catalogue())
+            .unwrap()
+            .head()
+            .unwrap()
+            .revision,
+        1
+    );
 }
 
 #[test]
@@ -275,7 +282,11 @@ fn every_permissions_revision_is_kept() {
     let (v1, v2) = (notes("text"), notes("body"));
     let db = open_at(compile_schema(&v1), &path);
     block_on(db.apply_catalogue(deploy(&v1, &v2, allow_all_policies(), 1))).unwrap();
-    let first = db.catalogue().unwrap().head().unwrap().clone();
+    let first = jazz::db::block_on(db.catalogue())
+        .unwrap()
+        .head()
+        .unwrap()
+        .clone();
     // Only the write policy changes: reads take effect where they did.
     let writes_only = TablePolicies {
         insert: TablePolicies::default().insert,
@@ -292,7 +303,7 @@ fn every_permissions_revision_is_kept() {
         ..CatalogueChange::default()
     }))
     .unwrap();
-    let rows = db.catalogue().unwrap();
+    let rows = jazz::db::block_on(db.catalogue()).unwrap();
     let revisions: Vec<_> = rows.permissions.iter().map(|row| row.revision).collect();
     assert_eq!(revisions, vec![1, 2, 3]);
     assert_eq!(rows.permissions[0], first);
@@ -319,9 +330,7 @@ fn put_and_reopen(put: CataloguePut) -> jazz::catalogue::CatalogueRows {
         }))
         .unwrap();
     }
-    open_at(compile_schema(&notes("text")), &path)
-        .catalogue()
-        .unwrap()
+    block_on(open_at(compile_schema(&notes("text")), &path).catalogue()).unwrap()
 }
 
 fn column(name: &str, column_type: ColumnType) -> ColumnDescriptor {
@@ -532,7 +541,7 @@ fn bundles_are_stamped_in_publication_order() {
     publish(&open, 100);
     publish(&closed, 100);
     publish(&open, 50);
-    let mut bundles = db.catalogue().unwrap().bundles;
+    let mut bundles = jazz::db::block_on(db.catalogue()).unwrap().bundles;
     bundles.sort_by_key(|bundle| bundle.published_at);
     let order = bundles
         .iter()
@@ -574,7 +583,7 @@ fn a_non_finite_double_is_refused_when_written() {
         compile_schema(&notes("text")),
         &dir.path().join("other.sqlite"),
     );
-    let before = db.catalogue().unwrap();
+    let before = jazz::db::block_on(db.catalogue()).unwrap();
     for default in [f64::NAN, f64::NEG_INFINITY] {
         let lens = CatalogueLens {
             source: SchemaHash::compute(&notes("text")),
@@ -597,5 +606,5 @@ fn a_non_finite_double_is_refused_when_written() {
         .unwrap_err();
         assert_eq!(error.code, jazz::db::ErrorCode::Schema);
     }
-    assert_eq!(db.catalogue().unwrap(), before);
+    assert_eq!(jazz::db::block_on(db.catalogue()).unwrap(), before);
 }

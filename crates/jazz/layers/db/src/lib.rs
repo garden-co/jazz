@@ -30,6 +30,7 @@ mod tools {
     pub use jazz_model::model::transaction::OpenTransactionId;
 }
 
+pub mod backend;
 pub mod binding_args;
 pub mod binding_codec;
 pub mod binding_host;
@@ -87,3 +88,8 @@ pub mod result_tree {
         Hole,
     }
 }
+
+// Available to lower-layer tests built with the testing feature.
+#[cfg(all(feature = "native", any(test, feature = "testing")))]
+#[cfg_attr(not(test), allow(dead_code))]
+mod sql_test;

@@ -112,17 +112,16 @@ fn connect(server: &Db, client: &Db) -> Link {
         allowance: None,
         drop_reads: None,
     })));
-    server
-        .accept_subscriber(
-            Box::new(End {
-                out: down,
-                inbox: up,
-                allowance: Some(allowance.clone()),
-                drop_reads: Some(drop_reads.clone()),
-            }),
-            alice_id(),
-        )
-        .unwrap();
+    block_on(server.accept_subscriber(
+        Box::new(End {
+            out: down,
+            inbox: up,
+            allowance: Some(allowance.clone()),
+            drop_reads: Some(drop_reads.clone()),
+        }),
+        alice_id(),
+    ))
+    .unwrap();
     let link = Link {
         _upstream: upstream,
         allowance,
@@ -150,7 +149,7 @@ fn insert(db: &Db, n: usize) {
 }
 
 fn count(db: &Db, table: &str) -> usize {
-    db.read(&db.prepare_query(&Query::from(table)).unwrap())
+    block_on(db.read(&db.prepare_query(&Query::from(table)).unwrap()))
         .unwrap()
         .len()
 }

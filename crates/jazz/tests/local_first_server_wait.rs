@@ -98,9 +98,9 @@ fn fresh_client(node: u8) -> Db {
 fn connect(client: &Db, server: &Db) {
     let (client_transport, server_transport) = duplex();
     let _upstream = block_on(client.connect_upstream(client_transport));
-    let _subscriber = server
-        .accept_subscriber(server_transport, AuthorSubject::SYSTEM)
-        .unwrap();
+    let _subscriber =
+        jazz::db::block_on(server.accept_subscriber(server_transport, AuthorSubject::SYSTEM))
+            .unwrap();
 }
 
 fn turn(client: &Db, server: Option<&Db>) {
@@ -219,7 +219,7 @@ fn all_rows() -> Vec<RowUuid> {
 fn warm_client(node: u8, server: &Db) -> Db {
     let client = fresh_client(node);
     connect(&client, server);
-    client.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(client.set_remote_link_hint(RemoteLinkHint::Live));
     let remote = ReadOpts {
         tier: jazz::db::ReadTier::Remote,
         ..ReadOpts::default()
@@ -347,7 +347,7 @@ fn nothing_waits_when_the_server_cannot_answer_or_the_timeout_is_zero() {
     ] {
         let alice = fresh_client(node);
         connect(&alice, &server);
-        alice.set_remote_link_hint(hint);
+        jazz::db::block_on(alice.set_remote_link_hint(hint));
         let mut stream = subscribe(&alice, &items(), first_load_remote_wait(LONG));
         let (reset, rows, settled) = opening(first_event(&mut stream, &alice, None));
         assert!(reset && rows.is_empty() && !settled, "{hint:?}");
@@ -356,7 +356,7 @@ fn nothing_waits_when_the_server_cannot_answer_or_the_timeout_is_zero() {
 
     let bob = fresh_client(0x75);
     connect(&bob, &server);
-    bob.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(bob.set_remote_link_hint(RemoteLinkHint::Live));
     let mut stream = subscribe(&bob, &items(), first_load_remote_wait(Duration::ZERO));
     let (reset, rows, settled) = opening(first_event(&mut stream, &bob, None));
     assert!(reset && rows.is_empty() && !settled);
@@ -384,7 +384,7 @@ fn a_failed_link_releases_a_held_opening_before_its_timeout() {
     let alice = warm_client(0x76, &server);
     let mut stream = subscribe(&alice, &items(), first_load_remote_wait(LONG));
     assert_withheld(&mut stream, &alice, None, 3);
-    alice.set_remote_link_hint(RemoteLinkHint::Failed);
+    jazz::db::block_on(alice.set_remote_link_hint(RemoteLinkHint::Failed));
     let (reset, mut rows, settled) = opening(first_event(&mut stream, &alice, None));
     rows.sort();
     assert!(reset && !settled);
@@ -519,7 +519,7 @@ fn a_remote_read_on_an_unadmitted_schema_version_fails_with_the_reason() {
 fn a_read_asked_before_the_first_connection_waits_for_its_answer() {
     let server = seeded_server();
     let alice = fresh_client(0x75);
-    alice.set_remote_link_hint(RemoteLinkHint::Attempting);
+    jazz::db::block_on(alice.set_remote_link_hint(RemoteLinkHint::Attempting));
     let bytes = postcard::to_allocvec(&items()).expect("encode query");
     let read = alice.all_serialized_query(&bytes, first_load_remote_wait(LONG), None, None, None);
     let mut read = pin!(read);
@@ -532,7 +532,7 @@ fn a_read_asked_before_the_first_connection_waits_for_its_answer() {
         turn(&alice, None);
     }
     connect(&alice, &server);
-    alice.set_remote_link_hint(RemoteLinkHint::Live);
+    jazz::db::block_on(alice.set_remote_link_hint(RemoteLinkHint::Live));
     for _ in 0..MAX_TURNS {
         if let Poll::Ready(result) = read.as_mut().poll(&mut context) {
             let SerializedReadResult::Rows(rows) = result.expect("one-shot read") else {

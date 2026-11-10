@@ -142,9 +142,7 @@ fn setup() -> (Db, Db) {
     let client = open(1);
     let (client_side, server_side) = duplex();
     let _ = block_on(client.connect_upstream(client_side));
-    server
-        .accept_subscriber(server_side, AuthorSubject::SYSTEM)
-        .unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, AuthorSubject::SYSTEM)).unwrap();
     (server, client)
 }
 

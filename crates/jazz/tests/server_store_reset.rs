@@ -104,9 +104,7 @@ fn alice() -> Db {
 fn connect(client: &Db, server: &Db) -> Upstream {
     let (client_side, server_side) = duplex();
     let upstream = block_on(client.connect_upstream(client_side));
-    server
-        .accept_subscriber(server_side, AuthorSubject::SYSTEM)
-        .unwrap();
+    jazz::db::block_on(server.accept_subscriber(server_side, AuthorSubject::SYSTEM)).unwrap();
     upstream
 }
 
@@ -403,7 +401,7 @@ fn file_server(path: &std::path::Path) -> Db {
         jazz::db::FileOptions::default(),
     ))
     .expect("open file server");
-    db.set_authority();
+    jazz::db::block_on(db.set_authority());
     db
 }
 
@@ -534,11 +532,14 @@ fn an_authority_store_without_a_namespace_mints_one_when_opened() {
     }
     let server = file_server(&path);
     seed_rows(&server, 1, 0..3);
-    let identity = server.table_identity("items").unwrap();
+    let identity = jazz::db::block_on(server.table_identity("items")).unwrap();
     block_on(server.close()).unwrap();
     drop(server);
     let server = file_server(&path);
-    assert_eq!(server.table_identity("items").unwrap(), identity);
+    assert_eq!(
+        jazz::db::block_on(server.table_identity("items")).unwrap(),
+        identity
+    );
 
     let alice = alice();
     let upstream = connect(&alice, &server);
@@ -547,7 +548,10 @@ fn an_authority_store_without_a_namespace_mints_one_when_opened() {
     assert_eq!(rejection(&mut stream), None);
     assert!(alice.upstream_refusal(&upstream).is_none());
     assert_eq!(local_ids(&alice), server_ids(&server));
-    assert_eq!(alice.table_identity("items").unwrap(), identity);
+    assert_eq!(
+        jazz::db::block_on(alice.table_identity("items")).unwrap(),
+        identity
+    );
 }
 
 /// A wait that only needs this store (`Local`) is not failed by a refused
