@@ -2,6 +2,7 @@ import { signChallenge } from "../local-first-auth/index.js";
 import { parseAuthSecret } from "../runtime/auth-secret-codec.js";
 import {
   AccountAuthError,
+  LINK_NEEDS_GUEST_MESSAGE,
   requestBackendLinkChallenge,
   requestBackendSignIn,
   readAccountAssignment,
@@ -337,7 +338,11 @@ export function createAccountManagerWithRuntime(options: {
         // for the signed-in user, never with its sync token: a proof links
         // once, and only to that user.
         if (account.identity.issuer !== "urn:jazz:local-first")
-          throw new AccountAuthError("local_first_account_required");
+          throw new AccountAuthError(
+            "local_first_account_required",
+            undefined,
+            LINK_NEEDS_GUEST_MESSAGE,
+          );
         const material = credentials.get(account);
         if (!material || material.registry !== registry || !material.localFirstSecret)
           throw new AccountAuthError("local_first_account_required");
