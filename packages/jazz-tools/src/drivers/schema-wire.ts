@@ -1,4 +1,5 @@
 import type { WasmSchema } from "./types.js";
+import type { ClientMigrations } from "../runtime/client-migrations.js";
 import { isRecord } from "../runtime/util.js";
 
 export function isWasmSchema(value: unknown): value is WasmSchema {
@@ -59,6 +60,23 @@ export function serializeSchemaSource(schema: WasmSchema): string {
     {
       tables: sortSchemaTables(schema),
     },
+    runtimeSchemaJsonReplacer,
+  );
+}
+
+/**
+ * Serialize an app for a React Native native session: its schema AST, as
+ * {@link serializeSchemaSource} does, and the migrations it ships (`null`
+ * for an app that ships none). The native relay opens its store along them,
+ * as every other client does, so it stores each column where the server
+ * does.
+ */
+export function serializeNativeAppSource(
+  schema: WasmSchema,
+  migrations: ClientMigrations | undefined,
+): string {
+  return JSON.stringify(
+    { schema: { tables: sortSchemaTables(schema) }, migrations: migrations ?? null },
     runtimeSchemaJsonReplacer,
   );
 }

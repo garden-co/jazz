@@ -150,10 +150,19 @@ object or a method that accepts it. Its exact top-level fields are:
   scope: { app_namespace, storage_namespace, auth_scope },
   sqlite_path,
   schema_json,
+  migrations_json?,
   identity: { node, author },
   claims
 }
 ```
+
+`migrations_json` (optional) is the app's `ClientMigrations` bundle as JSON:
+its earlier schema versions and the lenses between them. The relay and every
+foreground open along it, as every other client does (SPEC 10.7), so their
+stores name each column after the version that introduced it, where the
+server keeps it. A private session attaches the same two parts as one object,
+`{ "schema": <schema>, "migrations": <ClientMigrations> | null }` (native relay
+ABI 5).
 
 Unknown fields at the top level, scope, or identity level fail closed. Rust
 parses the schema JSON, serializes it to its normalized JSON spelling, builds
@@ -172,8 +181,8 @@ On success the ABI returns exactly 32 random bytes: the opaque admission
 capability. The trusted platform layer owns its lifetime and may hand that
 opaque value to foreground JavaScript only for relay lifecycle commands. It
 never logs, derives storage names from, or decodes the capability. A second
-admission for the same scope with different SQLite path, schema, durable
-identity, or claims fails before minting a capability, including when no relay
+admission for the same scope with different SQLite path, schema, schema
+history, durable identity, or claims fails before minting a capability, including when no relay
 alias has yet been opened.
 
 Auth switching is ordered: revoke every capability for the old authenticated

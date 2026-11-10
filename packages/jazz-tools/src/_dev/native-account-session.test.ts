@@ -59,7 +59,10 @@ describe("installed-device account lease", () => {
   it("owns production admission until explicit close without logging out the retained account", async () => {
     const { manager, account, native, pending, capability, config } = await setup();
     const lease = await createNativeAccountTestSession(config, schemaSource);
-    expect(native.attachAccountSchema).toHaveBeenCalledExactlyOnceWith(pending, schemaSource);
+    expect(native.attachAccountSchema).toHaveBeenCalledExactlyOnceWith(
+      pending,
+      `{"schema":${schemaSource},"migrations":null}`,
+    );
     expect(native.releaseAccountSession).toHaveBeenCalledExactlyOnceWith(pending);
     expect(lease.account).toBe(account);
     expect(lease.capability).toEqual(capability);

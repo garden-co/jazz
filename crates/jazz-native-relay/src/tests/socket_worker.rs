@@ -155,9 +155,10 @@ fn scripted_foreground(
         })
         .unwrap();
     let admitted = host
-        .attach_canonical_schema(
+        .attach_app(
             pending,
-            &serde_json::to_string(schema().public_schema()).unwrap(),
+            &serde_json::json!({"schema": schema().public_schema(), "migrations": null})
+                .to_string(),
         )
         .unwrap();
     let foreground = host

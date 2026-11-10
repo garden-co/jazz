@@ -46,10 +46,12 @@ use node_lease::{ForegroundNodeLease, ForegroundNodeLeasePool};
 /// 1 was the first public ABI; 2 added `CodedOperationError` answers to
 /// existing commands, so a JS bundle and native build from different ABIs
 /// refuse to open rather than misread a failure; 3 added its `reason_name`;
-/// 4 ends each subscription delta with its updated rows' splices.
+/// 4 ends each subscription delta with its updated rows' splices; 5 attaches
+/// an app (`{"schema", "migrations"}`) rather than a bare schema to a private
+/// session, so a relay opens along the app's schema history.
 /// Append-only commands use optional native capabilities while existing
 /// command layouts remain stable.
-pub const NATIVE_RELAY_ABI_V1: u16 = 4;
+pub const NATIVE_RELAY_ABI_V1: u16 = 5;
 
 const FOREGROUND_WAKE_IMMEDIATE: u8 = 0;
 const FOREGROUND_WAKE_CANCELLED: u8 = 3;
@@ -132,6 +134,9 @@ struct RelayScopeAdmissionRequest {
     pub scope: RelayScopeRequest,
     pub sqlite_path: String,
     pub schema_json: String,
+    /// The app's migrations bundle (`ClientMigrations` JSON), normalized;
+    /// `None` for an app that ships none.
+    pub migrations_json: Option<String>,
     pub identity: DbIdentity,
     pub claims: BTreeMap<String, Value>,
 }
@@ -185,8 +190,26 @@ struct TrustedRelayScopeAdmissionJson {
     scope: TrustedRelayScopeJson,
     sqlite_path: String,
     schema_json: String,
+    /// The app's migrations bundle (`ClientMigrations` JSON), if it ships one.
+    #[serde(default)]
+    migrations_json: Option<String>,
     identity: TrustedRelayIdentityJson,
     claims: BTreeMap<String, Value>,
+}
+
+/// What a private session attaches: the app's schema and the migrations it
+/// ships (`ClientMigrations`, or `null` for an app that ships none). Like the
+/// schema, the bundle carries no credential.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AttachedAppJson {
+    schema: serde_json::Value,
+    migrations: Option<serde_json::Value>,
+}
+
+/// One normalized JSON spelling of `value`.
+fn normalized_json(value: &serde_json::Value) -> Result<String, JazzNativeRelayStatus> {
+    serde_json::to_string(value).map_err(|_| JazzNativeRelayStatus::LifecycleFailure)
 }
 
 #[derive(serde::Deserialize)]
@@ -225,12 +248,20 @@ impl TrustedRelayScopeAdmissionJson {
         // normalized schema spelling and malformed JSON cannot reach admission.
         let schema_value = serde_json::from_str::<serde_json::Value>(&self.schema_json)
             .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
-        let schema_json = serde_json::to_string(&schema_value)
-            .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+        let schema_json = normalized_json(&schema_value)?;
+        let migrations_json = self
+            .migrations_json
+            .map(|json| {
+                serde_json::from_str::<serde_json::Value>(&json)
+                    .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)
+                    .and_then(|value| normalized_json(&value))
+            })
+            .transpose()?;
         Ok(RelayScopeAdmissionRequest {
             scope,
             sqlite_path: self.sqlite_path,
             schema_json,
+            migrations_json,
             identity: DbIdentity {
                 node: self.identity.node,
                 author: self.identity.author,
@@ -1906,6 +1937,13 @@ impl NativeRelayHost {
             .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
         let schema =
             JazzSchema::new(&public_schema).map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+        // Lowered as every other client lowers the bundle it ships; a bundle
+        // that names a version it lacks, or a lens that does not compile, is
+        // refused before a capability exists.
+        let migrations = jazz::tools::deployment::published::lowered_client_migrations(
+            request.migrations_json.as_deref().map(str::as_bytes),
+        )
+        .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
         let config = RelayOpenConfig {
             supported_abi: NativeRelayAbiRange {
                 minimum: NATIVE_RELAY_ABI_V1,
@@ -1914,6 +1952,7 @@ impl NativeRelayHost {
             scope: request.scope.into(),
             sqlite_path: PathBuf::from(request.sqlite_path),
             schema,
+            migrations,
             identity: request.identity,
         };
         // A scope is immutable once trusted code has admitted it. Reject a
@@ -1923,6 +1962,7 @@ impl NativeRelayHost {
             admitted.config.scope == config.scope
                 && (admitted.config.sqlite_path != config.sqlite_path
                     || admitted.config.schema.version_id() != config.schema.version_id()
+                    || admitted.config.migrations_key() != config.migrations_key()
                     || admitted.config.identity != config.identity
                     || admitted.claims != request.claims)
         }) {
@@ -1999,10 +2039,10 @@ impl NativeRelayHost {
         Ok(capability)
     }
 
-    fn attach_canonical_schema(
+    fn attach_app(
         &mut self,
         session: AdmissionCapability,
-        schema_json: &str,
+        app_json: &str,
     ) -> Result<AdmissionCapability, JazzNativeRelayStatus> {
         let mut pending = self
             .pending_private_sessions
@@ -2049,15 +2089,16 @@ impl NativeRelayHost {
         // Canonicalize at this credential-free boundary before constructing a
         // JazzSchema. A malformed schema consumes the one-shot session setup;
         // callers must restart setup rather than attach a different schema.
-        let value = serde_json::from_str::<serde_json::Value>(schema_json)
+        let app = serde_json::from_str::<AttachedAppJson>(app_json)
             .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
-        let schema_json =
-            serde_json::to_string(&value).map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+        let schema_json = normalized_json(&app.schema)?;
+        let migrations_json = app.migrations.as_ref().map(normalized_json).transpose()?;
         let socket = pending.socket;
         let admitted = self.admit_scope(RelayScopeAdmissionRequest {
             scope: pending.scope,
             sqlite_path: pending.sqlite_path,
             schema_json,
+            migrations_json,
             identity: pending.identity,
             claims: pending.claims,
         })?;
@@ -2613,7 +2654,10 @@ pub unsafe extern "C" fn jazz_native_relay_host_begin_private_session_json(
     })
 }
 
-/// Attach one credential-free canonical schema to a one-shot private setup.
+/// Attach one credential-free app to a one-shot private setup: JSON
+/// `{"schema": <schema>, "migrations": <ClientMigrations> | null}`. The
+/// relay and its foregrounds open along the shipped migrations, so their
+/// stores agree with the server's on every column.
 ///
 /// # Safety
 /// `host` and `out` are live ABI pointers; `session_capability` points to
@@ -2636,7 +2680,7 @@ pub unsafe extern "C" fn jazz_native_relay_host_attach_canonical_schema_json(
         };
         let schema =
             std::str::from_utf8(schema).map_err(|_| JazzNativeRelayStatus::InvalidCommand)?;
-        let capability = host.lock()?.attach_canonical_schema(capability, schema)?;
+        let capability = host.lock()?.attach_app(capability, schema)?;
         unsafe { write_capability_out(out, capability) };
         Ok(())
     })

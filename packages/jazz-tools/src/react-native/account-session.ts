@@ -46,14 +46,17 @@ export function beginNativeAccountSession(
   );
 }
 
-/** Schema attachment consumes the one-shot setup on success or failure. */
+/**
+ * Attach the app (see `serializeNativeAppSource`) to the one-shot setup,
+ * which this consumes on success or failure.
+ */
 export function attachNativeAccountSchema(
   factory: NativeForegroundFactory,
   pending: Uint8Array,
-  schemaSource: string,
+  appSource: string,
 ): Uint8Array {
   try {
-    return factory.attachAccountSchema!(pending, schemaSource);
+    return factory.attachAccountSchema!(pending, appSource);
   } finally {
     factory.releaseAccountSession!(pending);
   }

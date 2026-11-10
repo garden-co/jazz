@@ -33,7 +33,8 @@ export type NativeForegroundRuntimeFactory = {
   /** OS entropy and shared Rust signing; neither opens a database. */
   /** @internal Logical account setup, used only by the opaque-handle adapter. */
   beginAccountSession?(requestJson: string): Uint8Array;
-  attachAccountSchema?(capability: Uint8Array, schemaJson: string): Uint8Array;
+  /** The app as JSON: `{"schema": <schema>, "migrations": <ClientMigrations> | null}`. */
+  attachAccountSchema?(capability: Uint8Array, appJson: string): Uint8Array;
   releaseAccountSession?(capability: Uint8Array): void;
   refreshAccountSession?(capability: Uint8Array, requestJson: string): void;
   /** @internal Synchronous OS-protected account preference transaction. */

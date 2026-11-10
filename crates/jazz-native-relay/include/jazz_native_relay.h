@@ -10,7 +10,7 @@ extern "C" {
 #endif
 
 /* The relay ABI this header describes (Rust `NATIVE_RELAY_ABI_V1`). */
-#define JAZZ_NATIVE_RELAY_ABI_VERSION 4
+#define JAZZ_NATIVE_RELAY_ABI_VERSION 5
 
 /*
  * Return the shared native relay ABI version embedded in this artifact.
@@ -88,7 +88,8 @@ jazz_native_relay_status jazz_native_relay_host_execute(
 /* Trusted platform-only two phase admission. Setup receives serverUrl, appId,
  * jwt, and the platform-selected storage root; JWT payload decoding only
  * selects a local cache scope and is never authentication. Attach receives
- * only the opaque setup capability and canonical schema JSON. */
+ * only the opaque setup capability and the app as JSON
+ * {"schema": <schema>, "migrations": <ClientMigrations> | null} (ABI 5). */
 /* Internal account adapter: logical handle metadata is separate from the
  * platform-selected absolute OS storage root. Returned capabilities belong to
  * this runtime lease and are released on runtime invalidation. */

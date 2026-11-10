@@ -246,7 +246,9 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_begin_account_session_json
     })
 }
 
-/// Attach a schema to a setup owned by this runtime lease.
+/// Attach an app (`{"schema", "migrations"}` JSON, see
+/// [`jazz_native_relay_host_attach_canonical_schema_json`]) to a setup owned
+/// by this runtime lease.
 ///
 /// # Safety
 /// All pointers must be live for their stated lengths; `out` must be writable
@@ -277,7 +279,7 @@ pub unsafe extern "C" fn jazz_native_relay_host_lease_attach_account_schema_json
         {
             return Err(JazzNativeRelayStatus::InvalidHandle);
         }
-        let admitted = host.attach_canonical_schema(capability, schema)?;
+        let admitted = host.attach_app(capability, schema)?;
         unsafe { write_capability_out(out, admitted) };
         Ok(())
     })
@@ -604,7 +606,10 @@ mod tests {
         let root_bytes = root.path().to_str().unwrap().as_bytes();
         let request = serde_json::to_vec(&external("alice")).unwrap();
         let schema = JazzSchema::new(&jazz::tools::SchemaBuilder::new().build()).unwrap();
-        let schema = serde_json::to_vec(schema.public_schema()).unwrap();
+        let schema = serde_json::to_vec(
+            &serde_json::json!({"schema": schema.public_schema(), "migrations": null}),
+        )
+        .unwrap();
         unsafe {
             let host = jazz_native_relay_host_new();
             let lease = jazz_native_relay_host_retain(host, 1);
@@ -721,7 +726,10 @@ mod tests {
         let refresh_bearer = request.bearer.clone();
         let request = serde_json::to_vec(&request).unwrap();
         let schema = JazzSchema::new(&jazz::tools::SchemaBuilder::new().build()).unwrap();
-        let schema = serde_json::to_vec(schema.public_schema()).unwrap();
+        let schema = serde_json::to_vec(
+            &serde_json::json!({"schema": schema.public_schema(), "migrations": null}),
+        )
+        .unwrap();
         unsafe {
             let host = jazz_native_relay_host_new();
             let lease = jazz_native_relay_host_retain(host, 1);
@@ -842,7 +850,10 @@ mod tests {
         let second_request = serde_json::to_vec(&second_request).unwrap();
         let malformed_request = serde_json::to_vec(&malformed_request).unwrap();
         let schema = JazzSchema::new(&jazz::tools::SchemaBuilder::new().build()).unwrap();
-        let schema = serde_json::to_vec(schema.public_schema()).unwrap();
+        let schema = serde_json::to_vec(
+            &serde_json::json!({"schema": schema.public_schema(), "migrations": null}),
+        )
+        .unwrap();
         unsafe {
             let host = jazz_native_relay_host_new();
             let lease = jazz_native_relay_host_retain(host, 1);
@@ -1037,7 +1048,10 @@ mod tests {
                 .build(),
         )
         .unwrap();
-        let schema = serde_json::to_vec(schema.public_schema()).unwrap();
+        let schema = serde_json::to_vec(
+            &serde_json::json!({"schema": schema.public_schema(), "migrations": null}),
+        )
+        .unwrap();
         let host = jazz_native_relay_host_new();
         // All pointers below are owned until their final frees; the ABI test
         // proves lifecycle behavior without inspecting host implementation.

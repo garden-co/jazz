@@ -12,7 +12,8 @@ import type { Session } from "../../src/runtime/context.js";
 import type { TestJazz } from "../../src/testing/index.js";
 import { createAccountManagerWithRuntime } from "../../src/accounts/enrollment.js";
 import { accountRegistryUrl } from "../../src/accounts/context.js";
-import { serializeSchemaSource } from "../../src/drivers/schema-wire.js";
+import { serializeNativeAppSource } from "../../src/drivers/schema-wire.js";
+import { shippedMigrations } from "../../src/runtime/client-migrations.js";
 import { createPlatformHost, installPlatformHost } from "./native-platform.js";
 
 export interface NativeRelayFixtureOptions {
@@ -143,7 +144,10 @@ export async function createNativeRelayFixture(
           server_url: upstream?.serverUrl ?? null,
         }),
       ),
-      serializeSchemaSource(mergePermissionsIntoWasmSchema(resolveSchemaSource(app), permissions)),
+      serializeNativeAppSource(
+        mergePermissionsIntoWasmSchema(resolveSchemaSource(app), permissions),
+        shippedMigrations(resolveSchemaSource(app)),
+      ),
     );
     cleanupCapability = capability;
     const config: DbConfig = { appId, account, ...(options.upstream ? { serverUrl } : {}) };

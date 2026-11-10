@@ -12,7 +12,8 @@ import type { NativeForegroundFactory } from "../react-native/native-foreground-
  * Own one native account lease for raw and public foreground acceptance tests.
  * Public clients use the same AccountHandle alongside this capability, and may
  * close independently. Close the lease only after every foreground is closed.
- * The generated Rust schema is passed verbatim; no second schema ABI is added.
+ * The generated Rust schema is passed verbatim, as an app of one version that
+ * ships no migrations; no second schema ABI is added.
  */
 export async function createNativeAccountTestSession(
   config: AccountDbConfig,
@@ -41,7 +42,11 @@ export async function createNativeAccountTestSession(
     if (closed) throw new AccountAuthError("account_logged_out");
     factory = native.installNativeForegroundRuntime();
     const pending = beginNativeAccountSession(factory, resolved, resolveNativeSession(resolved));
-    capability = attachNativeAccountSchema(factory, pending, schemaSource);
+    capability = attachNativeAccountSchema(
+      factory,
+      pending,
+      `{"schema":${schemaSource},"migrations":null}`,
+    );
     if (!(capability instanceof Uint8Array) || capability.byteLength !== 32) {
       throw new Error("Native account admission returned an invalid capability");
     }
