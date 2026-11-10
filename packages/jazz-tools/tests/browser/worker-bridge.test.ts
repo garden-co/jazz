@@ -73,6 +73,8 @@ import {
   publishSyncServerSchemaAndPermissions,
   replaceStorageManifest,
   rawStorageRecords,
+  sqliteStoragePath,
+  requestResult,
   useSharedWorkerBridgeHarness,
 } from "./worker-bridge-harness.js";
 
@@ -1015,12 +1017,16 @@ describe("SharedWorker bridge with IndexedDB", () => {
       // during `createDb`, so the actual physical root must be derived from
       // the resolved Db config rather than the pre-normalization input.
       const physicalDbName = resolveDefaultPersistentDbName(initial.config);
+      const sqlitePath = await sqliteStoragePath(
+        physicalDbName,
+        createBrowserStorageOwner(initial.config),
+      );
 
       await replaceStorageManifest(physicalDbName, {
         ...INDEXEDDB_STORAGE_MANIFEST,
         storageEpoch: 99,
       });
-      const recordsBeforeRead = await rawStorageRecords(physicalDbName);
+      const recordsBeforeRead = await rawStorageRecords(physicalDbName, sqlitePath);
 
       // Persistent create must acquire a durable foreground-node lease before
       // any synchronous mutation can mint a transaction identity. Storage
@@ -1039,7 +1045,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
       await sleep(0);
       expect(ambientErrors).toEqual([]);
       expect(unhandledRejections).toEqual([]);
-      expect(await rawStorageRecords(physicalDbName)).toEqual(recordsBeforeRead);
+      expect(await rawStorageRecords(physicalDbName, sqlitePath)).toEqual(recordsBeforeRead);
     } finally {
       globalThis.removeEventListener("error", recordAmbientError);
       globalThis.removeEventListener("unhandledrejection", recordUnhandledRejection);

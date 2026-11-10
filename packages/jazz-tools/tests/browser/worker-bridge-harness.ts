@@ -11,11 +11,14 @@ import { commands } from "vitest/browser";
 import { Db, type QueryBuilder } from "../../src/runtime/db.js";
 import { type Schema } from "../../src/drivers/types.js";
 import {
-  INDEXEDDB_BTREE_METADATA_STORE,
-  INDEXEDDB_BTREE_PAGES_STORE,
+  INDEXEDDB_REPLICA_NODE_KEY,
   INDEXEDDB_STORAGE_MANIFEST_KEY,
   INDEXEDDB_STORAGE_MANIFEST_STORE,
 } from "../../src/runtime/indexeddb-page-store.js";
+import {
+  decodeSqliteBrowserRoot,
+  sqliteBrowserDescriptor,
+} from "../../src/runtime/browser-sqlite-storage.js";
 import { setBrowserFollowerProbeTimingForTest } from "../../src/runtime/native-runtime/browser-follower-connection.js";
 import { TestCleanup, uniqueDbName, waitForCondition, waitForQuery } from "./support.js";
 import {
@@ -531,35 +534,100 @@ export async function publishPermissionsForServer(
   return startJazzApp(testingServer, { schema: deployedSchema, permissions });
 }
 
-export async function replaceStorageManifest(name: string, manifest: unknown): Promise<void> {
-  const database = await requestResult(indexedDB.open(name));
-  const transaction = database.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readwrite");
-  transaction
-    .objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE)
-    .put(manifest, INDEXEDDB_STORAGE_MANIFEST_KEY);
-  await transactionDone(transaction);
-  database.close();
+/** Open an existing fixture database without creating a misleading empty root. */
+async function openExistingDatabase(name: string): Promise<IDBDatabase> {
+  const request = indexedDB.open(name);
+  request.onupgradeneeded = () => request.transaction?.abort();
+  return requestResult(request);
 }
 
-export async function rawStorageRecords(name: string): Promise<Record<string, unknown>> {
-  const database = await requestResult(indexedDB.open(name));
-  const storeNames = [
-    INDEXEDDB_BTREE_PAGES_STORE,
-    INDEXEDDB_BTREE_METADATA_STORE,
-    INDEXEDDB_STORAGE_MANIFEST_STORE,
-  ];
-  const transaction = database.transaction(storeNames, "readonly");
-  const records = Object.fromEntries(
-    await Promise.all(
-      storeNames.map(async (storeName) => {
-        const store = transaction.objectStore(storeName);
-        return [storeName, await requestResult(store.getAll())] as const;
-      }),
-    ),
-  );
-  await transactionDone(transaction);
-  database.close();
-  return records;
+export async function replaceStorageManifest(name: string, manifest: unknown): Promise<void> {
+  const database = await openExistingDatabase(name);
+  try {
+    const transaction = database.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readwrite");
+    const done = transactionDone(transaction);
+    transaction
+      .objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE)
+      .put(manifest, INDEXEDDB_STORAGE_MANIFEST_KEY);
+    await done;
+  } finally {
+    database.close();
+  }
+}
+
+/** Resolve the real file from the valid, owner-bound root before corrupting admission. */
+export async function sqliteStoragePath(name: string, owner: string): Promise<string> {
+  const database = await openExistingDatabase(name);
+  try {
+    const transaction = database.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readonly");
+    const done = transactionDone(transaction);
+    const store = transaction.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE);
+    const [manifest, node] = await Promise.all([
+      requestResult(store.get(INDEXEDDB_STORAGE_MANIFEST_KEY)),
+      requestResult(store.get(INDEXEDDB_REPLICA_NODE_KEY)),
+    ]);
+    await done;
+    if (!(node instanceof ArrayBuffer)) throw new Error("Missing fixture replica identity");
+    const root = decodeSqliteBrowserRoot(manifest, name, owner, new Uint8Array(node));
+    if (root.state !== "ready") throw new Error("Fixture SQLite root was not ready");
+    return sqliteBrowserDescriptor(root).path;
+  } finally {
+    database.close();
+  }
+}
+
+export async function rawStorageRecords(
+  name: string,
+  sqlitePath: string,
+): Promise<Record<string, unknown>> {
+  const database = await openExistingDatabase(name);
+  let sidecar: Record<string, unknown>;
+  try {
+    const storeNames = Array.from(database.objectStoreNames);
+    const transaction = database.transaction(storeNames, "readonly");
+    const done = transactionDone(transaction);
+    sidecar = Object.fromEntries(
+      await Promise.all(
+        storeNames.map(async (storeName) => {
+          const store = transaction.objectStore(storeName);
+          const [keys, values] = await Promise.all([
+            requestResult(store.getAllKeys()),
+            requestResult(store.getAll()),
+          ]);
+          return [storeName, { keys, values }] as const;
+        }),
+      ),
+    );
+    await done;
+  } finally {
+    database.close();
+  }
+  // The real SQLite bytes live in the VFS database, not the identity sidecar.
+  // Inspect only this validated root's exact main/journal/WAL/shared-memory paths.
+  const vfs = await openExistingDatabase("jazz-idb");
+  try {
+    const transaction = vfs.transaction("blocks", "readonly");
+    const done = transactionDone(transaction);
+    const store = transaction.objectStore("blocks");
+    const files = await Promise.all(
+      [sqlitePath, `${sqlitePath}-journal`, `${sqlitePath}-wal`, `${sqlitePath}-shm`].map(
+        async (path) => {
+          const range = IDBKeyRange.bound([path, 0], [path, Infinity]);
+          const [keys, values] = await Promise.all([
+            requestResult(store.getAllKeys(range)),
+            requestResult(store.getAll(range)),
+          ]);
+          return [path, { keys, values }] as const;
+        },
+      ),
+    );
+    await done;
+    if (files[0][1].values.length === 0)
+      throw new Error("Fixture SQLite file has no durable blocks");
+    return { sidecar, files: Object.fromEntries(files) };
+  } finally {
+    vfs.close();
+  }
 }
 
 export function requestResult<T>(request: IDBRequest<T>): Promise<T> {
