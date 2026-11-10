@@ -33,10 +33,10 @@ use thiserror::Error;
 pub use app_id::AppId;
 pub use public_api::session::unverified_jwt_scope_subject;
 pub use public_schema::{
-    AuthMode, CmpOp, ColumnDescriptor, ColumnMergeStrategy, ColumnType, Operation, OrderedRowDelta,
-    PolicyExpr, PolicyValue, QueryResult, QueryResultField, Row, RowDelta, RowDescriptor, Schema,
-    SchemaBuilder, SchemaHash, Session, TableName, TablePolicies, TableSchema, TableSchemaBuilder,
-    TransactionId, Value, WriteContext, permissions, policy_expr,
+    AuthMode, CmpOp, ColumnDescriptor, ColumnMergeStrategy, ColumnType, HistoryRetention,
+    Operation, OrderedRowDelta, PolicyExpr, PolicyValue, QueryResult, QueryResultField, Row,
+    RowDelta, RowDescriptor, Schema, SchemaBuilder, SchemaHash, Session, TableName, TablePolicies,
+    TableSchema, TableSchemaBuilder, TransactionId, Value, WriteContext, permissions, policy_expr,
 };
 pub use schema_lens::{Direction, Lens, LensOp, LensTransform};
 pub use transaction::OpenTransactionId;
@@ -78,6 +78,15 @@ pub struct AppContext {
     /// Backend secret for session impersonation.
     /// Enables `for_session()` to act as any user.
     pub backend_secret: Option<String>,
+    /// With `backend_secret`: the user this client acts for, as the app's
+    /// backend states it (the way `createJazz` relays its users' clients).
+    /// The client is then that user's session, not the backend's own link.
+    pub backend_session: Option<Session>,
+    /// With `backend_session`: the published permissions bundle (its hex
+    /// id) that session is pinned to, as `createJazz` pins every session it
+    /// states. A core governs a stated session only by its bundle, and
+    /// refuses one without.
+    pub bundle: Option<String>,
     /// Admin secret for privileged sync over WebSocket and `/admin/*` HTTP.
     /// On `/ws`, a valid admin secret authenticates this client as the backend.
     pub admin_secret: Option<String>,
@@ -103,6 +112,8 @@ impl AppContext {
             account_id: None,
             jwt_token: None,
             backend_secret: None,
+            backend_session: None,
+            bundle: None,
             admin_secret: None,
             migrations: Default::default(),
         }
@@ -233,6 +244,9 @@ pub struct SubscriptionStream {
     /// the public stream is dropped. Closing `receiver` alone cannot do that
     /// for an otherwise idle core subscription.
     cancellation: Option<tokio::sync::oneshot::Sender<()>>,
+    /// Drops the core subscription now, after `cancellation` marked it,
+    /// so its unsubscription is queued before whatever the caller does next.
+    on_drop: Option<Box<dyn FnOnce()>>,
 }
 
 #[cfg(feature = "runtime")]
@@ -242,10 +256,12 @@ impl SubscriptionStream {
     pub(crate) fn new(
         receiver: tokio::sync::mpsc::UnboundedReceiver<SubscriptionStreamItem>,
         cancellation: tokio::sync::oneshot::Sender<()>,
+        on_drop: Box<dyn FnOnce()>,
     ) -> Self {
         Self {
             receiver,
             cancellation: Some(cancellation),
+            on_drop: Some(on_drop),
         }
     }
 
@@ -262,6 +278,9 @@ impl Drop for SubscriptionStream {
         // dropping its core stream then runs subscription cleanup.
         if let Some(cancellation) = self.cancellation.take() {
             let _ = cancellation.send(());
+        }
+        if let Some(on_drop) = self.on_drop.take() {
+            on_drop();
         }
     }
 }

@@ -28,11 +28,7 @@ enum BranchOrder {
 fn policy_branch_closure_schema(order: BranchOrder) -> Schema {
     let plain_branch = PolicyExpr::eq_session(
         "direct_user_id",
-        vec![
-            "user".to_owned(),
-            "identity".to_owned(),
-            "subject".to_owned(),
-        ],
+        vec!["identity".to_owned(), "subject".to_owned()],
     );
     let gather_branch = gathered_resource_access_policy();
     let third_branch = PolicyExpr::eq_literal("route_key", Value::Text("third".to_owned()));
@@ -92,7 +88,6 @@ fn gathered_resource_access_policy() -> PolicyExpr {
                             },
                             op: RelationCmpOp::Eq,
                             right: RelationValueRef::SessionRef(vec![
-                                "user".to_owned(),
                                 "identity".to_owned(),
                                 "subject".to_owned(),
                             ]),

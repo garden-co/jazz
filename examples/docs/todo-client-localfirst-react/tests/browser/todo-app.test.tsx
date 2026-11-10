@@ -12,7 +12,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { act } from "react";
 import { App } from "../../src/App.js";
-import { TEST_PORT, APP_ID, ADMIN_SECRET } from "./test-constants.js";
+import { SCOPE, SERVER_URL } from "./test-constants.js";
 import type { DbConfig } from "jazz-tools";
 
 // ---------------------------------------------------------------------------
@@ -66,7 +66,7 @@ describe("React Todo App E2E", () => {
       (await prepareTestAccount(
         createAccountManager,
         overrides.appId ?? "test-app",
-        overrides.serverUrl ?? `http://127.0.0.1:${TEST_PORT}`,
+        overrides.serverUrl ?? SERVER_URL,
         secret,
       ));
     const resolvedConfig = {
@@ -141,11 +141,7 @@ describe("React Todo App E2E", () => {
 
   it("persists todos across app unmount and remount (IndexedDB)", async () => {
     const dbName = crypto.randomUUID();
-    const account = await prepareTestAccount(
-      createAccountManager,
-      "test-app",
-      `http://127.0.0.1:${TEST_PORT}`,
-    );
+    const account = await prepareTestAccount(createAccountManager, "test-app", SERVER_URL);
 
     // First session: mount app, add a todo via the form
     const el1 = await mountApp({ account, driver: { type: "persistent", dbName } });
@@ -180,19 +176,17 @@ describe("React Todo App E2E", () => {
 
   it("syncs a todo between two app instances through the server", async () => {
     (globalThis as { __JAZZ_SUBSCRIPTION_TRACE__?: boolean }).__JAZZ_SUBSCRIPTION_TRACE__ = true;
-    const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
+    const serverUrl = SERVER_URL;
 
     // Mount two independent app instances connected to the same server
     const el1 = await mountApp({
-      appId: APP_ID,
+      appId: SCOPE,
       serverUrl,
-      adminSecret: ADMIN_SECRET,
       secret: "jazz-auth-v1:Tb9eLjnS22z-_s9FK0EtiFIIRDe4EAygLAdni55RvAs",
     });
     const el2 = await mountApp({
-      appId: APP_ID,
+      appId: SCOPE,
       serverUrl,
-      adminSecret: ADMIN_SECRET,
       secret: "jazz-auth-v1:VDOGX2nez-5T9Lgk4VfYMT33Qsa6J4loRAoKLZpvxBg",
     });
 
@@ -225,20 +219,18 @@ describe("React Todo App E2E", () => {
   });
 
   it("syncs a todo between two app instances through the server without local persistence", async () => {
-    const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
+    const serverUrl = SERVER_URL;
 
     // Mount two independent app instances connected to the same server
     const el1 = await mountApp({
-      appId: APP_ID,
+      appId: SCOPE,
       serverUrl,
-      adminSecret: ADMIN_SECRET,
       secret: "jazz-auth-v1:disAKUpEX273joMo4f1NTW-tDTpc4bzPy_l5tvNLXnc",
       driver: { type: "memory" },
     });
     const el2 = await mountApp({
-      appId: APP_ID,
+      appId: SCOPE,
       serverUrl,
-      adminSecret: ADMIN_SECRET,
       secret: "jazz-auth-v1:TqNBXTv_Mv7HBp3FZ6KtHJwBWvnkI7YcOlrS57d3eEs",
       driver: { type: "memory" },
     });

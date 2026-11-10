@@ -29,10 +29,13 @@ pub struct DbConfig {
     /// Where settled large-value leaf bytes live. `None` keeps them in the
     /// SQLite file ([`crate::chunk_store`]).
     pub chunk_store: Option<std::sync::Arc<dyn crate::chunk_store::ChunkStore>>,
-    /// The wall clock (Unix ms) a shard draws commit positions from, as
+    /// The host runs chunk-store I/O ([`crate::db::Db::take_chunk_io`])
+    /// and the tick never awaits it.
+    pub host_chunk_io: bool,
+    /// The wall clock (Unix ms) the store draws commit positions from, as
     /// hybrid-clock timestamps ([`crate::db::shard`]), so the positions of
-    /// every shard compare by time. `None`, an unsharded store, counts
-    /// positions up by one and takes no shard role.
+    /// every store compare by time. `None` reads the system clock
+    /// ([`crate::db::shard::wall_clock_ms`]).
     pub clock: Option<Box<dyn Fn() -> u64>>,
     /// The app's earlier schema versions and the lenses between them, as
     /// it ships them. A store that has not admitted `schema` admits the
@@ -60,6 +63,7 @@ impl DbConfig {
             identity,
             id_source: None,
             chunk_store: None,
+            host_chunk_io: false,
             clock: None,
             migrations: Migrations::default(),
             system_node: None,
@@ -88,9 +92,19 @@ impl DbConfig {
         self
     }
 
-    /// Take the shard role, drawing commit positions from `clock` (Unix
-    /// ms): [`crate::db::shard::wall_clock_ms`] in production, a
-    /// simulation's virtual time or a skewed clock in a test.
+    /// Have the host run the chunk store's I/O: [`crate::db::Db::tick`]
+    /// then never awaits it, and the host takes each batch with
+    /// [`crate::db::Db::take_chunk_io`], runs it where it likes (a network
+    /// store on its own runtime) and hands the outcome back with
+    /// [`crate::db::Db::finish_chunk_io`]. For hosts whose tick is
+    /// synchronous, so a slow bucket never stalls sync.
+    pub fn with_host_chunk_io(mut self) -> Self {
+        self.host_chunk_io = true;
+        self
+    }
+
+    /// Draw commit positions from `clock` (Unix ms) instead of the system
+    /// clock: a simulation's virtual time, or a skewed clock in a test.
     pub fn with_clock(mut self, clock: impl Fn() -> u64 + 'static) -> Self {
         self.clock = Some(Box::new(clock));
         self
@@ -480,9 +494,6 @@ pub enum Reason {
     /// A read needs large-value chunks this replica requested from
     /// upstream but has not received yet (code `NotObserved`).
     MissingChunks,
-    /// The server holds commits from an untrusted session until it has a
-    /// published permissions head to check them by (code `WriteRejected`).
-    PermissionsHeadMissing,
     /// The write was built on an unsettled write the authority rejected,
     /// so it is rejected too (code `WriteRejected`, SPEC 4 §4.6).
     PredecessorRejected,
@@ -497,7 +508,7 @@ pub enum Reason {
 
 impl Reason {
     /// Every reason, in declaration order.
-    pub const ALL: [Reason; 13] = [
+    pub const ALL: [Reason; 12] = [
         Reason::AuthorizationDenied,
         Reason::ClientClockTooFarAhead,
         Reason::SerializationConflict,
@@ -507,7 +518,6 @@ impl Reason {
         Reason::MissingRequired,
         Reason::BranchMove,
         Reason::MissingChunks,
-        Reason::PermissionsHeadMissing,
         Reason::PredecessorRejected,
         Reason::SchemaVersionNotDeployed,
         Reason::IdentityMismatch,
@@ -530,7 +540,6 @@ impl Reason {
             Reason::MissingRequired => "missing_required",
             Reason::BranchMove => "branch_move",
             Reason::MissingChunks => "missing_chunks",
-            Reason::PermissionsHeadMissing => "permissions_head_missing",
             Reason::PredecessorRejected => "predecessor_rejected",
             Reason::SchemaVersionNotDeployed => "schema_version_not_deployed",
             Reason::IdentityMismatch => "identity_mismatch",
@@ -582,6 +591,15 @@ pub enum ErrorCode {
     /// An existing local store was written with a storage format this build
     /// does not read.
     UnsupportedStorageCodecs,
+    /// The upstream serves another authority history than the one this
+    /// store mirrors (its namespace differs): the server's store was
+    /// recreated (a deleted data directory, a restarted in-memory server, a
+    /// new environment behind the same URL), or it is another app's. This
+    /// store's rows, watermarks and unsynced writes belong to the old
+    /// history, so the link stops: nothing syncs with that server until the
+    /// local store is reset (`deleteClientStorage()` in jazz-tools) or the
+    /// old server is back.
+    AuthorityChanged,
 }
 
 impl ErrorCode {
@@ -603,6 +621,7 @@ impl ErrorCode {
             ErrorCode::NotObserved => "not_observed",
             ErrorCode::HistoricalReadRequiresServer => "historical_read_requires_server",
             ErrorCode::UnsupportedStorageCodecs => "unsupported_storage_codecs",
+            ErrorCode::AuthorityChanged => "authority_changed",
         }
     }
 }

@@ -1,9 +1,6 @@
-import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
-import { deploy, startLocalJazzServer, startTestJwtIssuer } from "../testing/index.js";
-import { resolveSchemaSource } from "../schema-source.js";
-import { createJazzSession } from "./index.js";
+import { startTestJazz } from "../testing/index.js";
 
 const app = s.defineApp(
   {
@@ -25,13 +22,13 @@ const permissions = s.definePermissions(app, ({ policy, session, allOf }) => {
     table.allowDelete.never();
   }
   policy.users.allowRead.always();
-  policy.users.allowInsert.where({ accountId: session.user.account });
+  policy.users.allowInsert.where({ accountId: session.user });
   policy.topics.allowInsert.always();
   policy.topics.allowRead.where(session.where({ "claims.role": "editor" }));
   policy.notes.allowRead.always();
   policy.notes.allowInsert.where((row) =>
     allOf([
-      policy.users.exists.where({ id: row.userId, accountId: session.user.account }),
+      policy.users.exists.where({ id: row.userId, accountId: session.user }),
       policy.topics.exists.where({ id: row.topicId }),
     ]),
   );
@@ -45,38 +42,27 @@ const outcome = (write: { wait(options: { tier: "global" }): Promise<unknown> })
 
 describe("deployed permissions with claims in referenced read policies", () => {
   it("authorizes inserts that check a row whose read policy compares a session claim", async () => {
-    const issuer = await startTestJwtIssuer();
-    const appId = randomUUID();
-    const server = await startLocalJazzServer({
-      appId,
-      jwksUrl: issuer.jwksUrl,
-      jwtIssuer: issuer.issuer,
-      jwtAudience: issuer.audience,
-    });
-    const sessions: { close(): Promise<void> }[] = [];
+    const server = await startTestJazz({ app, permissions });
+    // Each user is a request scope the app's `authenticate` names, carrying
+    // the claims the policies compare.
     const connect = async (subject: string, claims: Record<string, unknown>) => {
-      const session = await createJazzSession({
-        appId,
-        app,
-        permissions,
-        serverUrl: server.url,
-        driver: { type: "memory" },
-      });
-      sessions.push(session);
-      await session.loginOrRegisterJWT(issuer.jwtForUser(subject, claims));
-      const client = session.getSnapshot().client!;
-      const user = client.db.insert(app.users, { accountId: client.session!.user!.account });
+      await server.jazz.createAccountFor(subject);
+      const db = await server.jazz.forReqUser(
+        new Request("http://app.example/", {
+          headers: { authorization: `Bearer ${server.bearer(subject, claims)}` },
+        }),
+      );
+      // Learn the user's account from a row it wrote.
+      const probe = db.insert(app.topics, { title: `${subject}'s first topic` });
+      expect(await outcome(probe)).toBe("accepted");
+      const { $createdBy } = (await server.jazz.db.one(
+        app.topics.select("$createdBy").where({ id: probe.value.id }),
+      ))!;
+      const user = db.insert(app.users, { accountId: $createdBy.account });
       expect(await outcome(user)).toBe("accepted");
-      return { db: client.db, userId: user.value.id };
+      return { db, userId: user.value.id };
     };
     try {
-      await deploy({
-        serverUrl: server.url,
-        appId,
-        adminSecret: server.adminSecret,
-        schema: resolveSchemaSource(app),
-        permissions,
-      });
       const viewer = await connect("viewer", { role: "viewer" });
       const topic = viewer.db.insert(app.topics, { title: "topic" });
       expect(await outcome(topic)).toBe("accepted");
@@ -103,11 +89,7 @@ describe("deployed permissions with claims in referenced read policies", () => {
       // The denial must not break the session's later writes.
       expect(await outcome(editor.db.insert(app.topics, { title: "later" }))).toBe("accepted");
     } finally {
-      for (const session of [...sessions].reverse()) {
-        await session.close();
-      }
       await server.stop();
-      await issuer.stop();
     }
   }, 60_000);
 });

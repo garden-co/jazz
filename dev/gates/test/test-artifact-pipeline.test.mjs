@@ -479,11 +479,6 @@ test("CI uses the correctness artifact path while package builds keep release WA
       ),
       `${script} must leave atomic WASM publication as the sole provenance writer`,
     );
-  assert.match(
-    packageJson,
-    /"build:starters-e2e": "turbo run build --filter=jazz-wasm --only && turbo run build --filter=jazz-napi --only && node dev\/artifacts\/stage-native-fingerprints\.mjs --workspace && turbo run build --filter=\.\/packages\/\*\* --only/,
-    "build:starters-e2e must build the same release WASM and NAPI artifacts as build:core",
-  );
   assert.doesNotMatch(workflow, /CARGO_TARGET_DIR/);
   assert.doesNotMatch(pipeline, /target\/test-artifacts-(?:wasm|napi)/);
   for (const task of ["build", "build:fast"])
@@ -523,6 +518,8 @@ test("CI uses the correctness artifact path while package builds keep release WA
       `${task} must preserve the sealed shared test surface for child package scripts`,
     );
   assert.deepEqual(turbo.tasks["jazz-tools#build"].passThroughEnv, [
+    // build:runtime refuses to build missing native inputs implicitly in CI.
+    "CI",
     "JAZZ_TEST_SEALED_TOOLS_DIST",
     "JAZZ_CORRECTNESS_ARTIFACT_RUN",
     "JAZZ_RN_TEST_BRIDGE",

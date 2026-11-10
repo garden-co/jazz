@@ -193,6 +193,8 @@ export interface TableSchema {
   policies?: TablePolicies;
   /** Ordinary immutable columns that form this table's branch key. */
   branchBy?: string[];
+  /** `"latest"` keeps only each row's latest version; absent keeps full history. */
+  history?: "latest";
 }
 
 export type Schema = Record<string, TableSchema>;

@@ -953,6 +953,9 @@ pub struct Table {
     pub provenance: Vec<Column>,
     /// How provenance is stored: authors as interned codes.
     pub stored_provenance: Vec<Column>,
+    /// Whether this schema keeps only each row's latest version (SPEC 4
+    /// §4.9). Only the owner's schema decides what a store prunes.
+    pub latest_only: bool,
 }
 
 /// Provenance as read. Timestamps are Unix ms (u64, as in Jazz). Authors
@@ -977,7 +980,7 @@ pub(crate) const PROVENANCE: [&str; 12] = [
 /// The current deletion of a row, readable with `includeDeleted`: the
 /// deleting version's update stamp, NULL for live and restored rows. Never
 /// stored: a deleted row is its current version with [`STATE_DELETED`] set
-/// in `_st`, and that version's update stamp is the deletion's.
+/// in `_state`, and that version's update stamp is the deletion's.
 pub(crate) const DELETION: [&str; 6] = [
     "$deletedAt",
     "$deletedBy",
@@ -987,15 +990,15 @@ pub(crate) const DELETION: [&str; 6] = [
     "$deletedBy.identity.subject",
 ];
 
-/// `_st` bit: the version's commit wrote no content, only a delete, a
+/// `_state` bit: the version's commit wrote no content, only a delete, a
 /// restore or a move. Clear on an ordinary write, so a live content
 /// version stores 0. History reads list versions with it clear.
 pub(crate) const STATE_NO_CONTENT: i64 = 1;
-/// `_st` bit: the version is a tombstone. Live versions are `_st < 2`.
+/// `_state` bit: the version is a tombstone. Live versions are `_state < 2`.
 pub(crate) const STATE_DELETED: i64 = 2;
-/// `_st` bit: the version is an authority text merge's write as its writer
+/// `_state` bit: the version is an authority text merge's write as its writer
 /// sent it, superseded by the merged version at the same seq (SPEC 4
-/// §4.3). Kept only in `__h`, at `_seq` = minus the commit's seq, as the
+/// §4.3). Kept only in `__h`, at `_clock` = minus the version's own, as the
 /// base of its writer's next chained write; never read as a version, so
 /// every read of `__h` that is not by exact seq requires this bit clear.
 pub(crate) const STATE_AS_SENT: i64 = 4;
@@ -1206,6 +1209,10 @@ pub struct Schema {
     /// the current schema's policies, compiled under its names (tables
     /// match by stored name; see [`crate::compile::Ctx`]).
     pub policies_from: Option<std::rc::Rc<Schema>>,
+    /// The published bundle whose policies this schema carries, when it
+    /// is one's governing schema (see [`crate::catalogue`]): what a schema
+    /// governed by it keeps through a reset, whatever is current.
+    pub bundle: Option<crate::catalogue::BundleId>,
     /// Tables and columns are named by their stored names, as writes travel
     /// on the wire (see [`Schema::stored_view`]).
     pub stored_names: bool,
@@ -1292,6 +1299,7 @@ impl Schema {
                     branch_key_names: Vec::new(),
                     provenance: provenance_columns(),
                     stored_provenance: stored_provenance_columns(),
+                    latest_only: table.history == jazz_model::schema::HistoryRetention::Latest,
                 },
             );
         }
@@ -1300,6 +1308,7 @@ impl Schema {
             jazz: jazz.clone(),
             version: jazz.version_id(),
             policies_from: None,
+            bundle: None,
             stored_names: false,
         }
     }
@@ -1432,6 +1441,7 @@ impl Schema {
             jazz: current.jazz.clone(),
             version: current.version,
             policies_from: None,
+            bundle: None,
             stored_names: true,
         }
         .with_policies_of(current.clone())
@@ -1575,6 +1585,7 @@ impl Table {
             branch_key_names: Vec::new(),
             provenance: provenance_columns(),
             stored_provenance: stored_provenance_columns(),
+            latest_only: false,
         }
     }
 
@@ -1585,7 +1596,7 @@ impl Table {
         let lead = if table.branch_by.is_empty() {
             ""
         } else {
-            "_b, "
+            "_branch, "
         };
         let index = table.stored_index(index);
         let keys: Vec<String> = index
@@ -1614,26 +1625,29 @@ impl Table {
             .collect();
         let name = quote(&table.stored);
         let history = quote(&format!("{}__h", table.stored));
-        // `_b` is the canonical branch key ('' for unbranched tables).
-        // Rows are unique per (id, branch); branch views select by `_b`
-        // first, so every index leads with it. A version is at (`_n`,
-        // `_seq`): the code of the sequencer that numbered it (0 for the
-        // authority, see [`crate::db::RELAY`]) and its seq there. `_st` is the version's state
+        // `_branch` is the canonical branch key ('' for unbranched tables).
+        // Rows are unique per (id, branch); branch views select by `_branch`
+        // first, so every index leads with it. A version is at `_clock`: its
+        // position, kind and seq (see [`crate::sync::Pos::t`]), under 2^53.
+        // A pending version also keeps its writer, `_writer` (node, then tx
+        // big-endian; empty for an accepted one), current or in history:
+        // two writers' pending versions of a row can share a `_clock`.
+        // `_state` is the version's state
         // bits ([`STATE_NO_CONTENT`], [`STATE_DELETED`], and in history
         // [`STATE_AS_SENT`]): 0 for a live version whose commit wrote
-        // content. `_base` and `_cols` are what the authority keeps of the
+        // content. `_base` and `_touched` are what the authority keeps of the
         // version an accepted upload wrote: what it was built on and the
         // columns it authored (SPEC 4 §4.6); NULL everywhere else.
         sql.push_str(&format!(
             "CREATE TABLE {name} (rid INTEGER PRIMARY KEY, id BLOB NOT NULL, \
-             _b BLOB NOT NULL DEFAULT X'', _n INTEGER NOT NULL DEFAULT 0, _seq INTEGER NOT NULL, \
-             _st INTEGER NOT NULL DEFAULT 0, _base INTEGER, _cols BLOB{columns}, \
-             UNIQUE (id, _b));\n\
-             CREATE INDEX {} ON {name}(_n, _seq);\n\
-             CREATE TABLE {history} (id BLOB NOT NULL, _b BLOB NOT NULL, \
-             _n INTEGER NOT NULL DEFAULT 0, _seq INTEGER NOT NULL, _st INTEGER NOT NULL, \
-             _base INTEGER, _cols BLOB{columns}, PRIMARY KEY (id, _b, _n, _seq)) WITHOUT ROWID;\n",
-            quote(&format!("{}__by_seq", table.stored)),
+             _branch BLOB NOT NULL DEFAULT X'', _clock INTEGER NOT NULL, _writer BLOB NOT NULL DEFAULT X'', \
+             _state INTEGER NOT NULL DEFAULT 0, _base INTEGER, _touched BLOB{columns}, \
+             UNIQUE (id, _branch));\n\
+             CREATE INDEX {} ON {name}(_clock);\n\
+             CREATE TABLE {history} (id BLOB NOT NULL, _branch BLOB NOT NULL, \
+             _clock INTEGER NOT NULL, _writer BLOB NOT NULL DEFAULT X'', _state INTEGER NOT NULL, \
+             _base INTEGER, _touched BLOB{columns}, PRIMARY KEY (id, _branch, _clock, _writer)) WITHOUT ROWID;\n",
+            quote(&format!("{}__by_clock", table.stored)),
         ));
         for index in &table.indexes {
             sql.push_str(&table.index_ddl(index));
@@ -1830,6 +1844,9 @@ pub struct CurrentRow {
     pub(crate) id: RowUuid,
     /// Where the row's version is.
     pub(crate) seq: crate::db::Pos,
+    /// The version's writer as history keys it (`_writer`), when the read
+    /// carried it: empty for an accepted version.
+    pub(crate) writer: Option<Arc<[u8]>>,
     pub(crate) deleted: bool,
     /// Projected cells in projection order. `None` is an unwritten cell.
     pub(crate) cells: Arc<Vec<(String, Option<Value>)>>,
@@ -1926,7 +1943,7 @@ impl CurrentRow {
         self.deleted
     }
 
-    /// Where this row version is: its sequencer's code and its seq there.
+    /// Where this row version is: its banded position `_clock`.
     pub fn seq(&self) -> crate::db::Pos {
         self.seq
     }

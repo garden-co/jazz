@@ -158,6 +158,21 @@ export type AuthUpdate =
  * Common interface for the runtime backing `JazzClient`.
  */
 export interface Runtime {
+  /**
+   * @internal The Db handed over to a successor: end reads not sent yet with
+   * a `RuntimeClosedError` cause, so they ask the successor instead.
+   */
+  endUnsentReads?(): void;
+  /**
+   * Wait until every write committed so far reaches `tier`. `throughOutage`
+   * keeps the wait pending through outages until a terminal failure.
+   */
+  waitForPendingWrites?(
+    tier?: string,
+    options?: { throughOutage?: boolean; signal?: AbortSignal },
+  ): Promise<void>;
+  /** @internal Close mutation admission and report the foreground TxTime high-water. */
+  quiesceForegroundTxTimeHighWater?(): Promise<bigint>;
   beginTransaction(
     transactionKind: TransactionKind,
     id: OpenTransactionId,
@@ -298,6 +313,12 @@ export interface Runtime {
   nativeUpstreamConfigured?(): boolean;
   /** Push updated auth credentials into the live Rust transport. */
   updateAuth(auth_json: string): void;
+  /**
+   * The session this client resolved from its credentials, set before it
+   * connects and again whenever its auth changes. A runtime that serves
+   * only its connection's session (thin) compares calls against it.
+   */
+  useSession?(session: Session | null): void;
   /** End waits held for a refused credential that nothing will renew. */
   endCredentialWait?(): void;
   /** Register a callback invoked when the Rust transport rejects the JWT. */
@@ -350,6 +371,8 @@ export interface AuthConfig {
   admin_secret?: string;
   /** Opaque session payload forwarded by a backend proxy. */
   backend_session?: unknown;
+  /** The published permissions bundle the session is pinned to. */
+  bundle?: string;
 }
 
 /**
@@ -378,17 +401,26 @@ export const ReadTier = {
 export type ReadTier = (typeof ReadTier)[keyof typeof ReadTier];
 
 /**
- * @internal A local-first read's server wait, or `undefined` for none.
- * Throws for a value that is not a non-negative number of milliseconds.
+ * @internal A local-first read's server wait in whole milliseconds, or
+ * `undefined` when the caller gave none. An explicit `0` stays `0`: it opts
+ * out of the client default wait. Throws for a value that is not a
+ * non-negative number of milliseconds.
  */
 export function normalizeFirstLoadRemoteWaitMs(value: unknown): number | undefined {
   if (value === undefined || value === null) return undefined;
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
     throw new Error("firstLoadRemoteWaitMs must be a non-negative number of milliseconds.");
   }
-  const ms = Math.floor(value);
-  return ms > 0 ? ms : undefined;
+  return Math.floor(value);
 }
+
+/**
+ * How long a read that names no tier waits for the server on its first load
+ * in browsers and React Native, when a server is configured. It never waits
+ * offline or after `db.disconnect()`; pass `firstLoadRemoteWaitMs: 0` to show
+ * local data at once.
+ */
+export const DEFAULT_CLIENT_FIRST_LOAD_REMOTE_WAIT_MS = 5_000;
 
 // Keep removed names here solely to provide migration guidance at the public API boundary.
 const REMOVED_READ_TIERS: Readonly<Record<string, string>> = {
@@ -454,13 +486,17 @@ export type ReadTierOptions =
       /**
        * Read tier: {@link ReadTier.LocalFirst} or {@link ReadTier.Remote}.
        *
-       * Reads default to local-first in browsers and React Native, and without a
+       * Reads default to local-first in browsers and React Native (with a brief
+       * first-load server wait when a server is configured), and without a
        * configured server; other environments with a server default to remote.
        */
       tier?: typeof ReadTier.LocalFirst;
       /**
        * How long the initial load may wait for the server's answer, in
-       * milliseconds. Defaults to `0`, which shows local data at once.
+       * milliseconds. A read that names no tier in a browser or React Native
+       * with a server defaults to {@link DEFAULT_CLIENT_FIRST_LOAD_REMOTE_WAIT_MS};
+       * an explicit `tier: "local-first"` defaults to `0`. `0` shows local
+       * data at once.
        *
        * While the client is online (connected, or its connection attempt is still
        * young), a subscription's first callback, or a one-shot read, waits up to
@@ -663,16 +699,22 @@ export function resolveEffectiveQueryExecutionOptions(
   context: QueryExecutionDefaultsContext,
   options?: InternalQueryExecutionOptions,
 ): ResolvedQueryExecutionOptions {
+  const clientRuntime = isBrowserRuntime() || isReactNativeRuntime();
   const tier =
-    options?.tier ??
-    (context.serverUrl && !isBrowserRuntime() && !isReactNativeRuntime()
-      ? ReadTier.Remote
-      : ReadTier.LocalFirst);
+    options?.tier ?? (context.serverUrl && !clientRuntime ? ReadTier.Remote : ReadTier.LocalFirst);
   if (tier !== "local-only") rejectRemovedReadTier(tier);
-  const firstLoadRemoteWaitMs =
-    tier === ReadTier.LocalFirst
-      ? normalizeFirstLoadRemoteWaitMs(options?.firstLoadRemoteWaitMs)
+  // A client read that names no tier is local first, but its first load
+  // waits briefly for the server so it does not show a stale or empty cache.
+  const defaultWaitMs =
+    options?.tier === undefined && context.serverUrl && clientRuntime
+      ? DEFAULT_CLIENT_FIRST_LOAD_REMOTE_WAIT_MS
       : undefined;
+  const requestedWaitMs =
+    tier === ReadTier.LocalFirst
+      ? (normalizeFirstLoadRemoteWaitMs(options?.firstLoadRemoteWaitMs) ?? defaultWaitMs)
+      : undefined;
+  const firstLoadRemoteWaitMs =
+    requestedWaitMs !== undefined && requestedWaitMs > 0 ? requestedWaitMs : undefined;
   return {
     tier,
     ...(firstLoadRemoteWaitMs !== undefined ? { firstLoadRemoteWaitMs } : {}),
@@ -1130,6 +1172,7 @@ export class JazzClient {
     this.scheduler = getScheduler();
     this.context = context;
     this.resolvedSession = this.resolveSessionFromContext();
+    this.runtime.useSession?.(this.resolvedSession);
 
     const onAuthFailure = runtimeOptions?.onAuthFailure;
     this.runtime.onAuthFailure((rawReason: string) => {
@@ -1418,6 +1461,7 @@ export class JazzClient {
 
     try {
       this.resolvedSession = this.resolveSessionFromContext();
+      this.runtime.useSession?.(this.resolvedSession);
       if (updateRuntime) {
         this.runtime.updateAuth(JSON.stringify(this.buildTransportAuthPayload()));
       }
@@ -1426,6 +1470,7 @@ export class JazzClient {
       this.context.cookieSession = previousCookieSession;
       setTrustedReservedSession(this.context, previousTrustedReservedSession);
       this.resolvedSession = previousResolvedSession;
+      this.runtime.useSession?.(previousResolvedSession);
       throw error;
     }
   }
@@ -1621,11 +1666,74 @@ export class JazzClient {
     attribution?: string,
     objectId?: string,
   ): Promise<WriteHandle<{ id: string }>> {
+    const result = await this.runStreamingMutation(
+      mutation,
+      table,
+      values,
+      column,
+      source,
+      options,
+      session,
+      attribution,
+      objectId,
+    );
+    if (result.kind !== "committed") {
+      throw new Error("Streaming mutations cannot be staged inside an open transaction");
+    }
+    return new WriteHandle(result.txId, this, { id: result.id });
+  }
+
+  /**
+   * @internal Stage a streamed mutation in open transaction
+   * `openTransactionId`; it commits with the transaction.
+   */
+  async streamingMutationInTransaction(
+    mutation: StreamingMutationKind,
+    table: string,
+    values: InsertValues,
+    column: string,
+    source: StreamingValueSource,
+    openTransactionId: OpenTransactionId,
+    options?: InsertOptions | UpdateOptions,
+    session?: Session,
+    attribution?: string,
+    objectId?: string,
+  ): Promise<{ id: string }> {
+    const result = await this.runStreamingMutation(
+      mutation,
+      table,
+      values,
+      column,
+      source,
+      options,
+      session,
+      attribution,
+      objectId,
+      openTransactionId,
+    );
+    if (result.kind !== "staged") {
+      throw new Error("A streaming mutation in a transaction must be staged in it");
+    }
+    return { id: result.id };
+  }
+
+  private async runStreamingMutation(
+    mutation: StreamingMutationKind,
+    table: string,
+    values: InsertValues,
+    column: string,
+    source: StreamingValueSource,
+    options?: InsertOptions | UpdateOptions,
+    session?: Session,
+    attribution?: string,
+    objectId?: string,
+    openTransactionId?: OpenTransactionId,
+  ): Promise<StreamingInsertResult> {
     if (!this.runtime.streamingMutation) {
       throw new Error("This runtime does not support streaming mutations");
     }
-    const writeContext = this.writeContext(session, attribution, undefined, options);
-    const result = await this.runtime.streamingMutation(
+    const writeContext = this.writeContext(session, attribution, openTransactionId, options);
+    return this.runtime.streamingMutation(
       mutation,
       table,
       values,
@@ -1634,10 +1742,6 @@ export class JazzClient {
       writeContext,
       objectId ?? ("id" in (options ?? {}) ? (options as InsertOptions).id : undefined),
     );
-    if (result.kind !== "committed") {
-      throw new Error("Streaming mutations cannot be staged inside an open transaction");
-    }
-    return new WriteHandle(result.txId, this, { id: result.id });
   }
 
   /**
@@ -1840,7 +1944,9 @@ export class JazzClient {
     branch?: BranchView,
   ): MutationResult {
     if (branch) {
-      throw new Error("Partial-value updates are not yet supported in branch views.");
+      throw new Error(
+        "Partial-value updates (applyDiffs, editedFrom) are not yet supported in branch views.",
+      );
     }
     const writeContext = this.writeContext(session, attribution, openTransactionId, { updatedAt });
     if (!this.runtime.updateLargeValues) {

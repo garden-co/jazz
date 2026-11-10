@@ -5,9 +5,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use jazz::tools::AppId;
-use jazz::tools::public_schema::{SchemaHash, TableName, TablePolicies};
-
-use super::http::PermissionsHeadView;
+use jazz::tools::public_schema::SchemaHash;
 
 pub(super) fn parse_schema_hash_param(hash_text: &str) -> Result<SchemaHash, String> {
     let decoded_hash_bytes = hex::decode(hash_text)
@@ -39,28 +37,6 @@ pub(super) fn parse_app_id_param(app_id_text: &str) -> Result<AppId, String> {
     }
 
     Err("invalid appId: expected UUID or app identifier".to_string())
-}
-
-pub(super) fn permissions_head_view(
-    head: crate::server::ActiveSchemaSummary,
-) -> PermissionsHeadView {
-    PermissionsHeadView {
-        schema_hash: head.schema_hash.to_string(),
-        version: head.version,
-        parent_bundle_object_id: head
-            .parent_bundle_object_id
-            .map(|object_id| object_id.to_string()),
-        bundle_object_id: head.bundle_object_id.to_string(),
-    }
-}
-
-pub(super) fn permissions_map_view(
-    permissions: std::collections::HashMap<TableName, TablePolicies>,
-) -> std::collections::HashMap<String, TablePolicies> {
-    permissions
-        .into_iter()
-        .map(|(table_name, policies)| (table_name.to_string(), policies))
-        .collect()
 }
 
 pub(super) fn unix_timestamp_millis() -> u64 {

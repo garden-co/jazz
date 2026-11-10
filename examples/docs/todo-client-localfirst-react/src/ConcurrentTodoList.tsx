@@ -101,10 +101,8 @@ function ConcurrentTodoResults({
   page: number;
   onPageChange: (nextPage: number) => void;
 }) {
-  const db = useDb();
-
   // #region reading-reactive-hooks-suspense-react
-  const todos = useAllSuspense(query);
+  const { data: todos, db } = useAllSuspense(query);
   // #endregion reading-reactive-hooks-suspense-react
 
   return (

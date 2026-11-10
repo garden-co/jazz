@@ -1,7 +1,7 @@
 import { applyDelta, applyDeltaToRows } from "../reconcile-array.js";
-import { limitQueryToOne } from "../runtime/db.js";
+import { limitQueryToOne, type Db } from "../runtime/db.js";
 import type { QueryBuilder, QueryOptions, SubscriptionDelta } from "../shared/index.js";
-import { getJazzContext } from "./context.svelte.js";
+import { getJazzContext, type JazzContext } from "./context.svelte.js";
 import { toError } from "../runtime/util.js";
 
 type MaybeGetter<T> = T | (() => T);
@@ -12,7 +12,7 @@ function resolve<T>(value: MaybeGetter<T>): T {
 
 /**
  * Reactive query subscription. Instantiate in a component script block,
- * access results via `.current`.
+ * access results via `.current` and the {@link Db} handle for writes via `.db`.
  *
  * @param query - the database query, or a getter for a dynamic query
  *   (e.g. `() => filter ? app.todos.where({ title: { contains: filter } }) : undefined`).
@@ -31,7 +31,7 @@ function resolve<T>(value: MaybeGetter<T>): T {
  *   <p>Error: {todos.error.message}</p>
  * {:else}
  *   {#each todos.current ?? [] as todo}
- *     <p>{todo.title}</p>
+ *     <p onclick={() => todos.db.update(app.todos, todo.id, { done: true })}>{todo.title}</p>
  *   {/each}
  * {/if}
  * ```
@@ -40,6 +40,18 @@ class QuerySubscriptionBase<T extends { id: string }, Result> {
   current: Result | undefined = $state();
   isLoading: boolean = $state(true);
   error: Error | null = $state(null);
+  readonly #ctx: JazzContext;
+
+  /**
+   * The {@link Db} handle for writes, so components don't need a separate
+   * `getDb()`. Throws if the provider has not finished opening the database.
+   */
+  get db(): Db {
+    if (!this.#ctx.db) {
+      throw new Error("Jazz database is not yet initialised");
+    }
+    return this.#ctx.db;
+  }
 
   protected constructor(
     query: MaybeGetter<QueryBuilder<T> | undefined>,
@@ -47,6 +59,7 @@ class QuerySubscriptionBase<T extends { id: string }, Result> {
     mode: "all" | "one",
   ) {
     const ctx = getJazzContext();
+    this.#ctx = ctx;
 
     $effect(() => {
       const resolvedQuery = resolve(query);

@@ -1,67 +1,264 @@
 ---
 title: Overview
-description: The database that syncs.
-reviewedAt: "b29b48d1a"
+description: "Get a first glimpse of how to set Jazz up and how to use it from the server and clients."
 ---
 
-Jazz is a local-first relational database with row-level permissions, real-time sync, and offline support&hairsp;—&hairsp;no separate API layer needed. Your app reads from and writes to a local replica, and Jazz syncs it with a server in the background.
+Jazz is a relational database that runs inside your backend, with real-time queries and permissions built in. Query and update data from your server or directly from your frontend, using a thin client or a local-first client for offline support.
 
-```ts
+Every Jazz app is defined first by its database schema and permission policies. They're verbose, but agents are good at writing and checking them.
+
+```ts title="schema.ts"
 import { schema as s } from "jazz-tools";
 import { migrations } from "./migrations";
 
-// Define your schema
-const schema = {
-  todos: s.table(
-    {
-      title: s.string(),
-      done: s.boolean(),
-    },
-    {},
-  ),
-};
-const app = s.defineApp(schema, { migrations });
+export const app = s.defineApp(
+  { todos: s.table({ title: s.string(), done: s.boolean() }, {}) },
+  { migrations },
+);
+```
 
-// Write — instant, works offline
-db.insert(app.todos, { title: "Ship it", done: false });
+```ts title="permissions.ts"
+import { schema as s } from "jazz-tools";
+import { app } from "./schema";
 
-// Read — reactive, stays up to date across devices
-db.subscribe(app.todos.where({ done: false }), (todos) => {
-  console.log(todos);
+// Each user sees and edits only the todos they created
+export default s.definePermissions(app, ({ policy, session }) => {
+  const isCreator = { $createdBy: session.user };
+  policy.todos.allowRead.where(isCreator);
+  policy.todos.allowInsert.where(isCreator);
+  policy.todos.allowUpdate.where(isCreator);
+  policy.todos.allowDelete.where(isCreator);
 });
 ```
 
-Jazz works with React, Vue, Svelte, Solid, Expo/React Native, plain TypeScript, and Rust.
+Jazz runs inside your backend: no separate database server and no deploy step. The schema and permissions your code imports are the ones it enforces.
 
-(Looking for [classic Jazz docs?](https://classic.jazz.tools/docs))
+```ts title="server.ts"
+import { Hono } from "hono";
+import { createJazz, sqlite } from "jazz-tools/backend";
+import { app } from "./schema";
+import permissions from "./permissions";
 
-## Quickstart
+const jazz = createJazz({
+  app,
+  permissions,
+  store: sqlite({ path: "./data/jazz" }),
+  authenticate: async (request) => getSignedInUser(request), // your own auth: { userId } or null
+});
+
+new Hono()
+  // Runs with backend authority and sees every todo (check admin access in your app first)
+  .get("/admin/todos", async (c) => {
+    return c.json(await jazz.db.all(app.todos));
+  })
+  // Runs as the signed-in user: the query only returns their own todos
+  .get("/todos", async (c) => {
+    const db = await jazz.forReqUser(c.req.raw);
+    return c.json(await db.all(app.todos.where({ done: false })));
+  })
+  // Sync for browsers, on your own origin
+  .all("/jazz/*", (c) => jazz.handle(c.req.raw));
+```
+
+You can also query and write to the database right from your frontend. It is protected by the same auth as your backend, and the same permission policies apply. Pick a thin client (about 160 KB gzipped) or a full local-first client (about 3.4 MB gzipped, mostly the WASM engine).
+
+<Tabs groupId="client-framework" items={["JavaScript", "React", "Vue", "Svelte", "Solid", "Effect"]} persist updateAnchor>
+  <Tab value="JavaScript">
+    ```ts title="client.ts"
+    import { createJazzClient } from "jazz-tools/client";
+    import { app } from "./schema";
+
+    // Asks your backend's /jazz route who is signed in, with your app's own session cookie
+    const jazz = await createJazzClient({});
+    const db = jazz.getSnapshot().client!.db;
+
+    // Live query: updates as soon as the server (or anyone else) changes a todo
+    db.subscribe(app.todos.where({ done: false }), (todos) => {
+      console.log(todos);
+    });
+    ```
+
+  </Tab>
+  <Tab value="React">
+    ```tsx title="Todos.tsx"
+    import { useAll } from "jazz-tools/react";
+    import { app } from "./schema";
+
+    export function Todos() {
+      const { data: todos = [], db } = useAll(app.todos.where({ done: false }));
+
+      return todos.map((todo) => (
+        <label key={todo.id}>
+          <input type="checkbox" onChange={() => db.update(app.todos, todo.id, { done: true })} />
+          {todo.title}
+        </label>
+      ));
+    }
+    ```
+
+    ```tsx title="App.tsx"
+    import { JazzProvider } from "jazz-tools/react";
+
+    // Connects to /jazz on your backend by default, signed in as your app's current user
+    <JazzProvider>
+      <Todos />
+    </JazzProvider>;
+    ```
+
+  </Tab>
+  <Tab value="Vue">
+    ```vue title="Todos.vue"
+    <script setup lang="ts">
+    import { useAll } from "jazz-tools/vue";
+    import { app } from "./schema";
+
+    const { data: todos, db } = useAll(app.todos.where({ done: false }));
+    </script>
+
+    <template>
+      <label v-for="todo in todos ?? []" :key="todo.id">
+        <input type="checkbox" @change="db.update(app.todos, todo.id, { done: true })" />
+        {{ todo.title }}
+      </label>
+    </template>
+    ```
+
+    ```vue title="App.vue"
+    <script setup lang="ts">
+    import { JazzProvider } from "jazz-tools/vue";
+    </script>
+
+    <template>
+      <!-- Connects to /jazz on your backend by default, signed in as your app's current user -->
+      <JazzProvider>
+        <Todos />
+      </JazzProvider>
+    </template>
+    ```
+
+  </Tab>
+  <Tab value="Svelte">
+    ```svelte title="Todos.svelte"
+    <script lang="ts">
+      import { QuerySubscription } from "jazz-tools/svelte";
+      import { app } from "./schema";
+
+      const todos = new QuerySubscription(app.todos.where({ done: false }));
+    </script>
+
+    {#each todos.current ?? [] as todo (todo.id)}
+      <label>
+        <input type="checkbox" onchange={() => todos.db.update(app.todos, todo.id, { done: true })} />
+        {todo.title}
+      </label>
+    {/each}
+    ```
+
+    ```svelte title="App.svelte"
+    <script lang="ts">
+      import { JazzProvider } from "jazz-tools/svelte";
+    </script>
+
+    <!-- Connects to /jazz on your backend by default, signed in as your app's current user -->
+    <JazzProvider>
+      <Todos />
+    </JazzProvider>
+    ```
+
+  </Tab>
+  <Tab value="Solid">
+    ```tsx title="Todos.tsx"
+    import { For } from "solid-js";
+    import { useAll } from "jazz-tools/solid";
+    import { app } from "./schema";
+
+    export function Todos() {
+      const todos = useAll(() => ({ query: app.todos.where({ done: false }) }));
+
+      return (
+        <For each={todos.data ?? []}>
+          {(todo) => (
+            <label>
+              <input type="checkbox" onChange={() => todos.db.update(app.todos, todo.id, { done: true })} />
+              {todo.title}
+            </label>
+          )}
+        </For>
+      );
+    }
+    ```
+
+    ```tsx title="App.tsx"
+    import { JazzProvider } from "jazz-tools/solid";
+
+    // Connects to /jazz on your backend by default, signed in as your app's current user
+    <JazzProvider>
+      <Todos />
+    </JazzProvider>;
+    ```
+
+  </Tab>
+  <Tab value="Effect">
+    ```ts title="todos.ts"
+    import { Effect, Stream } from "effect";
+    import { Jazz } from "jazz-tools/effect";
+    import { app } from "./schema";
+
+    const program = Effect.gen(function* () {
+      const jazz = yield* Jazz;
+
+      // Live query as a Stream: a full snapshot on start and on every change
+      yield* jazz
+        .stream(app.todos.where({ done: false }))
+        .pipe(Stream.runForEach((todos) => Effect.log(todos)));
+    });
+
+    // Same config as createJazzClient(): asks /jazz who is signed in, with your session cookie
+    program.pipe(Effect.provide(Jazz.layer()), Effect.runPromise);
+    ```
+
+  </Tab>
+</Tabs>
+
+Set up the client: [Thin Client](/docs/setup/web-client/thin-client) (the default) or [Local-First Client](/docs/setup/web-client/local-first-client) (offline, instant UI).
+
+## Start here
 
 <Cards>
-  <Card title="Quickstart" href="/docs/quickstart" />
+  <Card title="Quickstart" href="/docs/setup/run-locally" />
+  <Card title="Why Jazz" href="/docs/why-jazz" />
+  <Card title="How Jazz works" href="/docs/how-jazz-works" />
 </Cards>
 
-## Install
+## What you'll learn, in order
 
-<Cards>
-  <Card title="Client" href="/docs/install/client" />
-  <Card title="TypeScript Server" href="/docs/install/typescript-server" />
-</Cards>
+- [Setup](/docs/setup/run-locally)&hairsp;—&hairsp;run locally, deploy to Vercel, Jazz Cloud or your own server, add a backend, then a client
+- [Schemas & Policies](/docs/schemas/defining-tables)&hairsp;—&hairsp;tables, column types, relationships, who can do what, and migrations
+- [Reading Data](/docs/reading/queries)&hairsp;—&hairsp;queries, live subscriptions and framework hooks
+- [Writing Data](/docs/writing/writing-data)&hairsp;—&hairsp;inserts, updates, transactions and mergeable text
+- [Operating Jazz](/docs/operating/monitoring)&hairsp;—&hairsp;backups, upgrades, monitoring and scaling
+- [Tooling](/docs/tooling/cli-and-mcp)&hairsp;—&hairsp;CLI, MCP, inspector and testing
 
-## Setup
+## What people build with Jazz
 
-<Cards>
-  <Card title="Client Setup" href="/docs/getting-started/client-setup" />
-  <Card title="Server Setup" href="/docs/getting-started/server-setup" />
-</Cards>
+<Callout type="info">
+  Preview: rough sketches of each scenario; each will link to a short path through the docs.
+</Callout>
 
-## Reference
+- **A backend with live data.** Your API or server components read from and write to Jazz directly, with permissions checked per user and live queries pushed to the browser. Path: [Quickstart](/docs/setup/run-locally) → [User-scoped use](/docs/setup/deployment/own-server#user-scoped-use) → [Declarative Permissions](/docs/schemas/policies) → [Thin client](/docs/setup/web-client/thin-client).
+- **A collaborative app.** Shared lists, boards or documents that several people edit at once, with mergeable text and edit history. Path: [Mergeable text](/docs/writing/text) → [Shared access](/docs/recipes/access-control/shared-access) → [Edit metadata](/docs/reading/metadata).
+- **An app that works offline.** Field tools, note-taking or mobile apps that keep working without a connection. Path: start thin, then [go local-first](/docs/setup/web-client/local-first-client) on the screens that need it, or use the [React Native client](/docs/setup/react-native).
+- **Agents and automations.** Background jobs and AI agents that read and write the same data as your users, attributed and permission-checked. Path: [Backend Client](/docs/setup/backend-client) → [How Auth Works](/docs/setup/auth/backend#the-session) → [CLI & MCP](/docs/tooling/cli-and-mcp).
+- **Drafts and review flows.** Edit a copy, compare it with the original, merge it back. Path: [Drafts & branches](/docs/recipes/drafts-and-branches).
 
-<Cards>
-  <Card title="Authentication" href="/docs/auth/authentication" />
-  <Card title="Schemas" href="/docs/schemas/defining-tables" />
-  <Card title="Reading Data" href="/docs/reading/queries" />
-  <Card title="Writing Data" href="/docs/writing/writing-data" />
-  <Card title="Permissions" href="/docs/auth/permissions" />
-  <Card title="Migrations" href="/docs/schemas/migrations" />
-</Cards>
+## Recipes
+
+- **Access control:** [user-owned data](/docs/recipes/access-control/user-owned-data), [shared access](/docs/recipes/access-control/shared-access), [invite links](/docs/recipes/access-control/invite-links), [group permissions](/docs/recipes/access-control/group-permissions)
+- **Auth providers:** [Better Auth](/docs/setup/auth/better-auth), [WorkOS](/docs/setup/auth/workos), [any other auth](/docs/setup/auth/custom), [Better Auth database adapter](/docs/setup/auth/better-auth#store-better-auths-tables-in-jazz)
+- **Data patterns:** [collaborative lists](/docs/recipes/data-patterns/real-time-collaborative-list), [collaborative text](/docs/recipes/data-patterns/collaborative-text-editing), [nested data](/docs/recipes/data-patterns/nested-data)
+- **Architecture:** [local-first as a client optimization](/docs/setup/web-client/local-first-client#when-to-pick-it), [drafts & branches](/docs/recipes/drafts-and-branches), [Effect](/docs/recipes/effect)
+
+## Examples and help
+
+- [Example apps](/docs/reference/examples), from a todo list to a multi-user music sequencer
+- Ask on [Discord](https://discord.gg/RN9UKh52be) or open an issue on [GitHub](https://github.com/garden-co/jazz)

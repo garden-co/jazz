@@ -6,13 +6,18 @@ import { TodoList } from "./TodoList.js";
 
 type AppProps = { config?: Partial<DbConfig>; fallback?: JSX.Element };
 export function App(props: AppProps = {}) {
-  const env = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env;
-  const config = (): JazzAppConfig => ({
-    appId: env?.VITE_JAZZ_APP_ID ?? env?.JAZZ_APP_ID ?? "",
-    serverUrl: env?.VITE_JAZZ_SERVER_URL ?? env?.JAZZ_SERVER_URL,
-    env: "dev",
-    ...props.config,
-  });
+  // The app's backend serves Jazz on this origin (`/jazz`), so the client needs no URL.
+  // Tests point the app at a sync server by its app id; a browser client
+  // takes that as its `scope` (it names no app of its own).
+  const config = (): JazzAppConfig => {
+    const { appId, ...rest } = props.config ?? {};
+    return {
+      env: "dev",
+      initial: "local-first",
+      ...(rest as Partial<JazzAppConfig>),
+      ...(appId === undefined ? {} : { scope: appId }),
+    };
+  };
   const content = () => (
     <>
       <h1>Todos</h1>

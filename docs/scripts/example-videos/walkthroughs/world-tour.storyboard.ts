@@ -6,8 +6,6 @@ export default {
   id: "world-tour",
   summary:
     "The tour manager sees every stop while a fan with the public link sees only the confirmed ones; a stop the manager confirms appears on the fan's globe live, and one confirmed with the Wi-Fi off arrives once it's back.",
-  // The globe is WebGL, which needs software rendering on the recording machine.
-  stage: { webgl: true },
   devices: {
     a: { name: "Tour manager's laptop", address },
     b: { name: "Fan's laptop", address, color: "#ea580c" },

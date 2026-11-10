@@ -54,7 +54,7 @@ pub fn policy_binding_directory_claims_from_value(
 
 pub fn policy_directory_descriptor() -> RecordDescriptor {
     RecordDescriptor::new([
-        ("derived_v1", ValueType::U8),
+        ("derived_v2", ValueType::U8),
         (
             "claims_v1",
             ValueType::Array(Box::new(ValueType::Record(Box::new(

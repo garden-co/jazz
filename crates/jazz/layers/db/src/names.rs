@@ -218,7 +218,7 @@ pub(crate) fn stored_table(version: &SchemaVersionId, name: &str) -> String {
 }
 
 fn stored_name(kind: &[u8], version: &SchemaVersionId, name: &str) -> String {
-    let mut hasher = blake3::Hasher::new();
+    let mut hasher = jazz_types::sha256::Hasher::new();
     for part in [kind, version.as_bytes(), name.as_bytes()] {
         hasher.update(&(part.len() as u64).to_le_bytes());
         hasher.update(part);
@@ -231,7 +231,7 @@ fn stored_name(kind: &[u8], version: &SchemaVersionId, name: &str) -> String {
 /// A digest of where a version stores its tables and columns: equal on
 /// two stores that name it alike.
 pub(crate) fn names_digest(names: &StoredNames) -> [u8; 16] {
-    let mut hasher = blake3::Hasher::new();
+    let mut hasher = jazz_types::sha256::Hasher::new();
     for (table, (stored, columns)) in &names.tables {
         for part in [table, stored] {
             hasher.update(&(part.len() as u64).to_le_bytes());
@@ -580,6 +580,11 @@ impl Names {
             .map(|(version, _)| *version)
     }
 
+    /// How many versions are named.
+    pub(crate) fn len(&self) -> usize {
+        self.versions.len()
+    }
+
     pub(crate) fn get(&self, version: &SchemaVersionId) -> Option<&StoredNames> {
         self.versions.get(version).map(|(_, names)| names)
     }
@@ -606,11 +611,13 @@ impl Names {
     /// Record `schema`'s version, names, stored columns and definition
     /// (once per version), in the file and then in memory. All are written
     /// in one savepoint, so a version is never known by name without its
-    /// stored columns.
+    /// stored columns. Another hash of a version admitted already (one that
+    /// differs only in defaults or indexes) adds no names; its definition
+    /// is kept, so a bundle selecting it resolves.
     pub(crate) fn admit(&mut self, conn: &Connection, schema: &Schema) -> Result<(), Error> {
         let version = schema.jazz.version_id();
         if self.versions.contains_key(&version) {
-            return Ok(());
+            return crate::catalogue::record_equivalent(conn, &schema.jazz);
         }
         let n = self.versions.values().map(|(n, _)| *n).max().unwrap_or(0) + 1;
         let names = schema.names();

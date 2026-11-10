@@ -42,9 +42,9 @@ const FIXTURE: &str = concat!(
     "/fixtures/server-data-dir-v1/jazz.sqlite.gz.base64"
 );
 /// SHA-256 of the decoded file.
-const SHA256: &str = "dae8cb277c9246acddd83844c10f95879b308da98241687c7a3f31fc27a19b21";
+const SHA256: &str = "8d093992f706fe7caf497b9927f658a4d11dde7f3d1348d8cabf53da10db084e";
 /// The account the producer registered for Alice.
-const ALICE_ACCOUNT: &str = "714ad828-4bed-4a4d-a66e-6eaf35c52535";
+const ALICE_ACCOUNT: &str = "ccb97561-7c69-40e7-9fcd-9f6b5ae6c3e2";
 const ADMIN_SECRET: &str = "corpus-admin";
 
 fn app_id() -> AppId {
@@ -74,6 +74,16 @@ fn v2() -> Schema {
                 .column("body", ColumnType::Text),
         )
         .build()
+}
+
+/// A handle on `db` that reads and writes by v2's names: publishing a
+/// bundle admits its schema but makes no version the store's own.
+fn as_v2(db: &jazz::db::Db) -> Result<jazz::db::Db, String> {
+    let version = jazz::schema::JazzSchema::new(&v2())
+        .map_err(|error| error.to_string())?
+        .version_id();
+    db.governed_view(version)
+        .ok_or_else(|| "v2 is not admitted".to_owned())
 }
 
 fn hash(schema: &Schema) -> String {
@@ -165,9 +175,15 @@ async fn insert_note(server: &BuiltServer, title: &'static str, body: Option<&'s
         .expect("a deployed server runs its runtime")
         .with_db_for_test(move |db| {
             let mut cells = BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))]);
-            if let Some(body) = body {
-                cells.insert("body".to_owned(), Value::String(body.to_owned()));
-            }
+            let view;
+            let db = match body {
+                Some(body) => {
+                    cells.insert("body".to_owned(), Value::String(body.to_owned()));
+                    view = as_v2(db)?;
+                    &view
+                }
+                None => db,
+            };
             block_on(db.insert("notes", cells, InsertOptions::default()))
                 .map(|_| ())
                 .map_err(|error| error.to_string())
@@ -183,6 +199,7 @@ async fn notes(server: &BuiltServer) -> Vec<(String, String)> {
         .runtime()
         .unwrap()
         .with_db_for_test(|db| {
+            let db = as_v2(db)?;
             let prepared = db
                 .prepare_query(&Query::from("notes"))
                 .map_err(|error| error.to_string())?;
@@ -240,9 +257,9 @@ async fn produce_server_data_dir_corpus_v1() {
     let dir = tempfile::tempdir().unwrap();
     {
         let server = open(dir.path()).await;
-        admin(&server, "POST", "/deploy", deploy_v1()).await;
+        admin(&server, "POST", "/bundles", deploy_v1()).await;
         insert_note(&server, "before the migration", None).await;
-        admin(&server, "POST", "/deploy", deploy_v2()).await;
+        admin(&server, "POST", "/bundles", deploy_v2()).await;
         insert_note(&server, "after the migration", Some("written with v2")).await;
         let alice = login(&server, alice()).await;
         println!("ALICE_ACCOUNT: {}", alice.account.0);
@@ -283,22 +300,26 @@ async fn pinned_server_data_dir_reopens_and_accepts_current_writes() {
         assert_eq!(
             graph,
             json!({
-                "activeSchemaHash": hash(&v2()),
+                "latestBundleSchemaHash": hash(&v2()),
                 "migrations": [{"fromHash": hash(&v1()), "toHash": hash(&v2())}],
                 "schemas": schemas,
             })
         );
-        let permissions = admin(&server, "GET", "/permissions", Json::Null).await;
-        assert!(
-            permissions["permissions"]["notes"].is_object(),
-            "{permissions}"
-        );
         assert_eq!(login(&server, alice()).await.account, pinned);
         assert_eq!(notes(&server).await, before);
 
-        // Unchanged deployments stay unchanged; current writes are accepted.
+        // The pinned store published v2's bundle: publishing it again
+        // changes nothing. Current writes are accepted.
+        let bundles = admin(&server, "GET", "/bundles", Json::Null).await;
+        assert!(
+            bundles["bundles"]
+                .as_array()
+                .and_then(|bundles| bundles.last())
+                .is_some_and(|bundle| bundle["permissions"]["notes"].is_object()),
+            "{bundles}"
+        );
         assert_eq!(
-            admin(&server, "POST", "/deploy", deploy_v2()).await["changed"],
+            admin(&server, "POST", "/bundles", deploy_v2()).await["changed"],
             false
         );
         insert_note(&server, "after reopening", Some("current")).await;

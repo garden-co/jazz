@@ -7,6 +7,7 @@ import {
   setWriteWaitReadiness,
   ReadTier,
   resolveEffectiveQueryExecutionOptions,
+  DEFAULT_CLIENT_FIRST_LOAD_REMOTE_WAIT_MS,
   publicQueryExecutionOptions,
   type Runtime,
   type TxId,
@@ -628,6 +629,46 @@ describe("default read tier", () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+
+  it.each([
+    { window: {}, document: {}, navigator: undefined },
+    { window: undefined, document: undefined, navigator: { product: "ReactNative" } },
+  ])("waits briefly for the server on a client's default first load", (globals) => {
+    try {
+      for (const [name, value] of Object.entries(globals)) vi.stubGlobal(name, value);
+      const context = { serverUrl: "https://example.test" };
+      expect(resolveEffectiveQueryExecutionOptions(context)).toMatchObject({
+        tier: ReadTier.LocalFirst,
+        firstLoadRemoteWaitMs: DEFAULT_CLIENT_FIRST_LOAD_REMOTE_WAIT_MS,
+      });
+      expect(
+        resolveEffectiveQueryExecutionOptions(context, { firstLoadRemoteWaitMs: 250 }),
+      ).toMatchObject({ tier: ReadTier.LocalFirst, firstLoadRemoteWaitMs: 250 });
+      // An explicit zero, an explicit local-first tier, and a remote read opt out.
+      for (const options of [
+        { firstLoadRemoteWaitMs: 0 },
+        { tier: ReadTier.LocalFirst },
+        { tier: ReadTier.Remote },
+      ] as const) {
+        expect(resolveEffectiveQueryExecutionOptions(context, options)).not.toHaveProperty(
+          "firstLoadRemoteWaitMs",
+        );
+      }
+      // Without a server nothing could answer, so nothing waits.
+      expect(resolveEffectiveQueryExecutionOptions({})).not.toHaveProperty("firstLoadRemoteWaitMs");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("does not wait by default outside client platforms", () => {
+    expect(
+      resolveEffectiveQueryExecutionOptions(
+        { serverUrl: "https://example.test" },
+        { tier: ReadTier.LocalFirst },
+      ),
+    ).not.toHaveProperty("firstLoadRemoteWaitMs");
   });
 });
 

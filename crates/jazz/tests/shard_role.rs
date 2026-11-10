@@ -11,7 +11,8 @@ use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
 
 use jazz::db::shard::{
-    CommitRef, HLC_COUNTER_BITS, HLC_MAX_OFFSET_MS, Held, HeldRow, Resolution, hlc, hlc_ms,
+    CommitRef, HLC_COUNTER_BITS, HLC_EPOCH_MS, HLC_MAX_OFFSET_MS, Held, HeldRow, Resolution, hlc,
+    hlc_ms, wall_clock_ms,
 };
 use jazz::db::{
     Db, DbConfig, DbIdentity, InsertOptions, Outcome, SyncMessage, Transport, TransportError,
@@ -122,24 +123,68 @@ fn newest(db: &Db) -> u64 {
 }
 
 #[test]
-fn an_unsharded_store_takes_no_shard_role() {
+fn every_authority_takes_the_shard_role() {
     let db = block_on(Db::open(config(1))).unwrap();
+    assert!(
+        db.shard().is_shard(),
+        "an unsharded server is a shard of one"
+    );
+    let before = hlc(wall_clock_ms());
+    insert(&db, "one");
+    assert!(
+        newest(&db) >= before,
+        "a store opened without a clock draws positions from the system clock"
+    );
+}
+
+/// A store whose positions counted up by one (stopped at the epoch, as
+/// one written before positions were clock times) continues above them on
+/// the clock once reopened.
+#[test]
+fn a_store_numbered_by_one_continues_on_the_clock() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.db");
+    let counted = Rc::new(Cell::new(HLC_EPOCH_MS));
+    {
+        let db = shard_at(&path, &counted);
+        insert(&db, "one");
+        insert(&db, "two");
+        assert_eq!(newest(&db), 2, "a stopped clock counts up by one");
+    }
+    let now = Rc::new(Cell::new(NOW));
+    let db = shard_at(&path, &now);
+    insert(&db, "three");
+    assert_eq!(
+        newest(&db),
+        hlc(NOW),
+        "the reopened store numbers on its clock"
+    );
+    now.set(HLC_EPOCH_MS);
+    insert(&db, "four");
+    assert_eq!(
+        newest(&db),
+        hlc(NOW) + 1,
+        "and never below what it numbered"
+    );
+}
+
+#[test]
+fn a_replica_of_an_upstream_takes_no_shard_role() {
+    let (db, _now) = shard(1);
+    let (writer, _upstream, _, _) = writer_of(&db);
     let part = CommitRef {
         node: [9; 16],
         tx: 1,
     };
-    assert!(!db.shard().is_shard());
+    assert!(!writer.shard().is_shard());
     for error in [
-        db.shard().observe(5).unwrap_err(),
-        db.shard().hold(part, &[], b"").unwrap_err(),
-        db.shard().fix(part, 5).unwrap_err(),
+        writer.shard().observe(5).unwrap_err(),
+        writer.shard().hold(part, &[], b"").unwrap_err(),
+        writer.shard().fix(part, 5).unwrap_err(),
     ] {
         assert!(error.to_string().contains("not supported"), "{error}");
     }
-    insert(&db, "one");
-    insert(&db, "two");
-    assert_eq!(db.shard().served_through(), 2, "positions count up by one");
-    assert_eq!(db.shard().lowest_hold(), None);
+    assert_eq!(writer.shard().lowest_hold(), None);
 }
 
 #[test]
@@ -346,7 +391,7 @@ fn a_fixed_part_lands_at_its_fixed_position() {
     let Outcome::Accepted { at, .. } = fate(&sent_down) else {
         panic!("refused");
     };
-    assert_eq!(at, vec![(None, held)], "at its fixed position");
+    assert_eq!(at, held, "at its fixed position");
 }
 
 /// The shard's own local write to a row a part holds waits until the part
@@ -375,7 +420,7 @@ fn a_local_write_of_a_held_row_waits_for_the_part() {
     let Outcome::Accepted { at, .. } = fate(&sent_down) else {
         panic!("the part was refused");
     };
-    assert_eq!(at, vec![(None, held)], "at its fixed position");
+    assert_eq!(at, held, "at its fixed position");
     let std::task::Poll::Ready(written) = poll_once(mine.as_mut()) else {
         panic!("the local write still waits once the part landed");
     };
@@ -436,7 +481,7 @@ fn a_hold_makes_other_writers_of_its_rows_wait() {
     let Outcome::Accepted { at, .. } = fate(&sent_down) else {
         panic!("refused");
     };
-    assert!(at[0].1 > held, "above the hold");
+    assert!(at > held, "above the hold");
 }
 
 /// Holds and fixed positions are durable: a shard reopened between a
@@ -472,7 +517,7 @@ fn holds_and_fixes_survive_a_reopen() {
     let Outcome::Accepted { at, .. } = fate(&sent_down) else {
         panic!("refused");
     };
-    assert_eq!(at, vec![(None, held)], "at its fixed position");
+    assert_eq!(at, held, "at its fixed position");
     assert_eq!(db.shard().lowest_hold(), None, "it landed");
     drop(db);
     let db = shard_at(&path, &now);
@@ -514,11 +559,7 @@ fn a_reopened_shard_waits_out_its_offset_bound() {
     let Outcome::Accepted { at, .. } = fate(&sent_down) else {
         panic!("refused");
     };
-    assert_eq!(
-        at,
-        vec![(None, hlc(NOW + HLC_MAX_OFFSET_MS + 1))],
-        "at its clock"
-    );
+    assert_eq!(at, hlc(NOW + HLC_MAX_OFFSET_MS + 1), "at its clock");
     assert!(newest(&db) > closed, "nothing lands at or below the close");
 }
 

@@ -115,11 +115,12 @@ citation_matches_test_source() {
         jazz) [[ $source_path == crates/jazz/* ]] || return 1 ;;
         jazz_tools) [[ $source_path == crates/jazz-testkit/* ]] || return 1 ;;
         jazz_server) [[ $source_path == crates/jazz-server/* ]] || return 1 ;;
+        jazz_text) [[ $source_path == crates/jazz-text/* ]] || return 1 ;;
         # Jazz layer crates (crates/jazz/layers/<layer>, package jazz-<layer>).
         jazz_types | jazz_model | jazz_protocol | jazz_db)
             [[ $source_path == "crates/jazz/layers/${crate#jazz_}/"* ]] || return 1 ;;
     esac
-    if [[ $crate != jazz && $crate != jazz_tools && $crate != jazz_server && $source_path != crates/jazz/layers/* ]]; then
+    if [[ $crate != jazz && $crate != jazz_tools && $crate != jazz_server && $crate != jazz_text && $source_path != crates/jazz/layers/* ]]; then
         [[ $source_path == "crates/"*"/tests/$crate.rs" ]] && return 0
         return 1
     fi

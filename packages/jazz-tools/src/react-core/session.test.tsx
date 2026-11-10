@@ -1,7 +1,7 @@
 import React, { StrictMode, useEffect, useSyncExternalStore } from "react";
 import { act, cleanup, render, waitFor } from "@testing-library/react";
 import { renderToString } from "react-dom/server";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { AccountManager } from "../accounts/state.js";
 import { createJazzSessionOwner } from "../session/state.js";
 import {
@@ -20,10 +20,8 @@ async function setup() {
   const enrollment = {
     createLocalFirst: () => makeFakeAccount(),
     restoreLocalFirst: () => makeFakeAccount(),
-    registerJWT: vi.fn(async () => makeFakeAccount()),
-    loginJWT: vi.fn(async () => makeFakeAccount()),
-    loginOrRegisterJWT: vi.fn(async () => makeFakeAccount()),
-    linkJWT: vi.fn(async () => makeFakeAccount()),
+    loginWithBackend: vi.fn(async () => makeFakeAccount()),
+    linkWithBackend: vi.fn(async () => makeFakeAccount()),
     logout: vi.fn(),
   };
   const accounts = new AccountManager(enrollment, account);
@@ -142,7 +140,7 @@ describe("JazzSessionProvider", () => {
 
   it("shows a recoverable transition error and permits a later operation", async () => {
     const { session, enrollment } = await setup();
-    enrollment.linkJWT.mockRejectedValueOnce(new Error("link rejected"));
+    enrollment.linkWithBackend.mockRejectedValueOnce(new Error("link rejected"));
     const view = render(
       <JazzSessionProvider session={session} fallback={<Status />}>
         <Status />
@@ -150,7 +148,7 @@ describe("JazzSessionProvider", () => {
     );
     let operation!: Promise<void>;
     act(() => {
-      operation = latest.linkJWT("token");
+      operation = latest.linkWithBackend();
     });
     await act(async () => {
       await expect(operation).rejects.toThrow("link rejected");
@@ -172,11 +170,7 @@ describe("JazzSessionProvider", () => {
     const factory = vi.fn(async () => session);
     const view = render(
       <StrictMode>
-        <ConfiguredJazzSessionProvider
-          config={{}}
-          createJazzSession={factory}
-          fallback={<Status />}
-        >
+        <ConfiguredJazzSessionProvider config={{}} createJazzClient={factory} fallback={<Status />}>
           <Status />
         </ConfiguredJazzSessionProvider>
       </StrictMode>,
@@ -190,17 +184,24 @@ describe("JazzSessionProvider", () => {
   });
 
   it("exposes initialization errors and retries from the fallback", async () => {
+    // A fallback may render nothing, so the failure is also logged.
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    onTestFinished(() => consoleError.mockRestore());
     const { session } = await setup();
     const factory = vi
       .fn()
       .mockRejectedValueOnce(new Error("startup failed"))
       .mockResolvedValueOnce(session);
     const view = render(
-      <ConfiguredJazzSessionProvider config={{}} createJazzSession={factory} fallback={<Status />}>
+      <ConfiguredJazzSessionProvider config={{}} createJazzClient={factory} fallback={<Status />}>
         <Status />
       </ConfiguredJazzSessionProvider>,
     );
     await waitFor(() => expect(view.container.textContent).toBe("error:startup failed"));
+    expect(consoleError).toHaveBeenCalledWith(
+      "Jazz could not start:",
+      expect.objectContaining({ message: "startup failed" }),
+    );
     await act(async () => {
       await latest.retry();
     });
@@ -218,7 +219,7 @@ describe("JazzSessionProvider", () => {
         resolve = yes;
       });
     const view = render(
-      <ConfiguredJazzSessionProvider config={{}} createJazzSession={factory}>
+      <ConfiguredJazzSessionProvider config={{}} createJazzClient={factory}>
         <Status />
       </ConfiguredJazzSessionProvider>,
     );
@@ -236,11 +237,7 @@ describe("JazzSessionProvider", () => {
     const factory = vi.fn();
     expect(
       renderToString(
-        <ConfiguredJazzSessionProvider
-          config={{}}
-          createJazzSession={factory}
-          fallback={<Status />}
-        >
+        <ConfiguredJazzSessionProvider config={{}} createJazzClient={factory} fallback={<Status />}>
           <Status />
         </ConfiguredJazzSessionProvider>,
       ),

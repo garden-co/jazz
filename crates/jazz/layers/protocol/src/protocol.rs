@@ -1895,8 +1895,8 @@ mod version_record_wire_row {
             let original = OwnedRecord::new(raw.clone(), descriptor);
             let encoded = encode(&original).unwrap();
             assert_eq!(
-                blake3::hash(&encoded).to_hex().as_str(),
-                "18d2325b449fa54152ec1f34c699ebdcfab7650b1ad9204087e3550ee979391d"
+                jazz_types::sha256::hash(&encoded).to_hex().as_str(),
+                "171d50dc3af93e711a6fe510893c47073e33d296f643a7ea9ffd621b278aba9a"
             );
             assert_eq!(&encoded[..6], b"JVRR\x03\x00");
             assert_eq!(decode(&encoded).unwrap(), original);
@@ -3109,7 +3109,7 @@ impl PolicyBindingKey {
         );
         let mut claims = self.claims().clone();
         let mut presence = 0_u8;
-        // Bits use the eight derived names' canonical UTF-8 ordering. Absent
+        // Bits use the derived names' canonical UTF-8 ordering. Absent
         // entries remain absent: internal bindings may intentionally be partial.
         for (bit, (name, expected)) in derived.into_iter().enumerate() {
             if claims.get(&name) == Some(&expected) {
@@ -3150,7 +3150,7 @@ impl PolicyBindingKey {
         let mut exact = Vec::new();
         put_str(&mut exact, self.identity.canonical());
         exact.extend_from_slice(&self.canonical_claims.comparison_key);
-        blake3::derive_key("jazz.authority-policy-binding-directory.v1", &exact)
+        jazz_types::sha256::derive_key("jazz.authority-policy-binding-directory.v1", &exact)
     }
 }
 
@@ -5528,7 +5528,8 @@ mod tests {
         let Value::Record(fields) = encoded.clone() else {
             panic!("typed directory record")
         };
-        assert_eq!(fields.get_idx(0).unwrap(), Value::U8(255));
+        // All seven identity-derived entries are reconstructed.
+        assert_eq!(fields.get_idx(0).unwrap(), Value::U8(0b111_1111));
         let stored =
             policy_binding_directory_claims_from_value(fields.get_idx(1).unwrap()).unwrap();
         assert_eq!(stored.len(), 1);
@@ -5560,7 +5561,7 @@ mod tests {
         assert!(
             PolicyBindingKey::from_directory_value(
                 identity,
-                policy_directory_payload(255, redundant).unwrap()
+                policy_directory_payload(0b111_1111, redundant).unwrap()
             )
             .is_err()
         );
@@ -5568,8 +5569,8 @@ mod tests {
             &identity,
             BTreeMap::new(),
         );
-        assert_eq!(derived.len(), 8);
-        for mask in 0_u16..=255 {
+        assert_eq!(derived.len(), 7);
+        for mask in 0_u16..=0b111_1111 {
             let partial = derived
                 .iter()
                 .enumerate()
@@ -5657,7 +5658,7 @@ mod tests {
         let Value::Array(nodes) = &encoded else {
             panic!("claim node array")
         };
-        let mut receipt = blake3::Hasher::new();
+        let mut receipt = jazz_types::sha256::Hasher::new();
         for node in nodes {
             let Value::Record(record) = node else {
                 panic!("claim node record")
@@ -5667,7 +5668,7 @@ mod tests {
         }
         assert_eq!(
             receipt.finalize().to_hex().as_str(),
-            "115d7dd21a7920aff3799d618abdfdedf47dd42e20401bcb744e689314bf907b"
+            "b8ea9b223b684e1dd7e201bb2e0a30cb15fdc20d1715cb49b1d7a3e1a417d177"
         );
         assert_eq!(
             policy_binding_directory_claims_from_value(encoded).unwrap(),

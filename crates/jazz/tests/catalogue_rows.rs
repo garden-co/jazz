@@ -130,6 +130,7 @@ fn deploy(v1: &Schema, v2: &Schema, policies: TablePolicies, revision: u64) -> C
                 forward: lens.forward.clone(),
             }],
             permissions: vec![(revision, SchemaHash::compute(v2), permissions, 3)],
+            ..Default::default()
         },
         admit: vec![(compile_schema(v2), vec![migration.clone()])],
         activate: Some((revision, current, vec![migration])),
@@ -384,6 +385,7 @@ fn every_definition_shape_reads_back_equal_after_a_reopen() {
         composite_indexes: vec![vec!["owner".into(), "at".into()]],
         policies: TablePolicies::default(),
         branch_by: vec!["branch".into()],
+        history: Default::default(),
     };
     let people = TableSchemaBuilder::new("people").column("name", ColumnType::Text);
     let mut schema = SchemaBuilder::new().table(people).build();
@@ -473,10 +475,70 @@ fn every_definition_shape_reads_back_equal_after_a_reopen() {
             forward: forward.clone(),
         }],
         permissions: vec![(4, target, permissions.clone(), 9)],
+        bundles: vec![(target, permissions.clone(), 10)],
     });
     assert_eq!(rows.schema(&target).unwrap().schema, schema);
     assert_eq!(rows.lenses[0].forward, forward);
     assert_eq!(rows.head().unwrap().permissions, permissions);
+    // A bundle is kept whole, by its content id.
+    assert_eq!(rows.bundles.len(), 1);
+    assert_eq!(
+        rows.bundles[0].id,
+        jazz::catalogue::bundle_id(&target, &permissions).unwrap()
+    );
+    assert_eq!(rows.bundles[0].permissions, permissions);
+    assert_eq!(rows.bundles[0].published_at, 10);
+}
+
+/// Bundles keep their publication order: one published in the same
+/// millisecond as an earlier one, or behind a clock that stepped back, still
+/// sorts after it, and publishing a bundle again keeps its first stamp.
+#[test]
+fn bundles_are_stamped_in_publication_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let schema = notes("text");
+    let hash = SchemaHash::compute(&schema);
+    let policies = |read: PolicyExpr| -> jazz::catalogue::Permissions {
+        [(
+            TableName::new("notes"),
+            TablePolicies::new().with_select(read),
+        )]
+        .into_iter()
+        .collect()
+    };
+    let (open, closed) = (policies(PolicyExpr::True), policies(PolicyExpr::False));
+    let db = block_on(Db::open_at(
+        DbConfig::new(
+            compile_schema(&schema),
+            DbIdentity {
+                node: NodeUuid::from_bytes([0x5e; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        ),
+        &dir.path().join("store.sqlite"),
+        FileOptions::default(),
+    ))
+    .unwrap();
+    let publish = |permissions: &jazz::catalogue::Permissions, at: u64| {
+        block_on(db.apply_catalogue(CatalogueChange {
+            put: CataloguePut {
+                bundles: vec![(hash, permissions.clone(), at)],
+                ..Default::default()
+            },
+            ..Default::default()
+        }))
+        .unwrap();
+    };
+    publish(&open, 100);
+    publish(&closed, 100);
+    publish(&open, 50);
+    let mut bundles = db.catalogue().unwrap().bundles;
+    bundles.sort_by_key(|bundle| bundle.published_at);
+    let order = bundles
+        .iter()
+        .map(|bundle| (bundle.permissions.clone(), bundle.published_at))
+        .collect::<Vec<_>>();
+    assert_eq!(order, vec![(open, 100), (closed, 101)]);
 }
 
 /// JSON has no NaN or infinity: a definition holding one is refused when

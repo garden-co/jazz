@@ -656,9 +656,9 @@ describe("permissions DSL", () => {
     });
   });
 
-  it("composes a type-column row predicate with isCreator", () => {
-    const compiled = definePermissions(documentApp, ({ policy, allOf, isCreator }) => [
-      policy.documents.allowRead.where(allOf([{ type: "Cmp" }, isCreator])),
+  it("composes a type-column row predicate with a creator condition", () => {
+    const compiled = definePermissions(documentApp, ({ policy, allOf, session }) => [
+      policy.documents.allowRead.where(allOf([{ type: "Cmp" }, { $createdBy: session.user }])),
     ]);
 
     expect(compiled.documents!.select?.using).toEqual({
@@ -773,6 +773,34 @@ describe("permissions DSL", () => {
     ).toThrow(/multiple asymmetric update rules.*todos.*USING and WITH CHECK.*ORed independently/i);
   });
 
+  it("names isCreator's replacement when a rule destructures it (removed in alpha.60)", () => {
+    expect(() =>
+      definePermissions(app, (ctx) => {
+        const { policy, isCreator } = ctx as typeof ctx & { isCreator: unknown };
+        policy.todos.allowUpdate.where(isCreator as never);
+      }),
+    ).toThrow(
+      /`isCreator` was removed in alpha\.60.*\$createdBy: session\.user.*"\$createdBy\.identity": session\.identity/,
+    );
+  });
+
+  it("names the rule and the input an unsupported condition came from", () => {
+    expect(() =>
+      definePermissions(app, ({ policy }) => {
+        policy.todos.allowRead.where(undefined as never);
+      }),
+    ).toThrow(
+      /^policy\.todos\.allowRead\.where: Unsupported permission condition input: undefined\./,
+    );
+    expect(() =>
+      definePermissions(app, ({ policy }) => {
+        policy.todos.allowUpdate.whereOld([{ done: true }] as never);
+      }),
+    ).toThrow(
+      /policy\.todos\.allowUpdate\.whereOld: .*an array \(wrap several conditions in anyOf or allOf\)/,
+    );
+  });
+
   it("still OR-merges multiple symmetric update rules", () => {
     const compiled = definePermissions(app, ({ policy }) => [
       policy.todos.allowUpdate.where({ archived: false }),
@@ -850,10 +878,10 @@ describe("permissions DSL", () => {
     });
   });
 
-  it("exposes isCreator as creator-based condition sugar", () => {
-    const compiled = definePermissions(app, ({ policy, isCreator }) => [
-      policy.todos.allowRead.where(isCreator),
-      policy.todos.allowUpdate.where(isCreator),
+  it("compiles a symmetric creator condition for read and update", () => {
+    const compiled = definePermissions(app, ({ policy, session }) => [
+      policy.todos.allowRead.where({ $createdBy: session.user }),
+      policy.todos.allowUpdate.where({ $createdBy: session.user }),
     ]);
 
     expect(compiled.todos!.select?.using).toEqual(creatorCondition);
@@ -861,9 +889,9 @@ describe("permissions DSL", () => {
     expect(compiled.todos!.update?.with_check).toEqual(creatorCondition);
   });
 
-  it("scopes creator helpers to the canonical issuer-scoped author", () => {
-    const compiled = definePermissions(app, ({ policy, isCreator }) => [
-      policy.todos.allowRead.where(isCreator),
+  it("scopes creator conditions to the canonical issuer-scoped author", () => {
+    const compiled = definePermissions(app, ({ policy, session }) => [
+      policy.todos.allowRead.where({ $createdBy: session.user }),
     ]);
     expect(compiled.todos!.select?.using).toEqual({
       type: "Cmp",
@@ -877,9 +905,12 @@ describe("permissions DSL", () => {
     expect(matching).not.toBe(canonicalAuthorSubject("https://issuer-b.example", "same-sub"));
   });
 
-  it("compiles managedByCreator() to creator-scoped CRUD rules", () => {
-    const compiled = definePermissions(app, ({ policy }) => {
-      policy.todos.managedByCreator();
+  it("compiles creator-scoped CRUD rules", () => {
+    const compiled = definePermissions(app, ({ policy, session }) => {
+      policy.todos.allowRead.where({ $createdBy: session.user });
+      policy.todos.allowInsert.where({ $createdBy: session.user });
+      policy.todos.allowUpdate.where({ $createdBy: session.user });
+      policy.todos.allowDelete.where({ $createdBy: session.user });
     });
 
     expect(compiled.todos!.select?.using).toEqual(creatorCondition);
@@ -889,9 +920,9 @@ describe("permissions DSL", () => {
     expect(compiled.todos!.delete?.using).toEqual(creatorCondition);
   });
 
-  it("composes isCreator inside anyOf()", () => {
-    const compiled = definePermissions(app, ({ policy, anyOf, isCreator }) => [
-      policy.todos.allowUpdate.where(anyOf([isCreator, { done: true }])),
+  it("composes a creator condition inside anyOf()", () => {
+    const compiled = definePermissions(app, ({ policy, anyOf, session }) => [
+      policy.todos.allowUpdate.where(anyOf([{ $createdBy: session.user }, { done: true }])),
     ]);
 
     expect(compiled.todos!.update?.using).toEqual({
@@ -2576,5 +2607,13 @@ describe("permissions DSL", () => {
         policy.todos.allowRead.where(raw(invalidManualExistsExpr)),
       ]),
     ).toThrow(/available fk columns: todoId/i);
+  });
+});
+
+describe("definePermissions without an app", () => {
+  it("points at a circular schema.ts and permissions.ts import", () => {
+    expect(() => definePermissions(undefined as never, () => {})).toThrow(
+      "If permissions.ts imports the app from schema.ts and schema.ts imports permissions.ts, the import is circular",
+    );
   });
 });

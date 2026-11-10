@@ -24,6 +24,12 @@ export {
   UnsupportedStorageCodecsError,
   isUnsupportedStorageCodecsError,
 } from "./unsupported-storage-codecs-error.js";
+export { AuthorityChangedError, isAuthorityChangedError } from "./authority-changed-error.js";
+export {
+  StoreHeldByAnotherTabError,
+  isStoreHeldByAnotherTabError,
+} from "./store-held-by-another-tab-error.js";
+export { DbReplacedError, type DbReplacedReason } from "./db-replaced-error.js";
 export { createDb } from "./default-create-db.js";
 export {
   type SnapshotRef,
@@ -34,7 +40,7 @@ export {
 } from "./snapshot-ref.js";
 export type { PublicSession, RuntimeSourcesConfig } from "./context.js";
 export type { ValueSplices } from "./subscription-manager.js";
-/** Encode the opaque logical identity exposed as `session.user` by bindings. */
+/** Encode a login (`session.identity`) as its canonical opaque `[issuer, subject]` string. */
 export { canonicalAuthorSubject as userIdentity } from "./author-id.js";
 export {
   Db,
@@ -56,21 +62,22 @@ export {
   type StreamingInsertOptions,
   type RestoreOptions,
   type UpdateOptions,
+  type UpdateEditOptions,
   type DeleteOptions,
   type TableProxy,
 } from "./db.js";
 export type { AccountDbConfig as DbConfig } from "../accounts/context.js";
 export type { ClientMigrations } from "./client-migrations.js";
 export type { AuthFailureReason, AuthState } from "./auth-state.js";
-export type { LinkStatus, SyncStatus } from "./sync-status.js";
+export type { LinkStatus, OfflineReason, SyncStatus } from "./sync-status.js";
 export {
-  fetchStoredPermissions,
+  fetchPublishedBundles,
   fetchSchemaHashes,
   fetchStoredWasmSchema,
-  type FetchStoredPermissionsOptions,
+  type FetchPublishedBundlesOptions,
   type FetchStoredWasmSchemaOptions,
+  type PublishedBundle,
   type StoredSchemaHash,
-  type StoredPermissionsResponse,
 } from "../dev/catalogue-api.js";
 export {
   fetchServerSubscriptions,
@@ -87,3 +94,11 @@ export {
   AuthSecretFormatError,
 } from "./auth-secret-store.js";
 export type { AuthSecretStore, BrowserAuthSecretStoreOptions } from "./auth-secret-store.js";
+export type {
+  ResolvedTextAnchor,
+  ResolvedTextRange,
+  TextAnchor,
+  TextAnchors,
+  TextRange,
+  TextSide,
+} from "./text-anchors.js";

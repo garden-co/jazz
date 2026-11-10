@@ -31,11 +31,7 @@ use jazz::tx::DurabilityTier;
 use common::compile_schema;
 
 fn me() -> PolicyValue {
-    PolicyValue::SessionRef(vec![
-        "user".to_owned(),
-        "identity".to_owned(),
-        "subject".to_owned(),
-    ])
+    PolicyValue::SessionRef(vec!["identity".to_owned(), "subject".to_owned()])
 }
 
 fn outer(column: &str) -> PolicyValue {

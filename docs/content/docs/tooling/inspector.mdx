@@ -1,0 +1,110 @@
+---
+title: Inspector
+description: "Learn how to look at your app's data, and let agents debug it, through your own backend."
+---
+
+<Callout type="info">
+  Coming soon: the Inspector isn't in alpha.60 yet. This page describes how it will work once it
+  ships; `inspect`, `/jazz/inspect/` and the `jazz-tools inspect` commands don't exist until then.
+</Callout>
+
+The Inspector lets you browse and edit your app's data, follow relations, see a table's schema and
+permissions, and look at the app as a given user would. Your backend serves it at
+`<basePath>/inspect/`, by default `/jazz/inspect/`, and decides who may open it. The same access
+works from the CLI and as MCP tools for agents.
+
+## Who may inspect
+
+Pass `inspect` to `createJazz`. It gets the request and returns who the person is, for the audit
+log, or `null` to refuse:
+
+```ts title="jazz.server.ts"
+export const jazz = createJazz({
+  app,
+  permissions,
+  store: sqlite({ path: "./data/jazz" }),
+  authenticate,
+  // Staff behind your SSO proxy, VPN or Vercel deployment protection
+  inspect: async (request) => {
+    const staff = await verifyStaff(request);
+    return staff ? { by: staff.email, write: staff.isAdmin } : null;
+  },
+});
+```
+
+<Callout type="warn" title="This grants unlimited access">
+  Whoever `inspect` lets in reads every row of every table, with your permissions not checked, and
+  with `write: true` can change any of them. They can also let agents in. Grant it only to people
+  who may see all of your users' data. Where you can, gate it with infrastructure that's separate
+  from your users' sign-in, such as Vercel deployment protection, Cloudflare Access, a VPN or an SSO
+  proxy, rather than a flag on a user account.
+</Callout>
+
+Without `inspect`, only local development gets in: a request from this machine while `NODE_ENV` is
+`"development"`. Jazz can only check that on hosts that hand it the Node request (`attach()` and
+`nodeHandler`). On Next.js route handlers, Hono, Bun and Deno it can't see where a request comes
+from, so the default is off there; pass an `inspect` hook to use the Inspector. Pass `() => null` to
+turn it off everywhere.
+
+Every call is audited, allowed or refused. By default that's one `console.info` line per call; pass
+`inspector: { audit }` to send events to your own log.
+
+## The Inspector page
+
+Open `/jazz/inspect/` on your app. Besides the data grid, it has:
+
+- **View as user**: browse the data under one user's permissions.
+- **Sessions**: who is connected right now.
+- **Linked queries**: follow a query from a session or an agent's answer.
+
+Links into the Inspector carry their place in the URL fragment (`#q`, `#table`, `#row`, `#as`), and
+hold no credential, so you can paste them into a chat or an issue. The page can't be framed by other
+sites.
+
+## Agents
+
+An agent gets access only when a person approves it in the browser:
+
+```bash title="Terminal"
+npx jazz-tools inspect login --app https://my-app.com
+```
+
+`--app` is your app's URL, or the URL Jazz is served at if you changed `basePath`.
+
+This opens the Inspector on an approval page. Once you approve, the browser hands the token straight
+to the waiting command on your machine, which keeps it in `~/.config/jazz/inspect-tokens.json`,
+so nothing goes into `.env`. When the agent runs elsewhere,
+the page shows the token to paste instead.
+
+- `jazz-tools inspect <whoami|schema|query|get|history|insert|update|delete|sessions|link>` prints
+  JSON.
+- `jazz-tools inspect mcp --app <url>` serves the same operations as MCP tools over stdio, for
+  example `claude mcp add jazz -- npx jazz-tools inspect mcp --app <url>`. An agent without a
+  token calls the `request_access` tool, which starts the same approval.
+
+Tokens are read-only unless you allow writes, can be limited to some tables, and expire (after a day
+at most, `inspector.maxTokenTtlSeconds`). To keep columns from agents, pass
+`inspector: { redact: { users: ["email"] } }`: those values read as `"[redacted]"`. To revoke every
+token, set `inspector.tokensIssuedAfter` to now.
+
+On `vercel()`, and on `remote()` with a backend credential, set `inspector.tokenSecret` so every
+instance signs tokens the same way. Changing it also revokes every token.
+
+## Inside a local-first page
+
+To look at a local-first page's own database, including writes that haven't synced yet, mount the
+overlay:
+
+```ts
+import { mountInspector } from "jazz-tools/inspector";
+
+mountInspector(db);
+```
+
+It docks the Inspector in the page, loaded from `<serverUrl>/inspect/embedded.html`. The page and
+your backend must share an origin; another origin is refused as not supported yet. Importing
+`jazz-tools/inspector` is safe on a server: the overlay loads on first mount.
+
+## Not supported yet
+
+- Explaining which policy let a row through or refused it (`explain`).

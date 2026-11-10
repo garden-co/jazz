@@ -24,7 +24,7 @@ vi.mock("../react-core/session.js", () => ({
   useJazzSession: () => null,
 }));
 vi.mock("../session/create-jazz-session.js", () => ({
-  createJazzSession: vi.fn(),
+  createJazzClient: vi.fn(),
 }));
 
 import { JazzSessionProvider } from "./session.js";
@@ -55,7 +55,7 @@ describe("JazzSessionProvider dev auto-attach", () => {
 
   it("enables devMode before creating a configured session", () => {
     render(
-      <JazzSessionProvider config={{ appId: "app" } as never}>
+      <JazzSessionProvider config={{ scope: "app" } as never}>
         <div />
       </JazzSessionProvider>,
     );

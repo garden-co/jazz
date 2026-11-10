@@ -8,8 +8,8 @@ import {
 } from "../runtime/auth-secret-store.js";
 import type { PublicSession, Session } from "../runtime/context.js";
 
-const mock = vi.hoisted(() => ({ createJazzClient: vi.fn() }));
-vi.mock("./create-jazz-client.js", () => ({ createJazzClient: mock.createJazzClient }));
+const mock = vi.hoisted(() => ({ openJazzClient: vi.fn() }));
+vi.mock("../web/create-jazz-client.js", () => ({ openJazzClient: mock.openJazzClient }));
 
 import { JazzProvider } from "./provider.js";
 import { useSession } from "./provider.js";
@@ -22,10 +22,8 @@ const SESSION: Session = {
   authMode: "local-first",
 };
 const PUBLIC_SESSION: PublicSession = {
-  user: {
-    account: "00000000-0000-4000-8000-000000000002",
-    identity: { issuer: SESSION.issuer, subject: SESSION.user_id },
-  },
+  user: "00000000-0000-4000-8000-000000000002",
+  identity: { issuer: SESSION.issuer, subject: SESSION.user_id },
   claims: { iss: SESSION.issuer, sub: SESSION.user_id },
   authMode: "local-first",
 };
@@ -51,14 +49,14 @@ function makeClient() {
 
 function IdentityProbe() {
   const session = useSession();
-  return <output data-testid="identity" data-account={session?.user.account ?? ""} />;
+  return <output data-testid="identity" data-account={session?.user ?? ""} />;
 }
 
 describe("JazzProvider local-first auth", () => {
   beforeEach(() => {
     Object.defineProperty(globalThis, "localStorage", { configurable: true, value: makeStorage() });
-    mock.createJazzClient.mockReset();
-    mock.createJazzClient.mockResolvedValue(makeClient());
+    mock.openJazzClient.mockReset();
+    mock.openJazzClient.mockResolvedValue(makeClient());
   });
 
   afterEach(() => {
@@ -79,9 +77,7 @@ describe("JazzProvider local-first auth", () => {
     );
     await waitFor(() => {
       expect(view.getByTestId("identity").dataset.account).toBe(account.id);
-      expect(mock.createJazzClient).toHaveBeenCalledWith(
-        expect.objectContaining({ appId, account }),
-      );
+      expect(mock.openJazzClient).toHaveBeenCalledWith(expect.objectContaining({ appId, account }));
     });
   });
 

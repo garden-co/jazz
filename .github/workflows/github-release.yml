@@ -120,5 +120,34 @@ jobs:
             echo "::error::Tag ${TAG} does not exist yet; publish to npm first."
             exit 1
           fi
+          # Self-hosters upgrading from alpha.59 need the exporter and the
+          # importer, which the "alpha59-alpha60 exporter" workflow attaches. They
+          # live in dev/alpha59-alpha60; this check goes with them.
+          # Only a 404 means the tag has no importer; any other error fails.
+          if response=$(gh api "repos/${GH_REPO}/contents/dev/alpha59-alpha60/README.md?ref=${TAG}" --silent 2>&1); then
+            has_importer=true
+          elif grep -q "HTTP 404" <<<"${response}"; then
+            has_importer=false
+          else
+            echo "::error::Could not check ${TAG} for dev/alpha59-alpha60: ${response}"
+            exit 1
+          fi
+          if [ "${has_importer}" = true ]; then
+            assets=$(gh release view "${TAG}" --json assets --jq '.assets[].name')
+            for checksums in jazz-alpha59-alpha60-export.sha256 jazz-alpha59-alpha60-import.sha256; do
+              if ! grep -qx "${checksums}" <<<"${assets}"; then
+                echo "::error::${TAG} has no ${checksums%.sha256} assets; dispatch the \"alpha59-alpha60 exporter\" workflow with version ${VERSION} first."
+                exit 1
+              fi
+            done
+          fi
+          # Jazz Cloud's images take the server binary from the release.
+          assets=$(gh release view "${TAG}" --json assets --jq '.assets[].name')
+          for asset in jazz-tools-linux-x64 jazz-tools-linux-arm64 SHA256SUMS; do
+            if ! grep -qx "${asset}" <<<"${assets}"; then
+              echo "::error::${TAG} has no ${asset}; \"Publish jazz-tools alpha\" attaches the server binaries after the npm publish."
+              exit 1
+            fi
+          done
           gh release edit "${TAG}" --draft=false --prerelease=false --latest
           gh release view "${TAG}" --json url --jq '"Published: " + .url'

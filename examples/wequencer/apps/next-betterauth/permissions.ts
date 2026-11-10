@@ -8,18 +8,18 @@ const wequencerPermissions = s.definePermissions(
     const isMember = (sessionId: RowRefValue) =>
       policy.session_members.exists.where({
         session_id: sessionId,
-        member_author: session.user.account,
+        member_author: session.user,
       });
     const canEdit = (sessionId: RowRefValue) =>
       anyOf([
         policy.session_members.exists.where({
           session_id: sessionId,
-          member_author: session.user.account,
+          member_author: session.user,
           role: "editor",
         }),
         policy.session_members.exists.where({
           session_id: sessionId,
-          member_author: session.user.account,
+          member_author: session.user,
           role: "owner",
         }),
       ]);
@@ -28,24 +28,24 @@ const wequencerPermissions = s.definePermissions(
     // or replacing that mutable membership row must not transfer or revoke the
     // creator's ability to administer the session.
     const isCreator = (sessionId: RowRefValue) =>
-      policy.sessions.exists.where({ id: sessionId, "$createdBy.account": session.user.account });
+      policy.sessions.exists.where({ id: sessionId, "$createdBy.account": session.user });
     // Bandmates see each other's display name once that profile has shown
     // presence in a session they can both read. Presence stays advisory: it
     // only reveals a name, never grants a write.
     policy.profiles.allowRead.where(
-      anyOf([{ author: session.user.account }, allowedTo.read("presenceViaProfile")]),
+      anyOf([{ author: session.user }, allowedTo.read("presenceViaProfile")]),
     );
-    policy.profiles.allowInsert.where({ author: session.user.account });
+    policy.profiles.allowInsert.where({ author: session.user });
     policy.profiles.allowUpdate
-      .whereOld({ author: session.user.account })
-      .whereNew({ author: session.user.account });
-    policy.profiles.allowDelete.where({ author: session.user.account });
+      .whereOld({ author: session.user })
+      .whereNew({ author: session.user });
+    policy.profiles.allowDelete.where({ author: session.user });
     policy.sessions.allowRead.where((row) =>
-      anyOf([{ "$createdBy.account": session.user.account }, isMember(row.id)]),
+      anyOf([{ "$createdBy.account": session.user }, isMember(row.id)]),
     );
     policy.sessions.allowInsert.always();
-    policy.sessions.allowUpdate.where({ "$createdBy.account": session.user.account });
-    policy.sessions.allowDelete.where({ "$createdBy.account": session.user.account });
+    policy.sessions.allowUpdate.where({ "$createdBy.account": session.user });
+    policy.sessions.allowDelete.where({ "$createdBy.account": session.user });
     policy.session_members.allowRead.where(allowedTo.read("session"));
     policy.session_members.allowInsert.where(allowedTo.update("session"));
     policy.session_members.allowUpdate.never();
@@ -94,7 +94,7 @@ const wequencerPermissions = s.definePermissions(
     policy.presence.allowUpdate.where((row) =>
       allOf([isMember(row.session_id), allowedTo.update("profile")]),
     );
-    policy.presence.allowDelete.where({ "$createdBy.account": session.user.account });
+    policy.presence.allowDelete.where({ "$createdBy.account": session.user });
   },
 );
 

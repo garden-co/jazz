@@ -30,10 +30,8 @@ describe("auth-state", () => {
       authMode: "external",
       error: "expired",
       session: {
-        user: {
-          account: null,
-          identity: { issuer: "https://issuer.example", subject: "alice" },
-        },
+        user: null,
+        identity: { issuer: "https://issuer.example", subject: "alice" },
         claims: {
           iss: "https://issuer.example",
           sub: "alice",

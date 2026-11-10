@@ -8,7 +8,7 @@ import type { ClientMigrations } from "jazz-tools";
 export const migrations: ClientMigrations = {
   "schemas": [
     {
-      "hash": "d2d23112dacb230e634e0420582492bbd838f8f418770674e150f2cfa21c58bc",
+      "hash": "f9c2e1ab9391434b67488cb23410ed340cd4836de7fbc3ce673ed2a56bc07f2c",
       "schema": {
         "tables": {
           "better_auth_user": {
@@ -383,7 +383,8 @@ export const migrations: ClientMigrations = {
                   "variants": [
                     "doc",
                     "issues",
-                    "issue"
+                    "issue",
+                    "song"
                   ]
                 },
                 "nullable": false
@@ -418,6 +419,11 @@ export const migrations: ClientMigrations = {
               "issuesViaPage": {
                 "kind": "reverse",
                 "table": "issues",
+                "relation": "page"
+              },
+              "sheetsViaPage": {
+                "kind": "reverse",
+                "table": "songSheets",
                 "relation": "page"
               }
             },
@@ -580,6 +586,176 @@ export const migrations: ClientMigrations = {
               "pageId",
               "position"
             ]
+          },
+          "songSheets": {
+            "columns": [
+              {
+                "name": "workspaceId",
+                "column_type": {
+                  "type": "Uuid"
+                },
+                "nullable": false,
+                "references": "workspaces"
+              },
+              {
+                "name": "pageId",
+                "column_type": {
+                  "type": "Uuid"
+                },
+                "nullable": false,
+                "references": "pages"
+              },
+              {
+                "name": "body",
+                "column_type": {
+                  "type": "Text"
+                },
+                "nullable": false,
+                "merge_strategy": "Markdown"
+              }
+            ],
+            "relations": {
+              "workspace": {
+                "kind": "forward",
+                "table": "workspaces",
+                "column": "workspaceId"
+              },
+              "page": {
+                "kind": "forward",
+                "table": "pages",
+                "column": "pageId"
+              }
+            },
+            "indexed_columns": [
+              "pageId"
+            ]
+          },
+          "sheetComments": {
+            "columns": [
+              {
+                "name": "workspaceId",
+                "column_type": {
+                  "type": "Uuid"
+                },
+                "nullable": false,
+                "references": "workspaces"
+              },
+              {
+                "name": "pageId",
+                "column_type": {
+                  "type": "Uuid"
+                },
+                "nullable": false,
+                "references": "pages"
+              },
+              {
+                "name": "author",
+                "column_type": {
+                  "type": "Uuid"
+                },
+                "nullable": false
+              },
+              {
+                "name": "range",
+                "column_type": {
+                  "type": "Json"
+                },
+                "nullable": false
+              },
+              {
+                "name": "text",
+                "column_type": {
+                  "type": "Text"
+                },
+                "nullable": false
+              },
+              {
+                "name": "resolved",
+                "column_type": {
+                  "type": "Boolean"
+                },
+                "nullable": false
+              }
+            ],
+            "relations": {
+              "workspace": {
+                "kind": "forward",
+                "table": "workspaces",
+                "column": "workspaceId"
+              },
+              "page": {
+                "kind": "forward",
+                "table": "pages",
+                "column": "pageId"
+              }
+            },
+            "indexed_columns": [
+              "pageId"
+            ]
+          },
+          "sheetPresence": {
+            "columns": [
+              {
+                "name": "workspaceId",
+                "column_type": {
+                  "type": "Uuid"
+                },
+                "nullable": false,
+                "references": "workspaces"
+              },
+              {
+                "name": "pageId",
+                "column_type": {
+                  "type": "Uuid"
+                },
+                "nullable": false,
+                "references": "pages"
+              },
+              {
+                "name": "account",
+                "column_type": {
+                  "type": "Uuid"
+                },
+                "nullable": false
+              },
+              {
+                "name": "cursor",
+                "column_type": {
+                  "type": "Json"
+                },
+                "nullable": false
+              },
+              {
+                "name": "selection",
+                "column_type": {
+                  "type": "Json"
+                },
+                "nullable": true
+              },
+              {
+                "name": "seenAt",
+                "column_type": {
+                  "type": "Double"
+                },
+                "nullable": false
+              }
+            ],
+            "relations": {
+              "workspace": {
+                "kind": "forward",
+                "table": "workspaces",
+                "column": "workspaceId"
+              },
+              "page": {
+                "kind": "forward",
+                "table": "pages",
+                "column": "pageId"
+              }
+            },
+            "indexed_columns": [
+              "pageId"
+            ],
+            "history": "latest"
           },
           "attachments": {
             "columns": [

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useAll, useDb } from "jazz-tools/react";
+import { useAll } from "jazz-tools/react";
 import { Avatar } from "@astryxdesign/core/Avatar";
 import { Button } from "@astryxdesign/core/Button";
 import { Dialog, DialogHeader } from "@astryxdesign/core/Dialog";
@@ -76,13 +76,12 @@ function TaskDetail({
   crew: CrewMember[];
   onClose: () => void;
 }) {
-  const db = useDb();
   const me = useMe();
   const [title, setTitle] = useState(task.title);
   const [notes, setNotes] = useState(task.notes ?? "");
   const [comment, setComment] = useState("");
   const [canDelete, setCanDelete] = useState(false);
-  const { data: comments = [] } = useAll(
+  const { data: comments = [], db } = useAll(
     app.comments
       .where({ taskId: task.id })
       .select("*", "$createdAt")

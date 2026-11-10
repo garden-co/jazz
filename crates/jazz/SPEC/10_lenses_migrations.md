@@ -85,24 +85,29 @@ what an open needs is read back from its own rows.
 
 Definitions are immutable and stored whole as canonical JSON text (object
 keys sorted, no whitespace), so SQL can read them with `json_each`; decisions
-about them (admission, publication time, activation) are real columns. The
-current permissions revision is the highest; its parent is the one before it.
-Every revision is kept.
+about them (admission, publication time, activation) are real columns. A
+replica's current permissions revision is the highest; its parent is the one
+before it. Every revision is kept. A server's store has no revisions: its
+sessions are governed by the bundle they pin (SPEC 8), never by a current
+schema.
 
 `Db::apply_catalogue(CatalogueChange { put, admit, activate })` writes new
 definition rows, admits versions with their lenses and makes a write schema
 current at a revision in one savepoint: a change that fails leaves neither
 rows nor in-memory state behind. A server deploy computes that change from
 the stored rows (`prepare_catalogue_change`) and applies it in one
-transaction, so a deploy is never half written. Admitted versions are
+transaction, so a deploy is never half written. A deploy only puts and admits
+(the store's first version included); it never activates, and a server
+refuses a change that does (`INV-LENS-7`). Admitted versions are
 immutable: a deploy that gives an admitted version a new incoming lens is
 refused and must publish a new convergent target instead. Lenses are needed
 only at admission, because the cells they produce are persisted in
 `_jazz_lens_cells`.
 
 On open, a store makes the head revision's write schema (with its policies)
-current; with no revision yet it opens under the lowest admitted version, and
-a store with no catalogue at all under the schema it was given. The server's
+current; with no revision yet (every server store) it opens under the lowest
+admitted version, and a store with no catalogue at all under the schema it
+was given. The server's
 HTTP catalogue index (schema hashes, lenses, permission bundle ids) is
 rebuilt from these rows; a permission bundle id is a version 5 UUID over the
 bundle's canonical JSON, chained to its parent revision.
@@ -631,10 +636,12 @@ the **authority namespace** and the stored table (and stored column) name.
 schema version.
 
 - The authority namespace is 16 random bytes an authority with no upstream
-  mints once and keeps in `_jazz_meta`. Every `Catalogue` carries it. A
-  replica keeps the first one it mirrors and refuses an upstream that sends
-  another (another app's authority): its remote reads fail with why and its
-  local reads go on.
+  mints once, when it is opened as the authority, and keeps in `_jazz_meta`.
+  Every `Catalogue` carries it. A replica keeps the first one it mirrors and
+  refuses an upstream that sends another (another app's authority, or one
+  whose store was recreated) with `AuthorityChanged`: its remote reads and
+  `Global` waits fail with why and its local reads go on (ch. 8 §8.10,
+  `INV-SYNC-54`).
 - A version's identities are the authority's only once the authority has
   confirmed that version's names. `Catalogue.confirmed` lists each version
   the sender's authority admitted with the digest of its names, and a
@@ -657,7 +664,7 @@ schema version.
   that version `v` introduces (a column of a new table, one a lens adds or
   copies, one whose type changed, one added without a lens that continues
   no stored column) is stored as `name~` and the first six hex digits of
-  BLAKE3 over the length-prefixed parts `"column"`, the 16 bytes of `v`'s
+  SHA-256 over the length-prefixed parts `"column"`, the 16 bytes of `v`'s
   compatibility id, and `name`. A table a lens adds is stored as `name~`
   and the same hash over `"table"`, `v`'s compatibility id and `name`. The
   compatibility id is the version id of `v` with its columns sorted by

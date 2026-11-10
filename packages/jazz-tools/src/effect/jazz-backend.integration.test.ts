@@ -1,12 +1,11 @@
-import { randomUUID } from "node:crypto";
-import { Effect, Fiber, Layer, Stream } from "effect";
+import { Effect, Fiber, Layer, Schema, Stream } from "effect";
 import { HttpServerRequest } from "effect/http";
 import { describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
-import { resolveSchemaSource } from "../schema-source.js";
+import { createJazz, memory } from "../backend/index.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
-import { deploy, startLocalJazzServer, startTestJwtIssuer } from "../testing/index.js";
-import { Jazz, JazzBackend, JazzWriteRejected } from "./backend/index.js";
+import { startTestJazz } from "../testing/index.js";
+import { Jazz, JazzBackend, JazzNoAccount, JazzWriteRejected } from "./backend/index.js";
 
 const app = s.defineApp(
   {
@@ -16,8 +15,8 @@ const app = s.defineApp(
   },
   { migrations: "none" },
 );
-const permissions = s.definePermissions(app, ({ policy, isCreator }) => {
-  policy.diaries.allowRead.where(isCreator);
+const permissions = s.definePermissions(app, ({ policy, session }) => {
+  policy.diaries.allowRead.where({ $createdBy: session.user });
   policy.diaries.allowInsert.always();
   policy.posts.allowRead.always();
   policy.posts.allowInsert.always();
@@ -42,35 +41,20 @@ const createPost = (text: string) =>
 
 describe("JazzBackend Effect layer", () => {
   it("serves request handlers as the requesting user and syncs to Effect clients", async () => {
-    const issuer = await startTestJwtIssuer();
-    const appId = randomUUID();
-    const auth = {
-      jwksUrl: issuer.jwksUrl,
-      jwtIssuer: issuer.issuer,
-      jwtAudience: issuer.audience,
-    };
-    const server = await startLocalJazzServer({ appId, allowLocalFirstAuth: true, ...auth });
+    // The app's Jazz decides who a request is (its `authenticate`); Effect
+    // clients sync as guests through it.
+    const server = await startTestJazz({
+      app,
+      permissions,
+      coreOptions: { allowLocalFirstAuth: true },
+    });
     try {
-      await deploy({
-        serverUrl: server.url,
-        appId,
-        adminSecret: server.adminSecret,
-        schema: resolveSchemaSource(app),
-        permissions,
-      });
-      const backendLayer = JazzBackend.layer({
-        appId,
-        serverUrl: server.url,
-        app,
-        permissions,
-        ...auth,
-        driver: { type: "memory" },
-        initial: { backendSecret: server.backendSecret },
-      });
-      const clientLayer = Jazz.layer(await localAccountConfig(appId, server.url));
-      const token = await issuer.jwtForUser("effect-reader");
-      const headers = { authorization: `Bearer ${token}` };
-      const account = { account: "login-or-register" } as const;
+      const backendLayer = JazzBackend.layerJazz(server.jazz);
+      const clientLayer = Jazz.layer(await localAccountConfig(server.appId, server.url));
+      // The reader is a user the backend serves without a client of their own.
+      await server.jazz.createAccountFor("effect-reader");
+      const headers = { authorization: `Bearer ${server.bearer("effect-reader")}` };
+      const request = () => new Request("http://localhost/posts", { headers });
 
       const result = await Effect.runPromise(
         Effect.gen(function* () {
@@ -84,14 +68,14 @@ describe("JazzBackend Effect layer", () => {
 
           // The same handler runs with the user's identity from a plain request...
           const fromRequest = yield* createPost("from request").pipe(
-            JazzBackend.forRequest({ headers }, account),
+            JazzBackend.forReqUser(request()),
           );
           // ...and from an `effect/http` request in the handler's context.
           const fromHttp = yield* createPost("from http").pipe(
-            JazzBackend.forCurrentRequest(account),
+            JazzBackend.forCurrentReqUser(),
             Effect.provideService(
               HttpServerRequest.HttpServerRequest,
-              HttpServerRequest.fromWeb(new Request("http://localhost/posts", { headers })),
+              HttpServerRequest.fromWeb(request()),
             ),
           );
 
@@ -99,7 +83,7 @@ describe("JazzBackend Effect layer", () => {
           const denied = yield* Effect.gen(function* () {
             const jazz = yield* Jazz;
             return yield* jazz.insert(app.notes, { text: "denied" }, { wait: "global" });
-          }).pipe(JazzBackend.forRequest({ headers }, account), Effect.flip);
+          }).pipe(JazzBackend.forReqUser(request()), Effect.flip);
 
           return { fromRequest, fromHttp, denied, seenByClient: yield* Fiber.join(seenByClient) };
         }).pipe(Effect.provide(Layer.mergeAll(backendLayer, clientLayer))),
@@ -108,49 +92,69 @@ describe("JazzBackend Effect layer", () => {
       for (const created of [result.fromRequest, result.fromHttp]) {
         expect(created).toMatchObject({
           _tag: "Some",
-          value: { $createdBy: { identity: { issuer: issuer.issuer, subject: "effect-reader" } } },
+          value: {
+            $createdBy: {
+              identity: { issuer: "jazz:backend", subject: "effect-reader" },
+            },
+          },
         });
       }
       expect(result.denied).toBeInstanceOf(JazzWriteRejected);
       expect(result.seenByClient).toMatchObject({ _tag: "Some" });
     } finally {
       await server.stop();
-      await issuer.stop();
     }
   }, 60_000);
-  it("isolates concurrent request handlers to each user's own permissions", async () => {
-    const issuer = await startTestJwtIssuer();
-    const appId = randomUUID();
-    const auth = {
-      jwksUrl: issuer.jwksUrl,
-      jwtIssuer: issuer.issuer,
-      jwtAudience: issuer.audience,
-    };
-    const server = await startLocalJazzServer({ appId, ...auth });
+
+  it("fails with JazzNoAccount for a user without an account, until the backend creates one", async () => {
+    const server = await startTestJazz({ app, permissions });
     try {
-      await deploy({
-        serverUrl: server.url,
-        appId,
-        adminSecret: server.adminSecret,
-        schema: resolveSchemaSource(app),
-        permissions,
+      const request = new Request("http://localhost/posts", {
+        headers: { authorization: `Bearer ${server.bearer("newcomer")}` },
       });
-      const backendLayer = JazzBackend.layer({
-        appId,
-        serverUrl: server.url,
-        app,
-        permissions,
-        ...auth,
-        driver: { type: "memory" },
-        initial: { backendSecret: server.backendSecret },
-      });
-      const users = ["diarist-a", "diarist-b"];
-      const requests = await Promise.all(
-        users.map(async (user) => ({
-          headers: { authorization: `Bearer ${await issuer.jwtForUser(user)}` },
-        })),
+      const write = createPost("first post").pipe(JazzBackend.forReqUser(request));
+      const outcome = await Effect.runPromise(
+        Effect.gen(function* () {
+          // Jazz creates no account on its own: the handler gets a typed failure...
+          const refused = yield* write.pipe(
+            Effect.flip,
+            Effect.flatMap((error) =>
+              error instanceof JazzNoAccount ? Effect.succeed(error) : Effect.die(error),
+            ),
+          );
+          // ...until the backend creates the account, once, explicitly.
+          const backend = yield* JazzBackend;
+          const account = yield* backend.createAccountFor("newcomer");
+          const created = yield* write;
+          return { refused, account, created };
+        }).pipe(Effect.provide(JazzBackend.layerJazz(server.jazz))),
       );
-      const account = { account: "login-or-register" } as const;
+      expect(outcome.refused).toMatchObject({
+        _tag: "JazzNoAccount",
+        userId: "newcomer",
+        operation: "forReqUser",
+      });
+      expect(outcome.created).toMatchObject({
+        _tag: "Some",
+        value: { $createdBy: { account: outcome.account } },
+      });
+    } finally {
+      await server.stop();
+    }
+  }, 60_000);
+
+  it("isolates concurrent request handlers to each user's own permissions", async () => {
+    const server = await startTestJazz({ app, permissions });
+    try {
+      const backendLayer = JazzBackend.layerJazz(server.jazz);
+      const users = ["diarist-a", "diarist-b"];
+      for (const user of users) await server.jazz.createAccountFor(user);
+      const requests = users.map(
+        (user) =>
+          new Request("http://localhost/diary", {
+            headers: { authorization: `Bearer ${server.bearer(user)}` },
+          }),
+      );
 
       // One handler, written once: write an entry, then read every visible entry.
       const writeThenRead = (text: string) =>
@@ -164,7 +168,7 @@ describe("JazzBackend Effect layer", () => {
       const seen = await Effect.runPromise(
         Effect.all(
           users.map((user, index) =>
-            writeThenRead(`${user} entry`).pipe(JazzBackend.forRequest(requests[index]!, account)),
+            writeThenRead(`${user} entry`).pipe(JazzBackend.forReqUser(requests[index]!)),
           ),
           { concurrency: "unbounded" },
         ).pipe(Effect.provide(backendLayer)),
@@ -173,7 +177,49 @@ describe("JazzBackend Effect layer", () => {
       expect(seen).toEqual([["diarist-a entry"], ["diarist-b entry"]]);
     } finally {
       await server.stop();
-      await issuer.stop();
+    }
+  }, 60_000);
+  it("leaves the request body to the handler under forCurrentReqUser", async () => {
+    const seenBodies: Array<ReadableStream | null> = [];
+    const jazz = createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate: (request) => {
+        seenBodies.push(request.body);
+        return { userId: "body-reader" };
+      },
+    });
+    try {
+      await jazz.createAccountFor("body-reader");
+      const handler = Effect.gen(function* () {
+        const body = yield* HttpServerRequest.schemaBodyJson(
+          Schema.Struct({ text: Schema.String }),
+        );
+        const created = yield* createPost(body.text);
+        return created;
+      });
+      const created = await Effect.runPromise(
+        handler.pipe(
+          JazzBackend.forCurrentReqUser(),
+          Effect.provideService(
+            HttpServerRequest.HttpServerRequest,
+            HttpServerRequest.fromWeb(
+              new Request("http://localhost/posts", {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ text: "from the body" }),
+              }),
+            ),
+          ),
+          Effect.provide(JazzBackend.layerJazz(jazz)),
+        ),
+      );
+      expect(created).toMatchObject({ _tag: "Some", value: { text: "from the body" } });
+      // authenticate decides from the method, URL and headers; the body stays unread.
+      expect(seenBodies).toEqual([null]);
+    } finally {
+      await jazz.close();
     }
   }, 60_000);
 });

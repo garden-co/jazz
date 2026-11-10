@@ -1823,7 +1823,6 @@ async fn deletion_metadata_respects_read_policy() {
                                     column: "reader".into(),
                                     op: CmpOp::Eq,
                                     value: PolicyValue::SessionRef(vec![
-                                        "user".into(),
                                         "identity".into(),
                                         "subject".into(),
                                     ]),
