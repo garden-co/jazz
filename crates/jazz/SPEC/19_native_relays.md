@@ -230,7 +230,9 @@ compatibility path is part of the released contract. ABI 2 (alpha.58) adds
 coded operation errors (response 25) as answers to existing commands, and
 ABI 3 (alpha.60) adds their optional reason name; see §19.6 ("Coded operation
 errors"). ABI 4 (alpha.60) ends each subscription delta with its updated rows'
-splices (`updated_splices`, SPEC 18). The exported constant keeps its `NATIVE_RELAY_ABI_V1` name and carries
+splices (`updated_splices`, SPEC 18). ABI 5 (alpha.61) attaches an app,
+`{ schema, migrations }`, rather than a bare schema to a private session (see
+"Trusted platform admission codec"). The exported constant keeps its `NATIVE_RELAY_ABI_V1` name and carries
 the current version.
 
 The ABI stays coarse and binary:

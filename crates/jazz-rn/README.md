@@ -59,7 +59,7 @@ iOS link that artifact directly from the `jazz-rn-android` and `jazz-rn-ios`
 payloads; neither routes through the obsolete UniFFI library.
 
 The wrapper accepts exactly one ABI version, `NATIVE_RELAY_ABI_V1` (currently
-4, generated from `jazz-native-relay`), and refuses any other native build. That
+5, generated from `jazz-native-relay`), and refuses any other native build. That
 ABI uses opaque host-generated admission capabilities and trusted revocation.
 It defines the shared foreground
 `NativeDb` postcard seam with canonical-query prepare/read/subscribe/drain,
