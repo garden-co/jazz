@@ -11,8 +11,8 @@ commit on the server.
 
 ## Connect
 
-The thin client is what you get with no choice made: `JazzProvider` in React, Vue or Svelte, or
-`createJazzClient` from `jazz-tools/client`, without a `client` loader.
+The thin client is the default: `JazzProvider` in React, Vue or Svelte, or `createJazzClient`
+from `jazz-tools/client`, without a `client` loader.
 
 <Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "TypeScript"]} persist updateAnchor>
   <Tab value="React">
@@ -103,12 +103,6 @@ The thin client is what you get with no choice made: `JazzProvider` in React, Vu
 
 <include>../../../partials/web-client-shared-options.mdx</include>
 
-There is no `driver` option, since the thin client keeps nothing locally.
-
-## What runs on the server
-
-- Transactions (mergeable and serializable), branch and snapshot views (`db.captureSnapshot`, branch/base options), large-value streaming (`insertStreaming` / `upsertStreaming`)
-
 ## Limitations
 
 Each is an explicit "not supported" error:
@@ -127,7 +121,6 @@ Each is an explicit "not supported" error:
   includes it. Read such a value a page at a time with a
   [range select](/docs/reading/includes-and-relations#partial-large-values), such as
   `select({ content: { from, to } })`, until streaming reads arrive
-- no admin secret in the browser
 
 ## Pending writes
 
@@ -154,8 +147,9 @@ For writes that survive a reload, [upgrade to local-first](#upgrading-to-local-f
 
 ## Upgrading to local-first
 
-Hand the provider a loader for the local-first client. It starts thin, then upgrades in the
-background after the first load. The session keeps the same `Db`: live queries and listeners carry on, restarting from the
+To keep initial loading fast, start with the thin client and upgrade to the local-first client
+when it's needed. Hand the provider a loader to upgrade in the background after the first load, or
+call `upgradeToLocalFirst` when your app needs it (below). The session keeps the same `Db`: live queries and listeners carry on, restarting from the
 local-first client's first result, and the thin client's pending writes finish first:
 
 ```tsx
