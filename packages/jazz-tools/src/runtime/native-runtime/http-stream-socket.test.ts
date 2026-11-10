@@ -375,3 +375,66 @@ describe("same-origin socket fallback", () => {
     expect(await result).toBe("closed");
   });
 });
+
+describe("why a socket failed (describeFailedUpgrade)", () => {
+  it("is asked after an answered upgrade, and its answer is the socket's error", async () => {
+    const url = "ws://says-why.test/jazz/apps/a1/ws";
+    vi.stubGlobal("fetch", backendThatUpgrades("says-why.test", url, "w1"));
+    const describe = vi.fn(async () => "the WebSocket upgrade was answered with HTTP 500");
+    const socket = new (httpStreamFallbackWebSocket(failingNative(), {
+      describeFailedUpgrade: describe,
+    }))(url);
+    const errors: unknown[] = [];
+    socket.addEventListener("error", (event) => errors.push(event));
+    expect(await outcome(socket)).toBe("closed");
+    expect(describe).toHaveBeenCalledTimes(1);
+    expect(String(errors[0])).toMatch(/answered with HTTP 500/);
+  });
+
+  it("is not asked for a hung upgrade, nor when the probe got no answer", async () => {
+    vi.useFakeTimers();
+    const describe = vi.fn(async () => "never asked");
+    // Hung: the upgrade got no answer, so it has no status to tell.
+    const hungUrl = "ws://holds.test/jazz/apps/a1/ws";
+    vi.stubGlobal("fetch", backendThatUpgrades("holds.test", hungUrl, "w2"));
+    const hung = outcome(
+      new (httpStreamFallbackWebSocket(hangingNative([]), { describeFailedUpgrade: describe }))(
+        hungUrl,
+      ),
+    );
+    await vi.advanceTimersByTimeAsync(SOCKET_OPEN_DEADLINE_MS);
+    expect(await hung).toBe("closed");
+    // The probe fails (the backend is down): nothing answers there either.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new TypeError("fetch failed");
+      }),
+    );
+    vi.useRealTimers();
+    const down = new (httpStreamFallbackWebSocket(failingNative(), {
+      describeFailedUpgrade: describe,
+    }))("ws://down.test/jazz/apps/a1/ws");
+    expect(await outcome(down)).toBe("closed");
+    expect(describe).not.toHaveBeenCalled();
+  });
+
+  it("is aborted when the socket is closed meanwhile", async () => {
+    const url = "ws://closed-meanwhile.test/jazz/apps/a1/ws";
+    vi.stubGlobal("fetch", backendThatUpgrades("closed-meanwhile.test", url, "w3"));
+    let signal: AbortSignal | undefined;
+    let asked!: () => void;
+    const wasAsked = new Promise<void>((resolve) => (asked = resolve));
+    const socket = new (httpStreamFallbackWebSocket(failingNative(), {
+      describeFailedUpgrade: (_url, given) => {
+        signal = given;
+        asked();
+        return new Promise(() => {});
+      },
+    }))(url);
+    await wasAsked;
+    expect(signal?.aborted).toBe(false);
+    socket.close();
+    expect(signal?.aborted).toBe(true);
+  });
+});

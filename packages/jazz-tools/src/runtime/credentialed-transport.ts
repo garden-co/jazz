@@ -21,6 +21,7 @@ export function credentialedTransport(
   describeFailedUpgrade?: (
     url: string,
     headers: Record<string, string>,
+    signal: AbortSignal,
   ) => Promise<string | undefined>,
 ): { fetch: typeof fetch; WebSocket: WebSocketConstructor } {
   const origin = new URL(serverUrl.replace(/^ws/, "http")).origin;
@@ -59,10 +60,11 @@ export function credentialedTransport(
       fetch: credentialedFetch,
       describeFailedUpgrade:
         describeFailedUpgrade &&
-        (async (url) =>
+        (async (url, signal) =>
           describeFailedUpgrade(
             url,
             forOrigin(url) ? { authorization: `Bearer ${await token()}` } : {},
+            signal,
           )),
     }),
   };

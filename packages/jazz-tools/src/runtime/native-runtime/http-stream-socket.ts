@@ -307,7 +307,7 @@ const refusedOrigins = new Set<string>();
 async function probeSocketPath(
   url: string,
   request: typeof fetch,
-): Promise<"stream" | "upgrades" | "refused" | "unknown"> {
+): Promise<"stream" | "upgrades" | "refused" | "other" | "silent"> {
   try {
     const response = await request(url.replace(/^ws/, "http"), {
       method: "POST",
@@ -318,14 +318,16 @@ async function probeSocketPath(
     });
     void response.body?.cancel().catch(() => undefined);
     if (response.status === 403) return "refused";
-    if (response.status !== 426) return "unknown";
+    // Not a createJazz socket path (another server, or a proxy's error).
+    if (response.status !== 426) return "other";
     return response.headers.get(STREAM_AVAILABLE_HEADER) === "1" ? "stream" : "upgrades";
   } catch {
-    return "unknown";
+    return "silent";
   }
 }
 
-/** Whether a socket to `url` that just failed before opening should give way to the stream.
+/** Whether a socket to `url` that just failed before opening should give way
+ * to the stream ("stream"), else what the probe said about the endpoint.
  * Upgrades that got no answer at all (`hung`) count on their own: a backend
  * that restarts or drains refuses a socket, it doesn't leave one hanging,
  * so fewer of them in a row ({@link UPGRADE_HANGS_BEFORE_STREAM}) switch. */
@@ -333,9 +335,9 @@ async function servesStreamInstead(
   url: string,
   hung: boolean,
   request: typeof fetch,
-): Promise<boolean> {
+): Promise<"stream" | "upgrades" | "refused" | "other" | "silent"> {
   const answer = await probeSocketPath(url, request);
-  if (answer === "stream") return true;
+  if (answer === "stream") return answer;
   if (answer !== "upgrades") {
     // Not a backend that answered and upgrades (down, restarting, or
     // refusing this origin): the failures are no longer in a row.
@@ -347,7 +349,7 @@ async function servesStreamInstead(
         `jazz: the backend at ${url} refuses this page's origin (403). If a proxy rewrites the Host header, set the backend's publicUrl or allowedOrigins.`,
       );
     }
-    return false;
+    return answer;
   }
   const failures = (failedUpgrades.get(url) ?? 0) + 1;
   failedUpgrades.set(url, failures);
@@ -355,19 +357,19 @@ async function servesStreamInstead(
   if (hung) hungUpgrades.set(url, hangs);
   else hungUpgrades.delete(url);
   const hangsSwitch = hangs >= UPGRADE_HANGS_BEFORE_STREAM;
-  if (failures < UPGRADE_FAILURES_BEFORE_STREAM && !hangsSwitch) return false;
+  if (failures < UPGRADE_FAILURES_BEFORE_STREAM && !hangsSwitch) return answer;
   failedUpgrades.delete(url);
   hungUpgrades.delete(url);
   if (hangsSwitch) {
     console.warn(
       `jazz: ${hangs} WebSockets in a row to ${url} got no answer in ${SOCKET_OPEN_DEADLINE_MS / 1000} s, although the backend answers and upgrades them: something in between (a proxy or dev server) doesn't pass WebSocket upgrades on. Syncing over the HTTP stream instead, for as long as this client runs.`,
     );
-    return true;
+    return "stream";
   }
   console.warn(
     `jazz: ${failures} WebSockets in a row to ${url} failed, although the backend answers and upgrades them: something in between (a proxy or dev server) doesn't pass WebSocket upgrades on. Syncing over the HTTP stream instead, for as long as this client runs.`,
   );
-  return true;
+  return "stream";
 }
 
 export type HttpStreamFallbackOptions = {
@@ -376,9 +378,11 @@ export type HttpStreamFallbackOptions = {
   /**
    * Why a socket that failed before opening, and doesn't give way to the
    * stream, failed: its error and close then say so. On Node, the HTTP
-   * status its upgrade got, which a WebSocket doesn't show.
+   * status its upgrade got, which a WebSocket doesn't show. Asked only when
+   * the upgrade was answered (not `hung`) and the probe got an answer from
+   * the backend; `signal` aborts when the socket is closed meanwhile.
    */
-  describeFailedUpgrade?: (url: string) => Promise<string | undefined>;
+  describeFailedUpgrade?: (url: string, signal: AbortSignal) => Promise<string | undefined>;
 };
 
 /**
@@ -402,6 +406,8 @@ export function httpStreamFallbackWebSocket(
     private probing = false;
     /** Ends a socket that stays connecting (see {@link SOCKET_OPEN_DEADLINE_MS}). */
     private openDeadline: ReturnType<typeof setTimeout> | undefined;
+    /** Cancels `describeFailedUpgrade` when the socket is closed. */
+    private readonly abort = new AbortController();
 
     constructor(private readonly url: string) {
       super();
@@ -423,6 +429,7 @@ export function httpStreamFallbackWebSocket(
       this.settled = true;
       this.probing = false;
       clearTimeout(this.openDeadline);
+      this.abort.abort();
       this.inner.close();
     }
 
@@ -440,11 +447,14 @@ export function httpStreamFallbackWebSocket(
         }
         failure = { [kind]: event };
         this.probing = true;
-        void servesStreamInstead(this.url, hung, request).then(async (stream) => {
+        void servesStreamInstead(this.url, hung, request).then(async (answer) => {
+          const stream = answer === "stream";
+          // A hung upgrade, or a probe with no answer, has no status to tell.
+          const answered = !hung && (answer === "upgrades" || answer === "other");
           const why =
-            stream || this.settled
+            !answered || this.settled
               ? undefined
-              : await describeFailedUpgrade?.(this.url).catch(() => undefined);
+              : await describeFailedUpgrade?.(this.url, this.abort.signal).catch(() => undefined);
           this.probing = false;
           if (this.settled) return;
           this.settled = true;

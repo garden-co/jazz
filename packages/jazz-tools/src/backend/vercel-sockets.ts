@@ -9,6 +9,12 @@ let check: Promise<boolean> | undefined;
  * process, and a missing `ws` is logged once, naming the fix. Until it is
  * installed, `next()` answers sockets with the HTTP stream marker (426 +
  * `x-jazz-stream`), so clients sync over the HTTP stream instead.
+ *
+ * `ws` is resolved from jazz-tools, while `upgradeWebSocket()` resolves it
+ * from `@vercel/functions`. Both declare it as an optional peer, so an app
+ * that installs it gives it to both; a layout where only one sees it (a
+ * strict pnpm one, with `ws` installed for one package alone) gets past
+ * this check, and its upgrades fail in `upgradeWebSocket()` as before.
  */
 export function vercelUpgradesSockets(): Promise<boolean> {
   check ??= import(/* @vite-ignore */ "ws").then(
