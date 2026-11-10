@@ -1016,10 +1016,11 @@ describe("SharedWorker bridge with IndexedDB", () => {
       // Local-first caller credentials are normalized to a canonical session
       // during `createDb`, so the actual physical root must be derived from
       // the resolved Db config rather than the pre-normalization input.
-      const physicalDbName = resolveDefaultPersistentDbName(initial.config);
+      const resolvedConfig = initial.config;
+      const physicalDbName = resolveDefaultPersistentDbName(resolvedConfig);
       const sqlitePath = await sqliteStoragePath(
         physicalDbName,
-        createBrowserStorageOwner(initial.config),
+        createBrowserStorageOwner(resolvedConfig),
       );
 
       await replaceStorageManifest(physicalDbName, {

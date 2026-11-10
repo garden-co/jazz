@@ -24,7 +24,8 @@ import historicalCorpus from "../../fixtures/epoch-1-browser-jazz-corpus.json?ra
 import publishedAlpha54Corpus from "../../fixtures/published-alpha54-browser-jazz-corpus.json?raw";
 import lastGrooveCorpus from "../../fixtures/groove-linear-history-browser-jazz-corpus.json?raw";
 import preLinearCorpus from "../../fixtures/pre-linear-browser-jazz-corpus.json?raw";
-import sqliteCorpus from "../../fixtures/sqlite-v1-browser-jazz-corpus.json?raw";
+import retiredSqliteCorpus from "../../fixtures/sqlite-v1-browser-jazz-corpus.json?raw";
+import sqliteCorpus from "../../fixtures/sqlite-root-v1-browser-jazz-corpus.json?raw";
 import { jazzStorageCorpusBrowserCommands } from "./browser-commands.js";
 import { createAccountManager, ReadTier, schema as s, type DbConfig } from "../../src/index.js";
 import { deploy } from "../../src/dev/catalogue.js";
@@ -302,11 +303,9 @@ describe("browser Jazz storage compatibility corpus", () => {
     await jazzStorageCorpusBrowserCommands().writeBrowserStorageCorpus(candidate);
   }, 90_000);
 
-  // `sqlite-v1-browser-jazz-corpus.json` is real output of the producer test
-  // above: the page store's records plus the SQLite file's blocks, written in
-  // Jazz SQLite storage format 1. Once alpha.60 ships it is immutable;
-  // until then a format change re-runs the producer (JAZZ_BROWSER_CORPUS_OUT
-  // set to a new path) and checks in the exported candidate.
+  // This is exact output of the public producer above under the current
+  // canonical root/owner/node-bound sidecar. The older version-3 SQLite
+  // corpus is retained unchanged and has its own explicit refusal below.
   it("opens the pinned SQLite corpus offline, accepts current writes and reopens", async () => {
     pinnedCorpusPhase = "pinned-test:start";
     receipt(pinnedCorpusPhase);
@@ -484,6 +483,17 @@ describe("browser Jazz storage compatibility corpus", () => {
     }, 30_000);
   }
 
+  it("refuses the former version-three SQLite sidecar without rewriting its pinned bytes", async () => {
+    const pinned = JSON.parse(retiredSqliteCorpus) as Record<string, string>;
+    const { config, physicalDbName } = await pinnedCorpusConfig(pinned, "retired-sqlite-sidecar");
+    await installBrowserStore(physicalDbName, pinned);
+    expect(await rawBrowserStore(physicalDbName)).toEqual(pinned);
+    await expect(
+      withTimeout(createDb(config), 5_000, "retired SQLite sidecar did not reject"),
+    ).rejects.toThrow("Missing or invalid IndexedDB storage epoch manifest");
+    expect(await rawBrowserStore(physicalDbName)).toEqual(pinned);
+  });
+
   it("rejects the historical retired-result codec profile without rewriting its pages", async () => {
     const historical = JSON.parse(historicalCorpus) as Record<string, string>;
     const owner = rawManifest(historical).find(
@@ -660,8 +670,8 @@ const SQLITE_VFS_STORE = "blocks";
 const SQLITE_BLOCKS = "jazz-idb/blocks";
 
 /**
- * The SQLite file the worker keeps for a physical root: named by a hash of
- * the root's name (see `StoreSpec::from_js` in crates/jazz-wasm/src/browser.rs).
+ * Resolve the current root's actual immutable replica-node filename, including
+ * after manifest corruption. Historical fixtures keep their old filename rule.
  */
 function sqliteRootFromRecords(records: Record<string, string>, name: string) {
   const manifest = rawManifest(records);
