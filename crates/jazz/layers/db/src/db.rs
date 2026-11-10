@@ -1372,9 +1372,41 @@ impl Error {
 
 impl Db {
     pub async fn open(config: DbConfig) -> Result<Self, Error> {
+        #[cfg(feature = "testing")]
+        if std::env::var_os("JAZZ_KV_VFS").is_some() {
+            return Self::open_on_kv_vfs(config).await;
+        }
         let conn = Connection::open_in_memory().map_err(storage)?;
         crate::format::admit(&conn)?;
         Self::open_on(config, conn, None)
+    }
+
+    /// A store opened by [`Db::open`] on a file of the Durable Object KV
+    /// VFS over storage in memory (`JAZZ_KV_VFS`, see [`crate::kv_vfs`]),
+    /// opened as `jazz-wasm`'s `do_kv::open` opens it, so any suite runs on
+    /// that VFS. The file lives as long as its connections.
+    #[cfg(feature = "testing")]
+    async fn open_on_kv_vfs(config: DbConfig) -> Result<Self, Error> {
+        use crate::kv_vfs::{self, testing};
+        thread_local! {
+            static FILES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        }
+        let (vfs, util) = testing::thread_vfs();
+        let file = FILES.with(|files| {
+            let file = files.get();
+            files.set(file + 1);
+            file
+        });
+        let path = format!("/jazz-kv-{file:06}.sqlite");
+        util.attach_ephemeral(&path, std::rc::Rc::new(testing::MemKv::default()), "store")
+            .map_err(|error| Error::new(ErrorCode::Storage, error))?;
+        let options = FileOptions {
+            vfs: Some(vfs),
+            journal: Journal::Memory,
+            page_size: Some(kv_vfs::PAGE_SIZE),
+            ..FileOptions::default()
+        };
+        Self::open_at(config, std::path::Path::new(&path), options).await
     }
 
     /// A durable store in one SQLite file (WAL unless `options.journal`

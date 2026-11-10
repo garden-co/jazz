@@ -7,20 +7,41 @@ jazz.initSync({ module: wasm });
 
 const json = (value) => Response.json(value ?? null);
 
+// Counts object instances in this isolate: a reset object comes back as a
+// new one.
+let instances = 0;
+
 export class Store {
   constructor(ctx) {
     this.ctx = ctx;
+    this.instance = ++instances;
+    this.failNextCommit = false;
+  }
+
+  // `ctx` for the store, with a storage failure that can be injected.
+  object() {
+    const ctx = this.ctx;
+    const storage = {
+      kv: ctx.storage.kv,
+      transactionSync: (callback) => {
+        if (this.failNextCommit) {
+          this.failNextCommit = false;
+          throw new Error("injected storage failure");
+        }
+        return ctx.storage.transactionSync(callback);
+      },
+    };
+    return { id: ctx.id, storage, abort: (reason) => ctx.abort(reason) };
   }
 
   async fetch(request) {
     const url = new URL(request.url);
     const args = JSON.parse(url.searchParams.get("args") ?? "[]");
     const storage = this.ctx.storage;
-    const id = this.ctx.id.toString();
     try {
       switch (url.pathname) {
         case "/open":
-          return json(await jazz.doKvBenchOpen(storage, id, args[0]));
+          return json(await jazz.doKvBenchOpen(this.object(), args[0]));
         case "/write":
           return json(jazz.doKvBenchWrite(...args));
         case "/read":
@@ -28,7 +49,12 @@ export class Store {
         case "/close":
           return json(await jazz.doKvBenchClose());
         case "/destroy":
-          return json(jazz.doKvBenchDestroy(storage, id));
+          return json(jazz.doKvBenchDestroy(this.object()));
+        case "/instance":
+          return json(this.instance);
+        case "/fail-next-commit":
+          this.failNextCommit = true;
+          return json(true);
         case "/keys": {
           // What the store keeps in storage.
           let keys = 0;

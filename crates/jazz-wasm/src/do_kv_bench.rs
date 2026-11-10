@@ -16,7 +16,7 @@ use wasm_bindgen::prelude::*;
 use web_time::Instant;
 
 use crate::do_kv::{self, Store};
-use crate::do_kv_vfs::KvStats;
+use jazz::kv_vfs::KvStats;
 
 thread_local! {
     static OPEN: RefCell<Option<(Db, Store)>> = const { RefCell::new(None) };
@@ -85,14 +85,10 @@ fn ops(before: KvStats, after: KvStats) -> [(&'static str, f64); 4] {
 
 /// Open the object's store; a new one gets `page_size` (default: Jazz's).
 #[wasm_bindgen(js_name = doKvBenchOpen)]
-pub async fn do_kv_bench_open(
-    storage: JsValue,
-    object_id: String,
-    page_size: Option<u32>,
-) -> Result<JsValue, JsValue> {
+pub async fn do_kv_bench_open(ctx: JsValue, page_size: Option<u32>) -> Result<JsValue, JsValue> {
     let start = Instant::now();
-    let page_size = page_size.unwrap_or(crate::do_kv_vfs::PAGE_SIZE);
-    let (db, store) = do_kv::open_with_page_size(storage, &object_id, config(), page_size).await?;
+    let page_size = page_size.unwrap_or(jazz::kv_vfs::PAGE_SIZE);
+    let (db, store) = do_kv::open_with_page_size(ctx, config(), page_size).await?;
     let open_ms = ms(start);
     let mut out = vec![("openMs", open_ms)];
     out.extend(ops(KvStats::default(), store.stats()));
@@ -171,6 +167,6 @@ pub async fn do_kv_bench_close() -> Result<(), JsValue> {
 
 /// Delete the object's store (closed).
 #[wasm_bindgen(js_name = doKvBenchDestroy)]
-pub fn do_kv_bench_destroy(storage: JsValue, object_id: String) -> Result<(), JsValue> {
-    do_kv::destroy(storage, &object_id)
+pub fn do_kv_bench_destroy(ctx: JsValue) -> Result<(), JsValue> {
+    do_kv::destroy(ctx)
 }

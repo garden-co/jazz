@@ -7,7 +7,11 @@ description = "Jazz's database: the thread-affine Db facade over SQLite."
 [features]
 default = []
 # Test helpers shared with the crates above this one.
-testing = ["jazz-types/testing", "jazz-model/testing", "jazz-protocol/testing"]
+testing = ["jazz-types/testing", "jazz-model/testing", "jazz-protocol/testing", "kv-vfs"]
+# The SQLite VFS on page-per-key synchronous storage (Cloudflare Durable
+# Objects' `ctx.storage.kv`), see `kv_vfs.rs`. `testing` runs suites on it
+# with `JAZZ_KV_VFS=1`.
+kv-vfs = ["dep:rsqlite-vfs"]
 # Log every statement to the file named by JAZZ_SQL_TRACE, for checking the
 # SQL against restricted SQLite hosts (Durable Objects).
 sql-trace = []
@@ -24,6 +28,9 @@ jazz-protocol.workspace = true
 rusqlite = { version = "0.40", features = ["bundled", "functions", "hooks", "limits"] }
 uuid = { version = "1.18.1", features = ["serde", "v4", "v5", "v7"] }
 web-time = "1.1"
+# Links against the SQLite rusqlite links (bundled natively, sqlite-wasm-rs in
+# wasm).
+rsqlite-vfs = { version = "0.1", optional = true }
 bytes = "1"
 serde_bytes = "0.11"
 serde_json = "1.0.145"

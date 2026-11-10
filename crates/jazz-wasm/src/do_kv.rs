@@ -1,11 +1,19 @@
 //! A Jazz store on a Cloudflare Durable Object's synchronous KV storage
 //! (`durable-object-kv` feature): the engine's SQLite file on
-//! [`crate::do_kv_vfs`], bound to the object's `ctx.storage`.
+//! [`jazz::kv_vfs`], bound to the object's `ctx.storage`.
 //!
 //! Reads are synchronous, so nothing is preloaded and nothing waits;
 //! every commit is one `transactionSync` of the pages it changed, and the
 //! object's output gate holds back replies until it is on disk, so no
 //! flush is needed (see the VFS's docs).
+//!
+//! A commit that cannot be written fails the open store for good (see the
+//! VFS's docs) and resets the object with `ctx.abort()`, as the runtime does
+//! when a storage write fails: the next request reopens the store from
+//! storage, at the last whole commit. The abort is queued, not thrown from
+//! inside SQLite: a JavaScript exception unwinding through the wasm stack
+//! would leave the module's state (shared by every object in the isolate)
+//! mid-borrow.
 
 use std::path::Path;
 use std::rc::Rc;
@@ -14,7 +22,7 @@ use jazz::db::{Db, DbConfig, FileOptions, Journal};
 use js_sys::{Array, Uint8Array};
 use wasm_bindgen::prelude::*;
 
-use crate::do_kv_vfs::{self, KvStats, KvVfsUtil, PageKv, PAGE_SIZE};
+use jazz::kv_vfs::{self, KvStats, KvVfsUtil, PageKv, PAGE_SIZE};
 
 const VFS: &str = "jazz-do-kv";
 
@@ -24,6 +32,9 @@ const STORE_NAME: &str = "store";
 #[wasm_bindgen(inline_js = r#"
 export function kvGet(storage, key) {
   return storage.kv.get(key);
+}
+export function abortSoon(ctx, message) {
+  queueMicrotask(() => ctx.abort(message));
 }
 export function kvCommit(storage, keys, values, deletes) {
   // All or nothing: a throw rolls the transaction back.
@@ -36,6 +47,8 @@ export function kvCommit(storage, keys, values, deletes) {
 extern "C" {
     #[wasm_bindgen(catch, js_name = kvGet)]
     fn kv_get(storage: &JsValue, key: &str) -> Result<JsValue, JsValue>;
+    #[wasm_bindgen(js_name = abortSoon)]
+    fn abort_soon(ctx: &JsValue, message: &str);
     #[wasm_bindgen(catch, js_name = kvCommit)]
     fn kv_commit(
         storage: &JsValue,
@@ -45,8 +58,11 @@ extern "C" {
     ) -> Result<(), JsValue>;
 }
 
-/// `ctx.storage` of a SQLite-backed Durable Object.
-struct ObjectStorage(JsValue);
+/// The storage of a SQLite-backed Durable Object (`ctx`, `ctx.storage`).
+struct ObjectStorage {
+    ctx: JsValue,
+    storage: JsValue,
+}
 
 fn js_error(error: JsValue) -> String {
     error
@@ -58,7 +74,7 @@ fn js_error(error: JsValue) -> String {
 
 impl PageKv for ObjectStorage {
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
-        let value = kv_get(&self.0, key).map_err(js_error)?;
+        let value = kv_get(&self.storage, key).map_err(js_error)?;
         if value.is_undefined() {
             return Ok(None);
         }
@@ -77,7 +93,14 @@ impl PageKv for ObjectStorage {
             values.set(i as u32, Uint8Array::from(*value).into());
         }
         let delete_keys = deletes.iter().map(|key| JsValue::from_str(key)).collect();
-        kv_commit(&self.0, &keys, &values, &delete_keys).map_err(js_error)
+        kv_commit(&self.storage, &keys, &values, &delete_keys).map_err(|error| {
+            let error = js_error(error);
+            abort_soon(
+                &self.ctx,
+                &format!("Jazz store: a commit could not be written ({error})"),
+            );
+            error
+        })
     }
 }
 
@@ -86,16 +109,52 @@ fn vfs_error(error: impl std::fmt::Display) -> JsValue {
 }
 
 fn install() -> Result<KvVfsUtil, JsValue> {
-    do_kv_vfs::install::<sqlite_wasm_rs::WasmOsCallback>(VFS).map_err(vfs_error)
+    kv_vfs::install::<sqlite_wasm_rs::WasmOsCallback>(VFS).map_err(vfs_error)
 }
 
-/// The VFS path of an object's store. Paths are per isolate, which may host
-/// several objects, so it names the object.
-fn path(object_id: &str) -> Result<String, JsValue> {
-    if object_id.is_empty() || object_id.contains('/') {
-        return Err(vfs_error(format!("{object_id:?} is not an object id")));
+/// The parts of `ctx` the store uses: its storage and its object id.
+fn object(ctx: &JsValue) -> Result<(ObjectStorage, String), JsValue> {
+    let get = |target: &JsValue, name: &str| js_sys::Reflect::get(target, &JsValue::from_str(name));
+    if ctx.is_undefined() || ctx.is_null() {
+        return Err(vfs_error("ctx is missing"));
     }
-    Ok(format!("/{object_id}.sqlite"))
+    let storage = get(ctx, "storage")?;
+    if storage.is_undefined() || get(&storage, "kv")?.is_undefined() {
+        return Err(crate::not_supported(
+            "a Durable Object without synchronous KV storage (it must be SQLite-backed)",
+        ));
+    }
+    let id = get(ctx, "id")?;
+    let id = js_sys::Reflect::apply(
+        &get(&id, "toString")?.dyn_into::<js_sys::Function>()?,
+        &id,
+        &Array::new(),
+    )?
+    .as_string()
+    .filter(|id| !id.is_empty() && !id.contains('/'))
+    .ok_or_else(|| vfs_error("ctx.id is not an object id"))?;
+    Ok((
+        ObjectStorage {
+            ctx: ctx.clone(),
+            storage,
+        },
+        id,
+    ))
+}
+
+/// A VFS path for one open of the object's store. Paths are per isolate,
+/// which may host several objects and outlive an aborted instance whose
+/// connections were never closed, so each open gets its own.
+fn path(object_id: &str) -> String {
+    thread_local! {
+        static OPENS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+    let open = OPENS.with(|opens| {
+        let open = opens.get();
+        opens.set(open + 1);
+        open
+    });
+    format!("/{object_id}-{open}.sqlite")
 }
 
 /// An open store's file, kept by its host.
@@ -117,36 +176,23 @@ impl Drop for Store {
     }
 }
 
-/// Open the store of the object `object_id` (`ctx.id.toString()`) on its
-/// `storage` (`ctx.storage`). The returned [`Store`] must outlive the
-/// [`Db`]: dropping it unbinds the file.
-pub async fn open(
-    storage: JsValue,
-    object_id: &str,
-    config: DbConfig,
-) -> Result<(Db, Store), JsValue> {
-    open_with_page_size(storage, object_id, config, PAGE_SIZE).await
+/// Open the store of the object whose state is `ctx` (the Durable Object's
+/// constructor argument). The returned [`Store`] must outlive the [`Db`]:
+/// dropping it unbinds the file.
+pub async fn open(ctx: JsValue, config: DbConfig) -> Result<(Db, Store), JsValue> {
+    open_with_page_size(ctx, config, PAGE_SIZE).await
 }
 
 /// [`open`], creating a new file with `page_size` (for comparisons).
 pub(crate) async fn open_with_page_size(
-    storage: JsValue,
-    object_id: &str,
+    ctx: JsValue,
     config: DbConfig,
     page_size: u32,
 ) -> Result<(Db, Store), JsValue> {
-    if storage.is_undefined() || storage.is_null() {
-        return Err(vfs_error("ctx.storage is missing"));
-    }
-    let kv = js_sys::Reflect::get(&storage, &JsValue::from_str("kv"))?;
-    if kv.is_undefined() {
-        return Err(crate::not_supported(
-            "a Durable Object without synchronous KV storage (it must be SQLite-backed)",
-        ));
-    }
+    let (storage, id) = object(&ctx)?;
     let util = Rc::new(install()?);
-    let path = path(object_id)?;
-    util.attach(&path, Rc::new(ObjectStorage(storage)), STORE_NAME)
+    let path = path(&id);
+    util.attach(&path, Rc::new(storage), STORE_NAME)
         .map_err(vfs_error)?;
     let store = Store { util, path };
     let options = FileOptions {
@@ -164,10 +210,11 @@ pub(crate) async fn open_with_page_size(
 }
 
 /// Delete the object's store (closed) from its storage.
-pub fn destroy(storage: JsValue, object_id: &str) -> Result<(), JsValue> {
+pub fn destroy(ctx: JsValue) -> Result<(), JsValue> {
+    let (storage, id) = object(&ctx)?;
     let util = install()?;
-    let path = path(object_id)?;
-    util.attach(&path, Rc::new(ObjectStorage(storage)), STORE_NAME)
+    let path = path(&id);
+    util.attach(&path, Rc::new(storage), STORE_NAME)
         .map_err(vfs_error)?;
     util.destroy(&path).map_err(vfs_error)
 }

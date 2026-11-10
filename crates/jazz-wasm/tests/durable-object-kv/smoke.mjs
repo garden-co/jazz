@@ -33,11 +33,15 @@ function harness() {
   });
 }
 
-async function call(mf, path, args = [], object = "smoke") {
+async function request(mf, path, args = [], object = "smoke") {
   const query = new URLSearchParams({ object, args: JSON.stringify(args) });
   const response = await mf.dispatchFetch(`http://do.test${path}?${query}`);
-  const text = await response.text();
-  assert.equal(response.status, 200, `${path}: ${text}`);
+  return { status: response.status, text: await response.text() };
+}
+
+async function call(mf, path, args = [], object = "smoke") {
+  const { status, text } = await request(mf, path, args, object);
+  assert.equal(status, 200, `${path}: ${text}`);
   return JSON.parse(text);
 }
 
@@ -89,6 +93,26 @@ try {
   await call(mf, "/open", [], "other");
   assert.equal((await call(mf, "/read", [], "other")).rows, 0);
   await call(mf, "/close", [], "other");
+
+  // A commit storage refuses fails the write, resets the object, and leaves
+  // storage at the last whole commit. (The probes keep one open store per
+  // isolate, so reopen this object's.)
+  await call(mf, "/open");
+  const before = await call(mf, "/instance");
+  await call(mf, "/fail-next-commit");
+  const failed = await request(mf, "/write", [ROWS + 10, 1]);
+  assert.equal(failed.status, 500, failed.text);
+  assert.match(failed.text, /injected storage failure|could not be written/);
+  let after = before;
+  for (let i = 0; i < 50 && after === before; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    after = await call(mf, "/instance");
+  }
+  assert.notEqual(after, before, "the object was reset");
+  await call(mf, "/open");
+  assert.equal((await call(mf, "/read")).rows, ROWS + 10, "the failed commit never happened");
+  assert.equal((await call(mf, "/write", [ROWS + 10, 1])).commits, 1);
+  assert.equal((await call(mf, "/read")).rows, ROWS + 11);
 
   await call(mf, "/close");
   await call(mf, "/destroy");

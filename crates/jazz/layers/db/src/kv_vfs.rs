@@ -49,15 +49,30 @@
 //! the rows written for atomicity the storage already gives. `MEMORY` beats
 //! `Journal::Rollback` only by skipping that in-memory copy.
 //!
-//! A commit whose write fails returns `SQLITE_IOERR` from the commit: the
-//! VFS drops the commit's pages, the pager enters its error state and
-//! reads the file again from storage, which still holds the commit before.
-//! The failed commit never happened.
+//! A commit whose write fails returns `SQLITE_IOERR` from the commit, and
+//! the VFS drops the commit's pages: storage still holds the commit before.
+//! The engine above may already have moved on (its sequence numbers, caches
+//! and subscribers saw the commit before SQLite's last step), so the file
+//! fails too: every later read, write and commit on it returns `SQLITE_IOERR`
+//! naming the failed commit, until it is attached again, and reopening it
+//! from storage gives exactly the last whole commit. A Durable Object host
+//! resets the object when that happens (`jazz-wasm`'s `do_kv` calls
+//! `ctx.abort()`), as the runtime itself does when a storage write fails.
 //!
 //! Durability needs no flush: the Durable Object runtime holds back the
 //! object's outgoing messages until its storage writes are on disk (its
 //! output gate), so nothing acknowledged before a commit was written can
 //! leave the object.
+//!
+//! # Memory
+//!
+//! A commit's pages are held three times while it is written: in SQLite's
+//! page cache, in the VFS's dirty pages, and as the byte arrays handed to
+//! `transactionSync`. A commit that changes N bytes of pages needs about 3N
+//! bytes for that moment, against an isolate's 128 MB, so one commit
+//! (a large value's chunks included: inserting one writes them all in its
+//! commit) must stay well below ~40 MB. Not enforced yet. The page cache is
+//! bounded by `FileOptions::cache_kib` per connection.
 //!
 //! # Not supported yet
 //!
@@ -77,13 +92,14 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use rsqlite_vfs::{
+    MemChunksFile, OsCallback, RegisterVfsError, SQLiteIoMethods, SQLiteVfs, SQLiteVfsFile,
+    VfsAppData, VfsError, VfsFile, VfsResult, VfsStore,
     ffi::{
-        sqlite3_file, sqlite3_vfs, SQLITE_CANTOPEN, SQLITE_FCNTL_COMMIT_PHASETWO, SQLITE_IOERR,
-        SQLITE_IOERR_DELETE, SQLITE_IOERR_READ, SQLITE_IOERR_WRITE, SQLITE_NOTFOUND, SQLITE_OK,
-        SQLITE_OPEN_MAIN_DB, SQLITE_OPEN_WAL,
+        SQLITE_CANTOPEN, SQLITE_FCNTL_COMMIT_PHASETWO, SQLITE_IOERR, SQLITE_IOERR_DELETE,
+        SQLITE_IOERR_READ, SQLITE_IOERR_WRITE, SQLITE_NOTFOUND, SQLITE_OK, SQLITE_OPEN_MAIN_DB,
+        SQLITE_OPEN_WAL, sqlite3_file, sqlite3_vfs,
     },
-    register_vfs, registered_vfs, MemChunksFile, OsCallback, RegisterVfsError, SQLiteIoMethods,
-    SQLiteVfs, SQLiteVfsFile, VfsAppData, VfsError, VfsFile, VfsResult, VfsStore,
+    register_vfs, registered_vfs,
 };
 
 /// The page size Jazz creates store files with (see the module docs).
@@ -140,6 +156,14 @@ struct KvPageFile {
     /// Pages written since the last commit, by index.
     dirty: BTreeMap<usize, Vec<u8>>,
     stats: Cell<KvStats>,
+    /// Connections open on the file.
+    opens: u32,
+    /// Unbound when its last connection closes (see
+    /// [`KvVfsUtil::attach_ephemeral`]).
+    ephemeral: bool,
+    /// Why a commit could not be written: every later operation on the
+    /// file fails until it is attached again (see the module docs).
+    failed: Option<String>,
 }
 
 impl KvPageFile {
@@ -177,6 +201,9 @@ impl KvPageFile {
             stored_size: size,
             dirty: BTreeMap::new(),
             stats: Cell::new(stats),
+            opens: 0,
+            ephemeral: false,
+            failed: None,
         })
     }
 
@@ -194,9 +221,25 @@ impl KvPageFile {
         }
     }
 
-    /// Write the commit to storage in one atomic call. On failure, drop it:
-    /// the file is again what storage holds.
+    /// Fail if a commit of the file could not be written.
+    fn check(&self) -> VfsResult<()> {
+        match &self.failed {
+            None => Ok(()),
+            Some(error) => Err(io_error(
+                SQLITE_IOERR,
+                format!(
+                    "{}: a commit could not be written ({error}); the store must be \
+                     reopened from storage",
+                    self.path
+                ),
+            )),
+        }
+    }
+
+    /// Write the commit to storage in one atomic call. On failure, drop it
+    /// and fail the file (see the module docs).
     fn commit(&mut self) -> VfsResult<()> {
+        self.check()?;
         if self.dirty.is_empty() && self.size == self.stored_size {
             return Ok(());
         }
@@ -244,6 +287,7 @@ impl KvPageFile {
                     // A new file's page size is set by its first commit.
                     self.page_size = 0;
                 }
+                self.failed = Some(error.clone());
                 Err(io_error(
                     SQLITE_IOERR_WRITE,
                     format!("could not write a commit of {}: {error}", self.path),
@@ -271,6 +315,7 @@ impl KvPageFile {
 
 impl VfsFile for KvPageFile {
     fn read(&self, buf: &mut [u8], offset: usize) -> VfsResult<bool> {
+        self.check()?;
         if self.page_size == 0 {
             buf.fill(0);
             return Ok(false);
@@ -310,6 +355,7 @@ impl VfsFile for KvPageFile {
     }
 
     fn write(&mut self, buf: &[u8], offset: usize) -> VfsResult<()> {
+        self.check()?;
         if self.page_size == 0 {
             self.page_size = buf.len();
         }
@@ -318,7 +364,8 @@ impl VfsFile for KvPageFile {
             return Err(io_error(
                 SQLITE_IOERR_WRITE,
                 format!(
-                    "{}: a write of {} bytes at {offset} is not one page of {} bytes",
+                    "{}: a write of {} bytes at {offset} is not one page of {} bytes \
+                     (a file's page size cannot change)",
                     self.path,
                     buf.len(),
                     self.page_size
@@ -326,6 +373,9 @@ impl VfsFile for KvPageFile {
             ));
         }
         let index = offset / self.page_size;
+        // Pages a rollback writes back (SQLite restores the originals when a
+        // transaction that already wrote the file aborts) stay dirty too; they
+        // equal what storage holds, and the next commit rewrites them.
         // A gap reads as zeros, never as pages a truncation dropped.
         for gap in self.pages(self.size)..index {
             self.dirty.insert(gap, vec![0; self.page_size]);
@@ -336,6 +386,7 @@ impl VfsFile for KvPageFile {
     }
 
     fn truncate(&mut self, size: usize) -> VfsResult<()> {
+        self.check()?;
         if self.page_size != 0 && !size.is_multiple_of(self.page_size) {
             return Err(io_error(
                 SQLITE_IOERR_WRITE,
@@ -495,21 +546,41 @@ impl SQLiteIoMethods for KvIoMethods {
         op: ::std::os::raw::c_int,
         _p_arg: *mut ::std::os::raw::c_void,
     ) -> ::std::os::raw::c_int {
-        if op != SQLITE_FCNTL_COMMIT_PHASETWO {
-            return SQLITE_NOTFOUND;
+        unsafe {
+            if op != SQLITE_FCNTL_COMMIT_PHASETWO {
+                return SQLITE_NOTFOUND;
+            }
+            let vfs_file = SQLiteVfsFile::from_file(p_file);
+            let vfs = Self::Store::app_data(vfs_file.vfs);
+            let name = vfs_file.name();
+
+            let mut files = vfs.files.borrow_mut();
+            let Some(KvFile::Main(file)) = files.get_mut(name) else {
+                return SQLITE_NOTFOUND;
+            };
+
+            match file.commit() {
+                Ok(()) => SQLITE_OK,
+                Err(error) => vfs.store_err(error),
+            }
         }
-        let vfs_file = SQLiteVfsFile::from_file(p_file);
-        let vfs = Self::Store::app_data(vfs_file.vfs);
-        let name = vfs_file.name();
+    }
 
-        let mut files = vfs.files.borrow_mut();
-        let Some(KvFile::Main(file)) = files.get_mut(name) else {
-            return SQLITE_NOTFOUND;
-        };
-
-        match file.commit() {
-            Ok(()) => SQLITE_OK,
-            Err(error) => vfs.store_err(error),
+    unsafe extern "C" fn xClose(p_file: *mut sqlite3_file) -> ::std::os::raw::c_int {
+        unsafe {
+            let vfs_file = SQLiteVfsFile::from_file(p_file);
+            let vfs = Self::Store::app_data(vfs_file.vfs);
+            // `xCloseImpl` frees the name.
+            let name = vfs_file.name().to_owned();
+            let closed = Self::xCloseImpl(p_file);
+            let mut files = vfs.files.borrow_mut();
+            if let Some(KvFile::Main(file)) = files.get_mut(&name) {
+                file.opens = file.opens.saturating_sub(1);
+                if file.ephemeral && file.opens == 0 {
+                    files.remove(&name);
+                }
+            }
+            closed
         }
     }
 }
@@ -518,6 +589,26 @@ struct KvSqliteVfs<C>(PhantomData<C>);
 
 impl<C: OsCallback> SQLiteVfs<KvIoMethods> for KvSqliteVfs<C> {
     const VERSION: ::std::os::raw::c_int = 1;
+
+    unsafe extern "C" fn xOpen(
+        p_vfs: *mut sqlite3_vfs,
+        z_name: rsqlite_vfs::ffi::sqlite3_filename,
+        p_file: *mut sqlite3_file,
+        flags: ::std::os::raw::c_int,
+        p_out_flags: *mut ::std::os::raw::c_int,
+    ) -> ::std::os::raw::c_int {
+        unsafe {
+            let opened = Self::xOpenImpl(p_vfs, z_name, p_file, flags, p_out_flags);
+            if opened == SQLITE_OK {
+                let vfs_file = SQLiteVfsFile::from_file(p_file);
+                let vfs = KvStore::app_data(p_vfs);
+                if let Some(KvFile::Main(file)) = vfs.files.borrow_mut().get_mut(vfs_file.name()) {
+                    file.opens += 1;
+                }
+            }
+            opened
+        }
+    }
 
     fn sleep(dur: Duration) {
         C::sleep(dur);
@@ -541,15 +632,38 @@ impl KvVfsUtil {
     /// Bind the VFS file `path` to the file `name` in `kv` (one object's
     /// storage), reading its metadata. Paths are per isolate, which may
     /// host several objects, so each object's path must be its own; `name`
-    /// is per object. Replaces an earlier binding of `path`: no database
-    /// may be open on it.
+    /// is per object. Replaces an earlier binding of `path`, which must
+    /// not be open.
     pub fn attach(&self, path: &str, kv: Rc<dyn PageKv>, name: &str) -> Result<(), String> {
-        let file = KvPageFile::load(kv, path, name)?;
-        self.vfs
-            .files
-            .borrow_mut()
-            .insert(path.to_owned(), KvFile::Main(file));
+        self.bind(path, KvPageFile::load(kv, path, name)?)
+    }
+
+    fn bind(&self, path: &str, file: KvPageFile) -> Result<(), String> {
+        let mut files = self.vfs.files.borrow_mut();
+        if let Some(KvFile::Main(open)) = files.get(path)
+            && open.opens > 0
+        {
+            return Err(format!(
+                "{path} is open ({} connections): close it before attaching it again",
+                open.opens
+            ));
+        }
+        files.insert(path.to_owned(), KvFile::Main(file));
         Ok(())
+    }
+
+    /// [`Self::attach`], unbinding `path` when the last connection on it
+    /// closes (for stores that live as long as their database, as
+    /// `JAZZ_KV_VFS` test stores do).
+    pub fn attach_ephemeral(
+        &self,
+        path: &str,
+        kv: Rc<dyn PageKv>,
+        name: &str,
+    ) -> Result<(), String> {
+        let mut file = KvPageFile::load(kv, path, name)?;
+        file.ephemeral = true;
+        self.bind(path, file)
     }
 
     /// Unbind `path` (closed), keeping its storage.
@@ -587,6 +701,99 @@ pub fn install<C: OsCallback>(vfs_name: &str) -> Result<KvVfsUtil, RegisterVfsEr
     Ok(KvVfsUtil {
         vfs: unsafe { KvStore::app_data(vfs) },
     })
+}
+
+/// A KV store in memory, and SQLite's OS hooks natively: what the engine's
+/// suites run the VFS on (`JAZZ_KV_VFS=1`, see `Db::open`).
+#[cfg(any(test, feature = "testing"))]
+pub mod testing {
+    use std::cell::{Cell, RefCell};
+    use std::collections::BTreeMap;
+    use std::rc::Rc;
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    use rsqlite_vfs::OsCallback;
+
+    use super::{KvVfsUtil, PageKv};
+
+    /// One object's storage: a sorted map, whose commits can be made to
+    /// fail.
+    #[derive(Default)]
+    pub struct MemKv {
+        pub data: RefCell<BTreeMap<String, Vec<u8>>>,
+        pub fail_commits: Cell<bool>,
+        pub commits: Cell<u32>,
+    }
+
+    impl PageKv for MemKv {
+        fn get(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
+            Ok(self.data.borrow().get(key).cloned())
+        }
+
+        fn commit(&self, puts: &[(String, &[u8])], deletes: &[String]) -> Result<(), String> {
+            if self.fail_commits.get() {
+                return Err("storage is full (test)".into());
+            }
+            let mut data = self.data.borrow_mut();
+            for (key, value) in puts {
+                data.insert(key.clone(), value.to_vec());
+            }
+            for key in deletes {
+                data.remove(key);
+            }
+            self.commits.set(self.commits.get() + 1);
+            Ok(())
+        }
+    }
+
+    /// SQLite's OS hooks on the host.
+    pub struct NativeOs;
+
+    impl OsCallback for NativeOs {
+        fn sleep(dur: Duration) {
+            std::thread::sleep(dur);
+        }
+
+        fn random(buf: &mut [u8]) {
+            // Names temporary files only.
+            static STATE: Mutex<u64> = Mutex::new(0x9e37_79b9_7f4a_7c15);
+            let mut state = STATE
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            for byte in buf {
+                *state ^= *state << 13;
+                *state ^= *state >> 7;
+                *state ^= *state << 17;
+                *byte = *state as u8;
+            }
+        }
+
+        fn epoch_timestamp_in_ms() -> i64 {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.as_millis() as i64)
+        }
+    }
+
+    /// This thread's own registration of the VFS. Its state is
+    /// single-threaded (as a Durable Object is) and stores are
+    /// thread-affine, so each thread gets a VFS of its own.
+    pub fn thread_vfs() -> (&'static str, Rc<KvVfsUtil>) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static THREADS: AtomicU64 = AtomicU64::new(0);
+        thread_local! {
+            static VFS: (&'static str, Rc<KvVfsUtil>) = {
+                let name: &'static str = Box::leak(
+                    format!("jazz-kv-test-{}", THREADS.fetch_add(1, Ordering::Relaxed))
+                        .into_boxed_str(),
+                );
+                let util = super::install::<NativeOs>(name).expect("register the KV test VFS");
+                (name, Rc::new(util))
+            };
+        }
+        VFS.with(|(name, util)| (*name, util.clone()))
+    }
 }
 
 #[cfg(test)]

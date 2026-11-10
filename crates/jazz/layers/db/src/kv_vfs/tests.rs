@@ -6,7 +6,7 @@
 //! These are lower-level than Jazz's usual client tests on purpose: the
 //! contracts are the VFS's (what storage holds after each commit, failed
 //! commit or reopen, and its byte layout), which no client API shows. The
-//! last test opens Jazz's engine on it through its public API.
+//! engine's suites run on it with `JAZZ_KV_VFS=1`.
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -15,68 +15,13 @@ use rusqlite::{Connection, OpenFlags};
 
 use super::*;
 
+use super::testing::{MemKv, NativeOs};
+
 const VFS: &str = "jazz-do-kv-test";
 
 /// The VFS state is single-threaded (as a Durable Object is); tests run one
 /// at a time.
 static SERIAL: Mutex<()> = Mutex::new(());
-
-struct NativeOs;
-
-impl OsCallback for NativeOs {
-    fn sleep(dur: Duration) {
-        std::thread::sleep(dur);
-    }
-
-    fn random(buf: &mut [u8]) {
-        // Names temporary files only.
-        static STATE: Mutex<u64> = Mutex::new(0x9e37_79b9_7f4a_7c15);
-        let mut state = STATE.lock().unwrap();
-        for byte in buf {
-            *state ^= *state << 13;
-            *state ^= *state >> 7;
-            *state ^= *state << 17;
-            *byte = *state as u8;
-        }
-    }
-
-    fn epoch_timestamp_in_ms() -> i64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64
-    }
-}
-
-/// One object's storage: a sorted map, with commits that can be made to
-/// fail.
-#[derive(Default)]
-struct MemKv {
-    data: RefCell<BTreeMap<String, Vec<u8>>>,
-    fail_commits: Cell<bool>,
-    commits: Cell<u32>,
-}
-
-impl PageKv for MemKv {
-    fn get(&self, key: &str) -> Result<Option<Vec<u8>>, String> {
-        Ok(self.data.borrow().get(key).cloned())
-    }
-
-    fn commit(&self, puts: &[(String, &[u8])], deletes: &[String]) -> Result<(), String> {
-        if self.fail_commits.get() {
-            return Err("storage is full (test)".into());
-        }
-        let mut data = self.data.borrow_mut();
-        for (key, value) in puts {
-            data.insert(key.clone(), value.to_vec());
-        }
-        for key in deletes {
-            data.remove(key);
-        }
-        self.commits.set(self.commits.get() + 1);
-        Ok(())
-    }
-}
 
 impl MemKv {
     fn snapshot(&self) -> BTreeMap<String, Vec<u8>> {
@@ -225,13 +170,13 @@ fn each_commit_is_one_storage_commit_of_only_the_pages_it_changed() {
 }
 
 /// A storage commit that fails fails the SQLite commit, leaves storage at the
-/// commit before, and the connection goes on from there, for every rollback
-/// journal mode:
+/// commit before, and fails the file until it is reopened, which goes on
+/// from the commit before, for every rollback journal mode:
 ///
 /// ```text
 /// insert 1 ──commit──► storage {1}
-/// insert 2,3 ──commit──✗ (storage full) ──► storage {1}, reads {1}
-/// insert 4 ──commit──► storage {1, 4}
+/// insert 2,3 ──commit──✗ (storage full) ──► storage {1}; reads fail
+/// reopen ─ reads {1} ─ insert 4 ──commit──► storage {1, 4}
 /// ```
 #[test]
 fn a_failed_storage_commit_fails_the_sqlite_commit_and_leaves_the_last_one() {
@@ -267,10 +212,22 @@ fn failed_commit(journal: &str) {
     assert_eq!(kv.snapshot(), stored, "storage holds the commit before");
     // A transaction may still be open on the connection after the error.
     let _ = conn.execute_batch("ROLLBACK");
-    // The same connection reads the file as storage holds it.
-    assert_eq!(count(&conn), 1);
-
+    // The file has failed: nothing more is read or written until it is
+    // attached again.
     kv.fail_commits.set(false);
+    let error = conn
+        .query_row("SELECT count(*) FROM t", [], |row| row.get::<_, i64>(0))
+        .unwrap_err();
+    assert!(error.to_string().contains("I/O"), "{journal}: {error}");
+    let error = util.attach(path, kv.clone(), "store").unwrap_err();
+    assert!(error.contains("is open"), "{error}");
+    drop(conn);
+
+    // Reopened from storage: the commit before, and writes go on.
+    util.detach(path);
+    attach(&util, path, &kv);
+    let conn = open_journal(path, 4096, journal);
+    assert_eq!(count(&conn), 1, "{journal}");
     conn.execute("INSERT INTO t VALUES (4)", []).unwrap();
     drop(conn);
     util.detach(path);
@@ -288,8 +245,8 @@ fn failed_commit(journal: &str) {
     util.detach(path);
 }
 
-/// A new file whose first commit fails stays empty in storage, and the next
-/// commit creates it.
+/// A new file whose first commit fails stays empty in storage, and the first
+/// commit after a reopen creates it.
 #[test]
 fn a_failed_first_commit_leaves_a_new_file_empty() {
     let _serial = SERIAL
@@ -305,6 +262,10 @@ fn a_failed_first_commit_leaves_a_new_file_empty() {
         .unwrap_err();
     assert!(kv.snapshot().is_empty());
     kv.fail_commits.set(false);
+    drop(conn);
+    util.detach(path);
+    attach(&util, path, &kv);
+    let conn = open(path, 4096);
     conn.execute_batch("CREATE TABLE t (x INTEGER); INSERT INTO t VALUES (1);")
         .unwrap();
     drop(conn);
@@ -513,8 +474,14 @@ fn random_transactions_leave_storage_at_the_last_committed_state() {
                 if committed.is_ok() {
                     // Nothing changed (deletes of missing rows): no write.
                     assert_eq!(staged, model, "round {round}");
+                } else {
+                    // The file failed: reopen it from storage.
+                    let _ = conn.execute_batch("ROLLBACK");
+                    drop(conn);
+                    util.detach(path);
+                    attach(&util, path, &kv);
+                    conn = open(path, 1024);
                 }
-                let _ = conn.execute_batch("ROLLBACK");
             }
             _ => {
                 tx.commit().unwrap();
@@ -544,106 +511,6 @@ fn random_transactions_leave_storage_at_the_last_committed_state() {
         .unwrap();
     assert_eq!(check, "ok");
     drop(conn);
-    util.detach(path);
-}
-
-/// Jazz's engine opens on the VFS the way `do_kv::open` does (4 KiB pages,
-/// in-memory journal), and a store reopened from storage alone reads back
-/// every row; WAL is refused at open.
-#[test]
-fn a_jazz_store_reopens_from_storage() {
-    use jazz::db::{Db, DbConfig, DbIdentity, FileOptions, Journal, ReadOpts};
-    use jazz::ids::{AuthorSubject, NodeUuid};
-    use jazz::query::Query;
-    use jazz::records::Value;
-    use jazz::schema::JazzSchema;
-    use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder};
-
-    let _serial = SERIAL
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let util = util();
-    let kv = Rc::new(MemKv::default());
-    let path = "/jazz.sqlite";
-    let config = || {
-        let policies = TablePolicies::new()
-            .with_select(PolicyExpr::True)
-            .with_insert(PolicyExpr::True)
-            .with_update(Some(PolicyExpr::True), PolicyExpr::True)
-            .with_delete(PolicyExpr::True);
-        DbConfig::new(
-            JazzSchema::new(
-                &SchemaBuilder::new()
-                    .table(
-                        TableSchemaBuilder::new("todos")
-                            .column("title", ColumnType::Text)
-                            .policies(policies),
-                    )
-                    .build(),
-            )
-            .unwrap(),
-            DbIdentity {
-                node: NodeUuid::from_bytes([7; 16]),
-                author: AuthorSubject::SYSTEM,
-            },
-        )
-    };
-    let options = || FileOptions {
-        vfs: Some(VFS),
-        journal: Journal::Memory,
-        page_size: Some(PAGE_SIZE),
-        ..FileOptions::default()
-    };
-    let titles = |db: &Db| -> Vec<String> {
-        let prepared = db.prepare_query(&Query::from("todos")).unwrap();
-        let mut titles: Vec<String> = block_on(db.all(&prepared, ReadOpts::default()))
-            .unwrap()
-            .iter()
-            .filter_map(|row| match row.cells().find(|(name, _)| *name == "title") {
-                Some((_, Some(Value::String(title)))) => Some(title.clone()),
-                _ => None,
-            })
-            .collect();
-        titles.sort();
-        titles
-    };
-    use jazz::db::block_on;
-
-    attach(&util, path, &kv);
-    {
-        let db = block_on(Db::open_at(config(), std::path::Path::new(path), options())).unwrap();
-        for i in 0..20 {
-            block_on(db.insert(
-                "todos",
-                BTreeMap::from([("title".to_owned(), Value::String(format!("todo {i:02}")))]),
-                Default::default(),
-            ))
-            .unwrap();
-        }
-        block_on(db.close()).unwrap();
-    }
-    util.detach(path);
-
-    attach(&util, path, &kv);
-    let db = block_on(Db::open_at(config(), std::path::Path::new(path), options())).unwrap();
-    let titles = titles(&db);
-    assert_eq!(titles.len(), 20);
-    assert_eq!(titles[0], "todo 00");
-    block_on(db.close()).unwrap();
-    drop(db);
-
-    // WAL is refused at open, not at the first write.
-    let Err(error) = block_on(Db::open_at(
-        config(),
-        std::path::Path::new(path),
-        FileOptions {
-            journal: Journal::Wal,
-            ..options()
-        },
-    )) else {
-        panic!("WAL must be refused");
-    };
-    assert!(error.to_string().contains("not supported"), "{error}");
     util.detach(path);
 }
 
