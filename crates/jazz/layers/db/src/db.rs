@@ -500,6 +500,8 @@ pub struct SchemaPublication {
 struct Inner {
     catalogue_cache_required: bool,
     catalogue_capture_pending: std::cell::Cell<bool>,
+    // Process-local publication fence; a loaded replica is still dormant until bound.
+    catalogue_owner_published: std::cell::Cell<bool>,
     conn: Connection,
     retired: bool,
     scheduler: Option<Rc<dyn TickScheduler>>,
@@ -1472,6 +1474,7 @@ impl Db {
                 conn,
                 catalogue_cache_required,
                 catalogue_capture_pending: std::cell::Cell::new(true),
+                catalogue_owner_published: std::cell::Cell::new(false),
                 retired: false,
                 scheduler: None,
                 read_deadlines: Vec::new(),
@@ -3713,7 +3716,9 @@ impl Inner {
 
     fn require_mutation_admission(&self) -> Result<(), Error> {
         self.require_cached_catalogue_schema(&self.schema)?;
-        self.require_mutation_lifetime()
+        self.require_mutation_lifetime()?;
+        self.catalogue_owner_published.set(true);
+        Ok(())
     }
 
     fn require_mutation_lifetime(&self) -> Result<(), Error> {
@@ -8345,6 +8350,7 @@ impl Db {
         if inner.batches.contains_key(&id) {
             return Err(rejected(format!("transaction {id:?} is already open")));
         }
+        inner.catalogue_owner_published.set(true);
         inner.batches.insert(
             id,
             Batch {
@@ -8587,7 +8593,15 @@ impl Db {
     }
 
     fn commit_ops_now(&self, batch: &Batch, kind: sync::Kind) -> Result<TxReceipt, Error> {
-        self.inner().require_mutation_admission()?;
+        {
+            let inner = self.inner();
+            inner.require_mutation_lifetime()?;
+            // Batches are owner-wide and can contain writes through several views.
+            // The committing handle's schema cannot admit another view's writes.
+            for (schema, _) in &batch.ops {
+                inner.require_cached_catalogue_schema(schema)?;
+            }
+        }
         let ops = &batch.ops;
         let (seq, prior, mark) = {
             let mut inner = self.inner();
@@ -8678,6 +8692,9 @@ impl Db {
             .get(&id)
             .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
         Self::check_client_evidence_owner(&inner, batch)?;
+        for (schema, _) in &batch.ops {
+            inner.require_cached_catalogue_schema(schema)?;
+        }
         let staged = batch.ops.len();
         let marked_batch = batch.ops.iter().any(|(schema, _)| {
             schema
@@ -8922,8 +8939,8 @@ impl Db {
         }
         let marks = {
             let mut inner = self.inner.staging();
-            inner.require_mutation_admission()?;
             inner.schema = self.governing_schema(&inner);
+            inner.require_mutation_admission()?;
             let chunked = inner.chunk_large_cells(&mut op)?;
             edits.pending_nodes.extend(chunked.pending_nodes);
             let batch = inner

@@ -346,3 +346,123 @@ fn catalogue_cache_unpublished_mergeable_transaction() {
 fn catalogue_cache_unpublished_serializable_transaction() {
     unpublished_transaction_contract(true);
 }
+
+/// Bob's unconfirmed view must not borrow Alice's ambient admitted schema for a write.
+#[test]
+fn catalogue_cache_view_stage_cannot_borrow_owner_admission() {
+    let authority = server(schema("notes"));
+    let bytes = capture(&authority);
+    let alice = open(schema("notes"), 8);
+    let unpublished = block_on(alice.register_schema_view(schema("drafts"))).unwrap();
+    install(&alice, &bytes).unwrap();
+    let id = jazz::tools::OpenTransactionId::new();
+    block_on(alice.begin_mergeable(id)).unwrap();
+    assert!(alice.has_authenticated_catalogue().unwrap());
+    let refused = block_on(unpublished.tx_ref(id).insert(
+        "drafts",
+        BTreeMap::from([("text".into(), Value::String("must not stage".into()))]),
+        Default::default(),
+    ));
+    assert_eq!(
+        refused
+            .err()
+            .expect("unpublished writing view must refuse before staging")
+            .code,
+        ErrorCode::Schema
+    );
+    alice.abandon_transaction_handle(id).unwrap();
+}
+
+/// Alice's admitted view remains writable when Bob leaves an unpublished view ambient.
+#[test]
+fn catalogue_cache_view_stage_uses_actual_admitted_handle() {
+    let authority = server(schema("notes"));
+    let bytes = capture(&authority);
+    let alice = open(schema("notes"), 8);
+    let unpublished = block_on(alice.register_schema_view(schema("drafts"))).unwrap();
+    install(&alice, &bytes).unwrap();
+    let id = jazz::tools::OpenTransactionId::new();
+    block_on(alice.begin_mergeable(id)).unwrap();
+    assert!(!unpublished.has_authenticated_catalogue().unwrap());
+    block_on(alice.tx_ref(id).insert(
+        "notes",
+        BTreeMap::from([("text".into(), Value::String("admitted".into()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    assert!(!unpublished.has_authenticated_catalogue().unwrap());
+    block_on(alice.commit_mergeable_handle(id)).unwrap();
+    let q = alice.prepare_query(&Query::from("notes")).unwrap();
+    assert_eq!(
+        block_on(alice.all(&q, ReadOpts::default())).unwrap().len(),
+        1
+    );
+}
+
+/// Alice's persistent Binding may restore the same cache again, preserving an offline upload.
+fn persistent_binding_restore(pending: bool) {
+    let s = schema("notes");
+    let authority = server(s.clone());
+    let bytes = capture(&authority);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("alice.sqlite");
+    let mut saved_row = None;
+    {
+        let cfg = config(s.clone(), 9, author("alice"));
+        let identity = cfg.identity;
+        let alice = block_on(Db::open_at(cfg, &path, FileOptions::default())).unwrap();
+        install(&alice, &bytes).unwrap();
+        let binding = jazz::binding_host::Binding::new(alice, identity, false);
+        assert!(
+            install(&binding.db, &bytes).is_err(),
+            "a live published Binding is not an opening boundary"
+        );
+        if pending {
+            saved_row = Some(
+                block_on(binding.db.insert(
+                    "notes",
+                    BTreeMap::from([(
+                        "text".into(),
+                        Value::String("pending before reopen".into()),
+                    )]),
+                    Default::default(),
+                ))
+                .unwrap()
+                .row_uuid(),
+            );
+        }
+        block_on(binding.close()).unwrap();
+    }
+    let cfg = config(s, 9, author("alice"));
+    let identity = cfg.identity;
+    let reopened = block_on(Db::open_at(cfg, &path, FileOptions::default())).unwrap();
+    install(&reopened, &bytes)
+        .expect("a dormant restored replica is still at its new opening boundary");
+    let binding = jazz::binding_host::Binding::new(reopened, identity, false);
+    assert!(binding.db.has_authenticated_catalogue().unwrap());
+    assert!(install(&binding.db, &bytes).is_err());
+    let q = binding.db.prepare_query(&Query::from("notes")).unwrap();
+    let local = block_on(binding.db.all(&q, ReadOpts::default())).unwrap();
+    assert_eq!(local.len(), usize::from(pending));
+    if let Some(row) = saved_row {
+        assert_eq!(local[0].row_uuid(), row);
+    }
+    let _link = connect(&binding.db, &authority);
+    let q = authority.prepare_query(&Query::from("notes")).unwrap();
+    let accepted = block_on(authority.all(&q, ReadOpts::default())).unwrap();
+    assert_eq!(accepted.len(), usize::from(pending));
+    if let Some(row) = saved_row {
+        assert_eq!(accepted[0].row_uuid(), row);
+    }
+    block_on(binding.close()).unwrap();
+}
+/// Alice closes/reopens a real Binding with no network or writes in between.
+#[test]
+fn catalogue_cache_persistent_binding_reopen_without_writes() {
+    persistent_binding_restore(false);
+}
+/// Alice's original pending row survives cache restoration and reconnects once.
+#[test]
+fn catalogue_cache_persistent_binding_reopen_preserves_pending() {
+    persistent_binding_restore(true);
+}

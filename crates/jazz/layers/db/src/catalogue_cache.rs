@@ -312,7 +312,7 @@ impl Db {
             ));
         }
         if inner.authority
-            || inner.client.is_some()
+            || inner.catalogue_owner_published.get()
             || !inner.batches.is_empty()
             || inner.tx.is_some()
             || !inner.sessions.is_empty()

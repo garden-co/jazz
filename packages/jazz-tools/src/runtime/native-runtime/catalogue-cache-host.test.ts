@@ -1,3 +1,6 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { expect, it } from "vitest";
 import { schema as s } from "../../schema-namespace.js";
 import { mergePermissionsIntoWasmSchema } from "../../schema-permissions.js";
@@ -63,6 +66,30 @@ for (const host of ["NAPI", "WASM"] as const) {
       expect(await restored.hasAuthenticatedCatalogue()).toBe(true);
       expect(Array.from(restored.tableIdentity("notes"))).toEqual(identity);
       expect((await restored.takeAuthenticatedCatalogueState()).capture).toBeUndefined();
+      if (host === "NAPI") {
+        const { NapiDb } = await loadNapiModule();
+        const directory = await mkdtemp(join(tmpdir(), "jazz-catalogue-reopen-"));
+        try {
+          // The second actual factory open must retain the persisted replica
+          // marker while distinguishing it from publication in this lifetime.
+          for (let opening = 0; opening < 2; opening++) {
+            const persistent = NapiDb.openPersistentWithCatalogue(
+              directory,
+              encodeSchema(schema),
+              openConfig(new Uint8Array(16).fill(95), bob, 1, false),
+              state.capture,
+            );
+            try {
+              expect(await persistent.hasAuthenticatedCatalogue()).toBe(true);
+              expect(Array.from(persistent.tableIdentity("notes"))).toEqual(identity);
+            } finally {
+              await persistent.close();
+            }
+          }
+        } finally {
+          await rm(directory, { recursive: true, force: true });
+        }
+      }
       expect(typeof ctor.openMemoryWithSelfSignedProofAndCatalogue).toBe("function");
       expect(() =>
         ctor.openMemoryWithSelfSignedProofAndCatalogue(
