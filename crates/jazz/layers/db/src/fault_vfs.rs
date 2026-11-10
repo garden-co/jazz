@@ -42,6 +42,12 @@ struct State {
     /// Blocks a read faulted on since the last load.
     pending: BTreeSet<(String, i64)>,
     rng: u64,
+    /// Where the latest fault the engine has not yet seen come back was
+    /// raised: a run that ends any other way swallowed it.
+    outstanding: Option<std::backtrace::Backtrace>,
+    /// Faults raised since the last [`check_run`]. A run stops at its
+    /// first fault, so more than one means one was swallowed.
+    in_run: u32,
     faults: u64,
     loads: u64,
     never_evict: bool,
@@ -135,6 +141,25 @@ impl PageSource for FaultSource {
     }
 }
 
+/// Check how a run of an operation ended: a run that faulted must end
+/// with the fault ([`crate::pages`]: a fault is never an answer). Panics
+/// with where the swallowed fault was raised.
+pub(crate) fn check_run(faulted: bool) {
+    let (outstanding, raised) = STATE.with(|s| {
+        let mut s = s.borrow_mut();
+        (s.outstanding.take(), std::mem::take(&mut s.in_run))
+    });
+    if let Some(at) = outstanding
+        && (!faulted || raised > 1)
+    {
+        panic!(
+            "a page fault was swallowed ({raised} raised, the run ended {}). \
+             The first was raised at:\n{at}",
+            if faulted { "with a later one" } else { "without it" }
+        );
+    }
+}
+
 /// `JAZZ_PAGE_FAULTS`, when set: the seed for this thread's evictions.
 pub(crate) fn from_env() -> Option<u64> {
     let seed = std::env::var("JAZZ_PAGE_FAULTS").ok()?;
@@ -175,6 +200,10 @@ fn faults(file: &str, offset: i64, amount: i64) -> bool {
             return false;
         }
         s.faults += 1;
+        s.in_run += 1;
+        if s.outstanding.is_none() {
+            s.outstanding = Some(std::backtrace::Backtrace::force_capture());
+        }
         for block in missing {
             s.pending.insert((file.to_owned(), block));
         }

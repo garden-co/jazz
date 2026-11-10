@@ -1401,6 +1401,8 @@ impl Db {
         let opened = loop {
             let run = crate::host::StoreFile::open(path, options)
                 .and_then(|file| Self::open_file_now(shared.attempt(), file));
+            #[cfg(feature = "testing")]
+            crate::fault_vfs::check_run(matches!(&run, Err(error) if crate::pages::is_fault(error)));
             match run {
                 Err(error) if crate::pages::is_fault(&error) => {
                     if let Err(error) = source.load().await {
@@ -1458,7 +1460,10 @@ impl Db {
         };
         source.begin_op();
         let result = loop {
-            match op() {
+            let run = op();
+            #[cfg(feature = "testing")]
+            crate::fault_vfs::check_run(matches!(&run, Err(error) if crate::pages::is_fault(error)));
+            match run {
                 Err(error) if crate::pages::is_fault(&error) => {
                     if let Err(error) = source.load().await {
                         break Err(error);
