@@ -124,6 +124,7 @@ impl Query {
             limit: None,
             offset: 0,
             relation: None,
+            partial: Vec::new(),
         }
     }
 
@@ -579,6 +580,20 @@ impl Query {
         self
     }
 
+    /// Select `column` read only in `part` (SPEC 19.12): the result holds
+    /// that part, and only the chunks it covers are read.
+    pub fn select_part(mut self, column: impl Into<String>, part: Part) -> Self {
+        let column = column.into();
+        if let Some(select) = &mut self.select
+            && !select.contains(&column)
+        {
+            select.push(column.clone());
+        }
+        self.partial.retain(|selected| selected.column != column);
+        self.partial.push(PartialSelect { column, part });
+        self
+    }
+
     /// Select application columns. The row id is always included.
     ///
     /// ```rust
@@ -700,10 +715,7 @@ impl Query {
     }
 
     #[doc(hidden)]
-    pub fn validate_runtime(
-        &self,
-        schema: &RuntimeSchema,
-    ) -> Result<ValidatedQuery, QueryError> {
+    pub fn validate_runtime(&self, schema: &RuntimeSchema) -> Result<ValidatedQuery, QueryError> {
         validate_query(self, schema)
     }
 

@@ -1,5 +1,5 @@
 import { acquireBrowserPhysicalDatabaseEpoch } from "./browser-physical-database-epoch.js";
-import { IDBFactory, IDBObjectStore, indexedDB as fakeIndexedDb } from "fake-indexeddb";
+import { IDBFactory, indexedDB as fakeIndexedDb } from "fake-indexeddb";
 import { readFile } from "node:fs/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -12,8 +12,6 @@ import {
   INDEXEDDB_BTREE_PAGE_SIZE,
   INDEXEDDB_BTREE_PAGES_STORE,
   INDEXEDDB_STORAGE_MANIFEST,
-  INDEXEDDB_EPOCH_1_STORAGE_MANIFEST,
-  INDEXEDDB_STORAGE_ADMISSION_KEY,
   INDEXEDDB_STORAGE_MANIFEST_KEY,
   INDEXEDDB_STORAGE_MANIFEST_STORE,
   INDEXEDDB_REPLICA_NODE_BYTES,
@@ -21,9 +19,6 @@ import {
   IndexedDbPageStore,
   UnsupportedStorageCodecsError,
 } from "./indexeddb-page-store.js";
-import type { IndexedDbAdmissionView } from "./indexeddb-page-store.js";
-import { loadWasmModule } from "./wasm-loader.js";
-import admissionGolden from "../../fixtures/browser-storage-admission-v1.json";
 
 async function ownReclamation(store: IndexedDbPageStore) {
   const epoch = await acquireBrowserPhysicalDatabaseEpoch(store.name, {
@@ -71,110 +66,64 @@ describe("IndexedDbPageStore", () => {
     vi.restoreAllMocks();
   });
 
-  it("publishes fresh admission without scanning and rejects missing or corrupt receipts on reopen", async () => {
-    const name = databaseName();
-    const first = await IndexedDbPageStore.open(name);
-    const admitted = first.storageAdmission();
-    expect(admitted[1]?.slice(0, 5)).toEqual(new Uint8Array([74, 83, 65, 49, 0]));
-    await first.commit({
-      expectedGeneration: 0,
-      metadata: { pageSize: INDEXEDDB_BTREE_PAGE_SIZE, rootPageId: 1, nextPageId: 2 },
-      pages: new Map([[1, new Uint8Array([7])]]),
-    });
-    await first.close();
-    const reopened = await IndexedDbPageStore.open(name);
-    expect(reopened.storageAdmission()).toEqual(admitted);
-    expect(await reopened.readPage(1)).toEqual(new Uint8Array([7]));
-    await reopened.close();
-    for (const receipt of [undefined, new Uint8Array([74, 83, 65, 49, 0])]) {
+  it("keeps the current epoch and page bytes through reopen without a migration receipt", async () => {
+    for (const existing of [false, true]) {
+      const name = databaseName();
+      if (existing) await installEmptyEpochOneFixture(name);
+      const first = await IndexedDbPageStore.open(name);
+      const node = first.replicaNode.slice();
+      await first.commit({
+        expectedGeneration: 0,
+        metadata: { pageSize: INDEXEDDB_BTREE_PAGE_SIZE, rootPageId: 1, nextPageId: 2 },
+        pages: new Map([[1, new Uint8Array([7])]]),
+      });
+      await first.close();
+      const reopened = await IndexedDbPageStore.open(name);
+      expect(reopened.replicaNode).toEqual(node);
+      expect(await reopened.readPage(1)).toEqual(new Uint8Array([7]));
+      await reopened.close();
       const raw = await openRawDatabase(name);
-      const tx = raw.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readwrite");
+      const tx = raw.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readonly");
       const plane = tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE);
-      if (receipt === undefined) plane.delete(INDEXEDDB_STORAGE_ADMISSION_KEY);
-      else plane.put(receipt, INDEXEDDB_STORAGE_ADMISSION_KEY);
+      expect(await requestResult(plane.get(INDEXEDDB_STORAGE_MANIFEST_KEY))).toEqual(
+        INDEXEDDB_STORAGE_MANIFEST,
+      );
+      expect(await requestResult(plane.get("admission-v1"))).toBeUndefined();
       await transactionDone(tx);
       raw.close();
-      await expect(IndexedDbPageStore.open(name)).rejects.toThrow("storage admission receipt");
-      const verify = await openRawDatabase(name);
-      const pages = verify.transaction(INDEXEDDB_BTREE_PAGES_STORE, "readonly");
-      expect(await requestResult(pages.objectStore(INDEXEDDB_BTREE_PAGES_STORE).get(1))).toEqual(
-        new Uint8Array([7]).buffer,
-      );
-      await transactionDone(pages);
-      verify.close();
     }
   });
 
-  it("keeps legacy admission read-only, revokes the view, and releases the lock on failure", async () => {
+  it("refuses an epoch-two profile without changing pages or stranding its physical claim", async () => {
     const name = databaseName();
-    await installEmptyEpochOneFixture(name);
-    let retained: IndexedDbAdmissionView | undefined;
-    const wasm = await loadWasmModule();
-    const validate = wasm.WasmDb.preflightBrowserEpochOne;
-    const preflight = vi
-      .spyOn(wasm.WasmDb, "preflightBrowserEpochOne")
-      .mockImplementation(async (handle) => {
-        retained = handle as IndexedDbAdmissionView;
-        expect(await retained.metadata()).toBeNull();
-        expect("commitPages" in retained).toBe(false);
-        await expect(IndexedDbPageStore.open(name)).rejects.toThrow("active in another");
-        await validate(handle);
-        throw new Error("interrupted after legacy preflight");
-      });
+    const unsupported = {
+      ...INDEXEDDB_STORAGE_MANIFEST,
+      storageEpoch: 2,
+      requiredCodecIds: ["jazz.node-storage.v3"],
+    };
+    await installRawEpochOneFixture(name, unsupported);
     await expect(IndexedDbPageStore.open(name)).rejects.toThrow(
-      "interrupted after legacy preflight",
+      "Missing or invalid IndexedDB storage epoch manifest",
     );
-    expect(() => retained!.metadata()).toThrow("invalidated");
     const raw = await openRawDatabase(name);
-    const tx = raw.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readonly");
+    const tx = raw.transaction(
+      [INDEXEDDB_STORAGE_MANIFEST_STORE, INDEXEDDB_BTREE_PAGES_STORE],
+      "readonly",
+    );
     expect(
       await requestResult(
         tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE).get(INDEXEDDB_STORAGE_MANIFEST_KEY),
       ),
-    ).toEqual(INDEXEDDB_EPOCH_1_STORAGE_MANIFEST);
+    ).toEqual(unsupported);
     expect(
-      await requestResult(
-        tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE).get(INDEXEDDB_STORAGE_ADMISSION_KEY),
-      ),
+      await requestResult(tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE).get("admission-v1")),
     ).toBeUndefined();
+    expect(await requestResult(tx.objectStore(INDEXEDDB_BTREE_PAGES_STORE).get(1))).toEqual(
+      new Uint8Array([1]).buffer,
+    );
     await transactionDone(tx);
     raw.close();
-    preflight.mockImplementation(async (handle) => {
-      retained = handle as IndexedDbAdmissionView;
-      await validate(handle);
-    });
-    const admitted = await IndexedDbPageStore.open(name);
-    expect(() => retained!.metadata()).toThrow("admission view has expired");
-    expect(admitted.storageAdmission()[1]?.slice(0, 5)).toEqual(
-      new Uint8Array([74, 83, 65, 49, 1]),
-    );
-    await admitted.close();
-  });
-
-  it("rolls back the E2 manifest when atomic receipt publication fails and retries from E1", async () => {
-    const name = databaseName();
-    await installEmptyEpochOneFixture(name);
-    const put = IDBObjectStore.prototype.put;
-    const failure = vi
-      .spyOn(IDBObjectStore.prototype, "put")
-      .mockImplementation(function (this: IDBObjectStore, value, key) {
-        if (key === INDEXEDDB_STORAGE_ADMISSION_KEY) throw new Error("injected admission failure");
-        return put.call(this, value, key);
-      });
-    await expect(IndexedDbPageStore.open(name)).rejects.toThrow("injected admission failure");
-    failure.mockRestore();
-    const raw = await openRawDatabase(name);
-    const tx = raw.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readonly");
-    const plane = tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE);
-    expect(await requestResult(plane.get(INDEXEDDB_STORAGE_MANIFEST_KEY))).toEqual(
-      INDEXEDDB_EPOCH_1_STORAGE_MANIFEST,
-    );
-    expect(await requestResult(plane.get(INDEXEDDB_STORAGE_ADMISSION_KEY))).toBeUndefined();
-    await transactionDone(tx);
-    raw.close();
-    const retry = await IndexedDbPageStore.open(name);
-    expect(retry.storageAdmission()[1]?.[4]).toBe(1);
-    await retry.close();
+    await expect(IndexedDbPageStore.open(name)).rejects.not.toThrow("active in another");
   });
 
   it("consumes a separate store claim once without consuming the later reclamation claim", async () => {
@@ -191,50 +140,6 @@ describe("IndexedDbPageStore", () => {
     await epoch.release();
     const next = await IndexedDbPageStore.open(name);
     await next.close();
-  });
-
-  it("pins complete browser JSA1 bytes against Rust and rejects changed source, target, tag and trailing bytes", async () => {
-    const wasm = await loadWasmModule();
-    for (const completed of [false, true]) {
-      const name = databaseName();
-      if (completed) await installEmptyEpochOneFixture(name);
-      const store = await IndexedDbPageStore.open(name);
-      const expected = hexBytes(completed ? admissionGolden.completed : admissionGolden.fresh);
-      expect(store.storageAdmission()[1]).toEqual(expected);
-      expect(wasm.WasmDb.__browserStorageAdmissionReceipt(completed)).toEqual(expected);
-      await store.close();
-      const wrongProfile = expected.slice();
-      wrongProfile[14] = 99;
-      const wrongTarget = expected.slice();
-      wrongTarget[wrongTarget.length - 1] = 1;
-      const wrongTag = expected.slice();
-      wrongTag[4] = 7;
-      for (const invalid of [
-        wrongProfile,
-        wrongTarget,
-        wrongTag,
-        new Uint8Array([...expected, 0]),
-      ]) {
-        const raw = await openRawDatabase(name);
-        const tx = raw.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readwrite");
-        tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE).put(
-          invalid,
-          INDEXEDDB_STORAGE_ADMISSION_KEY,
-        );
-        await transactionDone(tx);
-        raw.close();
-        await expect(IndexedDbPageStore.open(name)).rejects.toThrow("storage admission receipt");
-        const verify = await openRawDatabase(name);
-        const read = verify.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readonly");
-        expect(
-          await requestResult(
-            read.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE).get(INDEXEDDB_STORAGE_ADMISSION_KEY),
-          ),
-        ).toEqual(invalid);
-        await transactionDone(read);
-        verify.close();
-      }
-    }
   });
 
   it("rejects destructive opens while a writer owns the root and retains a blocked deletion lock", async () => {
@@ -835,19 +740,20 @@ describe("IndexedDbPageStore", () => {
 
   it("reports a codec-family mismatch as a typed storage-format refusal", async () => {
     const required = INDEXEDDB_STORAGE_MANIFEST.requiredCodecIds;
-    const withoutNodeFormat = required.filter(
-      (codec) => codec !== "groove.durable-index.v2" && codec !== "jazz.node-storage.v3",
-    );
+    // The last Groove browser root's inventory (alpha.59).
+    const groove = [
+      "groove.dictionary.v1",
+      "groove.durable-index.v2",
+      "groove.large-value.v2",
+      "groove.ordered-chunk-storage.v2",
+      "groove.ordered-kv.v1",
+      "jazz.node-storage.v2",
+    ];
     for (const [requiredCodecIds, missing, unknown] of [
-      [withoutNodeFormat, ["groove.durable-index.v2", "jazz.node-storage.v3"], []],
+      [groove, ["jazz.sqlite-storage.v1"], groove],
+      [[], ["jazz.sqlite-storage.v1"], []],
       [[...required, "jazz.future.v2"], [], ["jazz.future.v2"]],
-      [required.filter((codec) => codec !== "jazz.node-storage.v3"), ["jazz.node-storage.v3"], []],
-      [required.filter((codec) => codec !== "groove.dictionary.v1"), ["groove.dictionary.v1"], []],
-      [
-        [...required, "jazz.subscription-program-fact-key.v1"].sort(),
-        [],
-        ["jazz.subscription-program-fact-key.v1"],
-      ],
+      [["jazz.sqlite-storage.v2"], ["jazz.sqlite-storage.v1"], ["jazz.sqlite-storage.v2"]],
     ] as const) {
       const name = databaseName();
       await installRawEpochOneFixture(name, { ...INDEXEDDB_STORAGE_MANIFEST, requiredCodecIds });
@@ -915,10 +821,10 @@ describe("IndexedDbPageStore", () => {
     await store.close();
   });
 
-  it("persists the Rust-owned v1 page fixture byte-for-byte", async () => {
+  it("persists the checked-in historical page fixture byte-for-byte", async () => {
     const fixture = hexBytes(
       await readFile(
-        new URL("../../../../crates/idb-tree/fixtures/page-v1-leaf.hex", import.meta.url),
+        new URL("../../tests/browser/fixtures/page-v1-leaf.hex", import.meta.url),
         "utf8",
       ),
     );
@@ -975,7 +881,7 @@ async function installEmptyEpochOneFixture(name: string): Promise<void> {
   const raw = await createRawEpochDatabase(name);
   const tx = raw.transaction(INDEXEDDB_STORAGE_MANIFEST_STORE, "readwrite");
   const plane = tx.objectStore(INDEXEDDB_STORAGE_MANIFEST_STORE);
-  plane.put(INDEXEDDB_EPOCH_1_STORAGE_MANIFEST, INDEXEDDB_STORAGE_MANIFEST_KEY);
+  plane.put(INDEXEDDB_STORAGE_MANIFEST, INDEXEDDB_STORAGE_MANIFEST_KEY);
   plane.put(epochOneReplicaNode().buffer, INDEXEDDB_REPLICA_NODE_KEY);
   await transactionDone(tx);
   raw.close();
@@ -1067,12 +973,12 @@ function transactionDone(tx: IDBTransaction): Promise<void> {
   });
 }
 
-function hexBytes(value: string): Uint8Array {
-  const trimmed = value.trim();
-  if (trimmed.length % 2 !== 0) throw new Error("hex fixture must have even length");
-  return Uint8Array.from(
-    Array.from({ length: trimmed.length / 2 }, (_, index) =>
-      Number.parseInt(trimmed.slice(index * 2, index * 2 + 2), 16),
-    ),
-  );
+// This parses the checked-in historical fixture only; it is not a native
+// codec decoder or a claim that the retired Rust generator ran here.
+function hexBytes(source: string): Uint8Array {
+  const hex = source.replace(/\s/g, "");
+  if (hex.length % 2 !== 0 || !/^[0-9a-f]*$/i.test(hex)) {
+    throw new Error("Invalid checked-in historical page hex");
+  }
+  return Uint8Array.from(hex.match(/../g) ?? [], (byte) => Number.parseInt(byte, 16));
 }

@@ -22,25 +22,35 @@ use jazz_types::{ids, local_executor, object, records};
 
 /// The public schema and policy vocabulary.
 mod tools {
+    pub use jazz_model::model::json_schema::CompiledSchema;
     pub use jazz_model::model::public_schema::{
-        CmpOp, Operation, PolicyExpr, PolicyValue, TablePolicies, Value,
+        CmpOp, ColumnType, Operation, PolicyExpr, PolicyValue, TablePolicies, Value,
+        json_schema_failure,
     };
     pub use jazz_model::model::transaction::OpenTransactionId;
 }
 
+mod array_index;
 pub mod binding_args;
 pub mod binding_codec;
 pub mod binding_host;
+pub mod catalogue;
+pub mod chunk_store;
 pub mod compile;
 pub mod db;
 #[cfg(feature = "durable-object-limits")]
 mod durable_object_limits;
+pub mod format;
+pub mod host;
 pub(crate) mod large;
+pub mod link;
 pub(crate) mod merge;
 pub mod names;
 pub mod options;
+pub mod slow;
 #[cfg(feature = "sql-trace")]
 mod sql_trace;
+pub mod sync_codec;
 pub mod values;
 
 #[cfg(feature = "testing")]

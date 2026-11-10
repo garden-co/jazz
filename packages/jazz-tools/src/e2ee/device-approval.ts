@@ -1,11 +1,9 @@
-import { serializableE2eeTransaction } from "../runtime/db.js";
+import { E2eeHistoryUnavailable } from "./history-reader.js";
+import { acceptedContentPositions } from "./accepted-membership.js";
+import { acceptedDeviceTransaction } from "./accepted-membership.js";
 import type { Db } from "../runtime/db.js";
-import {
-  observeE2eeHistory,
-  E2eeHistoryUnavailable,
-  type E2eeHistoryReader,
-} from "./history-reader.js";
-import { PersistedWriteRejectedError, type RowSettlement } from "../runtime/client.js";
+import type { AcceptedDeviceTransactionScope } from "./accepted-membership.js";
+import { PersistedWriteRejectedError } from "../runtime/client.js";
 import { runtimeRandomBytes } from "../runtime/runtime-entropy.js";
 import { encodeCryptoContext } from "./context.js";
 import { deviceRequestApp as app } from "./device-requests.js";
@@ -66,13 +64,14 @@ function unavailableDelivery(cause: unknown): never {
   throw new UnavailableDelivery("Unable to authenticate E2EE key delivery", { cause });
 }
 
-const positions = (entries: RowSettlement[]) =>
-  new Map(entries.map((entry) => [entry.rowId, BigInt(entry.position)]));
+const positions = acceptedContentPositions;
 const comparePosition = (a: bigint, b: bigint) => (a < b ? -1 : a > b ? 1 : 0);
 
 const isTransactionConflict = (error: unknown): boolean =>
   (error instanceof PersistedWriteRejectedError &&
-    (error.code === "exclusive_conflict" || error.code === "transaction_conflict")) ||
+    (error.code === "exclusive_conflict" ||
+      error.code === "transaction_conflict" ||
+      error.code === "serialization_conflict")) ||
   (error instanceof Error && error.message.startsWith("(transaction_conflict):"));
 
 /** Internal account-device handshake. Ordinary Jazz policies own record authorisation. */
@@ -87,6 +86,25 @@ export class DeviceApproval {
   /** A completed authority read proved this device revoked; never an access grant. */
   isKnownRevoked(): boolean {
     return this.knownRevoked;
+  }
+
+  private revocationRefresh: Promise<void> | undefined;
+
+  /** Remember only a revocation from a genuine covered, Global-confirmed cut.
+   * Raw Remote query rows are merely the trigger; they are never this proof.
+   * This route creates no challenges, deliveries, retained keys or access grant.
+   */
+  async rememberAcceptedRevocation(): Promise<void> {
+    this.assertOpen();
+    if (!this.device || this.knownRevoked) return;
+    await (this.revocationRefresh ??= (async () => {
+      const observed = await acceptedDeviceTransaction(this.db, (tx) => this.currentSnapshot(tx));
+      const snapshot = await observed.wait();
+      this.assertOpen();
+      if (snapshot.revoked.has(this.deviceId)) this.knownRevoked = true;
+    })().finally(() => {
+      this.revocationRefresh = undefined;
+    }));
   }
 
   constructor(
@@ -163,7 +181,7 @@ export class DeviceApproval {
     });
   }
 
-  private async readSnapshot(tx: E2eeHistoryReader, recoveryRootId?: string) {
+  private async readSnapshot(tx: AcceptedDeviceTransactionScope, recoveryRootId?: string) {
     const [
       successors,
       identities,
@@ -175,28 +193,28 @@ export class DeviceApproval {
       recoveryDeliveries,
       publicHistory,
     ] = await Promise.all([
-      tx.allSettledForE2ee(
+      tx.readAccepted(
         this.tables.__e2ee_account_successors.where({ "$createdBy.account": this.accountId }),
       ),
-      tx.allSettledForE2ee(this.tables.__e2ee_account_identities.where({ id: this.accountId })),
-      tx.allSettledForE2ee(
+      tx.readAccepted(this.tables.__e2ee_account_identities.where({ id: this.accountId })),
+      tx.readAccepted(
         this.tables.__e2ee_device_challenges.where({ "$createdBy.account": this.accountId }),
       ),
-      tx.allSettledForE2ee(
+      tx.readAccepted(
         this.tables.__e2ee_device_requests.where({ "$createdBy.account": this.accountId }),
       ),
-      tx.allSettledForE2ee(
+      tx.readAccepted(
         this.tables.__e2ee_device_proofs.where({ "$createdBy.account": this.accountId }),
       ),
-      tx.allSettledForE2ee(
+      tx.readAccepted(
         this.tables.__e2ee_device_approvals.where({ "$createdBy.account": this.accountId }),
       ),
-      tx.allSettledForE2ee(
+      tx.readAccepted(
         this.tables.__e2ee_device_deliveries.where({ "$createdBy.account": this.accountId }),
       ),
       recoveryRootId === undefined
         ? undefined
-        : tx.allSettledForE2ee(
+        : tx.readAccepted(
             this.tables.__e2ee_recovery_deliveries.where({
               "$createdBy.account": this.accountId,
               rootId: recoveryRootId,
@@ -218,11 +236,11 @@ export class DeviceApproval {
       approvals: approvals.rows,
       deliveries: deliveries.rows,
       order: {
-        successors: positions(successors.settlements),
-        challenges: positions(challenges.settlements),
-        requests: positions(requests.settlements),
-        proofs: positions(proofs.settlements),
-        approvals: positions(approvals.settlements),
+        successors: positions(successors),
+        challenges: positions(challenges),
+        requests: positions(requests),
+        proofs: positions(proofs),
+        approvals: positions(approvals),
       },
     };
   }
@@ -256,10 +274,8 @@ export class DeviceApproval {
     this.snapshotPrefetched = true;
   }
 
-  private async snapshot(transaction?: E2eeHistoryReader, recoveryRootId?: string) {
+  private async snapshot(transaction?: AcceptedDeviceTransactionScope, recoveryRootId?: string) {
     if (transaction) return this.readSnapshot(transaction, recoveryRootId);
-    if (await this.db.e2eeIsExplicitlyOffline())
-      return observeE2eeHistory(this.db, (reader) => this.readSnapshot(reader, recoveryRootId));
     // ponytail: scan this account's history; index per-device history if it grows large.
     for (let attempt = 0; ; attempt++) {
       try {
@@ -273,20 +289,12 @@ export class DeviceApproval {
             tier: "remote",
           });
         }
-        // Private recovery envelopes are needed only when opening recovery
-        // material. Public recovery roots remain in every authority snapshot.
-        if (recoveryRootId !== undefined)
-          await this.db.all(
-            this.tables.__e2ee_recovery_deliveries.where({
-              "$createdBy.account": this.accountId,
-              rootId: recoveryRootId,
-            }),
-            { tier: "remote" },
-          );
-        const read = await serializableE2eeTransaction(this.db, (tx) =>
+        // Private recovery envelopes are requested only for the selected root;
+        // the authority batch supplies their complete same-cut coverage.
+        const read = await acceptedDeviceTransaction(this.db, (tx) =>
           this.readSnapshot(tx, recoveryRootId),
         );
-        const snapshot = await read.wait({ tier: "global" });
+        const snapshot = await read.wait();
         this.assertOpen();
         if (!snapshot.identity) throw new Error("Missing accepted E2EE account identity");
         return { ...snapshot, identity: snapshot.identity };
@@ -355,7 +363,7 @@ export class DeviceApproval {
   }
 
   private async currentSnapshot(
-    transaction?: E2eeHistoryReader,
+    transaction?: AcceptedDeviceTransactionScope,
     recoveryRootId?: string,
   ): Promise<EpochSnapshot> {
     const raw = await this.snapshot(transaction, recoveryRootId);
@@ -372,7 +380,7 @@ export class DeviceApproval {
       this.application,
       this.signer,
     );
-    const publicSuccessorPositions = positions(raw.publicHistory.successors.settlements);
+    const publicSuccessorPositions = positions(raw.publicHistory.successors);
     let view: EpochSnapshot = {
       ...raw,
       publicState,
@@ -543,7 +551,7 @@ export class DeviceApproval {
   ): Promise<Set<string>> {
     const active = new Set(snapshot.baseMembers);
     const accepted = new Set<string>();
-    const publicPositions = positions(snapshot.publicHistory.approvals.settlements);
+    const publicPositions = positions(snapshot.publicHistory.approvals);
     // Grants confer membership at their authority position, not at key delivery.
     const ordered = [...snapshot.approvals].sort((a, b) =>
       comparePosition(snapshot.order.approvals.get(a.id)!, snapshot.order.approvals.get(b.id)!),
@@ -753,13 +761,12 @@ export class DeviceApproval {
   /** Supplied readers never start a nested handshake write.
    * Authority transactions require global acceptance; observations prove only retained history.
    */
-  async deviceStates(transaction?: E2eeHistoryReader) {
-    // A supplied snapshot is independent of the background online responder.
-    // Keep its error pending for an explicit device operation, not local replay.
+  async deviceStates(transaction?: AcceptedDeviceTransactionScope) {
+    // A genuine caller-owned accepted snapshot is independent of the background
+    // online responder. Preserve its error for the next explicit device operation.
     if (!transaction) this.throwBackgroundError();
     const snapshot = await this.currentSnapshot(transaction);
-    const offline = await this.db.e2eeIsExplicitlyOffline();
-    for (const challenge of transaction || offline ? [] : snapshot.challenges) {
+    for (const challenge of transaction ? [] : snapshot.challenges) {
       if (
         challenge.deviceId === this.deviceId &&
         !this.responding.has(challenge.id) &&
@@ -941,8 +948,10 @@ export class DeviceApproval {
       } else if (!snapshot.publicState.recoveryRoots.some((root) => root.id === targetId)) {
         throw new Error("Unknown or inactive E2EE recovery root");
       }
-      const proposal = await serializableE2eeTransaction(this.db, async (tx) => {
-        const existing = await tx.all(this.tables.__e2ee_account_successors, { tier: "remote" });
+      const proposal = await acceptedDeviceTransaction(this.db, async (tx) => {
+        // Revalidate the complete account scope through the authority batch.
+        const covered = await this.readSnapshot(tx);
+        const existing = covered.successors;
         this.assertOpen();
         if (
           existing.length !== snapshot.successors.length ||
@@ -950,13 +959,13 @@ export class DeviceApproval {
         )
           throw new Error("Stale E2EE predecessor");
         // Predicate reads bind the complete immutable approval revision to acceptance.
-        const observed = await Promise.all([
-          tx.all(this.tables.__e2ee_device_requests, { tier: "remote" }),
-          tx.all(this.tables.__e2ee_device_challenges, { tier: "remote" }),
-          tx.all(this.tables.__e2ee_device_proofs, { tier: "remote" }),
-          tx.all(this.tables.__e2ee_device_approvals, { tier: "remote" }),
-          tx.all(this.tables.__e2ee_device_deliveries, { tier: "remote" }),
-        ]);
+        const observed = [
+          covered.requests,
+          covered.challenges,
+          covered.proofs,
+          covered.approvals,
+          covered.deliveries,
+        ];
         this.assertOpen();
         const expected = [
           snapshot.requests,
@@ -968,19 +977,12 @@ export class DeviceApproval {
         const ids = (rows: { id: string }[]) => JSON.stringify(rows.map((row) => row.id).sort());
         if (observed.some((rows, i) => ids(rows) !== ids(expected[i]!)))
           throw new Error("Stale E2EE membership revision");
-        const recoveryRoots = await tx.all(
-          this.tables.__e2ee_recovery_roots.where({ accountId: this.accountId }),
-          { tier: "remote" },
-        );
+        const recoveryRoots = covered.publicHistory.recovery.rows;
         this.assertOpen();
         if (ids(recoveryRoots) !== ids(snapshot.publicHistory.recovery.rows))
           throw new Error("Stale E2EE recovery revision");
-        const publicApprovals = await tx.all(
-          this.tables.__e2ee_public_device_approvals.where({
-            accountId: this.accountId,
-            epochId: snapshot.identity.epochId,
-          }),
-          { tier: "remote" },
+        const publicApprovals = covered.publicHistory.approvals.rows.filter(
+          (approval) => approval.epochId === snapshot.identity.epochId,
         );
         this.assertOpen();
         const nextSecret = runtimeRandomBytes(32);
@@ -1093,7 +1095,7 @@ export class DeviceApproval {
           nextSecret.fill(0);
         }
       });
-      const accepted = await proposal.wait({ tier: "global" });
+      const accepted = await proposal.wait();
       if ((await this.currentSnapshot()).successor?.id !== accepted.id)
         throw new Error("Stale E2EE successor proposal");
       this.assertOpen();
@@ -1334,7 +1336,7 @@ export class DeviceApproval {
       const author = device;
       recoverySigner = await this.signer.createKeyPair();
       const signing = recoverySigner;
-      const proposal = await serializableE2eeTransaction(this.db, async (tx) => {
+      const proposal = await acceptedDeviceTransaction(this.db, async (tx) => {
         const snapshot = await this.currentSnapshot(tx);
         if (!snapshot.publicState.active.has(this.deviceId))
           throw new Error("Recovery creation requires an active device");
@@ -1384,7 +1386,7 @@ export class DeviceApproval {
           secret.fill(0);
         }
       });
-      const result = await proposal.wait({ tier: "global" });
+      const result = await proposal.wait();
       this.assertOpen();
       // The ordinary insert policy resolves an already accepted recovery root.
       // Keep the encrypted delivery local until that root's global wait succeeds.

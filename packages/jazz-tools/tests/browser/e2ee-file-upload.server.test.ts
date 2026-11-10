@@ -9,21 +9,24 @@ import {
   type StreamingWritePlan,
 } from "jazz-tools";
 import { deploy } from "../../src/dev/catalogue.js";
-import { getJazzServerInfo, stopJazzServer } from "./testing-server.js";
+import { getJazzServerInfo, startJazzApp, stopJazzServer } from "./testing-server.js";
 
 it("uploads and replaces encrypted files through the public package in Chromium", async () => {
-  const server = await getJazzServerInfo(`e2ee-file-upload-${crypto.randomUUID()}`);
-  const app = s.defineApp({
-    projects: s.table({ title: s.string() }, {}),
-    files: s
-      .table(
-        { projectId: s.uuid(), payload: s.bytes(), name: s.string() },
-        {
-          project: s.rel("projects", "projectId"),
-        },
-      )
-      .encrypted({ space: "projectId", columns: ["payload", "name"] }),
-  });
+  let server = await getJazzServerInfo(`e2ee-file-upload-${crypto.randomUUID()}`);
+  const app = s.defineApp(
+    {
+      projects: s.table({ title: s.string() }, {}),
+      files: s
+        .table(
+          { projectId: s.uuid(), payload: s.bytes(), name: s.string() },
+          {
+            project: s.rel("projects", "projectId"),
+          },
+        )
+        .encrypted({ space: "projectId", columns: ["payload", "name"] }),
+    },
+    { migrations: "none" },
+  );
   const permissions = definePermissions(app, ({ policy, session }) => {
     policy.projects.allowRead.always();
     policy.projects.allowInsert.always();
@@ -53,6 +56,7 @@ it("uploads and replaces encrypted files through the public package in Chromium"
   });
   try {
     await deploy({ ...server, schema: app, permissions });
+    server = await startJazzApp(server, { schema: app, permissions });
     for (const store of stores) {
       let accountState: string | null = null;
       const manager = await createAccountManager({

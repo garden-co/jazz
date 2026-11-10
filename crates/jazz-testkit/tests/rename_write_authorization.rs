@@ -106,17 +106,24 @@ fn open_writer(
     schema: JazzSchema,
     table: &str,
 ) -> (Db, jazz::db::Upstream, jazz::db::SubscriptionStream) {
-    let writer = block_on(Db::open(DbConfig::new(
-        schema,
-        DbIdentity {
-            node: node(byte),
-            author,
-        },
-    )))
+    // The app ships v1, v2 and the rename between them (SPEC 10.7).
+    let v1 = SchemaVersion::new(v1_schema());
+    let v2 = SchemaVersion::new(v2_schema());
+    let lens = rename_lens(&v1, &v2);
+    let writer = block_on(Db::open(
+        DbConfig::new(
+            schema,
+            DbIdentity {
+                node: node(byte),
+                author,
+            },
+        )
+        .with_migrations(vec![v1.schema, v2.schema], vec![lens]),
+    ))
     .expect("open writer");
     let (client_side, authority_side) = duplex();
     let upstream = block_on(writer.connect_upstream(client_side));
-    authority.accept_subscriber(authority_side, author);
+    authority.accept_subscriber(authority_side, author).unwrap();
     let query = writer
         .prepare_query(&Query::from(table))
         .expect("prepare writer query");
@@ -553,20 +560,40 @@ async fn activate_legacy_fixture(
     }
     let runtime = server.server_state().runtime().unwrap();
     let revision = runtime
-        .trusted_catalogue_snapshot_for_test()
+        .catalogue()
         .await
         .unwrap()
-        .current_write_schema
-        .revision
+        .head()
+        .map_or(0, |head| head.revision)
         + 1;
     runtime
         .activate_schema(
             revision,
             jazz::schema::JazzSchema::new(&source).unwrap(),
-            permissions,
+            permissions.clone(),
         )
         .await
         .unwrap();
+    // Sessions are pinned to a published bundle, as createJazz pins them:
+    // publish this schema's permissions as one, for the clients made next.
+    runtime
+        .apply_catalogue(jazz::catalogue::CatalogueChange {
+            put: jazz::catalogue::CataloguePut {
+                bundles: vec![(
+                    SchemaHash::compute(schema),
+                    permissions.into_iter().collect(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis() as u64,
+                )],
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    server.refresh_catalogue();
 }
 
 /// A sibling path drops `a` before adding it again; the merged view uses its

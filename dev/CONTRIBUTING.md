@@ -4,7 +4,7 @@
 
 ### sccache (strongly recommended)
 
-[sccache](https://github.com/mozilla/sccache) caches compiler invocations across feature sets, profiles, and branches. Without it, crates with heavy C dependencies (rocksdb) recompile on every build.
+[sccache](https://github.com/mozilla/sccache) caches compiler invocations across feature sets, profiles, and branches. Without it, crates with C dependencies (the bundled SQLite) recompile on every build.
 
 ```sh
 cargo install sccache   # or: brew install sccache
@@ -16,22 +16,31 @@ Then add to your shell profile (`~/.zshrc`, `~/.bashrc`, etc.):
 export RUSTC_WRAPPER=sccache
 ```
 
-### RocksDB build requirements
+### Native build requirements
 
-RocksDB is compiled from source on the first build (cached by `sccache` afterwards).
-This requires a working C/C++ toolchain and `libclang` for `bindgen`:
+The bundled SQLite is compiled from source on the first build (cached by `sccache` afterwards).
+This requires a working C compiler:
 
 - macOS: `xcode-select --install` is enough.
-- Linux: install `libclang-dev` (Debian/Ubuntu) or `clang-devel` (Fedora).
+- Linux: install `build-essential` (Debian/Ubuntu) or `gcc` (Fedora).
+
+### WASM builds on macOS
+
+Install Homebrew LLVM with `brew install llvm`. The WASM build script selects
+`llvm-ar` from `PATH` or Homebrew's LLVM installation automatically; no shell
+`PATH` changes are needed. Apple's archive tools cannot bundle SQLite's WASM
+object files. This selection applies only to WASM builds, leaving native builds
+unchanged. Explicit `AR_wasm32-unknown-unknown` and `AR_wasm32_unknown_unknown`
+environment overrides take precedence.
 
 ## API documentation
 
 Keep API documentation attached to an authoritative, maintained source rather
 than committing a point-in-time export catalogue. The public application guide
 is in `docs/content/docs/`; its runnable examples are the adjacent
-`examples/docs/` projects. The new-core Rust contract is
-`crates/jazz/SPEC/13_db_api.md`, with the engine and incremental-maintenance
-contracts in `crates/jazz/SPEC/` and `crates/groove/SPEC/`.
+`examples/docs/` projects. The Rust contract is
+`crates/jazz/SPEC/13_db_api.md`, with the other engine contracts in
+`crates/jazz/SPEC/`.
 
 For a package's exact TypeScript surface, use its `package.json` export map and
 the emitted declaration files for the release being consumed. For Rust, use the
@@ -77,6 +86,29 @@ publishes its catalogue through the real deployment interface. Keep filesystem
 schema-loading coverage in the CLI and loader suites rather than repeating it
 in adapter setup.
 
+### TypeScript correctness partition
+
+```sh
+node dev/gates/local-ci-equivalent.mjs --ci-partition typescript
+pnpm --filter jazz-tools typecheck:react-native
+```
+
+The partition prepares and verifies sealed native artifacts before building
+and testing their consumers. Package tests run with three Turbo tasks; Jazz
+Tools retains its eight-worker Node cap and four-worker Chromium cap.
+
+`build:test` always validates the DSL fixture, runs the test compiler and checks
+public interface types. Its test compiler reuses
+`node_modules/.cache/tsc/tests.tsbuildinfo`; CI restores compatible state and
+TypeScript invalidates changed source, compiler options and native declarations.
+Keep cache options on the command, not in `tsconfig.tests.json`: generated
+migration fixtures extend that configuration and must not share package state.
+
+The `test` target owns the React Native/Expo compile-only contract, so
+`build:test` does not repeat it. The standalone typecheck remains available.
+Compare the complete partition as well as focused phases before claiming a
+performance improvement.
+
 ### Focus one Rust test safely
 
 `dev/t` first asks Cargo for the test inventory using the same target and
@@ -84,13 +116,9 @@ features it will run. A filter must resolve to exactly one inventory entry; the
 wrapper then invokes that canonical name with Cargo's `--exact`. It refuses an
 empty or ambiguous selection before a test runs, prints the selected binary,
 feature and cache context, and separately reports inventory/compile and test-run
-elapsed time. This is useful for files under the `jazz-node` crate's
-`src/node/tests/`: their test names are wrapped as `node::tests::harness::…`
-(rather than retaining their source file in the module path), but a distinctive
-test-name suffix is enough for `dev/t -p jazz-node` to discover and run the
-canonical name. A filter that already starts with `node::` or `peer::` selects
-`jazz-node` without `-p`, and one starting with `db::`, `binding_codec::`,
-`result_tree::` or `foreground_node_lease::` selects `jazz-db`.
+elapsed time. A distinctive test-name suffix is enough to discover and run the
+canonical name. A filter that starts with `db::` or `binding_codec::` selects
+`jazz-db` without `-p`.
 
 ```sh
 # Default: Jazz library tests, substring matching.
@@ -99,11 +127,11 @@ dev/t subscription::tests::reopens
 # Fully-qualified exact library test.
 dev/t --exact db::tests::round_trips
 
-# A node test: resolve its canonical harness path from the unique suffix.
-dev/t -p jazz-node query_rows_at_lowers_filters_against_historical_current_rows
+# A layer-crate test: resolve its canonical path from the unique suffix.
+dev/t -p jazz-types row_author_rejects_noncanonical_system_origin
 
 # An integration target is explicit, so Cargo cannot search an unintended bin.
-dev/t --test incremental_delivery_canary maintained_relation -- --nocapture
+dev/t --test integration include_live::renaming_a_sender -- --nocapture
 ```
 
 Run `pnpm test:focused-rust` to test the wrapper with a mocked Cargo inventory.
@@ -130,19 +158,6 @@ node dev/gates/run-rust-tests.mjs --timeout-seconds 900 -- -p jazz
 The Nextest `jazz` profile reports a test slow after 60 seconds and terminates
 it one minute later. Hash partitions are deterministic and do not overlap for a
 fixed test inventory; keep the shard count identical across all CI shards.
-
-### TypeScript consumer execution
-
-Run `pnpm build:correctness-artifacts`, then `pnpm test:typescript-consumers`.
-The CI TypeScript partition prepares source-admitted NAPI/WASM artifacts and runs
-the complete bounded consumer suites and browser storage-compatibility corpus.
-The exhaustive Rust workspace target check remains in the lint partition.
-The TypeScript job's 90-minute outer allowance does not change individual test
-deadlines, consumer concurrency or the requirement to report every failing test.
-
-Authority-backed test reads use `tier: "remote"`; write acceptance uses
-`wait({ tier: "global" })`. The removed `"edge"` read tier must appear only in
-tests that explicitly exercise its rejection.
 
 ### Snapshot testing with insta in rust
 

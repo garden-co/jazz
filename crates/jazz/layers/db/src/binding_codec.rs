@@ -168,6 +168,9 @@ pub struct SubscriptionDeltaPayload<'a> {
     pub updated_indices: Vec<u64>,
     /// Authoritative pre-frame position for each removed row.
     pub removed_indices: Vec<u64>,
+    /// For each updated row, the opted-in columns' splices from its
+    /// previous result ([`SubscriptionOutputRow::splices`]).
+    pub updated_splices: Vec<Vec<(String, Vec<crate::db::LargeValueDeltaSplice>)>>,
 }
 
 /// Removed-row wire identity.
@@ -199,8 +202,9 @@ fn occurrence(
     row: RowUuid,
     version: Option<crate::values::SourceVersion>,
     joined: &[crate::values::JoinedRow],
+    union_arm: Option<&str>,
 ) -> ResultKey {
-    crate::values::occurrence_key(row, version, joined)
+    crate::values::occurrence_key(row, version, joined, union_arm)
 }
 
 /// Encode an incremental subscription delta with aligned occurrence sidecars.
@@ -226,15 +230,36 @@ pub fn encode_subscription_delta(
             .collect(),
         added_occurrence_keys: added
             .iter()
-            .map(|row| occurrence(row.row_uuid(), row.root_version(), row.joined_rows()))
+            .map(|row| {
+                occurrence(
+                    row.row_uuid(),
+                    row.root_version(),
+                    row.joined_rows(),
+                    row.union_arm(),
+                )
+            })
             .collect(),
         updated_occurrence_keys: updated
             .iter()
-            .map(|row| occurrence(row.row_uuid(), row.root_version(), row.joined_rows()))
+            .map(|row| {
+                occurrence(
+                    row.row_uuid(),
+                    row.root_version(),
+                    row.joined_rows(),
+                    row.union_arm(),
+                )
+            })
             .collect(),
         removed_occurrence_keys: removed
             .iter()
-            .map(|row| occurrence(row.row_uuid, row.version, &row.joined))
+            .map(|row| {
+                occurrence(
+                    row.row_uuid,
+                    row.version,
+                    &row.joined,
+                    row.union_arm.as_deref(),
+                )
+            })
             .collect(),
         added_indices: added.iter().map(|row| row.index as u64).collect(),
         updated_previous_indices: updated
@@ -243,6 +268,7 @@ pub fn encode_subscription_delta(
             .collect(),
         updated_indices: updated.iter().map(|row| row.index as u64).collect(),
         removed_indices: removed.iter().map(|row| row.index as u64).collect(),
+        updated_splices: updated.iter().map(|row| row.splices.clone()).collect(),
     })
 }
 
@@ -271,11 +297,58 @@ pub fn row_record(row: &CurrentRow) -> Result<OwnedRecord, postcard::Error> {
     Ok(OwnedRecord::new(raw, descriptor))
 }
 
+/// [`row_record`] as a host reads it. History metadata (reserved names,
+/// read only from `history.<table>`) is converted only here, after the
+/// read: `$transactionId` becomes the public transaction id a write handle
+/// reports, and `$acceptedAt` its HLC's milliseconds. Ordering and
+/// occurrence identity keep the full values.
+fn published_record(row: &CurrentRow) -> Result<OwnedRecord, postcard::Error> {
+    use crate::schema::history::HistoryMetadataColumn;
+    use crate::schema::history::{ACCEPTED_AT_COLUMN, TRANSACTION_ID_COLUMN};
+    let record = row_record(row)?;
+    if !row
+        .cells()
+        .any(|(name, _)| HistoryMetadataColumn::contains(name))
+    {
+        return Ok(record);
+    }
+    let mut fields = Vec::with_capacity(record.descriptor().fields().len());
+    let mut values = Vec::with_capacity(fields.capacity());
+    for ((name, value), field) in row.cells().zip(record.descriptor().fields()) {
+        let value = value.cloned().unwrap_or(Value::Nullable(None));
+        let (ty, value) = match (name, value) {
+            (TRANSACTION_ID_COLUMN, Value::Tuple(parts)) => {
+                let [Value::U64(time), Value::Uuid(node)] = parts.as_slice() else {
+                    return Err(postcard::Error::SerdeSerCustom);
+                };
+                let tx = jazz_model::tx::TxId::new(
+                    jazz_types::time::TxTime(*time),
+                    jazz_types::ids::NodeUuid(*node),
+                );
+                let id = jazz_model::model::transaction::TransactionId::from_committed_tx(tx);
+                (ValueType::String, Value::String(id.to_string()))
+            }
+            (ACCEPTED_AT_COLUMN, Value::U64(hlc)) => (
+                ValueType::U64,
+                Value::U64(jazz_types::time::GlobalTime(hlc).physical_ms()),
+            ),
+            (_, value) => (field.value_type.clone(), value),
+        };
+        fields.push((name.to_owned(), ty));
+        values.push(value);
+    }
+    let descriptor = RecordDescriptor::new(fields);
+    let raw = descriptor
+        .create(&values)
+        .map_err(|_| postcard::Error::SerdeSerCustom)?;
+    Ok(OwnedRecord::new(raw, descriptor))
+}
+
 /// Group only adjacent rows with equal table and tagged descriptor.
 pub fn row_batches(rows: &[CurrentRow]) -> Result<Vec<RowBatch<'_>>, postcard::Error> {
     let mut batches: Vec<RowBatch<'_>> = Vec::new();
     for row in rows {
-        let record = row_record(row)?;
+        let record = published_record(row)?;
         let descriptor = row
             .cells()
             .zip(record.descriptor().fields())
@@ -484,7 +557,8 @@ mod tests {
         CurrentRow {
             table: Arc::from("todos"),
             id: RowUuid::from_bytes([id; 16]),
-            seq: id as u64,
+            seq: crate::db::Pos::at(id as u64),
+            writer: None,
             deleted: false,
             cells: Arc::new(vec![
                 (
@@ -496,6 +570,7 @@ mod tests {
             types: Arc::from([ValueType::String, ValueType::Bool]),
             joined: Arc::from([]),
             version: None,
+            union_arm: None,
         }
     }
 
@@ -570,6 +645,7 @@ mod tests {
                 row: row.clone(),
                 previous_index: None,
                 index: 0,
+                splices: Vec::new(),
             }],
             &[],
             &[RemovedRow {
@@ -577,6 +653,7 @@ mod tests {
                 row_uuid: RowUuid::from_bytes([8; 16]),
                 joined: Vec::new(),
                 version: None,
+                union_arm: None,
                 index: 1,
             }],
         )

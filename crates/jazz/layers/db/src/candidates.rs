@@ -2,10 +2,10 @@
 //! checks. SQLite supplies atomic absence and the complete serializable unit;
 //! the proof is a bounded least fixed point, followed by post-state revalidation.
 use super::*;
-use crate::compile::CandidateEvidence;
+use crate::compile::{CandidateEvidence, PermissionEvidence};
 
 // Connection-local scratch data, never persisted or sent to another runtime.
-pub(super) const TEMP_DDL: &str = "CREATE TEMP TABLE IF NOT EXISTS _jazz_candidate_created_v1(t TEXT NOT NULL,id BLOB NOT NULL,PRIMARY KEY(t,id)) WITHOUT ROWID; CREATE TEMP TABLE IF NOT EXISTS _jazz_candidate_qualified_v1(t TEXT NOT NULL,id BLOB NOT NULL,PRIMARY KEY(t,id)) WITHOUT ROWID;";
+pub(super) const TEMP_DDL: &str = "CREATE TEMP TABLE IF NOT EXISTS _jazz_candidate_created_v1(t TEXT NOT NULL,id BLOB NOT NULL,PRIMARY KEY(t,id)) WITHOUT ROWID; CREATE TEMP TABLE IF NOT EXISTS _jazz_candidate_qualified_v1(t TEXT NOT NULL,id BLOB NOT NULL,PRIMARY KEY(t,id)) WITHOUT ROWID; CREATE TEMP TABLE IF NOT EXISTS _jazz_candidate_lv_v2(slot INTEGER NOT NULL,cell INTEGER NOT NULL,v BLOB,PRIMARY KEY(slot,cell)) WITHOUT ROWID;";
 const MAX_PROOF_WORK: usize = 16_384;
 type Coordinate = (String, RowUuid);
 
@@ -31,11 +31,63 @@ fn charge(budget: &mut usize, cost: usize) -> Result<(), Error> {
     Ok(())
 }
 
+fn candidate_root_target(op: &StagedOp) -> bool {
+    match op {
+        StagedOp::Insert(.., opts) => matches!(opts.target, ExactWriteTarget::Root),
+        StagedOp::Restore(.., opts) => matches!(opts.target, ExactWriteTarget::Root),
+        StagedOp::Update(.., opts) => matches!(opts.target, WriteTarget::Root),
+        StagedOp::Upsert(.., opts) => matches!(opts.target, WriteTarget::Root),
+        StagedOp::Delete(.., opts) => matches!(opts.target, WriteTarget::Root),
+        StagedOp::Move(..) => false,
+    }
+}
+
 impl Inner {
+    /// Keep accepted-only policy evidence during a cached overlay read, just
+    /// as during prefix replay. Never qualify staged witnesses or change an
+    /// ordinary own-client read or an unmarked batch.
+    pub(super) fn with_candidate_read_evidence<T>(
+        &mut self,
+        marked_batch: bool,
+        accepted: Pos,
+        publication: sync::Rank,
+        read: impl FnOnce(&mut Self) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        if self.client.is_some() || !marked_batch {
+            return read(self);
+        }
+        let previous = self.candidate_read_evidence.replace(CandidateEvidence {
+            accepted,
+            publication,
+            post: false,
+        });
+        let result = read(self);
+        self.candidate_read_evidence = previous;
+        result
+    }
+
+    /// Physical absence is only an INSERT-witness eligibility fence. It grants
+    /// no read/write authority: the normal policy/read-set checks still decide
+    /// the operation. Like the former MAX(_seq) lookup, any current branch or
+    /// tombstone makes the coordinate existing, regardless of policy visibility.
+    fn candidate_coordinate_absent(&self, table: &str, row: RowUuid) -> Result<bool, Error> {
+        self.conn
+            .cached_row(
+                &format!(
+                    "SELECT NOT EXISTS(SELECT 1 FROM {} WHERE id=?1)",
+                    quote(table)
+                ),
+                [row.as_bytes().as_slice()],
+                |r| r.get(0),
+            )
+            .map_err(storage)
+    }
+
     /// Capture the exact policy and root image at the normal check site. The
     /// executor resolves its dependencies only after the complete unit exists.
     pub(super) fn defer_candidate_check(
         &self,
+        schema: &Schema,
         table: &Table,
         row: RowUuid,
         key: &[u8],
@@ -48,7 +100,7 @@ impl Inner {
         let mut statement = self
             .conn
             .prepare_cached(&format!(
-                "SELECT * FROM {} WHERE id=?1 AND _b=?2",
+                "SELECT * FROM {} WHERE id=?1 AND _branch=?2",
                 quote(&table.stored)
             ))
             .map_err(storage)?;
@@ -74,7 +126,7 @@ impl Inner {
             ));
         }
         checks.push(DeferredCheck {
-            schema: self.schema.clone(),
+            schema: Rc::new(schema.clone()),
             table: table.name.clone(),
             coordinate: (table.stored.clone(), row),
             author,
@@ -82,6 +134,114 @@ impl Inner {
             root,
         });
         Ok(true)
+    }
+
+    /// Callback transactions are mergeable. They collect exact check images
+    /// until the callback ends but never promote new rows to witnesses.
+    pub(super) fn begin_candidate_callback(&mut self, seq: u64) -> Result<(), Error> {
+        // Db::inner selects this executing handle's actual governing schema.
+        // An unrelated admitted marked view cannot change ordinary callbacks.
+        if self.client.is_some() || !marked(&self.schema) {
+            return Ok(());
+        }
+        self.conn
+            .execute_batch(
+                "DELETE FROM _jazz_candidate_created_v1; DELETE FROM _jazz_candidate_qualified_v1;",
+            )
+            .map_err(storage)?;
+        *self.candidate_checks.borrow_mut() = Some(Vec::new());
+        self.candidate_read_evidence = Some(CandidateEvidence {
+            accepted: self.own_pos(self.seq),
+            publication: self.own_rank(seq),
+            post: false,
+        });
+        self.candidate_callback_budget = Some(MAX_PROOF_WORK);
+        Ok(())
+    }
+
+    pub(super) fn abandon_candidate_callback(&mut self) {
+        if self.candidate_callback_budget.take().is_some() {
+            self.candidate_checks.borrow_mut().take();
+            self.candidate_read_evidence = None;
+        }
+    }
+
+    pub(super) fn finish_candidate_callback(&mut self) -> Result<(), Error> {
+        let Some(mut budget) = self.candidate_callback_budget.take() else {
+            return Ok(());
+        };
+        let checks = self
+            .candidate_checks
+            .borrow_mut()
+            .take()
+            .expect("callback collector");
+        let scope = self.candidate_read_evidence.take().expect("callback scope");
+        let eligible = BTreeSet::new();
+        self.candidate_fixed_point(&checks, &eligible, scope, &mut budget)?;
+        self.candidate_fixed_point(
+            &checks,
+            &eligible,
+            CandidateEvidence {
+                post: true,
+                ..scope
+            },
+            &mut budget,
+        )?;
+        self.conn
+            .execute_batch(
+                "DELETE FROM _jazz_candidate_created_v1; DELETE FROM _jazz_candidate_qualified_v1;",
+            )
+            .map_err(storage)?;
+        Ok(())
+    }
+
+    fn candidate_callback_step<T>(
+        &mut self,
+        ops: &[(Rc<Schema>, StagedOp)],
+        apply: impl FnOnce(&mut Self) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        for (schema, op) in ops {
+            charge(
+                self.candidate_callback_budget
+                    .as_mut()
+                    .expect("callback budget"),
+                1,
+            )?;
+            if matches!(op, StagedOp::Move(..)) {
+                return Err(unsupported(
+                    "candidate-created authorization for branch moves",
+                ));
+            }
+            let table = schema.table(op.table())?;
+            if let Some(row) = op.row()
+                && matches!(op, StagedOp::Insert(..) | StagedOp::Upsert(..))
+                && self.candidate_coordinate_absent(&table.stored, row)?
+            {
+                self.conn
+                    .execute(
+                        "INSERT OR IGNORE INTO _jazz_candidate_created_v1(t,id) VALUES(?1,?2)",
+                        rusqlite::params![table.stored, row.as_bytes().as_slice()],
+                    )
+                    .map_err(storage)?;
+            }
+        }
+        let mark = self
+            .candidate_checks
+            .borrow()
+            .as_ref()
+            .expect("callback collector")
+            .len();
+        let result = apply(self);
+        if result.is_err() {
+            // A caller may catch a failed write and keep the callback open.
+            // Its row/scratch savepoint rolls back; its captured checks must too.
+            self.candidate_checks
+                .borrow_mut()
+                .as_mut()
+                .expect("callback collector")
+                .truncate(mark);
+        }
+        result
     }
 
     /// Existing ordinary schemas keep their existing executor. A marked schema
@@ -94,8 +254,30 @@ impl Inner {
         provisional: bool,
         apply: impl FnOnce(&mut Self) -> Result<T, Error>,
     ) -> Result<T, Error> {
-        if self.client.is_some() || !ops.iter().any(|(schema, _)| marked(schema)) {
+        // This opt-in capability supports root targets only, including at
+        // optimistic replica staging. Unmarked schemas retain their existing
+        // branch behavior.
+        if ops.iter().any(|(schema, _)| marked(schema))
+            && ops.iter().any(|(_, op)| !candidate_root_target(op))
+        {
+            return Err(Error::new(
+                ErrorCode::Schema,
+                "creation-aware permission units require root write targets; branch views and moves are unsupported",
+            ));
+        }
+        if self.client.is_some() {
             return apply(self);
+        }
+        if self.candidate_callback_budget.is_some() {
+            return self.candidate_callback_step(ops, apply);
+        }
+        if !ops.iter().any(|(schema, _)| marked(schema)) {
+            return apply(self);
+        }
+        if self.tx.is_some() {
+            return Err(unsupported(
+                "candidate permission schemas introduced during an ordinary callback",
+            ));
         }
         if self.candidate_checks.borrow().is_some() || self.candidate_read_evidence.is_some() {
             return Err(unsupported("nested SQLite candidate authorization units"));
@@ -119,7 +301,7 @@ impl Inner {
             }
             *counts.entry(coordinate.clone()).or_default() += 1;
             if matches!(op, StagedOp::Insert(..) | StagedOp::Upsert(..))
-                && self.newest_seq(&table.stored, row)?.is_none()
+                && self.candidate_coordinate_absent(&table.stored, row)?
             {
                 created.insert(coordinate);
             }
@@ -138,8 +320,8 @@ impl Inner {
                 .map_err(storage)?;
         }
         let scope = CandidateEvidence {
-            accepted: self.seq,
-            publication: seq,
+            accepted: self.own_pos(self.seq),
+            publication: self.own_rank(seq),
             post: false,
         };
         *self.candidate_checks.borrow_mut() = Some(Vec::new());
@@ -262,8 +444,9 @@ impl Inner {
         let table = check.schema.table(&check.table)?;
         let session = self.session(check.author);
         let binding = BTreeMap::new();
-        let mut ctx =
-            Ctx::new(&check.schema, None, &session, &binding).with_candidate_evidence(Some(scope));
+        let mut ctx = Ctx::new(&check.schema, None, &session, &binding)
+            .with_catalogue(self)
+            .with_candidate_evidence(Some(scope));
         let condition = ctx.policy_clause(check.clause.as_ref(), table, "a", &session)?;
         // Generated SQL and preparation work are bounded too, not just the
         // number of passes through the candidate graph.
@@ -296,8 +479,10 @@ impl Inner {
                     schema,
                     governing,
                     &check.root,
+                    None,
+                    &session,
                     clause,
-                    scope,
+                    scope.into(),
                     crate::compile::DEFAULT_INHERITS_DEPTH,
                     budget,
                     &mut inputs,
@@ -305,26 +490,30 @@ impl Inner {
             }
             inputs
         };
-        let value: i64 = self.with_candidate_preps(&preps, &inputs, || {
-            self.conn
-                .query_row(&sql, params_from_iter(params.iter()), |r| r.get(0))
-                .map_err(storage)
+        let value: i64 = self.with_candidate_sql_budget(budget, || {
+            self.with_candidate_preps(&preps, &inputs, || {
+                self.conn
+                    .query_row(&sql, params_from_iter(params.iter()), |r| r.get(0))
+                    .map_err(storage)
+            })
         })?;
         Ok(value != 0)
     }
 }
 
-type PolicyInput = (String, Vec<(String, Sql)>);
+pub(super) type PolicyInput = (String, Vec<(String, Sql)>);
 
 impl Inner {
     #[allow(clippy::too_many_arguments)]
-    fn candidate_inputs(
+    pub(super) fn candidate_inputs(
         &self,
         schema: &Schema,
         table: &Table,
         root: &[(String, Sql)],
+        outer: Option<(&Table, &[(String, Sql)])>,
+        session: &Session,
         policy: &PolicyExpr,
-        scope: CandidateEvidence,
+        scope: PermissionEvidence,
         depth: usize,
         budget: &mut usize,
         inputs: &mut Vec<PolicyInput>,
@@ -336,13 +525,16 @@ impl Inner {
         let (target, column, parent, condition, created, next_depth) = match policy {
             PolicyExpr::And(items) | PolicyExpr::Or(items) => {
                 for item in items {
-                    self.candidate_inputs(schema, table, root, item, scope, depth, budget, inputs)?;
+                    self.candidate_inputs(
+                        schema, table, root, outer, session, item, scope, depth, budget, inputs,
+                    )?;
                 }
                 return Ok(());
             }
             PolicyExpr::Not(item) => {
-                return self
-                    .candidate_inputs(schema, table, root, item, scope, depth, budget, inputs);
+                return self.candidate_inputs(
+                    schema, table, root, outer, session, item, scope, depth, budget, inputs,
+                );
             }
             PolicyExpr::Exists {
                 table: target,
@@ -354,7 +546,7 @@ impl Inner {
             } => {
                 let target = schema.table(target)?;
                 let (column,parent)=crate::compile::candidate_correlation(condition,table,target)
-                    .ok_or_else(||unsupported("large-value candidate permission dependencies without a scalar declared-reference correlation"))?;
+                    .ok_or_else(||unsupported("large-value candidate permission dependencies without a scalar declared-reference correlation or indexed UUID equality"))?;
                 (
                     target,
                     column,
@@ -373,18 +565,13 @@ impl Inner {
                 if depth == 0 {
                     return Ok(());
                 }
-                if crate::compile::is_array(table, via_column) {
-                    return Err(unsupported(
-                        "array-reference inheritance in candidate authorization units",
-                    ));
-                }
                 let name = table.references.get(via_column).ok_or_else(|| {
                     unsupported(
                         "inheritance without a declared reference in candidate authorization units",
                     )
                 })?;
                 let target = schema.table(name)?;
-                let Some(condition) = target.policy(*operation) else {
+                let Some(condition) = target.inherited_policy(*operation) else {
                     return Ok(());
                 };
                 (
@@ -407,12 +594,7 @@ impl Inner {
                     return Ok(());
                 }
                 let target = schema.table(source_table)?;
-                if crate::compile::is_array(target, via_column) {
-                    return Err(unsupported(
-                        "array-reference inheritance in candidate authorization units",
-                    ));
-                }
-                let Some(condition) = target.policy(*operation) else {
+                let Some(condition) = target.inherited_policy(*operation) else {
                     return Ok(());
                 };
                 (
@@ -424,10 +606,43 @@ impl Inner {
                     depth - 1,
                 )
             }
-            PolicyExpr::ExistsRel { .. } => {
-                return Err(unsupported(
-                    "large-value candidate permission preprocessing through relation helpers",
-                ));
+            PolicyExpr::ExistsRel { rel } => {
+                let (table, root) = outer.unwrap_or((table, root));
+                let binding = BTreeMap::new();
+                let (queries, params) = Ctx::new(schema, None, session, &binding)
+                    .with_catalogue(self)
+                    .with_permission_evidence(scope)
+                    .candidate_relation_inputs(rel, table, root, session)?;
+                charge(budget, 1 + queries.len() + params.len())?;
+                for (table, sql) in queries {
+                    let sql = format!("{sql} LIMIT {}", *budget + 1);
+                    let found = self.with_candidate_sql_budget(budget, || {
+                        let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
+                        let names = statement
+                            .column_names()
+                            .iter()
+                            .map(|name| (*name).to_owned())
+                            .collect::<Vec<_>>();
+                        statement
+                            .query_map(params_from_iter(params.iter()), |row| {
+                                names
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, name)| {
+                                        row.get::<_, Sql>(i).map(|value| (name.clone(), value))
+                                    })
+                                    .collect::<rusqlite::Result<Vec<_>>>()
+                            })
+                            .map_err(storage)?
+                            .collect::<rusqlite::Result<Vec<_>>>()
+                            .map_err(storage)
+                    })?;
+                    for row in found {
+                        charge(budget, 1 + row.len())?;
+                        inputs.push((table.clone(), row));
+                    }
+                }
+                return Ok(());
             }
             _ => return Ok(()),
         };
@@ -441,85 +656,174 @@ impl Inner {
         if matches!(value, Sql::Null) {
             return Ok(());
         }
-        let claims = Session::default();
-        let binding = BTreeMap::new();
-        let mut ctx =
-            Ctx::new(schema, None, &claims, &binding).with_candidate_evidence(Some(scope));
-        ctx.params.push(value.clone());
-        let bound = format!("?{}", ctx.params.len());
-        let source = ctx.candidate_source(target, created, column, &bound)?;
-        let params = ctx.params;
-        let sql = format!("SELECT * FROM {source} WHERE _del=0 LIMIT {}", *budget + 1);
-        let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
-        let names = statement
-            .column_names()
-            .iter()
-            .map(|name| (*name).to_owned())
-            .collect::<Vec<_>>();
-        let matches = statement
-            .query_map(params_from_iter(params.iter()), |row| {
-                names
-                    .iter()
-                    .enumerate()
-                    .map(|(i, name)| row.get::<_, Sql>(i).map(|v| (name.clone(), v)))
-                    .collect::<Result<Vec<_>, _>>()
-            })
-            .map_err(storage)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(storage)?;
-        drop(statement);
-        for found in matches {
-            charge(budget, 1 + found.len())?;
-            self.candidate_inputs(
-                schema, target, &found, condition, scope, next_depth, budget, inputs,
-            )?;
-            inputs.push((target.stored.clone(), found));
+        let values = if matches!(policy, PolicyExpr::Inherits { .. })
+            && crate::compile::is_array(table, parent)
+        {
+            crate::array_index::members(value)?
+        } else {
+            vec![value.clone()]
+        };
+        charge(budget, values.len())?;
+        for value in values {
+            let claims = Session::default();
+            let binding = BTreeMap::new();
+            let mut ctx = Ctx::new(schema, None, &claims, &binding)
+                .with_catalogue(self)
+                .with_permission_evidence(scope);
+            ctx.params.push(value);
+            let bound = format!("?{}", ctx.params.len());
+            let source = ctx.candidate_source(target, created, column, &bound)?;
+            let params = ctx.params;
+            let sql = format!(
+                "SELECT * FROM {source} WHERE (_state & {STATE_DELETED})=0 LIMIT {}",
+                *budget + 1
+            );
+            let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
+            let names = statement
+                .column_names()
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect::<Vec<_>>();
+            let matches = statement
+                .query_map(params_from_iter(params.iter()), |row| {
+                    names
+                        .iter()
+                        .enumerate()
+                        .map(|(i, name)| row.get::<_, Sql>(i).map(|v| (name.clone(), v)))
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .map_err(storage)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(storage)?;
+            drop(statement);
+            for found in matches {
+                charge(budget, 1 + found.len())?;
+                self.candidate_inputs(
+                    schema,
+                    target,
+                    &found,
+                    matches!(
+                        policy,
+                        PolicyExpr::Exists { .. } | PolicyExpr::ExistsIncludingCreated { .. }
+                    )
+                    .then_some((table, root)),
+                    session,
+                    condition,
+                    scope,
+                    next_depth,
+                    budget,
+                    inputs,
+                )?;
+                inputs.push((target.stored.clone(), found));
+            }
         }
         Ok(())
     }
 
-    fn with_candidate_preps<T>(
+    /// Count VM work as well as Rust proof steps. Recursive relation queries
+    /// can revisit a finite graph many times before their depth bound, so each
+    /// batch of 256 SQLite instructions also consumes one unit of proof budget.
+    pub(super) fn with_candidate_sql_budget<T>(
+        &self,
+        budget: &mut usize,
+        body: impl FnOnce() -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        };
+        let initial = *budget;
+        let counter = Arc::new((AtomicUsize::new(initial), AtomicBool::new(false)));
+        let meter = counter.clone();
+        self.conn
+            .progress_handler(
+                256,
+                Some(move || {
+                    let exhausted = meter
+                        .0
+                        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
+                            left.checked_sub(1)
+                        })
+                        .is_err();
+                    if exhausted {
+                        meter.1.store(true, Ordering::Relaxed);
+                    }
+                    exhausted
+                }),
+            )
+            .map_err(storage)?;
+        // Also remove the callback if a test or host unwinds this call.
+        struct Reset<'a>(&'a rusqlite::Connection);
+        impl Drop for Reset<'_> {
+            fn drop(&mut self) {
+                let _ = self.0.progress_handler(0, None::<fn() -> bool>);
+            }
+        }
+        let reset = Reset(&self.conn);
+        let result = body();
+        drop(reset);
+        charge(budget, initial - counter.0.load(Ordering::Relaxed))?;
+        if counter.1.load(Ordering::Relaxed) {
+            return Err(unsupported(
+                "authorized-created proof exceeds its bounded work or dependency limit (SQL instruction budget)",
+            ));
+        }
+        result
+    }
+
+    pub(super) fn with_candidate_preps<T>(
         &self,
         preps: &[crate::compile::Prep],
         inputs: &[PolicyInput],
         body: impl FnOnce() -> Result<T, Error>,
     ) -> Result<T, Error> {
+        self.with_bounded_preps(preps, inputs, |_| body())
+    }
+
+    /// Prepare comparisons and ordering from an explicit evidence set. The body
+    /// receives whether distinct chunked cells tie on their stored sort prefix.
+    pub(super) fn with_bounded_preps<T>(
+        &self,
+        preps: &[crate::compile::Prep],
+        inputs: &[PolicyInput],
+        body: impl FnOnce(bool) -> Result<T, Error>,
+    ) -> Result<T, Error> {
         if preps.is_empty() {
-            return body();
+            return body(false);
         }
         self.conn
             .execute_batch("SAVEPOINT jazz_candidate_scratch")
             .map_err(storage)?;
         let result = (|| {
+            let mut ties = false;
             for prep in preps {
                 let columns = match prep {
                     crate::compile::Prep::Class { columns, .. } => columns.clone(),
                     crate::compile::Prep::Match { table, column, .. } => {
                         vec![(table.clone(), column.clone())]
                     }
-                    crate::compile::Prep::Rank { .. } => {
-                        return Err(unsupported(
-                            "rank preparations in candidate-created permission proofs",
-                        ));
-                    }
                 };
                 let mut cells = BTreeSet::new();
                 for (table, root) in inputs {
                     for (name, value) in root {
                         if columns.iter().any(|(t, c)| t == table && c == name)
-                            && let Sql::Text(bytes) = value
+                            && let Sql::Integer(cell) = value
                         {
-                            cells.insert(bytes.clone());
+                            cells.insert(*cell);
                         }
                     }
                 }
-                crate::large::answer_cells(&self.conn, &self.chunks, prep, &cells)?;
+                ties |=
+                    crate::large::answer_candidate_cells(&self.conn, &self.chunks, prep, &cells)?;
             }
-            body()
+            body(ties)
         })();
         for prep in preps {
             self.conn
-                .execute("DELETE FROM _jazz_lv_scratch WHERE slot=?1", [prep.slot()])
+                .execute(
+                    "DELETE FROM _jazz_candidate_lv_v2 WHERE slot=?1",
+                    [prep.slot()],
+                )
                 .map_err(storage)?;
         }
         self.conn

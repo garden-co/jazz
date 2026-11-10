@@ -23,9 +23,6 @@ use wasm_bindgen::prelude::*;
 const IDB_VFS: &str = "jazz-idb";
 const OPFS_VFS: &str = "jazz-opfs";
 const OPFS_DIRECTORY: &str = "jazz";
-/// Deleting this never-opened file is queued behind every pending commit,
-/// so its completion is a flush barrier.
-const IDB_BARRIER: &str = "/.jazz-flush-barrier";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Backend {
@@ -40,11 +37,11 @@ pub(crate) struct StoreSpec {
 }
 
 impl StoreSpec {
-    /// `storage` accepts `backend`, `path` and `requireExisting`, or is
-    /// `undefined` for the IndexedDB default. Without an explicit path, the
-    /// versioned filename hashes the complete storage owner. A ready SDK
-    /// sidecar passes its replica-specific path and requires an existing file.
-    pub(crate) fn from_js(storage: &JsValue, storage_owner: &str) -> Result<Self, JsValue> {
+    /// `storage` is `{ backend?: "indexeddb" | "opfs", path?: string, requireExisting?: boolean }`, or
+    /// `undefined` for the IndexedDB default. Without a path the file is
+    /// named after `database`, the physical database name the worker
+    /// admitted (one per app, environment, auth scope and dbName).
+    pub(crate) fn from_js(storage: &JsValue, database: &str) -> Result<Self, JsValue> {
         let field = |name: &str| -> Result<Option<String>, JsValue> {
             if storage.is_undefined() || storage.is_null() {
                 return Ok(None);
@@ -69,13 +66,12 @@ impl StoreSpec {
         };
         let path = match field("path")? {
             Some(path) => path,
+            // Hashed: the physical name is long and holds characters a VFS
+            // may not take.
             None => {
-                // Punctuation replacement aliases distinct admitted owners.
-                // This named default-path format hashes the complete UTF-8 owner.
-                let mut hash = Sha256::new();
-                hash.update(b"jazz.browser.default-path.v1\0");
-                hash.update(storage_owner.as_bytes());
-                format!("jazz-owner-v1-{:x}.sqlite", hash.finalize())
+                let digest = Sha256::digest(database.as_bytes());
+                let hex: String = digest[..16].iter().map(|b| format!("{b:02x}")).collect();
+                format!("jazz-{hex}.sqlite")
             }
         };
         // Both VFSes key files by absolute name.
@@ -107,20 +103,27 @@ impl StoreSpec {
 /// The open file's backing storage, kept by the database's host.
 #[derive(Clone)]
 pub(crate) enum Store {
-    IndexedDb(Rc<RelaxedIdbUtil>),
+    IndexedDb {
+        util: Rc<RelaxedIdbUtil>,
+        path: String,
+    },
     Opfs,
 }
 
 impl Store {
-    pub(crate) fn needs_flush(&self) -> bool {
-        matches!(self, Self::IndexedDb(_))
+    /// Avoid an asynchronous barrier when no writes remain pending.
+    pub(crate) fn is_flushed(&self) -> Result<bool, JsValue> {
+        match self {
+            Store::IndexedDb { util, path } => util.is_flushed(path).map_err(vfs_error),
+            Store::Opfs => Ok(true),
+        }
     }
 
     /// Resolves once every commit so far is in the backing storage.
     pub(crate) async fn flush(&self) -> Result<(), JsValue> {
         match self {
-            Store::IndexedDb(util) => util
-                .delete_db(IDB_BARRIER)
+            Store::IndexedDb { util, path } => util
+                .flush_db(path)
                 .map_err(vfs_error)?
                 .await
                 .map_err(vfs_error),
@@ -172,18 +175,27 @@ pub(crate) async fn open(spec: &StoreSpec, config: DbConfig) -> Result<(Db, Stor
         Backend::IndexedDb => {
             let util = install_idb().await?;
             // IndexedDB reads are async; SQLite's are not, so the file is
-            // loaded whole before opening.
-            util.preload_db(vec![spec.path.clone()])
-                .await
-                .map_err(vfs_error)?;
+            // loaded whole before opening. The previous owner has closed and
+            // flushed under the physical ownership lock. Reload this file so a
+            // cached image cannot hide a replacement, corruption or deletion.
+            util.reload_db(&spec.path).await.map_err(vfs_error)?;
             if spec.require_existing && !util.exists(&spec.path) {
-                return Err(JsValue::from_str("Admitted SQLite browser file is missing; reset this storage root before reopening"));
+                return Err(JsValue::from_str(
+                    "Admitted SQLite browser file is missing; reset this storage root before reopening",
+                ));
             }
             (
-                Store::IndexedDb(Rc::new(util)),
+                Store::IndexedDb {
+                    util: Rc::new(util),
+                    path: spec.path.clone(),
+                },
                 FileOptions {
                     vfs: Some(IDB_VFS),
                     journal: Journal::Memory,
+                    // Each page is one IndexedDB record, and opening reads
+                    // them all: few large records load far faster than
+                    // many small ones.
+                    page_size: Some(65536),
                     ..FileOptions::default()
                 },
             )
@@ -192,7 +204,9 @@ pub(crate) async fn open(spec: &StoreSpec, config: DbConfig) -> Result<(Db, Stor
             require_sync_access_handles()?;
             let util = install_opfs().await?;
             if spec.require_existing && !util.exists(&spec.path).map_err(vfs_error)? {
-                return Err(JsValue::from_str("Admitted SQLite browser file is missing; reset this storage root before reopening"));
+                return Err(JsValue::from_str(
+                    "Admitted SQLite browser file is missing; reset this storage root before reopening",
+                ));
             }
             (
                 Store::Opfs,
@@ -206,7 +220,9 @@ pub(crate) async fn open(spec: &StoreSpec, config: DbConfig) -> Result<(Db, Stor
     };
     let db = Db::open_at(config, Path::new(&spec.path), options)
         .await
-        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        // Keeps the stable code, so a refused store's
+        // `unsupported_storage_codecs` reaches JavaScript.
+        .map_err(|error| crate::core_error_to_js(&error))?;
     Ok((db, store))
 }
 

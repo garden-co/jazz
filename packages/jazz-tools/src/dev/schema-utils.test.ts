@@ -147,9 +147,12 @@ describe("structuralSchemaHash", () => {
 
 describe("canonical witness default equality", () => {
   it("normalizes exact human-JSON bigint defaults and rejects invalid carriers", () => {
-    const schema = s.defineApp({
-      records: s.table({ value: s.bigint().default(9223372036854775807n) }, {}),
-    }).wasmSchema;
+    const schema = s.defineApp(
+      {
+        records: s.table({ value: s.bigint().default(9223372036854775807n) }, {}),
+      },
+      { migrations: "none" },
+    ).wasmSchema;
     const serialized = JSON.parse(
       JSON.stringify(schema, (_, value) => (typeof value === "bigint" ? value.toString() : value)),
     );
@@ -192,8 +195,14 @@ describe("canonical witness default equality", () => {
       ],
     ] as const;
     for (const [before, after] of pairs) {
-      const left = s.defineApp({ records: s.table({ value: before }, {}) }).wasmSchema;
-      const right = s.defineApp({ records: s.table({ value: after }, {}) }).wasmSchema;
+      const left = s.defineApp(
+        { records: s.table({ value: before }, {}) },
+        { migrations: "none" },
+      ).wasmSchema;
+      const right = s.defineApp(
+        { records: s.table({ value: after }, {}) },
+        { migrations: "none" },
+      ).wasmSchema;
       expect(wasmSchemasEqual(left, right)).toBe(false);
       expect(wasmSchemasEqual(left, structuredClone(left))).toBe(true);
       const missing = structuredClone(left);

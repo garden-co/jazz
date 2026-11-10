@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
@@ -10,7 +11,7 @@ import {
 } from "./device-requests.js";
 
 it("refuses an unversioned account rather than treating a backfilled root as complete history", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Awaited<ReturnType<typeof createDb>>[] = [];
   try {
     await deploy({
@@ -20,6 +21,7 @@ it("refuses an unversioned account rather than treating a backfilled root as com
       schema: app,
       permissions,
     });
+    server = await frontE2eeCore(server, { schema: app, permissions: permissions });
     const account = await localAccountConfig(server.appId, server.url);
     const owner = await createDb(account);
     const observer = await createDb(await localAccountConfig(server.appId, server.url));
@@ -73,7 +75,7 @@ it("refuses an unversioned account rather than treating a backfilled root as com
       .wait({ tier: "global" });
     await expect(
       readAccountMembership(observer, account.account.id, "fixture", signer),
-    ).rejects.toThrow();
+    ).rejects.toThrow(/ledger|version|history/i);
     await expect(
       owner
         .insert(app.__e2ee_account_roots, {

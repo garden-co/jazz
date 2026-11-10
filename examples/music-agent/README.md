@@ -11,6 +11,8 @@ The family is split by concern:
 
 - `apps/nextjs/` is the full app: Next.js, Better Auth and the Astryx chat
   components with the Jazz theme.
+- `apps/ts-hono/` is the same app without a UI framework: plain TypeScript and
+  DOM in the browser, with Jazz, Better Auth and the agent in a Hono server.
 - `apps/ts-localfirst/` is a small headless TypeScript library with the same
   transcript shape and a provider-free agent, tested against a real Jazz
   runtime.
@@ -24,8 +26,14 @@ The family is split by concern:
 pnpm install
 pnpm build:ci            # builds the Jazz runtime and jazz-tools once
 cd examples/music-agent/apps/nextjs
-pnpm dev                 # starts Next.js and a local Jazz server
+pnpm dev                 # starts Next.js, with Jazz running inside it
 ```
+
+Jazz runs inside the Next app (`createJazz` in `src/lib/backend-jazz-client.ts`),
+mounted under `/jazz`. Its `authenticate` reads the Better Auth session cookie:
+there are no JWTs or token routes. Data lives in the git-ignored `.jazz/`
+directory; set `JAZZ_SERVER_URL` and `JAZZ_ADMIN_SECRET` to
+sync through Jazz Cloud or your own sync server with `remote()` instead.
 
 Open <http://127.0.0.1:3000>, create an account and the first conversation
 seeds itself: a request with an attached rough mix, answered live by the agent.

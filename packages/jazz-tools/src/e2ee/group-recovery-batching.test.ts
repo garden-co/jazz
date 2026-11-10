@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it, vi } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
@@ -11,7 +12,13 @@ import { createNativeCrypto } from "./native.js";
 import { Groups } from "./group-lifecycle.js";
 
 it("rejects stale recovery batches before staging and stops publication after device revocation", async () => {
-  const app = s.defineApp({ ...deviceRequestSchema, ...groupSchema });
+  const app = s.defineApp(
+    {
+      ...deviceRequestSchema,
+      ...groupSchema,
+    },
+    { migrations: "none" },
+  );
   const policies = definePermissions(app, ({ policy, session }) => {
     const authenticated = session.where({ authMode: { in: ["local-first", "external"] } });
     policy.__e2ee_groups.allowRead.where(authenticated);
@@ -29,7 +36,7 @@ it("rejects stale recovery batches before staging and stops publication after de
     policy.__e2ee_group_repairs.allowRead.where(authenticated);
     policy.__e2ee_group_repairs.allowInsert.where({ accountId: session.user.account });
   });
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Db[] = [];
   const secrets: Uint8Array[] = [];
   let recovering: Db | undefined;
@@ -63,6 +70,10 @@ it("rejects stale recovery batches before staging and stops publication after de
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
+      schema: app,
+      permissions: { ...deviceRequestPermissions, ...policies },
+    });
+    server = await frontE2eeCore(server, {
       schema: app,
       permissions: { ...deviceRequestPermissions, ...policies },
     });

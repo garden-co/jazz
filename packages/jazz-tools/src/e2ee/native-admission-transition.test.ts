@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
@@ -9,16 +10,19 @@ import { deviceRequestSchema, deviceRequestPermissions } from "./device-requests
 it.each(["switch", "logout"])(
   "retires suspended admission through the native session owner (%s)",
   async (change) => {
-    const app = s.defineApp({
-      ...deviceRequestSchema,
-      projects: s.table({ title: s.string() }, {}),
-    });
+    const app = s.defineApp(
+      {
+        ...deviceRequestSchema,
+        projects: s.table({ title: s.string() }, {}),
+      },
+      { migrations: "none" },
+    );
     const policies = definePermissions(app, ({ policy }) => {
       policy.projects.allowRead.always();
       policy.projects.allowInsert.always();
     });
     const permissions = { ...deviceRequestPermissions, ...policies };
-    const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+    let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
     let saved: string | null = null;
     let owner: Awaited<ReturnType<typeof createJazzSession>> | undefined;
     let release!: () => void;
@@ -30,13 +34,16 @@ it.each(["switch", "logout"])(
       entered = resolve;
     });
     try {
-      await deploy({
+      const initialDeployment = {
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
         schema: app,
         permissions,
-      });
+      };
+      await deploy(initialDeployment);
+      const appBackend = await frontE2eeCore(server, initialDeployment);
+      server = appBackend;
       owner = await createJazzSession({
         serverUrl: server.url,
         appId: server.appId,

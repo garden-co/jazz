@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { createJazzSession } from "../backend/create-jazz-session.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
@@ -7,7 +8,7 @@ import { createNativeDeviceSigner } from "./native.js";
 it.skipIf(process.env.JAZZ_E2EE_HISTORY_PERF !== "1")(
   "reuses unchanged public account approvals and invalidates them after revocation",
   async () => {
-    const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+    let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
     const sessions: Awaited<ReturnType<typeof createJazzSession>>[] = [];
     const memoryStore = () => {
       let value: string | null = null;
@@ -53,6 +54,7 @@ it.skipIf(process.env.JAZZ_E2EE_HISTORY_PERF !== "1")(
         schema: app,
         permissions: deviceRequestPermissions,
       });
+      server = await frontE2eeCore(server, { schema: app, permissions: deviceRequestPermissions });
       const owner = await open();
       await owner.e2ee.devices.list();
       const newcomer = await open();

@@ -42,7 +42,12 @@ export interface JsonSqlType<Output = JsonValue> {
   __output?: Output;
 }
 export type SqlType = ScalarSqlType | ArraySqlType | EnumSqlType | JsonSqlType<unknown>;
-export type ColumnMergeStrategy = "counter" | "g-set";
+/**
+ * How concurrent writes to a column combine. `counter` sums integer changes,
+ * `g-set` unions arrays, and `text`, `markdown` and `html` merge concurrent
+ * edits to a string three-way (markdown and HTML syntax is never split).
+ */
+export type ColumnMergeStrategy = "counter" | "g-set" | "text" | "markdown" | "html";
 export type ColumnMergeStrategyName = ColumnMergeStrategy | "lww";
 
 type TSTypeFromScalarSqlType<T extends ScalarSqlType> = T extends "TEXT"

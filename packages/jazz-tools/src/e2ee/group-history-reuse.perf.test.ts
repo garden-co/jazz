@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
@@ -10,7 +11,13 @@ import { createNativeDeviceSigner } from "./native.js";
 it.skipIf(process.env.JAZZ_E2EE_HISTORY_PERF !== "1")(
   "reuses unchanged group membership validation without hiding removal",
   async () => {
-    const app = s.defineApp({ ...deviceRequestSchema, ...groupSchema });
+    const app = s.defineApp(
+      {
+        ...deviceRequestSchema,
+        ...groupSchema,
+      },
+      { migrations: "none" },
+    );
     const policies = definePermissions(app, ({ policy, session }) => {
       policy.__e2ee_groups.allowRead.always();
       policy.__e2ee_groups.allowInsert.where({ accountId: session.user.account });
@@ -24,7 +31,7 @@ it.skipIf(process.env.JAZZ_E2EE_HISTORY_PERF !== "1")(
       policy.__e2ee_group_repairs.allowInsert.where({ accountId: session.user.account });
     });
     const permissions = { ...deviceRequestPermissions, ...policies };
-    const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+    let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
     const sessions: Awaited<ReturnType<typeof createJazzSession>>[] = [];
     const memoryStore = () => {
       let value: string | null = null;
@@ -70,6 +77,7 @@ it.skipIf(process.env.JAZZ_E2EE_HISTORY_PERF !== "1")(
         schema: app,
         permissions,
       });
+      server = await frontE2eeCore(server, { schema: app, permissions: permissions });
       const owner = await open();
       const other = await open();
       await owner.e2ee.devices.list();

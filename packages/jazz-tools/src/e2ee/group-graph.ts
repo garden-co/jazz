@@ -1,9 +1,9 @@
-import type { RowSettlement } from "../runtime/client.js";
 import type { GroupRoot, GroupMembership, GroupSuccessor } from "./groups.js";
 import { encodePublicApprovalRevision } from "./account-successor.js";
 import { encodeGroupMembership } from "./group-successor.js";
 
-type Settled<T> = { rows: T[]; settlements: RowSettlement[] };
+type ContentPosition = { rowId: string; position: string };
+type OrderedGroupRows<T> = { rows: T[]; contentOrigins: ContentPosition[] };
 
 export function validGroupGraph(
   graph: ReadonlyMap<string, { children: ReadonlySet<string> }>,
@@ -42,9 +42,9 @@ type State = {
 /** Key-free replay; callers supply settled records and the existing device-authentication checks. */
 export async function replayGroupGraph(
   snapshot: {
-    roots: Settled<GroupRoot>;
-    records: Settled<GroupMembership>;
-    successors: Settled<GroupSuccessor>;
+    roots: OrderedGroupRows<GroupRoot>;
+    records: OrderedGroupRows<GroupMembership>;
+    successors: OrderedGroupRows<GroupSuccessor>;
   },
   authority: {
     root(row: GroupRoot, position: bigint): Promise<boolean>;
@@ -54,8 +54,8 @@ export async function replayGroupGraph(
   },
   cutoff?: bigint,
 ) {
-  const position = (settlements: RowSettlement[], id: string) => {
-    const value = settlements.find((entry) => entry.rowId === id)?.position;
+  const position = (contentOrigins: ContentPosition[], id: string) => {
+    const value = contentOrigins.find((entry) => entry.rowId === id)?.position;
     if (value === undefined) throw new Error("Missing E2EE group authority coverage");
     return BigInt(value);
   };
@@ -63,17 +63,17 @@ export async function replayGroupGraph(
     ...snapshot.roots.rows.map((row) => ({
       kind: "root" as const,
       row,
-      at: position(snapshot.roots.settlements, row.id),
+      at: position(snapshot.roots.contentOrigins, row.id),
     })),
     ...snapshot.records.rows.map((row) => ({
       kind: "member" as const,
       row,
-      at: position(snapshot.records.settlements, row.id),
+      at: position(snapshot.records.contentOrigins, row.id),
     })),
     ...snapshot.successors.rows.map((row) => ({
       kind: "epoch" as const,
       row,
-      at: position(snapshot.successors.settlements, row.id),
+      at: position(snapshot.successors.contentOrigins, row.id),
     })),
   ].sort((a, b) => {
     if (a.at !== b.at) return a.at < b.at ? -1 : 1;
@@ -217,7 +217,7 @@ export async function replayGroupGraph(
     const row = event.row;
     state.revisionIds.push(row.id);
     if (
-      event.at <= position(snapshot.roots.settlements, state.root.id) ||
+      event.at <= position(snapshot.roots.contentOrigins, state.root.id) ||
       row.epochId !== state.keyRoot.epochId ||
       !(await authority.membership(state.root, row, event.at))
     )

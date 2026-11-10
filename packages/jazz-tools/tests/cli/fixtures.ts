@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, vi } from "vitest";
 import { structuralSchemaHash } from "../../src/dev/schema-utils.js";
-import { createMigration as rawCreateMigration, deploy as rawDeploy } from "../../src/cli.js";
+import { createMigration as rawCreateMigration } from "../../src/cli.js";
 
 export function createCliFixtures(moduleUrl: string) {
   const dslPath = fileURLToPath(new URL("./dsl.ts", moduleUrl));
@@ -31,8 +31,6 @@ export function createCliFixtures(moduleUrl: string) {
 
   const createMigration = (options: Parameters<typeof rawCreateMigration>[0]) =>
     rawCreateMigration(withAppId(options));
-  const deploy = (options: Omit<Parameters<typeof rawDeploy>[0], "appId"> & { appId?: string }) =>
-    rawDeploy(withAppId(options));
 
   afterEach(async () => {
     vi.unstubAllGlobals();
@@ -120,7 +118,7 @@ export function createCliFixtures(moduleUrl: string) {
           // changing cwd alone does not change TypeScript's type-root lookup.
           typeRoots: [join(dirname(packageRoot), "node_modules", "@types")],
         },
-        files: [migrationPath, join(packageRoot, "types", "fs-native-extensions.d.ts")],
+        files: [migrationPath],
       }),
     );
     const result = spawnSync(
@@ -227,7 +225,7 @@ const schema = {
 };
 
 type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema);
+export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
 `;
   }
 
@@ -243,7 +241,7 @@ const schema = {
 };
 
 type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema);
+export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
 `;
   }
 
@@ -252,7 +250,7 @@ export const app: s.App<AppSchema> = s.defineApp(schema);
 import { schema as s } from ${JSON.stringify(indexImportPath)};
 const schema = { todos: s.table({ title: s.string(), createdAt: s.timestamp() }, {  }) };
 type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema);
+export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
 `;
   }
 
@@ -266,7 +264,7 @@ const schema = { imports: s.table({
   assignedBy: s.string(),
 }, {  }) };
 type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema);
+export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
 `;
   }
 
@@ -291,7 +289,7 @@ const schema = {
 };
 
 type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema);
+export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
 `;
   }
 
@@ -311,7 +309,7 @@ const schema = {
 };
 
 type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema);
+export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
 `;
   }
 
@@ -372,7 +370,7 @@ const schema = {
 };
 
 type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema);
+export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
 `;
   }
 
@@ -678,7 +676,6 @@ export default {
     tempRoots,
     APP_ID,
     createMigration,
-    deploy,
     withAppId,
     createWorkspace,
     fileExists,

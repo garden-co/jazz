@@ -6,15 +6,18 @@ import { deploy } from "../../src/dev/catalogue.js";
 import { deviceRequestSchema, deviceRequestPermissions } from "../../src/e2ee/device-requests.js";
 import { spaceSchema } from "../../src/e2ee/spaces.js";
 import { acquireBrowserTestAccount } from "./account-fixtures.js";
-import { getJazzServerInfo, stopJazzServer } from "./testing-server.js";
+import { getJazzServerInfo, startJazzApp, stopJazzServer } from "./testing-server.js";
 
 it("shares a space with another browser account and retains access after reopening", async () => {
-  const server = await getJazzServerInfo(`e2ee-spaces-${crypto.randomUUID()}`);
-  const app = s.defineApp({
-    ...deviceRequestSchema,
-    ...spaceSchema,
-    projects: s.table({ title: s.string() }, {}),
-  });
+  let server = await getJazzServerInfo(`e2ee-spaces-${crypto.randomUUID()}`);
+  const app = s.defineApp(
+    {
+      ...deviceRequestSchema,
+      ...spaceSchema,
+      projects: s.table({ title: s.string() }, {}),
+    },
+    { migrations: "none" },
+  );
   const policies = definePermissions(app, ({ policy, session }) => {
     policy.projects.allowRead.always();
     policy.projects.allowInsert.always();
@@ -30,6 +33,16 @@ it("shares a space with another browser account and retains access after reopeni
   try {
     await deploy({
       ...server,
+      schema: app,
+      permissions: {
+        ...deviceRequestPermissions,
+        projects: policies.projects!,
+        __e2ee_spaces: policies.__e2ee_spaces!,
+        __e2ee_space_grants: policies.__e2ee_space_grants!,
+        __e2ee_space_deliveries: policies.__e2ee_space_deliveries!,
+      },
+    });
+    server = await startJazzApp(server, {
       schema: app,
       permissions: {
         ...deviceRequestPermissions,

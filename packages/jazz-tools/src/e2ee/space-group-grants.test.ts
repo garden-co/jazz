@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
@@ -9,12 +10,15 @@ import { groupSchema } from "./groups.js";
 import { spaceSchema } from "./spaces.js";
 
 it("follows nested group additions, independent grants and later recipient removal", async () => {
-  const app = s.defineApp({
-    ...deviceRequestSchema,
-    ...groupSchema,
-    ...spaceSchema,
-    projects: s.table({ title: s.string() }, {}),
-  });
+  const app = s.defineApp(
+    {
+      ...deviceRequestSchema,
+      ...groupSchema,
+      ...spaceSchema,
+      projects: s.table({ title: s.string() }, {}),
+    },
+    { migrations: "none" },
+  );
   const policies = definePermissions(app, ({ policy, session }) => {
     policy.projects.allowRead.always();
     policy.projects.allowInsert.always();
@@ -37,7 +41,7 @@ it("follows nested group additions, independent grants and later recipient remov
     policy.__e2ee_group_repairs.allowRead.always();
     policy.__e2ee_group_repairs.allowInsert.where({ accountId: session.user.account });
   });
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Awaited<ReturnType<typeof createDb>>[] = [];
   const store = () => {
     let value: string | null = null;
@@ -55,6 +59,22 @@ it("follows nested group additions, independent grants and later recipient remov
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
+      schema: app,
+      permissions: {
+        ...deviceRequestPermissions,
+        projects: policies.projects!,
+        __e2ee_spaces: policies.__e2ee_spaces!,
+        __e2ee_space_grants: policies.__e2ee_space_grants!,
+        __e2ee_space_deliveries: policies.__e2ee_space_deliveries!,
+        __e2ee_space_successors: policies.__e2ee_space_successors!,
+        __e2ee_groups: policies.__e2ee_groups!,
+        __e2ee_group_membership: policies.__e2ee_group_membership!,
+        __e2ee_group_successors: policies.__e2ee_group_successors!,
+        __e2ee_group_deliveries: policies.__e2ee_group_deliveries!,
+        __e2ee_group_repairs: policies.__e2ee_group_repairs!,
+      },
+    });
+    server = await frontE2eeCore(server, {
       schema: app,
       permissions: {
         ...deviceRequestPermissions,

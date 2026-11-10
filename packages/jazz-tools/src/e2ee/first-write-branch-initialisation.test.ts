@@ -1,3 +1,5 @@
+import { appMigrations } from "../testing/client-migrations.js";
+import { frontE2eeCore, redeployE2eeApp } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { migration as m } from "../migration-namespace.js";
@@ -29,12 +31,15 @@ it.each(["insert", "upsert"] as const)(
         )
         .encrypted({ space: "projectId", columns: ["body"] }),
     };
-    const oldApp = s.defineApp(before);
-    const app = s.defineApp(after);
+    const oldApp = s.defineApp(before, { migrations: await appMigrations(before) });
+
     const migration = m.defineMigration({
       from: before,
       to: after,
       createTables: { notes: true, rootNotes: true },
+    });
+    const app = s.defineApp(after, {
+      migrations: await appMigrations(oldApp, { to: after, migration: migration }),
     });
     const oldPermissions = definePermissions(oldApp, ({ policy }) => {
       policy.projects.allowRead.always();
@@ -54,7 +59,7 @@ it.each(["insert", "upsert"] as const)(
       policy.__e2ee_space_deliveries.allowRead.always();
       policy.__e2ee_space_deliveries.allowInsert.where({ senderAccountId: session.user.account });
     });
-    const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+    let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
     let creator: Db | undefined;
     let writer: Db | undefined;
     let saved: string | null = null;
@@ -64,14 +69,17 @@ it.each(["insert", "upsert"] as const)(
         appId: server.appId,
         adminSecret: server.adminSecret,
       };
-      await deploy({ ...target, schema: oldApp, permissions: oldPermissions });
+      const initialDeployment = { ...target, schema: oldApp, permissions: oldPermissions };
+      await deploy(initialDeployment);
+      const appBackend = await frontE2eeCore(server, initialDeployment);
+      server = appBackend;
       creator = await createDb(await localAccountConfig(server.appId, server.url));
       const project = await creator
         .insert(oldApp.projects, { title: "Legacy branch scope" })
         .wait({ tier: "global" });
       await creator.shutdown();
       creator = undefined;
-      await deploy({ ...target, schema: app, permissions, migration });
+      await redeployE2eeApp(appBackend, { ...target, schema: app, permissions, migration });
       const account = await localAccountConfig(server.appId, server.url);
       const keys = await createBrowserKeyEnvelope();
       let preparedEnvelopes = 0;
@@ -154,7 +162,10 @@ it.each(["insert", "upsert"] as const)(
       });
       const roots = await writer.all(app.__e2ee_spaces, { tier: "remote" });
       expect(roots).toHaveLength(1);
-      expect(roots[0]).toMatchObject({ identifier: project.id, accountId: account.account.id });
+      expect(roots[0]).toMatchObject({
+        identifier: project.id,
+        creatorAccountId: account.account.id,
+      });
       const grants = await writer.all(app.__e2ee_space_grants, { tier: "remote" });
       expect(grants).toHaveLength(1);
       expect(grants[0]).toMatchObject({

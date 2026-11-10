@@ -57,6 +57,11 @@ export interface TodoServerOptions {
   /** Server-only credential for durable backend writes. */
   backendSecret?: string;
   adminSecret?: string;
+  /**
+   * The published bundle (schema and permissions) this backend's users are
+   * checked by, as `deploy()` returns it. Defaults to `JAZZ_BUNDLE`.
+   */
+  bundle?: string;
 }
 interface ServerLifecycle {
   draining: boolean;
@@ -85,6 +90,7 @@ export async function createServer(
   const appId = options.appId ?? process.env.JAZZ_APP_ID ?? "019d4349-244c-74d4-8573-8e1b24cf21e2";
   const serverUrl = options.serverUrl ?? process.env.JAZZ_SERVER_URL;
   const backendSecret = options.backendSecret ?? process.env.JAZZ_BACKEND_SECRET;
+  const bundle = options.bundle ?? process.env.JAZZ_BUNDLE;
   const driver =
     storage.type === "persistent"
       ? { type: "persistent" as const, dataPath: storage.dataPath }
@@ -97,6 +103,11 @@ export async function createServer(
   if (!serverUrl || !backendSecret) {
     throw new Error("JAZZ_SERVER_URL and JAZZ_BACKEND_SECRET are required");
   }
+  if (!bundle) {
+    // Users act through a link pinned to the bundle this app deployed; an
+    // unpinned link cannot act for them.
+    throw new Error("JAZZ_BUNDLE is required: pass the bundle id that `deploy` returned");
+  }
 
   const session = await createJazzSession({
     appId,
@@ -105,9 +116,12 @@ export async function createServer(
     driver,
     serverUrl,
     initial: { backendSecret },
+    bundle,
     env: "dev",
     jwksUrl: options.jwksUrl ?? process.env.JAZZ_JWKS_URL,
     jwtPublicKey: process.env.JAZZ_JWT_PUBLIC_KEY,
+    // This demo uses local-first tokens, including when NODE_ENV is production.
+    allowLocalFirstAuth: true,
   });
   // Preserve the programmatic administrative handle for embedding and tests.
   // Network routes below exclusively use request-scoped databases.
@@ -179,6 +193,22 @@ export async function createServer(
       return;
     }
     res.status(503).json({ error: "Server is shutting down" });
+  });
+
+  // Sign in: the first call with a verified identity provisions its Jazz
+  // account for this app. The todo routes below only log existing accounts in.
+  app.post("/sign-in", async (req: Request, res: Response) => {
+    try {
+      const db = await client.forRequest(req, { account: "login-or-register" });
+      const session = db.getAuthState().session;
+      if (!session) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+      res.json({ account: session.user.account });
+    } catch {
+      res.status(401).json({ error: "Unauthorized" });
+    }
   });
 
   // Authenticate every todo request before selecting a session-scoped database.
@@ -505,6 +535,7 @@ async function main() {
 
   console.log(`Todo server listening on ${running.baseUrl}`);
   console.log(`  GET    /health`);
+  console.log(`  POST   /sign-in`);
   console.log(`  GET    /todos`);
   console.log(`  POST   /todos`);
   console.log(`  GET    /todos/:id`);

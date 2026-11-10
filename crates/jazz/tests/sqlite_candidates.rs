@@ -1,5 +1,5 @@
 //! SQLite same-unit creation permission contracts, through public transactions.
-mod common;
+use super::common;
 use jazz::db::{Db, DbConfig, DbIdentity, Error, ReadOpts, RemoteLinkHint, block_on, duplex};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::Query;
@@ -82,7 +82,7 @@ fn open(schema: jazz::schema::JazzSchema, node: u8, authority: bool) -> Db {
     .unwrap();
     if authority {
         db.set_authority();
-        db.initialize_authority_catalogue().unwrap();
+        assert!(db.table_identity("nodes").unwrap().is_some());
     }
     db
 }
@@ -125,6 +125,21 @@ fn drive<T>(dbs: &[&Db], future: impl Future<Output = T>) -> T {
     }
     panic!("did not settle")
 }
+// A real multi-user backend is distinct from a private Bob-owned store.
+// Incoming sessions remain unprivileged Alice/Bob and run their own policies.
+fn open_subscriber_authority(schema: jazz::schema::JazzSchema) -> Db {
+    let db = block_on(Db::open(DbConfig::new(
+        schema,
+        DbIdentity {
+            node: NodeUuid::from_bytes([2; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .unwrap();
+    db.set_authority();
+    assert!(db.table_identity("nodes").unwrap().is_some());
+    db
+}
 struct Fixture {
     alice: Db,
     bob: Db,
@@ -136,7 +151,7 @@ impl Fixture {
         alice.set_remote_link_hint(RemoteLinkHint::NoServer);
         Self {
             alice,
-            bob: open(schema, 2, true),
+            bob: open_subscriber_authority(schema),
         }
     }
     fn commit(&self, values: &[(u128, BTreeMap<String, Value>)], serializable: bool) -> u64 {
@@ -147,7 +162,7 @@ impl Fixture {
             block_on(self.alice.begin_mergeable(id)).unwrap();
         }
         for (row_id, value) in values {
-            block_on(self.alice.mergeable_tx_ref(id).upsert(
+            block_on(self.alice.tx_ref(id).upsert(
                 "nodes",
                 row(*row_id),
                 value.clone(),
@@ -166,7 +181,7 @@ impl Fixture {
     fn connect(&self) {
         let (up, down) = duplex();
         block_on(self.alice.connect_upstream(up));
-        self.bob.accept_subscriber(down, author("alice"));
+        self.bob.accept_subscriber(down, author("alice")).unwrap();
     }
     fn settle(&self, tx: u64) -> Result<(), Error> {
         drive(
@@ -274,7 +289,7 @@ fn local_serializable_session_uses_the_same_unit_proof() {
         (2, cells(2, true, true, "room")),
     ] {
         block_on(
-            bob.serializable_tx_ref(id)
+            bob.tx_ref(id)
                 .upsert("nodes", row(n), value, Default::default()),
         )
         .unwrap();
@@ -459,7 +474,7 @@ fn provisional_staging_does_not_grant_reads_through_unproven_creates() {
     .unwrap();
     let id = OpenTransactionId::new();
     block_on(bob.begin_serializable_for_identity(id, author("mallory"))).unwrap();
-    block_on(bob.serializable_tx_ref(id).upsert(
+    block_on(bob.tx_ref(id).upsert(
         "nodes",
         row(1),
         cells(1, false, true, "room"),
@@ -468,7 +483,7 @@ fn provisional_staging_does_not_grant_reads_through_unproven_creates() {
     .unwrap();
     let query = bob.prepare_query(&Query::from("secrets")).unwrap();
     assert!(
-        block_on(bob.serializable_tx_ref(id).all_prepared(&query))
+        block_on(bob.tx_ref(id).all_prepared(&query))
             .unwrap()
             .is_empty()
     );
@@ -547,14 +562,14 @@ fn update_with_check_revalidates_final_dependencies() {
     .unwrap();
     let id = OpenTransactionId::new();
     block_on(bob.begin_serializable_for_identity(id, author("alice"))).unwrap();
-    block_on(bob.serializable_tx_ref(id).upsert(
+    block_on(bob.tx_ref(id).upsert(
         "notes",
         row(1),
         BTreeMap::from([("scope".into(), Value::String("old".into()))]),
         Default::default(),
     ))
     .unwrap();
-    block_on(bob.serializable_tx_ref(id).upsert(
+    block_on(bob.tx_ref(id).upsert(
         "nodes",
         row(10),
         cells(10, true, true, "new"),
@@ -609,7 +624,7 @@ fn unselected_insert_marker_cannot_unlock_mutual_updates() {
     let id = OpenTransactionId::new();
     block_on(bob.begin_serializable_for_identity(id, author("alice"))).unwrap();
     for (row_id, parent) in [(1, 2), (2, 1)] {
-        block_on(bob.serializable_tx_ref(id).upsert(
+        block_on(bob.tx_ref(id).upsert(
             "nodes",
             row(row_id),
             cells(parent, true, true, "new"),
@@ -718,7 +733,7 @@ fn proof_preparation_does_not_touch_unrelated_chunked_values() {
     {
         let bob = block_on(Db::open_at(config(), &path, FileOptions::default())).unwrap();
         bob.set_authority();
-        bob.initialize_authority_catalogue().unwrap();
+        assert!(bob.table_identity("nodes").unwrap().is_some());
         block_on(bob.upsert(
             "nodes",
             row(99),
@@ -736,7 +751,7 @@ fn proof_preparation_does_not_touch_unrelated_chunked_values() {
     let id = OpenTransactionId::new();
     block_on(bob.begin_serializable_for_identity(id, author("alice"))).unwrap();
     for (row_id, parent, seed) in [(1, 2, false), (2, 2, true)] {
-        block_on(bob.serializable_tx_ref(id).upsert(
+        block_on(bob.tx_ref(id).upsert(
             "nodes",
             row(row_id),
             cells(parent, seed, true, "room"),
@@ -808,15 +823,13 @@ fn baseline_and_final_proofs_may_have_different_seed_orders() {
     for (row_id, parent, seed) in [(1, 2, false), (2, 1, true)] {
         let mut values = cells(parent, seed, true, "room");
         values.insert("grant".into(), Value::Uuid(row(10).0));
-        block_on(bob.serializable_tx_ref(id).upsert(
-            "nodes",
-            row(row_id),
-            values,
-            Default::default(),
-        ))
+        block_on(
+            bob.tx_ref(id)
+                .upsert("nodes", row(row_id), values, Default::default()),
+        )
         .unwrap();
     }
-    block_on(bob.serializable_tx_ref(id).upsert(
+    block_on(bob.tx_ref(id).upsert(
         "grants",
         row(10),
         BTreeMap::from([("phase".into(), Value::Bool(true))]),
@@ -866,7 +879,7 @@ fn provisional_large_value_reads_fail_explicitly() {
     let bob = open(common::compile_schema(&public), 2, true);
     let id = OpenTransactionId::new();
     block_on(bob.begin_serializable_for_identity(id, author("mallory"))).unwrap();
-    block_on(bob.serializable_tx_ref(id).upsert(
+    block_on(bob.tx_ref(id).upsert(
         "nodes",
         row(1),
         cells(1, false, true, "room"),
@@ -874,7 +887,7 @@ fn provisional_large_value_reads_fail_explicitly() {
     ))
     .unwrap();
     let query = bob.prepare_query(&Query::from("nodes")).unwrap();
-    let error = block_on(bob.serializable_tx_ref(id).all_prepared(&query)).unwrap_err();
+    let error = block_on(bob.tx_ref(id).all_prepared(&query)).unwrap_err();
     assert!(
         error
             .message
@@ -951,7 +964,7 @@ fn fixture_schema(schema: jazz::schema::JazzSchema) -> Fixture {
     alice.set_remote_link_hint(RemoteLinkHint::NoServer);
     Fixture {
         alice,
-        bob: open(schema, 2, true),
+        bob: open_subscriber_authority(schema),
     }
 }
 fn allowed() -> PolicyExpr {
@@ -1138,7 +1151,7 @@ fn staged_inherited_grants_do_not_unlock_existing_secrets() {
     .unwrap();
     let id = OpenTransactionId::new();
     block_on(bob.begin_serializable_for_identity(id, author("alice"))).unwrap();
-    block_on(bob.serializable_tx_ref(id).upsert(
+    block_on(bob.tx_ref(id).upsert(
         "nodes",
         row(10),
         cells(10, true, true, "room"),
@@ -1147,7 +1160,7 @@ fn staged_inherited_grants_do_not_unlock_existing_secrets() {
     .unwrap();
     let query = bob.prepare_query(&Query::from("secrets")).unwrap();
     assert!(
-        block_on(bob.serializable_tx_ref(id).all_prepared(&query))
+        block_on(bob.tx_ref(id).all_prepared(&query))
             .unwrap()
             .is_empty()
     );
@@ -1289,12 +1302,10 @@ fn named_commit(db: &Db, values: &[(&str, u128, BTreeMap<String, Value>)]) -> u6
     let id = OpenTransactionId::new();
     block_on(db.begin_serializable(id)).unwrap();
     for (table, row_id, value) in values {
-        block_on(db.serializable_tx_ref(id).upsert(
-            table,
-            row(*row_id),
-            value.clone(),
-            Default::default(),
-        ))
+        block_on(
+            db.tx_ref(id)
+                .upsert(table, row(*row_id), value.clone(), Default::default()),
+        )
         .unwrap();
     }
     block_on(db.commit_serializable_handle(id)).unwrap().0
@@ -1362,7 +1373,7 @@ fn accepted_forward_and_reverse_grants_authorize_only_their_session() {
     f.settle(next).unwrap();
     let id = OpenTransactionId::new();
     block_on(f.bob.begin_serializable_for_identity(id, author("mallory"))).unwrap();
-    block_on(f.bob.serializable_tx_ref(id).upsert(
+    block_on(f.bob.tx_ref(id).upsert(
         "grants",
         row(5),
         grant_cells(1, "room", "rotate"),
@@ -1458,10 +1469,10 @@ fn marked_and_unmarked_large_comparisons_share_accepted_parent_evidence() {
     assert_eq!(rows(&f.bob).len(), 2);
 }
 
-/// Array-backed reverse inheritance cannot silently use scalar equality or
-/// scan unrelated arrays in a candidate proof. Alice gets an exact refusal.
+/// Alice's accepted array-backed owner supplies inherited UPDATE evidence.
+/// The same serializable candidate now succeeds through indexed membership.
 #[test]
-fn array_inherited_sources_remain_explicitly_unsupported() {
+fn array_inherited_sources_use_accepted_indexed_membership() {
     let reverse = PolicyExpr::InheritsReferencing {
         operation: jazz::tools::Operation::Update,
         source_table: "owners".into(),
@@ -1498,12 +1509,8 @@ fn array_inherited_sources_remain_explicitly_unsupported() {
     .unwrap();
     let tx = f.commit(&[(1, cells(1, false, true, "room"))], true);
     f.connect();
-    let error = f.settle(tx).unwrap_err();
-    assert!(
-        error.message.contains("array-reference inheritance"),
-        "{error}"
-    );
-    assert!(rows(&f.bob).is_empty());
+    f.settle(tx).unwrap();
+    assert_eq!(rows(&f.bob), vec![(row(1), "room".into())]);
 }
 
 /// An accepted row's INSERT policy cannot launder newly created evidence
@@ -1621,4 +1628,617 @@ fn inherited_large_grants_use_historical_values_before_same_unit_updates() {
             );
         }
     }
+}
+
+/// The catalogue UUID comes from Bob's accepted manifest during deferred
+/// checks too. Mallory's claims cannot substitute a fake scope for a new seed.
+#[test]
+fn candidate_checks_keep_the_accepted_catalogue_identity_provider() {
+    for matching in [true, false] {
+        let policy = PolicyExpr::and(vec![
+            PolicyExpr::eq_session(
+                "scopeId",
+                vec!["__jazz_table_identity_v1".into(), "nodes".into()],
+            ),
+            insert(parent(true)),
+        ]);
+        let public = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("nodes")
+                    .fk_column("parent", "nodes")
+                    .column("scope", ColumnType::Text)
+                    .column("scopeId", ColumnType::Uuid)
+                    .column("seed", ColumnType::Boolean)
+                    .column("allowed", ColumnType::Boolean)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::True)
+                            .with_insert(policy),
+                    ),
+            )
+            .build();
+        let bob = open(common::compile_schema(&public), 2, true);
+        let scope = bob.table_identity("nodes").unwrap().unwrap().0;
+        let fake = uuid::Uuid::from_bytes([91; 16]);
+        bob.set_identity_claims(
+            author("mallory"),
+            BTreeMap::from([
+                ("__jazz_table_identity_v1".into(), Value::Uuid(fake)),
+                (
+                    jazz::query::provider_claim_key("__jazz_table_identity_v1"),
+                    Value::Uuid(fake),
+                ),
+            ]),
+        );
+        let id = OpenTransactionId::new();
+        block_on(bob.begin_serializable_for_identity(id, author("mallory"))).unwrap();
+        for (row_id, parent, seed) in [(1, 2, false), (2, 2, true)] {
+            let mut values = cells(parent, seed, true, "room");
+            values.insert(
+                "scopeId".into(),
+                Value::Uuid(if matching { scope } else { fake }),
+            );
+            block_on(
+                bob.tx_ref(id)
+                    .upsert("nodes", row(row_id), values, Default::default()),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            block_on(bob.commit_serializable_handle(id)).is_ok(),
+            matching
+        );
+        assert_eq!(rows(&bob).len(), if matching { 2 } else { 0 });
+    }
+}
+
+fn array_candidate_schema() -> jazz::schema::JazzSchema {
+    common::compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("nodes")
+                    .fk_column("parent", "nodes")
+                    .column("scope", ColumnType::Text)
+                    .column("seed", ColumnType::Boolean)
+                    .column("allowed", ColumnType::Boolean)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::True)
+                            .with_insert(PolicyExpr::or(vec![
+                                PolicyExpr::InheritsReferencing {
+                                    operation: jazz::tools::Operation::Update,
+                                    source_table: "owners".into(),
+                                    via_column: "parents".into(),
+                                    max_depth: None,
+                                },
+                                marker_only(),
+                            ])),
+                    ),
+            )
+            .table(
+                TableSchemaBuilder::new("owners")
+                    .array_fk_column("parents", "nodes")
+                    .column("owner", ColumnType::Text)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::True)
+                            .with_insert(PolicyExpr::True)
+                            .with_update(
+                                Some(PolicyExpr::eq_session(
+                                    "owner",
+                                    vec!["user".into(), "identity".into(), "subject".into()],
+                                )),
+                                PolicyExpr::True,
+                            ),
+                    ),
+            )
+            .build(),
+    )
+}
+fn array_owner(parents: &[u128]) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        (
+            "parents".into(),
+            Value::Array(parents.iter().map(|n| Value::Uuid(row(*n).0)).collect()),
+        ),
+        ("owner".into(), Value::String("alice".into())),
+    ])
+}
+
+/// Alice cannot use a newly inserted array grant as accepted inherited
+/// evidence. Bob rolls back both rows; accepting the grant separately allows
+/// the same dependent write, including duplicate array membership.
+#[test]
+fn newly_created_array_grants_do_not_unlock_their_own_unit() {
+    let f = fixture_schema(array_candidate_schema());
+    let tx = named_commit(
+        &f.alice,
+        &[
+            ("owners", 2, array_owner(&[1, 1])),
+            ("nodes", 1, cells(1, false, true, "room")),
+        ],
+    );
+    f.connect();
+    assert!(f.settle(tx).is_err());
+    assert!(rows(&f.bob).is_empty());
+    assert_eq!(table_count(&f.bob, "owners"), 0);
+    let grant = named_commit(&f.alice, &[("owners", 2, array_owner(&[1, 1]))]);
+    f.settle(grant).unwrap();
+    let child = named_commit(&f.alice, &[("nodes", 1, cells(1, false, true, "room"))]);
+    f.settle(child).unwrap();
+    assert_eq!(rows(&f.bob), vec![(row(1), "room".into())]);
+}
+
+/// Alice revokes an accepted array grant in the same unit as a dependent write.
+/// Bob checks both accepted and final images, rejecting the whole unit in either
+/// operation order. The rolled-back index must still authorize a later write.
+#[test]
+fn array_revocation_revalidates_the_final_unit_and_rolls_back_membership() {
+    for revoke_first in [false, true] {
+        let f = fixture_schema(array_candidate_schema());
+        let grant = named_commit(&f.alice, &[("owners", 2, array_owner(&[1]))]);
+        f.connect();
+        f.settle(grant).unwrap();
+        let mut writes = vec![
+            ("nodes", 1, cells(1, false, true, "room")),
+            ("owners", 2, array_owner(&[])),
+        ];
+        if revoke_first {
+            writes.reverse();
+        }
+        let tx = named_commit(&f.alice, &writes);
+        assert!(f.settle(tx).is_err());
+        assert!(rows(&f.bob).is_empty());
+        assert_eq!(table_count(&f.bob, "owners"), 1);
+        let next = named_commit(&f.alice, &[("nodes", 1, cells(1, false, true, "room"))]);
+        f.settle(next).unwrap();
+        assert_eq!(rows(&f.bob), vec![(row(1), "room".into())]);
+    }
+}
+
+/// Alice's callback cannot commit a child after deleting its accepted grant.
+/// Bob sees both original rows unchanged when the complete callback is refused.
+#[test]
+fn callback_revalidates_accepted_dependencies_at_commit() {
+    let bob = open(schema(insert(parent(true))), 2, true);
+    block_on(bob.upsert(
+        "nodes",
+        row(10),
+        cells(10, true, true, "room"),
+        Default::default(),
+    ))
+    .unwrap();
+    let result = block_on(bob.transaction(async |_tx| {
+        bob.upsert(
+            "nodes",
+            row(11),
+            cells(10, false, true, "room"),
+            jazz::db::UpsertOptions {
+                identity: jazz::db::WriteIdentity::Session(author("alice")),
+                ..Default::default()
+            },
+        )
+        .await?;
+        bob.delete(
+            "nodes",
+            row(10),
+            jazz::db::DeleteOptions {
+                identity: jazz::db::WriteIdentity::Session(author("alice")),
+                ..Default::default()
+            },
+        )
+        .await?;
+        Ok(())
+    }));
+    assert!(
+        result.is_err(),
+        "a revoked parent cannot authorize the callback"
+    );
+    assert_eq!(rows(&bob), vec![(row(10), "room".into())]);
+}
+
+/// Alice cancels a callback after staging a candidate. Bob must discard its
+/// deferred checks, and a later valid standalone write must still succeed.
+#[test]
+fn cancelled_callback_discards_candidate_checks() {
+    let bob = open(schema(insert(parent(true))), 2, true);
+    let mut transaction = Box::pin(bob.transaction(async |_tx| {
+        bob.upsert(
+            "nodes",
+            row(1),
+            cells(99, false, true, "room"),
+            jazz::db::UpsertOptions {
+                identity: jazz::db::WriteIdentity::Session(author("alice")),
+                ..Default::default()
+            },
+        )
+        .await?;
+        std::future::pending::<Result<(), Error>>().await
+    }));
+    assert!(
+        transaction
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+    drop(transaction);
+    assert!(rows(&bob).is_empty());
+    block_on(bob.upsert(
+        "nodes",
+        row(10),
+        cells(10, true, true, "room"),
+        Default::default(),
+    ))
+    .unwrap();
+    assert_eq!(rows(&bob), vec![(row(10), "room".into())]);
+}
+
+/// Alice's mergeable callback can use an accepted parent but cannot bootstrap
+/// from another new row. A failed callback leaves Bob free to accept the next.
+#[test]
+fn callback_never_promotes_new_rows_to_permission_evidence() {
+    let bob = open(schema(insert(parent(true))), 2, true);
+    let result = block_on(bob.transaction(async |_tx| {
+        bob.upsert(
+            "nodes",
+            row(1),
+            cells(1, true, true, "room"),
+            jazz::db::UpsertOptions {
+                identity: jazz::db::WriteIdentity::Session(author("alice")),
+                ..Default::default()
+            },
+        )
+        .await?;
+        bob.upsert(
+            "nodes",
+            row(2),
+            cells(1, false, true, "room"),
+            jazz::db::UpsertOptions {
+                identity: jazz::db::WriteIdentity::Session(author("alice")),
+                ..Default::default()
+            },
+        )
+        .await?;
+        Ok(())
+    }));
+    assert!(result.is_err());
+    assert!(rows(&bob).is_empty());
+    block_on(bob.upsert(
+        "nodes",
+        row(1),
+        cells(1, true, true, "room"),
+        Default::default(),
+    ))
+    .unwrap();
+    block_on(bob.transaction(async |_tx| {
+        bob.upsert(
+            "nodes",
+            row(2),
+            cells(1, false, true, "room"),
+            jazz::db::UpsertOptions {
+                identity: jazz::db::WriteIdentity::Session(author("alice")),
+                ..Default::default()
+            },
+        )
+        .await?;
+        Ok(())
+    }))
+    .unwrap();
+    assert_eq!(rows(&bob).len(), 2);
+}
+
+/// Bob registers a creation-aware view without changing his ordinary owner.
+/// His ordinary callback must keep the same inline-filter read behaviour
+/// before and after that unrelated view is admitted.
+#[test]
+fn unmarked_callback_reads_are_not_changed_by_an_admitted_marked_view() {
+    use jazz::query::{col, eq, lit};
+    let bob = open(schema(PolicyExpr::True), 2, true);
+    block_on(bob.upsert(
+        "nodes",
+        row(1),
+        cells(1, true, true, "room"),
+        Default::default(),
+    ))
+    .unwrap();
+    let query = bob
+        .prepare_query(&Query::from("nodes").filter(eq(col("scope"), lit("room"))))
+        .unwrap();
+    let (before, _) = block_on(bob.transaction(async |tx| tx.all_prepared(&query).await)).unwrap();
+    assert_eq!(
+        before.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+        vec![row(1)]
+    );
+    let marked = common::compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("nodes")
+                    .fk_column("parent", "nodes")
+                    .column("scope", ColumnType::Text)
+                    .column("seed", ColumnType::Boolean)
+                    .column("allowed", ColumnType::Boolean)
+                    .nullable_column("viewExtra", ColumnType::Boolean)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::True)
+                            .with_insert(insert(parent(true))),
+                    ),
+            )
+            .build(),
+    );
+    assert!(marked.may_have_authorized_created_insert_sources());
+    assert_ne!(marked.version_id(), bob.current_schema().version_id());
+    let _view = block_on(bob.register_schema_view(marked)).unwrap();
+    assert!(
+        !bob.current_schema()
+            .may_have_authorized_created_insert_sources()
+    );
+    let (after, _) = block_on(bob.transaction(async |tx| tx.all_prepared(&query).await)).unwrap();
+    assert_eq!(
+        after.iter().map(|row| row.row_uuid()).collect::<Vec<_>>(),
+        vec![row(1)]
+    );
+}
+
+/// Two disconnected replicas capture the same absence. Authority may accept
+/// exactly one complete parent/child unit, never one row from each.
+#[test]
+fn conflicting_absent_inserts_accept_exactly_one_complete_unit() {
+    let f = Fixture::new(insert(parent(true)));
+    let second = block_on(Db::open(DbConfig::new(
+        schema(insert(parent(true))),
+        DbIdentity {
+            node: NodeUuid::from_bytes([3; 16]),
+            author: author("alice"),
+        },
+    )))
+    .unwrap();
+    second.set_remote_link_hint(RemoteLinkHint::NoServer);
+    // Neither staged unit can reach authority before both capture absence.
+    let first_tx = f.commit(
+        &[
+            (1, cells(2, false, true, "first")),
+            (2, cells(2, true, true, "first")),
+        ],
+        true,
+    );
+    let id = OpenTransactionId::new();
+    block_on(second.begin_serializable(id)).unwrap();
+    for (row_id, value) in [
+        (1, cells(2, false, true, "second")),
+        (2, cells(2, true, true, "second")),
+    ] {
+        block_on(
+            second
+                .tx_ref(id)
+                .upsert("nodes", row(row_id), value, Default::default()),
+        )
+        .unwrap();
+    }
+    let second_tx = block_on(second.commit_serializable_handle(id)).unwrap().0;
+    f.connect();
+    let (up, down) = duplex();
+    block_on(second.connect_upstream(up));
+    f.bob.accept_subscriber(down, author("alice")).unwrap();
+    let first = drive(
+        &[&f.alice, &second, &f.bob],
+        f.alice
+            .wait_for_transaction(first_tx, DurabilityTier::Global),
+    );
+    let second_result = drive(
+        &[&f.alice, &second, &f.bob],
+        second.wait_for_transaction(second_tx, DurabilityTier::Global),
+    );
+    assert!(
+        matches!((&first, &second_result), (Ok(_), Err(_)) | (Err(_), Ok(_))),
+        "exact absence must select one whole unit: first={first:?}, second={second_result:?}",
+    );
+    let scope = if first.is_ok() { "first" } else { "second" };
+    assert_eq!(
+        rows(&f.bob),
+        vec![(row(1), scope.into()), (row(2), scope.into())],
+        "authority must retain both rows from the same winning unit",
+    );
+}
+
+/// Preserve the original invalid branch-target refusal before publication.
+/// This non-branched schema does not establish support for marked branch moves.
+#[test]
+fn serializable_invalid_branch_target_is_rejected_before_publication() {
+    let f = Fixture::new(insert(parent(true)));
+    let id = OpenTransactionId::new();
+    block_on(f.alice.begin_serializable(id)).unwrap();
+    let error = block_on(f.alice.tx_ref(id).upsert(
+        "nodes",
+        row(1),
+        cells(1, true, true, "draft"),
+        jazz::db::UpsertOptions {
+            target: jazz::db::WriteTarget::BranchView {
+                head: jazz::protocol::BranchSelector::new([(
+                    "scope",
+                    Value::String("draft".into()),
+                )]),
+                base: None,
+            },
+            ..Default::default()
+        },
+    ))
+    .unwrap_err();
+    assert_eq!(error.code, jazz::db::ErrorCode::Schema);
+    f.alice.abandon_transaction_handle(id).unwrap();
+    assert!(rows(&f.alice).is_empty());
+    assert!(rows(&f.bob).is_empty());
+}
+
+/// A new intermediate witness can itself depend on an accepted parent.
+/// Keep the original depth-two accepted/created union, not only sibling seeds.
+#[test]
+fn accepted_parent_seeds_a_new_intermediate_witness() {
+    let f = Fixture::new(insert(parent(true)));
+    let seed = f.commit(&[(10, cells(10, true, true, "room"))], true);
+    f.connect();
+    f.settle(seed).unwrap();
+    let tx = f.commit(
+        &[
+            (1, cells(2, false, true, "room")),
+            (2, cells(10, false, true, "room")),
+        ],
+        true,
+    );
+    f.settle(tx).unwrap();
+    assert_eq!(
+        rows(&f.bob),
+        vec![
+            (row(1), "room".into()),
+            (row(2), "room".into()),
+            (row(10), "room".into()),
+        ],
+    );
+}
+
+/// Alice's declared creation provenance cannot impersonate the authenticated
+/// Bob subscriber. An untrusted link cannot vouch for that attribution.
+#[test]
+fn authenticated_subscriber_subject_cannot_be_spoofed_by_created_by() {
+    let policy = PolicyExpr::and(vec![
+        PolicyExpr::eq_session("$createdBy", vec!["user".into()]),
+        insert(parent(true)),
+    ]);
+    let f = Fixture::new(policy);
+    let id = OpenTransactionId::new();
+    block_on(f.alice.begin_serializable(id)).unwrap();
+    for (row_id, value) in [
+        (1, cells(2, false, true, "room")),
+        (2, cells(2, true, true, "room")),
+    ] {
+        block_on(f.alice.tx_ref(id).upsert(
+            "nodes",
+            row(row_id),
+            value,
+            jazz::db::UpsertOptions {
+                identity: jazz::db::WriteIdentity::Attribution(author("alice")),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    }
+    let tx = block_on(f.alice.commit_serializable_handle(id)).unwrap().0;
+    let (up, down) = duplex();
+    block_on(f.alice.connect_upstream(up));
+    f.bob.accept_subscriber(down, author("bob")).unwrap();
+    assert!(f.settle(tx).is_err());
+    assert!(rows(&f.bob).is_empty());
+    assert!(rows(&f.alice).is_empty());
+}
+
+/// Preserve the original public two-table parent/child atomic creation case.
+/// The authenticated author independently qualifies the parent before that
+/// same serializable unit may use it to authorize the dependent child.
+#[test]
+fn authenticated_parent_and_child_are_created_as_one_global_unit() {
+    let definition = common::compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("parents")
+                    .column("title", ColumnType::Text)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::True)
+                            .with_insert(PolicyExpr::eq_session("$createdBy", vec!["user".into()])),
+                    ),
+            )
+            .table(
+                TableSchemaBuilder::new("children")
+                    .fk_column("parent_id", "parents")
+                    .column("title", ColumnType::Text)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::True)
+                            .with_insert(PolicyExpr::exists_including_created(
+                                "parents",
+                                outer("id", "parent_id"),
+                            )),
+                    ),
+            )
+            .build(),
+    );
+    let alice = block_on(Db::open(DbConfig::new(
+        definition.clone(),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0xa1; 16]),
+            author: author("alice"),
+        },
+    )))
+    .unwrap();
+    alice.set_remote_link_hint(RemoteLinkHint::NoServer);
+    let authority = block_on(Db::open(DbConfig::new(
+        definition,
+        DbIdentity {
+            node: NodeUuid::from_bytes([0xc1; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .unwrap();
+    authority.set_authority();
+    for table in ["parents", "children"] {
+        assert!(authority.table_identity(table).unwrap().is_some());
+    }
+    let id = OpenTransactionId::new();
+    block_on(alice.begin_serializable(id)).unwrap();
+    block_on(alice.tx_ref(id).upsert(
+        "parents",
+        row(10),
+        BTreeMap::from([("title".into(), Value::String("Alice's parent".into()))]),
+        Default::default(),
+    ))
+    .unwrap();
+    block_on(alice.tx_ref(id).upsert(
+        "children",
+        row(11),
+        BTreeMap::from([
+            ("parent_id".into(), Value::Uuid(row(10).0)),
+            ("title".into(), Value::String("Alice's child".into())),
+        ]),
+        Default::default(),
+    ))
+    .unwrap();
+    let committed = block_on(alice.commit_serializable_handle(id)).unwrap().0;
+    let (up, down) = duplex();
+    block_on(alice.connect_upstream(up));
+    authority.accept_subscriber(down, author("alice")).unwrap();
+    drive(
+        &[&alice, &authority],
+        alice.wait_for_transaction(committed, DurabilityTier::Global),
+    )
+    .unwrap();
+    for db in [&alice, &authority] {
+        let parents = db.prepare_query(&Query::from("parents")).unwrap();
+        let children = db.prepare_query(&Query::from("children")).unwrap();
+        let parents = block_on(db.all(&parents, ReadOpts::default())).unwrap();
+        let children = block_on(db.all(&children, ReadOpts::default())).unwrap();
+        assert_eq!(parents.len(), 1);
+        assert_eq!(children.len(), 1);
+        assert_eq!(parents[0].row_uuid(), row(10));
+        assert_eq!(
+            parents[0].cell("title"),
+            Some(Value::String("Alice's parent".into()))
+        );
+        assert_eq!(children[0].row_uuid(), row(11));
+        assert_eq!(children[0].cell("parent_id"), Some(Value::Uuid(row(10).0)));
+        assert_eq!(
+            children[0].cell("title"),
+            Some(Value::String("Alice's child".into()))
+        );
+    }
+}
+
+/// Configuring a multi-user fixture must not erase private-owner refusal.
+#[test]
+fn private_bob_store_still_refuses_an_alice_subscriber() {
+    let bob = open(schema(insert(parent(true))), 2, true);
+    let (_up, down) = duplex();
+    let error = bob.accept_subscriber(down, author("alice")).unwrap_err();
+    assert_eq!(error.code, jazz::db::ErrorCode::Protocol);
+    assert!(error.message.contains("serves only its own identity"));
+    assert!(rows(&bob).is_empty());
 }

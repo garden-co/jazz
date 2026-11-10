@@ -4,7 +4,7 @@ use jazz_testkit as support;
 use std::time::{Duration, Instant};
 
 use jazz::query::{Aggregate, AggregateFunction, OrderDirection};
-use jazz::records::{BorrowedRecord, RecordDescriptor, Value as GrooveValue, ValueType};
+use jazz::records::{BorrowedRecord, RecordDescriptor, Value as RecordValue, ValueType};
 use jazz::row_input;
 use jazz::tools::{
     ColumnMergeStrategy, ColumnType, DurabilityTier, JazzClient, PolicyExpr, Row, RowDescriptor,
@@ -327,20 +327,20 @@ impl ObservedSubscription {
                     .skip(4)
                     .take(self.descriptor.fields().len())
                     .map(|value| match value {
-                        GrooveValue::Nullable(None) => Value::Null,
-                        GrooveValue::Nullable(Some(value)) => match *value {
-                            GrooveValue::String(value) => Value::Text(value),
-                            GrooveValue::I32(value) => Value::Integer(value),
-                            GrooveValue::I64(value) => Value::BigInt(value),
-                            GrooveValue::U64(value) => Value::Timestamp(value),
-                            GrooveValue::F64(value) => Value::Double(value),
+                        RecordValue::Nullable(None) => Value::Null,
+                        RecordValue::Nullable(Some(value)) => match *value {
+                            RecordValue::String(value) => Value::Text(value),
+                            RecordValue::I32(value) => Value::Integer(value),
+                            RecordValue::I64(value) => Value::BigInt(value),
+                            RecordValue::U64(value) => Value::Timestamp(value),
+                            RecordValue::F64(value) => Value::Double(value),
                             other => panic!("unsupported delivered aggregate value: {other:?}"),
                         },
-                        GrooveValue::String(value) => Value::Text(value),
-                        GrooveValue::I32(value) => Value::Integer(value),
-                        GrooveValue::I64(value) => Value::BigInt(value),
-                        GrooveValue::U64(value) => Value::Timestamp(value),
-                        GrooveValue::F64(value) => Value::Double(value),
+                        RecordValue::String(value) => Value::Text(value),
+                        RecordValue::I32(value) => Value::Integer(value),
+                        RecordValue::I64(value) => Value::BigInt(value),
+                        RecordValue::U64(value) => Value::Timestamp(value),
+                        RecordValue::F64(value) => Value::Double(value),
                         other => panic!("unsupported delivered aggregate value: {other:?}"),
                     })
                     .collect::<Vec<_>>()
@@ -1977,21 +1977,16 @@ async fn aggregate_subscription_spy_stays_at_policy_visible_truth() {
                 .expect("start test server");
             let admin_id = test_user_id("aggregate-admin");
             let spy_id = test_user_id("aggregate-spy");
-            let mut admin_context =
-                server.make_client_context_for_user(schema.clone(), admin_id.clone());
-            // Exercise the authenticated-reader boundary, rather than the
-            // test helper's trusted-backend shortcut.  A backend secret makes
-            // this direct link's actual reader SYSTEM by design.
-            admin_context.backend_secret = None;
+            let mut admin_context = server.make_user_context(schema.clone(), admin_id.clone());
+            // Exercise the authenticated-reader boundary: the backend acts
+            // for this user, rather than reading as SYSTEM on its own link.
             support::enroll_test_context(&mut admin_context)
                 .await
                 .expect("enroll admin identity");
             let admin = jazz_testkit::connect(admin_context)
                 .await
                 .expect("connect admin");
-            let mut spy_context =
-                server.make_client_context_for_user(schema.clone(), spy_id.clone());
-            spy_context.backend_secret = None;
+            let mut spy_context = server.make_user_context(schema.clone(), spy_id.clone());
             support::enroll_test_context(&mut spy_context)
                 .await
                 .expect("enroll spy identity");
@@ -2084,8 +2079,7 @@ async fn shared_count_spy_with_concurrent_owner_subscription() {
             let mut clients = Vec::new();
             for name in ["review-owner", "review-spy"] {
                 let id = test_user_id(name);
-                let mut ctx = server.make_client_context_for_user(schema.clone(), id.clone());
-                ctx.backend_secret = None;
+                let mut ctx = server.make_user_context(schema.clone(), id.clone());
                 support::enroll_test_context(&mut ctx)
                     .await
                     .expect("enroll");

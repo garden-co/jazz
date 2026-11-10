@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
@@ -8,7 +9,7 @@ import { recoveryRootBytes } from "./recovery-format.js";
 import { readAccountMembership } from "./public-membership.js";
 
 it("accepts recovery after account activation with a later device-key projection", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Awaited<ReturnType<typeof createDb>>[] = [];
   const crypto = await createNativeCrypto();
   const signer = await crypto.deviceSigner.createKeyPair();
@@ -24,6 +25,7 @@ it("accepts recovery after account activation with a later device-key projection
       schema: app,
       permissions: deviceRequestPermissions,
     });
+    server = await frontE2eeCore(server, { schema: app, permissions: deviceRequestPermissions });
     const account = await localAccountConfig(server.appId, server.url);
     const owner = await createDb(account);
     const observer = await createDb(await localAccountConfig(server.appId, server.url));

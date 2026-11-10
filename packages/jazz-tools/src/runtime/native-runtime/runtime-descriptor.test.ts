@@ -3,8 +3,7 @@ import { schema as s } from "../../schema-namespace.js";
 import { defineApp } from "../../typed-app.js";
 import type { ColumnDescriptor, WasmSchema } from "../../drivers/types.js";
 import { createRecord } from "./native-codec.js";
-import { decodeNestedRowBytes, rowsFromBatches } from "./native-runtime-adapter.js";
-import { formatUuid } from "../uuid.js";
+import { decodeNestedRowBytes, formatUuid, rowsFromBatches } from "./native-runtime-adapter.js";
 import { nativeRowFieldPlanCacheKey, valueTypeCacheKey } from "./native-row-descriptor-key.js";
 
 describe("formatUuid", () => {
@@ -493,9 +492,12 @@ function concatBytes(chunks: Uint8Array[]): Uint8Array {
 }
 
 it("preserves stored application columns named like internal metadata", () => {
-  const app = defineApp({
-    notes: { parents: s.string(), schema_version: s.string(), authored_columns: s.string() },
-  });
+  const app = defineApp(
+    {
+      notes: { parents: s.string(), schema_version: s.string(), authored_columns: s.string() },
+    },
+    { migrations: "none" },
+  );
   const names = ["parents", "schema_version", "authored_columns"];
   const rows = rowsFromBatches(
     [

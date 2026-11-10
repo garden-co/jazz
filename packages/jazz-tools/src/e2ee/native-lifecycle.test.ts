@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { createJazzSession } from "../backend/create-jazz-session.js";
 import { createDb } from "../runtime/default-create-db.js";
@@ -20,7 +21,7 @@ const keyStore = () => {
 };
 
 it("uses native Node session lifecycle with a WASM device and retains revocation", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   let owner: Awaited<ReturnType<typeof createJazzSession>> | undefined;
   let other: Awaited<ReturnType<typeof createDb>> | undefined;
   try {
@@ -31,6 +32,7 @@ it("uses native Node session lifecycle with a WASM device and retains revocation
       schema: app,
       permissions,
     });
+    server = await frontE2eeCore(server, { schema: app, permissions: permissions });
     owner = await createJazzSession({
       appId: server.appId,
       serverUrl: server.url,

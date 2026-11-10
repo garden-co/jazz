@@ -6,15 +6,18 @@ import { deploy } from "../../src/dev/catalogue.js";
 import { deviceRequestSchema, deviceRequestPermissions } from "../../src/e2ee/device-requests.js";
 import { spaceSchema } from "../../src/e2ee/spaces.js";
 import { acquireBrowserTestAccount } from "./account-fixtures.js";
-import { getJazzServerInfo, stopJazzServer } from "./testing-server.js";
+import { getJazzServerInfo, startJazzApp, stopJazzServer } from "./testing-server.js";
 
 it("inspects, recovers and reopens a space without a live browser key holder", async () => {
-  const server = await getJazzServerInfo(`e2ee-space-recovery-${crypto.randomUUID()}`);
-  const app = s.defineApp({
-    ...deviceRequestSchema,
-    ...spaceSchema,
-    projects: s.table({ title: s.string() }, {}),
-  });
+  let server = await getJazzServerInfo(`e2ee-space-recovery-${crypto.randomUUID()}`);
+  const app = s.defineApp(
+    {
+      ...deviceRequestSchema,
+      ...spaceSchema,
+      projects: s.table({ title: s.string() }, {}),
+    },
+    { migrations: "none" },
+  );
   const policies = definePermissions(app, ({ policy, session, allOf }) => {
     const authenticated = session.where({ authMode: { in: ["local-first", "external"] } });
     policy.projects.allowRead.where(authenticated);
@@ -44,6 +47,10 @@ it("inspects, recovers and reopens a space without a live browser key holder", a
   try {
     await deploy({
       ...server,
+      schema: app,
+      permissions: { ...deviceRequestPermissions, ...policies },
+    });
+    server = await startJazzApp(server, {
       schema: app,
       permissions: { ...deviceRequestPermissions, ...policies },
     });

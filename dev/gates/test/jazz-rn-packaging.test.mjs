@@ -39,7 +39,10 @@ async function packPrebuildPayloadFixtures(directory) {
     await mkdir(source, { recursive: true });
     await writeFile(
       join(source, "package.json"),
-      JSON.stringify({ name: `jazz-rn-${platform}`, version: packageJson.version }),
+      JSON.stringify({
+        name: `jazz-rn-${platform}`,
+        version: packageJson.version,
+      }),
     );
     await mkdir(join(source, platform), { recursive: true });
     await writeFile(join(source, platform, "jazz-native-relay.manifest.json"), "{}\n");
@@ -220,8 +223,9 @@ test("jazz-rn relay production builds are SQLite-only on every artifact target",
       }),
     );
     const dependencies = productionDependencyNames(metadata, "jazz-native-relay");
-    assert.ok(dependencies.has("jazz-storage-sqlite"), `${target} relay must retain SQLite`);
-    for (const forbidden of ["jazz-storage-rocksdb", "jazz-benchmark-guard", "tempfile"])
+    assert.ok(dependencies.has("jazz-db"), `${target} relay must run on jazz-db`);
+    assert.ok(dependencies.has("libsqlite3-sys"), `${target} relay must retain SQLite`);
+    for (const forbidden of ["jazz-benchmark-guard", "tempfile"])
       assert.ok(!dependencies.has(forbidden), `${target} relay must exclude ${forbidden}`);
   }
 });
@@ -816,11 +820,8 @@ test("React Native docs advertise the supported alpha session and account-handle
     previewWorkflow,
   ] = await Promise.all([
     readFile(new URL("../../../crates/jazz-rn/README.md", import.meta.url), "utf8"),
-    readFile(new URL("../../../docs/content/docs/install/client.mdx", import.meta.url), "utf8"),
-    readFile(
-      new URL("../../../docs/content/docs/getting-started/client-setup.mdx", import.meta.url),
-      "utf8",
-    ),
+    readFile(new URL("../../../docs/content/docs/setup/react-native.mdx", import.meta.url), "utf8"),
+    readFile(new URL("../../../docs/content/docs/setup/react-native.mdx", import.meta.url), "utf8"),
     readFile(
       new URL("../../../docs/content/docs/reference/durability-tiers.mdx", import.meta.url),
       "utf8",
@@ -861,8 +862,8 @@ test("React Native docs advertise the supported alpha session and account-handle
     /React Native and Expo are supported as an alpha[\s\S]*`jazz-tools\/react-native`[\s\S]*canonical Expo\s+scaffold/,
     "the public install guide must direct RN users to the supported account-handle client path",
   );
-  const expoSetup = clientSetupGuide.match(/## React Native and Expo\n([\s\S]*?)(?=\n## )/)?.[1];
-  assert.ok(expoSetup, "the client setup guide must include a React Native and Expo section");
+  const expoSetup = clientSetupGuide.match(/## Setup\n([\s\S]*?)(?=\n## )/)?.[1];
+  assert.ok(expoSetup, "the React Native guide must include a Setup section");
   assert.match(expoSetup, /import \{ JazzSessionProvider \} from "jazz-tools\/expo"/);
   assert.match(
     expoSetup,
@@ -2433,13 +2434,10 @@ test("relay verification rejects a manifest-sealed XCFramework without its devic
       "--",
       "Cargo.lock",
       "Cargo.toml",
-      "crates/groove",
-      "crates/idb-tree",
       "crates/jazz",
       "crates/jazz-compression",
       "crates/jazz-native-relay",
       "crates/jazz-native-transport",
-      "crates/jazz-storage-sqlite",
       "crates/jazz-rn/scripts/build-relay-artifacts.sh",
     ],
     { cwd: sourceRoot, encoding: "utf8" },
@@ -2575,7 +2573,14 @@ ${
     await writeFile(
       destination,
       `${JSON.stringify(
-        { format: 2, nativeRelayAbi, sourceRevision, nativeSourceFingerprint, ...extra, files },
+        {
+          format: 2,
+          nativeRelayAbi,
+          sourceRevision,
+          nativeSourceFingerprint,
+          ...extra,
+          files,
+        },
         null,
         2,
       )}\n`,
@@ -2619,7 +2624,10 @@ ${
             process.execPath,
             [verifier.pathname, "--package-root", packageRoot, "android"],
             {
-              env: { ...environment, JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION: expectedCargoNdk },
+              env: {
+                ...environment,
+                JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION: expectedCargoNdk,
+              },
               stdio: "pipe",
             },
           ),
@@ -2628,7 +2636,7 @@ ${
     }
 
     for (const transitiveInput of [
-      "crates/idb-tree/",
+      "crates/jazz/layers/db/",
       "crates/jazz-compression/",
       "crates/jazz-native-transport/",
     ]) {
@@ -3091,13 +3099,10 @@ test("release, preview, and labeled platform gates seal and link the staged rela
   for (const nativeInput of [
     "Cargo.lock",
     "Cargo.toml",
-    "crates/groove",
-    "crates/idb-tree",
     "crates/jazz",
     "crates/jazz-compression",
     "crates/jazz-native-relay",
     "crates/jazz-native-transport",
-    "crates/jazz-storage-sqlite",
   ]) {
     assert.ok(artifactScript.includes(nativeInput), `artifact fingerprint omits ${nativeInput}`);
     assert.ok(verifier.includes(nativeInput), `artifact verifier omits ${nativeInput}`);

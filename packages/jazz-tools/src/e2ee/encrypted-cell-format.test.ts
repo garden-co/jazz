@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
@@ -39,29 +40,35 @@ function fields(value: Uint8Array): Uint8Array[] {
 it.each(["wasm", "native"])(
   "pins complete encrypted cell records through public %s writes and reads",
   async (runtime) => {
-    const app = s.defineApp({
-      ...deviceRequestSchema,
-      ...spaceSchema,
-      projects: s.table({ title: s.string() }, {}),
-      notes: s
-        .table(
-          { projectId: s.uuid(), title: s.string(), payload: s.bytes() },
-          { project: s.rel("projects", "projectId") },
-        )
-        .encrypted({ space: "projectId", columns: ["title", "payload"] }),
-    });
+    const app = s.defineApp(
+      {
+        ...deviceRequestSchema,
+        ...spaceSchema,
+        projects: s.table({ title: s.string() }, {}),
+        notes: s
+          .table(
+            { projectId: s.uuid(), title: s.string(), payload: s.bytes() },
+            { project: s.rel("projects", "projectId") },
+          )
+          .encrypted({ space: "projectId", columns: ["title", "payload"] }),
+      },
+      { migrations: "none" },
+    );
     // This is the ordinary physical schema a non-E2EE client sees, not an
     // inspection of private runtime state or a call to the cell encoder.
-    const physical = s.defineApp({
-      ...deviceRequestSchema,
-      ...groupSchema,
-      ...spaceSchema,
-      projects: s.table({ title: s.string() }, {}),
-      notes: s.table(
-        { projectId: s.uuid(), title: s.bytes(), payload: s.bytes() },
-        { project: s.rel("projects", "projectId") },
-      ),
-    });
+    const physical = s.defineApp(
+      {
+        ...deviceRequestSchema,
+        ...groupSchema,
+        ...spaceSchema,
+        projects: s.table({ title: s.string() }, {}),
+        notes: s.table(
+          { projectId: s.uuid(), title: s.bytes(), payload: s.bytes() },
+          { project: s.rel("projects", "projectId") },
+        ),
+      },
+      { migrations: "none" },
+    );
     const policies = definePermissions(app, ({ policy, session }) => {
       policy.projects.allowRead.always();
       policy.projects.allowInsert.always();
@@ -75,7 +82,7 @@ it.each(["wasm", "native"])(
       policy.__e2ee_space_deliveries.allowInsert.where({ senderAccountId: session.user.account });
     });
     const permissions = { ...deviceRequestPermissions, ...policies };
-    const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+    let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
     let db: Awaited<ReturnType<typeof createDb>> | undefined;
     let raw: Awaited<ReturnType<typeof createDb>> | undefined;
     let owner: Awaited<ReturnType<typeof createJazzSession>> | undefined;
@@ -90,6 +97,7 @@ it.each(["wasm", "native"])(
         schema: app,
         permissions,
       });
+      server = await frontE2eeCore(server, { schema: app, permissions: permissions });
       const crypto = await createBrowserCrypto();
       const e2ee = {
         app,

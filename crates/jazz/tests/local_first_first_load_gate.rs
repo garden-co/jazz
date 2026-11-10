@@ -1,41 +1,33 @@
-// Ported verbatim from crates/jazz/tests; only the Db facade imports are swapped.
 //! The machinery behind the core `Db` first-load gate
 //! (`FirstLoad::WaitForRemote`) and the host remote-link hint: link hints and
 //! the attempt window, release on link failure or loss, strict remote offset
 //! windows with their local fallback, and the non-durable foreground's
-//! authority witness through its storage owner.
+//! wait for the authority's answer through its storage owner.
 //!
-//! Most reads here use a long server wait to isolate link and answer behavior.
-//! Scheduler regressions also exercise timeout delivery with a host that keeps
-//! only the earliest timer.
+//! Most reads here use a long server wait to isolate link and answer behavior;
+//! deadline tests use short waits and tick past them explicitly.
 //!
 //! Every client here is a core `Db` connected to a history-complete server
 //! `Db` over an in-memory duplex transport, with ticks driven explicitly, so
 //! "the server has not answered yet" is a deterministic state rather than a
 //! race.
 
-// Helpers for the relay-tier tests below stay while those tests are
-// cfg-gated until the relay is ported.
-#![allow(dead_code, unused_imports)]
-
 // Shared with jazz-testkit by path so Jazz needs no testkit dev-dependency.
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;
-use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::pin;
-use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
-mod common;
+use crate::common;
 
 use duplex_transport::duplex;
 use jazz::block_on;
 use jazz::db::{
     Db, DbConfig, DbIdentity, FirstLoad, REMOTE_LINK_ATTEMPT_WINDOW, ReadOpts, RemoteLinkHint,
-    SerializedReadResult, SubscriptionEvent, SubscriptionStream, TickScheduler, TickUrgency,
+    SerializedReadResult, SubscriptionEvent, SubscriptionStream,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query};
@@ -111,7 +103,9 @@ fn fresh_client(node: u8) -> Db {
 fn connect(client: &Db, server: &Db) {
     let (client_transport, server_transport) = duplex();
     let _upstream = block_on(client.connect_upstream(client_transport));
-    let _subscriber = server.accept_subscriber(server_transport, AuthorSubject::SYSTEM);
+    let _subscriber = server
+        .accept_subscriber(server_transport, AuthorSubject::SYSTEM)
+        .unwrap();
 }
 
 fn turn(client: &Db, server: Option<&Db>) {
@@ -205,6 +199,16 @@ fn opening(event: SubscriptionEvent) -> (bool, Vec<RowUuid>, bool) {
     }
 }
 
+/// A released opening is not followed by a second one: whatever the stream
+/// publishes next is an incremental delta.
+fn assert_no_second_opening(stream: &mut SubscriptionStream) {
+    while let Some(event) = stream.try_next_event() {
+        if let SubscriptionEvent::Delta { reset: true, .. } = event {
+            panic!("a released opening was published again: {event:?}");
+        }
+    }
+}
+
 /// Run a host one-shot read to completion, driving owner turns between polls
 /// the way bindings re-poll a pending native read.
 fn one_shot(
@@ -215,16 +219,7 @@ fn one_shot(
     max_turns: usize,
 ) -> Vec<RowUuid> {
     let bytes = postcard::to_allocvec(query).expect("encode query");
-    let read = client.all_serialized_query(
-        &bytes,
-        opts,
-        None,
-        None,
-        None,
-        false,
-        || false,
-        |attachment| client.detach_query(attachment),
-    );
+    let read = client.all_serialized_query(&bytes, opts, None, None, None);
     let mut read = pin!(read);
     let mut context = Context::from_waker(Waker::noop());
     for _ in 0..max_turns {
@@ -362,7 +357,9 @@ fn losing_the_own_upstream_releases_a_held_opening() {
     let alice = fresh_client(0x67);
     let (client_transport, server_transport) = duplex();
     let upstream = block_on(alice.connect_upstream(client_transport));
-    let _subscriber = server.accept_subscriber(server_transport, AuthorSubject::SYSTEM);
+    let _subscriber = server
+        .accept_subscriber(server_transport, AuthorSubject::SYSTEM)
+        .unwrap();
     let mut stream = subscribe(&alice, &items(), gated());
     assert_withheld(&mut stream, &alice, None, 5);
 
@@ -375,7 +372,9 @@ fn losing_the_own_upstream_releases_a_held_opening() {
     let bob = fresh_client(0x69);
     let (client_transport, server_transport) = duplex();
     let upstream = block_on(bob.connect_upstream(client_transport));
-    let _subscriber = server.accept_subscriber(server_transport, AuthorSubject::SYSTEM);
+    let _subscriber = server
+        .accept_subscriber(server_transport, AuthorSubject::SYSTEM)
+        .unwrap();
     bob.set_remote_link_hint(RemoteLinkHint::Live);
     let mut stream = subscribe(&bob, &items(), gated());
     assert_withheld(&mut stream, &bob, None, 5);
@@ -392,8 +391,6 @@ fn losing_the_own_upstream_releases_a_held_opening() {
 /// alice: subscribe window (wait 60 s) ─► first delivery [e, f]
 /// alice: one-shot window (wait 60 s)  ─► [e, f]
 /// ```
-#[cfg(any())]
-// jazz-sqlite: not ported, offset windows as the server's page (pinned remote window): designed, not built
 #[test]
 fn an_offset_window_reads_the_remote_page_after_a_partial_sync() {
     let server = seeded_server();
@@ -405,16 +402,8 @@ fn an_offset_window_reads_the_remote_page_after_a_partial_sync() {
         ..ReadOpts::default()
     };
     let bytes = postcard::to_allocvec(&window()).expect("encode window");
-    let remote_read = alice.all_serialized_query(
-        &bytes,
-        remote,
-        None,
-        None,
-        None,
-        true,
-        || false,
-        |attachment| alice.detach_query(attachment),
-    );
+    let expired = || false;
+    let remote_read = alice.all_serialized_query(&bytes, remote, None, None, Some(&expired));
     let mut remote_read = pin!(remote_read);
     let mut context = Context::from_waker(Waker::noop());
     let remote_rows = loop {
@@ -458,7 +447,9 @@ fn an_offset_window_falls_back_to_the_warm_cache_when_the_remote_cannot_answer()
     let alice = fresh_client(0x69);
     let (client_transport, server_transport) = duplex();
     let upstream = block_on(alice.connect_upstream(client_transport));
-    let _subscriber = server.accept_subscriber(server_transport, AuthorSubject::SYSTEM);
+    let _subscriber = server
+        .accept_subscriber(server_transport, AuthorSubject::SYSTEM)
+        .unwrap();
     let remote = ReadOpts {
         tier: jazz::db::ReadTier::Remote,
         ..ReadOpts::default()
@@ -502,16 +493,13 @@ fn an_offset_window_falls_back_to_the_warm_cache_when_the_remote_cannot_answer()
 }
 
 /// A fallen-back window keeps its remote window registered: once the
-/// server can answer, the server's page replaces the local one with a single
-/// reset, even though the local-first read of a partly synced cache would
-/// never converge on it.
+/// server can answer, the server's page replaces the local one, even though
+/// the local-first read of a partly synced cache would never converge on it.
 ///
 /// ```text
 /// alice (empty): hint Attempting ─ subscribe window ── 5 s ──► reset []
-/// alice ══ connect ══ server(a..j), hint Live ────────────────► reset [e, f]
+/// alice ══ connect ══ server(a..j), hint Live ────────────────► [e, f]
 /// ```
-#[cfg(any())]
-// jazz-sqlite: not ported, offset windows as the server's page (pinned remote window): designed, not built
 #[test]
 fn a_fallen_back_window_switches_to_the_servers_page_once_it_answers() {
     let server = seeded_server();
@@ -524,24 +512,43 @@ fn a_fallen_back_window_switches_to_the_servers_page_once_it_answers() {
 
     connect(&alice, &server);
     alice.set_remote_link_hint(RemoteLinkHint::Live);
-    let mut page = None;
+    // The page as a consumer applying each delta sees it; it may only ever
+    // hold the server's page rows.
+    let expected = vec![row(4), row(5)];
+    let mut page = Vec::new();
+    let mut settled = false;
     for _ in 0..MAX_TURNS {
         while let Some(event) = stream.try_next_event() {
-            let (reset, mut rows, settled) = opening(event);
-            rows.sort();
-            if !rows.is_empty() || reset {
-                assert!(reset, "the server's page replaces the local one");
-                page = Some((rows, settled));
+            let SubscriptionEvent::Delta {
+                reset,
+                added,
+                removed,
+                settled: now_settled,
+                ..
+            } = event
+            else {
+                panic!("expected a window delta, got {event:?}");
+            };
+            if reset {
+                page.clear();
             }
+            page.retain(|row| !removed.iter().any(|gone| gone.row_uuid == *row));
+            page.extend(added.iter().map(|row| row.row_uuid()));
+            page.sort();
+            page.dedup();
+            settled = now_settled;
+            assert!(
+                page.iter().all(|row| expected.contains(row)),
+                "the window never shows a row off the server's page: {page:?}"
+            );
         }
-        if page.is_some() {
+        if page == expected && settled {
             break;
         }
         turn(&alice, Some(&server));
     }
-    let (rows, settled) = page.expect("the server's page arrives");
     assert!(settled, "the window's page is the settled server view");
-    assert_eq!(rows, vec![row(4), row(5)]);
+    assert_eq!(page, expected, "the server's page replaces the local one");
     block_on(stream.close()).expect("close the window");
 }
 
@@ -558,13 +565,15 @@ fn worker_connected_to(node: u8, server: &Db) -> Db {
     worker
 }
 
-fn foreground_over(node: u8, worker: Db) -> Foreground {
-    let tab = fresh_client(node);
+/// The tab is the worker's user, at its own node: a worker serves its own
+/// identity's tabs only.
+fn foreground_over(node: u8, worker_node: u8, worker: Db) -> Foreground {
+    let author = AuthorSubject::for_test_bytes([worker_node; 16]);
+    let tab = block_on(Db::open(config(node, author))).expect("open tab");
     tab.set_non_durable_client();
     let (tab_transport, worker_transport) = duplex();
     let _upstream = block_on(tab.connect_upstream(tab_transport));
-    let _foreground =
-        worker.accept_subscriber(worker_transport, AuthorSubject::for_test_bytes([node; 16]));
+    let _foreground = worker.accept_subscriber(worker_transport, author).unwrap();
     Foreground { tab, worker }
 }
 
@@ -597,16 +606,9 @@ impl Foreground {
 
     fn one_shot(&self, server: Option<&Db>, query: &Query) -> Vec<RowUuid> {
         let bytes = postcard::to_allocvec(query).expect("encode query");
-        let read = self.tab.all_serialized_query(
-            &bytes,
-            gated(),
-            None,
-            None,
-            None,
-            false,
-            || false,
-            |attachment| self.tab.detach_query(attachment),
-        );
+        let read = self
+            .tab
+            .all_serialized_query(&bytes, gated(), None, None, None);
         let mut read = pin!(read);
         let mut context = Context::from_waker(Waker::noop());
         for _ in 0..MAX_TURNS {
@@ -622,32 +624,23 @@ impl Foreground {
         }
         panic!("foreground one-shot read did not complete within {MAX_TURNS} owner turns");
     }
-
-    /// Coverage groups the tab holds upstream. Internal: whether the gate's
-    /// authority witness was retired has no public observable, because the
-    /// retained owner-local coverage delivers the same rows either way.
-    fn coverage_groups(&self) -> usize {
-        self.tab.query_coverage_attachment_counts_for_test().0
-    }
 }
 
 /// A foreground's own stream settles at its storage owner's local answer, so
 /// the gate waits for the authority's answer relayed by the owner instead:
 /// while the host reports the owner's server link live, a cold owner's empty
 /// answer is not published, and the first delivery is the server's rows.
-/// Once the gate releases, only the ordinary owner-local coverage remains.
+/// Once the gate releases, the stream stays open without a second opening.
 ///
 /// ```text
 /// server(a..j) ══ worker(cold) ══ tab (non-durable, hint Live)
 /// tab: subscribe ─ worker answers empty (server silent) ─ (withheld)
-/// server answers ─► worker ─► tab: opening a..j, witness coverage retired
+/// server answers ─► worker ─► tab: opening a..j, no second opening
 /// ```
-#[cfg(any())]
-// jazz-sqlite: not ported, a non-durable foreground over a relaying worker (set_non_durable_client): relay tier not built
 #[test]
 fn a_foreground_opening_waits_for_the_servers_rows_through_its_owner() {
     let server = seeded_server();
-    let foreground = foreground_over(0x71, worker_connected_to(0x70, &server));
+    let foreground = foreground_over(0x71, 0x70, worker_connected_to(0x70, &server));
     foreground.tab.set_remote_link_hint(RemoteLinkHint::Live);
 
     let mut stream = subscribe(&foreground.tab, &items(), gated());
@@ -658,26 +651,16 @@ fn a_foreground_opening_waits_for_the_servers_rows_through_its_owner() {
             "the owner's empty local answer must not open the stream"
         );
     }
-    assert_eq!(
-        foreground.coverage_groups(),
-        2,
-        "owner-local coverage plus the gate's authority witness"
-    );
-
     let (reset, mut rows, settled) = opening(foreground.first_event(&mut stream, Some(&server)));
     rows.sort();
     assert!(reset && settled);
     assert_eq!(rows, all_rows(), "the first delivery is the server's rows");
     foreground.turn(Some(&server));
-    assert_eq!(
-        foreground.coverage_groups(),
-        1,
-        "a released gate keeps only the local-first coverage"
-    );
+    assert_no_second_opening(&mut stream);
 
     // One-shot: a second foreground reads the server's rows through its
     // owner rather than the owner's empty local answer.
-    let other = foreground_over(0x72, worker_connected_to(0x73, &server));
+    let other = foreground_over(0x72, 0x73, worker_connected_to(0x73, &server));
     other.tab.set_remote_link_hint(RemoteLinkHint::Live);
     let mut rows = other.one_shot(Some(&server), &items());
     rows.sort();
@@ -691,8 +674,6 @@ fn a_foreground_opening_waits_for_the_servers_rows_through_its_owner() {
 /// server(no rows) ══ worker ══ tab (hint Live)
 /// tab: subscribe ─ (withheld) ─ server answers ─► tab: empty opening
 /// ```
-#[cfg(any())]
-// jazz-sqlite: not ported, a non-durable foreground over a relaying worker (set_non_durable_client): relay tier not built
 #[test]
 fn an_empty_authority_answer_releases_a_foreground_opening() {
     let server = block_on(Db::open_history_complete(config(
@@ -700,7 +681,7 @@ fn an_empty_authority_answer_releases_a_foreground_opening() {
         AuthorSubject::SYSTEM,
     )))
     .expect("open empty server");
-    let foreground = foreground_over(0x75, worker_connected_to(0x74, &server));
+    let foreground = foreground_over(0x75, 0x74, worker_connected_to(0x74, &server));
     foreground.tab.set_remote_link_hint(RemoteLinkHint::Live);
 
     let mut stream = subscribe(&foreground.tab, &items(), gated());
@@ -711,7 +692,7 @@ fn an_empty_authority_answer_releases_a_foreground_opening() {
     let (reset, rows, _) = opening(foreground.first_event(&mut stream, Some(&server)));
     assert!(reset && rows.is_empty());
     foreground.turn(Some(&server));
-    assert_eq!(foreground.coverage_groups(), 1);
+    assert_no_second_opening(&mut stream);
 }
 
 /// When the owner's server link has failed and the host reports that, a
@@ -719,19 +700,16 @@ fn an_empty_authority_answer_releases_a_foreground_opening() {
 ///
 /// ```text
 /// server(a..j)    worker(cold, link failed) ══ tab (hint Failed)
-/// tab: subscribe ─► the owner's (empty) local opening, no witness coverage
+/// tab: subscribe ─► the owner's (empty) local opening
 /// ```
-#[cfg(any())]
-// jazz-sqlite: not ported, a non-durable foreground over a relaying worker (set_non_durable_client): relay tier not built
 #[test]
 fn a_foreground_whose_owner_link_failed_opens_at_once() {
-    let foreground = foreground_over(0x77, fresh_client(0x76));
+    let foreground = foreground_over(0x77, 0x76, fresh_client(0x76));
     foreground.tab.set_remote_link_hint(RemoteLinkHint::Failed);
 
     let mut stream = subscribe(&foreground.tab, &items(), gated());
     let (reset, rows, _) = opening(foreground.first_event(&mut stream, None));
     assert!(reset && rows.is_empty());
-    assert_eq!(foreground.coverage_groups(), 1, "no authority witness");
     assert!(foreground.one_shot(None, &items()).is_empty());
 }
 
@@ -765,12 +743,10 @@ fn warm_worker(node: u8, server: &Db) -> Db {
 /// quiet(a..j, silent from here) ══ worker(cache a..j) ══ tab (hint Live)
 /// tab: subscribe (wait 200 ms) ─ (withheld) ── 200 ms ──► opening a..j from the owner
 /// ```
-#[cfg(any())]
-// jazz-sqlite: not ported, a non-durable foreground over a relaying worker (set_non_durable_client): relay tier not built
 #[test]
 fn a_warm_owner_cache_waits_for_the_authority_answer() {
     let server = seeded_server();
-    let answered = foreground_over(0x79, warm_worker(0x78, &server));
+    let answered = foreground_over(0x79, 0x78, warm_worker(0x78, &server));
     seed(&server, 10, "k");
     answered.tab.set_remote_link_hint(RemoteLinkHint::Live);
     let mut stream = subscribe(&answered.tab, &items(), gated());
@@ -781,11 +757,6 @@ fn a_warm_owner_cache_waits_for_the_authority_answer() {
             "the owner's cached answer must not open the stream"
         );
     }
-    assert_eq!(
-        answered.coverage_groups(),
-        2,
-        "owner-local coverage plus the gate's authority witness"
-    );
     let (reset, mut rows, _) = opening(answered.first_event(&mut stream, Some(&server)));
     rows.sort();
     assert!(reset);
@@ -795,12 +766,12 @@ fn a_warm_owner_cache_waits_for_the_authority_answer() {
         "the first delivery is the authority's answer"
     );
     answered.turn(Some(&server));
-    assert_eq!(answered.coverage_groups(), 1);
+    assert_no_second_opening(&mut stream);
 
     // A second server stays silent once it has warmed its owner: the
     // foreground's timeout releases the owner's cached rows.
     let quiet_server = seeded_server();
-    let silent = foreground_over(0x7e, warm_worker(0x7d, &quiet_server));
+    let silent = foreground_over(0x7e, 0x7d, warm_worker(0x7d, &quiet_server));
     silent.tab.set_remote_link_hint(RemoteLinkHint::Live);
     let mut stream = subscribe(&silent.tab, &items(), wait_for_remote(SHORT));
     for _ in 0..3 {
@@ -814,26 +785,21 @@ fn a_warm_owner_cache_waits_for_the_authority_answer() {
     assert_eq!(rows, all_rows(), "the owner's cached rows");
     silent.turn(None);
     silent.turn(None);
-    assert_eq!(
-        silent.coverage_groups(),
-        1,
-        "the released witness is retired"
-    );
+    assert_no_second_opening(&mut stream);
 }
 
-/// A held foreground opening is released when the host reports that the
-/// owner's server link failed, and the witness coverage is retired.
+/// A held foreground opening is released when the owner's server link
+/// fails (the owner and its host both see it): the owner serves its cached
+/// rows at once, and the opening is not repeated.
 ///
 /// ```text
-/// server(a..j, silent) ══ worker ══ tab (hint Live)
-/// tab: subscribe ─ (withheld) ─ hint Failed ─► empty opening, witness retired
+/// server(a..j, silent) ══ worker(cache a..j) ══ tab (hint Live)
+/// tab: subscribe ─ (withheld) ─ link Failed ─► opening a..j from the owner
 /// ```
-#[cfg(any())]
-// jazz-sqlite: not ported, a non-durable foreground over a relaying worker (set_non_durable_client): relay tier not built
 #[test]
 fn a_held_foreground_opening_is_released_when_its_owner_link_fails() {
     let server = seeded_server();
-    let foreground = foreground_over(0x7b, worker_connected_to(0x7a, &server));
+    let foreground = foreground_over(0x7b, 0x7a, warm_worker(0x7a, &server));
     foreground.tab.set_remote_link_hint(RemoteLinkHint::Live);
     let mut stream = subscribe(&foreground.tab, &items(), gated());
     for _ in 0..6 {
@@ -841,144 +807,111 @@ fn a_held_foreground_opening_is_released_when_its_owner_link_fails() {
         assert!(stream.try_next_event().is_none());
     }
 
+    foreground
+        .worker
+        .set_remote_link_hint(RemoteLinkHint::Failed);
     foreground.tab.set_remote_link_hint(RemoteLinkHint::Failed);
-    let (reset, rows, _) = opening(
-        stream
-            .try_next_event()
-            .expect("the failure report publishes the opening"),
+    let (reset, mut rows, _) = opening(foreground.first_event(&mut stream, None));
+    rows.sort();
+    assert!(reset);
+    assert_eq!(
+        rows,
+        all_rows(),
+        "the owner's cached rows, not the tab's empty store"
     );
-    assert!(reset && rows.is_empty());
     foreground.turn(None);
     foreground.turn(None);
-    assert_eq!(foreground.coverage_groups(), 1);
+    assert_no_second_opening(&mut stream);
 }
 
-/// A host tick scheduler like the WASM and NAPI hosts': it records wakes and
-/// timer requests instead of running them, so the test fires them itself.
-#[derive(Default)]
-struct RecordingScheduler {
-    timers_ms: RefCell<Vec<u64>>,
+/// Tick `db` once `deadline` has passed.
+fn tick_after(db: &Db, deadline: Instant) {
+    std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+    block_on(db.tick()).expect("tick past the deadline");
 }
 
-impl TickScheduler for RecordingScheduler {
-    fn schedule_tick(&self, _urgency: TickUrgency) {}
-
-    fn schedule_tick_after(&self, delay_ms: u64) {
-        self.timers_ms.borrow_mut().push(delay_ms);
-    }
-}
-
-/// Models the host contract: only the earliest timer survives, and firing it
-/// consumes it. The core must re-arm any remaining obligation during the tick.
-#[derive(Default)]
-struct EarliestTimerScheduler {
-    deadline: RefCell<Option<Instant>>,
-}
-
-impl TickScheduler for EarliestTimerScheduler {
-    fn schedule_tick(&self, _urgency: TickUrgency) {}
-
-    fn schedule_tick_after(&self, delay_ms: u64) {
-        let next = Instant::now() + Duration::from_millis(delay_ms);
-        let mut deadline = self.deadline.borrow_mut();
-        if deadline.is_none_or(|current| next < current) {
-            *deadline = Some(next);
-        }
-    }
-}
-
-impl EarliestTimerScheduler {
-    fn fire(&self, db: &Db) {
-        let deadline = self
-            .deadline
-            .borrow_mut()
-            .take()
-            .expect("a held read must retain a scheduled wake");
-        std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
-        block_on(db.tick()).expect("service the host timer");
-    }
-}
-
-/// Alice's two held subscriptions must both time out while Bob stays silent,
-/// even when an unrelated earlier timer consumes the host's only wake.
+/// Alice's two held subscriptions each time out at their own deadline while
+/// Bob stays silent: servicing the earlier deadline releases only the read it
+/// belongs to, and the later one still releases when its own time comes.
 ///
 /// ```text
-/// unrelated timer -> short read timeout -> long read timeout
-///                    each tick re-arms the next deadline
+/// alice ══ bob (never ticked)
+/// subscribe short (200 ms), long (600 ms) ─ (both withheld)
+/// tick after 200 ms ─► short opens, long withheld
+/// tick after 600 ms ─► long opens
 /// ```
-#[cfg(any())]
-// jazz-sqlite: not ported, host TickScheduler timers: the adapter has no host timer integration yet
 #[test]
-fn first_load_deadlines_rearm_after_an_earlier_host_timer() {
+fn first_load_deadlines_release_each_held_read_at_its_own_time() {
     let bob = seeded_server();
     let alice = fresh_client(0x81);
     connect(&alice, &bob);
-    let scheduler = Rc::new(EarliestTimerScheduler::default());
-    alice.set_tick_scheduler(Some(scheduler.clone()));
+    let started = Instant::now();
+    let long_wait = Duration::from_millis(600);
     let mut short = subscribe(&alice, &items(), wait_for_remote(SHORT));
-    let mut long = subscribe(
-        &alice,
-        &items(),
-        wait_for_remote(Duration::from_millis(600)),
-    );
+    let mut long = subscribe(&alice, &items(), wait_for_remote(long_wait));
     assert_withheld(&mut short, &alice, None, 3);
     assert!(long.try_next_event().is_none());
 
-    scheduler.schedule_tick_after(0);
-    scheduler.fire(&alice);
-    assert!(scheduler.deadline.borrow().is_some());
-
-    // Only scheduled timers drive progress; no unrelated polling ticks can
-    // accidentally rescue a read whose wake was lost.
-    let mut short_opened = false;
-    let mut long_opened = false;
-    for _ in 0..10 {
-        scheduler.fire(&alice);
-        if let Some(event) = short.try_next_event() {
-            let (reset, rows, _) = opening(event);
-            assert!(reset && rows.is_empty());
-            short_opened = true;
-        }
-        if let Some(event) = long.try_next_event() {
-            let (reset, rows, _) = opening(event);
-            assert!(reset && rows.is_empty());
-            long_opened = true;
-        }
-        if short_opened && long_opened {
-            break;
-        }
+    tick_after(&alice, started + SHORT + Duration::from_millis(50));
+    let (reset, rows, _) = opening(
+        short
+            .try_next_event()
+            .expect("the short read releases at its deadline"),
+    );
+    assert!(reset && rows.is_empty());
+    // On a machine slow enough to pass the long deadline already, the long
+    // read may be released by now too; otherwise it is still held.
+    if started.elapsed() < long_wait {
+        assert!(
+            long.try_next_event().is_none(),
+            "the long read is held until its own deadline"
+        );
     }
-    assert!(short_opened && long_opened, "both openings must time out");
+
+    tick_after(&alice, started + long_wait + Duration::from_millis(50));
+    let (reset, rows, _) = opening(
+        long.try_next_event()
+            .expect("the long read releases at its deadline"),
+    );
+    assert!(reset && rows.is_empty());
 }
 
-/// Alice's long first-load wait must release when her connection attempt
-/// expires, even if an unrelated timer fired before the attempt deadline.
-#[cfg(any())]
-// jazz-sqlite: not ported, host TickScheduler timers: the adapter has no host timer integration yet
+/// Alice's long first-load wait releases when her connection attempt
+/// expires, even after an unrelated read's earlier deadline was serviced
+/// first.
+///
+/// ```text
+/// hint Attempting ─ subscribe held (60 s), early (200 ms)
+/// tick after 200 ms ─► early opens, held withheld
+/// tick after the attempt window ─► held opens with the local result
+/// ```
 #[test]
-fn first_load_attempt_expiry_rearms_after_an_earlier_host_timer() {
+fn first_load_attempt_expiry_releases_after_an_earlier_deadline() {
     let alice = fresh_client(0x82);
-    let scheduler = Rc::new(EarliestTimerScheduler::default());
-    alice.set_tick_scheduler(Some(scheduler.clone()));
     let started = Instant::now();
     alice.set_remote_link_hint(RemoteLinkHint::Attempting);
-    let mut stream = subscribe(&alice, &items(), gated());
-    assert_withheld(&mut stream, &alice, None, 3);
+    let mut held = subscribe(&alice, &items(), gated());
+    let mut early = subscribe(&alice, &items(), wait_for_remote(SHORT));
+    assert_withheld(&mut held, &alice, None, 3);
 
-    scheduler.schedule_tick_after(0);
-    scheduler.fire(&alice);
-    let next = scheduler
-        .deadline
-        .borrow()
-        .expect("the connection attempt must retain its expiry wake");
-    assert!(
-        next <= started + REMOTE_LINK_ATTEMPT_WINDOW + Duration::from_millis(100),
-        "the attempt expiry must wake before the read's longer timeout",
-    );
-    scheduler.fire(&alice);
+    tick_after(&alice, started + SHORT + Duration::from_millis(50));
     let (reset, rows, _) = opening(
-        stream
+        early
             .try_next_event()
+            .expect("the early read releases at its deadline"),
+    );
+    assert!(reset && rows.is_empty());
+    assert!(
+        held.try_next_event().is_none(),
+        "the attempt window has not expired yet"
+    );
+
+    tick_after(
+        &alice,
+        started + REMOTE_LINK_ATTEMPT_WINDOW + Duration::from_millis(100),
+    );
+    let (reset, rows, _) = opening(
+        held.try_next_event()
             .expect("attempt expiry must release the local opening"),
     );
     assert!(reset && rows.is_empty());
@@ -987,9 +920,8 @@ fn first_load_attempt_expiry_rearms_after_an_earlier_host_timer() {
 /// The link reports a browser host sends over a client's life, ending in
 /// shutdown, with an answered gated subscription, a held gated window, an
 /// armed attempt window and a one-shot racing the remote. Every held read
-/// is released, the attempt timer is requested from the host scheduler, and
-/// closing the Db and then firing that timer and reporting the link again
-/// are harmless.
+/// is released, and closing the Db and then ticking it (as a host timer
+/// firing late would) and reporting the link again are harmless.
 ///
 /// ```text
 /// hint Attempting ─ connect ─ hint Live ─ items opens a..j (answered)
@@ -998,18 +930,16 @@ fn first_load_attempt_expiry_rearms_after_an_earlier_host_timer() {
 ///           to the local window [e, f] of the synced cache
 ///           hint Failed ─ detach ─ close ─ timer tick ─ hint Failed
 /// ```
-#[cfg(any())]
-// jazz-sqlite: not ported, host TickScheduler timers: the adapter has no host timer integration yet
 #[test]
 fn a_host_shutdown_link_sequence_releases_held_reads_and_closes_cleanly() {
     let server = seeded_server();
     let alice = fresh_client(0x7c);
-    let scheduler = Rc::new(RecordingScheduler::default());
-    alice.set_tick_scheduler(Some(scheduler.clone()));
     alice.set_remote_link_hint(RemoteLinkHint::Attempting);
     let (client_transport, server_transport) = duplex();
     let upstream = block_on(alice.connect_upstream(client_transport));
-    let _subscriber = server.accept_subscriber(server_transport, AuthorSubject::SYSTEM);
+    let _subscriber = server
+        .accept_subscriber(server_transport, AuthorSubject::SYSTEM)
+        .unwrap();
     alice.set_remote_link_hint(RemoteLinkHint::Live);
 
     let mut answered = subscribe(&alice, &items(), gated());
@@ -1020,16 +950,7 @@ fn a_host_shutdown_link_sequence_releases_held_reads_and_closes_cleanly() {
     // The server stays silent from here on: both window reads are held.
     let mut held = subscribe(&alice, &window(), gated());
     let bytes = postcard::to_allocvec(&window()).expect("encode window");
-    let one_shot = alice.all_serialized_query(
-        &bytes,
-        gated(),
-        None,
-        None,
-        None,
-        false,
-        || false,
-        |attachment| alice.detach_query(attachment),
-    );
+    let one_shot = alice.all_serialized_query(&bytes, gated(), None, None, None);
     let mut one_shot = pin!(one_shot);
     let mut context = Context::from_waker(Waker::noop());
     assert!(one_shot.as_mut().poll(&mut context).is_pending());
@@ -1042,14 +963,6 @@ fn a_host_shutdown_link_sequence_releases_held_reads_and_closes_cleanly() {
             .expect("losing the live link releases the held window"),
     );
     assert!(reset && !settled);
-    assert!(
-        scheduler
-            .timers_ms
-            .borrow()
-            .iter()
-            .any(|delay| *delay <= REMOTE_LINK_ATTEMPT_WINDOW.as_millis() as u64 + 1),
-        "the attempt window asks the host for a timer tick"
-    );
     let Poll::Ready(result) = one_shot.as_mut().poll(&mut context) else {
         panic!("the one-shot falls back once the live link is lost");
     };
@@ -1068,8 +981,8 @@ fn a_host_shutdown_link_sequence_releases_held_reads_and_closes_cleanly() {
     assert!(alice.detach_connection(&upstream));
     block_on(alice.tick()).expect("tick after detaching");
     block_on(alice.close()).expect("close");
-    // The host's attempt timer fires after close, and the host reports the
-    // link once more while shutting down: neither may disturb the closed Db.
+    // A host timer fires after close, and the host reports the link once
+    // more while shutting down: neither may disturb the closed Db.
     let _ = block_on(alice.tick());
     alice.set_remote_link_hint(RemoteLinkHint::Failed);
     let _ = block_on(alice.tick());
@@ -1078,41 +991,32 @@ fn a_host_shutdown_link_sequence_releases_held_reads_and_closes_cleanly() {
     let _ = block_on(alice.tick());
 }
 
-/// Alice's local-first remote-answer execution keeps pending writes visible,
-/// while her Remote subscription waits for Bob's confirmation. This uses the
-/// host one-shot subscription entrypoint to exercise its coverage promotion.
+/// Alice's local-first subscription, opened with Bob's answer, keeps her
+/// pending writes visible, while her Remote subscription to the same query
+/// waits for Bob's confirmation.
 ///
 /// ```text
-/// bob ── settled rows ──► alice: local-first remote answer + Remote
+/// bob ── settled rows ──► alice: local-first + Remote openings
 /// alice ── pending insert ──► local-first delta
 /// bob is not ticked: Remote has no confirmation and publishes nothing
 /// ```
-#[cfg(any())]
-// jazz-sqlite: not ported, subscribe_remote_answer (host one-shot subscription entry point) not built
 #[test]
 fn remote_answer_coverage_preserves_local_first_pending_writes() {
     let bob = seeded_server();
     let alice = fresh_client(0x7e);
     connect(&alice, &bob);
-    let prepared = alice.prepare_query(&items()).expect("prepare items");
-    let mut local_first = block_on(alice.subscribe_remote_answer(
-        &prepared,
-        ReadOpts::for_read_tier(jazz::db::ReadTier::LocalFirst),
-    ))
-    .expect("local-first remote answer");
+    let mut local_first = subscribe(&alice, &items(), gated());
     let mut remote = subscribe(
         &alice,
         &items(),
         ReadOpts::for_read_tier(jazz::db::ReadTier::Remote),
     );
-    assert_eq!(
-        opening(first_event(&mut local_first, &alice, Some(&bob))).1,
-        all_rows()
-    );
-    assert_eq!(
-        opening(first_event(&mut remote, &alice, Some(&bob))).1,
-        all_rows()
-    );
+    let mut opened = opening(first_event(&mut local_first, &alice, Some(&bob))).1;
+    opened.sort();
+    assert_eq!(opened, all_rows());
+    let mut opened = opening(first_event(&mut remote, &alice, Some(&bob))).1;
+    opened.sort();
+    assert_eq!(opened, all_rows());
     block_on(alice.insert(
         "items",
         BTreeMap::from([("label".to_owned(), Value::String("pending".to_owned()))]),
@@ -1126,6 +1030,396 @@ fn remote_answer_coverage_preserves_local_first_pending_writes() {
     assert!(!reset);
     assert_eq!(added, vec![row(20)]);
     assert_withheld(&mut remote, &alice, None, 8);
-    block_on(local_first.close()).expect("close local-first remote answer");
+    block_on(local_first.close()).expect("close local-first read");
     block_on(remote.close()).expect("close remote read");
+}
+
+/// A foreground over a storage owner that has no server (a browser app
+/// without `serverUrl`): its own write opens its subscription, and a
+/// second foreground over the same owner sees it too.
+#[test]
+fn a_foreground_over_an_owner_without_a_server_reads_the_owners_store() {
+    // A binding's store is a replica from the start, server or not.
+    let worker = fresh_client(0x80);
+    worker.become_replica();
+    let foreground = foreground_over(0x81, 0x80, worker);
+    block_on(foreground.tab.insert(
+        "items",
+        BTreeMap::from([("label".to_owned(), Value::String("local".to_owned()))]),
+        jazz::db::InsertOptions {
+            row_id: Some(row(30)),
+            ..Default::default()
+        },
+    ))
+    .expect("insert through the foreground");
+    let mut stream = subscribe(&foreground.tab, &items(), ReadOpts::default());
+    let (_, rows, _) = opening(foreground.first_event(&mut stream, None));
+    assert_eq!(rows, vec![row(30)]);
+
+    let owner = AuthorSubject::for_test_bytes([0x80; 16]);
+    let other = block_on(Db::open(config(0x82, owner))).expect("open second tab");
+    other.set_non_durable_client();
+    let (tab_transport, worker_transport) = duplex();
+    let _upstream = block_on(other.connect_upstream(tab_transport));
+    let _foreground = foreground
+        .worker
+        .accept_subscriber(worker_transport, owner)
+        .unwrap();
+    let mut stream = subscribe(&other, &items(), ReadOpts::default());
+    let rows = (0..MAX_TURNS)
+        .find_map(|_| {
+            let event = stream.try_next_event();
+            if event.is_none() {
+                block_on(other.tick()).expect("tick second tab");
+                foreground.turn(None);
+                block_on(other.tick()).expect("tick second tab after worker");
+            }
+            event
+        })
+        .map(|event| opening(event).1)
+        .expect("the second tab's opening");
+    assert_eq!(rows, vec![row(30)], "the second tab reads the owner's rows");
+}
+
+/// A foreground's one-shot read with a first-load wait, through a worker
+/// whose live server does not answer: the worker serves its store once the
+/// wait runs out, and the read completes with the rows held locally.
+///
+/// ```text
+/// server (silent) ══ worker ══ tab (hint Live)
+/// tab: all(wait 200ms) ─ worker relays ─ (no answer) ─ 200ms ─► worker's rows
+/// ```
+#[test]
+fn a_foreground_one_shot_falls_back_to_its_owner_when_a_live_server_is_silent() {
+    let server = seeded_server();
+    let foreground = foreground_over(0x75, 0x74, worker_connected_to(0x74, &server));
+    foreground.tab.set_remote_link_hint(RemoteLinkHint::Live);
+    foreground.worker.set_remote_link_hint(RemoteLinkHint::Live);
+
+    // An open subscription to the same query, released by its own wait.
+    let mut stream = subscribe(&foreground.tab, &items(), wait_for_remote(SHORT));
+    let opened = Instant::now();
+    while stream.try_next_event().is_none() {
+        assert!(
+            opened.elapsed() < Duration::from_secs(5),
+            "the opening is released"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+        foreground.turn(None);
+    }
+
+    let bytes = postcard::to_allocvec(&items()).expect("encode query");
+    let started = Instant::now();
+    let read =
+        foreground
+            .tab
+            .all_serialized_query(&bytes, wait_for_remote(SHORT), None, None, None);
+    let mut read = pin!(read);
+    let mut context = Context::from_waker(Waker::noop());
+    let rows = loop {
+        if let Poll::Ready(result) = read.as_mut().poll(&mut context) {
+            break match result.expect("foreground one-shot read") {
+                SerializedReadResult::Rows(rows) => rows.len(),
+                SerializedReadResult::Relation(_) => panic!("items is a row query"),
+            };
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the read must not outlive its first-load wait"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+        foreground.turn(None);
+    };
+    assert!(started.elapsed() >= SHORT);
+    assert_eq!(rows, 0, "the cold worker holds none of the server's rows");
+}
+
+/// Alice's cold foreground reads Bob's durable worker while its server is
+/// offline, inside the SAME mergeable handle and without a warming read.
+/// Its own staging remains visible; a later server change does not turn the
+/// mergeable commit into a serializable read-set conflict.
+///
+/// server(a..j) -> Bob(worker cache, offline upstream) -> Alice(cold tab)
+/// Alice: begin mergeable -> stage own -> LocalFirst -> server changes -> commit
+#[test]
+fn cold_mergeable_localfirst_uses_the_offline_workers_store_without_upgrade() {
+    for serialized in [false, true] {
+        let server = seeded_server();
+        let worker = warm_worker(0x82, &server);
+        worker.set_remote_link_hint(RemoteLinkHint::Failed);
+        let foreground = foreground_over(0x83, 0x82, worker);
+        foreground.tab.set_remote_link_hint(RemoteLinkHint::Failed);
+        for _ in 0..3 {
+            foreground.turn(None);
+        }
+        let id = jazz::tools::OpenTransactionId::new();
+        block_on(foreground.tab.begin_mergeable(id)).unwrap();
+        let own = block_on(foreground.tab.tx_ref(id).insert(
+            "items",
+            BTreeMap::from([("label".into(), Value::String("own-before".into()))]),
+            Default::default(),
+        ))
+        .unwrap()
+        .row_uuid();
+        let query = items();
+        let prepared = foreground.tab.prepare_query(&query).unwrap();
+        let bytes = postcard::to_allocvec(&query).unwrap();
+        let read = async {
+            if serialized {
+                let result = foreground
+                    .tab
+                    .all_serialized_query(
+                        &bytes,
+                        ReadOpts::for_read_tier(jazz::db::ReadTier::LocalFirst),
+                        Some(id),
+                        None,
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                let SerializedReadResult::Rows(rows) = result else {
+                    panic!("row query")
+                };
+                rows
+            } else {
+                foreground
+                    .tab
+                    .tx_ref(id)
+                    .all_prepared_at(&prepared, false, None, jazz::db::ReadTier::LocalFirst)
+                    .await
+                    .unwrap()
+            }
+        };
+        let rows = drive_cold_mergeable(&foreground, None, read);
+        let ids: Vec<_> = rows.iter().map(|r| r.row_uuid()).collect();
+        assert_eq!(
+            ids.len(),
+            LABELS.len() + 1,
+            "bound read must hydrate the worker's local rows"
+        );
+        assert!(ids.contains(&own));
+        assert!(all_rows().iter().all(|id| ids.contains(id)));
+        block_on(server.update(
+            "items",
+            row(0),
+            BTreeMap::from([(
+                "label".into(),
+                Value::String("server-changed-after-read".into()),
+            )]),
+            Default::default(),
+        ))
+        .unwrap();
+        let receipt = block_on(foreground.tab.commit_mergeable_handle(id)).unwrap();
+        foreground.worker.set_remote_link_hint(RemoteLinkHint::Live);
+        foreground.tab.set_remote_link_hint(RemoteLinkHint::Live);
+        drive_cold_mergeable(
+            &foreground,
+            Some(&server),
+            foreground
+                .tab
+                .wait_for_transaction(receipt.0, jazz::tx::DurabilityTier::Global),
+        )
+        .unwrap();
+    }
+}
+
+fn drive_cold_mergeable<T>(
+    foreground: &Foreground,
+    server: Option<&Db>,
+    future: impl Future<Output = T>,
+) -> T {
+    let mut future = pin!(future);
+    for _ in 0..MAX_TURNS {
+        if let Poll::Ready(result) = future
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+        {
+            return result;
+        }
+        foreground.turn(server);
+    }
+    panic!("cold mergeable read did not finish");
+}
+
+/// Alice admits a mergeable read before Bob's local worker answers, then stages
+/// a second row. Hydration must preserve the read's captured earlier prefix.
+#[test]
+fn cold_mergeable_localfirst_keeps_its_admitted_staging_prefix() {
+    let server = seeded_server();
+    let worker = warm_worker(0x84, &server);
+    worker.set_remote_link_hint(RemoteLinkHint::Failed);
+    let foreground = foreground_over(0x85, 0x84, worker);
+    foreground.tab.set_remote_link_hint(RemoteLinkHint::Failed);
+    for _ in 0..3 {
+        foreground.turn(None);
+    }
+    let id = jazz::tools::OpenTransactionId::new();
+    block_on(foreground.tab.begin_mergeable(id)).unwrap();
+    let transaction = foreground.tab.tx_ref(id);
+    let first = block_on(transaction.insert(
+        "items",
+        BTreeMap::from([("label".into(), Value::String("first".into()))]),
+        Default::default(),
+    ))
+    .unwrap()
+    .row_uuid();
+    let prepared = foreground.tab.prepare_query(&items()).unwrap();
+    let mut reading = Box::pin(transaction.all_prepared_at(
+        &prepared,
+        false,
+        None,
+        jazz::db::ReadTier::LocalFirst,
+    ));
+    assert!(
+        reading
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending(),
+        "the cold foreground must fetch its local worker"
+    );
+    let late = block_on(transaction.insert(
+        "items",
+        BTreeMap::from([("label".into(), Value::String("late".into()))]),
+        Default::default(),
+    ))
+    .unwrap()
+    .row_uuid();
+    let rows = drive_cold_mergeable(&foreground, None, reading).unwrap();
+    assert_eq!(rows.len(), LABELS.len() + 1);
+    assert!(rows.iter().any(|r| r.row_uuid() == first));
+    assert!(!rows.iter().any(|r| r.row_uuid() == late));
+    foreground.tab.abandon_transaction_handle(id).unwrap();
+}
+
+/// Alice abandons a mergeable fetch while Bob has not answered. Reusing the
+/// handle cannot revive the old read, and an unfinished read cannot commit.
+#[test]
+fn cold_mergeable_localfirst_refuses_abandonment_and_handle_reuse() {
+    let server = seeded_server();
+    let worker = warm_worker(0x86, &server);
+    worker.set_remote_link_hint(RemoteLinkHint::Failed);
+    let foreground = foreground_over(0x87, 0x86, worker);
+    foreground.tab.set_remote_link_hint(RemoteLinkHint::Failed);
+    for _ in 0..3 {
+        foreground.turn(None);
+    }
+    let id = jazz::tools::OpenTransactionId::new();
+    block_on(foreground.tab.begin_mergeable(id)).unwrap();
+    let prepared = foreground.tab.prepare_query(&items()).unwrap();
+    let transaction = foreground.tab.tx_ref(id);
+    let mut reading = Box::pin(transaction.all_prepared_at(
+        &prepared,
+        false,
+        None,
+        jazz::db::ReadTier::LocalFirst,
+    ));
+    assert!(
+        reading
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+    // A failed commit consumes its handle by the existing public contract.
+    // Abandon this attempt directly, then test consuming commit on a new read.
+    foreground.tab.abandon_transaction_handle(id).unwrap();
+    block_on(foreground.tab.begin_mergeable(id)).unwrap();
+    let Poll::Ready(Err(error)) = reading
+        .as_mut()
+        .poll(&mut Context::from_waker(Waker::noop()))
+    else {
+        panic!("old read survived handle reuse")
+    };
+    assert_eq!(error.code, jazz::db::ErrorCode::NotObserved);
+    drop(reading);
+    foreground.tab.abandon_transaction_handle(id).unwrap();
+    block_on(foreground.tab.begin_mergeable(id)).unwrap();
+    let transaction = foreground.tab.tx_ref(id);
+    let mut reading = Box::pin(transaction.all_prepared_at(
+        &prepared,
+        false,
+        None,
+        jazz::db::ReadTier::LocalFirst,
+    ));
+    assert!(
+        reading
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
+    assert!(block_on(foreground.tab.commit_mergeable_handle(id)).is_err());
+    assert!(matches!(
+        reading
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop())),
+        Poll::Ready(Err(_))
+    ));
+}
+
+struct ColdMergeableReadPolicy {
+    inner: Box<dyn jazz::db::Transport>,
+    requests: std::rc::Rc<std::cell::RefCell<Vec<(jazz::db::ReadTier, Option<u64>)>>>,
+}
+impl jazz::db::Transport for ColdMergeableReadPolicy {
+    fn send(&mut self, message: jazz::db::SyncMessage) -> Result<(), jazz::db::TransportError> {
+        if let jazz::db::SyncMessage::Read { tier, wait, .. } = &message {
+            self.requests.borrow_mut().push((*tier, *wait));
+        }
+        self.inner.send(message)
+    }
+    fn try_recv(&mut self) -> Option<jazz::db::SyncMessage> {
+        self.inner.try_recv()
+    }
+}
+
+/// Alice's binding entry point keeps LocalFirst and her exact first-load wait
+/// when asking Bob's offline worker. Inspecting public transport is necessary:
+/// returned rows alone cannot distinguish it from a stronger Remote request.
+#[test]
+fn cold_mergeable_localfirst_preserves_the_binding_first_load_policy() {
+    let server = seeded_server();
+    let worker = warm_worker(0x88, &server);
+    worker.set_remote_link_hint(RemoteLinkHint::Failed);
+    let author = AuthorSubject::for_test_bytes([0x88; 16]);
+    let tab = block_on(Db::open(config(0x89, author))).unwrap();
+    tab.set_non_durable_client();
+    let requests = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let (up, down) = duplex();
+    block_on(tab.connect_upstream(Box::new(ColdMergeableReadPolicy {
+        inner: up,
+        requests: requests.clone(),
+    })));
+    worker.accept_subscriber(down, author).unwrap();
+    let foreground = Foreground { tab, worker };
+    foreground.tab.set_remote_link_hint(RemoteLinkHint::Failed);
+    for _ in 0..3 {
+        foreground.turn(None);
+    }
+    let id = jazz::tools::OpenTransactionId::new();
+    block_on(foreground.tab.begin_mergeable(id)).unwrap();
+    let query = postcard::to_allocvec(&items()).unwrap();
+    let result = drive_cold_mergeable(
+        &foreground,
+        None,
+        foreground.tab.all_serialized_query(
+            &query,
+            ReadOpts {
+                tier: jazz::db::ReadTier::LocalFirst,
+                first_load: FirstLoad::WaitForRemote { timeout_ms: 37 },
+                ..ReadOpts::default()
+            },
+            Some(id),
+            None,
+            None,
+        ),
+    )
+    .unwrap();
+    let SerializedReadResult::Rows(rows) = result else {
+        panic!("row query")
+    };
+    assert_eq!(rows.len(), LABELS.len());
+    assert_eq!(
+        *requests.borrow(),
+        vec![(jazz::db::ReadTier::LocalFirst, Some(37))]
+    );
+    foreground.tab.abandon_transaction_handle(id).unwrap();
 }

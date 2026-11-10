@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
@@ -17,6 +18,10 @@ beforeAll(async () => {
     serverUrl: server.url,
     appId: server.appId,
     adminSecret: server.adminSecret,
+    schema: deviceRequestApp,
+    permissions: deviceRequestPermissions,
+  });
+  server = await frontE2eeCore(server, {
     schema: deviceRequestApp,
     permissions: deviceRequestPermissions,
   });

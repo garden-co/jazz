@@ -18,7 +18,7 @@ import type {
   RelProjectColumn,
   RelValueRef,
 } from "../ir.js";
-import { blake3 } from "@noble/hashes/blake3.js";
+import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { assertSchemaNameAllowed } from "../schema-name.js";
 import { encryptedSchemas } from "../e2ee/encrypted-schema.js";
@@ -126,16 +126,6 @@ function brandPermissionExpression<const T extends object>(
   });
   return expression as T & PermissionExpressionInput;
 }
-
-const CREATOR_CONDITION: PermissionExpression = brandPermissionExpression({
-  type: "Cmp",
-  column: "$createdBy",
-  op: "Eq",
-  value: {
-    type: "SessionRef",
-    path: ["user"],
-  },
-} satisfies PolicyExpr);
 
 export interface SessionRefValue {
   readonly __jazzPermissionKind: "session-ref";
@@ -862,8 +852,8 @@ interface TablePolicyBuilder<WhereInput, Row> extends TableRelationBuilder<Where
   allowDeletes: ActionBuilder<WhereInput, Row>;
   allowUpdate: UpdateRuleBuilder<WhereInput, Row>;
   allowUpdates: UpdateRuleBuilder<WhereInput, Row>;
-  managedByCreator(): void;
   exists: ExistsBuilder<WhereInput>;
+  /** Include independently authorised root inserts from the same serializable commit. */
   existsIncludingCreated: ExistsBuilder<WhereInput>;
 }
 
@@ -881,7 +871,6 @@ export type PolicyContext<TApp extends AppLike> = {
   allOf: typeof allOf;
   /** Explicit escape hatch for manually-authored policy IR. */
   raw: typeof rawPermissionExpression;
-  isCreator: PermissionExpressionInput;
   allowedTo: AllowedToContext<AppRelationNames<TApp>>;
   session: SessionContext;
 };
@@ -1052,7 +1041,6 @@ export function definePermissions<TApp extends AppLike>(
     anyOf,
     allOf,
     raw: rawPermissionExpression,
-    isCreator: CREATOR_CONDITION,
     allowedTo: createAllowedToContext(),
     session: createSessionContext(),
   } as unknown as PolicyContext<TApp>;
@@ -1239,12 +1227,6 @@ function buildTablePolicyBuilder(
   const relation = () => createTableRelation(table, relationsByTable);
   const updateFactory = (): UpdateRuleBuilder<unknown, unknown> =>
     new UpdateRuleBuilder(table, hasTypeColumn, collectRule, columnTransforms);
-  const managedByCreator = (): void => {
-    read.where(CREATOR_CONDITION);
-    insert.where(CREATOR_CONDITION);
-    updateFactory().where(CREATOR_CONDITION);
-    del.where(CREATOR_CONDITION);
-  };
   const exists: ExistsBuilder<unknown> = {
     where: (input) =>
       brandPermissionExpression({
@@ -1277,7 +1259,6 @@ function buildTablePolicyBuilder(
     get allowUpdates() {
       return updateFactory();
     },
-    managedByCreator,
     exists,
     existsIncludingCreated,
     where: (input: unknown) => relation().where(input),
@@ -1343,7 +1324,7 @@ function createUnionRelation(
           inputs: states.map((state) => {
             const input = relationStateToRelExpr(state);
             return {
-              label: `permission:${bytesToHex(blake3(new TextEncoder().encode(JSON.stringify(input))))}`,
+              label: `permission:${bytesToHex(sha256(new TextEncoder().encode(JSON.stringify(input))))}`,
               input,
             };
           }),
@@ -2085,7 +2066,7 @@ function validateComputedPermissionReferences(
       validateComputedPermissionReferences(child, table, transforms);
   } else if (expression.type === "Not") {
     validateComputedPermissionReferences(expression.expr, table, transforms);
-  } else if (expression.type === "Exists") {
+  } else if (expression.type === "Exists" || expression.type === "ExistsIncludingCreated") {
     validateComputedPermissionReferences(expression.condition, expression.table, transforms);
   } else if (expression.type === "ExistsRel" && transforms[table]) {
     const value = (ref: RelValueRef) => {

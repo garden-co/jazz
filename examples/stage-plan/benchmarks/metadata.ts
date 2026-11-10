@@ -105,7 +105,7 @@ export const stagePlanBenchmarks: BenchmarkMetadata[] = [
     name: "stage_plan_reopen_1500",
     title: "StagePlan · reopen with 1,500 tasks",
     description:
-      "Reopen a seeded RocksDB worker, publish its tasks into an empty memory foreground, and read the complete result.",
+      "Reopen a seeded file-backed worker, publish its tasks into an empty memory foreground, and read the complete result.",
     fixture: "1,500 persisted tasks; the foreground starts empty.",
     includes: ["Worker opening", "Publication, foreground ingest and final task query"],
     work: {

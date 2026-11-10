@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
@@ -14,7 +15,13 @@ import type { CryptoAdapters } from "./types.js";
 import { createBrowserCrypto } from "./browser.js";
 import { groupMembershipBytes } from "./group-format.js";
 
-const app = s.defineApp({ ...deviceRequestSchema, ...groupSchema });
+const app = s.defineApp(
+  {
+    ...deviceRequestSchema,
+    ...groupSchema,
+  },
+  { migrations: "none" },
+);
 const policies = (ownerOnly: boolean) =>
   definePermissions(app, ({ policy, session, allOf }) => {
     const authenticated = session.where({ authMode: { in: ["local-first", "external"] } });
@@ -49,7 +56,7 @@ async function withFixture(
   run: (fixture: Fixture) => Promise<void>,
   ownerOnly = false,
 ): Promise<void> {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Db[] = [];
   const stores = new Map<Db, ReturnType<typeof store>>();
   const store = () => {
@@ -67,12 +74,21 @@ async function withFixture(
     };
     return result;
   };
+  let failed = false;
+  let firstError: unknown;
   try {
     expect(["127.0.0.1", "localhost", "[::1]"]).toContain(new URL(server.url).hostname);
     await deploy({
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
+      schema: app,
+      permissions: withGroupTopologyPermissions(app, {
+        ...deviceRequestPermissions,
+        ...policies(ownerOnly),
+      }),
+    });
+    server = await frontE2eeCore(server, {
       schema: app,
       permissions: withGroupTopologyPermissions(app, {
         ...deviceRequestPermissions,
@@ -95,16 +111,17 @@ async function withFixture(
         return db;
       },
     });
-  } finally {
-    const closed = await Promise.allSettled(clients.map((client) => client.shutdown()));
-    try {
-      await server.stop();
-    } finally {
-      for (const saved of stores.values()) saved.clear();
-    }
-    for (const result of closed) {
-      if (result.status === "rejected") throw result.reason;
-    }
+  } catch (error) {
+    failed = true;
+    firstError = error;
+  }
+  const closed = await Promise.allSettled(clients.map(async (client) => client.shutdown()));
+  const stopped = await Promise.allSettled([Promise.resolve().then(() => server.stop())]);
+  for (const saved of stores.values()) saved.clear();
+  // Teardown must not hide the first assertion or operational error.
+  if (failed) throw firstError;
+  for (const result of [...closed, ...stopped]) {
+    if (result.status === "rejected") throw result.reason;
   }
 }
 

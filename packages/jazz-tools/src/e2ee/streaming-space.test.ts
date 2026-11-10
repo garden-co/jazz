@@ -1,8 +1,14 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
 import { createDb } from "../runtime/default-create-db.js";
-import { serializableE2eeTransaction, type Db } from "../runtime/db.js";
+import {
+  beginDbTransactionAfter,
+  prepareDbTransaction,
+  type PreparedTransactionScope,
+  type Db,
+} from "../runtime/db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
 import { deviceRequestSchema, deviceRequestPermissions } from "./device-requests.js";
@@ -11,12 +17,35 @@ import { prepareStreamingSpace, prepareInitialSpaceRows } from "./lifecycle.js";
 import { createBrowserKeyEnvelope, createBrowserDeviceSigner } from "./browser.js";
 import { E2eeDataError } from "./data-error.js";
 
+// Use the current real accepted opening and non-draining preparation scope.
+// This keeps the original opening boundary/read set; no warm-up or fake guard.
+async function withPreparedScope(
+  db: Db,
+  prepare: (scope: PreparedTransactionScope) => Promise<void>,
+) {
+  const transaction = beginDbTransactionAfter(db, async () => {}, "accepted-evidence");
+  try {
+    await prepareDbTransaction(transaction, prepare);
+    return transaction.commit();
+  } catch (error) {
+    try {
+      await transaction.rollback();
+    } catch {
+      // Preserve the first preparation/refusal error.
+    }
+    throw error;
+  }
+}
+
 it("hands each unpublished seed to one transaction and enforces creator inclusion and exclusion", async () => {
-  const app = s.defineApp({
-    ...deviceRequestSchema,
-    ...spaceSchema,
-    projects: s.table({ title: s.string() }, {}),
-  });
+  const app = s.defineApp(
+    {
+      ...deviceRequestSchema,
+      ...spaceSchema,
+      projects: s.table({ title: s.string() }, {}),
+    },
+    { migrations: "none" },
+  );
   const permissions = definePermissions(app, ({ policy, session }) => {
     policy.projects.allowRead.always();
     policy.projects.allowInsert.always();
@@ -29,18 +58,20 @@ it("hands each unpublished seed to one transaction and enforces creator inclusio
     policy.__e2ee_space_successors.allowRead.always();
     policy.__e2ee_space_successors.allowInsert.where({ authorAccountId: session.user.account });
   });
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   let db: Db | undefined;
   let recipient: Db | undefined;
   let saved: string | null = null;
   try {
-    await deploy({
+    const deployment = {
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
       schema: app,
       permissions: { ...deviceRequestPermissions, ...permissions },
-    });
+    };
+    await deploy(deployment);
+    server = await frontE2eeCore(server, deployment);
     const keys = await createBrowserKeyEnvelope();
     const signer = await createBrowserDeviceSigner();
     let failWrap = false;
@@ -117,7 +148,7 @@ it("hands each unpublished seed to one transaction and enforces creator inclusio
       try {
         expect(await db.all(app.__e2ee_spaces, { tier: "remote" })).toEqual(priorRoots);
         const owner = db;
-        const write = await serializableE2eeTransaction(db, async (tx) => {
+        const write = await withPreparedScope(db, async (tx) => {
           await prepared.plan.validate(tx);
           await prepareInitialSpaceRows(
             owner,
@@ -129,6 +160,7 @@ it("hands each unpublished seed to one transaction and enforces creator inclusio
               expect(root.epochId).toBe(prepared.value.epoch);
             },
             undefined,
+            false,
             prepared.plan.initialSeed,
           );
         });
@@ -138,7 +170,7 @@ it("hands each unpublished seed to one transaction and enforces creator inclusio
             ?.epochId,
         ).toBe(prepared.value.epoch);
         await expect(
-          serializableE2eeTransaction(db, (tx) =>
+          withPreparedScope(db, (tx) =>
             prepareInitialSpaceRows(
               owner,
               tx,
@@ -146,6 +178,7 @@ it("hands each unpublished seed to one transaction and enforces creator inclusio
               project.id,
               async () => {},
               undefined,
+              false,
               prepared.plan.initialSeed,
             ),
           ),
@@ -180,9 +213,9 @@ it("hands each unpublished seed to one transaction and enforces creator inclusio
               signer.verify = async () => {
                 throw adapterFailure;
               };
-              await expect(
-                serializableE2eeTransaction(db, (tx) => stale.plan.validate(tx)),
-              ).rejects.toEqual(new E2eeDataError("key-unavailable"));
+              await expect(withPreparedScope(db, (tx) => stale.plan.validate(tx))).rejects.toEqual(
+                new E2eeDataError("key-unavailable"),
+              );
             } finally {
               signer.verify = verify;
             }
@@ -190,9 +223,7 @@ it("hands each unpublished seed to one transaction and enforces creator inclusio
               tier: "remote",
             });
             await db.e2ee.spaces.revoke(app.projects, project.id, root!.creatorAccountId).wait();
-            await expect(
-              serializableE2eeTransaction(db, (tx) => stale.plan.validate(tx)),
-            ).rejects.toThrow();
+            await expect(withPreparedScope(db, (tx) => stale.plan.validate(tx))).rejects.toThrow();
           } finally {
             stale.plan.dispose();
           }

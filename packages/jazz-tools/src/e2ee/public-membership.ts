@@ -1,11 +1,8 @@
-import { serializableE2eeTransaction } from "../runtime/db.js";
+import { acceptedContentPositions } from "./accepted-membership.js";
+import { acceptedDeviceTransaction } from "./accepted-membership.js";
 import type { Db } from "../runtime/db.js";
-import {
-  observeE2eeHistory,
-  E2eeHistoryUnavailable,
-  type E2eeHistoryReader,
-} from "./history-reader.js";
-import type { RowSettlement } from "../runtime/client.js";
+import type { AcceptedDeviceTransactionScope } from "./accepted-membership.js";
+import type { AcceptedRows } from "../runtime/accepted-read.js";
 import type { DeviceSigner } from "./types.js";
 import { sameSnapshotValue } from "./public-snapshot.js";
 import { deviceRequestApp as app } from "./device-requests.js";
@@ -20,10 +17,7 @@ import {
   type PublicAccountSuccessor,
 } from "./account-successor.js";
 
-type SettledAuthority<T extends { id: string }> = {
-  rows: T[];
-  settlements: RowSettlement[];
-};
+type SettledAuthority<T extends { id: string }> = AcceptedRows<T>;
 
 type PublicAccountRoot = {
   id: string;
@@ -95,20 +89,12 @@ export async function readAccountMembership(
   signer: DeviceSigner,
   tables: DeviceTables = app,
 ) {
-  if (await db.e2eeIsExplicitlyOffline())
-    return observeE2eeHistory(db, async (reader) =>
-      replayAccountMembership(
-        await readPublicMembershipHistory(reader, accountId, tables),
-        application,
-        signer,
-      ),
-    );
   await prefetchPublicMembershipHistory(db, accountId, tables);
-  const read = await serializableE2eeTransaction(db, (tx) =>
+  const read = await acceptedDeviceTransaction(db, (tx) =>
     readPublicMembershipHistory(tx, accountId, tables),
   );
   // Refuse unavailable coverage; a partial history must never imply active membership.
-  return replayAccountMembership(await read.wait({ tier: "global" }), application, signer);
+  return replayAccountMembership(await read.wait(), application, signer);
 }
 
 // Track query preparation only, never records, authority, keys or replay results.
@@ -158,14 +144,15 @@ export function historyBefore(
   history: PublicMembershipHistory,
   cut: bigint,
 ): PublicMembershipHistory {
-  const before = <T extends { id: string }>(snapshot: {
-    rows: T[];
-    settlements: RowSettlement[];
-  }) => {
+  const before = <T extends { id: string }>(snapshot: AcceptedRows<T>) => {
     const order = positions(snapshot);
     const rows = snapshot.rows.filter((row) => order.get(row.id)! < cut);
     const ids = new Set(rows.map((row) => row.id));
-    return { rows, settlements: snapshot.settlements.filter((entry) => ids.has(entry.rowId)) };
+    return {
+      ...snapshot,
+      rows,
+      evidence: snapshot.evidence.filter((entry) => ids.has(entry.rowId)),
+    };
   };
   return {
     roots: before(history.roots),
@@ -176,18 +163,18 @@ export function historyBefore(
   };
 }
 
-/** Shared accepted-history reader; authority transactions still require their global wait. */
+/** Shared snapshot reader: callers must await the enclosing authority commit. */
 export async function readPublicMembershipHistory(
-  tx: E2eeHistoryReader,
+  tx: AcceptedDeviceTransactionScope,
   accountId: string,
   tables: DeviceTables = app,
 ): Promise<PublicMembershipHistory> {
   const [roots, keys, approvals, successors, recovery] = await Promise.all([
-    tx.allSettledForE2ee(tables.__e2ee_account_roots.where({ accountId })),
-    tx.allSettledForE2ee(tables.__e2ee_device_keys.where({ "$createdBy.account": accountId })),
-    tx.allSettledForE2ee(tables.__e2ee_public_device_approvals.where({ accountId })),
-    tx.allSettledForE2ee(tables.__e2ee_public_account_successors.where({ accountId })),
-    tx.allSettledForE2ee(tables.__e2ee_recovery_roots.where({ accountId })),
+    tx.readAccepted(tables.__e2ee_account_roots.where({ accountId })),
+    tx.readAccepted(tables.__e2ee_device_keys.where({ "$createdBy.account": accountId })),
+    tx.readAccepted(tables.__e2ee_public_device_approvals.where({ accountId })),
+    tx.readAccepted(tables.__e2ee_public_account_successors.where({ accountId })),
+    tx.readAccepted(tables.__e2ee_recovery_roots.where({ accountId })),
   ]);
   return { roots, keys, approvals, successors, recovery };
 }
@@ -248,8 +235,6 @@ async function replay(
   signer: DeviceSigner,
   recoveryMemo = new Map<string, boolean>(),
 ): Promise<AccountMembership> {
-  if (!history.roots.rows.length)
-    throw new E2eeHistoryUnavailable("Missing accepted E2EE account root");
   const initial = initialAccountAuthority(history);
   const recoveryPositions = positions(history.recovery);
   // Each recursive cutoff strictly precedes its root. Cache roots to avoid
@@ -270,7 +255,7 @@ async function replay(
     let valid = false;
     if (root.epochId === atRegistration.epochId && atRegistration.active.has(root.signerId)) {
       const key = prior.keys.rows.find((row) => row.deviceId === root.signerId);
-      if (!key) throw new E2eeHistoryUnavailable("Missing accepted E2EE recovery signer keys");
+      if (!key) throw new Error("Missing accepted E2EE recovery signer keys");
       if (
         key.signingMechanism !== signer.mechanism.id ||
         key.signingVersion !== signer.mechanism.version
@@ -300,10 +285,10 @@ async function replay(
   const successorIds = new Set<string>();
   const visited = new Set([epochId]);
   const keyFor = (deviceId: string) => history.keys.rows.find((key) => key.deviceId === deviceId);
-  if (!keyFor(root.deviceId)) throw new E2eeHistoryUnavailable("Missing accepted E2EE root keys");
+  if (!keyFor(root.deviceId)) throw new Error("Missing accepted E2EE root keys");
   const verify = async (deviceId: string, bytes: Uint8Array, signature: Uint8Array) => {
     const key = keyFor(deviceId);
-    if (!key) throw new E2eeHistoryUnavailable("Missing accepted E2EE signer keys");
+    if (!key) throw new Error("Missing accepted E2EE signer keys");
     if (
       key.signingMechanism !== signer.mechanism.id ||
       key.signingVersion !== signer.mechanism.version
@@ -362,8 +347,7 @@ async function replay(
           continue;
       }
       if (await verify(approval.signerId, bytes, approval.signature)) {
-        if (!keyFor(approval.deviceId))
-          throw new E2eeHistoryUnavailable("Missing accepted E2EE recipient keys");
+        if (!keyFor(approval.deviceId)) throw new Error("Missing accepted E2EE recipient keys");
         active.add(approval.deviceId);
         approvalIds.add(approval.id);
       }
@@ -449,14 +433,8 @@ async function replay(
   return { epochId, active, revoked, approvalIds, successorIds, recoveryRoots };
 }
 
-function positions(snapshot: { rows: { id: string }[]; settlements: RowSettlement[] }) {
-  const result = new Map(
-    snapshot.settlements.map((entry) => [entry.rowId, BigInt(entry.position)]),
-  );
-  if (snapshot.rows.some((row) => !result.has(row.id)))
-    throw new Error("Incomplete E2EE authority coverage");
-  return result;
-}
+const positions = acceptedContentPositions;
+
 function compare(a: bigint, b: bigint) {
   return a < b ? -1 : a > b ? 1 : 0;
 }

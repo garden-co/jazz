@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
@@ -17,16 +18,19 @@ it.each([
 ])(
   "composes managed records with application policies (devices first: $devicesFirst, schema only: $schemaOnly)",
   async ({ devicesFirst, schemaOnly }) => {
-    const app = s.defineApp({
-      ...deviceRequestSchema,
-      notes: s.table({ body: s.string() }, {}),
-    });
+    const app = s.defineApp(
+      {
+        ...deviceRequestSchema,
+        notes: s.table({ body: s.string() }, {}),
+      },
+      { migrations: "none" },
+    );
     const configuredApp = schemaOnly ? { wasmSchema: app.wasmSchema } : app;
     const applicationPermissions = definePermissions(app, ({ policy, session }) => {
       policy.notes.allowInsert.where({ "$createdBy.account": session.user.account });
       policy.notes.allowRead.where({ "$createdBy.account": session.user.account });
     });
-    const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+    let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
     let db: Awaited<ReturnType<typeof createDb>> | undefined;
     let second: Awaited<ReturnType<typeof createDb>> | undefined;
     let retained: string | null = null;
@@ -35,6 +39,10 @@ it.each([
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
+        schema: app,
+        permissions: { ...deviceRequestPermissions, notes: applicationPermissions.notes! },
+      });
+      server = await frontE2eeCore(server, {
         schema: app,
         permissions: { ...deviceRequestPermissions, notes: applicationPermissions.notes! },
       });
@@ -104,12 +112,18 @@ it.each([
 it.each([false, true])(
   "rejects partial configured group schemas before recovery can omit group recipients (schema only: %s)",
   async (schemaOnly) => {
-    const deployedApp = s.defineApp({
-      ...deviceRequestSchema,
-      ...groupSchema,
-      ...spaceSchema,
-    });
-    const accountOnlyApp = s.defineApp({ ...deviceRequestSchema, ...spaceSchema });
+    const deployedApp = s.defineApp(
+      {
+        ...deviceRequestSchema,
+        ...groupSchema,
+        ...spaceSchema,
+      },
+      { migrations: "none" },
+    );
+    const accountOnlyApp = s.defineApp(
+      { ...deviceRequestSchema, ...spaceSchema },
+      { migrations: "none" },
+    );
     const groupRootSchema = deployedApp.wasmSchema.__e2ee_groups;
     if (!groupRootSchema) throw new Error("Deployed schema is missing its group root table");
     // Preserve real builders and relationship metadata while omitting configured tables.

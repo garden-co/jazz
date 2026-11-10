@@ -68,8 +68,8 @@ amends the unpublished initial identity format: earlier experimental identities
 without verification are refused, never silently reset or upgraded.
 
 New identity creation inserts the private identity and its public
-`__e2ee_account_roots` binding in one exclusive transaction and waits for global
-acceptance. Existing-identity validation also uses an exclusive transaction and
+`__e2ee_account_roots` binding in one serializable transaction and waits for global
+acceptance. Existing-identity validation also uses an serializable transaction and
 an explicit global wait. If an existing identity has no public root, enrolment
 publishes the missing binding and waits globally before proceeding; this does
 not confer authority before the root's acceptance.
@@ -176,7 +176,7 @@ The approver retains the challenge secret locally, verifies the accepted proof,
 then publishes and waits for the key-free approval before sealing a delivery.
 The recipient validates a delivery against the accepted identity's key
 confirmation and the approval authenticator before activation. Read-only
-exclusive acceptance checks prevent optimistic records from establishing trust.
+serializable acceptance checks prevent optimistic records from establishing trust.
 Malformed challenges or unauthenticated grants/deliveries cannot hide a later
 valid approval. Concurrent contexts answering for one retained device reconcile
 an already accepted matching proof. Replayed proofs fail their challenge context.
@@ -333,7 +333,7 @@ The public revision contains every observed public approval statement ID for
 this account and predecessor epoch strictly before the successor, including
 unverified and preactivation candidates that confer no membership. It is not
 the private revision, which contains eligible private approval IDs. The producer
-reads the public revision inside the same exclusive transaction that publishes
+reads the public revision inside the same serializable transaction that publishes
 both successor records. Both records share a proposal ID and acceptance point.
 No private verification, history, proof or delivery bytes are published.
 

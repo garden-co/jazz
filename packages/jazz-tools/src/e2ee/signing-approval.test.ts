@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
@@ -8,13 +9,17 @@ import { deviceRequestApp, deviceRequestPermissions } from "./device-requests.js
 it.each(["recipient", "approver"])(
   "requires the %s's enrolled signing key before delivering the account key",
   async (role) => {
-    const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+    let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
     const clients: Awaited<ReturnType<typeof createDb>>[] = [];
     try {
       await deploy({
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
+        schema: deviceRequestApp,
+        permissions: deviceRequestPermissions,
+      });
+      server = await frontE2eeCore(server, {
         schema: deviceRequestApp,
         permissions: deviceRequestPermissions,
       });
@@ -58,7 +63,7 @@ it.each(["recipient", "approver"])(
         (device) => device.id !== creator!.id,
       )!;
       corrupt = true;
-      await expect(first.e2ee.devices.approve(pending.id).wait()).rejects.toThrow();
+      await expect(first.e2ee.devices.approve(pending.id).wait()).rejects.toThrow(/sign|proof/i);
       expect(
         await first.all(deviceRequestApp.__e2ee_device_deliveries, { tier: "remote" }),
       ).toEqual([]);

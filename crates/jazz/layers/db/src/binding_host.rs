@@ -10,11 +10,11 @@
 //! and write fates that need the server wait, and they complete on a later
 //! tick or write; [`Progress`] is how those waits learn to poll again.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::task::{Context, Poll, Waker};
 
 use jazz_model::model::transaction::{OpenTransactionId, TransactionId};
@@ -33,15 +33,83 @@ use serde::{Deserialize, Serialize};
 use crate::binding_args;
 use crate::db::{
     Db, DbConfig, DbIdentity, DeleteOptions, Error, ErrorCode, ExactWriteTarget, FirstLoad,
-    InsertOptions, LargeValueStagingPolicy, LargeValueUpdate, ReadOpts, ReadTier, RemoteLinkHint,
-    RestoreOptions, SeededRowIdSource, SerializedReadResult, StreamingMutationKind,
-    StreamingValueUpload, SubscriberId, SubscriptionEvent, SubscriptionStream, TransportError,
-    UpdateOptions, UpsertOptions, Upstream, WireTransport, WireTransportAdapter, WriteHandle,
-    WriteIdentity, WriteState, block_on,
+    FrameJoiner, InsertOptions, LargeValueStagingPolicy, LargeValueUpdate, ReadOpts, ReadTier,
+    RemoteLinkHint, RestoreOptions, SeededRowIdSource, SerializedReadResult, StreamingMutationKind,
+    StreamingValueUpload, SubscriberId, SubscriptionEvent, SubscriptionStream, SyncMessage,
+    Transport, TransportError, UpdateOptions, UpsertOptions, Upstream, WriteHandle, WriteIdentity,
+    block_on,
 };
 
 /// Named cells, as the binding codec decodes them.
 pub type Cells = BTreeMap<String, Value>;
+
+/// Maximum JSON header in `jazz.accepted-read.host.v1`. Row bytes use the
+/// existing binding codec and are outside this header bound.
+pub const ACCEPTED_READ_HEADER_LIMIT: usize = 16 * 1024 * 1024;
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AcceptedHostVersion {
+    transaction_id: String,
+    position: String,
+}
+
+impl From<crate::db::AcceptedVersion> for AcceptedHostVersion {
+    fn from(version: crate::db::AcceptedVersion) -> Self {
+        Self {
+            transaction_id: TransactionId::from_committed_tx(version.transaction).to_string(),
+            position: version.sequence.to_string(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AcceptedHostRow {
+    row_id: String,
+    state: AcceptedHostVersion,
+    content: AcceptedHostVersion,
+}
+
+#[derive(Serialize)]
+struct AcceptedHostHeader {
+    format: &'static str,
+    through: String,
+    schema: String,
+    evidence: Vec<AcceptedHostRow>,
+}
+
+fn encode_accepted_read(read: crate::db::EncodedAcceptedRead) -> HostResult<Vec<u8>> {
+    // Every entry needs at least 200 bytes in this named layout. Bound the
+    // header's allocations before constructing the transient JSON values.
+    if read.evidence.len() > ACCEPTED_READ_HEADER_LIMIT / 200 {
+        return Err(not_supported("accepted-read host header above 16 MiB"));
+    }
+    let header = AcceptedHostHeader {
+        format: "jazz.accepted-read.host.v1",
+        through: read.through.to_string(),
+        schema: uuid::Uuid::from_bytes(read.schema).to_string(),
+        evidence: read
+            .evidence
+            .into_iter()
+            .map(|row| AcceptedHostRow {
+                row_id: row.row.0.to_string(),
+                state: row.state.into(),
+                content: row.content.into(),
+            })
+            .collect(),
+    };
+    let header = serde_json::to_vec(&header)
+        .map_err(|error| HostError::Argument(format!("encode accepted-read header: {error}")))?;
+    if header.len() > ACCEPTED_READ_HEADER_LIMIT {
+        return Err(not_supported("accepted-read host header above 16 MiB"));
+    }
+    let mut frame = Vec::with_capacity(4 + header.len() + read.rows.len());
+    frame.extend_from_slice(&(header.len() as u32).to_le_bytes());
+    frame.extend_from_slice(&header);
+    frame.extend_from_slice(&read.rows);
+    Ok(frame)
+}
 
 // ---- errors ---------------------------------------------------------------------
 
@@ -94,7 +162,7 @@ pub type HostResult<T> = Result<T, HostError>;
 pub fn not_supported(what: &str) -> HostError {
     HostError::Engine(Error::new(
         ErrorCode::Query,
-        format!("{what} is not supported on SQLite yet"),
+        format!("{what} is not supported yet"),
     ))
 }
 
@@ -191,7 +259,10 @@ pub fn claims(author: AuthorSubject, claims: serde_json::Value) -> HostResult<Ce
 
 // ---- options -------------------------------------------------------------------------
 
-fn write_identity<O: HostObject>(options: &O) -> HostResult<WriteIdentity> {
+/// Resolves author bytes to the subject a write or read runs as.
+type AuthorOf<'a> = &'a dyn Fn(&[u8]) -> HostResult<AuthorSubject>;
+
+fn write_identity<O: HostObject>(options: &O, author: AuthorOf<'_>) -> HostResult<WriteIdentity> {
     match (options.get("author")?, options.get("attribution")?) {
         (Some(_), Some(_)) => {
             Err("write identity cannot contain both author and attribution".into())
@@ -233,12 +304,19 @@ fn branch_view_target<O: HostObject>(options: &O) -> HostResult<crate::db::Write
 
 /// `{ rowId?, author?, attribution?, branch?, updatedAtMs? }`.
 pub fn insert_options<O: HostObject>(options: &O) -> HostResult<InsertOptions> {
+    insert_options_as(options, &author)
+}
+
+fn insert_options_as<O: HostObject>(
+    options: &O,
+    author: AuthorOf<'_>,
+) -> HostResult<InsertOptions> {
     Ok(InsertOptions {
         row_id: options
             .get("rowId")?
             .map(|row| row_uuid(&O::bytes(&row)?))
             .transpose()?,
-        identity: write_identity(options)?,
+        identity: write_identity(options, author)?,
         target: exact_target(options)?,
         updated_at_ms: write_timestamp(options)?,
     })
@@ -246,8 +324,15 @@ pub fn insert_options<O: HostObject>(options: &O) -> HostResult<InsertOptions> {
 
 /// `{ author?, attribution?, head?, base?, updatedAtMs? }`.
 pub fn update_options<O: HostObject>(options: &O) -> HostResult<UpdateOptions> {
+    update_options_as(options, &author)
+}
+
+fn update_options_as<O: HostObject>(
+    options: &O,
+    author: AuthorOf<'_>,
+) -> HostResult<UpdateOptions> {
     Ok(UpdateOptions {
-        identity: write_identity(options)?,
+        identity: write_identity(options, author)?,
         target: branch_view_target(options)?,
         updated_at_ms: write_timestamp(options)?,
     })
@@ -256,6 +341,13 @@ pub fn update_options<O: HostObject>(options: &O) -> HostResult<UpdateOptions> {
 /// As [`update_options`]; the removed `branch` field is rejected even when
 /// `undefined`, so untyped callers cannot write to the root by accident.
 pub fn upsert_options<O: HostObject>(options: &O) -> HostResult<UpsertOptions> {
+    upsert_options_as(options, &author)
+}
+
+fn upsert_options_as<O: HostObject>(
+    options: &O,
+    author: AuthorOf<'_>,
+) -> HostResult<UpsertOptions> {
     if options.has("branch")? {
         return Err(
             "upsert option `branch` is not supported; use `head` (and optional `base`) for a branch view"
@@ -263,7 +355,7 @@ pub fn upsert_options<O: HostObject>(options: &O) -> HostResult<UpsertOptions> {
         );
     }
     Ok(UpsertOptions {
-        identity: write_identity(options)?,
+        identity: write_identity(options, author)?,
         target: branch_view_target(options)?,
         updated_at_ms: write_timestamp(options)?,
     })
@@ -271,7 +363,14 @@ pub fn upsert_options<O: HostObject>(options: &O) -> HostResult<UpsertOptions> {
 
 /// As [`update_options`].
 pub fn delete_options<O: HostObject>(options: &O) -> HostResult<DeleteOptions> {
-    let options = update_options(options)?;
+    delete_options_as(options, &author)
+}
+
+fn delete_options_as<O: HostObject>(
+    options: &O,
+    author: AuthorOf<'_>,
+) -> HostResult<DeleteOptions> {
+    let options = update_options_as(options, author)?;
     Ok(DeleteOptions {
         identity: options.identity,
         target: options.target,
@@ -281,14 +380,21 @@ pub fn delete_options<O: HostObject>(options: &O) -> HostResult<DeleteOptions> {
 
 /// As [`insert_options`] without a row id.
 pub fn restore_options<O: HostObject>(options: &O) -> HostResult<RestoreOptions> {
+    restore_options_as(options, &author)
+}
+
+fn restore_options_as<O: HostObject>(
+    options: &O,
+    author: AuthorOf<'_>,
+) -> HostResult<RestoreOptions> {
     Ok(RestoreOptions {
-        identity: write_identity(options)?,
+        identity: write_identity(options, author)?,
         target: exact_target(options)?,
         updated_at_ms: write_timestamp(options)?,
     })
 }
 
-/// `{ read_view? | readView?, tier?, include_deleted?, first_load_remote_wait_ms? }`.
+/// `{ read_view? | readView?, tier?, include_deleted?, first_load_remote_wait_ms?, splices? }`.
 pub fn read_opts<O: HostObject>(options: &O) -> HostResult<ReadOpts> {
     let mut opts = ReadOpts::default();
     for name in ["read_view", "readView"] {
@@ -319,6 +425,10 @@ pub fn read_opts<O: HostObject>(options: &O) -> HostResult<ReadOpts> {
         if opts.tier == ReadTier::LocalFirst {
             opts.first_load = FirstLoad::WaitForRemote { timeout_ms };
         }
+    }
+    if let Some(splices) = options.get("splices")? {
+        opts.splices = O::decode::<Vec<String>>(splices)
+            .map_err(|_| HostError::Argument("splices must be an array of column names".into()))?;
     }
     Ok(opts)
 }
@@ -364,12 +474,19 @@ pub struct OpenConfig {
     pub identity: OpenIdentity,
     /// Seed for deterministic row ids (tests).
     pub row_id_seed: Option<u64>,
-    /// Open as an authority keeping full history. Every SQLite store keeps
-    /// full history, so this opens normally.
+    /// Whether the replica keeps full history. Every store keeps full
+    /// history, so either value opens the same store (not an authority).
     pub history_complete: bool,
-    /// A Groove persistence knob: SQLite commits each applied batch, so it
-    /// is accepted and has nothing to configure.
+    /// The public `initialSyncFlushEvery` option. Each applied batch commits
+    /// on its own, so there is nothing to tune and any value is accepted.
     pub initial_sync_flush_every: Option<u32>,
+    /// The app's schema versions and migrations as JSON (a deployment's
+    /// `schemas` and `migrations`), which the binding lowers into
+    /// [`DbConfig::with_migrations`] (SPEC 10.7).
+    pub migrations: Option<Vec<u8>>,
+    /// The node SYSTEM provenance names when it is not `identity.node`: a
+    /// backend that draws a fresh node per open keeps one stable subject.
+    pub system_node: Option<NodeUuid>,
 }
 
 /// The identity in an [`OpenConfig`].
@@ -402,6 +519,10 @@ pub fn decode_open(schema: &[u8], config: &[u8]) -> HostResult<(JazzSchema, Open
 pub fn decode_schema(schema: &[u8]) -> HostResult<JazzSchema> {
     Ok(jazz_model::model::public_schema_convert::decode_public_schema_json(schema)?)
 }
+
+/// How long a Remote one-shot read waits for the server to cover it
+/// before failing with `NotObserved`.
+pub const REMOTE_READ_COVERAGE_BUDGET: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// How a host opens: the caller-controlled author, the backend's SYSTEM
 /// author, or a verified self-signed author.
@@ -444,6 +565,17 @@ pub fn verify_self_signed(
     )?)
 }
 
+/// The account-bound local-first author `proof` proves `claimed_author` is.
+fn verify_local_first(proof: &SelfSignedProof, claimed_author: &str) -> HostResult<AuthorSubject> {
+    let author = verify_self_signed(&proof.token, &proof.app_id, claimed_author)?;
+    if author.principal_parts().0 != AuthorSubject::LOCAL_FIRST_ISSUER
+        || author.account_id().is_none()
+    {
+        return Err("session admission requires an account-bound local-first proof".into());
+    }
+    Ok(author)
+}
+
 /// The identity `config` opens with under `how`, checked; and whether the
 /// runtime is a trusted backend.
 pub fn open_identity(config: &mut OpenConfig, how: OpenAs<'_>) -> HostResult<(DbIdentity, bool)> {
@@ -477,20 +609,27 @@ pub fn open_identity(config: &mut OpenConfig, how: OpenAs<'_>) -> HostResult<(Db
 
 /// The [`DbConfig`] for `schema` under `config` and `identity`.
 pub fn db_config(schema: JazzSchema, config: &OpenConfig, identity: DbIdentity) -> DbConfig {
-    let db_config = DbConfig::new(schema, identity);
+    let mut db_config = DbConfig::new(schema, identity);
+    db_config.system_node = config.system_node;
     match config.row_id_seed {
         Some(seed) => db_config.with_id_source(SeededRowIdSource::new(seed)),
         None => db_config,
     }
 }
 
-/// Open an in-memory database.
-pub async fn open_memory(db_config: DbConfig, config: &OpenConfig) -> Result<Db, Error> {
-    if config.history_complete {
-        Db::open_history_complete(db_config).await
-    } else {
-        Db::open(db_config).await
-    }
+/// Open an in-memory database. `history_complete` needs nothing: every
+/// SQLite store keeps full history.
+pub async fn open_memory(db_config: DbConfig) -> Result<Db, Error> {
+    Db::open(db_config).await
+}
+
+/// Open a durable store in the SQLite file at `path` (see [`open_memory`]).
+pub async fn open_file(
+    db_config: DbConfig,
+    path: &std::path::Path,
+    options: crate::db::FileOptions,
+) -> Result<Db, Error> {
+    Db::open_at(db_config, path, options).await
 }
 
 // ---- progress ------------------------------------------------------------------------
@@ -524,6 +663,7 @@ impl Progress {
         Parked {
             future: Box::pin(future),
             progress: self.clone(),
+            kick: None,
         }
     }
 }
@@ -532,24 +672,34 @@ impl Progress {
 pub struct Parked<F: Future> {
     future: Pin<Box<F>>,
     progress: Progress,
+    /// Asked for a tick after the future's first poll: what it queued for
+    /// the upstream (a remote read, or a local-first read's refresh) goes
+    /// out without waiting for unrelated work.
+    kick: Option<Rc<Hooks>>,
 }
 
 impl<F: Future> Future for Parked<F> {
     type Output = F::Output;
 
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<F::Output> {
-        match self.future.as_mut().poll(context) {
-            Poll::Ready(output) => Poll::Ready(output),
-            Poll::Pending => {
-                self.progress.park(context);
-                Poll::Pending
-            }
+        let poll = self.future.as_mut().poll(context);
+        if poll.is_pending() {
+            self.progress.park(context);
         }
+        if let Some(hooks) = self.kick.take() {
+            hooks.schedule_tick();
+        }
+        poll
     }
 }
 
 /// A boxed binding future.
 pub type HostFuture<T> = Pin<Box<dyn Future<Output = HostResult<T>>>>;
+
+/// See [`Hooks::rejected`].
+/// Told of a refused upload no wait claimed; returns whether the refusal
+/// reached the application (a listener was there to take it).
+pub type RejectedHook = Box<dyn Fn(&TransactionId, &Error, bool, Option<Rc<Cell<bool>>>) -> bool>;
 
 /// Hooks a host gives the database it binds.
 #[derive(Default)]
@@ -558,6 +708,16 @@ pub struct Hooks {
     pub progress: Progress,
     /// Asks the host for a tick: there is sync work to send or apply.
     pub schedule_tick: RefCell<Option<Box<dyn Fn()>>>,
+    /// Told of an upload the authority refused that no wait claimed yet,
+    /// whether it was a serializable transaction, and the write's claim
+    /// if it has one: a wait the caller makes before the host delivers the
+    /// report (the task that wrote it ends) still claims it.
+    pub rejected: RefCell<Option<RejectedHook>>,
+    /// Each uploaded write's claim, by commit seq: a wait sets it, and a
+    /// dropped receipt leaves no one to claim it.
+    claims: RefCell<BTreeMap<u64, Weak<Cell<bool>>>>,
+    /// The claim count after the last sweep of dropped receipts.
+    swept: Cell<usize>,
 }
 
 impl Hooks {
@@ -573,6 +733,70 @@ impl Hooks {
     pub fn after_write(&self) {
         self.progress.wake_all();
         self.schedule_tick();
+    }
+
+    /// Follow `write`'s fate: if the authority refuses it before a wait
+    /// sets `claimed`, [`Hooks::rejected`] is told.
+    pub fn track(&self, write: &Write, claimed: &Rc<Cell<bool>>) {
+        if write.rejected.is_some() {
+            return;
+        }
+        let mut claims = self.claims.borrow_mut();
+        claims.insert(write.seq, Rc::downgrade(claimed));
+        if claims.len() > 2 * self.swept.get().max(64) {
+            claims.retain(|_, claim| claim.strong_count() > 0);
+            self.swept.set(claims.len());
+        }
+    }
+
+    /// Tell [`Hooks::rejected`] of each refused upload no wait claimed.
+    /// A relayed session's refused commit is reported under its own id.
+    /// Returns the seqs of `node`'s own refusals that reached the
+    /// application, through a wait or the hook.
+    fn report(&self, node: NodeUuid, rejections: Vec<crate::db::UpstreamRejection>) -> Vec<u64> {
+        let mut delivered = Vec::new();
+        for rejection in rejections {
+            let (seq, error) = (rejection.seq, &rejection.error);
+            let writer = NodeUuid::from_bytes(rejection.writer);
+            let claim = (writer == node)
+                .then(|| self.claims.borrow_mut().remove(&seq))
+                .flatten()
+                .and_then(|claim| claim.upgrade());
+            let reached = if claim.as_ref().is_some_and(|claim| claim.get()) {
+                true
+            } else if let Some(rejected) = self.rejected.borrow().as_ref() {
+                let tx_id = TransactionId::from_committed_tx(TxId::new(TxTime(seq), writer));
+                rejected(&tx_id, error, rejection.serializable, claim)
+            } else {
+                false
+            };
+            if reached && writer == node {
+                delivered.push(seq);
+            }
+        }
+        delivered
+    }
+}
+
+/// The public `kind` of a transaction in a mutation-error event.
+pub fn transaction_kind(serializable: bool) -> &'static str {
+    if serializable {
+        "serializable"
+    } else {
+        "mergeable"
+    }
+}
+
+/// The public code and reason of a mutation-error event for `error`; an
+/// `upstream` one is the authority's refusal of an upload.
+pub fn mutation_error_parts(error: &Error, upstream: bool) -> (&'static str, String) {
+    match (error.is_authorization_denied(), upstream) {
+        (true, true) => (
+            "permission_denied",
+            "Write rejected by server authorization".to_owned(),
+        ),
+        (true, false) => ("permission_denied", error.message.clone()),
+        (false, _) => (error.code.as_str(), error.message.clone()),
     }
 }
 
@@ -599,6 +823,8 @@ pub struct Write {
     /// Why the write was refused when it applied, if it was: its waits
     /// fail with this, and nothing was committed.
     pub rejected: Option<Error>,
+    /// Whether the write commits a serializable transaction.
+    pub serializable: bool,
 }
 
 // ---- the binding ------------------------------------------------------------------
@@ -616,11 +842,32 @@ pub struct Binding {
     /// Open transactions a staged write was refused in for its row's
     /// state: the transaction's commit reports the first such refusal.
     refused: Rc<RefCell<BTreeMap<OpenTransactionId, Error>>>,
+    /// Open transactions bound to an identity: their writes are its, and
+    /// their reads run as it.
+    bound: Rc<RefCell<BTreeMap<OpenTransactionId, WriteIdentity>>>,
+    /// Local-first accounts a backend admitted (see
+    /// [`Binding::admit_local_first_session`]), by canonical author.
+    admitted: Rc<RefCell<BTreeMap<String, SelfSignedProof>>>,
+    /// Whether the next tick reports the retry store's refusals again.
+    requeue: Rc<Cell<bool>>,
+}
+
+/// A Jazz self-signed proof of a local-first account.
+#[derive(Clone)]
+struct SelfSignedProof {
+    token: String,
+    app_id: String,
 }
 
 impl Binding {
     /// Bind `db`, opened as `identity`.
+    /// Unless `db` is the authority, it is a replica from the start: what
+    /// it writes before its upstream connects is uploaded once it does.
     pub fn new(db: Db, identity: DbIdentity, trusted_backend: bool) -> Self {
+        if !db.is_authority() {
+            db.become_replica();
+        }
+        db.track_upstream_rejections();
         Self {
             db: Rc::new(db),
             hooks: Rc::default(),
@@ -628,6 +875,58 @@ impl Binding {
             author: identity.author,
             trusted_backend,
             refused: Rc::default(),
+            bound: Rc::default(),
+            admitted: Rc::default(),
+            requeue: Rc::new(Cell::new(true)),
+        }
+    }
+
+    /// `future`, parked on this binding's progress, asking for a tick
+    /// after its first poll (it may have queued a request upstream).
+    fn parked<F: Future>(&self, future: F) -> Parked<F> {
+        Parked {
+            kick: Some(Rc::clone(&self.hooks)),
+            ..self.hooks.progress.parked(future)
+        }
+    }
+
+    /// Let this backend runtime write and read as the local-first account
+    /// `claimed_author`, proven by `token`. Raw author bytes never name a
+    /// Jazz-reserved identity otherwise. The admission covers this runtime
+    /// and its schema views; the proof is checked again at every use, so an
+    /// expired one stops admitting.
+    pub fn admit_local_first_session(
+        &self,
+        token: &str,
+        app_id: &str,
+        claimed_author: &str,
+    ) -> HostResult<()> {
+        self.require_trusted_backend()?;
+        let proof = SelfSignedProof {
+            token: token.to_owned(),
+            app_id: app_id.to_owned(),
+        };
+        verify_local_first(&proof, claimed_author)?;
+        self.admitted
+            .borrow_mut()
+            .insert(claimed_author.to_owned(), proof);
+        Ok(())
+    }
+
+    /// The subject `bytes` (canonical author JSON) names: an ordinary
+    /// author, or a local-first account this backend admitted.
+    fn author_of(&self, bytes: &[u8]) -> HostResult<AuthorSubject> {
+        match author(bytes) {
+            Ok(author) => Ok(author),
+            Err(error) => {
+                let admitted = std::str::from_utf8(bytes).ok().and_then(|canonical| {
+                    Some((canonical, self.admitted.borrow().get(canonical)?.clone()))
+                });
+                match admitted {
+                    Some((canonical, proof)) => verify_local_first(&proof, canonical),
+                    None => Err(error),
+                }
+            }
         }
     }
 
@@ -641,9 +940,64 @@ impl Binding {
         self.trusted_backend
     }
 
+    /// The authority's table identity for this schema view. An unknown table
+    /// is None; a catalogue not confirmed by the authority is NotObserved.
+    /// Learning an identity grants no permission to read its rows.
+    pub fn table_identity(&self, table: &str) -> HostResult<Option<[u8; 16]>> {
+        Ok(self.db.table_identity(table)?.map(|id| *id.0.as_bytes()))
+    }
+
+    /// The authority's stored column identity, following rename lenses.
+    pub fn column_identity(&self, table: &str, column: &str) -> HostResult<Option<[u8; 16]>> {
+        Ok(self
+            .db
+            .column_identity(table, column)?
+            .map(|id| *id.0.as_bytes()))
+    }
+
+    /// Fresh schema/session catalogue coverage using the normal pending read
+    /// lifetime. Claims use the ordinary host JSON codec and are never installed.
+    pub fn cover_catalogue(
+        &self,
+        timeout_ms: f64,
+        author: Option<&[u8]>,
+        claims: Option<serde_json::Value>,
+    ) -> HostResult<HostFuture<Vec<u8>>> {
+        let timeout_ms = checked_u64(timeout_ms, "catalogue timeout")?;
+        let scope = match author {
+            Some(bytes) => {
+                let author = self.author_of(bytes)?;
+                Some(crate::db::AcceptedReadScope {
+                    author,
+                    claims: self::claims(author, claims.unwrap_or(serde_json::Value::Null))?,
+                })
+            }
+            None if claims.is_some() => {
+                return Err("catalogue claims require an explicit author".into());
+            }
+            None => None,
+        };
+        let admitted = self.db.cover_catalogue_with_timeout(scope, timeout_ms)?;
+        Ok(Box::pin(self.parked(async move {
+            admitted.await?;
+            Ok(Vec::new())
+        })))
+    }
+
     /// A typed schema view backed by the same runtime.
     pub fn register_schema(&self, schema: &[u8]) -> HostResult<Self> {
+        self.register_schema_shipping(schema, crate::db::Migrations::default())
+    }
+
+    /// A typed schema view of an app that ships `migrations` (see
+    /// [`crate::db::Db::add_migrations`]), backed by the same runtime.
+    pub fn register_schema_shipping(
+        &self,
+        schema: &[u8],
+        migrations: crate::db::Migrations,
+    ) -> HostResult<Self> {
         let schema = decode_schema(schema)?;
+        self.db.add_migrations(migrations);
         let view = block_on(self.db.register_schema_view(schema))?;
         Ok(Self {
             db: Rc::new(view),
@@ -672,7 +1026,7 @@ impl Binding {
     /// the database's own.
     fn read_author(&self, author: Option<&[u8]>) -> HostResult<Option<AuthorSubject>> {
         match author {
-            Some(bytes) => Ok(Some(self::author(bytes)?)),
+            Some(bytes) => Ok(Some(self.author_of(bytes)?)),
             None if self.trusted_backend => Ok(Some(AuthorSubject::SYSTEM)),
             None => Ok(None),
         }
@@ -684,20 +1038,21 @@ impl Binding {
     /// host reports it through the write's waits.
     fn write(&self, write: Result<WriteHandle, Error>) -> HostResult<Write> {
         let write = match write {
-            Err(error) if error.is_apply_time_rejection() => return self.rejected(error),
+            Err(error) if error.is_apply_time_rejection() => return self.rejected(error, false),
             write => write?,
         };
         self.hooks.after_write();
         self.receipt(write.row_uuid(), write.mergeable_tx_id())
     }
 
-    fn rejected(&self, error: Error) -> HostResult<Write> {
+    fn rejected(&self, error: Error, serializable: bool) -> HostResult<Write> {
         // Rejected transactions take ids from the top of this node's range,
         // which commits (counted from the bottom) never reach.
         static REJECTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = REJECTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut write = self.receipt(RowUuid::from_bytes([0; 16]), u64::MAX - n)?;
         write.rejected = Some(error);
+        write.serializable = serializable;
         Ok(write)
     }
 
@@ -711,6 +1066,7 @@ impl Binding {
             tx_id: TransactionId::from_committed_tx(tx_id),
             seq,
             rejected: None,
+            serializable: false,
         })
     }
 
@@ -722,7 +1078,7 @@ impl Binding {
         options: &O,
     ) -> HostResult<Write> {
         let cells = decode_cells(cells)?;
-        let mut options = insert_options(options)?;
+        let mut options = insert_options_as(options, &|bytes| self.author_of(bytes))?;
         options.identity = self.checked(options.identity)?;
         self.write(block_on(self.db.insert(table, cells, options)))
     }
@@ -737,7 +1093,7 @@ impl Binding {
     ) -> HostResult<Write> {
         let row = row_uuid(row)?;
         let patch = decode_cells(patch)?;
-        let mut options = update_options(options)?;
+        let mut options = update_options_as(options, &|bytes| self.author_of(bytes))?;
         options.identity = self.checked(options.identity)?;
         self.write(block_on(self.db.update(table, row, patch, options)))
     }
@@ -772,9 +1128,11 @@ impl Binding {
         cells: &[u8],
         options: &O,
     ) -> HostResult<Write> {
+        // The removed `branch` option is refused before any payload is read,
+        // so a malformed row cannot mask it.
+        let mut options = upsert_options_as(options, &|bytes| self.author_of(bytes))?;
         let row = row_uuid(row)?;
         let cells = decode_cells(cells)?;
-        let mut options = upsert_options(options)?;
         options.identity = self.checked(options.identity)?;
         self.write(block_on(self.db.upsert(table, row, cells, options)))
     }
@@ -782,30 +1140,31 @@ impl Binding {
     /// Delete `row`.
     pub fn delete<O: HostObject>(&self, table: &str, row: &[u8], options: &O) -> HostResult<Write> {
         let row = row_uuid(row)?;
-        let mut options = delete_options(options)?;
+        let mut options = delete_options_as(options, &|bytes| self.author_of(bytes))?;
         options.identity = self.checked(options.identity)?;
         self.write(block_on(self.db.delete(table, row, options)))
     }
 
-    /// Undelete `row` with `cells`.
+    /// Undelete `row`, with `cells` or (`None`) the values it was deleted with.
     pub fn restore<O: HostObject>(
         &self,
         table: &str,
         row: &[u8],
-        cells: &[u8],
+        cells: Option<&[u8]>,
         options: &O,
     ) -> HostResult<Write> {
         let row = row_uuid(row)?;
-        let cells = decode_cells(cells)?;
-        let mut options = restore_options(options)?;
+        let cells = cells.map(decode_cells).transpose()?;
+        let mut options = restore_options_as(options, &|bytes| self.author_of(bytes))?;
         options.identity = self.checked(options.identity)?;
-        self.write(block_on(self.db.restore(table, row, Some(cells), options)))
+        self.write(block_on(self.db.restore(table, row, cells, options)))
     }
 
     // ---- transactions ----
 
-    /// Begin one owner-wide transaction, optionally bound to an authenticated
-    /// session or explicit backend provenance. Replica admission stays upstream.
+    /// Begin one owner-wide transaction, bound to the session `author` or
+    /// the backend `attribution` if one is given: its writes are that
+    /// identity's, and its reads run as it.
     pub fn begin_transaction(
         &self,
         id: &str,
@@ -813,47 +1172,102 @@ impl Binding {
         author: Option<&[u8]>,
         attribution: Option<&[u8]>,
     ) -> HostResult<()> {
+        self.begin_transaction_with_capability(id, kind, author, attribution, false)
+    }
+
+    /// Opt in before opening, using this binding's actual peer when no session
+    /// is named. The flag never upgrades an existing batch or rewrites claims.
+    pub fn begin_transaction_with_capability(
+        &self,
+        id: &str,
+        kind: &str,
+        author: Option<&[u8]>,
+        attribution: Option<&[u8]>,
+        accepted_evidence: bool,
+    ) -> HostResult<()> {
         let id = open_transaction(id)?;
+        let kind = TransactionKind::parse(kind)?;
         if author.is_some() && attribution.is_some() {
             return Err("transaction identity cannot contain both author and attribution".into());
         }
-        let identity = match (author, attribution) {
-            (Some(bytes), None) => WriteIdentity::Session(self::author(bytes)?),
-            (None, Some(bytes)) => {
-                self.checked(WriteIdentity::Attribution(self::author(bytes)?))?
+        if accepted_evidence {
+            if !matches!(kind, TransactionKind::Serializable) {
+                return Err("accepted evidence requires a serializable transaction".into());
             }
-            _ => WriteIdentity::Database,
+            if attribution.is_some() {
+                return Err("accepted evidence cannot use attribution".into());
+            }
+            if author.is_none()
+                && (self.trusted_backend
+                    || matches!(
+                        self.author,
+                        AuthorSubject::System | AuthorSubject::SystemAt(_)
+                    ))
+            {
+                return Err("accepted evidence on a backend requires an explicit session".into());
+            }
+        }
+        let identity = match (author, attribution) {
+            (Some(author), _) => WriteIdentity::Session(self.author_of(author)?),
+            (_, Some(attribution)) => {
+                self.checked(WriteIdentity::Attribution(self.author_of(attribution)?))?
+            }
+            (None, None) if accepted_evidence => WriteIdentity::Session(self.author),
+            (None, None) => WriteIdentity::Database,
         };
-        match (TransactionKind::parse(kind)?, identity) {
+        match (kind, identity) {
             (TransactionKind::Mergeable, WriteIdentity::Database) => {
                 block_on(self.db.begin_mergeable(id))?
-            }
-            (TransactionKind::Mergeable, WriteIdentity::Session(author)) => {
-                block_on(self.db.begin_mergeable_for_identity(id, author))?
-            }
-            (TransactionKind::Mergeable, WriteIdentity::Attribution(author)) => {
-                block_on(self.db.begin_mergeable_for_attribution(id, author))?
             }
             (TransactionKind::Serializable, WriteIdentity::Database) => {
                 block_on(self.db.begin_serializable(id))?
             }
+            (TransactionKind::Mergeable, WriteIdentity::Session(author)) => {
+                block_on(self.db.begin_mergeable_for_identity(id, author))?
+            }
             (TransactionKind::Serializable, WriteIdentity::Session(author)) => {
                 block_on(self.db.begin_serializable_for_identity(id, author))?
+            }
+            (TransactionKind::Mergeable, WriteIdentity::Attribution(author)) => {
+                block_on(self.db.begin_mergeable_for_attribution(id, author))?
             }
             (TransactionKind::Serializable, WriteIdentity::Attribution(author)) => {
                 block_on(self.db.begin_serializable_for_attribution(id, author))?
             }
         }
+        if identity != WriteIdentity::Database {
+            self.bound.borrow_mut().insert(id, identity);
+        }
+        Ok(())
+    }
+
+    /// Open only this unprivileged replica's actual owner. No caller-selected
+    /// session, attribution or late capability upgrade is accepted here.
+    pub fn begin_client_evidence_transaction(&self, id: &str) -> HostResult<()> {
+        if self.trusted_backend
+            || matches!(
+                self.author,
+                AuthorSubject::System | AuthorSubject::SystemAt(_)
+            )
+        {
+            return Err("own-client evidence is unavailable to a backend".into());
+        }
+        block_on(
+            self.db
+                .begin_client_evidence_transaction(open_transaction(id)?),
+        )?;
         Ok(())
     }
 
     /// Commit an owner-wide transaction (`kind` defaults to mergeable).
     pub fn commit_transaction(&self, id: &str, kind: Option<&str>) -> HostResult<Write> {
         let id = open_transaction(id)?;
+        self.bound.borrow_mut().remove(&id);
         let kind = TransactionKind::parse(kind.unwrap_or("mergeable"))?;
+        let serializable = matches!(kind, TransactionKind::Serializable);
         if let Some(error) = self.refused.borrow_mut().remove(&id) {
             self.db.abandon_transaction_handle(id)?;
-            return self.rejected(error);
+            return self.rejected(error, serializable);
         }
         let receipt = match kind {
             TransactionKind::Mergeable => block_on(self.db.commit_mergeable_handle(id)),
@@ -863,32 +1277,80 @@ impl Binding {
         // as the authority's verdict on a replica's commit is.
         let receipt = match receipt {
             Err(error) if error.code == ErrorCode::TransactionConflict => {
-                return self.rejected(error);
+                return self.rejected(error, serializable);
             }
             receipt => receipt?,
         };
         self.hooks.after_write();
-        self.receipt(RowUuid::from_bytes([0; 16]), receipt.0)
+        let mut write = self.receipt(RowUuid::from_bytes([0; 16]), receipt.0)?;
+        write.serializable = serializable;
+        Ok(write)
     }
 
     /// Roll back an open transaction.
     pub fn rollback_transaction(&self, id: &str) -> HostResult<()> {
         let id = open_transaction(id)?;
         self.refused.borrow_mut().remove(&id);
+        self.bound.borrow_mut().remove(&id);
         Ok(self.db.abandon_transaction_handle(id)?)
+    }
+
+    /// The identity a write staged in transaction `id` runs as: the one the
+    /// transaction is bound to, if any, which the write may only repeat.
+    fn staged_identity(
+        &self,
+        id: OpenTransactionId,
+        identity: WriteIdentity,
+    ) -> HostResult<WriteIdentity> {
+        let identity = self.checked(identity)?;
+        match self.bound.borrow().get(&id) {
+            None => Ok(identity),
+            Some(bound) if identity == WriteIdentity::Database || identity == *bound => Ok(*bound),
+            Some(_) => Err(HostError::Argument(
+                "a staged write's identity must match its open transaction's bound identity".into(),
+            )),
+        }
+    }
+
+    /// The author a read in open transaction `id` runs as: the session the
+    /// transaction is bound to, which an explicit author may only repeat.
+    fn transaction_reader(
+        &self,
+        id: OpenTransactionId,
+        author: Option<&[u8]>,
+    ) -> HostResult<Option<AuthorSubject>> {
+        let bound = match self.bound.borrow().get(&id) {
+            Some(WriteIdentity::Session(bound)) => *bound,
+            _ => return Ok(None),
+        };
+        match author.map(|bytes| self.author_of(bytes)).transpose()? {
+            Some(author) if author != bound => Err(HostError::Argument(
+                "the open transaction identity does not match the transaction's bound identity"
+                    .into(),
+            )),
+            _ => Ok(Some(bound)),
+        }
     }
 
     /// A staged write's outcome. Like a direct write's (see
     /// [`Self::write`]), a refusal decided by the row's stored state is not
     /// the call's error: the transaction stays open and its commit is
-    /// rejected with the first such refusal.
+    /// rejected with the first such refusal. So is a serializable write's
+    /// conflict with a row that moved past its snapshot.
     fn staged(&self, id: OpenTransactionId, staged: Result<WriteHandle, Error>) -> HostResult<()> {
+        self.staged_result(id, staged.map(drop))
+    }
+
+    fn staged_result(&self, id: OpenTransactionId, staged: Result<(), Error>) -> HostResult<()> {
         match staged {
-            Err(error) if error.is_apply_time_rejection() => {
+            Err(error)
+                if error.is_apply_time_rejection()
+                    || error.code == ErrorCode::TransactionConflict =>
+            {
                 self.refused.borrow_mut().entry(id).or_insert(error);
                 Ok(())
             }
-            staged => staged.map(drop).map_err(Into::into),
+            staged => staged.map_err(Into::into),
         }
     }
 
@@ -902,10 +1364,10 @@ impl Binding {
     ) -> HostResult<RowUuid> {
         let id = open_transaction(id)?;
         let cells = decode_cells(cells)?;
-        let mut options = insert_options(options)?;
-        options.identity = self.checked(options.identity)?;
+        let mut options = insert_options_as(options, &|bytes| self.author_of(bytes))?;
+        options.identity = self.staged_identity(id, options.identity)?;
         let row = *options.row_id.get_or_insert_with(|| self.db.next_row_id());
-        let staged = block_on(self.db.mergeable_tx_ref(id).insert(table, cells, options));
+        let staged = block_on(self.db.tx_ref(id).insert(table, cells, options));
         self.staged(id, staged)?;
         Ok(row)
     }
@@ -922,13 +1384,9 @@ impl Binding {
         let id = open_transaction(id)?;
         let row = row_uuid(row)?;
         let patch = decode_cells(patch)?;
-        let mut options = update_options(options)?;
-        options.identity = self.checked(options.identity)?;
-        let staged = block_on(
-            self.db
-                .mergeable_tx_ref(id)
-                .update(table, row, patch, options),
-        );
+        let mut options = update_options_as(options, &|bytes| self.author_of(bytes))?;
+        options.identity = self.staged_identity(id, options.identity)?;
+        let staged = block_on(self.db.tx_ref(id).update(table, row, patch, options));
         self.staged(id, staged)
     }
 
@@ -941,16 +1399,12 @@ impl Binding {
         cells: &[u8],
         options: &O,
     ) -> HostResult<()> {
+        let mut options = upsert_options_as(options, &|bytes| self.author_of(bytes))?;
         let id = open_transaction(id)?;
+        options.identity = self.staged_identity(id, options.identity)?;
         let row = row_uuid(row)?;
         let cells = decode_cells(cells)?;
-        let mut options = upsert_options(options)?;
-        options.identity = self.checked(options.identity)?;
-        let staged = block_on(
-            self.db
-                .mergeable_tx_ref(id)
-                .upsert(table, row, cells, options),
-        );
+        let staged = block_on(self.db.tx_ref(id).upsert(table, row, cells, options));
         self.staged(id, staged)
     }
 
@@ -964,9 +1418,9 @@ impl Binding {
     ) -> HostResult<()> {
         let id = open_transaction(id)?;
         let row = row_uuid(row)?;
-        let mut options = delete_options(options)?;
-        options.identity = self.checked(options.identity)?;
-        let staged = block_on(self.db.mergeable_tx_ref(id).delete(table, row, options));
+        let mut options = delete_options_as(options, &|bytes| self.author_of(bytes))?;
+        options.identity = self.staged_identity(id, options.identity)?;
+        let staged = block_on(self.db.tx_ref(id).delete(table, row, options));
         self.staged(id, staged)
     }
 
@@ -988,11 +1442,12 @@ impl Binding {
             updated_at_ms: updated_at_ms
                 .map(|value| checked_u64(value, "updatedAtMs"))
                 .transpose()?,
+            identity: self.staged_identity(id, WriteIdentity::Database)?,
             ..Default::default()
         };
         let staged = block_on(
             self.db
-                .mergeable_tx_ref(id)
+                .tx_ref(id)
                 .update_with_large_value_mutations(table, row, patch, mutations, options),
         );
         self.staged(id, staged)
@@ -1004,20 +1459,15 @@ impl Binding {
         id: &str,
         table: &str,
         row: &[u8],
-        cells: &[u8],
+        cells: Option<&[u8]>,
         options: &O,
     ) -> HostResult<()> {
         let id = open_transaction(id)?;
         let row = row_uuid(row)?;
-        let cells = decode_cells(cells)?;
-        let mut options = restore_options(options)?;
-        options.identity = self.checked(options.identity)?;
-        let staged = block_on(self.db.mergeable_tx_ref(id).restore(
-            table,
-            row,
-            Some(cells),
-            options,
-        ));
+        let cells = cells.map(decode_cells).transpose()?;
+        let mut options = restore_options_as(options, &|bytes| self.author_of(bytes))?;
+        options.identity = self.staged_identity(id, options.identity)?;
+        let staged = block_on(self.db.tx_ref(id).restore(table, row, cells, options));
         self.staged(id, staged)
     }
 
@@ -1049,30 +1499,57 @@ impl Binding {
         claims: Option<serde_json::Value>,
     ) -> HostResult<HostFuture<Vec<u8>>> {
         let opts = read_opts(opts)?;
-        let explicit = author.is_some();
-        let author = self.read_author(author)?;
-        let admission = match (explicit, author) {
-            (true, Some(author)) => Some((
+        let open_tx = open_transaction_id.map(open_transaction).transpose()?;
+        // A transaction bound to a session reads as it.
+        let bound = match open_tx {
+            Some(id) => self.transaction_reader(id, author)?,
+            None => None,
+        };
+        let explicit = author.is_some() || bound.is_some();
+        let author = match bound {
+            Some(bound) => Some(bound),
+            None => self.read_author(author)?,
+        };
+        let admission = match (explicit, author, claims) {
+            // A bound batch already supplies its reader. Omitted claims inherit
+            // the current core registration, just like accepted_read; explicit
+            // claims (including an empty map) remain authoritative overrides.
+            (true, Some(_), None) if bound.is_some() => None,
+            (true, Some(author), claims) => Some((
                 author,
                 self::claims(author, claims.unwrap_or(serde_json::Value::Null))?,
             )),
             _ => None,
         };
-        let open_tx = open_transaction_id.map(open_transaction).transpose()?;
         let db = self.db.clone();
-        Ok(Box::pin(self.hooks.progress.parked(async move {
-            let result = db
-                .all_serialized_query(
-                    &query,
-                    opts,
-                    open_tx,
-                    admission,
-                    author,
-                    false,
-                    || false,
-                    |_| {},
-                )
-                .await?;
+        // A Remote read must be covered by the server; its budget runs
+        // from its first wait.
+        let require_coverage = opts.tier == crate::db::ReadTier::Remote;
+        let started = std::cell::Cell::new(None::<web_time::Instant>);
+        let expired = move || {
+            let first = started.get().unwrap_or_else(|| {
+                let now = web_time::Instant::now();
+                started.set(Some(now));
+                now
+            });
+            first.elapsed() >= REMOTE_READ_COVERAGE_BUDGET
+        };
+        let hooks = Rc::clone(&self.hooks);
+        Ok(Box::pin(self.parked(async move {
+            let coverage: Option<&dyn Fn() -> bool> = require_coverage.then_some(&expired);
+            let mut read =
+                std::pin::pin!(db.all_serialized_query(&query, opts, open_tx, admission, coverage));
+            // A row whose large values are missing records their chunks for
+            // the next send; ask for the tick that sends it, or the read
+            // waits on unrelated sync traffic.
+            let result = std::future::poll_fn(|context| {
+                let poll = read.as_mut().poll(context);
+                if poll.is_pending() && db.owes_chunk_requests() {
+                    hooks.schedule_tick();
+                }
+                poll
+            })
+            .await?;
             Ok(match result {
                 SerializedReadResult::Rows(rows) => crate::binding_codec::encode_rows(&rows),
                 SerializedReadResult::Relation(snapshot) => {
@@ -1082,104 +1559,113 @@ impl Binding {
         })))
     }
 
-    /// Cached authority-issued identities; these calls never fetch or allocate.
-    pub fn table_identity(&self, table: &str) -> HostResult<Vec<u8>> {
-        Ok(self
-            .db
-            .table_identity(table)?
-            .map_or_else(Vec::new, |id| id.0.as_bytes().to_vec()))
-    }
-    pub fn column_identity(&self, table: &str, column: &str) -> HostResult<Vec<u8>> {
-        Ok(self
-            .db
-            .column_identity(table, column)?
-            .map_or_else(Vec::new, |id| id.0.as_bytes().to_vec()))
-    }
-    /// Fresh catalogue coverage still executes the opened schema's query and
-    /// policy path at the authority; cached identities cannot satisfy it.
-    pub fn cover_catalogue(
-        &self,
-        table: String,
-        author: Option<&[u8]>,
-        claims: Option<serde_json::Value>,
-    ) -> HostResult<HostFuture<Vec<u8>>> {
-        let explicit = author.is_some();
-        let author = self.read_author(author)?;
-        let scope = author
-            .map(|author| {
-                let claims = if explicit {
-                    self::claims(author, claims.unwrap_or(serde_json::Value::Null))?
-                } else {
-                    BTreeMap::new()
-                };
-                Ok::<_, HostError>((author, claims))
-            })
-            .transpose()?;
-        let db = self.db.clone();
-        Ok(Box::pin(self.hooks.progress.parked(async move {
-            db.cover_catalogue(&table, scope).await?;
-            Ok(Vec::new())
-        })))
-    }
-
-    /// Paired accepted content and settlement metadata for one serializable
-    /// transaction. The read registers before its returned future is polled.
-    pub fn all_settlement_metadata<O: HostObject>(
+    /// Admit an authority-evidence read synchronously into an identity-bound
+    /// serializable batch. Its future uses the ordinary host read lifetime.
+    pub fn accepted_read(
         &self,
         query: Vec<u8>,
-        options: &O,
         open_transaction_id: &str,
+        include_deleted: bool,
+        timeout_ms: f64,
         author: Option<&[u8]>,
         claims: Option<serde_json::Value>,
-        include_rows: bool,
     ) -> HostResult<HostFuture<Vec<u8>>> {
-        let opts = read_opts(options)?;
-        let snapshot_at_begin = options
-            .get("e2ee_snapshot_at_begin")?
-            .map(|value| O::boolean(&value).ok_or("e2ee_snapshot_at_begin must be a boolean"))
-            .transpose()?
-            .unwrap_or(opts.tier == ReadTier::LocalOnly);
+        let timeout_ms = checked_u64(timeout_ms, "timeoutMs")?;
         let id = open_transaction(open_transaction_id)?;
-        let explicit = author.is_some();
-        let author = self.read_author(author)?;
+        let bound = if let Some(owner) = self.db.client_evidence_author(id)? {
+            if author.is_some() || claims.is_some() {
+                return Err("own-client evidence cannot select a session or frozen claims".into());
+            }
+            owner
+        } else {
+            self.transaction_reader(id, author)?.ok_or_else(|| {
+                not_supported("accepted evidence without an explicitly bound session")
+            })?
+        };
         let query: Query = postcard::from_bytes(&query)
-            .map_err(|e| HostError::Argument(format!("undecodable query: {e}")))?;
+            .map_err(|error| HostError::Argument(format!("undecodable query: {error}")))?;
         let mut prepared = self.db.prepare_query(&query)?;
-        if let (true, Some(author)) = (explicit, author) {
-            prepared = prepared.with_identity_claims(
-                author,
-                self::claims(author, claims.unwrap_or(serde_json::Value::Null))?,
-            );
+        // Omitted claims mean the registered core claims, including on a
+        // schema view. Do not replace them with an empty JavaScript object.
+        if let Some(claims) = claims {
+            prepared = prepared.with_identity_claims(bound, self::claims(bound, claims)?);
         }
         let read = self
             .db
-            .all_settled(prepared, opts, id, snapshot_at_begin, author)?;
-        Ok(Box::pin(self.hooks.progress.parked(async move {
-            let result = read.await?;
-            let metadata = result
-                .rows
-                .iter()
-                .zip(&result.settlements)
-                .map(|(row, (tx, position))| {
-                    serde_json::json!({ "rowId": row.row_uuid().0.to_string(),
-                    "transactionId": TransactionId::from_committed_tx(*tx).to_string(),
-                    "position": position.0.to_string() })
-                })
-                .collect::<Vec<_>>();
-            let metadata =
-                serde_json::to_vec(&metadata).map_err(|e| HostError::Argument(e.to_string()))?;
-            if !include_rows {
-                return Ok(metadata);
+            .accepted_transaction_query(id, prepared, include_deleted, timeout_ms)?;
+        Ok(Box::pin(
+            self.parked(async move { encode_accepted_read(read.await?) }),
+        ))
+    }
+
+    /// Synchronous local candidates for nonempty metadata queries at ONE cut.
+    /// This neither opens a transaction nor retains a cut across host turns;
+    /// every error drops it. Pending overlays and authority inference are excluded.
+    pub fn observe_local_batch(
+        &self,
+        queries: Vec<Vec<u8>>,
+        author: Option<&[u8]>,
+        claims: Option<serde_json::Value>,
+    ) -> HostResult<serde_json::Value> {
+        let explicit = author.is_some();
+        let author = self.read_author(author)?;
+        let claims = if explicit {
+            author
+                .map(|author| self::claims(author, claims.unwrap_or(serde_json::Value::Null)))
+                .transpose()?
+        } else {
+            None
+        };
+        Self::observe_local_batch_as(&self.db, queries, author, claims, |db, prepared| {
+            db.local_observation_cut(prepared, author)
+        })
+    }
+
+    fn observe_local_batch_as(
+        db: &Db,
+        queries: Vec<Vec<u8>>,
+        author: Option<AuthorSubject>,
+        claims: Option<Cells>,
+        capture: impl FnOnce(
+            &Db,
+            &crate::db::PreparedQuery,
+        ) -> Result<crate::db::LocalObservationCut, Error>,
+    ) -> HostResult<serde_json::Value> {
+        if queries.is_empty() {
+            return Err("local observation requires queries".into());
+        }
+        let mut prepared = Vec::with_capacity(queries.len());
+        for bytes in queries {
+            let query: Query = postcard::from_bytes(&bytes)?;
+            let mut query = db.prepare_query(&query)?;
+            if let (Some(author), Some(claims)) = (author, &claims) {
+                query = query.with_identity_claims(author, claims.clone());
             }
-            // Existing jazz.binding.settled-rows.v1: u32LE JSON byte length,
-            // UTF-8 metadata, then the ordinary binding row codec.
-            let length =
-                u32::try_from(metadata.len()).map_err(|_| "settled-row metadata is too large")?;
-            let mut bytes = length.to_le_bytes().to_vec();
-            bytes.extend(metadata);
-            bytes.extend(crate::binding_codec::encode_rows(&result.rows)?);
-            Ok(bytes)
-        })))
+            prepared.push(query);
+        }
+        let cut = capture(db, &prepared[0])?;
+        let mut output = Vec::with_capacity(prepared.len());
+        for query in &prepared {
+            let observed = db.observe_local(&cut, query, false)?;
+            let evidence: Vec<_> = observed.evidence.iter().map(|pair| {
+                let origin = |value: crate::db::AcceptedVersion| serde_json::json!({
+                    "transactionId": TransactionId::from_committed_tx(value.transaction).to_string(),
+                    "position": value.sequence.to_string()
+                });
+                serde_json::json!({"rowId": pair.row.0.to_string(), "state": origin(pair.state), "content": origin(pair.content)})
+            }).collect();
+            let provenance: Vec<_> = observed
+                .provenance
+                .iter()
+                .map(|value| match value {
+                    crate::db::LocalEvidenceProvenance::LocalSubmission => "local-submission",
+                    crate::db::LocalEvidenceProvenance::AuthorityRead => "authority-read",
+                })
+                .collect();
+            output.push(serde_json::json!({"rows": crate::binding_codec::encode_rows(&observed.rows)?,
+                "through": observed.through.to_string(), "evidence": evidence, "provenance": provenance}));
+        }
+        Ok(serde_json::Value::Array(output))
     }
 
     /// Subscribe to a postcard query. A remote attachment goes upstream on
@@ -1215,6 +1701,7 @@ impl Binding {
     /// none.
     pub fn next_event<'a>(&'a self, stream: &'a mut SubscriptionStream) -> NextEvent<'a> {
         NextEvent {
+            db: &self.db,
             stream,
             progress: &self.hooks.progress,
         }
@@ -1230,7 +1717,7 @@ impl Binding {
 
     /// Bind correlation claims to `author` (a served identity).
     pub fn set_identity_claims(&self, author: &[u8], claims: serde_json::Value) -> HostResult<()> {
-        let author = self::author(author)?;
+        let author = self.author_of(author)?;
         let claims = self::claims(author, claims)?;
         self.db.set_identity_claims(author, claims);
         self.hooks.progress.wake_all();
@@ -1241,11 +1728,25 @@ impl Binding {
 
     /// Ask the authority whether `action` would be allowed; the request goes
     /// out on the next tick. Resolves to `"allowed" | "denied" | "unknown"`.
+    /// Ask the authority about `action` for this database's own session,
+    /// or, on a trusted backend, for `author` with its `claims`.
     pub fn request_permission_advice(
         &self,
         action: PermissionAdviceAction,
-    ) -> (u64, HostFuture<&'static str>) {
-        let id = self.db.request_permission_advice(action);
+        author: Option<&[u8]>,
+        claims: Option<serde_json::Value>,
+    ) -> HostResult<(u64, HostFuture<&'static str>)> {
+        let session = match author {
+            Some(author) => {
+                let author = self.author_of(author)?;
+                Some((
+                    author,
+                    self::claims(author, claims.unwrap_or(serde_json::Value::Null))?,
+                ))
+            }
+            None => None,
+        };
+        let id = self.db.request_permission_advice(action, session);
         self.hooks.after_write();
         let db = self.db.clone();
         let progress = self.hooks.progress.clone();
@@ -1253,7 +1754,7 @@ impl Binding {
             Box::pin(
                 async move { Ok(advice_str(progress.parked(db.permission_advice(id)).await)) },
             );
-        (id, future)
+        Ok((id, future))
     }
 
     /// Drop a pending advice request; it resolves `"unknown"`.
@@ -1266,9 +1767,9 @@ impl Binding {
     pub fn capture_snapshot(&self) -> HostFuture<Vec<u8>> {
         let db = self.db.clone();
         Box::pin(
-            self.hooks.progress.parked(async move {
-                Ok(db.capture_snapshot().await?.to_persisted().into_bytes())
-            }),
+            self.parked(
+                async move { Ok(db.capture_snapshot().await?.to_persisted().into_bytes()) },
+            ),
         )
     }
 
@@ -1284,27 +1785,12 @@ impl Binding {
         })))
     }
 
-    /// Read a receipt only under its originating node. Schema views and a
-    /// reopened store retain that node; another node cannot reinterpret it.
-    pub fn write_state(&self, write: &Write) -> HostResult<WriteState> {
-        self.check_write_owner(write)?;
-        if let Some(error) = &write.rejected {
-            return Ok(WriteState::rejected(error, DurabilityTier::None));
-        }
-        Ok(self.db.write_state(write.seq)?)
-    }
-
-    fn check_write_owner(&self, write: &Write) -> HostResult<()> {
-        if self.node != write.node {
-            return Err("write belongs to a different database node".into());
-        }
-        Ok(())
-    }
-
     /// Resolve once `write` reached `tier`; fail at once with its
     /// rejection, if it was rejected.
     pub fn wait_for_write(&self, write: &Write, tier: &str) -> HostResult<HostFuture<()>> {
-        self.check_write_owner(write)?;
+        if self.node != write.node {
+            return Err("write belongs to a different database node".into());
+        }
         if let Some(error) = &write.rejected {
             binding_args::durability_tier(tier)?;
             let error = error.clone();
@@ -1323,11 +1809,68 @@ impl Binding {
         }))
     }
 
+    /// How many local commits still wait for the server's verdict.
+    pub fn pending_upload_count(&self) -> usize {
+        self.db.pending_upload_count()
+    }
+
     /// Apply received frames and send what is due; waits wake.
     pub async fn tick(&self) -> HostResult<()> {
         let result = self.db.tick().await;
+        // Refusals kept from before (a reopened store's, or ones no
+        // listener took) go out again first.
+        let requeued = if self.requeue.replace(false) {
+            self.db.requeue_rejected_transactions()
+        } else {
+            Ok(())
+        };
+        let rejections = self.db.take_upstream_rejections();
+        let delivered = self.hooks.report(self.node, rejections);
+        // Delivered: the retry store lets go of their payloads. One no
+        // listener took stays, for the next listener or the next open.
+        let discarded = delivered
+            .into_iter()
+            .try_for_each(|seq| self.db.discard_rejected_transaction(seq));
         self.hooks.progress.wake_all();
-        Ok(result?)
+        result?;
+        requeued?;
+        Ok(discarded?)
+    }
+
+    /// Report the refusals the retry store still holds again on the next
+    /// tick: the host now has a listener for them.
+    pub fn redeliver_rejections(&self) {
+        self.requeue.set(true);
+        self.hooks.schedule_tick();
+    }
+
+    /// The slow-query report due now: one line per slow query shape,
+    /// naming `app`: the first at once, then at most every 10 seconds. The host
+    /// writes the lines where it reports problems (`console.warn`).
+    pub fn take_slow_query_report(&self, app: Option<&str>) -> Vec<String> {
+        self.db.take_slow_query_report(app)
+    }
+
+    /// Report query runs of at least `ms` milliseconds; 0 turns the log
+    /// off.
+    pub fn set_slow_query_threshold_ms(&self, ms: f64) -> HostResult<()> {
+        if !ms.is_finite() || ms < 0.0 {
+            return Err(HostError::Argument(format!(
+                "slow query threshold must be a non-negative number of milliseconds, not {ms}"
+            )));
+        }
+        self.db.set_slow_query_threshold(
+            (ms > 0.0).then(|| std::time::Duration::from_secs_f64(ms / 1000.0)),
+        );
+        Ok(())
+    }
+
+    /// Make this store the optimistic, non-durable foreground of a durable
+    /// relay (a browser tab over its worker): its store starts empty, so
+    /// every subscription's opening waits for the relay's answer.
+    pub fn set_non_durable_client(&self) {
+        self.db.set_non_durable_client();
+        self.hooks.progress.wake_all();
     }
 
     /// Report the path to the authoritative server (`"none" | "attempting"
@@ -1382,6 +1925,7 @@ impl Binding {
         updated_at_ms: Option<f64>,
         head: Option<BranchSelector>,
         base: Option<BranchViewBase>,
+        transaction: Option<&str>,
     ) -> HostResult<StreamingMutation> {
         let identity = match (author, attribution) {
             (Some(_), Some(_)) => {
@@ -1389,10 +1933,10 @@ impl Binding {
                     "streaming mutation identity cannot contain both author and attribution".into(),
                 );
             }
-            (Some(bytes), None) => WriteIdentity::Session(self::author(bytes)?),
+            (Some(bytes), None) => WriteIdentity::Session(self.author_of(bytes)?),
             (None, Some(bytes)) => {
                 self.require_trusted_backend()?;
-                WriteIdentity::Attribution(self::author(bytes)?)
+                WriteIdentity::Attribution(self.author_of(bytes)?)
             }
             (None, None) => WriteIdentity::Database,
         };
@@ -1415,12 +1959,18 @@ impl Binding {
                 "backend-attributed streaming mutations do not support branch writes".into(),
             );
         }
+        let transaction = transaction.map(open_transaction).transpose()?;
+        let identity = match transaction {
+            Some(id) => self.staged_identity(id, identity)?,
+            None => identity,
+        };
         let upload = self
             .db
             .begin_streaming_value_upload(&table, &cells, &column)?;
         Ok(StreamingMutation {
             state: Some(Box::new(StreamingState {
                 binding: self.clone(),
+                transaction,
                 upload,
                 mutation,
                 table,
@@ -1432,6 +1982,7 @@ impl Binding {
                 head,
                 base,
             })),
+            failed: false,
         })
     }
 
@@ -1442,34 +1993,67 @@ impl Binding {
     /// out on the next tick.
     pub fn connect_upstream(&self) -> Link {
         let queues = WireQueues::default();
-        let transport = Box::new(WireTransportAdapter::current(QueueTransport {
+        let transport = Box::new(QueueTransport {
             queues: queues.clone(),
-        }));
+            failed: None,
+        });
         let upstream = block_on(self.db.connect_upstream(transport));
         self.hooks.schedule_tick();
         Link {
             binding: self.clone(),
             queues,
             kind: LinkKind::Upstream(Some(upstream)),
+            local: RefCell::default(),
         }
     }
 
-    /// Serve a subscriber (another replica) as `identity` with `claims`.
-    pub fn accept_subscriber(&self, identity: AuthorSubject, claims: Cells) -> Link {
-        self.db.set_identity_claims(identity, claims);
+    /// A local observer admitted by the already-authenticated owner. There is
+    /// deliberately no host identity, claims, bundle or policy-mode argument.
+    pub fn accept_own_observation_subscriber(&self) -> HostResult<Link> {
+        if self.trusted_backend {
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                "backend cannot select own-client observation",
+            )
+            .into());
+        }
         let queues = WireQueues::default();
-        let transport = Box::new(WireTransportAdapter::current(QueueTransport {
+        let transport = Box::new(QueueTransport {
             queues: queues.clone(),
-        }));
-        let subscriber = self.db.accept_subscriber(transport, identity);
-        Link {
+            failed: None,
+        });
+        let (subscriber, identity) = self.db.accept_own_observation_subscriber(transport)?;
+        Ok(Link {
             binding: self.clone(),
             queues,
             kind: LinkKind::Subscriber {
                 id: Some(subscriber),
                 identity,
             },
-        }
+            local: RefCell::default(),
+        })
+    }
+
+    /// Serve a subscriber (another replica) as `identity` with `claims`.
+    /// A store configured as a user refuses any other identity (see
+    /// [`Db::accept_subscriber`]).
+    pub fn accept_subscriber(&self, identity: AuthorSubject, claims: Cells) -> HostResult<Link> {
+        let queues = WireQueues::default();
+        let transport = Box::new(QueueTransport {
+            queues: queues.clone(),
+            failed: None,
+        });
+        let subscriber = self.db.accept_subscriber(transport, identity)?;
+        self.db.set_identity_claims(identity, claims);
+        Ok(Link {
+            binding: self.clone(),
+            queues,
+            kind: LinkKind::Subscriber {
+                id: Some(subscriber),
+                identity,
+            },
+            local: RefCell::default(),
+        })
     }
 
     /// Close the database (a schema view leaves its owner open).
@@ -1518,6 +2102,7 @@ pub mod advice {
 
 /// The next event of a subscription (see [`Binding::next_event`]).
 pub struct NextEvent<'a> {
+    db: &'a Db,
     stream: &'a mut SubscriptionStream,
     progress: &'a Progress,
 }
@@ -1526,6 +2111,9 @@ impl Future for NextEvent<'_> {
     type Output = SubscriptionEvent;
 
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<SubscriptionEvent> {
+        if self.db.ensure_storage_owner_active().is_err() {
+            return Poll::Ready(SubscriptionEvent::Closed);
+        }
         match self.stream.try_next_event() {
             Some(event) => Poll::Ready(event),
             None => {
@@ -1595,6 +2183,8 @@ struct StreamingState {
     updated_at_ms: Option<u64>,
     head: Option<BranchSelector>,
     base: Option<BranchViewBase>,
+    /// The open transaction the finished value is staged in.
+    transaction: Option<OpenTransactionId>,
 }
 
 /// A large value uploaded in chunks, then published as one row mutation.
@@ -1602,6 +2192,9 @@ struct StreamingState {
 /// arrives. A failed push closes the mutation.
 pub struct StreamingMutation {
     state: Option<Box<StreamingState>>,
+    /// A push failed: the upload takes no more chunks and cannot finish,
+    /// but stays for [`StreamingMutation::abort`] to release.
+    failed: bool,
 }
 
 fn closed() -> HostError {
@@ -1611,21 +2204,35 @@ fn closed() -> HostError {
 impl StreamingMutation {
     /// Upload the next chunk.
     pub fn push(&mut self, chunk: &[u8]) -> HostResult<()> {
-        let state = self.state.as_mut().ok_or_else(closed)?;
+        let state = self
+            .state
+            .as_mut()
+            .filter(|_| !self.failed)
+            .ok_or_else(closed)?;
         let pushed = block_on(
             state
                 .binding
                 .db
                 .push_streaming_value_upload(&mut state.upload, chunk),
         );
-        if pushed.is_err() {
-            self.state = None;
-        }
+        self.failed = pushed.is_err();
         Ok(pushed?)
     }
 
     /// Publish the uploaded value as the row mutation.
     pub fn finish(&mut self) -> HostResult<Write> {
+        if self.failed {
+            return Err(closed());
+        }
+        if self
+            .state
+            .as_ref()
+            .is_some_and(|state| state.transaction.is_some())
+        {
+            return Err(HostError::Argument(
+                "a streaming mutation begun in a transaction finishes in it".into(),
+            ));
+        }
         let state = *self.state.take().ok_or_else(closed)?;
         let write = block_on(state.binding.db.finish_streaming_value_upload(
             state.upload,
@@ -1642,8 +2249,52 @@ impl StreamingMutation {
         state.binding.write(write)
     }
 
-    /// Finish the upload without publishing; attach it to a serializable batch.
+    /// Whether the mutation began in a transaction, and so finishes with
+    /// [`Self::finish_in_transaction`].
+    pub fn in_transaction(&self) -> bool {
+        self.state
+            .as_ref()
+            .is_some_and(|state| state.transaction.is_some())
+    }
+
+    /// Stage the uploaded value's row mutation in the transaction the
+    /// mutation began in. Like any staged write, a refusal decided by the
+    /// row's stored state is reported by the commit.
+    pub fn finish_in_transaction(&mut self) -> HostResult<()> {
+        if self.failed {
+            return Err(closed());
+        }
+        let Some(id) = self.state.as_ref().and_then(|state| state.transaction) else {
+            return Err(HostError::Argument(
+                "a streaming mutation begun outside a transaction finishes with finish".into(),
+            ));
+        };
+        let state = *self.state.take().ok_or_else(closed)?;
+        let staged = block_on(state.binding.db.tx_ref(id).finish_streaming_value_upload(
+            state.upload,
+            state.mutation,
+            &state.table,
+            state.row,
+            state.cells,
+            &state.column,
+            state.identity,
+            state.updated_at_ms,
+            state.head,
+            state.base,
+        ));
+        state.binding.staged(id, staged)
+    }
+
+    /// Complete an out-of-transaction upload for later atomic attachment.
     pub fn stage(&mut self) -> HostResult<StagedStreamingMutation> {
+        if self.failed {
+            return Err(closed());
+        }
+        if self.in_transaction() {
+            return Err(HostError::Argument(
+                "a streaming mutation begun in a transaction finishes in it".into(),
+            ));
+        }
         let state = *self.state.take().ok_or_else(closed)?;
         let staged = block_on(state.binding.db.stage_streaming_value_upload(
             state.upload,
@@ -1673,26 +2324,27 @@ impl StreamingMutation {
     }
 }
 
-/// Single-use staged upload owned by the binding that admitted it.
+/// Single-use completed upload retained by the binding that admitted it.
 pub struct StagedStreamingMutation {
     binding: Binding,
     staged: Option<crate::db::StagedStreamingValue>,
 }
 
 impl StagedStreamingMutation {
-    /// Consume the capability, including on invalid transaction identifiers.
+    /// Consume even a failed attachment; stored-state refusals poison commit
+    /// exactly like the binding's other staged writes.
     pub fn attach(&mut self, transaction: &str) -> HostResult<()> {
         let mut staged = self.staged.take().ok_or_else(closed)?;
-        let tx = open_transaction(transaction)?;
-        block_on(
+        let id = open_transaction(transaction)?;
+        let result = block_on(
             self.binding
                 .db
-                .attach_staged_streaming_value(tx, &mut staged),
-        )?;
-        Ok(())
+                .attach_staged_streaming_value(id, &mut staged),
+        );
+        self.binding.staged_result(id, result)
     }
 
-    /// Release an unattached upload; false after attachment or abandonment.
+    /// Release an unattached upload. A consumed capability is already closed.
     pub fn abort(&mut self) -> HostResult<bool> {
         let Some(mut staged) = self.staged.take() else {
             return Ok(false);
@@ -1708,26 +2360,45 @@ impl StagedStreamingMutation {
 /// The frame queues between a link and its host carrier.
 #[derive(Clone, Default)]
 pub struct WireQueues {
-    inbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
+    inbound: Rc<RefCell<VecDeque<Result<SyncMessage, TransportError>>>>,
+    inbound_joiner: Rc<RefCell<FrameJoiner>>,
     outbound: Rc<RefCell<VecDeque<Vec<u8>>>>,
     outbound_ready: Rc<RefCell<Option<Box<dyn Fn()>>>>,
 }
 
 struct QueueTransport {
     queues: WireQueues,
+    failed: Option<Option<TransportError>>,
 }
 
-impl WireTransport for QueueTransport {
-    fn send_frame(&mut self, frame: Vec<u8>) -> Result<(), TransportError> {
-        self.queues.outbound.borrow_mut().push_back(frame);
-        if let Some(ready) = self.queues.outbound_ready.borrow().as_ref() {
-            ready();
+impl Transport for QueueTransport {
+    fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+        for frame in crate::db::encode_frames(message)
+            .map_err(|error| TransportError::Failed(error.to_string()))?
+        {
+            self.queues.outbound.borrow_mut().push_back(frame);
+            if let Some(ready) = self.queues.outbound_ready.borrow().as_ref() {
+                ready();
+            }
         }
         Ok(())
     }
 
-    fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
-        self.queues.inbound.borrow_mut().pop_front()
+    fn try_recv(&mut self) -> Option<SyncMessage> {
+        if self.failed.is_some() {
+            return None;
+        }
+        match self.queues.inbound.borrow_mut().pop_front()? {
+            Ok(message) => Some(message),
+            Err(error) => {
+                self.failed = Some(Some(error));
+                None
+            }
+        }
+    }
+
+    fn take_failure(&mut self) -> Option<TransportError> {
+        self.failed.as_mut().and_then(Option::take)
     }
 }
 
@@ -1745,6 +2416,18 @@ pub struct Link {
     binding: Binding,
     queues: WireQueues,
     kind: LinkKind,
+    local: RefCell<LocalLink>,
+}
+
+#[derive(Default)]
+struct LocalLink {
+    enabled: bool,
+    retired: bool,
+    source: Option<crate::db::LocalSubmissionSource>,
+    port: Option<crate::db::LocalSubmissionPort>,
+    descriptor: Vec<u8>,
+    joiner: crate::db::FrameJoiner,
+    outbound: Vec<Vec<u8>>,
 }
 
 impl Link {
@@ -1755,13 +2438,178 @@ impl Link {
 
     /// Frames received from the peer; applied on the next tick.
     pub fn receive(&self, frames: impl IntoIterator<Item = Vec<u8>>) {
-        self.queues.inbound.borrow_mut().extend(frames);
+        let mut joiner = self.queues.inbound_joiner.borrow_mut();
+        let mut inbound = self.queues.inbound.borrow_mut();
+        for frame in frames {
+            match joiner.push(&frame) {
+                Ok(Some(message)) => inbound.push_back(Ok(message)),
+                Ok(None) => {}
+                Err(error) => {
+                    inbound.push_back(Err(error));
+                    break;
+                }
+            }
+        }
+        drop(inbound);
+        drop(joiner);
         self.binding.hooks.schedule_tick();
+    }
+
+    /// Join and canonically decode the whole host batch before admitting any
+    /// prefix. Stage partial bytes too, so a rejected batch cannot change the
+    /// link's previous reassembly state. Completed messages are decoded once.
+    pub fn receive_checked(
+        &self,
+        frames: impl IntoIterator<Item = impl AsRef<[u8]>>,
+    ) -> Result<(), Error> {
+        let mut staged = self.queues.inbound_joiner.borrow().clone();
+        let mut decoded = Vec::new();
+        for frame in frames {
+            if let Some(message) = staged.push(frame.as_ref()).map_err(|error| {
+                Error::new(
+                    ErrorCode::Protocol,
+                    format!("invalid SQLite sync frame: {error}"),
+                )
+            })? {
+                decoded.push(Ok(message));
+            }
+        }
+        *self.queues.inbound_joiner.borrow_mut() = staged;
+        self.queues.inbound.borrow_mut().extend(decoded);
+        self.binding.hooks.schedule_tick();
+        Ok(())
     }
 
     /// Frames to send to the peer, oldest first.
     pub fn take_outbound(&self) -> Vec<Vec<u8>> {
-        self.queues.outbound.borrow_mut().drain(..).collect()
+        let frames: Vec<_> = self.queues.outbound.borrow_mut().drain(..).collect();
+        let mut local = self.local.borrow_mut();
+        if local.enabled && matches!(self.kind, LinkKind::Upstream(Some(_))) {
+            for frame in &frames {
+                match local.joiner.push(frame) {
+                    Ok(Some(crate::db::SyncMessage::Commit { id, .. })) => {
+                        // Capture outside the core tick/Store borrow, from the
+                        // actual pending transaction that emitted these frames.
+                        if local.source.is_none() {
+                            local.source = self.binding.db.local_submission_source().ok();
+                        }
+                        if let Some(source) = &local.source
+                            && let Ok(Some(bytes)) = source.export(crate::db::TxReceipt(id.time.0))
+                        {
+                            if local.outbound.len() < 64 {
+                                local.outbound.push(bytes);
+                            } else {
+                                local.enabled = false;
+                                local.outbound.clear();
+                            }
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(_) => {
+                        local.enabled = false;
+                        local.outbound.clear();
+                    }
+                }
+            }
+        }
+        frames
+    }
+
+    /// Observe with this actual admitted identity/claims/governance. No host
+    /// session token or requested policy context crosses this entrypoint.
+    pub fn observe_local_batch(
+        &self,
+        queries: Vec<Vec<u8>>,
+        expected_claims: Option<serde_json::Value>,
+    ) -> HostResult<serde_json::Value> {
+        if self.local.borrow().retired {
+            return Err(
+                Error::new(ErrorCode::NotObserved, "local observation link retired").into(),
+            );
+        }
+        let LinkKind::Subscriber { id: Some(id), .. } = self.kind else {
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                "local observation requires an admitted subscriber",
+            )
+            .into());
+        };
+        let (db, identity, claims, _) = self.binding.db.admitted_observation_context(id)?;
+        if let Some(expected) = expected_claims
+            && self::claims(identity, expected)? != claims
+        {
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                "local observation admission claims changed",
+            )
+            .into());
+        }
+        Binding::observe_local_batch_as(
+            &db,
+            queries,
+            Some(identity),
+            Some(claims),
+            |db, prepared| db.local_observation_cut_for_admitted_session(prepared, id),
+        )
+    }
+
+    /// Privileged browser-local upstream capture; never enable for a network link.
+    pub fn enable_local_submission_source(&self) -> HostResult<()> {
+        if !matches!(self.kind, LinkKind::Upstream(Some(_))) {
+            return Err("local submission source requires an open upstream link".into());
+        }
+        if self.local.borrow().retired {
+            return Err("local submission link retired".into());
+        }
+        self.local.borrow_mut().enabled = true;
+        Ok(())
+    }
+
+    /// Synchronous capability revocation, safe while normal core retirement
+    /// waits for an evaluator pass. Already-dispatched ordinary I/O is untouched.
+    pub fn retire_local_submission_port(&self) {
+        let mut local = self.local.borrow_mut();
+        if let Some(port) = &local.port {
+            port.retire();
+        }
+        local.enabled = false;
+        local.retired = true;
+        local.source = None;
+        local.outbound.clear();
+    }
+
+    /// Drain immediately after take_outbound; send on the private local channel
+    /// before the matching frames. No companion is added to normal wire bytes.
+    pub fn take_local_submission_companions(&self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.local.borrow_mut().outbound)
+    }
+
+    /// Privileged local MessagePort ingress, deliberately separate from receive.
+    pub fn attach_local_submission_companion(&self, bytes: &[u8]) -> HostResult<bool> {
+        let LinkKind::Subscriber { id: Some(id), .. } = self.kind else {
+            return Ok(false);
+        };
+        if self.local.borrow().retired || bytes.len() < 88 {
+            return Ok(false);
+        }
+        let mut local = self.local.borrow_mut();
+        if local.port.is_none() {
+            let Ok(port) = self
+                .binding
+                .db
+                .trusted_local_submission_port(id, &bytes[..88])
+            else {
+                return Ok(false);
+            };
+            local.descriptor = bytes[..88].to_vec();
+            local.port = Some(port);
+        }
+        let port = local.port.as_ref().unwrap();
+        if local.descriptor != bytes[..88] {
+            port.retire();
+            return Ok(false);
+        }
+        Ok(self.binding.db.attach_host_local_submission(port, bytes)?)
     }
 
     /// How many frames are waiting to be sent.
@@ -1794,6 +2642,7 @@ impl Link {
 
     /// Detach the link; `false` when already closed.
     pub fn close(&mut self) -> bool {
+        self.retire_local_submission_port();
         match &mut self.kind {
             LinkKind::Upstream(upstream) => upstream
                 .take()
@@ -1805,6 +2654,57 @@ impl Link {
                 }
                 None => false,
             },
+        }
+    }
+}
+
+#[cfg(test)]
+mod accepted_host_codec_tests {
+    use super::*;
+
+    /// Alice and Bob's independently assembled host frames pin this boundary's
+    /// bytes. This codec unit test needs constructed origins to exercise u64
+    /// limits that ordinary authority clocks cannot reach in a runtime test.
+    #[test]
+    fn accepted_host_empty_and_paired_bytes_match_independent_fixtures() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../fixtures/accepted_read_host_v1.json"))
+                .unwrap();
+        let unhex = |hex: &str| {
+            hex.as_bytes()
+                .chunks_exact(2)
+                .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+                .collect::<Vec<_>>()
+        };
+        for case in fixture["cases"].as_array().unwrap() {
+            let paired = case["name"] == "paired_u64";
+            let evidence = if paired {
+                vec![crate::db::AcceptedRowEvidence {
+                    row: RowUuid::from_bytes([0x11; 16]),
+                    state: crate::db::AcceptedVersion {
+                        transaction: TxId::new(TxTime(2), NodeUuid::from_bytes([2; 16])),
+                        sequence: u64::MAX,
+                    },
+                    content: crate::db::AcceptedVersion {
+                        transaction: TxId::new(TxTime(1), NodeUuid::from_bytes([1; 16])),
+                        sequence: 9_007_199_254_740_993,
+                    },
+                }]
+            } else {
+                vec![]
+            };
+            let frame = encode_accepted_read(crate::db::EncodedAcceptedRead {
+                through: if paired { u64::MAX } else { 0 },
+                schema: [0x22; 16],
+                scope: crate::db::AcceptedReadScope {
+                    author: AuthorSubject::for_test_bytes([7; 16]),
+                    claims: BTreeMap::new(),
+                },
+                evidence,
+                rows: unhex(case["rows_hex"].as_str().unwrap()),
+            })
+            .unwrap();
+            assert_eq!(frame, unhex(case["frame_hex"].as_str().unwrap()));
         }
     }
 }

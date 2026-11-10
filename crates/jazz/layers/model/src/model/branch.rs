@@ -67,9 +67,9 @@ pub enum BranchCodecError {
     /// The encoded scalar tag does not match the declared schema type.
     #[error("branch column encoding does not match its declared type")]
     TypeMismatch,
-    /// Groove rejected the declared-type payload.
-    #[error("invalid Groove branch column payload: {0}")]
-    Groove(#[from] jazz_types::records::Error),
+    /// The payload is not a canonical value of the declared type.
+    #[error("invalid branch column payload: {0}")]
+    Record(#[from] jazz_types::records::Error),
 }
 
 const BRANCH_COLUMN_CODEC_VERSION: u8 = 1;
@@ -89,8 +89,8 @@ const BRANCH_COLUMN_ENUM_TAG: u8 = 8;
 /// Canonical wire/storage encoding of one branch-column value.
 ///
 /// Byte zero is the codec version, byte one is a permanently assigned scalar
-/// tag, and the remainder is the canonical Groove encoding under the declared
-/// column type. Keeping the tag outside Groove lets a selector cross the wire
+/// tag, and the remainder is the canonical record encoding under the declared
+/// column type. Keeping the tag outside the record lets a selector cross the wire
 /// before a table is chosen while exact [`BranchKey`] construction still
 /// re-encodes and validates the payload against that table's schema.
 #[derive(
@@ -127,7 +127,7 @@ impl From<Value> for BranchColumnValue {
 }
 
 impl BranchColumnValue {
-    /// Encode one value using its schema-declared Groove column type.
+    /// Encode one value using its schema-declared column type.
     pub fn encode_typed(value: &Value, value_type: &ValueType) -> Result<Self, BranchCodecError> {
         let tag = branch_column_tag(value_type).ok_or(BranchCodecError::UnsupportedType)?;
         let descriptor = RecordDescriptor::new([("value", value_type.clone())]);

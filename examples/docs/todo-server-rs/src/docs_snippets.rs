@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use axum::http::{HeaderMap, StatusCode, header::AUTHORIZATION};
 use jazz::db::{Db, SerializableTxOps, InsertOptions, MergeableTxOps, UpdateOptions};
-use jazz::groove::records::Value as DbValue;
+use jazz::records::Value as DbValue;
 use jazz::ids::RowUuid;
 use jazz::query::{
     ArraySubquery, ArraySubqueryRequirement, Gather, OrderDirection, Query, col, contains, eq, gt,

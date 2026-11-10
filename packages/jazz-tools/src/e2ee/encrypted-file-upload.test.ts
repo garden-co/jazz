@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
@@ -14,25 +15,31 @@ import {
 } from "./fixtures/encrypted-upload-fixture.js";
 
 it("publishes an encrypted file and metadata that a granted recipient can read", async () => {
-  const app = s.defineApp({
-    projects: s.table({ title: s.string() }, {}),
-    files: s
-      .table(
-        { projectId: s.uuid(), payload: s.bytes(), name: s.string() },
+  const app = s.defineApp(
+    {
+      projects: s.table({ title: s.string() }, {}),
+      files: s
+        .table(
+          { projectId: s.uuid(), payload: s.bytes(), name: s.string() },
+          { project: s.rel("projects", "projectId") },
+        )
+        .encrypted({ space: "projectId", columns: ["payload", "name"] }),
+    },
+    { migrations: "none" },
+  );
+  const physical = s.defineApp(
+    {
+      ...deviceRequestSchema,
+      ...groupSchema,
+      ...spaceSchema,
+      projects: s.table({ title: s.string() }, {}),
+      files: s.table(
+        { projectId: s.uuid(), payload: s.bytes(), name: s.bytes() },
         { project: s.rel("projects", "projectId") },
-      )
-      .encrypted({ space: "projectId", columns: ["payload", "name"] }),
-  });
-  const physical = s.defineApp({
-    ...deviceRequestSchema,
-    ...groupSchema,
-    ...spaceSchema,
-    projects: s.table({ title: s.string() }, {}),
-    files: s.table(
-      { projectId: s.uuid(), payload: s.bytes(), name: s.bytes() },
-      { project: s.rel("projects", "projectId") },
-    ),
-  });
+      ),
+    },
+    { migrations: "none" },
+  );
   const permissions = definePermissions(app, ({ policy, session }) => {
     policy.projects.allowRead.always();
     policy.projects.allowInsert.where({ "$createdBy.account": session.user.account });
@@ -48,16 +55,18 @@ it("publishes an encrypted file and metadata that a granted recipient can read",
     policy.__e2ee_space_successors.allowRead.always();
     policy.__e2ee_space_successors.allowInsert.where({ authorAccountId: session.user.account });
   });
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Db[] = [];
   try {
-    await deploy({
+    const deployment = {
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
       schema: app,
       permissions,
-    });
+    };
+    await deploy(deployment);
+    server = await frontE2eeCore(server, deployment);
     const accounts = await Promise.all([
       localAccountConfig(server.appId, server.url),
       localAccountConfig(server.appId, server.url),

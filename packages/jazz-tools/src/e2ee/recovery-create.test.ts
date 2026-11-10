@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it, vi } from "vitest";
 import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
@@ -10,7 +11,7 @@ import { readAccountMembership } from "./public-membership.js";
 import { recoveryRecords } from "./fixtures/recovery-verifier-fixture.js";
 
 it("creates independent recovery material, recovers offline and reopens the recovered device", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Awaited<ReturnType<typeof createDb>>[] = [];
   const store = () => {
     let saved: string | null = null;
@@ -31,6 +32,7 @@ it("creates independent recovery material, recovers offline and reopens the reco
       schema: app,
       permissions: deviceRequestPermissions,
     });
+    server = await frontE2eeCore(server, { schema: app, permissions: deviceRequestPermissions });
     const account = await localAccountConfig(server.appId, server.url);
     const retained = store();
     const owner = await createDb({ ...account, e2ee: { store: retained } });
@@ -102,7 +104,7 @@ it("creates independent recovery material, recovers offline and reopens the reco
     }
     const pending = await createDb({ ...account, e2ee: { store: store() } });
     clients.push(pending);
-    await expect(pending.e2ee.recovery.create().wait()).rejects.toThrow();
+    await expect(pending.e2ee.recovery.create().wait()).rejects.toThrow(/active|approved|key/i);
     expect(await owner.all(app.__e2ee_recovery_roots, { tier: "remote" })).toHaveLength(1);
     expect(await owner.all(app.__e2ee_recovery_deliveries, { tier: "remote" })).toHaveLength(1);
     const refused = (await pending.e2ee.devices.list()).find((entry) => entry.id !== device!.id)!;
@@ -153,7 +155,7 @@ it("creates independent recovery material, recovers offline and reopens the reco
 it.each(["root", "delivery", "protector"] as const)(
   "does not return recovery material when its %s setup stage fails",
   async (stage) => {
-    const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+    let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
     const clients: Awaited<ReturnType<typeof createDb>>[] = [];
     const store = () => {
       let saved: string | null = null;
@@ -174,6 +176,7 @@ it.each(["root", "delivery", "protector"] as const)(
         schema: app,
         permissions: deviceRequestPermissions,
       });
+      server = await frontE2eeCore(server, { schema: app, permissions: deviceRequestPermissions });
       const account = await localAccountConfig(server.appId, server.url);
       let injected = 0;
       let failRootSigning = false;

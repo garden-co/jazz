@@ -141,6 +141,9 @@ const mocks = vi.hoisted(() => {
           onServerTransportError: vi.fn(),
           onRemoteLinkStateChange: vi.fn(),
           remoteLinkState: vi.fn(() => "connected"),
+          onUpstreamLinkStatusChange: vi.fn(),
+          upstreamLinkStatus: vi.fn(() => ({ state: "connected" })),
+          setRemoteLinkHint: vi.fn(),
           onPeerTransportWork: vi.fn(() => () => {}),
           progressPeerTransport: vi.fn(async () => undefined),
           retirePeerTransport: vi.fn(async (transport: Transport) => {
@@ -958,6 +961,109 @@ describe("broker worker context initialization", () => {
       first.port.emitMessage({ type: "close" });
       replacement.emitMessage({ type: "close" });
       control.emitMessage({ type: "close" });
+    }
+  });
+
+  it("attaches private local companions before ordinary frames and reads one durable-owner batch", async () => {
+    const first = await bounded(connect(options("local-observation-bridge"), "alice"));
+    const runtime = mocks.runtimes[0]!;
+    const order: string[] = [];
+    const subscriber = Object.assign(createAdmissionTransport(), {
+      attachLocalSubmissionCompanion: vi.fn(() => {
+        order.push("companion");
+        return false;
+      }),
+    });
+    subscriber.sendWireFrame = vi.fn(() => {
+      order.push("frame");
+    });
+    runtime.acceptPeer.mockResolvedValueOnce(subscriber);
+    const observations = [{ rows: [], evidence: [], provenance: [], through: "7" }];
+    runtime.observeLocalBatchForPeer = vi.fn(async () => observations);
+    try {
+      await initializeFollower(first.port, 1);
+      first.port.emitMessage({
+        type: "frames",
+        frames: [Uint8Array.of(1)],
+        localCompanions: [Uint8Array.of(2)],
+      });
+      await nextTask();
+      expect(order).toEqual(["companion", "frame"]);
+      // A refused optional companion did not discard the normal frame.
+      const reply = await bounded(
+        followerResult(first.port, {
+          type: "observe-local",
+          id: 2,
+          queries: ["roots", "refs"],
+          sessionClaims: { iss: "urn:jazz:local-first", sub: "alice" },
+          schema: Uint8Array.of(3),
+        }),
+      );
+      expect(reply).toMatchObject({ observations });
+      expect(runtime.observeLocalBatchForPeer).toHaveBeenCalledExactlyOnceWith(
+        subscriber,
+        ["roots", "refs"],
+        { iss: "urn:jazz:local-first", sub: "alice" },
+        Uint8Array.of(3),
+      );
+      // Native binding canonicalizes identity operands and refuses a genuine
+      // provider-scope mismatch; the worker must propagate that refusal.
+      runtime.observeLocalBatchForPeer.mockRejectedValueOnce(
+        new Error("local observation admission claims changed"),
+      );
+      const refused = await bounded(
+        followerResult(first.port, {
+          type: "observe-local",
+          id: 3,
+          queries: ["roots"],
+          sessionClaims: { scope: "unadmitted" },
+          schema: Uint8Array.of(3),
+        }),
+      );
+      expect(refused).toHaveProperty("error.message", "local observation admission claims changed");
+      expect(runtime.observeLocalBatchForPeer).toHaveBeenCalledTimes(2);
+    } finally {
+      first.port.emitMessage({ type: "close" });
+    }
+  });
+
+  it("publishes an admitted observation before a queued auth rebind", async () => {
+    const first = await bounded(connect(options("local-observation-auth-order"), "alice"));
+    const runtime = mocks.runtimes[0]!;
+    const subscriber = Object.assign(createAdmissionTransport(), {
+      updateAuthenticatedClaims: vi.fn(async () => undefined),
+    });
+    runtime.acceptPeer.mockResolvedValueOnce(subscriber);
+    const held = deferred<unknown[]>();
+    runtime.observeLocalBatchForPeer = vi.fn(() => held.promise);
+    const observations = [{ rows: [], evidence: [], provenance: [], through: "7" }];
+    try {
+      await initializeFollower(first.port, 1);
+      const reading = followerResult(first.port, {
+        type: "observe-local",
+        id: 2,
+        queries: ["roots"],
+        sessionClaims: {},
+        schema: Uint8Array.of(3),
+      });
+      await vi.waitFor(() => expect(runtime.observeLocalBatchForPeer).toHaveBeenCalledOnce());
+      first.port.emitMessage({
+        type: "update-auth",
+        authJson: TAB_AUTH,
+        sessionClaims: { scope: "next" },
+      });
+      await nextTask();
+      expect(subscriber.updateAuthenticatedClaims).not.toHaveBeenCalled();
+      held.resolve(observations);
+      await expect(bounded(reading)).resolves.toMatchObject({ observations });
+      await vi.waitFor(() =>
+        expect(subscriber.updateAuthenticatedClaims).toHaveBeenCalledExactlyOnceWith({
+          scope: "next",
+        }),
+      );
+    } finally {
+      held.resolve(observations);
+      first.port.emitMessage({ type: "close" });
     }
   });
 
@@ -2484,12 +2590,14 @@ describe("broker worker context initialization", () => {
       false,
       initOptions.initialSyncFlushEvery,
       undefined,
+      // No app migrations bundle in these options.
+      undefined,
     ]);
     expect(mocks.openBrowser.mock.calls[0]?.[0]).toBe(mocks.pageStores[0]);
     expect(mocks.openBrowser.mock.calls[0]?.[2]).toBe(config);
     // Only the worker's physical-owner admission may grant relay serving.
     // It carries the exact admitted owner into the host-only WASM open.
-    expect(mocks.openBrowser.mock.calls[0]?.[3]).toBe(initOptions.storageOwner);
+    expect(mocks.openBrowser.mock.calls[0]?.[3]).toBe(initOptions.dbName);
     // NativeRuntimeAdapter is the final runtime boundary. It must receive the
     // persisted physical-replica identity, not a process constant or a node
     // intended for a different open attempt.
@@ -2527,6 +2635,28 @@ describe("broker worker context initialization", () => {
     expect(mocks.openConfig.mock.calls[1]?.[0]).toEqual(mocks.pageStores[1]?.canonicalReplicaNode);
     expect(mocks.openBrowser.mock.calls[0]?.[2]).toBe(rejectedConfig);
     expect(mocks.openBrowser.mock.calls[1]?.[2]).toBe(retryConfig);
+  });
+
+  it("carries a verified local-first proof from worker open to follower admission", async () => {
+    const selfSignedClientProof = {
+      token: "verified-token",
+      appId: "worker-initialization-test",
+      claimedAuthor: '["urn:jazz:local-first","alice"]',
+    };
+    const initOptions = { ...options("self-signed-worker"), selfSignedClientProof };
+
+    expect((await connect(initOptions, "proof-tab")).outcome).toEqual({ type: "runtime-ready" });
+    expect(mocks.openBrowser).not.toHaveBeenCalled();
+    expect(mocks.openBrowserWithSelfSignedProof).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.any(Uint8Array),
+      expect.any(Uint8Array),
+      selfSignedClientProof.token,
+      selfSignedClientProof.appId,
+      selfSignedClientProof.claimedAuthor,
+      initOptions.dbName,
+    );
+    expect(mocks.fromDb.mock.calls[0]?.[2]).toEqual(mocks.pageStores[0]?.canonicalReplicaNode);
   });
 
   it("closes an unowned browser DB when adapter construction fails, cleans up, and retries", async () => {
@@ -2929,6 +3059,18 @@ describe("broker worker context initialization", () => {
     expect(mocks.runtimes[0]?.acceptPeer).toHaveBeenCalledOnce();
   });
 
+  it("admits each tab as its own replica's author, so the runtime can refuse another user's", async () => {
+    const initOptions = options("tab-author-admission");
+    const first = await connect(initOptions, "first-tab");
+    const second = await connect({ ...initOptions, author: new Uint8Array([9]) }, "second-tab");
+    await initializeFollower(first.port, 1);
+    await initializeFollower(second.port, 2);
+    const acceptPeer = mocks.runtimes[0]?.acceptPeer;
+    expect(acceptPeer).toHaveBeenCalledTimes(2);
+    expect(acceptPeer?.mock.calls[0]?.[2]).toEqual(new Uint8Array([2]));
+    expect(acceptPeer?.mock.calls[1]?.[2]).toEqual(new Uint8Array([9]));
+  });
+
   it("keeps every tab attached after auth rejection so a sibling can refresh the session", async () => {
     const initOptions = {
       ...options("auth-recovery-owner"),
@@ -3187,11 +3329,11 @@ describe("broker worker context initialization", () => {
     const late = await connect(initOptions, "late-tab");
     const runtime = mocks.runtimes[0]!;
     const callback = runtime.onServerTransportError.mock.calls[0]?.[0] as
-      | ((error: Error) => void)
+      | ((error: Error, state: { retrying: boolean }) => void)
       | undefined;
     expect(callback).toBeTypeOf("function");
     const terminalError = new Error("Protocol: terminal maintained view failure");
-    callback?.(terminalError);
+    callback?.(terminalError, { retrying: false });
 
     for (const port of [owner.port, successor.port]) {
       await expect(
@@ -3203,6 +3345,7 @@ describe("broker worker context initialization", () => {
           message: terminalError.message,
           stack: terminalError.stack,
         },
+        retrying: false,
       });
     }
     expect(late.port.hasEvent((event) => event.type === "transport-error")).toBe(false);

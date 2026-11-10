@@ -188,7 +188,12 @@ test("missing Core observation cannot release the native foreground", async () =
   });
   try {
     assert.equal(
-      (await fetch(control.endpoint, { method: "POST", body: JSON.stringify(expected) })).status,
+      (
+        await fetch(control.endpoint, {
+          method: "POST",
+          body: JSON.stringify(expected),
+        })
+      ).status,
       503,
     );
     assert.equal(
@@ -233,7 +238,7 @@ function assertCoreObserverContract(source) {
     /with_data_dir\(server_storage\.path\(\)\)/,
     "Core reopens its original store",
   );
-  assert.match(recovery, /with_storage_factory/, "Core restart retains persistent storage");
+  assert.match(recovery, /with_persistent_storage\(\)/, "Core restart retains persistent storage");
   const ready = recovery.indexOf('.expect("reopen persistent Core before the recovery write")');
   assert.ok(
     ready >= 0 && ready < recovery.indexOf("let core_writer"),

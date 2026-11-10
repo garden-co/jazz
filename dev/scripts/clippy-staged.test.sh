@@ -34,24 +34,24 @@ grep -F -- '--workspace --' "$log" >/dev/null
 : >"$log"
 output=$(PATH="$tmp:$PATH" REAL_CARGO="$real_cargo" JAZZ_REPO_ROOT="$root" CLIPPY_TEST_LOG="$log" \
   sh "$root/dev/scripts/clippy-staged.sh" \
-    "dev/benchmarks/storage/native/file with spaces.rs")
+    "examples/todo-server-rs/src/file with spaces.rs")
 grep -F -- '--workspace --' "$log" >/dev/null
 : >"$log"
 PATH="$tmp:$PATH" REAL_CARGO="$real_cargo" JAZZ_REPO_ROOT="$root" CLIPPY_TEST_LOG="$log" \
   sh "$root/dev/scripts/clippy-staged.sh" examples/todo-server-rs/src/main.rs >/dev/null
 grep -F -- '--workspace --' "$log" >/dev/null
-if [ "$(grep -c -- '--package groove' "$log")" -ne 0 ]; then
+if [ "$(grep -c -- '--package' "$log")" -ne 0 ]; then
   echo "root Cargo.toml must not be mixed with package mode" >&2
   exit 1
 fi
 
 : >"$log"
 output=$(PATH="$tmp:$PATH" REAL_CARGO="$real_cargo" JAZZ_REPO_ROOT="$root" CLIPPY_TEST_LOG="$log" \
-  sh "$root/dev/scripts/clippy-staged.sh" crates/groove/removed.rs crates/groove/renamed.rs)
-[ "$(grep -c -- '--package groove' "$log")" -eq 1 ]
+  sh "$root/dev/scripts/clippy-staged.sh" crates/jazz/layers/db/src/removed.rs crates/jazz/layers/db/src/renamed.rs)
+[ "$(grep -c -- '--package jazz-db' "$log")" -eq 1 ]
 
 if PATH="$tmp:$PATH" REAL_CARGO="$real_cargo" JAZZ_REPO_ROOT="$root" CLIPPY_TEST_LOG="$log" CLIPPY_TEST_EXIT=37 \
-  sh "$root/dev/scripts/clippy-staged.sh" crates/groove/removed.rs >/dev/null 2>&1; then
+  sh "$root/dev/scripts/clippy-staged.sh" crates/jazz/layers/db/src/removed.rs >/dev/null 2>&1; then
   echo "expected cargo failure to propagate" >&2
   exit 1
 elif [ "$?" -ne 37 ]; then

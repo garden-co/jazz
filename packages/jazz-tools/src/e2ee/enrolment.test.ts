@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { readFileSync } from "node:fs";
 import { expect, it } from "vitest";
 import { bytes, vectors } from "./fixtures/vectors.js";
@@ -10,7 +11,7 @@ import { deviceRequestApp, deviceRequestPermissions } from "./device-requests.js
 it.each(["mismatched", "oversized"])(
   "does not retain a %s generated device keypair and can retry enrolment",
   async (fault) => {
-    const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+    let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
     let db: Awaited<ReturnType<typeof createDb>> | undefined;
     let persisted: string | null = null;
     let generatedPrivateKey: Uint8Array | undefined;
@@ -20,6 +21,10 @@ it.each(["mismatched", "oversized"])(
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
+        schema: deviceRequestApp,
+        permissions: deviceRequestPermissions,
+      });
+      server = await frontE2eeCore(server, {
         schema: deviceRequestApp,
         permissions: deviceRequestPermissions,
       });
@@ -76,13 +81,17 @@ it.each(["mismatched", "oversized"])(
 it.each([1, 2])(
   "validates the literal version-%i device fixture without rewriting it",
   async (version) => {
-    const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+    let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
     let db: Awaited<ReturnType<typeof createDb>> | undefined;
     try {
       await deploy({
         serverUrl: server.url,
         appId: server.appId,
         adminSecret: server.adminSecret,
+        schema: deviceRequestApp,
+        permissions: deviceRequestPermissions,
+      });
+      server = await frontE2eeCore(server, {
         schema: deviceRequestApp,
         permissions: deviceRequestPermissions,
       });
@@ -129,7 +138,7 @@ it.each([1, 2])(
 );
 
 it("publishes no device before durable storage succeeds and refuses to replace corrupted retained keys", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Awaited<ReturnType<typeof createDb>>[] = [];
   let persisted: string | null = null;
   let rejectWrites = true;
@@ -148,6 +157,10 @@ it("publishes no device before durable storage succeeds and refuses to replace c
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
+      schema: deviceRequestApp,
+      permissions: deviceRequestPermissions,
+    });
+    server = await frontE2eeCore(server, {
       schema: deviceRequestApp,
       permissions: deviceRequestPermissions,
     });
@@ -186,7 +199,7 @@ it("publishes no device before durable storage succeeds and refuses to replace c
 }, 30_000);
 
 it("retains one active first device across concurrent contexts and reopening without sharing it with another account", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Awaited<ReturnType<typeof createDb>>[] = [];
   let persisted: string | null = null;
   const store = {
@@ -202,6 +215,10 @@ it("retains one active first device across concurrent contexts and reopening wit
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
+      schema: deviceRequestApp,
+      permissions: deviceRequestPermissions,
+    });
+    server = await frontE2eeCore(server, {
       schema: deviceRequestApp,
       permissions: deviceRequestPermissions,
     });

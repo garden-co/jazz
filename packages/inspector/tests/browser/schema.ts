@@ -9,7 +9,7 @@ const schema = {
 
 type AppSchema = Schema<typeof schema>;
 
-export const app: App<AppSchema> = defineApp(schema);
+export const app: App<AppSchema> = defineApp(schema, { migrations: "none" });
 
 // Embedded Inspector hosts are ordinary sessions and must be able to read.
 export const permissions = definePermissions(app, ({ policy }) => {

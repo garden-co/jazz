@@ -7,21 +7,36 @@ import { encryptedRowSpaces } from "./encrypted-schema.js";
 import { E2eeDataError } from "./data-error.js";
 import { decryptCellRows, encryptCell } from "./cell-data.js";
 
-const access = vi.hoisted(() => ({ crypto: vi.fn(), keys: vi.fn() }));
-vi.mock("./lifecycle.js", () => ({ cellCryptoForDb: access.crypto, withSpaceKeys: access.keys }));
+const access = vi.hoisted(() => ({ crypto: vi.fn(), keys: vi.fn(), authorityKeys: vi.fn() }));
+vi.mock("./lifecycle.js", () => ({
+  cellCryptoForDb: access.crypto,
+  withContentSpaceKeys: access.keys,
+  withSpaceKeys: access.authorityKeys,
+  contentIdentitiesForDb: async (
+    db: Db,
+    table: Parameters<Db["tableIdentity"]>[0],
+    column: string,
+  ) => ({
+    table: await db.tableIdentity(table),
+    column: await db.columnIdentity(table, column),
+  }),
+}));
 
 const uuid = (n: number) => `00000000-0000-4000-8000-${n.toString().padStart(12, "0")}`;
-const app = s.defineApp({
-  projects: s.table({ name: s.string() }, {}),
-  notes: s
-    .table(
-      { projectId: s.uuid(), title: s.string(), bytes: s.bytes() },
-      {
-        project: s.rel("projects", "projectId"),
-      },
-    )
-    .encrypted({ space: "projectId", columns: ["title", "bytes"] }),
-});
+const app = s.defineApp(
+  {
+    projects: s.table({ name: s.string() }, {}),
+    notes: s
+      .table(
+        { projectId: s.uuid(), title: s.string(), bytes: s.bytes() },
+        {
+          project: s.rel("projects", "projectId"),
+        },
+      )
+      .encrypted({ space: "projectId", columns: ["title", "bytes"] }),
+  },
+  { migrations: "none" },
+);
 const root = (identifier: number, epoch: number) =>
   ({
     id: uuid(identifier + 100),
@@ -88,6 +103,7 @@ beforeEach(() => {
       }
     }
   });
+  access.authorityKeys.mockImplementation((...args: unknown[]) => access.keys(...args));
 });
 
 async function stored(id: number, epoch: SpaceRoot, title: string) {
@@ -199,6 +215,22 @@ it.each([false, true])(
     expect(observed).not.toHaveBeenCalled();
   },
 );
+
+it("does not report retained content keys as validated equality history", async () => {
+  const rows = [await stored(31, currentA, "retained content")];
+  const failure = new E2eeDataError("key-unavailable");
+  access.authorityKeys.mockRejectedValue(failure);
+  await expect(decryptCellRows(db, app.wasmSchema, "notes", rows)).resolves.toMatchObject([
+    { title: "retained content" },
+  ]);
+  expect(access.authorityKeys).not.toHaveBeenCalled();
+  const observed = vi.fn();
+  await expect(
+    decryptCellRows(db, app.wasmSchema, "notes", rows, undefined, observed),
+  ).rejects.toBe(failure);
+  expect(observed).not.toHaveBeenCalled();
+  expect(borrowed.every((key) => key.every((byte) => byte === 0))).toBe(true);
+});
 
 it.each([1, 2])("reports complete validated history after key release (%i rows)", async (count) => {
   const rows = [await stored(31, currentA, "current"), await stored(33, oldA, "old")].slice(

@@ -150,6 +150,9 @@ pub struct ArraySubquery {
     /// Nested correlated relation arrays rooted at child rows.
     #[serde(default)]
     pub nested_arrays: Vec<ArraySubquery>,
+    /// Child-local columns read only in part (SPEC 19.12).
+    #[serde(default)]
+    pub partial: Vec<PartialSelect>,
 }
 
 impl ArraySubquery {
@@ -179,6 +182,7 @@ impl ArraySubquery {
             offset: 0,
             requirement: ArraySubqueryRequirement::Optional,
             nested_arrays: Vec::new(),
+            partial: Vec::new(),
         }
     }
 
@@ -191,6 +195,19 @@ impl ArraySubquery {
     /// Select child application columns. The row id is always included.
     pub fn select(mut self, columns: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.select = Some(columns.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Select child `column` read only in `part` (SPEC 19.12).
+    pub fn select_part(mut self, column: impl Into<String>, part: Part) -> Self {
+        let column = column.into();
+        if let Some(select) = &mut self.select
+            && !select.contains(&column)
+        {
+            select.push(column.clone());
+        }
+        self.partial.retain(|selected| selected.column != column);
+        self.partial.push(PartialSelect { column, part });
         self
     }
 
@@ -647,7 +664,7 @@ pub enum RecursionBound {
     /// Stop after at most this many recursive steps. The seed is at depth zero,
     /// so `MaxDepth(0)` evaluates the seed without traversing an edge. Unified
     /// lowering must carry depth through the recursive relation and filter by
-    /// it; this is not the same as groove's internal safety cap.
+    /// it; this is not the same as the fixpoint safety cap.
     MaxDepth(usize),
 }
 
@@ -727,7 +744,10 @@ impl Predicate {
                     predicate.for_each_operand_mut(f);
                 }
             }
-            Self::Not(predicate) | Self::EnumMatch { payload: predicate, .. } => {
+            Self::Not(predicate)
+            | Self::EnumMatch {
+                payload: predicate, ..
+            } => {
                 predicate.for_each_operand_mut(f);
             }
             Self::Eq(left, right)
@@ -755,9 +775,10 @@ impl Predicate {
             Self::All(predicates) | Self::Any(predicates) => {
                 predicates.iter().any(|predicate| predicate.any_operand(f))
             }
-            Self::Not(predicate) | Self::EnumMatch { payload: predicate, .. } => {
-                predicate.any_operand(f)
-            }
+            Self::Not(predicate)
+            | Self::EnumMatch {
+                payload: predicate, ..
+            } => predicate.any_operand(f),
             Self::Eq(left, right)
             | Self::Ne(left, right)
             | Self::Gt(left, right)
@@ -779,7 +800,12 @@ impl Query {
     pub fn for_each_condition_mut(&mut self, f: &mut impl FnMut(&mut Predicate)) {
         for_each_condition_in(&mut self.filters, &mut self.joins, &mut self.reachable, f);
         for branch in &mut self.policy_branches {
-            for_each_condition_in(&mut branch.filters, &mut branch.joins, &mut branch.reachable, f);
+            for_each_condition_in(
+                &mut branch.filters,
+                &mut branch.joins,
+                &mut branch.reachable,
+                f,
+            );
         }
     }
 }
@@ -900,6 +926,9 @@ pub enum Operand {
 /// Collision-proof internal namespace for raw identity-provider claims.
 /// Public policy paths remain `session.claims[<name>]`.
 pub const PROVIDER_CLAIM_PREFIX: &str = "\0claims:";
+
+/// CatalogueTableIdentityV1: resolved from the policy schema, never session claims.
+pub const TABLE_IDENTITY_OPERAND_PREFIX: &str = "\0jazz-table-identity-v1:";
 
 /// Collision-proof storage key for a raw provider claim exposed as
 /// `session.claims[name]` in public policies.

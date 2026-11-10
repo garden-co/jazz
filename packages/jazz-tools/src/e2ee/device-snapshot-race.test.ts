@@ -1,5 +1,7 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it, vi } from "vitest";
-import type { Db, E2eeTransactionScope } from "../runtime/db.js";
+import type { Db } from "../runtime/db.js";
+import type { AcceptedDeviceTransactionScope } from "./accepted-membership.js";
 import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { deploy, startLocalJazzServer } from "../testing/index.js";
@@ -8,7 +10,7 @@ import { deviceRequestApp, deviceRequestPermissions } from "./device-requests.js
 import { createNativeCrypto } from "./native.js";
 
 it("refreshes a warm snapshot when another device revokes its reader before acceptance", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Db[] = [];
   let resume!: () => void;
   const resumed = new Promise<void>((resolve) => {
@@ -20,7 +22,7 @@ it("refreshes a warm snapshot when another device revokes its reader before acce
   });
   // Delay an actual covered read, preserving its rows, metadata and transaction.
   const prototype = DeviceApproval.prototype as unknown as {
-    readSnapshot(this: { db: Db }, tx: E2eeTransactionScope): Promise<unknown>;
+    readSnapshot(this: { db: Db }, tx: AcceptedDeviceTransactionScope): Promise<unknown>;
   };
   const original = prototype.readSnapshot;
   let gate = false;
@@ -41,6 +43,10 @@ it("refreshes a warm snapshot when another device revokes its reader before acce
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
+      schema: deviceRequestApp,
+      permissions: deviceRequestPermissions,
+    });
+    server = await frontE2eeCore(server, {
       schema: deviceRequestApp,
       permissions: deviceRequestPermissions,
     });

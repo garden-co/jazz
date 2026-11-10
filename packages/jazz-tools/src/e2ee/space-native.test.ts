@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
@@ -9,11 +10,14 @@ import { deviceRequestSchema, deviceRequestPermissions } from "./device-requests
 import { spaceSchema } from "./spaces.js";
 
 it("shares scoped keys in both directions between native Node and WASM accounts", async () => {
-  const app = s.defineApp({
-    ...deviceRequestSchema,
-    ...spaceSchema,
-    projects: s.table({ title: s.string() }, {}),
-  });
+  const app = s.defineApp(
+    {
+      ...deviceRequestSchema,
+      ...spaceSchema,
+      projects: s.table({ title: s.string() }, {}),
+    },
+    { migrations: "none" },
+  );
   const policies = definePermissions(app, ({ policy, session }) => {
     policy.projects.allowRead.always();
     policy.projects.allowInsert.always();
@@ -42,7 +46,7 @@ it("shares scoped keys in both directions between native Node and WASM accounts"
       },
     };
   };
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   let owner: Awaited<ReturnType<typeof createJazzSession>> | undefined;
   let wasm: Awaited<ReturnType<typeof createDb>> | undefined;
   try {
@@ -53,6 +57,7 @@ it("shares scoped keys in both directions between native Node and WASM accounts"
       schema: app,
       permissions,
     });
+    server = await frontE2eeCore(server, { schema: app, permissions: permissions });
     owner = await createJazzSession({
       appId: server.appId,
       serverUrl: server.url,

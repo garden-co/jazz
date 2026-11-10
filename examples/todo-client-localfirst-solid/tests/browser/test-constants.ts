@@ -1,5 +1,4 @@
 /** Shared constants for browser tests — no Node.js imports. */
-export const TEST_PORT = 19883;
-export const JWT_SECRET = "test-jwt-secret-for-solid-browser-tests";
-export const ADMIN_SECRET = "test-admin-secret-for-solid-browser-tests";
+/** The app's backend: Jazz in the test server, on the page's own origin. */
+export const SERVER_URL = `${globalThis.location?.origin}/jazz`;
 export const APP_ID = "b95ab3f0-9605-4c0b-a3f3-8fb5ab6d8a12";

@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
@@ -10,19 +11,22 @@ import { spaceSchema } from "./spaces.js";
 import { E2eeDataError } from "./data-error.js";
 
 it("preserves accepted scope and data when later initial recipient delivery is denied", async () => {
-  const app = s.defineApp({
-    ...deviceRequestSchema,
-    ...spaceSchema,
-    projects: s.table({ title: s.string() }, {}),
-    notes: s
-      .table(
-        { projectId: s.uuid(), body: s.string() },
-        {
-          project: s.rel("projects", "projectId"),
-        },
-      )
-      .encrypted({ space: "projectId", columns: ["body"] }),
-  });
+  const app = s.defineApp(
+    {
+      ...deviceRequestSchema,
+      ...spaceSchema,
+      projects: s.table({ title: s.string() }, {}),
+      notes: s
+        .table(
+          { projectId: s.uuid(), body: s.string() },
+          {
+            project: s.rel("projects", "projectId"),
+          },
+        )
+        .encrypted({ space: "projectId", columns: ["body"] }),
+    },
+    { migrations: "none" },
+  );
   const policies = definePermissions(app, ({ policy, session }) => {
     policy.projects.allowRead.always();
     policy.projects.allowInsert.always();
@@ -35,19 +39,21 @@ it("preserves accepted scope and data when later initial recipient delivery is d
     policy.__e2ee_space_deliveries.allowRead.always();
     // No delivery insert permission: accepted initial data cannot be undone by handoff denial.
   });
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   let creator: Db | undefined;
   let recipient: Db | undefined;
   let creatorStore: string | null = null;
   let recipientStore: string | null = null;
   try {
-    await deploy({
+    const deployment = {
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
       schema: app,
       permissions: { ...deviceRequestPermissions, ...policies },
-    });
+    };
+    await deploy(deployment);
+    server = await frontE2eeCore(server, deployment);
     const alice = await localAccountConfig(server.appId, server.url);
     const bob = await localAccountConfig(server.appId, server.url);
     creator = await createDb({

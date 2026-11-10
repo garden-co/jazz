@@ -5,8 +5,9 @@
 mod compatible;
 pub use compatible::schemas_are_compatible;
 mod migration_validation;
+pub mod published;
 mod runtime;
-pub use runtime::prepare_runtime_snapshot;
+pub use runtime::prepare_catalogue_change;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -24,7 +25,6 @@ type Edge = (Hash, Hash);
 pub struct DeploymentCatalogue {
     pub schemas: Vec<Schema>,
     pub migrations: Vec<Lens>,
-    pub active_schema_hash: Option<SchemaHash>,
 }
 
 /// Missing artifacts plus the requested target and its complete permission set.
@@ -83,13 +83,6 @@ pub enum DeploymentError {
     },
     #[error("migration graph contains a cycle; blocked schemas: {}", display_hashes(.schemas, ", "))]
     Cycle { schemas: Vec<SchemaHash> },
-    #[error(
-        "cannot deploy schema {target} from active schema {active}: no forward migration path exists. Create a new target schema with a forward migration from the active schema, review it, then deploy again."
-    )]
-    UnreachableTarget {
-        active: SchemaHash,
-        target: SchemaHash,
-    },
     #[error("migration history has disconnected roots: {}. Add migrations connecting these histories to one common root before deploying", display_hashes(.roots, ", "))]
     DisconnectedGraph { roots: Vec<SchemaHash> },
     #[error("migration paths disagree: {} and {}", display_hashes(.first, " -> "), display_hashes(.second, " -> "))]
@@ -130,13 +123,10 @@ pub fn prepare_deployment(
         }
         schemas.insert(actual.0, structural(schema));
     }
-    for hash in [Some(request.target_schema_hash), stored.active_schema_hash]
-        .into_iter()
-        .flatten()
-    {
-        if !schemas.contains_key(&hash.0) {
-            return Err(DeploymentError::MissingSchema { schema: hash });
-        }
+    if !schemas.contains_key(&request.target_schema_hash.0) {
+        return Err(DeploymentError::MissingSchema {
+            schema: request.target_schema_hash,
+        });
     }
     let compiled = schemas
         .iter()
@@ -180,13 +170,7 @@ pub fn prepare_deployment(
         request.target_schema_hash.0,
     )?;
     let order = topological_order(&schemas, &migrations)?;
-    compatible::validate_compatible_graph(
-        &schemas,
-        &migrations,
-        &representatives,
-        stored,
-        request.target_schema_hash,
-    )?;
+    compatible::validate_compatible_graph(&schemas, &migrations, &representatives)?;
     for ((from, to), lens) in &migrations {
         let check = || -> Result<(), String> {
             if lens.is_draft() {

@@ -26,7 +26,7 @@ Or follow one of the setup guides:
 
 ## Architecture specs
 
-The authoritative architecture contracts live with the crates: [`crates/jazz/SPEC/`](crates/jazz/SPEC/) (data model, transactions, authorization, sync, queries, lowering, API) and [`crates/groove/SPEC/`](crates/groove/SPEC/) (storage model, operators, incremental maintenance). Each chapter is structured as Overview (read this) / Details / Open Questions.
+The authoritative architecture contracts live with the crates: [`crates/jazz/SPEC/`](crates/jazz/SPEC/) (data model, transactions, authorization, sync, queries, storage, API). Each chapter is structured as Overview (read this) / Details / Open Questions.
 
 ## Prerequisites
 
@@ -58,7 +58,7 @@ The homepage and documentation are a self-contained Next.js application under
 `docs/`. Build them with `pnpm build:vercel-docs`; they do not need a Rust or
 React Native bootstrap.
 
-Server builds compile RocksDB from source on first build (cached afterwards by `sccache`); this requires a C/C++ toolchain and `libclang` (`xcode-select --install` on macOS; `libclang-dev`/`clang-devel` on Linux).
+Native builds compile the bundled SQLite from source on first build (cached afterwards by `sccache`); this requires a C compiler (`xcode-select --install` on macOS; `build-essential` on Linux).
 
 ## Package versioning
 
@@ -102,11 +102,10 @@ preparing changesets and let versioning record consumed entries.
 The release workflow dispatches
 [Release preview (alpha)](.github/workflows/preview-jazz-tools-alpha-release.yml)
 on the generated release branch. Before merging the release PR, verify its
-versions and release notes, and require a successful preview on that exact head,
-the separate [Starters E2E](.github/workflows/starters-e2e.yml) matrix, and the
-required correctness and React Native device-acceptance receipts. The preview
+versions and release notes, and require a successful preview on that exact head
+and the required correctness and React Native device-acceptance receipts. The preview
 builds and verifies packed native/React Native artifacts and their consumers.
-If a preview or starter run is missing, dispatch its workflow on
+If a preview run is missing, dispatch its workflow on
 `changeset-release/main`.
 
 Merging the versioned release PR triggers the

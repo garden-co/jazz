@@ -1,3 +1,4 @@
+import { frontE2eeCore } from "./fixtures/app.js";
 import { expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
@@ -10,11 +11,14 @@ import { createBrowserCrypto } from "./browser.js";
 import { spaceContext, spaceRootBytes, spaceGrantBytes } from "./space-format.js";
 
 it("initialises and shares a scoped space, then seals it against signed creator regrants", async () => {
-  const app = s.defineApp({
-    ...deviceRequestSchema,
-    ...spaceSchema,
-    projects: s.table({ title: s.string() }, {}),
-  });
+  const app = s.defineApp(
+    {
+      ...deviceRequestSchema,
+      ...spaceSchema,
+      projects: s.table({ title: s.string() }, {}),
+    },
+    { migrations: "none" },
+  );
   const policies = definePermissions(app, ({ policy, session }) => {
     policy.projects.allowRead.always();
     policy.projects.allowInsert.always();
@@ -27,7 +31,7 @@ it("initialises and shares a scoped space, then seals it against signed creator 
     policy.__e2ee_space_deliveries.allowRead.always();
     policy.__e2ee_space_deliveries.allowInsert.where({ senderAccountId: session.user.account });
   });
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  let server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
   const clients: Awaited<ReturnType<typeof createDb>>[] = [];
   const store = () => {
     let value: string | null = null;
@@ -45,6 +49,17 @@ it("initialises and shares a scoped space, then seals it against signed creator 
       serverUrl: server.url,
       appId: server.appId,
       adminSecret: server.adminSecret,
+      schema: app,
+      permissions: {
+        ...deviceRequestPermissions,
+        projects: policies.projects!,
+        __e2ee_spaces: policies.__e2ee_spaces!,
+        __e2ee_space_grants: policies.__e2ee_space_grants!,
+        __e2ee_space_deliveries: policies.__e2ee_space_deliveries!,
+        __e2ee_space_successors: policies.__e2ee_space_successors!,
+      },
+    });
+    server = await frontE2eeCore(server, {
       schema: app,
       permissions: {
         ...deviceRequestPermissions,

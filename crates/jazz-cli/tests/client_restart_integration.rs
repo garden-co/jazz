@@ -6,9 +6,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use axum::{Json, Router, routing::get};
-use base64::Engine;
 use jazz::account_registry::AccountId;
+use jazz::tools::Session;
 use jazz::tools::{
     AppContext, AppId, ClientId, ClientStorage, ColumnType, DurabilityTier, JazzClient,
     SchemaBuilder, TableSchema, Value,
@@ -25,7 +24,7 @@ use support::{cargo_binary, publish_allow_all_permissions};
 const APP_ID_STR: &str = "00000000-0000-0000-0000-000000000001";
 const BACKEND_SECRET: &str = "backend-secret-for-integration-tests";
 const ADMIN_SECRET: &str = "admin-secret-for-integration-tests";
-const JWT_KID: &str = "test-jwks-kid";
+/// Only shapes an offline client's own identity: no core verifies it.
 const JWT_SECRET: &str = "test-jwt-secret-for-integration";
 const JWT_ISSUER: &str = "https://issuer.jazz.test";
 const JWT_AUDIENCE: &str = APP_ID_STR;
@@ -47,49 +46,6 @@ struct JwtClaims {
     exp: u64,
 }
 
-struct JwksServer {
-    addr: std::net::SocketAddr,
-    task: tokio::task::JoinHandle<()>,
-}
-
-impl JwksServer {
-    async fn start() -> Self {
-        let app = Router::new().route("/jwks", get(jwks_handler));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind jwks server");
-        let addr = listener.local_addr().expect("jwks local addr");
-        let task = tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("serve jwks");
-        });
-        Self { addr, task }
-    }
-
-    fn endpoint(&self) -> String {
-        format!("http://{}/jwks", self.addr)
-    }
-}
-
-impl Drop for JwksServer {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
-}
-
-async fn jwks_handler() -> Json<JsonValue> {
-    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(JWT_SECRET.as_bytes());
-    Json(json!({
-        "keys": [
-            {
-                "kty": "oct",
-                "kid": JWT_KID,
-                "alg": "HS256",
-                "k": encoded,
-            }
-        ]
-    }))
-}
-
 struct ServerProcess {
     process: Child,
     port: u16,
@@ -98,7 +54,7 @@ struct ServerProcess {
 }
 
 impl ServerProcess {
-    async fn start(port: u16, data_dir: &Path, jwks_endpoint: &str) -> Self {
+    async fn start(port: u16, data_dir: &Path) -> Self {
         let bound_port_file = data_dir.join("bound-port");
         let mut cmd = Command::new(cargo_binary("jazz-tools"));
         cmd.args([
@@ -109,9 +65,6 @@ impl ServerProcess {
             "--data-dir",
             data_dir.to_str().expect("data dir path"),
         ])
-        .env("JAZZ_JWKS_URL", jwks_endpoint)
-        .env("JAZZ_JWT_ISSUER", JWT_ISSUER)
-        .env("JAZZ_JWT_AUDIENCE", JWT_AUDIENCE)
         .env("JAZZ_BACKEND_SECRET", BACKEND_SECRET)
         .env("JAZZ_ADMIN_SECRET", ADMIN_SECRET)
         .env("JAZZ_BOUND_PORT_FILE", &bound_port_file)
@@ -244,8 +197,7 @@ fn make_jwt(sub: &str) -> String {
             + 3600,
     };
 
-    let mut header = Header::new(Algorithm::HS256);
-    header.kid = Some(JWT_KID.to_string());
+    let header = Header::new(Algorithm::HS256);
 
     encode(
         &header,
@@ -265,12 +217,9 @@ fn test_schema() -> jazz::tools::Schema {
         .build()
 }
 
-fn make_context(
-    app_id: AppId,
-    server_url: String,
-    data_dir: PathBuf,
-    jwt_token: String,
-) -> AppContext {
+/// A client the app's backend opens for `user_id` (a core admits nothing
+/// else).
+fn make_context(app_id: AppId, server_url: String, data_dir: PathBuf, user_id: &str) -> AppContext {
     AppContext {
         app_id,
         client_id: None,
@@ -279,9 +228,14 @@ fn make_context(
         data_dir,
         storage: ClientStorage::Persistent,
         account_id: None,
-        jwt_token: Some(jwt_token),
-        backend_secret: None,
+        jwt_token: None,
+        backend_secret: Some(BACKEND_SECRET.to_owned()),
+        backend_session: Some(
+            Session::new(JWT_ISSUER, user_id).with_claims(json!({ "role": "user" })),
+        ),
+        bundle: None,
         admin_secret: None,
+        migrations: Default::default(),
     }
 }
 
@@ -349,21 +303,24 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
 async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_without_catalogue_resync_impl()
  {
     let user_id = "919ba477-426f-5b7d-9d27-f50e07d1e8ef";
-    let jwks_server = JwksServer::start().await;
     let server_data = TempDir::new().expect("temp server dir");
     let app_id = AppId::from_string(APP_ID_STR).expect("parse app id");
 
-    let server = ServerProcess::start(0, server_data.path(), &jwks_server.endpoint()).await;
-    publish_allow_all_permissions(&server.base_url(), app_id, ADMIN_SECRET, &test_schema()).await;
+    let server = ServerProcess::start(0, server_data.path()).await;
+    let published =
+        publish_allow_all_permissions(&server.base_url(), app_id, ADMIN_SECRET, &test_schema())
+            .await;
 
     let client_dir = TempDir::new().expect("client dir");
     let mut context = make_context(
         app_id,
         server.base_url(),
         client_dir.path().to_path_buf(),
-        make_jwt(user_id),
+        user_id,
     );
-    jazz_testkit::enroll_test_context(&mut context)
+    // The backend pins the user's session to the bundle it published.
+    context.bundle = Some(published.bundle);
+    jazz_testkit::enroll_test_context_with_admin_secret(ADMIN_SECRET, &mut context)
         .await
         .expect("enroll the restart fixture before public admission");
     let client = connect_native(context).await.expect("connect client");
@@ -400,8 +357,7 @@ async fn jazz_tools_cli_existing_client_keeps_working_after_server_restart_witho
     let restart_port = server.port;
     drop(server);
 
-    let restarted =
-        ServerProcess::start(restart_port, server_data.path(), &jwks_server.endpoint()).await;
+    let restarted = ServerProcess::start(restart_port, server_data.path()).await;
 
     let rows_after_restart = wait_for_todos_count(
         &client,
@@ -472,7 +428,10 @@ async fn memory_storage_client_does_not_persist_local_state_to_disk_impl() {
         account_id: Some(AccountId(uuid::Uuid::from_bytes([0xa9; 16]))),
         jwt_token: Some(make_jwt("memory-writer")),
         backend_secret: None,
+        backend_session: None,
+        bundle: None,
         admin_secret: None,
+        migrations: Default::default(),
     };
 
     let client = connect_native(context.clone())
@@ -507,10 +466,6 @@ async fn memory_storage_client_does_not_persist_local_state_to_disk_impl() {
 
     client.shutdown().await.expect("shutdown memory client");
 
-    assert!(
-        !data_dir.path().join("jazz.rocksdb").exists(),
-        "memory storage should not create a RocksDB database on disk"
-    );
     assert!(
         !data_dir.path().join("jazz.sqlite").exists(),
         "memory storage should not create a SQLite database on disk"

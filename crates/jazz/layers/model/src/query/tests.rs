@@ -1,14 +1,14 @@
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jazz_types::records::{
-        EnumCase, EnumSchema, EnumValue, OwnedRecord, RecordDescriptor, ValueType,
-    };
-    use jazz_types::column_schema::{ColumnSchema, ColumnType};
     use crate::model::public_schema::{
         ColumnDescriptor as PublicColumnDescriptor, ColumnType as PublicColumnType,
         EnumCaseDescriptor, SchemaBuilder as PublicSchemaBuilder,
         TableSchemaBuilder as PublicTableSchemaBuilder,
+    };
+    use jazz_types::column_schema::{ColumnSchema, ColumnType};
+    use jazz_types::records::{
+        EnumCase, EnumSchema, EnumValue, OwnedRecord, RecordDescriptor, ValueType,
     };
 
     fn payload_enum_schema() -> JazzSchema {
@@ -168,14 +168,12 @@ mod tests {
     #[test]
     fn empty_array_literal_compares_with_nullable_array_column_on_either_side() {
         let source = PublicSchemaBuilder::new()
-            .table(
-                PublicTableSchemaBuilder::new("issues").nullable_column(
-                    "labels",
-                    PublicColumnType::Array {
-                        element: Box::new(PublicColumnType::Uuid),
-                    },
-                ),
-            )
+            .table(PublicTableSchemaBuilder::new("issues").nullable_column(
+                "labels",
+                PublicColumnType::Array {
+                    element: Box::new(PublicColumnType::Uuid),
+                },
+            ))
             .build();
         let schema = JazzSchema::new(&source).expect("nullable array schema compiles");
         let empty_array = || lit(Value::Array(vec![]));
@@ -196,7 +194,6 @@ mod tests {
         assert_eq!(error, QueryError::OperandTypeMismatch);
     }
 
-
     #[test]
     fn empty_array_comparison_does_not_use_inferred_param_type() {
         let empty_array = || lit(Value::Array(vec![]));
@@ -206,10 +203,7 @@ mod tests {
             .filter(eq(empty_array(), param("labels")))
             .validate_runtime(&schema())
             .expect_err("an inferred parameter is not a direct array column");
-        assert_eq!(
-            column_comparison_first,
-            QueryError::OperandTypeMismatch
-        );
+        assert_eq!(column_comparison_first, QueryError::OperandTypeMismatch);
 
         let empty_array_comparison_first = Query::from("issues")
             .filter(eq(empty_array(), param("labels")))
@@ -323,7 +317,7 @@ mod tests {
 
     // This focused lowerer test is intentional: relation IR is the NAPI/WASM
     // boundary, while end-to-end matching and subscription deltas are covered
-    // at the Groove runtime boundary below it.
+    // at the database boundary below it.
     #[test]
     fn relation_payload_enum_match_lowers_and_validates_against_case_fields() {
         let event_payload = RecordDescriptor::new([("level", ValueType::I32)]);
@@ -462,10 +456,7 @@ mod tests {
         let schema = RuntimeSchema::new([TableSchema::new(
             "items",
             [
-                ColumnSchema::new(
-                    "uuids",
-                    ColumnType::Array(Box::new(ColumnType::Uuid)),
-                ),
+                ColumnSchema::new("uuids", ColumnType::Array(Box::new(ColumnType::Uuid))),
                 ColumnSchema::new("text", ColumnType::String),
             ],
         )]);
@@ -1830,6 +1821,33 @@ mod tests {
         assert!(binding_values_from_canonical_bytes(&record_bytes).is_err());
     }
 
+    /// Alice's new policy syntax has a pinned JSON representation. Bob's
+    /// query endpoint must refuse this capability outside schema INSERT checks.
+    /// Codec inspection pins the public boundary independently of row effects.
+    #[test]
+    fn authorized_created_policy_json_and_query_boundary_are_pinned() {
+        use crate::model::public_schema::PolicyExpr;
+        let expr = PolicyExpr::exists_including_created("parents", PolicyExpr::True);
+        let bytes =
+            br#"{"type":"ExistsIncludingCreated","table":"parents","condition":{"type":"True"}}"#;
+        assert_eq!(serde_json::to_vec(&expr).unwrap(), bytes);
+        assert_eq!(serde_json::from_slice::<PolicyExpr>(bytes).unwrap(), expr);
+        let mut query = Query::from("unused").join_via("parents", "parent", []);
+        query.joins[0].source_mode = CandidateSourceMode::IncludeAuthorizedCreatedV1;
+        assert!(
+            query
+                .validate(
+                    &JazzSchema::new(&crate::model::public_schema::SchemaBuilder::new().build())
+                        .unwrap()
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("only in INSERT policies")
+        );
+    }
+
+    /// Alice's ordinary query keeps its bytes; Bob's older decoder must reject
+    /// Mallory's new source capability. Codec inspection pins this boundary.
     #[test]
     fn authorized_created_join_v1_wire_corpus_preserves_legacy_and_fails_closed() {
         // Internal codec corpus: old peers must reject a new source capability,
@@ -1906,6 +1924,8 @@ mod tests {
         assert!(serde_json::to_string(&unsupported).is_err());
     }
 
+    /// Alice's canonical query identity frames the capability before filters.
+    /// Byte-level inspection is necessary because row results cannot pin a key.
     #[test]
     fn authorized_created_join_v1_canonical_marker_precedes_filter_bytes() {
         // Canonical identity is a codec contract; pin the marker's framing,
@@ -2129,7 +2149,7 @@ mod tests {
         fn predicate_json_and_postcard_encodings_are_pinned() {
             let predicate = every_variant();
             let json = r#"{"All":[{"Any":[{"Eq":[{"Column":"a"},{"Param":"p"}]},{"Ne":[{"Column":"a"},{"Claim":"c"}]}]},{"Not":{"Gt":[{"Column":"b"},{"Literal":{"I64":-3}}]}},{"Gte":[{"Column":"b"},{"Literal":{"String":"s"}}]},{"Lt":[{"Column":"b"},{"Literal":{"Bool":true}}]},{"Lte":[{"Column":"b"},{"Literal":{"U64":7}}]},{"In":[{"Column":"c"},[{"Literal":{"I32":1}},{"Param":"q"}]]},{"Contains":[{"Column":"d"},{"Literal":{"Bytes":[1,2]}}]},{"EnumMatch":{"column":"e","case":"k","payload":{"Any":[{"IsNull":{"Column":"f"}}]}}},{"All":[]}]}"#;
-            let bytes = "0009010203000161010170040001610201630206000162030d05070001620306017308000162030501090001620303070500016302030e020101710a00016403070201020b0165016b01010c0001660000";
+            let bytes = "0009010203000161010170040001610201630206000162030e05070001620306017308000162030501090001620303070500016302030f020101710a00016403070201020b0165016b01010c0001660000";
             assert_eq!(serde_json::to_string(&predicate).unwrap(), json);
             assert_eq!(
                 hex::encode(postcard::to_allocvec(&predicate).unwrap()),

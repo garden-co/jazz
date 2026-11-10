@@ -3,30 +3,30 @@ import { createDb } from "../../src/runtime/default-create-db.js";
 import { deploy } from "../../src/dev/catalogue.js";
 import { deviceRequestApp, deviceRequestPermissions } from "../../src/e2ee/device-requests.js";
 import { acquireBrowserTestAccount } from "./account-fixtures.js";
-import { getJazzServerInfo, getJazzServerJwtForUser, stopJazzServer } from "./testing-server.js";
-import { createAccountManager } from "../../src/accounts/create-account-manager.js";
+import { getJazzServerInfo, jazzAppUser, startJazzApp, stopJazzServer } from "./testing-server.js";
 
 it.each(["material", "protected", "external"])(
   "recovers, reopens and retains recovery with browser crypto (%s)",
   async (mode) => {
     const protectedMaterial = mode === "protected";
-    const server = await getJazzServerInfo(`e2ee-recovery-${crypto.randomUUID()}`);
+    let server = await getJazzServerInfo(`e2ee-recovery-${crypto.randomUUID()}`);
     const clients: Awaited<ReturnType<typeof createDb>>[] = [];
     const keys = [crypto.randomUUID(), crypto.randomUUID(), crypto.randomUUID()];
     try {
       await deploy({ ...server, schema: deviceRequestApp, permissions: deviceRequestPermissions });
-      const account =
+      server = await startJazzApp(server, {
+        schema: deviceRequestApp,
+        permissions: deviceRequestPermissions,
+      });
+      const selected =
         mode === "external"
-          ? await (
-              await createAccountManager({ appId: server.appId, serverUrl: server.serverUrl })
-            ).registerJWT(
-              await getJazzServerJwtForUser(crypto.randomUUID(), undefined, server.appId),
-            )
-          : await acquireBrowserTestAccount(server);
+          ? await jazzAppUser(server, crypto.randomUUID())
+          : { ...server, account: await acquireBrowserTestAccount(server) };
+      const { account, serverUrl } = selected;
       const open = async (key: string) => {
         const client = await createDb({
           appId: server.appId,
-          serverUrl: server.serverUrl,
+          serverUrl,
           account,
           driver: { type: "memory" },
           e2ee: {
@@ -79,9 +79,9 @@ it.each(["material", "protected", "external"])(
       expect(localStorage.getItem(keys[1]!)).toBeNull();
       const pending = (await second.e2ee.devices.list()).find((row) => row.state === "pending")!;
       if (mode === "external") {
-        await expect(second.e2ee.recovery.use().wait()).rejects.toMatchObject({
-          code: "local_first_recovery_unavailable",
-        });
+        await expect(second.e2ee.recovery.use().wait()).rejects.toThrow(
+          /local_first_recovery_unavailable/,
+        );
         expect(await second.e2ee.devices.list()).toContainEqual(
           expect.objectContaining({ id: pending.id, state: "pending" }),
         );

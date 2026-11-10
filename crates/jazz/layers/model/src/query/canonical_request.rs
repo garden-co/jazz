@@ -440,6 +440,8 @@ fn canonical_query_bytes_for_schema(
             canonical_array_subquery_key,
         );
     }
+    // `partial` is not part of the identity: a partial selection syncs the
+    // same rows and only reads less of their values (SPEC 19.12).
     if let Some(select) = &query.select {
         bytes.push(b's');
         put_len(&mut bytes, select.len());
@@ -550,9 +552,9 @@ fn validate_binding_value(value: &Value) -> Result<(), QueryError> {
             }
         }
         Value::Nullable(Some(value)) => validate_binding_value(value)?,
-        Value::Record(record) => validate_public_column_type(&ColumnType::Record(Box::new(
-            record.descriptor().clone(),
-        )))?,
+        Value::Record(record) => {
+            validate_public_column_type(&ColumnType::Record(Box::new(record.descriptor().clone())))?
+        }
         // U48 is an engine-owned stamp width, never a public query binding.
         Value::Enum(_) | Value::Large(_) | Value::U48(_) => {
             return Err(QueryError::OperandTypeMismatch);
@@ -736,7 +738,7 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
             );
             put_bytes(bytes, record.raw());
         }
-        // These Groove-native arms are rejected by value_type before a
+        // These internal arms are rejected by value_type before a
         // validated query reaches canonicalization. Keep their fallback
         // encodings total for defensive callers such as binding identities.
         Value::Enum(value) => {

@@ -47,7 +47,8 @@
     subscribe: (listener) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
     createLocalFirst: unavailable, restoreLocalFirst: unavailable,
       becomeBackend: unavailable,
-    registerJWT: unavailable, loginJWT: unavailable, loginOrRegisterJWT: unavailable, linkJWT: unavailable,
+      loginWithBackend: unavailable,
+      linkWithBackend: unavailable,
     logout: unavailable, retry: start,
     close: async () => { cancelled = true; publish({ status: 'closed' }); await created?.close(); },
   });
