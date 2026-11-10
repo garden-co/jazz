@@ -414,7 +414,7 @@ impl Inner {
                     unsupported("ordinary policy inheritance without a declared reference")
                 })?;
                 let target = governing.table(name)?;
-                let Some(condition) = target.inherited_policy(*operation) else {
+                let Some(condition) = target.policy(*operation) else {
                     return Ok(());
                 };
                 (target, "id", via_column.as_str(), condition, depth - 1)
@@ -439,7 +439,7 @@ impl Inner {
                     target,
                     via_column.as_str(),
                     "id",
-                    match target.inherited_policy(*operation) {
+                    match target.policy(*operation) {
                         Some(p) => p,
                         None => return Ok(()),
                     },
