@@ -2399,6 +2399,9 @@ pub(crate) struct Session {
     outbox: Vec<SyncMessage>,
     /// Images to send this tick: (table, id, branch key).
     touched: BTreeSet<(String, RowUuid, Vec<u8>)>,
+    /// Refused targets refresh only when currently readable. A refusal
+    /// does not create a read owner or imply an access-loss event.
+    refused: BTreeSet<(String, RowUuid, Vec<u8>)>,
     /// On a relay, rows a one-shot answer shipped at one of this store's
     /// unsettled versions (by its position), which no watch keeps
     /// current: each ships again once uploads settle and that version is no
@@ -2536,6 +2539,7 @@ impl Session {
             subs: BTreeMap::new(),
             outbox: Vec::new(),
             touched: BTreeSet::new(),
+            refused: BTreeSet::new(),
             unsettled: BTreeMap::new(),
             unreadable: HashSet::new(),
             committed: Vec::new(),
@@ -2596,6 +2600,7 @@ impl Session {
 
     fn idle(&self) -> bool {
         self.touched.is_empty()
+            && self.refused.is_empty()
             && self.outbox.is_empty()
             && self.resume.is_empty()
             && self
@@ -11063,6 +11068,7 @@ impl Db {
                 .session_schema(index)
                 .unwrap_or_else(|| inner.owner.clone());
             let mut touched = std::mem::take(&mut inner.sessions[index].touched);
+            let refused = std::mem::take(&mut inner.sessions[index].refused);
             let committed = std::mem::take(&mut inner.sessions[index].committed);
             let mut echoes = std::mem::take(&mut inner.sessions[index].echoes);
             let asked_whole = std::mem::take(&mut inner.sessions[index].asked_whole);
@@ -11532,37 +11538,63 @@ impl Db {
                     hidden,
                 });
             }
-            // Commit acknowledgement is not a read subscription. The
-            // writer can confirm the exact current image it supplied even
-            // without SELECT; only its authenticated, accepted Fate may
-            // acknowledge that image. Real result/access-loss events still
-            // evict it below, before any as-written acknowledgement.
-            // Superseded history still requires current read permission.
+            // An unwatched refusal still refreshes a readable authority
+            // image, but cannot manufacture access loss for a target the
+            // writer could never read. Real result/held-row eviction above
+            // remains independent and still wins below.
+            for (table, row, key) in refused {
+                if let Some(current) = inner.current_image(&table, row, &key)?
+                    && readable(&inner, &policies, &table, row, &key, policy)?
+                {
+                    images.push(current);
+                }
+            }
+            // A whole accepted own prefix can precede one fan-out. Retain
+            // each exact authenticated echo, not just the current version:
+            // a later restore can need the founder's accepted creation stamp.
+            // These private versions are confirmed only by their real Fates;
+            // unrelated/superseded history still requires SELECT permission.
+            let accepted_fates: HashSet<TxId> = inner.sessions[index]
+                .outbox
+                .iter()
+                .filter_map(|message| match message {
+                    SyncMessage::Fate {
+                        id,
+                        outcome: Outcome::Accepted { .. },
+                        global: true,
+                    } => Some(*id),
+                    _ => None,
+                })
+                .collect();
+            let own_versions: HashSet<(String, RowUuid, Vec<u8>, Pos)> = echoes
+                .iter()
+                .filter(|echo| accepted_fates.contains(&echo.id))
+                .map(|echo| (echo.table.clone(), echo.row, echo.key.clone(), echo.at))
+                .collect();
             for (table, row, key, at) in committed {
                 let current = inner.current_image(&table, row, &key)?;
                 let superseded = current.as_ref().is_some_and(|current| {
                     current.at != at.0 || at.1.is_some_and(|_| rank(current).1 != at.1)
                 });
-                if let Some(current) = current {
-                    let exact_accepted_echo = !superseded && echoes.iter().any(|echo| {
-                        echo.table == table && echo.row == row && echo.key == key
-                            && echo.at == current.at && current.at.accepted()
-                            && inner.sessions[index].outbox.iter().any(|message| matches!(
-                                message,
-                                SyncMessage::Fate { id, outcome: Outcome::Accepted { .. }, global: true }
-                                    if *id == echo.id
-                            ))
+                let own_ack = at.0.accepted()
+                    && own_versions.contains(&(table.clone(), row, key.clone(), at.0));
+                let can_read = readable(&inner, &policies, &table, row, &key, policy)?;
+                if superseded && can_read {
+                    // Preserve normal readable-row reconciliation when a
+                    // concurrent version superseded an own write: full
+                    // authority images avoid stale optimistic echo digests.
+                    // The private write-only prefix instead needs its exact
+                    // authenticated historical acknowledgements above.
+                    echoes.retain(|echo| {
+                        !(echo.table == table && echo.row == row && echo.key == key)
                     });
-                    if exact_accepted_echo
-                        || readable(&inner, &policies, &table, row, &key, policy)?
-                    {
-                        images.push(current);
-                    }
                 }
-                if superseded {
-                    echoes.retain(|e| !(e.table == table && e.row == row && e.key == key));
+                if let Some(current) = current
+                    && (can_read || (!superseded && own_ack))
+                {
+                    images.push(current);
                 }
-                if superseded && readable(&inner, &policies, &table, row, &key, policy)? {
+                if superseded && (can_read || own_ack) {
                     let id = row.0.as_bytes().to_vec();
                     let w =
                         at.1.map_or_else(Vec::new, |(node, tx)| writer_bytes(node, tx));
@@ -12857,6 +12889,9 @@ impl Db {
                                 versioned(landed, node, tx),
                             )
                         }));
+                }
+                if result.is_err() {
+                    session.refused.extend(rows.iter().cloned());
                 }
                 // A commit's rows are acknowledged through `committed`;
                 // treating its (even refused) target as a read result would
