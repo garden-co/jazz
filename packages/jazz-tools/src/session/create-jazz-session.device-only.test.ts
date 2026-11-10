@@ -56,6 +56,17 @@ describe("device-only browser session (serverUrl: null)", () => {
     expect((await db.all(app.notes)).map((row) => row.text)).toEqual(["on this device"]);
   }, 60_000);
 
+  it("keeps account-manager options out of the client's config", async () => {
+    const session = await openDeviceOnly(memoryStore(), {
+      fetch: (input, init) => fetch(input, init),
+      linkGuestOnSignUp: false,
+    });
+    const config = session.getSnapshot().client!.db.getConfig();
+    expect(config).not.toHaveProperty("fetch");
+    expect(config).not.toHaveProperty("store");
+    expect(config).not.toHaveProperty("linkGuestOnSignUp");
+  }, 60_000);
+
   it("reopens the same account from its store", async () => {
     const store = memoryStore();
     const first = await openDeviceOnly(store);

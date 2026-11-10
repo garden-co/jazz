@@ -64,6 +64,44 @@ export function jazzAppUserUrl(
 }
 
 /**
+ * Sign the user at `userUrl` (from {@link jazzAppUserUrl}) out of the app
+ * backend `app`, as its logout clears their cookie.
+ */
+export function signOutOfJazzApp(app: JazzServerInfo, userUrl: string): Promise<void> {
+  const signOut = jazzServerBrowserCommands().jazzAppSignOut;
+  if (!signOut)
+    throw new Error("This browser test config does not register the jazzAppSignOut command");
+  return signOut(app.serverUrl, userUrl);
+}
+
+/**
+ * A new origin of the app backend `app` (from {@link startJazzApp}) where no
+ * one is signed in yet, as a visitor's browser: its `/jazz` URL. A guest
+ * there signs up with {@link signUpAtJazzApp}.
+ */
+export function jazzAppVisitor(app: JazzServerInfo): Promise<string> {
+  const visitor = jazzServerBrowserCommands().jazzAppVisitor;
+  if (!visitor)
+    throw new Error("This browser test config does not register the jazzAppVisitor command");
+  return visitor(app.serverUrl);
+}
+
+/**
+ * Sign `userId` up on `originUrl` (from {@link jazzAppVisitor}), as the app's
+ * own sign-up sets their cookie. No Jazz account is made for them.
+ */
+export function signUpAtJazzApp(
+  app: JazzServerInfo,
+  originUrl: string,
+  userId: string,
+): Promise<void> {
+  const signUp = jazzServerBrowserCommands().jazzAppSignUp;
+  if (!signUp)
+    throw new Error("This browser test config does not register the jazzAppSignUp command");
+  return signUp(app.serverUrl, originUrl, userId);
+}
+
+/**
  * A `fetch` for an account manager's sign-in requests to a test app backend.
  * The page's origin is not the backend's and the backend answers no CORS (an
  * app serves its backend on its own origin), so Node sends them.
@@ -177,6 +215,10 @@ export interface JazzServerTransportControl {
   block(): Promise<void>;
   blockInbound(): Promise<void>;
   unblock(): Promise<void>;
+  /** The server goes away: connections close and new ones are refused. */
+  down(): Promise<void>;
+  /** The server is back, at `serverUrl` if given (a restarted front). */
+  up(serverUrl?: string): Promise<void>;
   stop(): Promise<void>;
 }
 
@@ -190,6 +232,8 @@ export async function createJazzServerTransportControl(
     block: () => commands.jazzServerTransportControlBlock(url, "both"),
     blockInbound: () => commands.jazzServerTransportControlBlock(url, "inbound"),
     unblock: () => commands.jazzServerTransportControlUnblock(url),
+    down: () => commands.jazzServerTransportControlDown(url),
+    up: (serverUrl?: string) => commands.jazzServerTransportControlUp(url, serverUrl),
     stop: () => commands.jazzServerTransportControlStop(url),
   };
 }

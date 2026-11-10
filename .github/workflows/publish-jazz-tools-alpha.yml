@@ -676,6 +676,8 @@ jobs:
           tar -xOf "${TARBALL}" package/package.json | node -e 'let s="";process.stdin.on("data",(d)=>s+=d);process.stdin.on("end",()=>{const p=JSON.parse(s);for(const field of ["dependencies","optionalDependencies","peerDependencies"]){for(const [name,version] of Object.entries(p[field]||{})){if(typeof version==="string"&&version.startsWith("workspace:")){throw new Error(`${field}.${name} uses workspace protocol (${version}) in packed manifest`);}}}console.log(`Packed manifest OK for ${p.name}@${p.version}`);});'
           # The inspector overlay's embedded build must be bundled into jazz-tools.
           tar -tf "${TARBALL}" | grep -q "package/dist/dev/inspector-overlay/embedded/embedded.html"
+          # So must the Inspector that createJazz serves at <basePath>/inspect/.
+          tar -tf "${TARBALL}" | grep -q "package/dist/dev/inspector-overlay/embedded/backend.html"
 
       - name: Verify packed create-jazz manifest
         run: |
@@ -729,7 +731,7 @@ jobs:
             pnpm --filter jazz-tools publish --tag alpha --access public --no-git-checks
           fi
 
-      - name: Publish create-jazz (alpha tag, promote latest)
+      - name: Publish create-jazz (alpha tag)
         if: env.RELEASE_MODE == 'publish'
         run: |
           CREATE_JAZZ_VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("packages/create-jazz/package.json","utf8")).version')
@@ -739,7 +741,42 @@ jobs:
             pnpm --filter create-jazz publish --tag alpha --access public --no-git-checks
           fi
 
-          npm dist-tag add "create-jazz@${CREATE_JAZZ_VERSION}" latest
+      # From alpha.60, a plain `npm install jazz-tools` gets v2 (Classic stays
+      # `jazz-tools@0`). Every v2 package moves `latest` to this version, after
+      # all of them are published, and never back to an older alpha. Each one
+      # waits until npm serves the new version, which can lag the upload. The
+      # React Native packages, the slowest to appear, are promoted by
+      # promote-rn-latest so they don't hold up the server binaries.
+      - name: Promote every non-RN v2 package to latest
+        if: env.RELEASE_MODE == 'publish'
+        run: node dev/artifacts/promote-latest.mjs core
+
+  # jazz-rn-android (~100 MB) took 85 minutes to appear on npm after alpha.60's
+  # upload. Waiting for it here, not in publish-npm, lets the server binaries
+  # and Inspector go out as soon as everything else is live.
+  promote-rn-latest:
+    name: Promote React Native packages to latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs:
+      - publish-npm
+    if: >-
+      always() &&
+      needs.publish-npm.result == 'success' &&
+      (inputs.mode || github.event.inputs.mode || 'publish') == 'publish'
+    timeout-minutes: 200
+    permissions:
+      contents: read
+    env:
+      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: .nvmrc
+          registry-url: https://registry.npmjs.org
+
+      - run: node dev/artifacts/promote-latest.mjs rn
 
   # Jazz Cloud's images run the Linux server binary from the GitHub release:
   # npm's jazz-tools carries no native binary. Attach both builds with their

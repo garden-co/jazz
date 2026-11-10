@@ -46,7 +46,7 @@ import {
 } from "../schema-permissions.js";
 import { collectConventionalProvenanceDiagnostics } from "../provenance-guidance.js";
 import { fetchSchemaHashes, fetchStoredWasmSchema } from "./catalogue-api.js";
-import { renderMigrationStub } from "./migrations.js";
+import { renderMigrationStub, UNFILLED_STUB_TODO } from "./migrations.js";
 import { normalizeSchemaHashInput } from "./schema-utils.js";
 import { legacySchemaHash } from "./legacy-schema-hash.js";
 import {
@@ -105,6 +105,11 @@ export interface DeployOptions extends CatalogueProjectOptions {
    * Directory containing migration files. Defaults to `<schemaDir>/migrations`.
    */
   migrationsDir?: string;
+  /**
+   * Confirms switching tables of the active schema to latest-only history,
+   * which drops their past versions for good.
+   */
+  allowDroppingHistory?: boolean;
 }
 
 export interface ValidateProjectOptions {
@@ -119,6 +124,16 @@ export interface ValidateProjectResult {
   permissionsFile?: string;
   tableCount: number;
   warnings: string[];
+  /**
+   * How schema.ts relates to the project's committed snapshots:
+   * `snapshotted` when one is of it, `changed` when it differs from every
+   * one (a schema change that needs `migrations create`), `unsnapshotted`
+   * when the project has none yet.
+   */
+  schema: {
+    hash: string;
+    status: "snapshotted" | "changed" | "unsnapshotted";
+  };
 }
 
 interface CompileSchemaOptions {
@@ -146,6 +161,12 @@ interface CreateMigrationOptions {
 type CreateMigrationResult =
   | {
       status: "unchanged";
+    }
+  | {
+      /** The project had no snapshot: the current schema became its first. */
+      status: "initial-snapshot";
+      hash: string;
+      snapshotPath: string;
     }
   | {
       status: "migration-not-required";
@@ -191,14 +212,20 @@ export async function validateProject(
   const compiled = ensurePermissionsProject(await loadCompiledSchema(options.schemaDir));
   await validateSchemaAndPermissions(compiled.wasmSchema, compiled.permissions);
   const migrationsDir = resolvedMigrationsDir(options.schemaDir, options.migrationsDir);
+  await refuseUnfilledStubs(migrationsDir);
+  // Legacy migrations go first: alpha.59 wrote them in a DSL this version
+  // no longer has, so loading them (as the check below does) would fail.
   let retired: string[] = [];
   if (options.check) {
     await checkLegacyMigrations(migrationsDir, compiled.wasmSchema);
   } else {
     retired = await retireLegacyMigrations(migrationsDir, compiled.wasmSchema);
-    await writeLocalClientMigrations(options.schemaDir, migrationsDir);
   }
+  await checkLocalMigrations(compiled.wasmSchema, migrationsDir);
+  const schema = await schemaSnapshotStatus(migrationsDir, compiled.wasmSchema);
+  if (!options.check) await writeLocalClientMigrations(options.schemaDir, migrationsDir);
   return {
+    schema,
     schemaFile: compiled.schemaFile,
     permissionsFile: compiled.permissionsFile,
     tableCount: compiled.schema.tables.length,
@@ -211,6 +238,64 @@ export async function validateProject(
       ).map((diagnostic) => diagnostic.message),
     ],
   };
+}
+
+/** A line that gives `column` a step: `column: …` or `"column": …`. */
+function stepKey(column: string): RegExp {
+  const name = column.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^\\s*(?:${name}|"${name}"|'${name}')\\s*:`);
+}
+
+/**
+ * The lines after `lines[index]` up to the end of the block it sits in: the
+ * first later line indented less closes it. A stub's TODO sits in its
+ * table's `migrate` block, so this stops before the next table and before
+ * the `from`/`to` witnesses, which name every column.
+ */
+function tableBlockAfter(lines: readonly string[], index: number): readonly string[] {
+  const indent = (line: string) => line.length - line.trimStart().length;
+  const own = indent(lines[index]!);
+  const block: string[] = [];
+  for (const line of lines.slice(index + 1)) {
+    if (line.trim() !== "" && indent(line) < own) break;
+    block.push(line);
+  }
+  return block;
+}
+
+/** Refuse a migration file that still holds a step its stub left to fill in. */
+async function refuseUnfilledStubs(migrationsDir: string): Promise<void> {
+  const files = await readdir(migrationsDir).catch(() => [] as string[]);
+  const unfilled: string[] = [];
+  for (const file of files.filter((name) => name.endsWith(".ts")).sort()) {
+    const lines = (await readFile(join(migrationsDir, file), "utf8")).split("\n");
+    lines.forEach((line, index) => {
+      const todo = UNFILLED_STUB_TODO.exec(line);
+      // Authors often fill the step in under the comment and keep it, so
+      // only a column its table's block gives no step is unfilled.
+      if (todo && !tableBlockAfter(lines, index).some((later) => stepKey(todo[2]!).test(later))) {
+        unfilled.push(`  ${join(basename(migrationsDir), file)}:${index + 1}: ${todo[1]}`);
+      }
+    });
+  }
+  if (unfilled.length === 0) return;
+  throw new Error(
+    `A migration still has steps to fill in, so it cannot deploy:\n${unfilled.join("\n")}\n` +
+      "Replace each TODO with its step (for example `points: m.add.int({ default: 1 })`).",
+  );
+}
+
+/** How `schema` relates to the committed snapshots in `migrationsDir`. */
+async function schemaSnapshotStatus(
+  migrationsDir: string,
+  schema: WasmSchema,
+): Promise<ValidateProjectResult["schema"]> {
+  const hash = await computeSchemaHash(schema);
+  const committed = (await new MigrationStorage(migrationsDir).listSnapshots()).filter((entry) =>
+    isCommittedSnapshotFileName(entry.fileName),
+  );
+  if (committed.some((entry) => entry.hash === hash)) return { hash, status: "snapshotted" };
+  return { hash, status: committed.length === 0 ? "unsnapshotted" : "changed" };
 }
 
 export async function compileSchema(options: CompileSchemaOptions): Promise<CompileSchemaResult> {
@@ -865,6 +950,12 @@ async function resolveHistoricalSchemaForCreateMigration(
   );
 }
 
+const NO_BASELINE =
+  "No schema snapshot in migrations/snapshots to diff against. Run `jazz-tools migrations create` " +
+  "without --fromHash/--toHash on the schema.ts your backend runs to snapshot it as the first " +
+  "version. With Jazz Cloud (`remote()`), --server-url and --admin-secret use the schema of the " +
+  "app's latest bundle instead.";
+
 async function loadMigrationBaseline(
   options: CreateMigrationOptions,
   storage: MigrationStorage,
@@ -872,9 +963,7 @@ async function loadMigrationBaseline(
   const local = await loadLatestCommittedSnapshot(storage);
   if (local) return local;
   if (!options.serverUrl) {
-    throw new Error(
-      "No local schema snapshot found. Pass --server-url and --admin-secret to use the schema of the server's latest bundle as the migration baseline.",
-    );
+    throw new Error(NO_BASELINE);
   }
   const appId = requireAppId(options.appId);
   const adminSecret = requireServerValue(options.adminSecret, "adminSecret");
@@ -932,6 +1021,21 @@ async function createMigrationUnlocked(
       : currentSchema!;
     shouldWriteCommittedSnapshot = !options.toHash;
   } else {
+    if (!options.serverUrl && !(await loadLatestCommittedSnapshot(storage))) {
+      // The project's first snapshot: there is nothing to diff against yet.
+      const publication = await committedSnapshotPublication(
+        storage,
+        currentSchema!,
+        await nextCommittedSnapshotTimestamp(storage),
+      );
+      if (!publication) throw new Error(NO_BASELINE);
+      await publishMigrationFilesRecoverably(storage, [publication]);
+      return {
+        status: "initial-snapshot",
+        hash: currentSchema!.hash,
+        snapshotPath: publication.finalPath,
+      };
+    }
     fromSchema = await loadMigrationBaseline(options, storage);
     toSchema = currentSchema!;
     shouldWriteCommittedSnapshot = true;
@@ -1177,7 +1281,15 @@ export async function createMigration(
 ): Promise<CreateMigrationResult> {
   const storage = new MigrationStorage(options.migrationsDir);
   await storage.initialize();
-  return withMigrationDirectoryLock(storage, async () => createMigrationUnlocked(options, storage));
+  const result = await withMigrationDirectoryLock(storage, async () =>
+    createMigrationUnlocked(options, storage),
+  );
+  // The app ships migrations/index.ts: what this wrote belongs in it now,
+  // not only after the next `validate`.
+  if (result.status !== "unchanged" && (await hasRootSchema(options.schemaDir))) {
+    await writeLocalClientMigrations(options.schemaDir, options.migrationsDir);
+  }
+  return result;
 }
 
 function isDefinedMigration(value: unknown): value is DefinedMigration {
@@ -1530,13 +1642,25 @@ function isMigrationFile(fileName: string): boolean {
   return fileName.endsWith(".ts") && fileName !== CLIENT_MIGRATIONS_FILE;
 }
 
+type MigrationEdge = { fromHash: string; toHash: string; migration: DefinedMigration };
+
 /** Write the app's schema versions and the migrations between them. */
 async function writeClientMigrations(
   schemaFile: string,
   schemas: ReadonlyMap<string, WasmSchema>,
-  edges: ReadonlyArray<{ fromHash: string; toHash: string; migration: DefinedMigration }>,
+  edges: ReadonlyArray<MigrationEdge>,
 ): Promise<void> {
   if (!(await importsClientMigrations(schemaFile))) return;
+  const path = clientMigrationsPath(schemaFile);
+  await assertNoSymlinkComponents(dirname(path), true);
+  await writeClientMigrationsModule(path, clientMigrationsJson(schemas, edges));
+}
+
+/** The app's schema versions and migrations as JSON, as it ships them to clients. */
+function clientMigrationsJson(
+  schemas: ReadonlyMap<string, WasmSchema>,
+  edges: ReadonlyArray<MigrationEdge>,
+): string {
   const bundle = {
     // As a deployment sends them (`{ tables }`), which the bindings decode.
     schemas: [...schemas]
@@ -1551,9 +1675,7 @@ async function writeClientMigrations(
       forward: serializeForwardLenses(edge.migration.forward),
     })),
   };
-  const path = clientMigrationsPath(schemaFile);
-  await assertNoSymlinkComponents(dirname(path), true);
-  await writeClientMigrationsModule(path, JSON.stringify(bundle, runtimeSchemaJsonReplacer, 2));
+  return JSON.stringify(bundle, runtimeSchemaJsonReplacer, 2);
 }
 
 /** Where `validate` moves migrations that predate SHA-256 schema hashes. */
@@ -1571,6 +1693,20 @@ interface LegacyPlan {
   migrations: string[];
   /** Snapshots named by their BLAKE3 hash, to name by their SHA-256 one. */
   snapshots: { from: string; to: string }[];
+  /**
+   * Snapshots to move to `legacy/snapshots/`: once the legacy migrations
+   * are gone, a snapshot no remaining migration reaches is a second root of
+   * the history, which the app refuses ("disconnected roots"). The one for
+   * schema.ts stays; with none for it, the newest stays, so `migrations
+   * create` can still start from the schema the app's data was written in.
+   */
+  retired: string[];
+  /**
+   * The snapshot kept when none is for schema.ts and none is reached by a
+   * remaining migration: the newest, which `migrations create` must lead
+   * from to schema.ts before the app starts.
+   */
+  startFrom?: string;
 }
 
 /**
@@ -1594,7 +1730,7 @@ async function planLegacyMigrations(
   migrationsDir: string,
   currentSchema: WasmSchema,
 ): Promise<LegacyPlan> {
-  const plan: LegacyPlan = { migrations: [], snapshots: [] };
+  const plan: LegacyPlan = { migrations: [], snapshots: [], retired: [] };
   if (!(await pathExists(migrationsDir))) return plan;
   await assertNoSymlinkComponents(migrationsDir);
   const snapshots = await new MigrationStorage(migrationsDir).listSnapshots();
@@ -1640,7 +1776,52 @@ async function planLegacyMigrations(
     }
     if (legacy(named.from) || legacy(named.to)) plan.migrations.push(fileName);
   }
+  if (plan.migrations.length > 0 || plan.snapshots.length > 0) {
+    await retireUnreachedSnapshots(plan, migrationsDir, snapshots, currentSchema);
+  }
   return plan;
+}
+
+/** Plan the snapshots of a project being retired that nothing reaches (see
+ * [`LegacyPlan.retired`]). */
+async function retireUnreachedSnapshots(
+  plan: LegacyPlan,
+  migrationsDir: string,
+  snapshots: SnapshotEntry[],
+  currentSchema: WasmSchema,
+): Promise<void> {
+  const current = await computeSchemaHash(currentSchema);
+  const reached = new Set<string>();
+  const moving = new Set(plan.migrations);
+  for (const fileName of (await readdir(migrationsDir)).filter(isMigrationFile)) {
+    if (moving.has(fileName)) continue;
+    try {
+      const { from, to } = migrationHashesFromFileName(fileName);
+      reached.add(from.toLowerCase());
+      reached.add(to.toLowerCase());
+    } catch {
+      continue;
+    }
+  }
+  const isReached = (hash: string) =>
+    hash === current || [...reached].some((prefix) => hash.startsWith(prefix));
+  let unreached = snapshots.filter(({ hash }) => !isReached(hash));
+  if (!snapshots.some(({ hash }) => isReached(hash))) {
+    // Committed snapshot names start with their timestamp: the last is the
+    // newest, as `loadLatestCommittedSnapshot` picks it.
+    const newest = unreached
+      .filter(({ fileName }) => isCommittedSnapshotFileName(fileName))
+      .sort((a, b) => a.fileName.localeCompare(b.fileName))
+      .pop();
+    if (newest) {
+      unreached = unreached.filter((snapshot) => snapshot !== newest);
+      const renamed = plan.snapshots.find(({ from }) => from === newest.filePath);
+      plan.startFrom = basename(renamed?.to ?? newest.filePath);
+    }
+  }
+  const retired = new Set(unreached.map(({ filePath }) => filePath));
+  plan.snapshots = plan.snapshots.filter(({ from }) => !retired.has(from));
+  plan.retired = [...retired].sort();
 }
 
 async function sameBytes(left: string, right: string): Promise<boolean> {
@@ -1679,11 +1860,29 @@ async function retireLegacyMigrations(
       }
       kept.add(move.fileName);
     }
-    const warnings: string[] = [];
-    if (moves.length > 0) {
+    const legacySnapshots = join(legacyDir, "snapshots");
+    const snapshotMoves = plan.retired.map((from) => ({
+      fileName: basename(from),
+      from,
+      to: join(legacySnapshots, basename(from)),
+    }));
+    for (const move of snapshotMoves) {
+      if ((await pathExists(move.to)) && !(await sameBytes(move.from, move.to))) {
+        throw new Error(
+          `Cannot move snapshot ${move.fileName} to ${LEGACY_MIGRATIONS_DIR}/snapshots/: a different ${LEGACY_MIGRATIONS_DIR}/snapshots/${move.fileName} is already there. Compare the two, keep the one you want there and delete the other, then run validate again.`,
+        );
+      }
+    }
+    if (moves.length > 0 || snapshotMoves.length > 0) {
       await mkdir(legacyDir, { recursive: true });
       await assertNoSymlinkComponents(legacyDir);
     }
+    if (snapshotMoves.length > 0) {
+      await mkdir(legacySnapshots, { recursive: true });
+      await assertNoSymlinkComponents(legacySnapshots);
+    }
+    const runsOn = plan.startFrom ? "" : " The app runs on schema.ts as it is.";
+    const warnings: string[] = [];
     for (const move of moves) {
       if (kept.has(move.fileName)) {
         await rm(move.from);
@@ -1693,9 +1892,19 @@ async function retireLegacyMigrations(
       } else {
         await rename(move.from, move.to);
         warnings.push(
-          `Moved ${move.fileName} to ${LEGACY_MIGRATIONS_DIR}/: it ${LEGACY_REASON}, so it no longer applies. The app runs on schema.ts as it is. Delete ${LEGACY_MIGRATIONS_DIR}/ once you no longer need it, or exclude it from type checking.`,
+          `Moved ${move.fileName} to ${LEGACY_MIGRATIONS_DIR}/: it ${LEGACY_REASON}, so it no longer applies.${runsOn} Delete ${LEGACY_MIGRATIONS_DIR}/ once you no longer need it, or exclude it from type checking.`,
         );
       }
+    }
+    for (const move of snapshotMoves) {
+      if (await pathExists(move.to)) {
+        await rm(move.from);
+      } else {
+        await rename(move.from, move.to);
+      }
+      warnings.push(
+        `Moved snapshot ${move.fileName} to ${LEGACY_MIGRATIONS_DIR}/snapshots/: no remaining migration reaches it, so it would be a second root of the history.`,
+      );
     }
     for (const snapshot of plan.snapshots) {
       const from = basename(snapshot.from);
@@ -1712,6 +1921,11 @@ async function retireLegacyMigrations(
           `Renamed snapshot ${from} to ${to}: snapshots are named by their SHA-256 schema hash since alpha.60.`,
         );
       }
+    }
+    if (plan.startFrom) {
+      warnings.push(
+        `Run \`jazz-tools migrations create\` before the app starts: no snapshot is for schema.ts, so the app needs a migration from ${plan.startFrom}, the newest snapshot.`,
+      );
     }
     return warnings;
   });
@@ -1741,11 +1955,14 @@ async function checkLegacyMigrations(
   const plan = await planLegacyMigrations(migrationsDir, currentSchema);
   const pending = [
     ...plan.migrations.map((fileName) => `move ${fileName} to ${LEGACY_MIGRATIONS_DIR}/`),
+    ...plan.retired.map(
+      (from) => `move snapshot ${basename(from)} to ${LEGACY_MIGRATIONS_DIR}/snapshots/`,
+    ),
     ...plan.snapshots.map(({ from, to }) => `rename snapshot ${basename(from)} to ${basename(to)}`),
   ];
   if (pending.length === 0) return;
   throw new Error(
-    `This project still uses the schema hashes Jazz used before alpha.60. Run \`jazz-tools validate\` to ${pending.join("; ")}.`,
+    `This project still uses the schema hashes Jazz used before alpha.60. Run \`jazz-tools validate\` to ${pending.join("; ")}.${plan.startFrom ? ` Then run \`jazz-tools migrations create\`: no snapshot is for schema.ts, so the app needs a migration from ${plan.startFrom}.` : ""}`,
   );
 }
 
@@ -1756,9 +1973,38 @@ async function checkLegacyMigrations(
 async function writeLocalClientMigrations(schemaDir: string, migrationsDir: string): Promise<void> {
   const compiled = await loadCompiledSchema(schemaDir);
   if (!(await importsClientMigrations(compiled.schemaFile))) return;
+  const { schemas, edges } = await localClientMigrations(compiled.wasmSchema, migrationsDir);
+  await writeClientMigrations(compiled.schemaFile, schemas, edges);
+}
+
+/**
+ * Check the project's migrations up to `schema` as a deploy of them to a
+ * new authority would, so validate refuses what deploy would refuse.
+ */
+async function checkLocalMigrations(schema: WasmSchema, migrationsDir: string): Promise<void> {
+  const { current, schemas, edges } = await localClientMigrations(schema, migrationsDir);
+  if (schemas.size < 2) return;
+  if (typeof process === "undefined" || !process.versions?.node) return;
+  const { checkClientMigrations } = await import("jazz-napi");
+  try {
+    checkClientMigrations(clientMigrationsJson(schemas, edges), current);
+  } catch (error) {
+    throw new Error(
+      `The migrations in ${basename(migrationsDir)} would not deploy: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+}
+
+/** The snapshots and migration files in `migrationsDir`, leading to `schema`. */
+async function localClientMigrations(
+  schema: WasmSchema,
+  migrationsDir: string,
+): Promise<{ current: string; schemas: Map<string, WasmSchema>; edges: MigrationEdge[] }> {
   const current = {
-    hash: await computeSchemaHash(compiled.wasmSchema),
-    schema: compiled.wasmSchema,
+    hash: await computeSchemaHash(schema),
+    schema,
   };
   const schemas = new Map<string, WasmSchema>(
     (await new MigrationStorage(migrationsDir).listSnapshots()).map(({ hash, schema }) => [
@@ -1767,8 +2013,9 @@ async function writeLocalClientMigrations(schemaDir: string, migrationsDir: stri
     ]),
   );
   schemas.set(current.hash, current.schema);
-  const edges = [];
-  if (await pathExists(migrationsDir)) {
+  const edges: MigrationEdge[] = [];
+  // A migration joins two known versions: with one, none can, so none is loaded.
+  if (schemas.size > 1 && (await pathExists(migrationsDir))) {
     await assertNoSymlinkComponents(migrationsDir);
     for (const fileName of (await readdir(migrationsDir)).filter(isMigrationFile).sort()) {
       const migration = await loadDefinedMigration(join(migrationsDir, fileName));
@@ -1788,5 +2035,5 @@ async function writeLocalClientMigrations(schemaDir: string, migrationsDir: stri
       if (fromHash && toHash) edges.push({ fromHash, toHash, migration });
     }
   }
-  await writeClientMigrations(compiled.schemaFile, schemas, edges);
+  return { current: current.hash, schemas, edges };
 }

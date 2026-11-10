@@ -2,6 +2,8 @@ import { signChallenge } from "../local-first-auth/index.js";
 import { parseAuthSecret } from "../runtime/auth-secret-codec.js";
 import {
   AccountAuthError,
+  LINK_GUEST_KEY_MISSING_MESSAGE,
+  LINK_NEEDS_GUEST_MESSAGE,
   requestBackendLinkChallenge,
   requestBackendSignIn,
   readAccountAssignment,
@@ -15,6 +17,14 @@ import {
   type AccountIdentity,
   type AccountSelectionDurability,
 } from "./state.js";
+
+/**
+ * The backend refuses a link for good when the signed-in user already has an
+ * account of their own (most often: they signed up on another device), or
+ * when this guest's key was retired or is another app's.
+ */
+const LINK_REFUSED_MESSAGE =
+  "link_refused: the backend won't link this guest to the signed-in user, most likely because they already have an account (from another device). Call loginWithBackend() to open their account instead. The guest stays signed in on this device until then, and linking never moves its data into an existing account.";
 
 /** @internal A local-first account's self-minted token, or its refresh callback. */
 export type JWTAuth = string | { getToken(): Promise<string> };
@@ -203,6 +213,30 @@ export function accountRegistry(handle: AccountHandle): string {
   return material.registry;
 }
 
+/**
+ * @internal What a device remembers of the user its backend signed in, so a
+ * reload reopens their account (offline too) instead of starting over. The
+ * shape of the backend's sign-in answer: the account, identity and claims,
+ * never a credential. The backend still states the identity on every
+ * connection.
+ */
+export interface RememberedBackendUser {
+  readonly account: string;
+  readonly identity: AccountIdentity;
+  readonly claims: Readonly<Record<string, unknown>>;
+}
+
+/** @internal The remembered form of a user the backend signed in, or undefined for any other account. */
+export function rememberBackendUser(handle: AccountHandle): RememberedBackendUser | undefined {
+  const material = credentials.get(handle);
+  if (!material?.delegated) return undefined;
+  return {
+    account: handle.id,
+    identity: { issuer: handle.identity.issuer, subject: handle.identity.subject },
+    claims: { ...material.delegated.claims },
+  };
+}
+
 /** @internal Public host factories prepare native crypto and persistence first. */
 export function createAccountManagerWithRuntime(options: {
   /** Exact application-scoped HTTP URL ending in /accounts. */
@@ -210,6 +244,8 @@ export function createAccountManagerWithRuntime(options: {
   localFirst: LocalFirstAccountFactory;
   backend?: BackendAccountHost;
   restoredLocalFirstSecret?: string;
+  /** The backend user this device last had selected (see `RememberedBackendUser`). */
+  restoredBackendUser?: RememberedBackendUser;
   selectionDurability?: AccountSelectionDurability;
   fetch?: typeof fetch;
   /** Sent as `Authorization: Bearer` on sign-in requests to the app's backend. */
@@ -242,6 +278,8 @@ export function createAccountManagerWithRuntime(options: {
       : options.localFirst.restore?.(options.restoredLocalFirstSecret);
   if (options.restoredLocalFirstSecret !== undefined && !restored)
     throw new AccountAuthError("local_first_restore_unavailable");
+  if (options.restoredLocalFirstSecret !== undefined && options.restoredBackendUser !== undefined)
+    throw new AccountAuthError("ambiguous_restored_account");
   return new AccountManager(
     {
       logout() {
@@ -301,10 +339,18 @@ export function createAccountManagerWithRuntime(options: {
         // for the signed-in user, never with its sync token: a proof links
         // once, and only to that user.
         if (account.identity.issuer !== "urn:jazz:local-first")
-          throw new AccountAuthError("local_first_account_required");
+          throw new AccountAuthError(
+            "local_first_account_required",
+            undefined,
+            LINK_NEEDS_GUEST_MESSAGE,
+          );
         const material = credentials.get(account);
         if (!material || material.registry !== registry || !material.localFirstSecret)
-          throw new AccountAuthError("local_first_account_required");
+          throw new AccountAuthError(
+            "local_first_account_required",
+            undefined,
+            LINK_GUEST_KEY_MISSING_MESSAGE,
+          );
         const secret = material.localFirstSecret;
         // The namespace the guest's account was founded in (its token's
         // audience: the app id, or the endpoint for an app-less client), so
@@ -322,6 +368,10 @@ export function createAccountManagerWithRuntime(options: {
               proof: signChallenge(secret, challenge),
               ...(typeof audience === "string" ? { audience } : {}),
             },
+          }).catch((error: unknown) => {
+            if (error instanceof AccountAuthError && error.code === "link_refused")
+              throw new AccountAuthError(error.code, error.status, LINK_REFUSED_MESSAGE);
+            throw error;
           });
         });
         if (linked.id !== account.id) throw new AccountAuthError("linked_account_mismatch");
@@ -338,7 +388,9 @@ export function createAccountManagerWithRuntime(options: {
             options.restoredLocalFirstSecret,
           ),
         )
-      : undefined,
+      : options.restoredBackendUser
+        ? delegatedHandle(options.restoredBackendUser)
+        : undefined,
     options.selectionDurability,
   );
 
@@ -346,6 +398,11 @@ export function createAccountManagerWithRuntime(options: {
     const started = epoch;
     const value = await signIn();
     assertCurrent(started);
+    return delegatedHandle(value);
+  }
+
+  /** A handle for a user the backend signed in, from its answer (or a remembered one). */
+  function delegatedHandle(value: unknown): AccountHandle {
     const { identity, claims } = (value ?? {}) as {
       identity?: AccountIdentity;
       claims?: unknown;

@@ -25,22 +25,20 @@ export default s.definePermissions(app, ({ policy, session, allowedTo, anyOf, al
   // this demo so every console can observe stock and queues; reading the
   // manager-only metadata row is too, so the switcher can list warehouses.
   policy.warehouses.allowRead.always();
-  policy.warehouses.allowInsert.where({ operator_id: session.user.account });
+  policy.warehouses.allowInsert.where({ operator_id: session.user });
   // Update authority belongs to the current manager. The manager either keeps
   // the warehouse or hands it over to someone already staffed on it; after a
   // handover the former manager is immediately revoked, operational rows
   // included. (`whereOld` alone would apply the same condition to the new row.)
-  policy.warehouses.allowUpdate
-    .whereOld({ operator_id: session.user.account })
-    .whereNew((warehouse) =>
-      anyOf([
-        { operator_id: session.user.account },
-        policy.warehouse_operators.exists.where({
-          warehouse_id: warehouse.id,
-          account_id: warehouse.operator_id,
-        }),
-      ]),
-    );
+  policy.warehouses.allowUpdate.whereOld({ operator_id: session.user }).whereNew((warehouse) =>
+    anyOf([
+      { operator_id: session.user },
+      policy.warehouse_operators.exists.where({
+        warehouse_id: warehouse.id,
+        account_id: warehouse.operator_id,
+      }),
+    ]),
+  );
 
   // Staffing: the manager (or the trusted server bootstrap, which has backend
   // authority) adds operators. An operator may leave; nobody edits a row.
@@ -48,7 +46,7 @@ export default s.definePermissions(app, ({ policy, session, allowedTo, anyOf, al
   policy.warehouse_operators.allowInsert.where(allowedTo.update("warehouse"));
   policy.warehouse_operators.allowUpdate.never();
   policy.warehouse_operators.allowDelete.where(
-    anyOf([allowedTo.update("warehouse"), { account_id: session.user.account }]),
+    anyOf([allowedTo.update("warehouse"), { account_id: session.user }]),
   );
 
   /**
@@ -61,7 +59,7 @@ export default s.definePermissions(app, ({ policy, session, allowedTo, anyOf, al
       allowedTo.update("warehouse"),
       policy.warehouse_operators.exists.where({
         warehouse_id: row.warehouse_id,
-        account_id: session.user.account,
+        account_id: session.user,
       }),
     ]);
 
@@ -118,11 +116,11 @@ export default s.definePermissions(app, ({ policy, session, allowedTo, anyOf, al
   policy.orders.allowDelete.where((order) => operates(order));
 
   policy.items.allowRead.always();
-  policy.items.allowInsert.where({ operator_id: session.user.account });
+  policy.items.allowInsert.where({ operator_id: session.user });
   policy.items.allowUpdate
-    .whereOld({ operator_id: session.user.account })
-    .whereNew({ operator_id: session.user.account });
-  policy.items.allowDelete.where({ operator_id: session.user.account });
+    .whereOld({ operator_id: session.user })
+    .whereNew({ operator_id: session.user });
+  policy.items.allowDelete.where({ operator_id: session.user });
 
   // A line belongs to an order of the same warehouse and names an item that
   // warehouse stocks.

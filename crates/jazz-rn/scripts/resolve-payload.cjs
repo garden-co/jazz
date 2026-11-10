@@ -18,10 +18,13 @@ function resolvePayload(platform, wrapperRoot = join(__dirname, "..")) {
       ? declared.slice(previewPrefix.length)
       : "";
   const preview = /^[a-f0-9]{40}$/.test(previewCommit);
+  // Release-candidate tarballs are GitHub release assets, not npm packages;
+  // dev/artifacts/rc-tarballs.mjs links each one to its sibling asset's URL.
+  const releaseAsset = `https://github.com/garden-co/jazz/releases/download/v${wrapper.version}/${name}-${wrapper.version}.tgz`;
   if (
     metadata.name !== name ||
     metadata.version !== wrapper.version ||
-    (![wrapper.version, "workspace:*"].includes(declared) && !preview)
+    (![wrapper.version, "workspace:*", releaseAsset].includes(declared) && !preview)
   )
     throw new Error(`RN payload ${name} must match jazz-rn ${wrapper.version}`);
   if (metadata.os || metadata.cpu || metadata.optionalDependencies || metadata.codegenConfig)

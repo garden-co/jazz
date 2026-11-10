@@ -14,10 +14,20 @@ name: alpha59-alpha60 exporter
 # exporter or importer assets. The assets stay on that release, and are never replaced
 # once it is published.
 on:
+  # "Release candidate" calls it for its prerelease.
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      ref:
+        required: false
+        type: string
+        default: ""
   workflow_dispatch:
     inputs:
       version:
-        description: "Release to attach the exporter and importer to, e.g. 2.0.0-alpha.60 (tag v<version>). It must still be a draft."
+        description: "Release to attach the exporter and importer to, e.g. 2.0.0-alpha.60 or 2.0.0-alpha.60-rc.1 (tag v<version>). It must still be a draft."
         required: true
         type: string
       ref:
@@ -57,8 +67,11 @@ jobs:
     steps:
       - name: Validate inputs
         run: |
-          if ! [[ "${VERSION}" =~ ^2\.0\.0-alpha\.[0-9]+$ ]]; then
-            echo "::error::version must look like 2.0.0-alpha.N, got '${VERSION}'"
+          # A release candidate (2.0.0-alpha.N-rc.M, a prerelease the
+          # "Release candidate" workflow makes) lets hosts try the upgrade
+          # before 2.0.0-alpha.N ships.
+          if ! [[ "${VERSION}" =~ ^2\.0\.0-alpha\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
+            echo "::error::version must look like 2.0.0-alpha.N or 2.0.0-alpha.N-rc.M, got '${VERSION}'"
             exit 1
           fi
 
@@ -92,6 +105,7 @@ jobs:
           cat usage.txt
           test "$status" = 2
           grep -q "usage: jazz-alpha59-alpha60-export" usage.txt
+          .a59/target/release/jazz-alpha59-alpha60-export --help | grep -q "usage: jazz-alpha59-alpha60-export"
 
       - name: Build the importer
         run: cargo build --release -p jazz-cli --bin jazz-alpha59-alpha60-import
@@ -105,6 +119,7 @@ jobs:
           cat usage.txt
           test "$status" = 2
           grep -q "usage: jazz-alpha59-alpha60-import" usage.txt
+          target/release/jazz-alpha59-alpha60-import import --help | grep -q "usage: jazz-alpha59-alpha60-import"
 
       - name: Stage
         env:

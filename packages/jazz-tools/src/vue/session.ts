@@ -15,6 +15,10 @@ import type { JazzClient } from "../web/create-jazz-client.js";
 import type { JazzSession, JazzSessionActions, JazzSessionSnapshot } from "../session/state.js";
 import { attachJazzSessionConsumer } from "../session/consumer.js";
 import { JazzClientProvider } from "./provider.js";
+import {
+  refuseAutoAttachDevTools,
+  type NoAutoAttachDevTools,
+} from "../runtime/removed-provider-props.js";
 
 const SessionKey: InjectionKey<JazzSession<JazzClient>> = Symbol("JazzSession");
 export type UseJazzSession = JazzSessionActions & {
@@ -32,18 +36,17 @@ export function useJazzSession(session = inject(SessionKey)): UseJazzSession {
   );
   return { ...session, snapshot: shallowReadonly(snapshot) };
 }
-export interface JazzSessionProviderProps {
+export interface JazzSessionProviderProps extends NoAutoAttachDevTools {
   session: JazzSession<JazzClient>;
-  autoAttachDevTools?: boolean;
 }
 /** Provides a caller-owned session to both active children and the fallback slot. */
 export const JazzSessionProvider = defineComponent({
   name: "JazzSessionProvider",
   props: {
     session: { type: Object as PropType<JazzSession<JazzClient>>, required: true },
-    autoAttachDevTools: { type: Boolean, default: true },
   },
-  setup(props, { slots }) {
+  setup(props, { slots, attrs }) {
+    refuseAutoAttachDevTools("JazzSessionProvider", attrs);
     const session = props.session;
     provide(SessionKey, session);
     const snapshot = shallowRef(session.getSnapshot());
@@ -62,7 +65,7 @@ export const JazzSessionProvider = defineComponent({
       snapshot.value.client
         ? h(
             JazzClientProvider,
-            { client: snapshot.value.client, autoAttachDevTools: props.autoAttachDevTools },
+            { client: snapshot.value.client },
             { default: slots.default, fallback: slots.fallback },
           )
         : (slots.fallback?.() ?? null);

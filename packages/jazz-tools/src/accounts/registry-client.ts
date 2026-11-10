@@ -7,11 +7,28 @@ export class AccountAuthError extends Error {
     readonly code: string,
     /** The registry's HTTP status when it answered with an error. */
     readonly status?: number,
+    /** What the app can do about it, when the code alone doesn't say. */
+    message: string = code,
   ) {
-    super(code);
+    super(message);
     this.name = "AccountAuthError";
   }
 }
+
+/**
+ * `linkWithBackend()` was called without a guest to link: the session is
+ * signed out, or its account isn't a guest (it came from your backend or
+ * another sign-in).
+ */
+export const LINK_NEEDS_GUEST_MESSAGE =
+  "local_first_account_required: linkWithBackend() links this device's guest (local-first) account to the user your backend signed in, and there is no guest to link: the session is signed out, or its account isn't a guest (it came from your backend or another sign-in). Call loginWithBackend() to open the backend user's account instead. To keep what a guest wrote, link while that guest is signed in.";
+
+/**
+ * `linkWithBackend()` was called with a guest whose key this client no longer
+ * holds: it signed out meanwhile, or the handle comes from another client.
+ */
+export const LINK_GUEST_KEY_MISSING_MESSAGE =
+  "local_first_account_required: this guest's key isn't held by this client any more (the guest signed out, or its account handle comes from another Jazz client), so it can't prove itself to link. Link from the client where the guest is signed in, or call loginWithBackend() instead.";
 
 /**
  * The app's backend vouches to the core's registry for an identity it
@@ -113,8 +130,11 @@ async function backendRequest(
       method: "POST",
       credentials: "same-origin",
       redirect: "error",
-      headers: { "Content-Type": "application/json" },
-      body: body === undefined ? undefined : JSON.stringify(body),
+      // No body, no content type: a host's JSON parser (Fastify's, Express's)
+      // refuses or swallows an empty "JSON" body.
+      ...(body === undefined
+        ? {}
+        : { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }),
     });
     if (!response.ok) {
       const code = await response.text();

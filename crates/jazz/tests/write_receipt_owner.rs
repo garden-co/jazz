@@ -62,7 +62,7 @@ fn insert(binding: &Binding, value: &str) -> Write {
 
 fn assert_foreign(binding: &Binding, write: &Write) {
     for tier in ["global", "local", "none"] {
-        match binding.wait_for_write(write, tier) {
+        match binding.wait_for_write(write, tier, None) {
             Err(HostError::Argument(message)) => {
                 assert_eq!(message, "write belongs to a different database node");
             }
@@ -85,7 +85,7 @@ fn a_matching_sequence_on_another_node_cannot_settle_a_write() {
     let bob_write = insert(&bob, "bob");
     assert_eq!(alice_write.seq, bob_write.seq);
     for (binding, write) in [(&alice, &alice_write), (&bob, &bob_write)] {
-        block_on(binding.wait_for_write(write, "global").unwrap()).unwrap();
+        block_on(binding.wait_for_write(write, "global", None).unwrap()).unwrap();
     }
     assert_foreign(&bob, &alice_write);
     assert_foreign(&alice, &bob_write);
@@ -110,7 +110,7 @@ fn rejected_receipts_keep_their_owner_and_original_rejection() {
         .rejected
         .as_ref()
         .expect("restoring a live row is rejected");
-    let error = block_on(alice.wait_for_write(&rejected, "local").unwrap()).unwrap_err();
+    let error = block_on(alice.wait_for_write(&rejected, "local", None).unwrap()).unwrap_err();
     match error {
         HostError::Engine(error) => {
             assert_eq!(error.code, expected.code);
@@ -133,11 +133,11 @@ fn the_original_node_can_wait_through_a_schema_view_and_after_reopen() {
         let view = block_on(alice.db.register_schema_view(schema())).unwrap();
         let sibling = Binding::new(view, identity(1), true);
         let cloned = receipt.clone();
-        block_on(sibling.wait_for_write(&cloned, "global").unwrap()).unwrap();
+        block_on(sibling.wait_for_write(&cloned, "global", None).unwrap()).unwrap();
         receipt
     };
     let reopened = open(1, Some(&path));
-    block_on(reopened.wait_for_write(&receipt, "global").unwrap()).unwrap();
+    block_on(reopened.wait_for_write(&receipt, "global", None).unwrap()).unwrap();
     let query = reopened.db.prepare_query(&Query::from("notes")).unwrap();
     let rows = reopened.db.read(&query).unwrap();
     assert_eq!(rows.len(), 1);
@@ -145,4 +145,43 @@ fn the_original_node_can_wait_through_a_schema_view_and_after_reopen() {
         rows[0].cell("title"),
         Some(Value::String("retained".into()))
     );
+}
+
+/// A wait given the write's claim claims reporting its rejection as it
+/// starts when it will report it: for a write already refused here (any
+/// tier) and at `global`, which hears the authority's verdict. A `local`
+/// wait on a write in flight claims nothing as it starts, so a refusal
+/// that arrives after it resolved still reaches the listener. An
+/// observing wait claims nothing.
+#[test]
+fn a_wait_claims_a_rejection_only_when_it_reports_it() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    let alice = open(1, None);
+    let live = insert(&alice, "live");
+    let refused = alice
+        .restore(
+            "notes",
+            &live.row_id.to_bytes(),
+            Some(&title("again")),
+            &serde_json::Value::Null,
+        )
+        .unwrap();
+    assert!(refused.rejected.is_some());
+    let claimed = |write: &Write, tier: &str, observe: bool| {
+        let claim = Rc::new(Cell::new(false));
+        let wait = alice
+            .wait_for_write(write, tier, (!observe).then(|| Rc::clone(&claim)))
+            .unwrap();
+        let started = claim.get();
+        let _ = block_on(wait);
+        (started, claim.get())
+    };
+    for tier in ["none", "local", "global"] {
+        assert_eq!(claimed(&refused, tier, false), (true, true), "{tier}");
+        assert_eq!(claimed(&refused, tier, true), (false, false), "{tier}");
+    }
+    assert_eq!(claimed(&live, "none", false), (false, false));
+    assert_eq!(claimed(&live, "local", false), (false, false));
+    assert_eq!(claimed(&live, "global", false), (true, true));
 }

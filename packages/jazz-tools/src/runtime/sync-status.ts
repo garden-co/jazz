@@ -1,3 +1,12 @@
+/** Why a {@link LinkStatus} is `offline`. */
+export type OfflineReason =
+  | "disconnected"
+  | "network"
+  | "auth"
+  | "stopped"
+  | "authority-changed"
+  | "held-by-another-tab";
+
 /**
  * The upstream connection as an app should show it.
  *
@@ -14,6 +23,18 @@
  *     backend).
  *   - `stopped`: a failure retrying cannot fix (a protocol error or an
  *     incompatible server); only `db.reconnect()` tries again.
+ *   - `authority-changed`: the server serves another history than this
+ *     client's local store (its store was recreated, or it is another app's
+ *     server), so nothing syncs with it. Waits for the server fail with an
+ *     `AuthorityChangedError`, which says how to recover: reset the local
+ *     store (`db.deleteClientStorage()` in the browser). Nothing is reset
+ *     automatically, so unsynced writes are never discarded behind the
+ *     app's back.
+ *   - `held-by-another-tab` (browser): another tab holds this account's
+ *     local store under another sign-in (it was still the guest when this
+ *     tab signed up) and has not let go for a while. The tab keeps trying
+ *     (`retrying: true`) and joins once the other tab follows or closes;
+ *     waits fail meanwhile with a `StoreHeldByAnotherTabError`.
  */
 export type LinkStatus =
   | { state: "local-only" }
@@ -21,7 +42,7 @@ export type LinkStatus =
   | { state: "connected" }
   | {
       state: "offline";
-      reason: "disconnected" | "network" | "auth" | "stopped";
+      reason: OfflineReason;
       retrying: boolean;
     };
 
@@ -38,10 +59,106 @@ export interface SyncStatus {
    */
   pendingUploads: number;
   /**
+   * When the oldest of {@link pendingUploads} was committed, in Unix ms, or
+   * null when none waits. How long a write has been stuck is
+   * `Date.now() - oldestPendingAt`.
+   */
+  oldestPendingAt: number | null;
+  /**
+   * This client's transactions the server rejected since the Db opened.
+   * Each is also reported through `db.onMutationError`, or to the write
+   * whose `wait()` claimed it.
+   */
+  rejected: number;
+  /**
+   * The latest thing that went wrong with sync since the Db opened, and
+   * when: a rejected transaction, or the link failing. It stays after the
+   * link recovers (`link` says how things are now), so an agent or a
+   * debugging person can see what happened and when.
+   */
+  lastError: SyncError | null;
+  /**
    * Nothing waits for upload and the link is connected, or no server is
    * configured.
    */
   synced: boolean;
+}
+
+/** What went wrong, as {@link SyncStatus.lastError} reports it. */
+export type SyncError =
+  | {
+      /** The server rejected a transaction this client committed. */
+      kind: "rejected";
+      /** The public error code, such as `permission_denied`. */
+      code: string;
+      message: string;
+      /** When the rejection arrived, in Unix ms. */
+      at: number;
+    }
+  | LinkFailure;
+
+/** The link failing, as {@link SyncError} reports it. */
+export interface LinkFailure {
+  /** Why, as an offline {@link LinkStatus} names it. */
+  kind: Exclude<OfflineReason, "disconnected">;
+  message: string;
+  /** When the link failed this way, in Unix ms. */
+  at: number;
+}
+
+/** @internal A client's uploads, as the core reports them. */
+export interface UploadStatus {
+  pending: number;
+  oldestPendingAt: number | null;
+  rejected: number;
+  lastRejection: { code: string; message: string; at: number } | null;
+}
+
+/** @internal The upload status of a client that has uploaded nothing. */
+export const NO_UPLOADS: UploadStatus = Object.freeze({
+  pending: 0,
+  oldestPendingAt: null,
+  rejected: 0,
+  lastRejection: null,
+});
+
+/** @internal The upload status from a count alone (a host without the full status). */
+export function uploadStatusFromCount(pending: number): UploadStatus {
+  return { ...NO_UPLOADS, pending };
+}
+
+/** @internal The later of a rejection and a link failure. */
+export function latestSyncError(uploads: UploadStatus, link: LinkFailure | null): SyncError | null {
+  const rejection = uploads.lastRejection
+    ? ({ kind: "rejected", ...uploads.lastRejection } as const)
+    : null;
+  if (!rejection) return link;
+  if (!link) return rejection;
+  return link.at > rejection.at ? link : rejection;
+}
+
+/** @internal The failure an offline link reports, or null for a link that is not failing. */
+export function linkFailureOf(link: LinkStatus, message: string | undefined): LinkFailure | null {
+  if (link.state !== "offline" || link.reason === "disconnected") return null;
+  const said = {
+    network: "The server is unreachable; retrying.",
+    auth: "The server refused this client's credential.",
+    stopped: "The link stopped for good; only db.reconnect() tries again.",
+    "authority-changed": "The server serves another history than this client's local store.",
+    "held-by-another-tab": "Another tab holds this account's local store under another sign-in.",
+  }[link.reason];
+  return { kind: link.reason, message: message || said, at: Date.now() };
+}
+
+export function sameSyncError(a: SyncError | null, b: SyncError | null): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return (
+    a.kind === b.kind &&
+    a.at === b.at &&
+    a.message === b.message &&
+    (a.kind !== "rejected" || (b.kind === "rejected" && a.code === b.code))
+  );
 }
 
 /** @internal The upstream link machine's status, as the core reports it to its host. */
@@ -62,10 +179,7 @@ export const CONNECTING: LinkStatus = Object.freeze({ state: "connecting" });
 export const CONNECTED: LinkStatus = Object.freeze({ state: "connected" });
 
 /** @internal The app-facing status of an offline link. */
-export function offlineLink(
-  reason: "disconnected" | "network" | "auth" | "stopped",
-  retrying = reason === "network",
-): LinkStatus {
+export function offlineLink(reason: OfflineReason, retrying = reason === "network"): LinkStatus {
   return { state: "offline", reason, retrying };
 }
 
@@ -99,16 +213,40 @@ export function sameLinkStatus(a: LinkStatus, b: LinkStatus): boolean {
 }
 
 /** @internal Assemble a {@link SyncStatus}. */
-export function syncStatus(link: LinkStatus, pendingUploads: number): SyncStatus {
+export function syncStatus(
+  link: LinkStatus,
+  uploads: UploadStatus = NO_UPLOADS,
+  linkFailure: LinkFailure | null = null,
+): SyncStatus {
   return {
     link,
-    pendingUploads,
-    synced: pendingUploads === 0 && (link.state === "connected" || link.state === "local-only"),
+    pendingUploads: uploads.pending,
+    oldestPendingAt: uploads.pending === 0 ? null : uploads.oldestPendingAt,
+    rejected: uploads.rejected,
+    lastError: latestSyncError(uploads, linkFailure),
+    synced: uploads.pending === 0 && (link.state === "connected" || link.state === "local-only"),
   };
 }
 
 export function sameSyncStatus(a: SyncStatus, b: SyncStatus): boolean {
-  return a.pendingUploads === b.pendingUploads && sameLinkStatus(a.link, b.link);
+  return (
+    a.pendingUploads === b.pendingUploads &&
+    a.oldestPendingAt === b.oldestPendingAt &&
+    a.rejected === b.rejected &&
+    sameSyncError(a.lastError, b.lastError) &&
+    sameLinkStatus(a.link, b.link)
+  );
+}
+
+/** @internal Whether two upload statuses report the same. */
+export function sameUploadStatus(a: UploadStatus, b: UploadStatus): boolean {
+  return (
+    a.pending === b.pending &&
+    a.oldestPendingAt === b.oldestPendingAt &&
+    a.rejected === b.rejected &&
+    a.lastRejection?.at === b.lastRejection?.at &&
+    a.lastRejection?.code === b.lastRejection?.code
+  );
 }
 
 /**

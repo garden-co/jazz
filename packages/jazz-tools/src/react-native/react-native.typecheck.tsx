@@ -77,12 +77,14 @@ function Hooks({ children }: { children: ReactNode }) {
   client satisfies { db: Db; shutdown(): Promise<void> };
   session satisfies ReturnType<typeof useSession>;
   if (session) {
-    session.user.account satisfies string | null;
-    session.user.identity.subject satisfies string;
+    session.user satisfies string | null;
+    session.identity.subject satisfies string;
   }
   auth.secret satisfies string | null;
   todos satisfies ReturnType<typeof useAll<typeof app.todos._rowType>>;
-  suspenseTodos satisfies Array<{ id: string; title: string; done?: boolean | null }>;
+  suspenseTodos.data satisfies Array<{ id: string; title: string; done?: boolean | null }>;
+  suspenseTodos.db satisfies Db;
+  todos.db satisfies Db;
 
   return (
     <JazzProvider config={config} fallback={null}>

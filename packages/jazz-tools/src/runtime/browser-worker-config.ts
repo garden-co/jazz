@@ -149,8 +149,8 @@ export function createBrowserWorkerFingerprint(
  * durable-owner metadata.
  *
  * This deliberately names the authenticated principal rather than hashing it:
- * the identifier is already the canonical public `session.user` encoding
- * (`[issuer, subject]`), and a collision here could give two accounts the same
+ * the identifier is already the canonical public encoding of
+ * `session.identity` (`[issuer, subject]`), and a collision here could give two accounts the same
  * worker or physical store. Tokens, secrets, claims, expiry and other
  * credentials are never included. Anonymous callers intentionally share their
  * app/environment scope; a browser persistent worker never admits a backend,

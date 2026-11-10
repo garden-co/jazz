@@ -22,7 +22,6 @@ import {
   JazzClientProvider,
   createJazzClient,
   useAll,
-  useDb,
   useSession,
 } from "jazz-tools/vue";
 import { app } from "../../schema.js";
@@ -79,7 +78,7 @@ async function waitFor(check: () => boolean, ms: number, label: string): Promise
 }
 
 function sessionUser(client: JazzClient): string {
-  const userId = client.session?.user.account;
+  const userId = client.session?.user;
   if (!userId) throw new Error("test session is missing user");
   return userId;
 }
@@ -257,11 +256,7 @@ describe("world-tour Jazz + Vue integration", () => {
       setup() {
         const session = useSession();
         return () =>
-          h(
-            "p",
-            { id: "session" },
-            session.value ? `id:${session.value.user.account}` : "anonymous",
-          );
+          h("p", { id: "session" }, session.value ? `id:${session.value.user}` : "anonymous");
       },
     });
 
@@ -269,7 +264,7 @@ describe("world-tour Jazz + Vue integration", () => {
     const text = el.querySelector("#session")!.textContent ?? "";
 
     if (client.session) {
-      expect(text).toBe(`id:${client.session.user.account}`);
+      expect(text).toBe(`id:${client.session.user}`);
     } else {
       expect(text).toBe("anonymous");
     }
@@ -279,9 +274,8 @@ describe("world-tour Jazz + Vue integration", () => {
     const s = scope("inserter");
     const Inserter = defineComponent({
       setup() {
-        const db = useDb();
         const session = useSession();
-        const { data: venues } = useAll(s.queries.venues);
+        const { data: venues, db } = useAll(s.queries.venues);
         function add() {
           db.insert(
             app.venues,
@@ -291,7 +285,7 @@ describe("world-tour Jazz + Vue integration", () => {
               country: "UK",
               lat: 51.4659,
               lng: -0.1149,
-              ownerId: session.value!.user.account,
+              ownerId: session.value!.user,
             }),
           );
         }

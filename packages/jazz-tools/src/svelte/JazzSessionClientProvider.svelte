@@ -10,9 +10,8 @@
     session: JazzSession<JazzClient>;
     children: Snippet;
     fallback?: Snippet;
-    autoAttachDevTools?: boolean;
   }
-  let { session, children, fallback, autoAttachDevTools = true }: Props = $props();
+  let { session, children, fallback }: Props = $props();
   // A provider owns one session; replace/key the provider to change owners.
   const owner = untrack(() => session);
   setJazzSession(owner);
@@ -32,7 +31,7 @@
 
 {#if snapshot.client}
   {#key snapshot.client}
-    <JazzSvelteClientProvider client={snapshot.client} {autoAttachDevTools}>
+    <JazzSvelteClientProvider client={snapshot.client}>
       {#snippet children()}{@render children()}{/snippet}
       {#snippet fallback()}{@render fallback?.()}{/snippet}
     </JazzSvelteClientProvider>

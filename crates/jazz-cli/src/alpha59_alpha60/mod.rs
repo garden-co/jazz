@@ -83,10 +83,20 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
 const USAGE_ARGS: &str = "(import | verify) --dump <dump> --data-dir <dir> --app-id <app id> \
     [--no-backend-identity-links] [--drop-transaction-metadata]";
 
+/// `--help` or `-h` anywhere, or `help` as the subcommand.
+fn wants_help(args: &[String]) -> bool {
+    args.first().is_some_and(|arg| arg == "help")
+        || args.iter().any(|arg| arg == "--help" || arg == "-h")
+}
+
 /// Run the importer as `program` (`jazz-alpha59-alpha60-import`, or `jazz-tools
 /// alpha59-alpha60` in a dev build) with `args`; the process exit code.
 pub async fn main(program: &str, args: Vec<String>) -> i32 {
     let usage = format!("usage: {program} {USAGE_ARGS}");
+    if wants_help(&args) {
+        println!("{usage}");
+        return 0;
+    }
     let mut args = args.into_iter();
     let verifying = match args.next().as_deref() {
         Some("import") => false,
@@ -221,14 +231,16 @@ fn remove_built(dir: &std::path::Path, keep_dir: bool) -> std::io::Result<()> {
 /// Read the whole dump once, so its digest and counts are checked before
 /// anything is built from it.
 fn check_dump(args: &Args) -> Result<(), String> {
-    let file = std::fs::File::open(&args.dump).map_err(err)?;
+    let file = std::fs::File::open(&args.dump)
+        .map_err(|error| format!("{}: {error}", args.dump.display()))?;
     let (mut reader, _) = dump::Reader::open(std::io::BufReader::new(file)).map_err(err)?;
     while reader.next_record().map_err(err)?.is_some() {}
     Ok(())
 }
 
 async fn run(args: &Args) -> Result<Json, String> {
-    let file = std::fs::File::open(&args.dump).map_err(err)?;
+    let file = std::fs::File::open(&args.dump)
+        .map_err(|error| format!("{}: {error}", args.dump.display()))?;
     // The reader refuses another dump format, naming the exporter to use.
     let (mut reader, _) = dump::Reader::open(std::io::BufReader::new(file)).map_err(err)?;
 
@@ -254,6 +266,8 @@ async fn run(args: &Args) -> Result<Json, String> {
         }
     }
 
+    check_app_id(&head.admin, &args.app_id_text)?;
+
     let built = ServerBuilder::new(args.app_id)
         .with_storage(StorageBackend::Persistent {
             path: args.data_dir.clone(),
@@ -261,16 +275,31 @@ async fn run(args: &Args) -> Result<Json, String> {
         .build()
         .await?;
     let state = built.state.clone();
-    let deployments = replay_admin_catalogue(&state, &head.admin).await?;
+    let (deployments, session_paths_renamed) = replay_admin_catalogue(&state, &head.admin).await?;
     for account in &head.accounts {
         migrate_import_account(&state, &account.command_json)
             .await
             .map_err(|error| format!("account command {}: {error}", account.revision))?;
     }
+    let identities = links::identities(&head.accounts, &head.principals);
     let mut linked = 0;
     if args.link_backend_identities {
-        let planned = links::plan(&links::identities(&head.accounts, &head.principals)?)?;
+        let planned = links::plan(identities.as_ref().map_err(Clone::clone)?)?;
         linked = links::apply(&state, &planned).await?;
+    }
+    // Counted for the summary only; with linking off, an identity the
+    // journal can't place leaves the count unknown (null), not zero.
+    let guests = identities.as_deref().ok().map(local_first_guests);
+    if let Err(error) = &identities {
+        eprintln!("could not count local-first guests: {error}");
+    }
+    if let Some(guests) = guests.filter(|guests| *guests > 0) {
+        eprintln!(
+            "{guests} local-first guests came over. Their devices find their accounts \
+             again only with the client scoped to this app: \
+             createJazzClient({{ scope: \"{}\" }}) (<JazzProvider scope=\"{0}\"> in React).",
+            args.app_id_text
+        );
     }
 
     let mut rows = RowImport::default();
@@ -352,8 +381,10 @@ async fn run(args: &Args) -> Result<Json, String> {
     Ok(json!({
         "data_dir": args.data_dir,
         "deployments": deployments,
+        "permission_session_paths_renamed": session_paths_renamed,
         "account_commands": head.accounts.len(),
         "backend_identities_linked": linked,
+        "local_first_guests": guests,
         "versions_in_dump": footer.versions,
         "versions_written": rows.written,
         "versions_skipped_rejected": rows.rejected,
@@ -379,19 +410,57 @@ async fn run(args: &Args) -> Result<Json, String> {
 async fn replay_admin_catalogue(
     state: &Arc<ServerState>,
     entries: &[dump::AdminEntry],
-) -> Result<usize, String> {
-    let Some(deployment) = active_deployment(entries)? else {
-        return Ok(0);
+) -> Result<(usize, usize), String> {
+    let Some((deployment, renamed)) = active_deployment(entries)? else {
+        return Ok((0, 0));
     };
     migrate_import_deploy(state, deployment)
         .await
         .map_err(|error| format!("active schema: {error}"))?;
-    Ok(1)
+    Ok((1, renamed))
 }
 
-/// The deploy request for the admin catalogue's active schema, or `None`
-/// when nothing was ever published.
-pub(crate) fn active_deployment(entries: &[dump::AdminEntry]) -> Result<Option<Json>, String> {
+/// The admitted local-first identities: alpha.59 founded each guest's
+/// account in the app id's namespace, so a client finds it again only when
+/// scoped to that id (`createJazzClient({ scope })`).
+fn local_first_guests(identities: &[links::Identity]) -> usize {
+    identities
+        .iter()
+        .filter(|identity| identity.active && identity.issuer == AuthorSubject::LOCAL_FIRST_ISSUER)
+        .count()
+}
+
+/// Refuse an `--app-id` other than the one alpha.59's admin catalogue was
+/// written for, exactly as alpha.59 wrote it. The import keeps the id as
+/// given, and backend identities and the local-first issuer derive from it,
+/// so another spelling would strand every user on the wrong accounts.
+fn check_app_id(entries: &[dump::AdminEntry], app_id: &str) -> Result<(), String> {
+    let mut ids: BTreeSet<&str> = entries
+        .iter()
+        .filter_map(|entry| entry.metadata.get("app_id").map(String::as_str))
+        .collect();
+    match (ids.pop_first(), ids.is_empty()) {
+        (None, _) => Err(
+            "the dump's admin catalogue names no app id to check --app-id \
+                          against: not supported yet"
+                .to_owned(),
+        ),
+        (Some(id), true) if id == app_id => Ok(()),
+        (Some(id), true) => Err(format!(
+            "--app-id {app_id} is not this dump's app: alpha.59 served it as {id}"
+        )),
+        (Some(_), false) => Err("the dump's admin catalogue names more than one app id: \
+                                 not supported yet"
+            .to_owned()),
+    }
+}
+
+/// The deploy request for the admin catalogue's active schema, with how many
+/// session paths [`rename_session_paths`] renamed in its permissions, or
+/// `None` when nothing was ever published.
+pub(crate) fn active_deployment(
+    entries: &[dump::AdminEntry],
+) -> Result<Option<(Json, usize)>, String> {
     let payload = |entry: &dump::AdminEntry| -> Result<Json, String> {
         serde_json::from_str(&entry.payload_json).map_err(err)
     };
@@ -446,12 +515,61 @@ pub(crate) fn active_deployment(entries: &[dump::AdminEntry]) -> Result<Option<J
         .ok_or("the active schema is missing from the dump")?;
     let schema = payload(schema)?;
     let hash = schema_hash(&schema)?;
-    Ok(Some(json!({
-        "targetSchemaHash": hash,
-        "schemas": [{ "hash": hash, "schema": schema }],
-        "migrations": [],
-        "permissions": bundle["permissions"],
-    })))
+    let mut permissions = bundle["permissions"].clone();
+    let renamed = rename_session_paths(&mut permissions);
+    Ok(Some((
+        json!({
+            "targetSchemaHash": hash,
+            "schemas": [{ "hash": hash, "schema": schema }],
+            "migrations": [],
+            "permissions": permissions,
+        }),
+        renamed,
+    )))
+}
+
+/// Rename alpha.59's parts of `session.user` in permissions to the names
+/// they have now, returning how many it renamed. In alpha.59
+/// `session.user.account` was the account and `session.user.identity` the
+/// login; now `session.user` is the account and `session.identity` the
+/// login, and the old paths are refused. A whole `session.user` stays as it
+/// is: compared with `$createdBy` it now matches by account, which is what
+/// alpha.59 apps meant by owner. A session path sits in `path` of a
+/// `SessionRef` value and of the `Session*` policies, in `session_path` of
+/// `In`, and is the whole of a relation's `{"SessionRef": [...]}`.
+pub(crate) fn rename_session_paths(permissions: &mut Json) -> usize {
+    fn rename(path: &mut Json) -> usize {
+        let Some(parts) = path.as_array() else {
+            return 0;
+        };
+        let parts: Option<Vec<&str>> = parts.iter().map(Json::as_str).collect();
+        let renamed: Vec<&str> = match parts.as_deref() {
+            Some(["user", "account"]) => vec!["user"],
+            Some(["user", "identity", rest @ ..]) => std::iter::once("identity")
+                .chain(rest.iter().copied())
+                .collect(),
+            _ => return 0,
+        };
+        *path = json!(renamed);
+        1
+    }
+    match permissions {
+        Json::Object(object) => {
+            let key = match object.get("type").and_then(Json::as_str) {
+                Some(
+                    "SessionRef" | "SessionCmp" | "SessionIsNull" | "SessionIsNotNull"
+                    | "SessionContains" | "SessionInList",
+                ) => Some("path"),
+                Some("In") => Some("session_path"),
+                _ if object.len() == 1 => Some("SessionRef"),
+                _ => None,
+            };
+            let count = key.and_then(|key| object.get_mut(key)).map_or(0, rename);
+            count + object.values_mut().map(rename_session_paths).sum::<usize>()
+        }
+        Json::Array(items) => items.iter_mut().map(rename_session_paths).sum(),
+        _ => 0,
+    }
 }
 
 /// A schema's hash as the SQLite engine computes it. alpha.59's catalogue
@@ -1006,6 +1124,107 @@ fn err(error: impl std::fmt::Display) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_admitted_local_first_identities_count_as_guests() {
+        let identity = |issuer: &str, active| links::Identity {
+            issuer: issuer.to_owned(),
+            subject: "s".to_owned(),
+            account: "\"a\"".to_owned(),
+            active,
+            manage_identities: true,
+        };
+        let identities = [
+            identity(AuthorSubject::LOCAL_FIRST_ISSUER, true),
+            identity(AuthorSubject::LOCAL_FIRST_ISSUER, false),
+            identity("https://idp.example", true),
+        ];
+        assert_eq!(local_first_guests(&identities), 1);
+    }
+
+    #[test]
+    fn the_import_refuses_another_app_id_than_alpha59_served() {
+        let id = "0a590000-0000-4000-8000-000000000059";
+        let entry = |app: &str| dump::AdminEntry {
+            object_id: [1; 16],
+            metadata: BTreeMap::from([("app_id".to_owned(), app.to_owned())]),
+            object_type: "catalogue_schema".to_owned(),
+            payload_json: "{}".to_owned(),
+        };
+        check_app_id(&[entry(id)], id).unwrap();
+        assert!(check_app_id(&[], id).is_err());
+        let refused = check_app_id(&[entry(id)], &id.to_uppercase()).unwrap_err();
+        assert!(refused.contains("is not this dump's app"), "{refused}");
+        let other = "0a590000-0000-4000-8000-000000000060";
+        assert!(check_app_id(&[entry(id)], other).is_err());
+        assert!(check_app_id(&[entry(id), entry(other)], id).is_err());
+    }
+
+    #[test]
+    fn alpha59_session_paths_come_over_under_their_new_names() {
+        let reference = |path: &[&str]| json!({ "type": "SessionRef", "path": path });
+        let mut permissions = json!({
+            "todos": {
+                "select": { "using": { "type": "Or", "exprs": [
+                    { "type": "Cmp", "column": "ownerId", "op": "Eq",
+                      "value": reference(&["user", "account"]) },
+                    { "type": "Cmp", "column": "$createdBy.identity", "op": "Eq",
+                      "value": reference(&["user", "identity"]) },
+                    { "type": "Cmp", "column": "$createdBy", "op": "Eq",
+                      "value": reference(&["user"]) },
+                    { "type": "Cmp", "column": "team", "op": "Eq",
+                      "value": reference(&["claims", "user", "account"]) },
+                    { "type": "SessionCmp", "path": ["user", "identity", "issuer"],
+                      "op": "Eq", "value": { "type": "Text", "value": "https://idp" } },
+                    { "type": "SessionIsNull", "path": ["user", "account"] },
+                    { "type": "SessionIsNotNull", "path": ["user", "account"] },
+                    { "type": "SessionContains", "path": ["user", "identity", "subject"],
+                      "value": { "type": "Text", "value": "a" } },
+                    { "type": "SessionInList", "path": ["user", "account"], "values": [] },
+                    { "type": "In", "column": "team", "session_path": ["user", "account"] },
+                ]}},
+                "insert": { "relation": { "Filter": { "predicate": { "Cmp": {
+                    "right": { "SessionRef": ["user", "identity", "subject"] },
+                }}}}},
+            },
+        });
+        assert_eq!(rename_session_paths(&mut permissions), 9);
+        let exprs = &permissions["todos"]["select"]["using"]["exprs"];
+        assert_eq!(exprs[4]["path"], json!(["identity", "issuer"]));
+        for at in [5, 6, 8] {
+            assert_eq!(exprs[at]["path"], json!(["user"]), "{at}");
+        }
+        assert_eq!(exprs[7]["path"], json!(["identity", "subject"]));
+        assert_eq!(exprs[9]["session_path"], json!(["user"]));
+        assert_eq!(exprs[0]["value"], reference(&["user"]));
+        assert_eq!(exprs[1]["value"], reference(&["identity"]));
+        // A whole `session.user` and provider claims keep their paths.
+        assert_eq!(exprs[2]["value"], reference(&["user"]));
+        assert_eq!(exprs[3]["value"], reference(&["claims", "user", "account"]));
+        assert_eq!(
+            permissions["todos"]["insert"]["relation"]["Filter"]["predicate"]["Cmp"]["right"],
+            json!({ "SessionRef": ["identity", "subject"] })
+        );
+        // Renamed paths are left alone a second time.
+        assert_eq!(rename_session_paths(&mut permissions), 0);
+    }
+
+    #[test]
+    fn help_is_recognised_in_any_position() {
+        let args = |list: &[&str]| list.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+        for asked in [
+            &["--help"][..],
+            &["-h"],
+            &["help"],
+            &["import", "--help"],
+            &["verify", "--dump", "x", "-h"],
+        ] {
+            assert!(wants_help(&args(asked)), "{asked:?}");
+        }
+        for not_asked in [&[][..], &["import"], &["import", "--dump", "help"]] {
+            assert!(!wants_help(&args(not_asked)), "{not_asked:?}");
+        }
+    }
 
     const HEAD: [u8; 16] = [7; 16];
     const ROW: [u8; 16] = [1; 16];

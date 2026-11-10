@@ -16,11 +16,20 @@ export interface MarkdownSyncOptions {
   /** Writers for nodes and marks beyond CommonMark's. */
   spec?: MarkdownSpec;
   /** Called with the document's markdown after each local change: write it
-   * to the text column right away. Every write must reach the column before
-   * the next merged value is applied, so do not throttle or debounce it;
-   * the authority merges each write, and a merged value always includes the
-   * writes this client made before it. */
-  onChange?(markdown: string): void;
+   * to the text column right away, as an edit of `editedFrom`, the value
+   * the editor showed or wrote last:
+   *
+   * ```ts
+   * onChange: (body, { editedFrom }) =>
+   *   db.update(app.notes, id, { body }, { editedFrom: { body: editedFrom } })
+   * ```
+   *
+   * The column may hold a newer merged value than the editor shows yet (it
+   * is applied on the next render); the write is then merged over it, where
+   * a plain `{ body: text }` write would undo it. Every write must reach the
+   * column before the next merged value is applied, so do not throttle or
+   * debounce it. */
+  onChange?(markdown: string, change: { editedFrom: string }): void;
 }
 
 interface SyncState {
@@ -60,8 +69,9 @@ export function markdownSync(options: MarkdownSyncOptions): Plugin<SyncState> {
           if (view.state.doc === previous.doc || key.getState(view.state)?.remote) return;
           const markdown = ownChanges(config, markdownOf(view.state).text);
           if (markdown === config.base) return;
+          const editedFrom = config.base ?? markdown;
           config.base = markdown;
-          options.onChange?.(markdown);
+          options.onChange?.(markdown, { editedFrom });
         },
       };
     },

@@ -11,7 +11,7 @@ class RouteError extends Data.TaggedError("RouteError")<{
 
 /**
  * POST /api/shows/:id/checklist: add the standard pre-show checklist. The
- * route acts as the requesting user (`forRequest`), so permissions.ts decides
+ * route acts as the requesting user (`forReqUser`), so permissions.ts decides
  * whether they may add tasks to this show, exactly as for the browser.
  */
 export function checklistRoute(request: Request, showId: string): Promise<Response> {
@@ -19,7 +19,7 @@ export function checklistRoute(request: Request, showId: string): Promise<Respon
     const backend = yield* Effect.promise(() => jazz());
     const account = yield* Effect.promise(() => backend.accountFor(request));
     if (!account) return yield* new RouteError({ status: 401, message: "sign in required" });
-    const db = Jazz.fromDb(yield* Effect.promise(() => backend.forRequest(request)));
+    const db = Jazz.fromDb(yield* Effect.promise(() => backend.forReqUser(request)));
 
     const profile = yield* db.one(app.crew.where({ account }), { tier: "remote" });
     if (Option.isNone(profile))

@@ -84,19 +84,34 @@ pub enum LargeValueUpdate {
         /// Ordered replacements.
         edits: Vec<JsonSetEdit>,
     },
+    /// A text-merge column's new value, `text`, made by editing
+    /// `edited_from`: the value its writer (an editor) last saw. When the
+    /// column moved on since (a merged value this store took in that the
+    /// editor has not shown yet), `text` is merged over the column's value
+    /// as the authority merges, so the write keeps what it did not see.
+    TextEdit {
+        /// Target column.
+        column: String,
+        /// The column's new value as the writer made it.
+        text: String,
+        /// The value the writer made it from.
+        edited_from: String,
+    },
 }
 
 impl LargeValueUpdate {
     fn column(&self) -> &str {
         match self {
-            Self::Splice { column, .. } | Self::JsonSet { column, .. } => column,
+            Self::Splice { column, .. }
+            | Self::JsonSet { column, .. }
+            | Self::TextEdit { column, .. } => column,
         }
     }
 }
 
 /// One byte-coordinate edit.
 #[derive(Clone)]
-enum Edit {
+pub(crate) enum Edit {
     Append(Vec<u8>),
     Splice {
         offset: u64,
@@ -200,7 +215,9 @@ impl Inner {
             shape: Shape([0; 16]),
             binding_id: Binding([0; 16]),
             request_claims: None,
-            schema: None,
+            // Read under the schema this handle serves (a pinned session's
+            // view and its bundle's policies), as its own reads are.
+            schema: Some(self.schema.clone()),
         };
         let compiled = self.compile(&prepared, identity, &ReadSpec::default())?;
         let cell: Option<Sql> = self
@@ -504,10 +521,64 @@ impl Inner {
         Ok(json.pointer(pointer).cloned())
     }
 
+    /// A whole write of `logical` over a chunked value as the edit that
+    /// makes it: the one splice between the held value and the new one,
+    /// which costs its epoch a few bytes and travels as an edit, where the
+    /// whole value would be a new tree. `None` keeps the write whole: the
+    /// held value is inline or cannot be read here (its chunks not fetched,
+    /// a branched table), or the change inserts more than an epoch edit
+    /// holds. The edit's derived value and any nodes it wrote are left in
+    /// `derived` and `pending_nodes` for the caller to take.
+    pub(crate) fn whole_write_as_edit(
+        &mut self,
+        table: &str,
+        row: RowUuid,
+        column: &crate::values::Column,
+        logical: &[u8],
+        identity: WriteIdentity,
+    ) -> Option<Value> {
+        let (col, cell) = self
+            .physical_cell(table, row, &column.name, identity_of(identity))
+            .ok()?;
+        self.as_edit_of(table, &col, cell, logical)
+    }
+
+    /// `logical` as an edit of the chunked `cell` ([`Self::whole_write_as_edit`]);
+    /// a value equal to the held one is the held value, so rewriting a
+    /// document unchanged costs nothing.
+    pub(crate) fn as_edit_of(
+        &mut self,
+        table: &str,
+        column: &crate::values::Column,
+        cell: Sql,
+        logical: &[u8],
+    ) -> Option<Value> {
+        let Ok(Logical::Chunked(held)) = self.chunks.logical(cell.as_ref()) else {
+            return None;
+        };
+        let current = self.chunks.value_bytes(&held).ok()?;
+        let text = crate::large::kind(column) != lv::LargeValueKind::Bytes;
+        let Some(splice) = byte_splices(&current, logical, text).pop() else {
+            self.derived.push((*held).clone());
+            return Some(Value::Large(held));
+        };
+        // A longer insertion materializes a new tree either way (SPEC 19.4),
+        // which the whole write builds as well.
+        if splice.insert.len() > lv::epoch::EPOCH_INSERT_BYTES {
+            return None;
+        }
+        let edit = Edit::Splice {
+            offset: splice.at,
+            delete: splice.delete,
+            insert: splice.insert,
+        };
+        self.edited(table, column, cell, edit).ok()
+    }
+
     /// The value `edit` makes of the current cell. A chunked value gains a
     /// tail entry, or is consolidated when its tail is full; the nodes a
     /// consolidation writes are stored with the row update.
-    fn edited(
+    pub(crate) fn edited(
         &mut self,
         table: &str,
         column: &crate::values::Column,
@@ -1183,7 +1254,7 @@ impl Db {
         // A value that fits inline is written as an ordinary inline cell, as
         // the store keeps it: its commit carries the bytes, not a
         // descriptor of chunks the store then reclaims.
-        let (logical, large) = if value.byte_length <= lv::INLINE_VALUE_MAX_BYTES as u64 {
+        let (logical, large) = if value.byte_length <= crate::large::inline_max(&col) as u64 {
             let bytes = self.inner().chunks.value_bytes(&value)?;
             (logical_value(value.kind, bytes)?, None)
         } else {
@@ -1482,7 +1553,9 @@ impl Inner {
                     for splice in lower_splices(self, &col, &cell, &within, splices)? {
                         let next = self.edited(table, &col, cell.clone(), splice)?;
                         cell = match &next {
-                            Value::Large(large) => self.large_cell(large)?,
+                            Value::Large(large) => {
+                                self.large_cell(large, crate::large::inline_max(&col))?
+                            }
                             other => to_sql(other)?.ok_or_else(|| unsupported("NaN"))?,
                         };
                         value = Some(next);
@@ -1515,6 +1588,34 @@ impl Inner {
                         *slot = edit.value;
                     }
                     Value::String(json.to_string())
+                }
+                LargeValueUpdate::TextEdit {
+                    text, edited_from, ..
+                } => {
+                    let Some(format) = col.merge.text_format() else {
+                        return Err(Error::new(
+                            ErrorCode::Schema,
+                            format!("{table}.{column} does not merge text"),
+                        ));
+                    };
+                    let current = if large_cell(&cell) {
+                        String::from_utf8(self.chunks.materialize(cell.as_ref())?)
+                            .map_err(|_| query(format!("{table}.{column} is not text")))?
+                    } else {
+                        String::new()
+                    };
+                    let value = if current == edited_from {
+                        text
+                    } else {
+                        jazz_text::merge3_within(
+                            format,
+                            &edited_from,
+                            &current,
+                            &text,
+                            self.merge_budget,
+                        )
+                    };
+                    Value::String(value)
                 }
             };
             patch.insert(column, nullable(&col, value));

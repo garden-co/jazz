@@ -11,6 +11,11 @@ export const repositoryRoot = resolve(fileURLToPath(new URL("../..", import.meta
 export const wasmManifestPath = "crates/jazz-wasm/pkg/.jazz-artifact-manifest.json";
 export const wasmEntryPath = "crates/jazz-wasm/pkg/jazz_wasm.js";
 export const napiPointerPath = "crates/jazz-napi/native-binding.pointer.cjs";
+// CI release assembly ("Assemble npm packages") has no local build pointer: it
+// downloads every platform's binding plus their sealed manifests, and
+// stage-native-fingerprints.mjs (no flag) stages from this one.
+export const napiReleaseManifestPath =
+  "crates/jazz-napi/provenance/jazz-napi.linux-x64-gnu.manifest.json";
 export const fingerprintPaths = [
   "packages/jazz-tools/src/runtime/native-artifact-fingerprint-napi.ts",
   "packages/jazz-tools/src/runtime/native-artifact-fingerprint-wasm.ts",
@@ -23,7 +28,7 @@ export function missingNativeInputs(root = repositoryRoot) {
   const has = (path) => existsSync(join(root, path));
   return {
     wasm: !has(wasmManifestPath) || !has(wasmEntryPath),
-    napi: !has(napiPointerPath),
+    napi: !has(napiPointerPath) && !has(napiReleaseManifestPath),
     fingerprints: fingerprintPaths.some((path) => !has(path)),
   };
 }

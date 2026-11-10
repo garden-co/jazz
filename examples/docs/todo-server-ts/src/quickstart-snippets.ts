@@ -24,7 +24,7 @@ const api = new Hono();
 api.post("/api/todos", async (c) => {
   const account = await jazz.accountFor(c.req.raw);
   if (!account) return c.json({ error: "Account required" }, 401);
-  const db = await jazz.forRequest(c.req.raw);
+  const db = await jazz.forReqUser(c.req.raw);
   const { title } = await c.req.json();
 
   const { value: todo } = db.insert(schemaApp.todos, {
@@ -39,7 +39,7 @@ api.post("/api/todos", async (c) => {
 
 // #region quickstart-server-read-ts
 api.get("/api/todos", async (c) => {
-  const db = await jazz.forRequest(c.req.raw);
+  const db = await jazz.forReqUser(c.req.raw);
   const todos = await db.all(
     schemaApp.todos.where({ done: false }).orderBy("title", "asc").limit(100),
   );
@@ -49,7 +49,7 @@ api.get("/api/todos", async (c) => {
 
 // #region quickstart-server-update-ts
 api.patch("/api/todos/:id", async (c) => {
-  const db = await jazz.forRequest(c.req.raw);
+  const db = await jazz.forReqUser(c.req.raw);
   const { id } = c.req.param();
   const { done } = await c.req.json();
   db.update(schemaApp.todos, id, { done });
@@ -57,7 +57,7 @@ api.patch("/api/todos/:id", async (c) => {
 });
 
 api.delete("/api/todos/:id", async (c) => {
-  const db = await jazz.forRequest(c.req.raw);
+  const db = await jazz.forReqUser(c.req.raw);
   const { id } = c.req.param();
   db.delete(schemaApp.todos, id);
   return c.json({ ok: true });

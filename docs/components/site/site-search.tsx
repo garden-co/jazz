@@ -108,12 +108,12 @@ export function SearchField({ onOpen }: { onOpen: () => void }) {
       label="Search the docs"
       variant="secondary"
       size="lg"
-      width={320}
+      width={220}
       icon={<Icon icon={Search} size="sm" />}
       onClick={onOpen}
     >
       <span className="flex w-full items-center justify-between gap-3">
-        <span>Search the docs</span>
+        <span>Search docs</span>
         <Kbd keys="mod+k" />
       </span>
     </Button>

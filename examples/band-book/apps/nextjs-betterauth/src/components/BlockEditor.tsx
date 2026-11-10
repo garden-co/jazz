@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
-import { useAll, useDb } from "jazz-tools/react";
+import { useAll } from "jazz-tools/react";
 import {
   Banner,
   Blockquote,
@@ -58,9 +58,8 @@ const SHORTCUTS: [prefix: string, kind: BlockKind][] = [
  * access to the page as it syncs.
  */
 export function BlockEditor({ pageId, editable }: { pageId: string; editable: boolean }) {
-  const db = useDb();
   const { workspace } = useWorkspace();
-  const { data: blocks } = useAll(app.blocks.where({ pageId }).select("*", "$createdAt"));
+  const { data: blocks, db } = useAll(app.blocks.where({ pageId }).select("*", "$createdAt"));
   const [uploading, setUploading] = useState(false);
   const [writeError, setWriteError] = useState<string | null>(null);
   const inputs = useRef(new Map<string, HTMLTextAreaElement>());

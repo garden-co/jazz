@@ -953,6 +953,9 @@ pub struct Table {
     pub provenance: Vec<Column>,
     /// How provenance is stored: authors as interned codes.
     pub stored_provenance: Vec<Column>,
+    /// Whether this schema keeps only each row's latest version (SPEC 4
+    /// §4.9). Only the owner's schema decides what a store prunes.
+    pub latest_only: bool,
 }
 
 /// Provenance as read. Timestamps are Unix ms (u64, as in Jazz). Authors
@@ -1296,6 +1299,7 @@ impl Schema {
                     branch_key_names: Vec::new(),
                     provenance: provenance_columns(),
                     stored_provenance: stored_provenance_columns(),
+                    latest_only: table.history == jazz_model::schema::HistoryRetention::Latest,
                 },
             );
         }
@@ -1581,6 +1585,7 @@ impl Table {
             branch_key_names: Vec::new(),
             provenance: provenance_columns(),
             stored_provenance: stored_provenance_columns(),
+            latest_only: false,
         }
     }
 

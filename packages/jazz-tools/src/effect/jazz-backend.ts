@@ -5,8 +5,9 @@ import {
   type CreateJazzOptions,
   type Jazz as AppJazz,
 } from "../backend/create-jazz.js";
+import { isNoJazzAccountError } from "../backend/no-account-error.js";
 import type { Db } from "../runtime/db.js";
-import { JazzError, toJazzError } from "./errors.js";
+import { JazzError, JazzNoAccount, toJazzError } from "./errors.js";
 import { Jazz, type JazzDb } from "./jazz.js";
 
 export interface JazzBackendService {
@@ -14,29 +15,39 @@ export interface JazzBackendService {
   readonly jazz: AppJazz;
   /**
    * The backend's own database, acting with the backend's authority rather
-   * than a user's. Prefer {@link forRequest} in request handlers.
+   * than a user's. Prefer {@link forReqUser} in request handlers.
    */
   readonly authority: Effect.Effect<JazzDb>;
-  /** Act as the user your `authenticate` names for `request`, with their permissions. */
-  forRequest(request: Request): Effect.Effect<JazzDb, JazzError>;
+  /**
+   * Act as the user your `authenticate` names for `request`, with their
+   * permissions. Fails with {@link JazzNoAccount} when that user has no Jazz
+   * account yet.
+   */
+  forReqUser(request: Request): Effect.Effect<JazzDb, JazzError | JazzNoAccount>;
   /**
    * Keep backend permissions while recording the request's signed-in user as
    * author. Your permissions are not checked (see `createJazz`'s `withAttribution`).
+   * Fails with {@link JazzNoAccount} when that user has no Jazz account yet.
    */
-  withAttribution(request: Request): Effect.Effect<JazzDb, JazzError>;
+  withAttribution(request: Request): Effect.Effect<JazzDb, JazzError | JazzNoAccount>;
+  /**
+   * Create the Jazz account of `userId` (as your `authenticate` names them),
+   * or return the one they have (see `createJazz`'s `createAccountFor`).
+   */
+  createAccountFor(userId: string): Effect.Effect<string, JazzError>;
 }
 
 /**
  * The app's Jazz in an Effect backend. It deliberately does not provide
  * {@link Jazz} itself: handlers choose whose permissions they act with, most
- * often the requesting user's through {@link JazzBackend.forRequest}.
+ * often the requesting user's through {@link JazzBackend.forReqUser}.
  *
  * @example
  * ```ts
  * const handler = Effect.gen(function* () {
  *   const jazz = yield* Jazz;
  *   return yield* jazz.all(app.todos);
- * }).pipe(JazzBackend.forCurrentRequest());
+ * }).pipe(JazzBackend.forCurrentReqUser());
  * ```
  */
 export class JazzBackend extends Context.Service<JazzBackend, JazzBackendService>()(
@@ -80,38 +91,40 @@ export class JazzBackend extends Context.Service<JazzBackend, JazzBackendService
     );
 
   /** Provide {@link Jazz} to `self` as the user who sent `request`. */
-  static readonly forRequest =
+  static readonly forReqUser =
     (request: Request) =>
     <A, E, R>(
       self: Effect.Effect<A, E, R>,
-    ): Effect.Effect<A, E | JazzError, Exclude<R, Jazz> | JazzBackend> =>
+    ): Effect.Effect<A, E | JazzError | JazzNoAccount, Exclude<R, Jazz> | JazzBackend> =>
       Effect.provideServiceEffect(
         self,
         Jazz,
-        JazzBackend.use((backend) => backend.forRequest(request)),
+        JazzBackend.use((backend) => backend.forReqUser(request)),
       );
 
   /**
    * Provide {@link Jazz} to `self` as the user who sent the current
-   * `HttpServerRequest`, for handlers built with `effect/http`.
+   * `HttpServerRequest`, for handlers built with `effect/http`. Your
+   * `authenticate` gets the request's method, URL and headers but not its
+   * body, which stays for the handler to read.
    */
-  static readonly forCurrentRequest =
+  static readonly forCurrentReqUser =
     () =>
     <A, E, R>(
       self: Effect.Effect<A, E, R>,
     ): Effect.Effect<
       A,
-      E | JazzError,
+      E | JazzError | JazzNoAccount,
       Exclude<R, Jazz> | JazzBackend | HttpServerRequest.HttpServerRequest
     > =>
       Effect.provideServiceEffect(
         self,
         Jazz,
         HttpServerRequest.HttpServerRequest.use((request) =>
-          HttpServerRequest.toWeb(request).pipe(
-            Effect.mapError(toJazzError("forRequest")),
-            Effect.flatMap((web) => JazzBackend.use((backend) => backend.forRequest(web))),
-          ),
+          Effect.try({
+            try: () => credentialsOf(request),
+            catch: toJazzError("forReqUser"),
+          }).pipe(Effect.flatMap((web) => JazzBackend.use((backend) => backend.forReqUser(web)))),
         ),
       );
 
@@ -126,13 +139,35 @@ export class JazzBackend extends Context.Service<JazzBackend, JazzBackendService
     );
 }
 
+/**
+ * The request `authenticate` decides on, without its body: `toWeb` would hand
+ * over the body stream, and reading it there (some effect versions start to)
+ * leaves the handler's own body read empty.
+ */
+function credentialsOf(request: HttpServerRequest.HttpServerRequest): Request {
+  const url = HttpServerRequest.toURL(request);
+  if (url._tag === "None") throw new Error(`forCurrentReqUser: invalid request URL ${request.url}`);
+  return new Request(url.value, { method: request.method, headers: request.headers });
+}
+
 function makeJazzBackend(jazz: AppJazz): JazzBackendService {
   const scoped = (operation: string, open: () => Promise<Db>) =>
-    Effect.tryPromise({ try: open, catch: toJazzError(operation) }).pipe(Effect.map(Jazz.fromDb));
+    Effect.tryPromise({
+      try: open,
+      catch: (cause): JazzError | JazzNoAccount =>
+        isNoJazzAccountError(cause)
+          ? new JazzNoAccount({ userId: cause.userId, operation })
+          : toJazzError(operation)(cause),
+    }).pipe(Effect.map(Jazz.fromDb));
   return {
     jazz,
     authority: Effect.sync(() => Jazz.fromDb(jazz.db)),
-    forRequest: (request) => scoped("forRequest", () => jazz.forRequest(request)),
+    forReqUser: (request) => scoped("forReqUser", () => jazz.forReqUser(request)),
     withAttribution: (request) => scoped("withAttribution", () => jazz.withAttribution(request)),
+    createAccountFor: (userId) =>
+      Effect.tryPromise({
+        try: () => jazz.createAccountFor(userId),
+        catch: toJazzError("createAccountFor"),
+      }),
   };
 }

@@ -28,6 +28,12 @@ export declare class JazzCore {
    * each message for the client and, last, the close.
    */
   openSocket(headers: Array<Array<string>>, onEvent: (err: Error | null, event: JazzCoreSocketEvent) => void): JazzCoreSocket
+  /**
+   * Start a sync session for a client in this process. Unlike
+   * `openSocket` it has no handshake deadline: the client's Hello waits on
+   * this event loop, which synchronous work can hold for seconds.
+   */
+  openInProcessSocket(onEvent: (err: Error | null, event: JazzCoreSocketEvent) => void): JazzCoreSocket
   /** Close every session and the storage. */
   close(): Promise<void>
 }
@@ -36,6 +42,12 @@ export declare class JazzCore {
 export declare class JazzCoreSocket {
   /** Pass one binary message from the client. False once the session ended. */
   send(data: Uint8Array): boolean
+  /**
+   * `send`, resolving once the session has read enough of the messages
+   * before it. A host that awaits it before reading more from its client
+   * holds a fast client back instead of queueing all it sends.
+   */
+  sendWithRoom(data: Uint8Array): Promise<boolean>
   /** The client's socket closed. */
   close(): void
 }
@@ -149,8 +161,12 @@ export declare class NapiDb {
   setLargeValueStagingPolicy(incomingBytesPerWindow: number, windowMs: number, maxAgeMs?: number | undefined | null): void
   /** Run one idempotent expiry pass; native hosts normally call this on a timer. */
   evictExpiredStagedLargeValues(): number
-  /** How many local commits still wait for the server's verdict. */
-  pendingUploadCount(): number
+  /**
+   * This store's uploads: how many still wait for the server's verdict
+   * and since when, and what the server refused since it opened
+   * (`{ pending, oldestPendingAt, rejected, lastRejection }`).
+   */
+  uploadStatus(): JsonValue
   /**
    * The optimistic in-memory side of a client/worker pair: its
    * subscriptions open with the worker's answer.
@@ -290,6 +306,13 @@ export declare class Transport {
    * what is due. Returns the number of frames waiting to be sent.
    */
   tick(): number
+  /**
+   * Why the database dropped this upstream link on its own, with the
+   * core's stable `code` (`authority_changed` for a server whose store
+   * was recreated), or `null` while the link stands. The host stops the
+   * link with it rather than retry.
+   */
+  upstreamRefusal(): UpstreamRefusal | null
   close(): boolean
 }
 
@@ -328,6 +351,13 @@ export declare function captureTextAnchor(text: string, version: number | undefi
 
 /** The range `start..end` (UTF-16 code units) of `text`. */
 export declare function captureTextRange(text: string, version: number | undefined | null, start: number, end: number): JsonValue
+
+/**
+ * Check an app's shipped migrations (the `ClientMigrations` JSON) leading
+ * to the schema hash `target` as a deployment to a new authority would,
+ * without opening a database. `jazz-tools validate` runs it.
+ */
+export declare function checkClientMigrations(migrations: string, target: string): void
 
 export interface DeleteOptions {
   author?: Uint8Array
@@ -481,6 +511,14 @@ export interface UpsertOptions {
   head?: JsonValue
   base?: JsonValue
   updatedAtMs?: number
+}
+
+/** Why the database dropped an upstream link (see `Transport.upstreamRefusal`). */
+export interface UpstreamRefusal {
+  /** The core's stable error code. */
+  code: string
+  /** What the core said, as an error's message. */
+  message: string
 }
 
 /** Validate a schema and its embedded permissions without opening a database. */

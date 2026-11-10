@@ -25,8 +25,8 @@ it("rejects caller credentials and requires an enrolled account handle", async (
       }),
     ).rejects.toThrow();
     const db = await fixture.createDb();
-    expect(db.getAuthState().session?.user).toEqual({
-      account: fixture.config.account.id,
+    expect(db.getAuthState().session).toMatchObject({
+      user: fixture.config.account.id,
       identity: fixture.config.account.identity,
     });
     expect(await db.all(app.notes, { tier: "local-first" })).toEqual([]);
@@ -52,8 +52,8 @@ it("logout retires old contexts before opening an independently registered ident
     const secondConfig = await first.registerIdentity("second");
     const current = await first.createDb(secondConfig);
     await expect(old.all(app.notes, { tier: "local-first" })).rejects.toThrow();
-    expect(current.getAuthState().session?.user).toEqual({
-      account: secondConfig.account.id,
+    expect(current.getAuthState().session).toMatchObject({
+      user: secondConfig.account.id,
       identity: secondConfig.account.identity,
     });
     expect(await current.all(app.notes, { tier: "local-first" })).toEqual([]);
@@ -144,8 +144,8 @@ it("caller config mutation cannot replace the handle behind an existing context"
     const secondConfig = await fixture.registerIdentity("review-second");
     supplied.account = secondConfig.account;
     await first.insert(app.notes, { title: "belongs to first admission" }).wait({ tier: "local" });
-    expect(first.getAuthState().session?.user).toEqual({
-      account: fixture.config.account.id,
+    expect(first.getAuthState().session).toMatchObject({
+      user: fixture.config.account.id,
       identity: fixture.config.account.identity,
     });
     const other = await fixture.createDb(secondConfig);

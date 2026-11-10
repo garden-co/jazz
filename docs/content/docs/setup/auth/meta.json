@@ -1,4 +1,1 @@
-{
-  "title": "Auth",
-  "pages": ["backend", "better-auth", "workos", "custom", "local-first", "sessions", "lifecycle"]
-}
+{ "title": "Auth", "pages": ["backend", "better-auth", "workos", "custom", "local-first"] }

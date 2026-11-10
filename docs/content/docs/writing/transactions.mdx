@@ -1,6 +1,6 @@
 ---
 title: Transactions
-description: Group related reads and writes into one mergeable or serializable transaction.
+description: "Learn how to group reads and writes into one mergeable or serializable transaction."
 reviewedAt: "b29b48d1a"
 ---
 
@@ -12,7 +12,7 @@ sees the rows the transaction creates or updates, so you can create a row and th
 on it for permissions in one transaction. A row the transaction deletes is still seen as it was
 before the transaction. Each write must also be allowed by the state the whole transaction
 leaves behind, whatever order you made the writes in. Writes from other transactions stay
-invisible until they are accepted. See [Permissions](/docs/schemas/policies#share-based-access).
+invisible until they are accepted. See [Declarative Permissions](/docs/schemas/policies#share-based-access).
 
 Jazz has two transaction types. The difference is how they handle concurrent changes:
 
@@ -59,11 +59,10 @@ already apply locally first and sync in the background.
 
 ## Use a callback for normal work
 
-The callback form commits automatically when the callback finishes. In TypeScript, Jazz rolls the
-transaction back if the callback throws or returns a rejected promise. In Rust, it leaves the
-transaction uncommitted if the callback returns `Err`.
+The callback form commits automatically when the callback finishes. Jazz rolls the transaction back
+if the callback throws or returns a rejected promise.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts" meta='title="app.ts"'>
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-transaction-ts
@@ -74,16 +73,10 @@ transaction uncommitted if the callback returns `Err`.
       ../examples/docs/todo-effect/src/docs-snippets.ts#writing-transaction-effect
     </include>
   </Tab>
-  <Tab value="Rust">
-    <include cwd lang="rs" meta='title="app.rs"'>
-      ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-transaction-rust
-    </include>
-  </Tab>
 </Tabs>
 
 The TypeScript callback returns the new row ID. Jazz exposes that value as `result.value`, and
-`result.wait(...)` resolves to the same value. In Rust, `Db::transaction` returns the callback value
-and the committed transaction ID as a tuple.
+`result.wait(...)` resolves to the same value.
 
 Inside a TypeScript transaction:
 
@@ -93,6 +86,15 @@ Inside a TypeScript transaction:
 | `update(...)`, `upsert(...)`, `delete(...)` | `void`                                                    |
 | `all(...)`                                  | A promise for all matching rows, including staged changes |
 | `one(...)`                                  | A promise for the first matching row, or `null`           |
+
+To point one new row at another in the same transaction, use the staged row's `id`:
+
+```ts
+const project = tx.insert(app.projects, { name: "Launch" });
+tx.insert(app.todos, { title: "Write the post", projectId: project.id });
+```
+
+`insert` assigns the id itself: an `id` in the values fails with "Unknown column id".
 
 Use the `tx` object for every read and write that belongs to the transaction. A query made through
 the outer `db` does not read the transaction's staged changes.
@@ -120,7 +122,8 @@ See [Durability Tiers](/docs/reference/durability-tiers) for the meaning of `loc
 A transaction can fail at three points:
 
 1. While the callback runs, a write can throw immediately or an awaited read can reject, for
-   example because its input is invalid.
+   example because its input is invalid. An update inside a transaction needs its row read first
+   in this process (with `tx.one(...)`, say); otherwise it throws a `not_observed` error.
 2. The callback or local commit can fail. Jazz rolls back a callback transaction and rejects
    `db.transaction(...)` or `db.serializableTransaction(...)`.
 3. The authority can reject a committed transaction later. In TypeScript, `wait(...)` then rejects
@@ -148,7 +151,7 @@ A serializable transaction reads from a stable transaction snapshot. The authori
 and writes, then accepts or rejects the transaction as one serialisable unit. This is useful when a
 write is valid only if the data you just read has not changed in a conflicting transaction.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts" meta='title="app.ts"'>
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-serializable-transaction-ts
@@ -159,18 +162,18 @@ write is valid only if the data you just read has not changed in a conflicting t
       ../examples/docs/todo-effect/src/docs-snippets.ts#writing-serializable-transaction-effect
     </include>
   </Tab>
-  <Tab value="Rust">
-    <include cwd lang="rs" meta='title="app.rs"'>
-      ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-serializable-transaction-rust
-    </include>
-  </Tab>
 </Tabs>
 
 In TypeScript, `wait()` takes no durability tier for a serializable transaction. It resolves if the
 authority accepts the transaction and rejects if the authority rejects it.
 
-The Rust example uses the embedded `jazz::db::Db` API. An owning `SerializableTx` abandons the open
-transaction if it is dropped before `commit()` succeeds.
+Keep transactions small. Their cost grows faster than their size for now, so split a bulk import
+into transactions of 10 to 50 rows.
+
+A conflict rejects with code `serialization_conflict` or `transaction_conflict`; treat both as "read
+again and retry". A rejection is different from a transport error, such as "websocket transport
+error" during an outage: there the transaction may still reach the authority, so check before you
+retry it.
 
 <Callout type="warn">
   The authority checks only the reads the writing client reports. That keeps honest writers from
