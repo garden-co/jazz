@@ -4,11 +4,11 @@ import { definePermissions } from "../permissions/index.js";
 import { createDb } from "./default-create-db.js";
 import { beginDbTransactionAfter, readAcceptedTransactionRows } from "./db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
-import { deploy, startLocalJazzServer } from "../testing/index.js";
+import { deploy, startLocalJazzServer, startTestJazz } from "../testing/index.js";
 import { createAccountDbWithRuntimeSource } from "../accounts/context.js";
 import { DefaultRuntimeSource } from "./default-runtime-source.js";
 import type { RuntimeClientContext } from "./runtime-source.js";
-import type { JazzClient } from "./client.js";
+import { PersistedWriteRejectedError, type JazzClient } from "./client.js";
 
 const app = s.defineApp({ notes: s.table({ body: s.string() }, {}) }, { migrations: "none" });
 const permissions = definePermissions(app, ({ policy }) => {
@@ -126,32 +126,93 @@ it("records an empty accepted predicate and refuses a phantom at Global commit",
   }
 }, 60000);
 
-it("uses current policies after a retained accepted read and never publishes its staged write", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+it("revalidates live grant support under one fixed bundle and never publishes its staged write", async () => {
+  // This replaces the old global policy-definition activation scenario.
+  // The deployment, session and INSERT policy stay fixed; only grant data changes.
+  const app = s.defineApp(
+    {
+      notes: s.table({ body: s.string() }, {}),
+      grants: s.table({ enabled: s.boolean() }, {}),
+    },
+    { migrations: "none" },
+  );
+  const permissions = definePermissions(app, ({ policy }) => {
+    policy.notes.allowRead.where(() => policy.grants.exists.where({ enabled: true }));
+    policy.notes.allowInsert.always();
+    policy.notes.allowDelete.always();
+    policy.grants.allowRead.always();
+    policy.grants.allowInsert.always();
+    policy.grants.allowUpdate.always();
+  });
+  const server = await startTestJazz({
+    app,
+    permissions,
+    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+  });
+  const closed = vi.spyOn(server.jazz, "close");
+  const redeployed = vi.spyOn(server, "redeploy");
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
   try {
-    const target = {
-      serverUrl: server.url,
-      appId: server.appId,
-      adminSecret: server.adminSecret,
-      schema: app,
-    };
-    await deploy({ ...target, permissions });
     db = await createDb(await localAccountConfig(server.appId, server.url));
+    const grant = await server.jazz.db
+      .insert(app.grants, { enabled: true })
+      .wait({ tier: "global" });
     const initial = await db
       .insert(app.notes, { body: "before revocation" })
       .wait({ tier: "global" });
+    const session = structuredClone(db.getAuthState());
+
+    // The same admitted accepted-read/write path succeeds while support is live.
+    const control = beginDbTransactionAfter(db, async () => {}, "accepted-evidence");
+    expect((await readAcceptedTransactionRows(control, app.notes, 5000)).rows).toEqual([initial]);
+    const controlRow = control.insert(app.notes, { body: "stable support control" });
+    await control.commit().wait({ tier: "global", timeoutMs: 10000 });
+    await db.delete(app.notes, controlRow.id).wait({ tier: "global" });
+
     const tx = beginDbTransactionAfter(db, async () => {}, "accepted-evidence");
-    expect((await readAcceptedTransactionRows(tx, app.notes, 5000)).rows).toEqual([initial]);
+    const accepted = await readAcceptedTransactionRows(tx, app.notes, 5000);
+    expect(accepted.rows).toEqual([initial]);
+    expect(accepted.evidence).toHaveLength(1);
+    expect(accepted.evidence[0]?.rowId).toBe(initial.id);
+    expect(accepted.evidence[0]?.state).toEqual(accepted.evidence[0]?.content);
     tx.insert(app.notes, { body: "must not publish" });
-    const denied = definePermissions(app, ({ policy }) => {
-      policy.notes.allowInsert.always();
-    });
-    await deploy({ ...target, permissions: denied });
-    await expect(tx.commit().wait({ tier: "global" })).rejects.toThrow();
-    await deploy({ ...target, permissions });
+
+    // A separate normal owner changes only permission support, at Global.
+    await server.jazz.db.update(app.grants, grant.id, { enabled: false }).wait({ tier: "global" });
+    const committed = tx.commit().wait({ tier: "global", timeoutMs: 10000 });
+    await expect(committed).rejects.toThrow();
+    const error: unknown = await committed.catch((reason: unknown) => reason);
+    expect(error).toBeInstanceOf(PersistedWriteRejectedError);
+    expect(error).toMatchObject({ code: "serialization_conflict" });
+
+    // A denied SELECT cannot hide a published marker from the real backend.
+    expect(await server.jazz.db.all(app.notes)).toEqual([initial]);
+    expect(await db.all(app.notes, { tier: "remote" })).toEqual([]);
+
+    // The same client still has a live accepted-read and Global-write service.
+    await db.insert(app.grants, { enabled: false }).wait({ tier: "global" });
+    const alive = beginDbTransactionAfter(db, async () => {}, "accepted-evidence");
+    const liveGrant = await readAcceptedTransactionRows(
+      alive,
+      app.grants.where({ id: grant.id }),
+      5000,
+    );
+    expect(liveGrant.rows).toEqual([{ ...grant, enabled: false }]);
+    await alive.commit().wait({ tier: "global", timeoutMs: 10000 });
+
+    await server.jazz.db.update(app.grants, grant.id, { enabled: true }).wait({ tier: "global" });
     expect(await db.all(app.notes, { tier: "remote" })).toEqual([initial]);
+    const restored = beginDbTransactionAfter(db, async () => {}, "accepted-evidence");
+    const unchanged = await readAcceptedTransactionRows(restored, app.notes, 5000);
+    expect(unchanged.rows).toEqual([initial]);
+    expect(unchanged.evidence).toEqual(accepted.evidence);
+    await restored.commit().wait({ tier: "global", timeoutMs: 10000 });
+    expect(db.getAuthState()).toEqual(session);
+    expect(closed).not.toHaveBeenCalled();
+    expect(redeployed).not.toHaveBeenCalled();
   } finally {
+    closed.mockRestore();
+    redeployed.mockRestore();
     await db?.shutdown();
     await server.stop();
   }
