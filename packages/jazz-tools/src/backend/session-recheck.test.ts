@@ -87,7 +87,8 @@ describe("recheckEvery", () => {
 
   it(`ends the session as a refusal after ${RECHECK_FAILURES_BEFORE_END} failed checks in a row`, async () => {
     expect(RECHECK_FAILURES_BEFORE_END).toBe(3);
-    const check = vi.fn<() => Promise<boolean>>().mockRejectedValue(NEXT_SCOPE_ERROR);
+    const outage = new Error("auth database down");
+    const check = vi.fn<() => Promise<boolean>>().mockRejectedValue(outage);
     const refused = vi.fn();
     const failed = vi.fn();
     recheckEvery(1_000, check, refused, { failed });
@@ -95,10 +96,11 @@ describe("recheckEvery", () => {
     expect(refused).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1_000);
     expect(refused).toHaveBeenCalledOnce();
+    expect(refused).toHaveBeenCalledWith({ kind: "failed", error: outage, inARow: 3 });
     expect(failed.mock.calls).toEqual([
-      [NEXT_SCOPE_ERROR, 1],
-      [NEXT_SCOPE_ERROR, 2],
-      [NEXT_SCOPE_ERROR, 3],
+      [outage, 1],
+      [outage, 2],
+      [outage, 3],
     ]);
     // It stopped: no more checks, no second refusal.
     await vi.advanceTimersByTimeAsync(10_000);
@@ -122,6 +124,46 @@ describe("recheckEvery", () => {
     await vi.advanceTimersByTimeAsync(10_000);
     expect(refused).not.toHaveBeenCalled();
     expect(failed.mock.calls.map(([, inARow]) => inARow)).toEqual([1, 2, 1, 2]);
+  });
+
+  it("ends the session at the first failure endsAtOnce picks out", async () => {
+    const outage = new Error("auth database down");
+    const check = vi
+      .fn<() => Promise<boolean>>()
+      .mockRejectedValueOnce(outage)
+      .mockRejectedValue(NEXT_SCOPE_ERROR);
+    const refused = vi.fn();
+    const failed = vi.fn();
+    recheckEvery(1_000, check, refused, { failed, endsAtOnce: isOutsideRequestScope });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(refused).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(refused).toHaveBeenCalledExactlyOnceWith({
+      kind: "failed",
+      error: NEXT_SCOPE_ERROR,
+      inARow: 2,
+    });
+    expect(failed).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(check).toHaveBeenCalledTimes(2);
+  });
+
+  it("ends the session when endsAtOnce itself throws, rather than keep it open", async () => {
+    const refused = vi.fn();
+    recheckEvery(1_000, () => Promise.reject(new Error("down")), refused, {
+      endsAtOnce: () => {
+        throw new Error("judge broke");
+      },
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(refused).toHaveBeenCalledOnce();
+  });
+
+  it("says a refusal is one", async () => {
+    const refused = vi.fn();
+    recheckEvery(1_000, () => false, refused);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(refused).toHaveBeenCalledExactlyOnceWith({ kind: "refused" });
   });
 
   it("takes how many failures in a row end the session", async () => {
@@ -244,7 +286,7 @@ describe("isOutsideRequestScope", () => {
 describe("recheckFailedWarning", () => {
   it("names the request-scope cause, and the fix, for a request-scope error", () => {
     const warning = recheckFailedWarning(NEXT_SCOPE_ERROR);
-    expect(warning).toContain("request-scope error");
+    expect(warning).toContain("It threw a request-scope error");
     expect(warning).toContain("withAuth()");
     expect(warning).toContain("request.headers");
     expect(warning).toContain(RECHECK_DOCS_URL);
@@ -252,9 +294,9 @@ describe("recheckFailedWarning", () => {
 
   it("explains the re-check contract, without guessing a cause, for any other error", () => {
     const warning = recheckFailedWarning(new Error("auth database down"));
-    expect(warning).not.toContain("request-scope error");
+    expect(warning).not.toContain("It threw a request-scope error");
     expect(warning).toContain("outside your framework's request scope");
-    expect(warning).toContain(`After ${RECHECK_FAILURES_BEFORE_END} failed re-checks in a row`);
+    expect(warning).toContain(`after ${RECHECK_FAILURES_BEFORE_END} failed re-checks in a row`);
     expect(warning).toContain(RECHECK_DOCS_URL);
   });
 });

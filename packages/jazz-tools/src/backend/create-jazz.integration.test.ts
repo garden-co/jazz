@@ -766,7 +766,7 @@ describe("createJazz", () => {
     expect(upgrades).toBe(refused);
   }, 30_000);
 
-  it("ends a session whose re-checks keep throwing, so a sign-out still reaches it", async () => {
+  it("ends a session whose re-check can't run outside a request, so a sign-out still reaches it", async () => {
     // An authenticate built on a request-scoped helper (Next.js's cookies(),
     // AuthKit's withAuth()): it answers while a request is handled, and
     // throws as Next.js does when a re-check asks again about a request it
@@ -783,13 +783,13 @@ describe("createJazz", () => {
         const userId = request.headers.get("x-test-user");
         return userId && !signedOut.has(userId) ? { userId } : null;
       },
-      recheckSeconds: 0.05,
+      recheckSeconds: 0.2,
     }).ready();
     cleanups.push(() => jazz.close());
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    cleanups.push(async () => warn.mockRestore());
-    const warnings = () =>
-      warn.mock.calls.map(([message]) => String(message)).filter((m) => m.includes("re-check"));
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    cleanups.push(async () => error.mockRestore());
+    const logged = (text: string) =>
+      error.mock.calls.map(([message]) => String(message)).filter((m) => m.includes(text));
     let upgrades = 0;
     const origin = await serve(jazz, { sockets: true, onUpgrade: () => upgrades++ });
     const alice = await userSession(jazz.appId, origin, "alice");
@@ -797,19 +797,18 @@ describe("createJazz", () => {
       .insert(app.todos, { title: "signed in", owner: alice.session!.user! })
       .wait({ tier: "global" });
 
-    // Her re-checks throw: the first says why, once, and the third in a row
-    // ends the session; the client reconnects and is admitted afresh.
+    // Her first re-check throws: the session ends at once, the contract is
+    // explained, and the client reconnects and is admitted afresh.
     const opened = upgrades;
-    await expect.poll(() => upgrades, { timeout: 5_000, interval: 50 }).toBeGreaterThan(opened);
-    const [first, ended] = warnings();
-    expect(first).toContain("authenticate threw while re-checking an open sync session");
-    expect(first).toContain("request-scope error");
-    expect(first).toContain(
+    await expect.poll(() => upgrades, { timeout: 5_000, interval: 20 }).toBeGreaterThan(opened);
+    const [explained] = logged("authenticate threw while re-checking an open sync session");
+    expect(explained).toContain("request-scope error");
+    expect(explained).toContain(
       "https://jazz.tools/docs/setup/auth/backend#re-checking-open-connections",
     );
-    expect(ended).toContain("after 3 failed re-checks in a row");
+    expect(logged("can't run outside a request scope").length).toBeGreaterThanOrEqual(1);
     await expect
-      .poll(() => alice.db.getSyncStatus().link, { timeout: 10_000, interval: 50 })
+      .poll(() => alice.db.getSyncStatus().link, { timeout: 10_000, interval: 20 })
       .toEqual({ state: "connected" });
 
     // She signs out elsewhere: the next session that ends can't come back.
@@ -820,6 +819,56 @@ describe("createJazz", () => {
     const refused = upgrades;
     await new Promise((resolve) => setTimeout(resolve, 1_000));
     expect(upgrades).toBe(refused);
+    // The contract is explained once per process, not per session.
+    expect(logged("authenticate threw while re-checking")).toHaveLength(1);
+  }, 30_000);
+
+  it("rides out a re-check failure, and ends the session after three in a row", async () => {
+    let outage = false;
+    const jazz = await createJazz({
+      app,
+      permissions,
+      store: memory(),
+      authenticate: (request) => {
+        if (outage) throw new Error("auth database down");
+        const userId = request.headers.get("x-test-user");
+        return userId ? { userId } : null;
+      },
+      recheckSeconds: 0.2,
+    }).ready();
+    cleanups.push(() => jazz.close());
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    cleanups.push(async () => warn.mockRestore());
+    const logged = (text: string) =>
+      warn.mock.calls.map(([message]) => String(message)).filter((m) => m.includes(text));
+    let upgrades = 0;
+    const origin = await serve(jazz, { sockets: true, onUpgrade: () => upgrades++ });
+    const alice = await userSession(jazz.appId, origin, "alice");
+    await alice.db
+      .insert(app.todos, { title: "signed in", owner: alice.session!.user! })
+      .wait({ tier: "global" });
+    const opened = upgrades;
+    expect(opened).toBeGreaterThan(0);
+
+    // One failed re-check, then answers again: the session stays open.
+    outage = true;
+    await expect.poll(() => logged("re-check failed").length, { timeout: 5_000 }).toBe(1);
+    outage = false;
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    expect(upgrades).toBe(opened);
+    expect(logged("ended a sync session")).toHaveLength(0);
+
+    // A longer outage ends it after three; the client reconnects once it's over.
+    outage = true;
+    await expect
+      .poll(() => logged("ended a sync session after 3 failed re-checks in a row").length, {
+        timeout: 5_000,
+      })
+      .toBe(1);
+    // Warned once per session, even after it recovered once.
+    expect(logged("re-check failed")).toHaveLength(1);
+    outage = false;
+    await expect.poll(() => upgrades, { timeout: 10_000, interval: 50 }).toBeGreaterThan(opened);
   }, 30_000);
 
   it("ends a user's open sync session once their claims change, so policies see the new ones", async () => {

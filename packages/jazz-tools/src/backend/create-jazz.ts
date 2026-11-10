@@ -74,10 +74,12 @@ export {
   type VercelBlobStore,
 } from "./blobs.js";
 import {
+  isOutsideRequestScope,
   isSameAdmission,
   RECHECK_FAILURES_BEFORE_END,
   recheckEvery,
   recheckFailedWarning,
+  type RecheckEnd,
   type RecheckFailures,
 } from "./session-recheck.js";
 import { NoJazzAccountError } from "./no-account-error.js";
@@ -381,9 +383,11 @@ export interface CreateJazzOptions {
    *
    * A re-check calls `authenticate` from a timer, outside your framework's
    * request scope, with the request that opened the session (see
-   * `authenticate`). A re-check that throws is logged once per session and
-   * asked again next time; 3 in a row end the session as a refusal does,
-   * so an `authenticate` that can't answer there fails closed.
+   * `authenticate`). One that throws a request-scope error (Next.js's
+   * "called outside a request scope") ends the session at once, as a
+   * refusal does, with an error logged. Other errors are logged and asked
+   * again next time, and 3 in a row end the session, so an `authenticate`
+   * that can't answer there fails closed.
    */
   recheckSeconds?: number;
   /**
@@ -1702,6 +1706,10 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
     readonly trusted: boolean;
   }
 
+  // What a failed re-check means is explained once per process; each
+  // session then says only what happened to it.
+  let explainedRecheckFailure = false;
+
   function openClientSession(
     request: Request,
     onEvent: (error: Error | null, event: JazzCoreSocketEvent) => void,
@@ -1764,18 +1772,39 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         onEvent(null, { kind: "close", code: 1008, reason: "authenticate again" });
         end();
       };
-      // A re-check whose `authenticate` throws says so once per session,
-      // and enough of them in a row end it as a refusal does: one that can't
-      // answer outside a request (Next.js's `cookies()`) would otherwise keep
-      // the session open past a sign-out, silently.
+      // A re-check whose `authenticate` throws ends the session at once
+      // when it can't run outside a request (Next.js's `cookies()`), and
+      // after enough failures in a row otherwise: either would keep the
+      // session open past a sign-out, silently.
+      let warnedFailure = false;
       const failures: RecheckFailures = {
-        failed: (error, inARow) => {
-          if (inARow === 1) console.warn(recheckFailedWarning(error), error);
-          if (inARow === RECHECK_FAILURES_BEFORE_END)
-            console.warn(
-              `createJazz: ended an open sync session after ${inARow} failed re-checks in a row; the client reconnects and authenticate is asked afresh.`,
+        endAfter: RECHECK_FAILURES_BEFORE_END,
+        endsAtOnce: isOutsideRequestScope,
+        failed: (error) => {
+          if (!explainedRecheckFailure) {
+            explainedRecheckFailure = true;
+            (isOutsideRequestScope(error) ? console.error : console.warn)(
+              recheckFailedWarning(error),
             );
+          }
+          if (!warnedFailure && !isOutsideRequestScope(error)) {
+            warnedFailure = true;
+            console.warn("createJazz: a sync session's re-check failed; asking again.", error);
+          }
         },
+      };
+      const recheckEnded = (end: RecheckEnd) => {
+        authenticateAgain();
+        if (end.kind !== "failed") return;
+        if (isOutsideRequestScope(end.error))
+          console.error(
+            "createJazz: ended a sync session: authenticate can't run outside a request scope; the client reconnects.",
+          );
+        else
+          console.warn(
+            `createJazz: ended a sync session after ${end.inARow} failed re-checks in a row; the client reconnects.`,
+            end.error,
+          );
       };
       const admittedUser = admitted.user;
       if (admittedUser && every > 0) {
@@ -1783,12 +1812,12 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         recheck = recheckEvery(
           every,
           async () => isSameAdmission(admittedUser, await authenticate(request)),
-          authenticateAgain,
+          recheckEnded,
           failures,
         );
       } else if (admitted.guest && every > 0) {
         // The app may stop letting guests in (or this one): ask again, as for users.
-        recheck = recheckEvery(every, () => acceptsGuest(request), authenticateAgain, failures);
+        recheck = recheckEvery(every, () => acceptsGuest(request), recheckEnded, failures);
       }
       socket = core.openSocket(headerPairs(request.headers), onEvent, admitted.access);
       return socket.send(admitted.prelude);
