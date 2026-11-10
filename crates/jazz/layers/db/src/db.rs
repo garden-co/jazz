@@ -41,7 +41,8 @@ mod large_ops;
 pub(crate) use large_ops::byte_splices;
 pub use large_ops::{
     JsonSetEdit, LargeValueDeltaSplice, LargeValueStagingPolicy, LargeValueUpdate,
-    LargeValueUpdatePage, LargeValueUpdateSplice, StreamingMutationKind, StreamingValueUpload,
+    LargeValueUpdatePage, LargeValueUpdateSplice, StagedStreamingValue, StreamingMutationKind,
+    StreamingValueUpload,
 };
 #[path = "sync.rs"]
 pub(crate) mod sync;
@@ -69,12 +70,12 @@ pub use accepted_read::{
 pub use sync::{
     ACCEPTED, AccessProof, Acting, BuiltOn, CatalogueCoverage, Cell as SyncCell, CellDelta,
     CorpusReader, FirstLoad, FrameJoiner, Image, LocalEvidenceProvenance, LocalObservation,
-    LocalObservationCut, LocalSubmissionExport, LocalSubmissionRoute, MAX_SEQ, Outcome, PENDING,
-    Pos, ReadSpan, RejectedTransaction, RelationSnapshot, RemoteLinkHint, SerializedReadResult,
-    SubscriberId, SyncMessage, Transport, TransportError, TxName, Upstream, WireBase, WireChunk,
-    WireChunkRef, WireDelta, WireError, WireKind, WireOp, WirePull, WireTarget, WireTransport,
-    WireTransportAdapter, WireWrite, WriteConflict, decode_message, duplex, encode_frames,
-    validate_frame_batch_for_corpus,
+    LocalObservationCut, LocalSubmissionExport, LocalSubmissionPort, LocalSubmissionRoute,
+    LocalSubmissionSource, MAX_SEQ, Outcome, PENDING, Pos, ReadSpan, RejectedTransaction,
+    RelationSnapshot, RemoteLinkHint, SerializedReadResult, SubscriberId, SyncMessage, Transport,
+    TransportError, TxName, Upstream, WireBase, WireChunk, WireChunkRef, WireDelta, WireError,
+    WireKind, WireOp, WirePull, WireTarget, WireTransport, WireTransportAdapter, WireWrite,
+    WriteConflict, decode_message, duplex, encode_frames, validate_frame_batch_for_corpus,
 };
 
 /// Shape identity: equal for bindings of one query against one schema.
@@ -496,9 +497,9 @@ pub struct SchemaPublication {
 
 struct Inner {
     conn: Connection,
-    retired: bool,
     scheduler: Option<Rc<dyn TickScheduler>>,
     read_deadlines: Vec<Weak<sync::ReadDeadline>>,
+    retired: bool,
     /// One-way, owner-wide fence for new application mutations during close.
     mutation_admission_closed: bool,
     /// Errors the next ticks fail with, for tests of a tick driver.
@@ -1458,9 +1459,9 @@ impl Db {
             governance: Governance::CurrentOwner,
             inner: Rc::new(Store::new(Inner {
                 conn,
-                retired: false,
                 scheduler: None,
                 read_deadlines: Vec::new(),
+                retired: false,
                 mutation_admission_closed: false,
                 #[cfg(any(test, feature = "testing"))]
                 failing_ticks: VecDeque::new(),
@@ -9138,6 +9139,22 @@ impl TxRef<'_> {
         identity: Option<AuthorSubject>,
         tier: ReadTier,
     ) -> Result<Vec<CurrentRow>, Error> {
+        let mut opts = ReadOpts::for_read_tier(tier);
+        opts.read_view.include_deleted = include_deleted;
+        self.all_prepared_with_options(prepared, identity, &opts, None)
+            .await
+    }
+
+    /// Binding entry point retaining the ordinary first-load policy. This does
+    /// not select a different identity or upgrade a mergeable read's read set.
+    pub(crate) async fn all_prepared_with_options(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        opts: &ReadOpts,
+        coverage: Option<&dyn Fn() -> bool>,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let tier = opts.tier;
         let identity = {
             let inner = self.db.inner.staging();
             let batch = inner
@@ -9195,19 +9212,21 @@ impl TxRef<'_> {
             .prefix();
         guard.wait().await?;
         self.db.check_read_guard(self.id, &guard)?;
-        self.all_prepared_guarded(prepared, include_deleted, identity, tier, &guard, prefix)
+        self.all_prepared_guarded(prepared, identity, opts, coverage, &guard, prefix)
             .await
     }
 
     async fn all_prepared_guarded(
         &self,
         prepared: &PreparedQuery,
-        include_deleted: bool,
         identity: Option<AuthorSubject>,
-        tier: ReadTier,
+        opts: &ReadOpts,
+        coverage: Option<&dyn Fn() -> bool>,
         guard: &transaction_reads::ReadGuard,
         prefix: BatchPrefix,
     ) -> Result<Vec<CurrentRow>, Error> {
+        let tier = opts.tier;
+        let include_deleted = opts.read_view.include_deleted;
         // Except for LocalOnly, a client hydrates a serializable read from
         // the authority at the snapshot first. LocalFirst may answer from
         // the replica when the link cannot answer.
@@ -9302,6 +9321,41 @@ impl TxRef<'_> {
                 }
                 *pinned = true;
             }
+        }
+        if snapshot.is_none()
+            && self.db.inner.staging().non_durable
+            && self.db.is_client()
+            && tier == ReadTier::LocalFirst
+            && matches!(opts.read_view.source, ReadViewSourceSpec::Current)
+        {
+            // A cold foreground's local store is its durable relay, including
+            // while that relay's server is offline. Preserve LocalFirst reach:
+            // Serializable BEST_EFFORT instead asks for Remote authority.
+            let reach = sync::remote_reach(opts, true, false).expect("foreground local reach");
+            let deadline = sync::remote_deadline(opts, true, true).expect("foreground local wait");
+            self.db.remote_shape(&prepared.query)?;
+            let fetch = self.db.fetch(
+                prepared,
+                None,
+                include_deleted,
+                reach,
+                deadline,
+                coverage,
+                false,
+                &ReadViewSourceSpec::Current,
+            );
+            let mut fetch = std::pin::pin!(fetch);
+            std::future::poll_fn(|cx| {
+                guard.watch(cx.waker());
+                if let Err(error) = self.db.check_read_guard(self.id, guard) {
+                    return std::task::Poll::Ready(Err(error));
+                }
+                fetch.as_mut().poll(cx)
+            })
+            .await?;
+            self.db.check_read_guard(self.id, guard)?;
+            // Keep the admitted prefix, ordinary current view and mergeable
+            // no-read-set semantics below. This is no accepted observation.
         }
         self.db
             .check_mixed_accepted_read(self.id, prepared, identity)?;

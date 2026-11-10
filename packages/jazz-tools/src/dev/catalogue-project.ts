@@ -50,10 +50,10 @@ import { renderMigrationStub } from "./migrations.js";
 import { normalizeSchemaHashInput } from "./schema-utils.js";
 import { legacySchemaHash } from "./legacy-schema-hash.js";
 import {
-  assertMigrationMatchesCanonicalBundle,
+  resolveCanonicalMigrationForward,
+  serializeForwardLenses,
   computeSchemaHash,
   deployArtifacts,
-  serializeForwardLenses,
   type DeployResult as CatalogueDeployResult,
   resolveKnownSchemaHash,
   schemaTransitionRequiresRowTransform,
@@ -1456,14 +1456,14 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
         loadCanonicalSchema(fromHash),
         loadCanonicalSchema(toHash),
       ]);
-      assertMigrationMatchesCanonicalBundle(migration, {
+      const forward = resolveCanonicalMigrationForward(migration, {
         fromHash,
         toHash,
         fromSchema,
         toSchema,
       });
 
-      return { migration, filePath, fromHash, toHash };
+      return { migration, filePath, fromHash, toHash, forward };
     }),
   );
 
@@ -1478,10 +1478,11 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
     migrations: edges.map((edge) => ({
       fromHash: edge.fromHash,
       toHash: edge.toHash,
-      forward: serializeForwardLenses(edge.migration.forward),
+      forward: edge.forward,
     })),
     permissions: compiled.permissions,
   });
+
   for (const warning of result.warnings) emit(options, { type: "warning", message: warning });
   for (const hash of result.published.schemas) emit(options, { type: "schema-published", hash });
   if (result.schema.status === "already-stored")

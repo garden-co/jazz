@@ -112,6 +112,7 @@ export class BrowserWorkerTransportPump {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.transport.retireLocalSubmissionPort?.();
     this.receiveDeadline.close();
     this.removeWorkListener();
     this.transport.clearOutboundScheduler?.();

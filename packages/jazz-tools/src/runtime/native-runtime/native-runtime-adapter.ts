@@ -11,7 +11,6 @@ import {
   type PreparedCatalogueIdentities,
 } from "../catalogue-identities.js";
 import type { ClientMigrations } from "../client-migrations.js";
-import { streamingChunks } from "../streaming-source.js";
 import { isHistoryTable, resolveQueryTable } from "../history-relation.js";
 import { AuxiliaryReceiveDeadline } from "./auxiliary-receive-deadline.js";
 import { Utf8Decoder } from "../utf8.js";
@@ -49,7 +48,10 @@ import type {
 } from "../../drivers/types.js";
 import { serializeRuntimeSchema } from "../../drivers/schema-wire.js";
 import { parseRelationQueryJsonLossless } from "../../ir.js";
+import { streamingChunks } from "../streaming-source.js";
+import { assertRequiredRowColumnsPresent } from "../row-validation.js";
 import type {
+  LocalObservationSnapshot,
   TxId,
   InsertResult,
   MutationErrorEvent,
@@ -59,6 +61,7 @@ import type {
   Runtime,
   RuntimeWriteWaitOptions,
   StreamingInsertResult,
+  StagedStreamingMutation,
   StreamingMutationKind,
   StreamingValueSource,
   TransactionKind,
@@ -252,6 +255,12 @@ type NativeRestoreOptions = NativeWriteOptions & {
 };
 
 type NativeDb = {
+  observeLocalBatch?(
+    queries: Uint8Array[],
+    author?: Uint8Array,
+    claims?: Record<string, unknown>,
+  ): unknown;
+
   coverCatalogue?(
     timeoutMs: number,
     author?: Uint8Array,
@@ -458,6 +467,8 @@ type NativeDb = {
     localNode: Uint8Array,
     localEpoch: bigint,
   ): Transport | Promise<Transport>;
+  /** Inherits native owner identity/live claims; takes no host scope arguments. */
+  acceptOwnObservationSubscriber?(): Transport;
   acceptSubscriber?(
     author: Uint8Array,
     claims: Record<string, unknown>,
@@ -484,6 +495,12 @@ type NativeStreamingMutation = {
   finish(): Write | Promise<Write>;
   /** Stage the row mutation in the transaction the mutation began in. */
   finishInTransaction?(): void | Promise<void>;
+  stage?(): NativeStagedStreamingMutation | Promise<NativeStagedStreamingMutation>;
+  abort(): boolean | Promise<boolean>;
+};
+
+type NativeStagedStreamingMutation = {
+  attach(openTransactionId: string): void | Promise<void>;
   abort(): boolean | Promise<boolean>;
 };
 
@@ -513,6 +530,12 @@ type Write = {
 };
 
 export type Transport = {
+  /** @internal Only the private foreground/worker carrier enables this lane. */
+  observeLocalBatch?(queries: Uint8Array[], claims: Record<string, unknown>): unknown;
+  enableLocalSubmissionSource?(): void;
+  retireLocalSubmissionPort?(): void;
+  takeLocalSubmissionCompanions?(): Uint8Array[];
+  attachLocalSubmissionCompanion?(bytes: Uint8Array): boolean;
   close(): boolean;
   recvWireFrames(): unknown[];
   sendWireFrame(frame: Uint8Array): void;
@@ -535,6 +558,8 @@ export type Transport = {
 type PendingTx = {
   id: OpenTransactionId;
   kind: TransactionKind;
+  /** SDK schema used at opening; checked only by opaque streamed attachment. */
+  streamingSchema: Uint8Array;
   identity?: Uint8Array;
   requestSession?: RuntimeSession;
   readCapability?: TransactionReadCapability;
@@ -1201,6 +1226,197 @@ export class NativeRuntimeAdapter implements Runtime {
     });
   }
 
+  private localObservationRelay:
+    | ((
+        queries: readonly string[],
+        claims: Record<string, unknown>,
+        schema: Uint8Array,
+      ) => Promise<LocalObservationSnapshot[]>)
+    | null = null;
+
+  /** @internal Installed only by the private local follower connection. */
+  setLocalObservationRelay(
+    relay: NonNullable<NativeRuntimeAdapter["localObservationRelay"]>,
+  ): () => void {
+    const owner = this.ownerRuntime;
+    owner.localObservationRelay = relay;
+    return () => {
+      if (owner.localObservationRelay === relay) owner.localObservationRelay = null;
+    };
+  }
+  private ownObservationPeer: Transport | null = null;
+  private ownObservationAdmission: Promise<Transport> | null = null;
+
+  async observeLocalBatch(
+    queries: readonly string[],
+    sessionJson?: string | null,
+    expectedSchema?: Uint8Array,
+  ): Promise<LocalObservationSnapshot[]> {
+    if (this.closed || this.ownerRuntime.closed) throw new Error("Native runtime is closed");
+    if (!queries.length) throw new Error("Local observation requires queries");
+    if (expectedSchema && !sameBytes(expectedSchema, this.schemaBytes))
+      throw new Error("Local observation schema view is not available on this durable owner");
+    if (this.ownerRuntime.localObservationRelay) {
+      const session = readSession(sessionJson);
+      if (session && (session.backendAuthority || !sameBytes(session.identity, this.peerIdentity)))
+        throw new Error("Local observation requires the admitted foreground identity");
+      await this.ensureClientSessionClaims(session);
+      const claims =
+        session?.claims ??
+        (this.clientSessionClaimsKey
+          ? (JSON.parse(this.clientSessionClaimsKey) as Record<string, unknown>)
+          : {});
+      return this.ownerRuntime.localObservationRelay(queries, claims, this.schemaBytes);
+    }
+    if (this.ownerRuntime.nonDurableClient)
+      throw new Error("Local observation durable owner is unavailable");
+    const observe = this.db.observeLocalBatch;
+    if (!observe)
+      throw new Error(
+        "Native runtime does not expose local accepted observations; rebuild matching artifacts",
+      );
+    const session = readSession(sessionJson);
+    const context = this.nativeReadContext(session, undefined);
+    if (this === this.ownerRuntime && context.kind === "client-local" && session) {
+      if (session.backendAuthority || !sameBytes(session.identity, this.peerIdentity))
+        throw new Error("Local observation requires the admitted owner identity");
+      // Never restore cached JavaScript claims during observation. The native
+      // binding derives iss/sub from the admitted identity, both when the
+      // handshake installs provider-only claims and when reads include them.
+      // Compare that same projection while retaining every provider claim.
+      if (
+        !this.clientSessionClaimsKey ||
+        canonicalJson(session.claims) !==
+          canonicalJson(sessionClaims(JSON.parse(this.clientSessionClaimsKey), session))
+      )
+        throw new Error("Local observation requires the current installed owner claims");
+      if (!this.db.acceptOwnObservationSubscriber)
+        throw new Error(
+          "Native runtime lacks own observation admission; rebuild matching artifacts",
+        );
+      if (!this.ownObservationPeer) {
+        this.ownObservationAdmission ??= this.runWhenCoreIdle(() => {
+          if (this.closed) throw new Error("Native runtime is closed");
+          return this.db.acceptOwnObservationSubscriber!();
+        })
+          .then((peer) => {
+            if (this.closed) {
+              peer.close();
+              throw new Error("Native runtime is closed");
+            }
+            this.ownObservationPeer = peer;
+            return peer;
+          })
+          .finally(() => {
+            this.ownObservationAdmission = null;
+          });
+        await this.ownObservationAdmission;
+      }
+      if (this.closed || !this.ownObservationPeer) throw new Error("Native runtime is closed");
+      return this.observeLocalBatchForPeer(
+        this.ownObservationPeer,
+        queries,
+        session.claims,
+        this.schemaBytes,
+      );
+    }
+    await this.ensureClientSessionClaims(session);
+    await this.processPendingPeerActivityBeforeRead();
+    return this.runWhenCoreIdle(() => {
+      if (this.closed || this.ownerRuntime.closed) throw new Error("Native runtime is closed");
+      const raw = observe.call(
+        this.db,
+        queries.map((q) => nativeQueryInput(q, this.schema)),
+        this.nativeReadAuthor(context),
+        this.nativeReadClaims(context),
+      );
+      return this.decodeLocalObservationBatch(raw, queries);
+    });
+  }
+
+  /** @internal The actual admitted link supplies scope; no foreground token is interpreted here. */
+  async observeLocalBatchForPeer(
+    peer: Transport,
+    queries: readonly string[],
+    expectedClaims: Record<string, unknown>,
+    expectedSchema: Uint8Array,
+  ): Promise<LocalObservationSnapshot[]> {
+    if (!queries.length || !sameBytes(expectedSchema, this.schemaBytes))
+      throw new Error("Local observation schema view is not available on this durable owner");
+    if (!peer.observeLocalBatch)
+      throw new Error(
+        "Admitted link does not expose local observations; rebuild matching artifacts",
+      );
+    await this.processPendingPeerActivityBeforeRead();
+    return this.runWhenCoreIdle(() => {
+      if (this.closed || this.ownerRuntime.closed) throw new Error("Native runtime is closed");
+      return this.decodeLocalObservationBatch(
+        peer.observeLocalBatch!(
+          queries.map((q) => nativeQueryInput(q, this.schema)),
+          expectedClaims,
+        ),
+        queries,
+      );
+    });
+  }
+
+  private decodeLocalObservationBatch(
+    raw: unknown,
+    queries: readonly string[],
+  ): LocalObservationSnapshot[] {
+    if (!Array.isArray(raw) || raw.length !== queries.length)
+      throw new Error("Incomplete local observation batch");
+    let through: string | undefined;
+    return raw.map((value, index) => {
+      if (
+        !isRecord(value) ||
+        typeof value.through !== "string" ||
+        !/^[0-9]+$/.test(value.through) ||
+        !Array.isArray(value.rows) ||
+        !Array.isArray(value.evidence) ||
+        !Array.isArray(value.provenance)
+      )
+        throw new Error("Malformed local observation result");
+      through ??= value.through;
+      if (value.through !== through) throw new Error("Local observations do not share one cut");
+      const rows = rowsFromBatches(
+        readRowBatches(Uint8Array.from(value.rows)),
+        this.schema,
+        subscriptionOutputColumns(queries[index]!, this.schema).rootColumns,
+      );
+      const ids = new Set(rows.map((row) => row.id));
+      if (
+        ids.size !== rows.length ||
+        value.evidence.length !== rows.length ||
+        value.provenance.length !== rows.length
+      )
+        throw new Error("Incomplete local observation evidence");
+      for (const pair of value.evidence) {
+        if (!isRecord(pair) || typeof pair.rowId !== "string" || !ids.delete(pair.rowId))
+          throw new Error("Mismatched local observation row");
+        for (const origin of [pair.state, pair.content]) {
+          if (
+            !isRecord(origin) ||
+            typeof origin.transactionId !== "string" ||
+            !origin.transactionId ||
+            typeof origin.position !== "string" ||
+            !/^[0-9]+$/.test(origin.position) ||
+            BigInt(origin.position) > BigInt(value.through)
+          )
+            throw new Error("Malformed local observation origin");
+        }
+      }
+      if (value.provenance.some((p) => p !== "local-submission" && p !== "authority-read"))
+        throw new Error("Unknown local observation provenance");
+      return {
+        rows,
+        through: value.through,
+        evidence: value.evidence,
+        provenance: value.provenance,
+      } as LocalObservationSnapshot;
+    });
+  }
+
   createPeerAuthority(): { node: Uint8Array; epoch: bigint; features: number } {
     return {
       node: this.node,
@@ -1756,6 +1972,10 @@ export class NativeRuntimeAdapter implements Runtime {
     this.peerTransportWorkListeners.clear();
     this.localSettlementListeners.clear();
     this.pendingInboundServerFrames.length = 0;
+    const ownObservationPeer = this.ownObservationPeer;
+    this.ownObservationPeer = null;
+    if (ownObservationPeer)
+      void this.retirePeerTransport(ownObservationPeer).catch(reportAsyncRuntimeError);
     const serverTransport = this.serverTransport;
     this.serverTransport = null;
     if (serverTransport) {
@@ -1827,7 +2047,7 @@ export class NativeRuntimeAdapter implements Runtime {
     return this.finishInsert(table, suppliedRowId ?? write.rowId, values, write);
   }
 
-  async streamingMutation(
+  streamingMutation(
     mutation: StreamingMutationKind,
     table: string,
     values: InsertValues,
@@ -1836,14 +2056,84 @@ export class NativeRuntimeAdapter implements Runtime {
     writeContext?: string | null,
     objectId?: string | null,
   ): Promise<StreamingInsertResult> {
+    return this.consumeStreamingMutation(
+      mutation,
+      table,
+      values,
+      column,
+      source,
+      writeContext,
+      objectId,
+      false,
+    ) as Promise<StreamingInsertResult>;
+  }
+
+  stageStreamingMutation(
+    mutation: StreamingMutationKind,
+    table: string,
+    values: InsertValues,
+    column: string,
+    source: StreamingValueSource,
+    writeContext?: string | null,
+    objectId?: string | null,
+    publicationReadCapability?: TransactionReadCapability,
+  ): Promise<StagedStreamingMutation> {
+    return this.consumeStreamingMutation(
+      mutation,
+      table,
+      values,
+      column,
+      source,
+      writeContext,
+      objectId,
+      true,
+      publicationReadCapability,
+    ) as Promise<StagedStreamingMutation>;
+  }
+
+  private async consumeStreamingMutation(
+    mutation: StreamingMutationKind,
+    table: string,
+    values: InsertValues,
+    column: string,
+    source: StreamingValueSource,
+    writeContext: string | null | undefined,
+    objectId: string | null | undefined,
+    stageOnly: boolean,
+    publicationReadCapability?: TransactionReadCapability,
+  ): Promise<StreamingInsertResult | StagedStreamingMutation> {
     const begin = this.db.beginStreamingMutation;
     const operation =
       mutation === "insert" ? "Insert" : mutation === "update" ? "Update" : "Upsert";
     this.assertMutationAdmission(operation);
     const tx = this.currentTx(writeContext, operation);
     const writeSession = sessionFromWriteContext(writeContext);
-    const writeIdentity = this.mutationWriteIdentity(writeSession, writeContext);
     const attribution = this.backendAttribution(writeContext);
+    if (
+      publicationReadCapability !== undefined &&
+      (!stageOnly ||
+        tx ||
+        !isAcceptedReadCapability(publicationReadCapability) ||
+        attribution ||
+        !this.db.acceptedRead ||
+        (this.trustedBackend && (!writeSession || writeSession.backendAuthority)))
+    )
+      throw new Error("Staged publication evidence requires a supported authenticated owner");
+    const ownClientEvidence = publicationReadCapability === "client-accepted-evidence";
+    if (
+      ownClientEvidence &&
+      (writeSession ||
+        this.trustedBackend ||
+        this.readAuthorizationHost === "trusted-serving" ||
+        !this.db.beginClientEvidenceTransaction)
+    )
+      throw new Error("Staged own-client publication cannot select another session");
+    // Capture the exact actor used by the future begin. This does not open a
+    // batch, install claims, or confer authority; attachment still checks the
+    // live batch's identity and normal commit policy/read-set validation.
+    const writeIdentity = publicationReadCapability
+      ? (writeSession?.identity ?? this.peerIdentity.slice())
+      : this.mutationWriteIdentity(writeSession, writeContext);
     const branchView = branchViewFromWriteContext(writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     rejectAttributedBranchWrite(attribution, branchView);
@@ -1851,6 +2141,8 @@ export class NativeRuntimeAdapter implements Runtime {
       this.assertTransactionAttribution(tx, attribution);
       this.assertTransactionWriteIdentity(tx, attribution ? undefined : writeIdentity);
     }
+    if (stageOnly && branchView)
+      throw new Error("Staged streaming mutations require the root view");
     if (!begin) throw new Error("Native runtime does not expose streaming mutations");
 
     const definition = this.table(table);
@@ -1873,13 +2165,19 @@ export class NativeRuntimeAdapter implements Runtime {
       cells,
       column,
       mutation,
-      attribution ? undefined : writeIdentity,
+      // Own-client evidence opens in Database mode; authenticated evidence
+      // opens in Session mode, even when that session is the actual owner.
+      attribution || ownClientEvidence ? undefined : writeIdentity,
       attribution,
       updatedAtMs ?? undefined,
       branchView?.head,
       branchView?.base,
       tx?.id,
     );
+    if (stageOnly && !upload.stage) {
+      await upload.abort();
+      throw new Error("Native runtime does not expose staged streaming mutations");
+    }
     if (tx && !upload.finishInTransaction) {
       await upload.abort();
       throw new Error("This native runtime does not support streaming inside a transaction yet");
@@ -1930,6 +2228,46 @@ export class NativeRuntimeAdapter implements Runtime {
       await previousFinalization;
       let receipt: MutationResult;
       try {
+        if (stageOnly) {
+          const staged = await upload.stage!();
+          let available = true;
+          return {
+            id: formatUuid(rowId),
+            attach: async (openTransactionId) => {
+              if (!available) throw new Error("Staged streaming mutation is already consumed");
+              available = false;
+              try {
+                this.assertMutationAdmission(operation);
+                const pending = owner.pendingTxs.get(openTransactionId);
+                if (!pending || pending.kind !== "serializable")
+                  throw new Error(
+                    "Staged streaming mutation requires an open serializable transaction",
+                  );
+                if (!sameBytes(pending.streamingSchema, this.schemaBytes))
+                  throw new Error("Staged streaming mutation belongs to another schema");
+                this.assertTransactionWriteIdentity(
+                  pending,
+                  attribution ? undefined : writeIdentity,
+                );
+                this.assertTransactionAttribution(pending, attribution);
+                await staged.attach(openTransactionId);
+                pending.hasStagedMutations = true;
+              } catch (error) {
+                try {
+                  await staged.abort();
+                } catch {
+                  // A retired owner must retain its original attachment refusal.
+                }
+                throw error;
+              }
+            },
+            abort: async () => {
+              if (!available) return false;
+              available = false;
+              return await staged.abort();
+            },
+          };
+        }
         if (tx) {
           await upload.finishInTransaction!();
           tx.hasStagedMutations = true;
@@ -2349,7 +2687,9 @@ export class NativeRuntimeAdapter implements Runtime {
     readCapability?: TransactionReadCapability,
   ): OpenTransactionId {
     if (this !== this.ownerRuntime) {
-      return this.ownerRuntime.beginTransaction(kind, id, sessionJson, readCapability);
+      const opened = this.ownerRuntime.beginTransaction(kind, id, sessionJson, readCapability);
+      this.ownerRuntime.pendingTxs.get(opened)!.streamingSchema = this.schemaBytes;
+      return opened;
     }
     if (this.closed) {
       throw new Error("Begin transaction failed: native runtime is closed");
@@ -2405,6 +2745,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.pendingTxs.set(id, {
       id,
       kind,
+      streamingSchema: this.schemaBytes,
       identity: admission,
       requestSession: admission ? (session ?? undefined) : undefined,
       readCapability,
@@ -4022,6 +4363,14 @@ export class NativeRuntimeAdapter implements Runtime {
     this.coreTickScheduled = true;
     queueMicrotask(() => {
       this.coreTickScheduled = false;
+      if (!this.coreProgressAllowed()) return;
+      if (this.coreOperation) {
+        this.coreTickAgain = true;
+        return;
+      }
+      // Observe only a tick started here, never a predecessor's completion.
+      const hasServerTransport = this.serverTransport !== null;
+      const generation = this.serverConnectionGeneration;
       void this.runCoreTick().catch((error) => {
         // Native revocation can retire a foreground after its wake crossed
         // into the JS queue. Native liveness distinguishes that stale wake
@@ -4032,7 +4381,11 @@ export class NativeRuntimeAdapter implements Runtime {
           reportAsyncRuntimeError(livenessError);
           return;
         }
-        reportAsyncRuntimeError(error);
+        if (hasServerTransport) {
+          this.handleServerTransportError(error, generation);
+        } else {
+          reportAsyncRuntimeError(error);
+        }
       });
     });
   }
@@ -6690,23 +7043,6 @@ function encodeCells(
   writeDescriptor(writer, descriptor);
   writer.bytes(createRecord(descriptor, values));
   return writer.finish();
-}
-
-function assertRequiredRowColumnsPresent(
-  columns: ColumnDescriptor[],
-  row: InsertValues,
-  table?: string,
-): void {
-  for (const column of columns) {
-    const value = row[column.name] ?? column.default;
-    if (value && value.type !== "Null") continue;
-    if (column.nullable) continue;
-    throw new Error(
-      table
-        ? `encoding error: missing required field \`${column.name}\` on table \`${table}\``
-        : `missing required column ${column.name}`,
-    );
-  }
 }
 
 /**

@@ -15,6 +15,67 @@ class PreparationSource extends DefaultRuntimeSource {
   }
 }
 
+it.each([
+  ["mergeable", "update"],
+  ["mergeable", "upsert"],
+  ["serializable", "update"],
+  ["serializable", "upsert"],
+] as const)(
+  "loads stored and queued dependencies for %s transaction %s",
+  async (kind, operation) => {
+    const app = s.defineApp(
+      {
+        prices: s.table(
+          {
+            amount: s.float().transform({
+              dependsOn: ["scale"],
+              from: (value, context: Readonly<{ scale: number }>) => value / context.scale,
+              to: (value: number, context: Readonly<{ scale: number }>) => value * context.scale,
+            }),
+            scale: s.float(),
+          },
+          {},
+        ),
+      },
+      { migrations: "none" },
+    );
+    const db = await createAccountDbWithRuntimeSource(
+      await localAccountConfig(`partial-transform-${crypto.randomUUID()}`),
+      new PreparationSource(),
+    );
+    try {
+      const inserted = db.insert(app.prices, { amount: 2, scale: 10 });
+      await inserted.wait({ tier: "local" });
+      const tx =
+        kind === "serializable" ? db.beginSerializableTransaction() : db.beginTransaction();
+      try {
+        if (operation === "update") tx.update(app.prices, inserted.value.id, { amount: 3 });
+        else tx.upsert(app.prices, inserted.value.id, { amount: 3 });
+        expect(await tx.all(app.prices, { tier: "local-first" })).toEqual([
+          { id: inserted.value.id, amount: 3, scale: 10 },
+        ]);
+        tx.update(app.prices, inserted.value.id, { scale: 20 });
+        if (operation === "update") tx.update(app.prices, inserted.value.id, { amount: 4 });
+        else tx.upsert(app.prices, inserted.value.id, { amount: 4 });
+        expect(await tx.all(app.prices, { tier: "local-first" })).toEqual([
+          { id: inserted.value.id, amount: 4, scale: 20 },
+        ]);
+        await tx.commit().wait({ tier: "local" });
+      } catch (error) {
+        await tx.rollback();
+        throw error;
+      }
+      await expect(db.one(app.prices)).resolves.toEqual({
+        id: inserted.value.id,
+        amount: 4,
+        scale: 20,
+      });
+    } finally {
+      await db.shutdown();
+    }
+  },
+);
+
 it.each(["mergeable", "serializable"] as const)(
   "keeps generated IDs native for immediate %s transaction inserts without dependencies",
   async (kind) => {

@@ -791,3 +791,58 @@ describe("transformRows", () => {
     expect(() => unknownRelation({ id: "x", values: [] })).toThrow('Unknown relation "nope"');
   });
 });
+
+describe("payload enum decoding", () => {
+  const payloadType = {
+    type: "EnumPayload" as const,
+    cases: [
+      {
+        name: "message",
+        fields: [
+          { name: "body", nullable: false, column_type: { type: "Text" as const } },
+          { name: "priority", nullable: false, column_type: { type: "Integer" as const } },
+        ],
+      },
+    ],
+  };
+  const encoded = {
+    type: "Enum" as const,
+    value: {
+      case: "message",
+      values: [
+        { type: "Text" as const, value: "hello" },
+        { type: "Integer" as const, value: 3 },
+      ],
+    },
+  };
+
+  it("returns the declared case and named typed fields", () => {
+    expect(unwrapValue(encoded, payloadType)).toEqual({
+      type: "message",
+      body: "hello",
+      priority: 3,
+    });
+  });
+
+  it("preserves payload enums nested in typed arrays", () => {
+    expect(
+      unwrapValue({ type: "Array", value: [encoded] }, { type: "Array", element: payloadType }),
+    ).toEqual([{ type: "message", body: "hello", priority: 3 }]);
+  });
+
+  it.each(["unknown-case", "field-count"] as const)(
+    "refuses a payload enum with %s drift",
+    (mode) => {
+      const value = {
+        ...encoded,
+        value: {
+          ...encoded.value,
+          ...(mode === "unknown-case"
+            ? { case: "missing" }
+            : { values: encoded.value.values.slice(0, 1) }),
+        },
+      };
+      expect(() => unwrapValue(value, payloadType)).toThrow("Invalid payload enum result");
+    },
+  );
+});

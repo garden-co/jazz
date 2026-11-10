@@ -145,6 +145,8 @@ export declare class NapiDb {
   all(query: Uint8Array, opts?: { tier?: string; include_deleted?: boolean; sync?: boolean } | undefined | null, openTransactionId?: string | undefined | null, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): Uint8Array | PendingNativeRead
   /** Authority evidence in one explicitly admitted serializable transaction. */
   acceptedRead(query: Uint8Array, openTransactionId: string, includeDeleted: boolean, timeoutMs: number, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): Uint8Array | PendingNativeRead
+  /** Partial accepted local candidates, never SELECT or complete-history proof. */
+  observeLocalBatch(queries: Array<Uint8Array>, author?: Uint8Array | undefined | null, claims?: JsonValue | undefined | null): JsonValue
   /** Bind receipt-correlation claims to this client's own admitted identity. */
   setSessionClaims(claims?: Record<string, unknown> | undefined | null): void
   /** Set the claims reads and writes as `author` are checked with. */
@@ -192,6 +194,8 @@ export declare class NapiDb {
    * turns the slow-query log off.
    */
   setSlowQueryThresholdMs(ms: number): void
+  /** Inherit this already-authenticated durable owner's live observation scope. */
+  acceptOwnObservationSubscriber(): Transport
   /**
    * Connect to the server over byte frames the host carries: each frame
    * is one postcard `SyncMessage`.
@@ -247,12 +251,19 @@ export declare class PendingNativeRead {
   cancel(): void
 }
 
+/** An owner-bound completed upload for one later serializable attachment. */
+export declare class StagedStreamingMutation {
+  attach(openTransactionId: string): void
+  abort(): boolean
+}
+
 /** A large value uploaded in chunks, then published as one row mutation. */
 export declare class StreamingMutation {
   push(chunk: Uint8Array): void
   finish(): Write
   /** Stage the value's row mutation in the transaction it began in. */
   finishInTransaction(): void
+  stage(): StagedStreamingMutation
   abort(): boolean
 }
 
@@ -280,6 +291,13 @@ export declare class Transport {
   auxiliaryReceiveTimeoutMs(): number | null
   expireAuxiliaryReceive(): void
   auxiliaryOutboundReady(): boolean
+  /** Partial accepted local candidates, never SELECT or complete-history proof. */
+  observeLocalBatch(queries: Array<Uint8Array>, claims: JsonValue): JsonValue
+  /** Private trusted local-host channel, never enable for a network link. */
+  enableLocalSubmissionSource(): void
+  retireLocalSubmissionPort(): void
+  takeLocalSubmissionCompanions(): Array<Uint8Array>
+  attachLocalSubmissionCompanion(bytes: Uint8Array): boolean
   sendWireFrame(frame: Uint8Array): void
   sendWireFrames(frames: Array<Uint8Array>): void
   recvWireFrames(): Array<Uint8Array>

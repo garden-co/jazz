@@ -4,6 +4,11 @@ use super::*;
 use crate::db::Store;
 use std::rc::Weak;
 
+#[path = "local_submission_port.rs"]
+mod port;
+pub(crate) use port::HostSubmission;
+pub use port::{LocalSubmissionPort, LocalSubmissionSource};
+
 /// Effective operands for this local observation, not a transport capability
 /// or evidence that a caller-selected policy bundle was authenticated.
 #[derive(Clone, Debug, PartialEq)]
@@ -224,6 +229,9 @@ impl Db {
         index: usize,
         message: &SyncMessage,
     ) -> Result<Option<Vec<Option<SubmissionProvenance>>>, Error> {
+        if let Some(provenance) = self.host_local_submission_for(index, message)? {
+            return Ok(Some(provenance));
+        }
         let export = self.inner.borrow().sessions[index].local_submission.clone();
         let Some(export) = export else {
             return Ok(None);
@@ -695,6 +703,8 @@ pub struct LocalObservationCut {
     schema: [u8; 16],
     scope: ObservationScope,
     digest: [u8; 32],
+    read_policy: Option<AuthorSubject>,
+    admitted: Option<SubscriberId>,
     through: u64,
     admission: i64,
 }
@@ -710,6 +720,78 @@ pub struct LocalObservation {
 }
 
 impl Db {
+    /// Admit an observation-only local peer of this authenticated durable owner.
+    /// Identity and live claims are inherited from the Store, never supplied
+    /// by the host. No authority, volatile follower or schema-view substitution.
+    pub(crate) fn accept_own_observation_subscriber(
+        &self,
+        transport: Box<dyn crate::db::Transport>,
+    ) -> Result<(crate::db::SubscriberId, AuthorSubject), Error> {
+        self.ensure_storage_owner_active()?;
+        if self.inner.1.get() == u64::MAX {
+            return Err(unobserved("observation owner was retired"));
+        }
+        let author = {
+            let inner = self.inner.borrow();
+            if self.view.is_some()
+                || inner.client.is_none()
+                || inner.non_durable
+                || inner.identity.author == AuthorSubject::SYSTEM
+            {
+                return Err(unobserved(
+                    "own observation requires the durable replica owner",
+                ));
+            }
+            inner.identity.author
+        };
+        let subscriber = self.accept_subscriber(transport, author)?;
+        Ok((subscriber, author))
+    }
+
+    /// The same handle, identity and fixed-claim choice used by normal serving.
+    /// This is crate-private: a host cannot select a bundle or forge a principal.
+    pub(crate) fn admitted_observation_context(
+        &self,
+        subscriber: SubscriberId,
+    ) -> Result<
+        (
+            Db,
+            AuthorSubject,
+            BTreeMap<String, Value>,
+            Option<AuthorSubject>,
+        ),
+        Error,
+    > {
+        self.ensure_storage_owner_active()?;
+        let (identity, claims, policy) = {
+            let inner = self.inner.borrow();
+            let session = inner
+                .sessions
+                .get(subscriber.slot)
+                .filter(|session| session.open && session.generation == subscriber.generation)
+                .ok_or_else(|| unobserved("observation session was retired or replaced"))?;
+            let fixed = session
+                .claims
+                .clone()
+                .filter(|_| session.identity != AuthorSubject::SYSTEM);
+            // Normal serving treats SYSTEM as the store's local read, with
+            // the actual owner's operands rather than a SYSTEM registry entry.
+            let identity = if session.identity == AuthorSubject::SYSTEM {
+                inner.identity.author
+            } else {
+                session.identity
+            };
+            (
+                identity,
+                fixed
+                    .or_else(|| inner.claims.get(&identity).cloned())
+                    .unwrap_or_default(),
+                inner.session_policy(subscriber.slot),
+            )
+        };
+        Ok((self.session_db(subscriber.slot), identity, claims, policy))
+    }
+
     /// Freeze one local cut for several prepared metadata queries. No network,
     /// hidden hydration, transaction admission or freshness promise is made.
     /// An active SQLite transaction refuses capture: its evidence admission
@@ -747,9 +829,29 @@ impl Db {
             schema: *schema.jazz.version_id().as_bytes(),
             scope,
             digest,
+            read_policy: Some(author),
+            admitted: None,
             through: inner.served_through().max(evidence_through),
             admission,
         })
+    }
+
+    /// Only core admission chooses this policy mode. In particular, normal
+    /// serving of an own-identity replica uses permissive-local reads; that
+    /// mode is distinct from provenance identity and conveys no SELECT proof.
+    pub(crate) fn local_observation_cut_for_admitted_session(
+        &self,
+        prepared: &PreparedQuery,
+        subscriber: SubscriberId,
+    ) -> Result<LocalObservationCut, Error> {
+        let (handle, author, claims, policy) = self.admitted_observation_context(subscriber)?;
+        let mut cut = handle.local_observation_cut(prepared, Some(author))?;
+        if cut.scope.claims != claims {
+            return Err(unobserved("observation session claims changed"));
+        }
+        cut.read_policy = policy;
+        cut.admitted = Some(subscriber);
+        Ok(cut)
     }
 
     /// Run against an existing local cut with current applicable policies.
@@ -771,6 +873,19 @@ impl Db {
         {
             return Err(unobserved("observation owner was retired or replaced"));
         }
+        if let Some(subscriber) = cut.admitted {
+            let (handle, author, claims, policy) = self.admitted_observation_context(subscriber)?;
+            let inner = handle.inner.borrow();
+            let schema = handle.view.as_ref().unwrap_or(&inner.owner);
+            if author != cut.scope.author
+                || claims != cut.scope.claims
+                || policy != cut.read_policy
+                || schema.jazz.version_id().as_bytes() != &cut.schema
+                || handle.governance.key() != self.governance.key()
+            {
+                return Err(unobserved("local observation session changed"));
+            }
+        }
         let inner = self.inner();
         let schema = prepared.schema.as_ref().unwrap_or(&inner.owner);
         crate::db::accepted_read::check_accepted_shape(prepared, schema)?;
@@ -790,7 +905,7 @@ impl Db {
             settled_only: true,
             ..ReadSpec::new(self.governance.clone())
         };
-        let rows = inner.run(prepared, Some(scope.author), &read)?;
+        let rows = inner.run(prepared, cut.read_policy, &read)?;
         let table = schema.table(&prepared.query.table)?;
         let mut evidence = Vec::with_capacity(rows.len());
         let mut provenance = Vec::with_capacity(rows.len());

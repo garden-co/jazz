@@ -30,8 +30,10 @@ import type {
 import {
   DefinedTable,
   unwrapTableDefinition,
+  withManagedEncryptionTables,
   definitionToSchema as compileSchemaDefinition,
 } from "./typed-app.js";
+import { encryptedTableToPhysical, equalityIndexColumn } from "./e2ee/encrypted-schema.js";
 
 type SchemaLike = SchemaDefinition | AppSchema<any>;
 
@@ -578,6 +580,20 @@ function normalizeSchemaDefinition(
   );
 }
 
+function definitionToSchema(definition: SchemaDefinition): SchemaAst {
+  const normalizedDefinition = withManagedEncryptionTables(normalizeSchemaDefinition(definition));
+  const logical = compileSchemaDefinition(normalizedDefinition);
+  return {
+    tables: logical.tables.map((table) => {
+      const tableDefinition = normalizedDefinition[table.name];
+      return encryptedTableToPhysical(
+        table,
+        tableDefinition instanceof DefinedTable ? tableDefinition.encryption : undefined,
+      );
+    }),
+  };
+}
+
 export function renameTableFrom<const TOldName extends string>(
   oldName: TOldName,
 ): RenameTableFromOp<TOldName> {
@@ -695,6 +711,33 @@ function columnMetadataEqual(left: AnyTypedColumnBuilder, right: AnyTypedColumnB
   const source = left._build("__migration_shape__"),
     target = right._build("__migration_shape__");
   return source.mergeStrategy === target.mergeStrategy && columnDefaultsEqual(left, right);
+}
+
+function encryptionShapeSignature(
+  definition: TableDefinition | DefinedTable<TableDefinition>,
+  columnRenames?: ReadonlyMap<string, string>,
+  tableRenames?: ReadonlyMap<string, string>,
+): string | undefined {
+  if (!(definition instanceof DefinedTable) || !definition.encryption) return undefined;
+  const { space, columns, indexes } = definition.encryption;
+  const scope = Object.values(definition.relations).find(
+    (relation) => relation.kind === "forward" && relation.column === space,
+  )!.table;
+  const originalName = (name: string) => columnRenames?.get(name) ?? name;
+  return JSON.stringify({
+    space: [originalName(space), tableRenames?.get(scope) ?? scope],
+    columns: columns
+      .map((name) => {
+        const column = definition.columns[name];
+        if (!column || isComputedColumn(column))
+          throw new Error(`Encrypted migration column "${name}" must be a stored column`);
+        return [originalName(name), columnShapeSignature(column)];
+      })
+      .sort(([left], [right]) => left!.localeCompare(right!)),
+    indexes: Object.keys(indexes ?? {})
+      .map((name) => [originalName(name), indexes![name]])
+      .sort(([left], [right]) => left!.localeCompare(right!)),
+  });
 }
 
 function tableMatchesAfterApplyingColumnOperations(
@@ -832,6 +875,31 @@ function buildForwardLenses<
     renamedSources,
   );
 
+  // Check before the empty-lens shortcut: encryption is client-side metadata,
+  // not a server lens capable of converting existing values.
+  for (const [tableName, target] of Object.entries(toDefinition)) {
+    const source = (fromDefinition as SchemaDefinition)[renameTableMap.get(tableName) ?? tableName];
+    if (!source) continue;
+    const columnRenames = new Map<string, string>();
+    const operations = (
+      migrate as Record<string, Record<string, AddOp | DropOp | RenameOp>> | undefined
+    )?.[tableName];
+    for (const [name, operation] of Object.entries(operations ?? {})) {
+      if (operation._type === "rename") columnRenames.set(name, operation.oldName);
+    }
+    if (
+      encryptionShapeSignature(source) !==
+      encryptionShapeSignature(
+        target as TableDefinition | DefinedTable<TableDefinition>,
+        columnRenames,
+        renameTableMap,
+      )
+    ) {
+      throw new Error(
+        `Migration for ${tableName} changes encryption; convert existing data through an authorised client instead.`,
+      );
+    }
+  }
   const sourceTables = unwrapSchemaTables(fromDefinition);
   const targetTables = unwrapSchemaTables(toDefinition);
   const referenceAdditionTables = new Set<string>();
@@ -926,6 +994,9 @@ function buildForwardLenses<
     const renamedSources = new Set<string>();
     const droppedColumns = new Set<string>();
     const sourceTableName = renamedFrom ?? tableName;
+    const sourceDefinition = (fromDefinition as SchemaDefinition)[sourceTableName];
+    const sourceEncryption =
+      sourceDefinition instanceof DefinedTable ? sourceDefinition.encryption : undefined;
 
     for (const [columnName, operation] of operationEntries) {
       switch (operation._type) {
@@ -947,6 +1018,13 @@ function buildForwardLenses<
             column: operation.oldName,
             value: columnName,
           });
+          if (sourceEncryption?.indexes?.[operation.oldName]) {
+            operations.push({
+              type: "rename",
+              column: equalityIndexColumn(operation.oldName),
+              value: equalityIndexColumn(columnName),
+            });
+          }
           break;
         }
         case "add": {
@@ -1049,7 +1127,7 @@ function buildForwardLenses<
 }
 
 export function schemaDefinitionToAst(definition: SchemaDefinition | AppSchema<any>): SchemaAst {
-  return compileSchemaDefinition(definition as SchemaDefinition);
+  return definitionToSchema(definition as SchemaDefinition);
 }
 
 /**
@@ -1126,18 +1204,20 @@ export function defineMigration<
     config.to as SchemaDefinition,
   ) as NormalizedSchema<TTo>;
 
+  const forward = buildForwardLenses(
+    config.migrate,
+    config.renameTables,
+    config.createTables,
+    config.dropTables,
+    fromDefinition,
+    toDefinition,
+  );
+
   return {
     from: config.from,
     to: config.to,
     fromHash: config.fromHash,
     toHash: config.toHash,
-    forward: buildForwardLenses(
-      config.migrate,
-      config.renameTables,
-      config.createTables,
-      config.dropTables,
-      fromDefinition,
-      toDefinition,
-    ),
+    forward,
   };
 }

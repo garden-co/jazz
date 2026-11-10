@@ -27,6 +27,11 @@ export function encodeEnvelope(mechanism: CryptoMechanism, payload: Uint8Array):
 
 /** Validate routing metadata. The adapter must still authenticate the payload. */
 export function decodeEnvelope(mechanism: CryptoMechanism, envelope: Uint8Array): Uint8Array {
+  return Uint8Array.from(decodeEnvelopeView(mechanism, envelope));
+}
+
+/** Internal routing over resident large values without copying their payload. */
+export function decodeEnvelopeView(mechanism: CryptoMechanism, envelope: Uint8Array): Uint8Array {
   validateMechanism(mechanism);
   if (
     envelope.length < 11 ||
@@ -50,6 +55,5 @@ export function decodeEnvelope(mechanism: CryptoMechanism, envelope: Uint8Array)
   if (id !== mechanism.id || version !== mechanism.version) {
     throw new Error("Unsupported E2EE mechanism");
   }
-  // Buffer is a Uint8Array subtype, but its slice() shares the source storage.
-  return Uint8Array.from(envelope.subarray(10 + length));
+  return envelope.subarray(10 + length);
 }

@@ -125,6 +125,168 @@ fn drive<T>(links: &[(&Link, &Link)], future: impl Future<Output = T>) -> T {
     panic!("did not complete");
 }
 
+/// Alice's two local host realms exchange ordinary wire frames plus a private
+/// companion lane; her authority still admits and settles every Commit.
+/// foreground -> durable owner -> authority -> Global -> paired shared cut
+#[test]
+fn local_companion_binding_keeps_multiple_commits_paired_without_wire_changes() {
+    local_binding_companions(false, false, true);
+}
+
+/// Alice's local channel retirement revokes queued companions synchronously,
+/// even before her durable owner's normal evaluator consumes the valid frames.
+#[test]
+fn local_companion_binding_revokes_before_queued_commit_processing() {
+    local_binding_companions(true, false, true);
+}
+
+/// Alice's reserved local-first principal is already admitted by the host;
+/// observing through that link must not parse a realm-local token again.
+#[test]
+fn local_companion_binding_reads_as_reserved_admitted_identity() {
+    local_binding_companions(false, true, true);
+}
+
+/// Alice's client schema has no authority policy installation. Her actual
+/// own-replica serving mode still reads accepted local submissions; an
+/// observation must preserve that mode rather than invent a policy context.
+#[test]
+fn local_companion_binding_own_replica_keeps_its_normal_serving_policy_mode() {
+    local_binding_companions(false, true, false);
+}
+
+fn local_binding_companions(revoke: bool, reserved: bool, local_policies: bool) {
+    let server = authority();
+    let writer_identity = if reserved {
+        DbIdentity {
+            node: NodeUuid::from_bytes([9; 16]),
+            author: AuthorSubject::reserved(AuthorSubject::LOCAL_FIRST_ISSUER, "alice").unwrap(),
+        }
+    } else {
+        identity(9)
+    };
+    let client_schema = if local_policies {
+        schema()
+    } else {
+        compile_schema(
+            &SchemaBuilder::new()
+                .table(TableSchemaBuilder::new("notes").column("title", ColumnType::Text))
+                .table(
+                    TableSchemaBuilder::new("comments")
+                        .column("note", ColumnType::Uuid)
+                        .column("body", ColumnType::Text),
+                )
+                .build(),
+        )
+    };
+    let foreground = Binding::new(
+        block_on(Db::open(DbConfig::new(
+            client_schema.clone(),
+            writer_identity,
+        )))
+        .unwrap(),
+        writer_identity,
+        false,
+    );
+    let durable_identity = DbIdentity {
+        node: NodeUuid::from_bytes([10; 16]),
+        author: writer_identity.author,
+    };
+    let durable = Binding::new(
+        block_on(Db::open(DbConfig::new(client_schema, durable_identity))).unwrap(),
+        durable_identity,
+        false,
+    );
+    let to_server = durable.connect_upstream();
+    let from_durable = server
+        .accept_subscriber(writer_identity.author, Default::default())
+        .unwrap();
+    let to_durable = foreground.connect_upstream();
+    let admitted_claims =
+        binding_host::claims(writer_identity.author, json!({"scope":"admitted"})).unwrap();
+    foreground
+        .set_session_claims(json!({"scope":"admitted"}))
+        .unwrap();
+    let from_foreground = durable
+        .accept_subscriber(writer_identity.author, admitted_claims)
+        .unwrap();
+    pump(&[(&to_server, &from_durable), (&to_durable, &from_foreground)]);
+    to_durable.enable_local_submission_source().unwrap();
+    let first = foreground
+        .insert("notes", &title("first"), &none())
+        .unwrap();
+    let second = foreground
+        .insert("notes", &title("second"), &none())
+        .unwrap();
+    for _ in 0..20 {
+        block_on(foreground.tick()).unwrap();
+        let frames = to_durable.take_outbound();
+        let companions = to_durable.take_local_submission_companions();
+        for companion in &companions {
+            assert!(
+                from_foreground
+                    .attach_local_submission_companion(companion)
+                    .unwrap()
+            );
+            assert!(
+                !from_foreground
+                    .attach_local_submission_companion(companion)
+                    .unwrap()
+            );
+        }
+        if revoke {
+            from_foreground.retire_local_submission_port();
+        }
+        from_foreground.receive(frames);
+        block_on(durable.tick()).unwrap();
+        pump(&[(&to_server, &from_durable)]);
+        to_durable.receive(from_foreground.take_outbound());
+    }
+    block_on(foreground.wait_for_write(&first, "global").unwrap()).unwrap();
+    block_on(foreground.wait_for_write(&second, "global").unwrap()).unwrap();
+    if !local_policies {
+        assert_eq!(
+            titles(&durable),
+            vec!["first", "second"],
+            "ordinary own-replica read keeps the accepted bodies"
+        );
+    }
+    let queries = vec![
+        postcard::to_allocvec(&Query::from("notes")).unwrap(),
+        postcard::to_allocvec(&Query::from("comments")).unwrap(),
+    ];
+    assert!(
+        from_foreground
+            .observe_local_batch(queries.clone(), Some(json!({"scope":"unadmitted"})))
+            .is_err()
+    );
+    let observed =
+        from_foreground.observe_local_batch(queries.clone(), Some(json!({"scope":"admitted"})));
+    if revoke {
+        assert!(
+            matches!(observed, Err(HostError::Engine(error)) if error.code == ErrorCode::NotObserved)
+        );
+        return;
+    }
+    let observed = observed.unwrap();
+    assert_eq!(observed[0]["evidence"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        observed[0]["provenance"],
+        json!(["local-submission", "local-submission"])
+    );
+    assert_eq!(observed[0]["through"], observed[1]["through"]);
+    assert_eq!(observed[1]["evidence"], json!([]));
+    assert!(durable.observe_local_batch(vec![], None, None).is_err());
+    from_foreground
+        .update_claims(json!({"scope":"rebound"}))
+        .unwrap();
+    assert!(
+        from_foreground
+            .observe_local_batch(queries, Some(json!({"scope":"admitted"})))
+            .is_err()
+    );
+}
+
 #[test]
 fn options_objects_decode_as_the_typescript_runtime_sends_them() {
     let row = [7u8; 16];
@@ -1620,4 +1782,253 @@ fn checked_host_batch_preserves_a_split_prefix_after_rejection() {
     subscriber.receive_checked(suffix).unwrap();
     block_on(server.tick()).unwrap();
     assert_eq!(titles(&server), ["alice"]);
+}
+
+/// A later native scope withdrawal, even before fresh observer admission, must
+/// not be overwritten by cached host claims; the old proof stays refused.
+#[test]
+fn own_observer_inherits_live_claims_and_refuses_withdrawn_submission_scope() {
+    let server = authority();
+    let alice = open(0x71);
+    alice
+        .set_session_claims(json!({"scope":"original"}))
+        .unwrap();
+    let up = alice.connect_upstream();
+    let down = server
+        .accept_subscriber(alice.author(), Default::default())
+        .unwrap();
+    pump(&[(&up, &down)]);
+    let write = alice
+        .insert("notes", &title("alice accepted"), &none())
+        .unwrap();
+    pump(&[(&up, &down)]);
+    block_on(alice.wait_for_write(&write, "global").unwrap()).unwrap();
+    let query = postcard::to_allocvec(&Query::from("notes")).unwrap();
+    let mut observer = alice.accept_own_observation_subscriber().unwrap();
+    let rows = observer
+        .observe_local_batch(vec![query.clone()], Some(json!({"scope":"original"})))
+        .unwrap();
+    assert_eq!(rows[0]["evidence"].as_array().unwrap().len(), 1);
+    assert_eq!(rows[0]["provenance"], json!(["local-submission"]));
+    observer.close();
+    alice
+        .set_session_claims(json!({"scope":"withdrawn"}))
+        .unwrap();
+    let mut fresh = alice.accept_own_observation_subscriber().unwrap();
+    let stale = fresh.observe_local_batch(vec![query.clone()], Some(json!({"scope":"original"})));
+    assert!(matches!(stale, Err(HostError::Engine(error)) if error.code == ErrorCode::NotObserved));
+    let current =
+        fresh.observe_local_batch(vec![query.clone()], Some(json!({"scope":"withdrawn"})));
+    assert!(
+        matches!(current, Err(HostError::Engine(error)) if error.code == ErrorCode::NotObserved)
+    );
+    fresh.close();
+    assert!(
+        matches!(fresh.observe_local_batch(vec![query], Some(json!({"scope":"withdrawn"}))), Err(HostError::Engine(error)) if error.code == ErrorCode::NotObserved)
+    );
+    block_on(alice.close()).unwrap();
+    assert!(alice.accept_own_observation_subscriber().is_err());
+}
+
+/// Bob cannot turn an authority or a volatile follower into an own-client
+/// observer. Both refusals occur before allocating a subscriber slot.
+#[test]
+fn own_observer_refuses_backend_and_volatile_followers() {
+    assert!(
+        matches!(authority().accept_own_observation_subscriber(), Err(HostError::Engine(error)) if error.code == ErrorCode::NotObserved)
+    );
+    let bob = open(0x72);
+    bob.set_non_durable_client();
+    assert!(
+        matches!(bob.accept_own_observation_subscriber(), Err(HostError::Engine(error)) if error.code == ErrorCode::NotObserved)
+    );
+}
+
+fn completed_text_stream(
+    db: &Binding,
+    row: [u8; 16],
+    text: &str,
+    tx: Option<&str>,
+) -> binding_host::StreamingMutation {
+    let mut upload = db
+        .begin_streaming_mutation(
+            "notes".to_owned(),
+            &row,
+            &empty_cells(),
+            "title".to_owned(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            tx,
+        )
+        .unwrap();
+    upload.push(text.as_bytes()).unwrap();
+    upload
+}
+
+/// Alice completes an upload before opening her batch; neither the file nor
+/// companion is visible until one commit. Invalid attach consumes its handle.
+#[test]
+fn a_completed_binding_stream_attaches_once_after_opening() {
+    let db = open(0xa1);
+    let mut invalid = completed_text_stream(&db, [0x31; 16], "invalid", None)
+        .stage()
+        .unwrap();
+    assert!(invalid.attach("not a transaction").is_err());
+    assert!(!invalid.abort().unwrap());
+    let mut upload = completed_text_stream(&db, [0x32; 16], "streamed", None);
+    let mut staged = upload.stage().unwrap();
+    assert!(titles(&db).is_empty());
+    assert!(upload.push(b"late").is_err());
+    let tx = OpenTransactionId::new().to_string();
+    db.begin_transaction(&tx, "serializable", None, None)
+        .unwrap();
+    staged.attach(&tx).unwrap();
+    db.insert_in_transaction(&tx, "notes", &title("companion"), &none())
+        .unwrap();
+    assert!(titles(&db).is_empty());
+    db.commit_transaction(&tx, Some("serializable")).unwrap();
+    assert_eq!(titles(&db), ["companion", "streamed"]);
+    assert!(staged.attach(&tx).is_err());
+    assert!(!staged.abort().unwrap());
+}
+
+/// Alice cannot detach a stream admitted to one transaction. A refused stage
+/// keeps the original finish-in-that-transaction route intact.
+#[test]
+fn a_transaction_bound_stream_cannot_escape_as_a_capability() {
+    let db = open(0xa1);
+    let tx = OpenTransactionId::new().to_string();
+    db.begin_transaction(&tx, "serializable", None, None)
+        .unwrap();
+    let mut upload = completed_text_stream(&db, [0x33; 16], "bound", Some(&tx));
+    assert!(upload.stage().is_err());
+    upload.finish_in_transaction().unwrap();
+    assert!(titles(&db).is_empty());
+    db.commit_transaction(&tx, Some("serializable")).unwrap();
+    assert_eq!(titles(&db), ["bound"]);
+}
+
+/// Alice's duplicate-row attachment poisons the whole batch like an ordinary
+/// staged write. The streamed row and companion cannot partially publish.
+#[test]
+fn a_refused_stream_attachment_rejects_the_companion_commit() {
+    let db = open(0xa1);
+    let id = [0x34; 16];
+    db.insert("notes", &title("original"), &json!({"rowId": id}))
+        .unwrap();
+    let mut staged = completed_text_stream(&db, id, "duplicate", None)
+        .stage()
+        .unwrap();
+    let tx = OpenTransactionId::new().to_string();
+    db.begin_transaction(&tx, "serializable", None, None)
+        .unwrap();
+    staged.attach(&tx).unwrap();
+    db.insert_in_transaction(&tx, "notes", &title("must not escape"), &none())
+        .unwrap();
+    let commit = db.commit_transaction(&tx, Some("serializable")).unwrap();
+    assert!(commit.rejected.is_some());
+    assert_eq!(titles(&db), ["original"]);
+}
+
+/// Retiring Alice's owning binding prevents a retained capability from staging
+/// into any later batch; consuming that refusal does not resurrect the owner.
+#[test]
+fn a_retained_stream_capability_cannot_outlive_its_binding_owner() {
+    let db = open(0xa1);
+    let mut staged = completed_text_stream(&db, [0x35; 16], "retired", None)
+        .stage()
+        .unwrap();
+    let tx = OpenTransactionId::new().to_string();
+    db.begin_transaction(&tx, "serializable", None, None)
+        .unwrap();
+    // The owning host performs admission stop, final drain, then permanent
+    // storage retirement. Binding.close alone is the drain phase.
+    db.db.stop_mutation_admission();
+    block_on(db.close()).unwrap();
+    db.db.retire_storage_owner().unwrap();
+    assert!(staged.attach(&tx).is_err());
+    assert!(!staged.abort().unwrap());
+}
+
+/// Alice stages a large value through the host binding, edits it in the same
+/// serializable batch, and publishes both writes together. Invalid attachment
+/// consumes its capability; neither rollback nor retry can publish it later.
+#[test]
+fn staged_upload_and_partial_edit_share_one_binding_transaction() {
+    use jazz::db::{LargeValueUpdate, LargeValueUpdatePage, LargeValueUpdateSplice};
+    let alice = open(0xa1);
+    let upload = |id: u8| {
+        let mut streaming = alice
+            .begin_streaming_mutation(
+                "notes".to_owned(),
+                &[id; 16],
+                &empty_cells(),
+                "title".to_owned(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        streaming.push("x".repeat(200 * 1024).as_bytes()).unwrap();
+        let staged = streaming.stage().unwrap();
+        assert!(streaming.finish().is_err());
+        staged
+    };
+    let tx = OpenTransactionId::new().to_string();
+    alice
+        .begin_transaction(&tx, "serializable", None, None)
+        .unwrap();
+    let mut staged = upload(3);
+    staged.attach(&tx).unwrap();
+    assert!(!staged.abort().unwrap());
+    alice
+        .update_large_values_in_transaction(
+            &tx,
+            "notes",
+            &[3; 16],
+            &empty_cells(),
+            vec![LargeValueUpdate::Splice {
+                column: "title".to_owned(),
+                within: LargeValueUpdatePage::TextUtf8 { from: 0, to: 1 },
+                splices: vec![LargeValueUpdateSplice {
+                    at: 0,
+                    delete: 1,
+                    insert: b"A".to_vec(),
+                }],
+            }],
+            None,
+        )
+        .unwrap();
+    alice
+        .insert_in_transaction(&tx, "notes", &title("manifest"), &none())
+        .unwrap();
+    assert!(titles(&alice).is_empty());
+    alice.commit_transaction(&tx, Some("serializable")).unwrap();
+    assert_eq!(
+        titles(&alice),
+        [
+            format!("A{}", "x".repeat(200 * 1024 - 1)),
+            "manifest".to_owned()
+        ]
+    );
+
+    let mut invalid = upload(4);
+    assert!(invalid.attach("invalid transaction").is_err());
+    assert!(invalid.attach(&tx).is_err());
+    assert!(!invalid.abort().unwrap());
+    let tx = OpenTransactionId::new().to_string();
+    alice
+        .begin_transaction(&tx, "serializable", None, None)
+        .unwrap();
+    upload(5).attach(&tx).unwrap();
+    alice.rollback_transaction(&tx).unwrap();
+    assert_eq!(titles(&alice).len(), 2);
 }

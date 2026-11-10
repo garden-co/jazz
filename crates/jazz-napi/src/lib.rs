@@ -908,17 +908,24 @@ impl Write {
 pub struct StreamingMutation {
     inner: Inner,
     mutation: binding_host::StreamingMutation,
+    owner_closed: Rc<Cell<bool>>,
 }
 
 #[napi]
 impl StreamingMutation {
     #[napi]
     pub fn push(&mut self, chunk: Uint8Array) -> js::Result<()> {
+        if self.owner_closed.get() {
+            return Err(closed().into());
+        }
         Ok(self.mutation.push(&chunk).map_err(host_error)?)
     }
 
     #[napi]
     pub fn finish(&mut self, env: Env) -> js::Result<Write> {
+        if self.owner_closed.get() {
+            return Err(closed().into());
+        }
         let write = self.mutation.finish();
         Ok(self.inner.write(&env, write)?)
     }
@@ -926,12 +933,61 @@ impl StreamingMutation {
     /// Stage the value's row mutation in the transaction it began in.
     #[napi(js_name = "finishInTransaction")]
     pub fn finish_in_transaction(&mut self) -> js::Result<()> {
+        if self.owner_closed.get() {
+            return Err(closed().into());
+        }
         Ok(self.mutation.finish_in_transaction().map_err(host_error)?)
     }
 
     #[napi]
+    pub fn stage(&mut self) -> js::Result<StagedStreamingMutation> {
+        if self.owner_closed.get() {
+            return Err(closed().into());
+        }
+        Ok(StagedStreamingMutation {
+            mutation: Some(self.mutation.stage().map_err(host_error)?),
+            owner_closed: Rc::clone(&self.owner_closed),
+        })
+    }
+
+    #[napi]
     pub fn abort(&mut self) -> js::Result<bool> {
+        if self.owner_closed.get() {
+            return Err(closed().into());
+        }
         Ok(self.mutation.abort().map_err(host_error)?)
+    }
+}
+
+/// An owner-bound completed upload for one later serializable attachment.
+#[napi(js_name = "StagedStreamingMutation")]
+pub struct StagedStreamingMutation {
+    mutation: Option<binding_host::StagedStreamingMutation>,
+    owner_closed: Rc<Cell<bool>>,
+}
+
+#[napi]
+impl StagedStreamingMutation {
+    #[napi]
+    pub fn attach(&mut self, open_transaction_id: String) -> js::Result<()> {
+        // Every attempt consumes the capability, including a closed owner.
+        let mut mutation = self.mutation.take().ok_or_else(closed)?;
+        if self.owner_closed.get() {
+            return Err(closed().into());
+        }
+        Ok(mutation.attach(&open_transaction_id).map_err(host_error)?)
+    }
+
+    #[napi]
+    pub fn abort(&mut self) -> js::Result<bool> {
+        let Some(mut mutation) = self.mutation.take() else {
+            return Ok(false);
+        };
+        // Dropping schedules lease cleanup; never touch SQLite after close.
+        if self.owner_closed.get() {
+            return Ok(true);
+        }
+        Ok(mutation.abort().map_err(host_error)?)
     }
 }
 
@@ -1081,6 +1137,53 @@ impl Transport {
         false
     }
 
+    /// Partial accepted local candidates, never SELECT or complete-history proof.
+    #[napi(js_name = "observeLocalBatch")]
+    pub fn observe_local_batch(
+        &self,
+        queries: Vec<Uint8Array>,
+        claims: JsonValue,
+    ) -> js::Result<JsonValue> {
+        Ok(self
+            .link
+            .observe_local_batch(
+                queries.into_iter().map(|q| q.to_vec()).collect(),
+                Some(claims),
+            )
+            .map_err(host_error)?)
+    }
+
+    /// Private trusted local-host channel, never enable for a network link.
+    #[napi(js_name = "enableLocalSubmissionSource")]
+    pub fn enable_local_submission_source(&self) -> js::Result<()> {
+        Ok(self
+            .link
+            .enable_local_submission_source()
+            .map_err(host_error)?)
+    }
+
+    #[napi(js_name = "retireLocalSubmissionPort")]
+    pub fn retire_local_submission_port(&self) {
+        self.link.retire_local_submission_port();
+    }
+
+    #[napi(js_name = "takeLocalSubmissionCompanions")]
+    pub fn take_local_submission_companions(&self) -> Vec<Uint8Array> {
+        self.link
+            .take_local_submission_companions()
+            .into_iter()
+            .map(Uint8Array::from)
+            .collect()
+    }
+
+    #[napi(js_name = "attachLocalSubmissionCompanion")]
+    pub fn attach_local_submission_companion(&self, bytes: Uint8Array) -> js::Result<bool> {
+        Ok(self
+            .link
+            .attach_local_submission_companion(&bytes)
+            .map_err(host_error)?)
+    }
+
     #[napi(js_name = "sendWireFrame")]
     pub fn send_wire_frame(&self, frame: Uint8Array) -> js::Result<()> {
         self.link
@@ -1129,10 +1232,14 @@ pub struct NapiDb {
     // Taken at close: every later call fails before touching the engine.
     inner: Rc<RefCell<Option<Inner>>>,
     owns_runtime: bool,
+    streaming_owner_closed: Rc<Cell<bool>>,
 }
 
 impl Drop for NapiDb {
     fn drop(&mut self) {
+        if self.owns_runtime {
+            self.streaming_owner_closed.set(true);
+        }
         // Release the tick callback so it no longer keeps Node's event loop
         // alive once JavaScript dropped an unclosed database.
         if self.owns_runtime
@@ -1156,6 +1263,7 @@ impl NapiDb {
         Self {
             inner: Rc::new(RefCell::new(Some(Inner::new(binding)))),
             owns_runtime: true,
+            streaming_owner_closed: Rc::new(Cell::new(false)),
         }
     }
 
@@ -1606,7 +1714,11 @@ impl NapiDb {
                 transaction.as_deref(),
             )
             .map_err(host_error)?;
-        Ok(StreamingMutation { inner, mutation })
+        Ok(StreamingMutation {
+            inner,
+            mutation,
+            owner_closed: Rc::clone(&self.streaming_owner_closed),
+        })
     }
 
     #[napi(factory, js_name = "openMemory")]
@@ -1741,6 +1853,7 @@ impl NapiDb {
         Ok(Self {
             inner: Rc::new(RefCell::new(Some(Inner { binding, ..inner }))),
             owns_runtime: false,
+            streaming_owner_closed: Rc::clone(&self.streaming_owner_closed),
         })
     }
 
@@ -1898,6 +2011,24 @@ impl NapiDb {
         read_or_pending(read)
     }
 
+    /// Partial accepted local candidates, never SELECT or complete-history proof.
+    #[napi(js_name = "observeLocalBatch")]
+    pub fn observe_local_batch(
+        &self,
+        queries: Vec<Uint8Array>,
+        author: Option<Uint8Array>,
+        claims: Option<JsonValue>,
+    ) -> js::Result<JsonValue> {
+        Ok(self
+            .binding()?
+            .observe_local_batch(
+                queries.into_iter().map(|q| q.to_vec()).collect(),
+                author.as_deref(),
+                claims,
+            )
+            .map_err(host_error)?)
+    }
+
     /// Bind receipt-correlation claims to this client's own admitted identity.
     #[napi(js_name = "setSessionClaims")]
     pub fn set_session_claims(
@@ -2041,6 +2172,16 @@ impl NapiDb {
         Ok(())
     }
 
+    /// Inherit this already-authenticated durable owner's live observation scope.
+    #[napi(js_name = "acceptOwnObservationSubscriber")]
+    pub fn accept_own_observation_subscriber(&self) -> js::Result<Transport> {
+        Ok(self.transport(
+            self.binding()?
+                .accept_own_observation_subscriber()
+                .map_err(host_error)?,
+        ))
+    }
+
     /// Connect to the server over byte frames the host carries: each frame
     /// is one postcard `SyncMessage`.
     #[napi(js_name = "connectUpstream")]
@@ -2131,6 +2272,9 @@ impl NapiDb {
     /// package's `close()` wraps this pollable form.
     #[napi(js_name = "__closePollable", skip_typescript)]
     pub fn close(&self) -> js::Result<Either<Uint8Array, PendingNativeRead>> {
+        if self.owns_runtime {
+            self.streaming_owner_closed.set(true);
+        }
         // A close failure still consumes the binding: retrying a partially
         // failed close would re-enter an indeterminate runtime.
         let Some(inner) = self.inner.borrow_mut().take() else {

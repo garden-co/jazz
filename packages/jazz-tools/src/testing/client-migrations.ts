@@ -1,4 +1,5 @@
-import { computeSchemaHash, serializeForwardLenses } from "../dev/catalogue.js";
+import { computeSchemaHash, resolveCanonicalMigrationForward } from "../dev/catalogue.js";
+import type { DefinedMigration } from "../migrations.js";
 import type { WasmSchema } from "../drivers/types.js";
 import type { ClientMigrations } from "../runtime/client-migrations.js";
 import { defineApp, type SchemaDefinition } from "../typed-app.js";
@@ -30,7 +31,7 @@ export async function appMigrations(
   app: SchemaVersion,
   ...steps: Array<{
     to: SchemaVersion;
-    migration: { forward: Parameters<typeof serializeForwardLenses>[0] };
+    migration: DefinedMigration;
   }>
 ): Promise<ClientMigrations> {
   const versions = [app, ...steps.map((step) => step.to)].map(wasmSchemaOf);
@@ -40,7 +41,12 @@ export async function appMigrations(
     migrations: steps.map((step, i) => ({
       fromHash: hashes[i]!,
       toHash: hashes[i + 1]!,
-      forward: serializeForwardLenses(step.migration.forward),
+      forward: resolveCanonicalMigrationForward(step.migration, {
+        fromHash: hashes[i]!,
+        toHash: hashes[i + 1]!,
+        fromSchema: versions[i]!,
+        toSchema: versions[i + 1]!,
+      }),
     })),
   };
 }

@@ -50,3 +50,10 @@ export async function* streamingChunks(
     reader.releaseLock();
   }
 }
+
+export async function* streamingBytes(source: StreamingValueSource): AsyncGenerator<Uint8Array> {
+  for await (const chunk of streamingChunks(source)) {
+    if (!(chunk instanceof Uint8Array)) throw new Error("Bytea streams require Uint8Array chunks");
+    yield chunk;
+  }
+}

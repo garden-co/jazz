@@ -26,7 +26,12 @@ try {
   ]);
   await symlink(resolve(root, "../../crates/jazz-napi"), resolve(modules, "jazz-napi"), "dir");
   const manifest = JSON.parse(await readFile(resolve(consumer, "package.json"), "utf8"));
-  for (const dependency of ["@standard-schema/spec", "jazz-wasm", "json-schema-to-ts"]) {
+  for (const dependency of [
+    "@standard-schema/spec",
+    "jazz-wasm",
+    "json-schema-to-ts",
+    "@noble/hashes",
+  ]) {
     assert.ok(manifest.dependencies?.[dependency], `${dependency} must be declared`);
     const destination = resolve(modules, dependency);
     await mkdir(dirname(destination), { recursive: true });
@@ -38,6 +43,31 @@ try {
     resolve(directory, "consumer.mts"),
     `
     import type { CryptoAdapters, LargeValueCipher } from "jazz-tools/e2ee";
+    import type { DeviceInfo } from "jazz-tools";
+    import { schema as s } from "jazz-tools";
+    import { deviceRequestSchema, deviceRequestPermissions, groupSchema, spaceSchema, withGroupTopologyPermissions } from "jazz-tools/e2ee";
+    export const app = s.defineApp({
+      ...deviceRequestSchema,
+      ...groupSchema,
+      ...spaceSchema,
+      notes: s.table({ body: s.string() }, {}),
+    });
+    const applicationPermissions = s.definePermissions(app, ({ policy, session }) => {
+      policy.notes.allowRead.where({ "$createdBy.account": session.user.account });
+    });
+    export const permissions = withGroupTopologyPermissions(app, {
+      ...deviceRequestPermissions,
+      notes: applicationPermissions.notes!,
+    });
+    export function deviceState(device: DeviceInfo): "pending" | "active" | "revoked" {
+      return device.state;
+    }
+    export function keyReadiness(device: DeviceInfo): "verified" | "not-verified" {
+      return device.keyReadiness;
+    }
+    import { E2eeRecoveryError } from "jazz-tools/e2ee";
+    import type { E2eeRecoveryErrorCode } from "jazz-tools/e2ee";
+    export const reason: E2eeRecoveryErrorCode = new E2eeRecoveryError("recovery-material-unusable").code;
     import { createBrowserCrypto } from "jazz-tools/e2ee/browser";
     import { createNativeCrypto } from "jazz-tools/e2ee/native";
     import { E2EeSodiumStream } from "jazz-napi";
@@ -83,7 +113,25 @@ try {
       "-e",
       `
     import { strict as assert } from "node:assert";
-    import { encodeCryptoContext } from "jazz-tools/e2ee";
+    import { encodeCryptoContext, deviceRequestSchema, deviceRequestPermissions, groupSchema, spaceSchema, withGroupTopologyPermissions, E2eeRecoveryError } from "jazz-tools/e2ee";
+    import { schema as s } from "jazz-tools";
+    const app = s.defineApp({
+      ...deviceRequestSchema,
+      ...groupSchema,
+      ...spaceSchema,
+      notes: s.table({ body: s.string() }, {}),
+    });
+    const applicationPermissions = s.definePermissions(app, ({ policy, session }) => {
+      policy.notes.allowRead.where({ "$createdBy.account": session.user.account });
+    });
+    const permissions = withGroupTopologyPermissions(app, {
+      ...deviceRequestPermissions,
+      notes: applicationPermissions.notes,
+    });
+    const error = new E2eeRecoveryError("recovery-material-unusable");
+    assert.ok(error instanceof Error);
+    assert.equal(error.code, "recovery-material-unusable");
+    assert.equal(error.cause, undefined);
     import { createBrowserCrypto } from "jazz-tools/e2ee/browser";
     import { createNativeCrypto } from "jazz-tools/e2ee/native";
     import {

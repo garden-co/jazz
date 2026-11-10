@@ -45,6 +45,13 @@ are coverage facts for the maintained subscription view only; they do not become
 complete transaction payload refs. The peer state machine MUST NOT answer a live
 subscription by running an independent semantic scan.
 
+Materializing a content version through a lens MUST retain its selected authored
+schema and content transaction independently from the requested logical cells
+and public update provenance. Inline snapshot and historical content witnesses
+use that retained origin, not the requested schema or a later update-register
+transaction. This retention happens before supporting membership and revision
+calculation; it does not replace the read view or relax receiver validation.
+
 Every reset or incremental publication of flat-tuple membership, including a
 reset forwarded from an already maintained upstream subscription, MUST carry a
 `ContributingMembers` fact for every declared source position. Repeated physical

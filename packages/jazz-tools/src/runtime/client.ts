@@ -50,6 +50,7 @@ export type TransactionPreparationIO = Pick<
   | "upsertInternal"
   | "restoreInternal"
 > & {
+  attachStreamingMutation(staged: StagedStreamingMutation): Promise<void>;
   assertActive(): void;
   /** @internal Ordinary policy-checked query outside this transaction's overlay. */
   queryGlobal(
@@ -58,6 +59,15 @@ export type TransactionPreparationIO = Pick<
     session?: Session,
   ): Promise<Row[]>;
 };
+
+/** @internal Single-use capability; no descriptor or locator crosses this seam. */
+export type StagedStreamingMutation = {
+  readonly id: string;
+  attach(openTransactionId: OpenTransactionId): void | Promise<void>;
+  abort(): boolean | Promise<boolean>;
+};
+
+const stagedStreamingOwners = new WeakMap<StagedStreamingMutation, JazzClient>();
 
 type RuntimeSerializedSession = Pick<
   Session,
@@ -181,7 +191,25 @@ export type AuthUpdate =
 /**
  * Common interface for the runtime backing `JazzClient`.
  */
+/** @internal Partial accepted local candidates; never SELECT or completeness proof. */
+export type LocalObservationSnapshot = {
+  rows: Row[];
+  through: string;
+  evidence: {
+    rowId: string;
+    state: { transactionId: string; position: string };
+    content: { transactionId: string; position: string };
+  }[];
+  provenance: ("local-submission" | "authority-read")[];
+};
+
 export interface Runtime {
+  /** @internal One shared cut on the actual durable owner, excluding pending prefixes. */
+  observeLocalBatch?(
+    queries: readonly string[],
+    sessionJson?: string | null,
+  ): Promise<LocalObservationSnapshot[]>;
+
   /**
    * Wait until every write committed so far reaches `tier`. `throughOutage`
    * keeps the wait pending through outages until a terminal failure.
@@ -241,6 +269,16 @@ export interface Runtime {
     write_context_json?: string | null,
     object_id?: string | null,
   ): Promise<StreamingInsertResult>;
+  stageStreamingMutation?(
+    mutation: StreamingMutationKind,
+    table: string,
+    values: InsertValues,
+    column: string,
+    source: StreamingValueSource,
+    write_context_json?: string | null,
+    object_id?: string | null,
+    publicationReadCapability?: TransactionReadCapability,
+  ): Promise<StagedStreamingMutation>;
   restore(
     table: string,
     object_id: string,
@@ -1375,6 +1413,21 @@ export class JazzClient {
       try {
         await prepare({
           assertActive,
+          attachStreamingMutation: async (staged) => {
+            try {
+              assertActive();
+              if (stagedStreamingOwners.get(staged) !== this)
+                throw new Error("Staged streaming mutation belongs to another client");
+              await staged.attach(id);
+            } catch (error) {
+              try {
+                await staged.abort();
+              } catch {
+                // Preserve the attachment refusal, including owner retirement.
+              }
+              throw error;
+            }
+          },
           queryInternal: (query, options, session) => {
             assertActive();
             return this.queryWithoutPreparation(
@@ -1629,6 +1682,8 @@ export class JazzClient {
   /**
    * Resolve the writing session and encode the runtime write context. An
    * insert/restore branch selector is lowered to a head-only branch view.
+   * Accepted publication with no explicit session keeps the native owner's
+   * actor, as openTransaction does; ordinary writes retain session resolution.
    */
   private writeContext(
     explicitSession?: Session,
@@ -1638,11 +1693,14 @@ export class JazzClient {
       updatedAt,
       branch: selected,
     }: { updatedAt?: number; branch?: BranchView | BranchSelector } = {},
+    implicitOwner = false,
   ): string | undefined {
     // An explicit attribution without a session writes as no session, not the client's.
     const session =
       explicitSession ||
-      (attribution === undefined ? (this.resolvedSession ?? undefined) : undefined);
+      (attribution === undefined && !implicitOwner
+        ? (this.resolvedSession ?? undefined)
+        : undefined);
     const branch = selected && ("head" in selected ? selected : { head: selected });
     if (
       !session &&
@@ -1769,6 +1827,43 @@ export class JazzClient {
       attribution,
       objectId,
     );
+  }
+
+  /** @internal Consume input before opening the publication transaction. */
+  async stageStreamingMutation(
+    mutation: StreamingMutationKind,
+    table: string,
+    values: InsertValues,
+    column: string,
+    source: StreamingValueSource,
+    options?: InsertOptions | UpdateOptions,
+    session?: Session,
+    attribution?: string,
+    objectId?: string,
+    publicationReadCapability?: TransactionReadCapability,
+  ): Promise<StagedStreamingMutation> {
+    if (!this.runtime.stageStreamingMutation)
+      throw new Error("This runtime does not support staged streaming mutations");
+    const staged = await this.runtime.stageStreamingMutation(
+      mutation,
+      table,
+      values,
+      column,
+      source,
+      this.writeContext(
+        session,
+        attribution,
+        undefined,
+        options,
+        publicationReadCapability !== undefined &&
+          isAcceptedReadCapability(publicationReadCapability) &&
+          session === undefined,
+      ),
+      objectId ?? (options as InsertOptions | undefined)?.id,
+      publicationReadCapability,
+    );
+    stagedStreamingOwners.set(staged, this);
+    return staged;
   }
 
   private async streamingMutation(
@@ -1983,6 +2078,11 @@ export class JazzClient {
   }
 
   /** @internal */
+  transactionPreparation(openTransactionId: OpenTransactionId): Promise<void> | undefined {
+    return this.transactionPreparations.get(openTransactionId)?.pending;
+  }
+
+  /** @internal */
   async queryInternal(
     query: string,
     options?: InternalQueryExecutionOptions,
@@ -1993,6 +2093,20 @@ export class JazzClient {
       : undefined;
     if (preparation) await preparation;
     return this.queryWithoutPreparation(query, options, session);
+  }
+
+  /** @internal Keep the same effective session selection as ordinary queries. */
+  async observeLocalBatch(
+    queries: readonly string[],
+    session?: Session,
+  ): Promise<LocalObservationSnapshot[]> {
+    if (!this.runtime.observeLocalBatch)
+      throw new Error("Runtime does not expose local accepted observations");
+    const effective = session ?? this.resolvedSession;
+    return this.runtime.observeLocalBatch(
+      queries,
+      effective ? JSON.stringify(serializeRuntimeSession(effective)) : undefined,
+    );
   }
 
   private async queryWithoutPreparation(

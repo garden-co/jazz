@@ -1,3 +1,15 @@
+import {
+  DefinedTable,
+  type TableDefinition,
+  type ValidateTransformContexts,
+} from "./table-definition.js";
+export {
+  DefinedTable,
+  defineTable,
+  defineComputed,
+  type TableDefinition,
+  type ComputedField,
+} from "./table-definition.js";
 import type { TxId } from "./runtime/client.js";
 import { historyTableName, resolveQueryTable } from "./runtime/history-relation.js";
 import { assertRelationshipDeclaration } from "./relationships.js";
@@ -26,6 +38,12 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { hasExternalProvenanceNameAllowance, isComputedColumn } from "./dsl.js";
 import { schemaToWasm } from "./codegen/schema-reader.js";
+import { deviceRequestSchema, groupSchema, spaceSchema } from "./e2ee/managed-schema.js";
+import {
+  encryptedSchemas,
+  encryptedTableToPhysical,
+  type EncryptionDeclaration,
+} from "./e2ee/encrypted-schema.js";
 import type { ColumnType, WasmSchema } from "./drivers/types.js";
 import { shipMigrations, type ClientMigrations } from "./runtime/client-migrations.js";
 import {
@@ -41,320 +59,8 @@ import type { ColumnTransformMap, ColumnTransformRegistry, QueryBuilder } from "
 import type { StreamingValueSource } from "./runtime/client.js";
 import type { Column, Schema as SchemaAst, SqlType, TSTypeFromSqlType } from "./schema.js";
 
-export type TableDefinition = Record<string, AnyColumnDefinition> & NoExplicitIdColumn;
-type StoredColumnKeys<C extends TableDefinition> = {
-  [K in keyof C & string]: C[K] extends ComputedColumn ? never : K;
-}[keyof C & string];
-
-// Wrap table columns so we can hang chained modifiers like .indexOnly(...) off tables
-// without changing the column-level schema representation the runtime uses today.
-export class DefinedTable<
-  TColumns extends TableDefinition = TableDefinition,
-  TRelations extends Relationships = Relationships,
-> {
-  public readonly __jazzTableDefinition = true as const;
-
-  constructor(
-    public readonly columns: TColumns,
-    public readonly relations: TRelations,
-    public readonly indexedColumns?: readonly (keyof TColumns & string)[],
-    public readonly branchColumns?: readonly (keyof TColumns & string)[],
-    public readonly compositeIndexes?: readonly (readonly (keyof TColumns & string)[])[],
-  ) {
-    validateTransformDependencies(columns);
-    for (const column of Object.keys(columns)) assertUserTableColumnNameAllowed(column);
-  }
-
-  indexOnly<
-    const TColumnsForIndex extends readonly [
-      StoredColumnKeys<TColumns>,
-      ...StoredColumnKeys<TColumns>[],
-    ],
-  >(columns: TColumnsForIndex): DefinedTable<TColumns, TRelations> {
-    const normalizedColumns = [...columns];
-    for (const column of normalizedColumns) {
-      if (!(column in this.columns) || isComputedColumn(this.columns[column]!)) {
-        throw new Error(`table.indexOnly(...) references unknown column "${column}".`);
-      }
-    }
-
-    return new DefinedTable(
-      this.columns,
-      this.relations,
-      normalizedColumns,
-      this.branchColumns,
-      this.compositeIndexes,
-    );
-  }
-
-  compositeIndex<
-    const TColumnsForIndex extends readonly [
-      StoredColumnKeys<TColumns>,
-      StoredColumnKeys<TColumns>,
-      ...StoredColumnKeys<TColumns>[],
-    ],
-  >(columns: TColumnsForIndex): DefinedTable<TColumns, TRelations> {
-    if (
-      new Set(columns).size !== columns.length ||
-      columns.some((column) => !(column in this.columns) || isComputedColumn(this.columns[column]!))
-    ) {
-      throw new Error("table.compositeIndex(...) requires distinct declared columns.");
-    }
-    const key = JSON.stringify(columns);
-    if ((this.compositeIndexes ?? []).some((existing) => JSON.stringify(existing) === key)) {
-      throw new Error("table.compositeIndex(...) declares the same index twice.");
-    }
-    return new DefinedTable(this.columns, this.relations, this.indexedColumns, this.branchColumns, [
-      ...(this.compositeIndexes ?? []),
-      [...columns],
-    ]);
-  }
-
-  branchBy<const TBranchColumn extends StoredColumnKeys<TColumns>>(
-    column: TBranchColumn,
-  ): DefinedTable<TColumns, TRelations>;
-  branchBy<
-    const TBranchColumns extends readonly [
-      StoredColumnKeys<TColumns>,
-      ...StoredColumnKeys<TColumns>[],
-    ],
-  >(columns: TBranchColumns): DefinedTable<TColumns, TRelations>;
-  branchBy(
-    columns:
-      | Extract<keyof TColumns, string>
-      | readonly [Extract<keyof TColumns, string>, ...Extract<keyof TColumns, string>[]],
-  ): DefinedTable<TColumns, TRelations> {
-    const normalizedColumns = (Array.isArray(columns) ? [...columns] : [columns]) as Extract<
-      keyof TColumns,
-      string
-    >[];
-    for (const column of normalizedColumns) {
-      if (!(column in this.columns) || isComputedColumn(this.columns[column]!)) {
-        throw new Error(`table.branchBy(...) references unknown column "${column}".`);
-      }
-    }
-
-    return new DefinedTable(
-      this.columns,
-      this.relations,
-      this.indexedColumns,
-      normalizedColumns,
-      this.compositeIndexes,
-    );
-  }
-}
-
-/**
- * Define a table with the given columns.
- *
- * @example
- * ```typescript
- * const schema = {
- *   todos: s.table({
- *     title: s.string(),
- *     done: s.boolean(),
- *   }),
- * });
- * type AppSchema = s.Schema<typeof schema>;
- * // The module `jazz-tools` generates beside schema.ts.
- * export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
- * ```
- */
 declare const tableRelationsBrand: unique symbol;
-type RelationColumns<T extends TableDefinition> = {
-  [K in StoredColumnKeys<T>]: ColumnBuilderSqlType<T[K]> extends
-    | "UUID"
-    | { kind: "ARRAY"; element: "UUID" }
-    ? K
-    : never;
-}[StoredColumnKeys<T>];
-type ConflictingTargets<R extends Relationships, C extends string, T extends string> = {
-  [N in keyof R]: R[N] extends ForwardRelationship<infer OtherTarget, C>
-    ? OtherTarget extends T
-      ? never
-      : N
-    : never;
-}[keyof R];
-type ValidateLocalRelations<C extends TableDefinition, R extends Relationships> = {
-  [K in keyof R]: K extends
-    | keyof C
-    | "id"
-    | "__proto__"
-    | "constructor"
-    | "prototype"
-    | ""
-    | `$${string}`
-    ? never
-    : R[K] extends ForwardRelationship<infer Target, infer Col>
-      ? Col extends RelationColumns<C>
-        ? [ConflictingTargets<R, Col, Target>] extends [never]
-          ? R[K]
-          : never
-        : never
-      : R[K];
-};
-export function defineTable<
-  const TColumns extends TableDefinition,
-  const TFields extends Record<
-    string,
-    Relationship | ComputedField<ComputedRow<TColumns>, unknown>
-  >,
->(
-  columns: TColumns & ValidateTransformContexts<TColumns>,
-  fields: TFields,
-  ..._validation: [TFields] extends [
-    ValidateLocalRelations<TColumns, TableRelations<TFields>> & {
-      [K in keyof TFields]: K extends keyof TColumns | "id" ? never : TFields[K];
-    },
-  ]
-    ? []
-    : [invalidFields: never]
-): DefinedTable<TColumns & ComputedColumns<TFields>, TableRelations<TFields>> {
-  if (!fields || typeof fields !== "object" || Array.isArray(fields))
-    throw new Error(
-      "s.table(columns, fields) requires a relationship map, optionally containing computed fields; use {} for no fields.",
-    );
-  let completeColumns: Record<string, AnyColumnDefinition> = columns;
-  const relations: Relationships = {};
-  const targets = new Map<string, string>();
-  for (const [name, relation] of Object.entries(fields)) {
-    const computed = relation && typeof relation === "object" && "_computed" in relation;
-    if (
-      !name ||
-      ["__proto__", "constructor", "prototype"].includes(name) ||
-      name.startsWith("$") ||
-      name === "id" ||
-      Object.hasOwn(columns, name)
-    )
-      throw new Error(
-        `${computed ? "Computed field" : "Relationship"} "${name}" collides with a column.`,
-      );
-    if (computed) {
-      assertUserTableColumnNameAllowed(name);
-      if (completeColumns === columns) completeColumns = { ...columns };
-      completeColumns[name] = {
-        _computed: {
-          ...relation._computed,
-          rowColumns: Object.freeze(["id", ...Object.keys(columns)]),
-        },
-      } as ComputedColumn;
-      continue;
-    }
-    assertRelationshipDeclaration(relation, name);
-    relations[name] = relation;
-    if (relation.kind === "forward") {
-      const previous = targets.get(relation.column);
-      if (previous && previous !== relation.table)
-        throw new Error(`Conflicting relationship targets for column "${relation.column}".`);
-      targets.set(relation.column, relation.table);
-      const builder = columns[relation.column];
-      const column =
-        Object.hasOwn(columns, relation.column) && builder && !isComputedColumn(builder)
-          ? builder._build(relation.column)
-          : undefined;
-      if (!column)
-        throw new Error(`Relationship "${name}" references unknown column "${relation.column}".`);
-      if (
-        typeof column.sqlType === "object" &&
-        column.sqlType.kind === "ARRAY" &&
-        typeof column.sqlType.element === "object" &&
-        column.sqlType.element.kind === "ARRAY"
-      )
-        throw new Error(
-          `Relationship "${name}" cannot use a nested reference array column; "${relation.column}" must be a UUID or UUID[] column.`,
-        );
-      if (
-        column.sqlType !== "UUID" &&
-        !(
-          typeof column.sqlType === "object" &&
-          column.sqlType.kind === "ARRAY" &&
-          column.sqlType.element === "UUID"
-        )
-      )
-        throw new Error(
-          `Relationship "${name}" requires a UUID or UUID[] column; "${relation.column}" is not one.`,
-        );
-    }
-  }
-  return new DefinedTable(
-    completeColumns as TColumns & ComputedColumns<TFields>,
-    relations as TableRelations<TFields>,
-  );
-}
 
-type ComputedRow<C extends TableDefinition> = { readonly id: string } & {
-  readonly [K in keyof C & string]: ReturnedColumnValue<C[K]>;
-};
-export type ComputedField<R, V> = {
-  readonly _computed: {
-    readonly compute: (row: Readonly<R>) => V;
-  };
-};
-type ComputedColumns<F> = [F] extends [never]
-  ? {}
-  : {
-      [K in keyof F as F[K] extends ComputedField<never, unknown>
-        ? K
-        : never]: F[K] extends ComputedField<never, infer V> ? ComputedColumn<V> : never;
-    };
-type TableRelations<F> = [F] extends [never]
-  ? never
-  : {
-      [K in keyof F as F[K] extends Relationship ? K : never]: Extract<F[K], Relationship>;
-    };
-
-/** Declare a virtual, read-only field in s.table's second argument. */
-export function defineComputed<R, V>(compute: (row: Readonly<R>) => V): ComputedField<R, V> {
-  if (typeof compute !== "function")
-    throw new TypeError("s.computed(...) requires a synchronous callback.");
-  return Object.freeze({ _computed: Object.freeze({ compute }) });
-}
-
-type StoredDependencyValue<C extends AnyColumnDefinition> =
-  ColumnBuilderOptional<C> extends true
-    ? TSTypeFromSqlType<ColumnBuilderSqlType<C>> | null
-    : TSTypeFromSqlType<ColumnBuilderSqlType<C>>;
-type DependencyValues<C extends TableDefinition, D extends string, Stored extends boolean> = {
-  readonly [K in D]: K extends "id"
-    ? string
-    : K extends keyof C
-      ? Stored extends true
-        ? StoredDependencyValue<C[K]>
-        : ColumnBuilderOptional<C[K]> extends true
-          ? ColumnBuilderInitValue<C[K]> | null
-          : ColumnBuilderInitValue<C[K]>
-      : never;
-};
-type ValidDependencyContext<
-  C extends TableDefinition,
-  D extends string,
-  Context,
-  Stored extends boolean,
-> =
-  Exclude<keyof Context, D> extends never
-    ? DependencyValues<C, D, Stored> extends Context
-      ? true
-      : false
-    : false;
-type ValidateTransformContexts<C extends TableDefinition> = {
-  [K in keyof C]: C[K] extends {
-    readonly __jazzDependencies: readonly (infer D extends string)[];
-    readonly __jazzStoredDependencies: infer S;
-    readonly __jazzInputDependencies: infer I;
-  }
-    ? string extends D
-      ? C[K]
-      : Exclude<D, StoredColumnKeys<C> | "id"> extends never
-        ? K extends D
-          ? never
-          : ValidDependencyContext<C, D, S, true> extends true
-            ? ValidDependencyContext<C, D, I, false> extends true
-              ? C[K]
-              : never
-            : never
-        : never
-    : C[K];
-};
 type ValidateSchemaTransformContexts<S extends SchemaDefinition> = {
   [K in keyof S]: S[K] extends TableDefinition ? ValidateTransformContexts<S[K]> : S[K];
 };
@@ -385,13 +91,28 @@ type ValidateSchemaColumnNames<TSchema extends SchemaDefinition> = {
   [TTable in keyof TSchema]: TSchema[TTable] extends DefinedTable ? unknown : NoExplicitIdColumn;
 };
 export type Simplify<T> = { [K in keyof T]: T[K] } & {};
+type ManagedEncryptionSchema = typeof deviceRequestSchema & typeof groupSchema & typeof spaceSchema;
+type AutomaticEncryptionSchema<TSchema extends SchemaDefinition> = [
+  {
+    [K in keyof TSchema]: TSchema[K] extends DefinedTable<any, any, infer TEncryption>
+      ? [TEncryption] extends [EncryptionDeclaration]
+        ? K
+        : never
+      : never;
+  }[keyof TSchema],
+] extends [never]
+  ? {}
+  : ManagedEncryptionSchema;
+
 export type CompactSchema<TSchema extends SchemaDefinition> = Simplify<{
   [TTable in keyof TSchema]: NormalizeTableDefinition<TSchema[TTable]>;
 }>;
 
 declare const definedSchemaBrand: unique symbol;
+declare const automaticEncryptionSchemaBrand: unique symbol;
 export interface Schema<TSchema extends SchemaDefinition = SchemaDefinition> {
   readonly [definedSchemaBrand]: CompactSchema<TSchema>;
+  readonly [automaticEncryptionSchemaBrand]: AutomaticEncryptionSchema<TSchema>;
 }
 
 export type DefinedSchema<TSchema extends SchemaDefinition = SchemaDefinition> = Schema<TSchema>;
@@ -432,10 +153,12 @@ type ValidateSchemaRefs<TSchema extends SchemaDefinition> = [
     };
 
 type NormalizedSchema<TSchema extends SchemaLike> =
-  TSchema extends Schema<infer TDefinition>
-    ? CompactSchema<TDefinition>
+  TSchema extends Schema<any>
+    ? CompactSchema<
+        TSchema[typeof definedSchemaBrand] & TSchema[typeof automaticEncryptionSchemaBrand]
+      >
     : TSchema extends SchemaDefinition
-      ? CompactSchema<TSchema>
+      ? CompactSchema<TSchema & AutomaticEncryptionSchema<TSchema>>
       : never;
 
 type TableName<TSchema extends SchemaLike> = Extract<keyof NormalizedSchema<TSchema>, string>;
@@ -1270,6 +993,20 @@ function queryBuilderJsonReplacer(_key: string, value: unknown): unknown {
   return typeof value === "bigint" ? value.toString() : value;
 }
 
+function rejectNonFiniteEncryptedPredicate(value: unknown): void {
+  if (typeof value === "number" && !Number.isFinite(value)) {
+    throw new Error("Non-finite numbers are not supported in encrypted query predicates");
+  }
+  if (
+    value &&
+    typeof value === "object" &&
+    !(value instanceof Date) &&
+    !ArrayBuffer.isView(value)
+  ) {
+    for (const child of Object.values(value)) rejectNonFiniteEncryptedPredicate(child);
+  }
+}
+
 function cloneBuiltRelation(relation: BuiltRelation): BuiltRelation {
   return {
     ...(relation.table ? { table: relation.table } : {}),
@@ -1578,6 +1315,15 @@ export class TypedTableQueryBuilder<
   }
 
   _build(): string {
+    const encrypted = encryptedSchemas.get(this._schema)?.tables.get(this._table);
+    if (encrypted) {
+      if (this._gatherVal) throw new Error("Unsupported encrypted query plan: gather");
+      for (const condition of this._conditions) {
+        if (encrypted.columns.includes(condition.column)) {
+          rejectNonFiniteEncryptedPredicate(condition.value);
+        }
+      }
+    }
     return JSON.stringify(
       {
         table: this._table,
@@ -1645,7 +1391,10 @@ export class TypedTableQueryBuilder<
 
   private _whereConditions(conditions: Record<string, unknown>): BuiltCondition[] {
     const built: BuiltCondition[] = [];
-    const tableSchema = resolveQueryTable(this._schema, this._table);
+    const tableSchema = resolveQueryTable(
+      encryptedSchemas.get(this._schema)?.logical ?? this._schema,
+      this._table,
+    );
     const transforms = this._outputColumnTransforms();
     for (const [key, value] of Object.entries(conditions)) {
       if (transforms?.[key]?.computed)
@@ -1876,7 +1625,20 @@ export type TypedApp<TSchema extends SchemaLike> = App<TSchema>;
 type SchemaSlice<
   TSchema extends SchemaLike,
   TTables extends readonly TableName<TSchema>[],
-> = Schema<Pick<NormalizedSchema<TSchema>, TTables[number]>>;
+> = Schema<
+  Pick<
+    NormalizedSchema<TSchema>,
+    | TTables[number]
+    | Extract<
+        keyof (TSchema extends Schema<any>
+          ? TSchema[typeof automaticEncryptionSchemaBrand]
+          : TSchema extends SchemaDefinition
+            ? AutomaticEncryptionSchema<TSchema>
+            : {}),
+        TableName<TSchema>
+      >
+  >
+>;
 
 export interface SliceableApp<TSchema extends SchemaLike> {
   readonly wasmSchema: WasmSchema;
@@ -2113,6 +1875,55 @@ export function defineSchema<const TSchema extends SchemaDefinition>(
   return definition as unknown as Schema<TSchema>;
 }
 
+/** Internal package-owned tables shared by app compilation and catalogue publication. */
+export const managedEncryptionSchema = { ...deviceRequestSchema, ...groupSchema, ...spaceSchema };
+
+/** Internal: keep app compilation and migration witnesses on the same managed tables. */
+export function withManagedEncryptionTables(definition: SchemaDefinition): SchemaDefinition {
+  if (
+    Object.values(definition).some(
+      (table) => table instanceof DefinedTable && table.encryption !== undefined,
+    )
+  ) {
+    for (const [name, table] of Object.entries(managedEncryptionSchema)) {
+      if (Object.hasOwn(definition, name) && definition[name] !== table) {
+        throw new Error(`Cannot replace managed E2EE table "${name}"`);
+      }
+    }
+    definition = { ...managedEncryptionSchema, ...definition };
+  }
+  return definition;
+}
+
+function compileAppSchema(definition: SchemaDefinition) {
+  definition = withManagedEncryptionTables(definition);
+  const logical = definitionToSchema(definition);
+  const encrypted = new Map<string, EncryptionDeclaration & { scope: string }>();
+  for (const table of logical.tables) {
+    const source = definition[table.name] as DefinedTable | undefined;
+    const declaration = source?.__jazzTableDefinition === true ? source.encryption : undefined;
+    if (!declaration) continue;
+    const scope = table.columns.find((column) => column.name === declaration.space)?.references;
+    if (!scope || !logical.tables.some((candidate) => candidate.name === scope))
+      throw new Error(`Unknown encryption scope for table "${table.name}"`);
+    encrypted.set(table.name, { ...declaration, scope });
+  }
+  if (!encrypted.size) return { schema: logical, wasmSchema: schemaToWasm(logical) };
+  const schema: SchemaAst = {
+    ...logical,
+    tables: logical.tables.map((table) =>
+      encryptedTableToPhysical(table, encrypted.get(table.name)),
+    ),
+  };
+  const wasmSchema = schemaToWasm(schema);
+  encryptedSchemas.set(wasmSchema, {
+    logical: schemaToWasm(logical),
+    tables: encrypted,
+    scopes: new Set([...encrypted.values()].map((table) => table.scope)),
+  });
+  return { schema, wasmSchema };
+}
+
 /**
  * Create an app from a schema definition.
  *
@@ -2158,15 +1969,9 @@ export function defineApp(
   options: DefineAppOptions,
 ): App<Schema<SchemaDefinition>> {
   const normalizedDefinition = definition as unknown as SchemaDefinition;
-  const schema = definitionToSchema(normalizedDefinition);
-  const wasmSchema = schemaToWasm(schema);
+  const { schema, wasmSchema } = compileAppSchema(normalizedDefinition);
   shipMigrations(wasmSchema, options?.migrations);
-  return createAppForTables(
-    Object.keys(normalizedDefinition),
-    wasmSchema,
-    normalizedDefinition,
-    schema,
-  );
+  return createAppForTables(Object.keys(wasmSchema), wasmSchema, normalizedDefinition, schema);
 }
 
 /**
@@ -2198,8 +2003,7 @@ export function defineSliceableApp(
   options: DefineAppOptions,
 ): SliceableApp<Schema<SchemaDefinition>> {
   const normalizedDefinition = definition as unknown as SchemaDefinition;
-  const schema = definitionToSchema(normalizedDefinition);
-  const wasmSchema = schemaToWasm(schema);
+  const { wasmSchema } = compileAppSchema(normalizedDefinition);
   shipMigrations(wasmSchema, options?.migrations);
 
   return {
@@ -2211,7 +2015,7 @@ export function defineSliceableApp(
 
       for (const tableName of tableNames) {
         assertSchemaNameAllowed(tableName);
-        if (!(tableName in normalizedDefinition)) {
+        if (!Object.hasOwn(wasmSchema, tableName)) {
           throw new Error(`slice(...) references unknown table "${tableName}".`);
         }
       }
@@ -2244,6 +2048,16 @@ function createAppForTables(
   const tables = {} as Record<string, TypedTableQueryBuilder<any>>;
   const history = {} as App<Schema<SchemaDefinition>>["$history"];
 
+  if (encryptedSchemas.has(wasmSchema)) {
+    tableNames = [
+      ...new Set([
+        ...tableNames,
+        ...Object.keys(deviceRequestSchema),
+        ...Object.keys(groupSchema),
+        ...Object.keys(spaceSchema),
+      ]),
+    ];
+  }
   for (const tableName of tableNames) {
     assertSchemaNameAllowed(tableName);
     tables[tableName] = new TypedTableQueryBuilder(

@@ -26,6 +26,7 @@ export const {
   JazzServer,
   NapiDb,
   StreamingMutation,
+  StagedStreamingMutation,
   Subscription,
   Transport,
   Write,
