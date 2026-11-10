@@ -207,7 +207,10 @@ export class BrowserConnectionManager extends ConnectionManager {
     this.rejectReconnectWaiters(error);
     this.notifyWorkerRemoteLink();
     const refused = this.admissionRefused(connection);
+    // A later refusal for another reason (an older deploy's schema, a dead
+    // worker) is no longer the other tab holding the store: report that.
     if (refused) this.startHeldPatience();
+    else this.clearHeldPatience();
     if (error instanceof BrowserWorkerUnresponsiveError || refused)
       this.scheduleWorkerRecovery(connection);
   }
@@ -583,6 +586,12 @@ export class BrowserConnectionManager extends ConnectionManager {
     if (!this.recoverableConnectionFailure) return;
     this.clearWorkerRecoveryTimer();
     this.host.clearAuthenticatedInspectorLocalReads();
+    // Close the failed follower's port and release its page lock, so the
+    // worker detaches it instead of counting it as a live tab until the page
+    // goes away. Its own follower already failed, so this sends no request
+    // and doesn't wait for the worker.
+    const failed = this.connection;
+    if (failed) void failed.shutdown().catch(() => undefined);
     this.connection = null;
     this.connectionReady = null;
     this.connectionError = null;

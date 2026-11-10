@@ -197,7 +197,9 @@ it("keeps backend authority opaque, scoped, and revocable", async () => {
   await expect(accountToken(backend, registry)).rejects.toThrow(
     /backend_account_requires_backend_host/,
   );
-  await expect(manager.linkWithBackend()).rejects.toThrow(/local_first_account_required/);
+  await expect(manager.linkWithBackend()).rejects.toThrow(
+    /local_first_account_required: .*already signed in through your backend.*loginWithBackend\(\)/,
+  );
   const invalidated = vi.fn();
   onAccountInvalidated(backend, invalidated);
   manager.createLocalFirst();

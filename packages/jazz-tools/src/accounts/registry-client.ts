@@ -16,6 +16,13 @@ export class AccountAuthError extends Error {
 }
 
 /**
+ * `linkWithBackend()` was called without a guest to link: the session is
+ * signed out, or its account already came from the backend.
+ */
+export const LINK_NEEDS_GUEST_MESSAGE =
+  "local_first_account_required: linkWithBackend() links this device's guest (local-first) account to the user your backend signed in, and there is no guest to link: the session is signed out, or already signed in through your backend. Call loginWithBackend() to open the backend user's account instead. To keep what a guest wrote, link while that guest is signed in.";
+
+/**
  * The app's backend vouches to the core's registry for an identity it
  * verified itself, with its backend secret: resolve its account
  * (`resolve`), create it on first sign-in (`login-or-register`), or found a
