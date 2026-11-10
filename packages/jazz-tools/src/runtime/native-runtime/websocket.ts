@@ -1,5 +1,5 @@
 import { inProcessWebSocketFor } from "../in-process-transport.js";
-import { sameOriginWebSocketConstructor } from "./http-stream-socket.js";
+import { httpStreamFallbackWebSocket } from "./http-stream-socket.js";
 import { Utf8Decoder } from "../utf8.js";
 import { httpUrlToWs } from "../url.js";
 import { mapAuthReason } from "../auth-state.js";
@@ -333,11 +333,13 @@ export class WebSocketCarrier {
         this.close();
       });
     });
-    this.socket.addEventListener("error", () => {
+    this.socket.addEventListener("error", (event) => {
       this.reportTerminal({
         code: "websocket_error",
         retry: "later",
-        message: "websocket transport error",
+        // A native socket's error event says nothing; the HTTP stream and a
+        // backend client's failed upgrade hand an Error that does.
+        message: event instanceof Error ? event.message : "websocket transport error",
       });
     });
     this.socket.addEventListener("close", (event) => {
@@ -752,7 +754,7 @@ export async function bytesFromWebSocketMessage(data: unknown): Promise<Uint8Arr
  * can't upgrade WebSockets (see `http-stream-socket.ts`). */
 function defaultWebSocketConstructor(url: string): WebSocketConstructor {
   const native = browserWebSocketConstructor();
-  return isSameOriginEndpoint(url) ? sameOriginWebSocketConstructor(native) : native;
+  return isSameOriginEndpoint(url) ? httpStreamFallbackWebSocket(native) : native;
 }
 
 function isSameOriginEndpoint(url: string): boolean {

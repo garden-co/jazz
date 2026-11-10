@@ -1,4 +1,5 @@
 import { clientScope } from "./client-scope.js";
+import { registerPageDb } from "./page-handle.js";
 import { isHistoryTable, resolveQueryTable } from "./history-relation.js";
 import type { ConnectionRequirement } from "./connection-manager/types.js";
 import type { DbAccessContext } from "./db-access-context.js";
@@ -2555,6 +2556,11 @@ export class Db {
     const inspectorAttachmentRequested =
       config.runtimeSources?.browserWorkerPort !== undefined &&
       config.runtimeSources.inspectorHostPhysicalDbName !== undefined;
+    // The Inspector's own Db reads the page's data; it is not one of the page's Dbs.
+    if (!inspectorAttachmentRequested) {
+      const unregister = registerPageDb(this, config.appId ?? null);
+      this.shutdownAbort.signal.addEventListener("abort", unregister, { once: true });
+    }
     dbSubscriptionSources.set(this, {
       // Cache identity is reserved before the async worker receipt arrives so
       // an Inspector entry can never share a host application's query cache.
@@ -3036,12 +3042,6 @@ export class Db {
   }
 
   /**
-   * Whether this Db's writes have reached the server: the upstream
-   * connection, and how many committed transactions the server has not
-   * accepted or rejected yet. The same object is returned until the status
-   * changes, so it can back `useSyncExternalStore` directly.
-   */
-  /**
    * Stateless anchors and ranges into text values, such as cursors,
    * selections and comments on a text column: captured from one value and
    * found again in later ones by the text around them.
@@ -3050,6 +3050,13 @@ export class Db {
     return this.runtimeSource.textAnchors();
   }
 
+  /**
+   * Whether this Db's writes have reached the server: the upstream
+   * connection, and how many committed transactions the server has not
+   * accepted or rejected yet. The same object is returned until the status
+   * changes, so it can back `useSyncExternalStore` directly. In a browser,
+   * agents and tests read the same through `window.__jazz.status()`.
+   */
   getSyncStatus(): SyncStatus {
     const next = this.connection.syncStatus();
     if (this.syncStatusSnapshot && sameSyncStatus(next, this.syncStatusSnapshot)) {
@@ -4410,6 +4417,15 @@ export class Db {
       const status: SyncStatus = {
         link: ahead.link,
         pendingUploads: ahead.pendingUploads + own.pendingUploads,
+        oldestPendingAt:
+          ahead.oldestPendingAt === null || own.oldestPendingAt === null
+            ? (ahead.oldestPendingAt ?? own.oldestPendingAt)
+            : Math.min(ahead.oldestPendingAt, own.oldestPendingAt),
+        rejected: ahead.rejected + own.rejected,
+        lastError:
+          own.lastError && (!ahead.lastError || own.lastError.at > ahead.lastError.at)
+            ? own.lastError
+            : ahead.lastError,
         synced: ahead.synced && own.pendingUploads === 0,
       };
       if (combined && sameSyncStatus(status, combined)) return combined;
