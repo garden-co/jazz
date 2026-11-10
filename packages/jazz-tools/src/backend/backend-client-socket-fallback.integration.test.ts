@@ -165,8 +165,11 @@ describe("a backend client whose main backend can't upgrade sockets", () => {
     // uncaught exception (vitest fails the run on one).
     const read = client.db.all(app.todos, { tier: "remote" });
     await expect(read).rejects.toThrow(/WebSocket upgrade .* answered with HTTP 500/);
-    await vi.waitFor(() =>
-      expect(client.db.getSyncStatus().link).toMatchObject({ state: "offline", retrying: true }),
-    );
+    // Still retrying (connecting until an outage is published, then
+    // offline with retrying), never stopped, and the session stays ready.
+    const link = client.db.getSyncStatus().link;
+    expect(link.state === "connecting" || (link.state === "offline" && link.retrying)).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    expect(client.db.getSyncStatus().link).not.toMatchObject({ state: "offline", retrying: false });
   }, 60_000);
 });

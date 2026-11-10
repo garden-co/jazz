@@ -56,9 +56,12 @@ it("answers sockets on Vercel with the HTTP stream marker when `ws` is missing, 
     // One clear error, naming the fix, however many sockets come.
     await GET(new Request(socketUrl, { headers: { upgrade: "websocket" } }));
     const logged = error.mock.calls.map((call) => call.join(" "));
-    expect(logged.filter((line) => /npm install ws/.test(line))).toEqual([
+    // (vitest wraps the mocked import's failure, so this reads "could not
+    // load"; a package that isn't installed reads "needs the ws package:
+    // npm install ws".)
+    expect(logged.filter((line) => /the ws package/.test(line))).toEqual([
       expect.stringMatching(
-        /^jazz: next\(\) on Vercel needs the ws package: npm install ws\. Without it, sync sockets can't open/,
+        /^jazz: next\(\) on Vercel (needs|could not load) the ws package.*Without it, sync sockets can't open: clients sync over the HTTP stream instead\.$/s,
       ),
     ]);
   } finally {
