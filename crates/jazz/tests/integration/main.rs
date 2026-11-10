@@ -3,9 +3,6 @@
 //! Tests that need a process of their own (durable_file re-executes and
 //! measures its binary) stay separate targets.
 
-#[path = "../sqlite_read_policy_literals.rs"]
-mod sqlite_read_policy_literals;
-
 #[allow(dead_code)]
 #[path = "../common/mod.rs"]
 mod common;
