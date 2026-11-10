@@ -264,7 +264,12 @@ fn inherited_browser(node: u8, authority: bool) -> WasmDb {
         system_node: None,
     })
     .unwrap();
-    let db = WasmDb::open_memory_as_backend(serde_json::to_vec(&schema).unwrap(), config).unwrap();
+    let db = if authority {
+        WasmDb::open_memory_as_backend(serde_json::to_vec(&schema).unwrap(), config)
+    } else {
+        WasmDb::open_memory(serde_json::to_vec(&schema).unwrap(), config)
+    }
+    .unwrap();
     if !authority {
         db.set_remote_link_hint("no-server".into()).unwrap();
     }

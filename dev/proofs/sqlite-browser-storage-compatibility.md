@@ -1,9 +1,9 @@
 # SQLite browser storage admission
 
-The SDK SharedWorker now opens the SQLite file selected by its physical browser
-root. Previously it passed the retired Groove page adapter to a WASM API that
-expected a SQLite descriptor. This ignored `dbName`, could alias punctuation in
-owner names, and left the SQLite file behind when resetting the old sidecar.
+The SDK SharedWorker opens the SQLite file selected by its physical browser
+root. It supplies the actual SQLite descriptor and couples runtime ownership
+and reset to the identity sidecar. Each physical root selects a replica-specific
+file. The existing low-level implicit filename mapping remains unchanged.
 
 ## Encoding and identity
 
