@@ -27,12 +27,13 @@ Two independently created roots for Alice receive different nodes and files.
 Bob cannot open Alice's root: owner admission precedes WASM configuration.
 Copying the manifest to a different physical name is rejected.
 
-Low-level WASM calls without a path use the separately named mapping
-`jazz.browser.default-path.v1`: SHA-256 of its UTF-8 name followed by a zero byte
-and the complete UTF-8 owner, rendered as
-`/jazz-owner-v1-<lowercase digest>.sqlite`. The same fixture pins punctuation-
-distinct owners, and a browser test reopens the generated file explicitly.
-The SDK supplies a replica-specific path instead of using this default.
+Low-level WASM calls without an explicit path keep the existing production
+mapping: SHA-256 of the complete UTF-8 `database` argument, taking its first
+16 bytes as lowercase hexadecimal in `/jazz-<32 hex>.sqlite`. No domain prefix,
+zero-byte separator or owner-v1 filename is added. The fixture pins
+punctuation-distinct arguments and a real browser test reopens the generated
+file explicitly. The SDK supplies its separate replica-specific path. This
+fixture correction changes no persisted production name and needs no migration.
 
 ## Publication, retirement and reset
 

@@ -1,27 +1,15 @@
 //! SQLite worker storage identity and retirement through the public WASM ABI.
 #![cfg(target_arch = "wasm32")]
+use jazz::binding_host::{OpenConfig as Config, OpenIdentity as Identity};
 use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::records::{OwnedRecord, RecordDescriptor, Value, ValueType};
 use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder};
 use jazz_wasm::WasmDb;
-use serde::Serialize;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::*;
 wasm_bindgen_test_configure!(run_in_browser);
 
-#[derive(Serialize)]
-struct Config {
-    identity: Identity,
-    row_id_seed: Option<u64>,
-    history_complete: bool,
-    initial_sync_flush_every: Option<u32>,
-}
-#[derive(Serialize)]
-struct Identity {
-    node: NodeUuid,
-    author: AuthorSubject,
-}
 fn config() -> Vec<u8> {
     postcard::to_allocvec(&Config {
         identity: Identity {
@@ -31,6 +19,8 @@ fn config() -> Vec<u8> {
         row_id_seed: Some(83),
         history_complete: false,
         initial_sync_flush_every: None,
+        migrations: None,
+        system_node: None,
     })
     .unwrap()
 }

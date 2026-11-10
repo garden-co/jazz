@@ -1,5 +1,6 @@
 //! SQLite candidate authorization exercised through the real browser ABI.
 #![cfg(target_arch = "wasm32")]
+use jazz::binding_host::{OpenConfig as Config, OpenIdentity as Identity};
 use jazz::db::WriteState;
 use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::records::{OwnedRecord, RecordDescriptor, Value, ValueType};
@@ -8,23 +9,10 @@ use jazz::tools::{
 };
 use jazz::tx::Fate;
 use jazz_wasm::{WasmDb, WasmWrite};
-use serde::Serialize;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::*;
 wasm_bindgen_test_configure!(run_in_browser);
-#[derive(Serialize)]
-struct Config {
-    identity: Identity,
-    row_id_seed: Option<u64>,
-    history_complete: bool,
-    initial_sync_flush_every: Option<u32>,
-}
-#[derive(Serialize)]
-struct Identity {
-    node: NodeUuid,
-    author: AuthorSubject,
-}
 fn alice() -> AuthorSubject {
     AuthorSubject::authenticated("https://issuer.example", "alice").unwrap()
 }
@@ -61,6 +49,8 @@ fn open(node: u8, authority: bool) -> WasmDb {
         row_id_seed: Some(node.into()),
         history_complete: authority,
         initial_sync_flush_every: None,
+        migrations: None,
+        system_node: None,
     })
     .unwrap();
     if authority {
@@ -280,6 +270,8 @@ fn inherited_browser(node: u8, authority: bool) -> WasmDb {
         row_id_seed: Some(node.into()),
         history_complete: authority,
         initial_sync_flush_every: None,
+        migrations: None,
+        system_node: None,
     })
     .unwrap();
     let db = WasmDb::open_memory_as_backend(serde_json::to_vec(&schema).unwrap(), config).unwrap();

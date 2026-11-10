@@ -1,5 +1,6 @@
 /// <reference types="vite/client" />
 import { afterEach, expect, it } from "vitest";
+import rootFixture from "../../fixtures/browser-sqlite-root-v1.json?raw";
 import { schema as s } from "../../src/schema-namespace.js";
 import { mergePermissionsIntoWasmSchema } from "../../src/schema-permissions.js";
 import { IndexedDbPageStore } from "../../src/runtime/indexeddb-page-store.js";
@@ -209,4 +210,62 @@ it("admits, reopens and resets the physical root through the production SharedWo
   const reset = await open(physical);
   expect(reset.store.replicaNode).not.toEqual(node);
   expect(await count(reset.db)).toBe(0);
+});
+
+// The low-level default filename is separate from the SDK replica-specific path.
+// Preserve the original Rust fixture's isolation/reopen assertions through the
+// actual admitted browser ABI as well as compiling its shared OpenConfig type.
+it("keeps punctuation-distinct default files and reopens the exact production path fixture", async () => {
+  const wasm = await loadWasmModule(sources);
+  const fixture = JSON.parse(rootFixture) as { defaultPaths: Record<string, string> };
+  const config = openConfig(
+    new Uint8Array(16).fill(83),
+    new TextEncoder().encode('["https://issuer.example","alice"]'),
+    83,
+    false,
+  );
+  // The original Rust fixtures stopped before the two required None tags.
+  // Exercise the real decoder's refusal before using the complete ABI bytes.
+  expect(Array.from(config.slice(-2))).toEqual([0, 0]);
+  await expect(
+    wasm.WasmDb.openBrowser(
+      undefined,
+      encodeSchema(schema),
+      config.slice(0, -2),
+      "truncated-fixture",
+    ),
+  ).rejects.toThrow("decode open config");
+  const live: WasmDb[] = [];
+  const openDefault = async (
+    owner: string,
+    storage?: { backend: "indexeddb"; path: string; requireExisting: boolean },
+  ) => {
+    const db = await wasm.WasmDb.openBrowser(storage, encodeSchema(schema), config, owner);
+    live.push(db);
+    return db;
+  };
+  const close = async (db: WasmDb) => {
+    await db.close();
+    live.splice(live.indexOf(db), 1);
+  };
+  try {
+    const a = await openDefault("alice/a");
+    const b = await openDefault("alice?a");
+    await insert(a, "hello").wait("local");
+    expect(await count(a)).toBe(1);
+    expect(await count(b)).toBe(0);
+    await close(a);
+    await close(b);
+    const again = await openDefault("alice/a", {
+      backend: "indexeddb",
+      path: fixture.defaultPaths["alice/a"]!,
+      requireExisting: true,
+    });
+    expect(await count(again)).toBe(1);
+    await close(again);
+  } finally {
+    await Promise.all(live.map((db) => db.close()));
+    for (const owner of ["alice/a", "alice?a"])
+      await wasm.WasmDb.destroyBrowserStorage(undefined, owner);
+  }
 });
