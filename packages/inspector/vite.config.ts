@@ -24,7 +24,13 @@ export default defineConfig(({ mode }): UserConfig => {
       build: {
         outDir: "dist-embedded",
         emptyOutDir: true,
-        rollupOptions: { input: { index: resolve(__dirname, "embedded.html") } },
+        rollupOptions: {
+          input: {
+            index: resolve(__dirname, "embedded.html"),
+            // The Inspector an app's backend serves at <basePath>/inspect/.
+            backend: resolve(__dirname, "backend.html"),
+          },
+        },
       },
     };
   }
