@@ -10,7 +10,10 @@ const mocks = vi.hoisted(() => {
     subscribe,
   }));
 
+  const db = { marker: "db" };
+
   return {
+    db,
     makeQueryKey,
     getCacheEntry,
     subscribe,
@@ -27,6 +30,7 @@ const mocks = vi.hoisted(() => {
 
 vi.mock("./provider.js", () => ({
   useJazzClient: () => ({
+    db: mocks.db,
     manager: {
       makeQueryKey: mocks.makeQueryKey,
       getCacheEntry: mocks.getCacheEntry,
@@ -90,7 +94,9 @@ describe("vue/useAll", () => {
     const scope = effectScope();
     scope.run(() => useAll(query, options));
 
-    expect(mocks.makeQueryKey).toHaveBeenCalledWith(query, { tier: "local-first" });
+    expect(mocks.makeQueryKey).toHaveBeenCalledWith(query, {
+      tier: "local-first",
+    });
     expect(mocks.subscribe).toHaveBeenCalledTimes(1);
 
     options.value = { tier: "remote" };
@@ -113,6 +119,7 @@ describe("vue/useAll", () => {
     const scope = effectScope();
     const result = scope.run(() => useAll(makeQuery()));
     expect(result!.data.value).toEqual([alice]);
+    expect(result!.db).toBe(mocks.db);
     scope.stop();
   });
 
@@ -150,7 +157,14 @@ describe("vue/useAll", () => {
     // Simulate a delta — role changed, name unchanged
     capturedOnDelta!({
       all: [{ id: "u1", name: "Alice", role: "editor" }],
-      delta: [{ kind: 2, id: "u1", index: 0, item: { id: "u1", name: "Alice", role: "editor" } }],
+      delta: [
+        {
+          kind: 2,
+          id: "u1",
+          index: 0,
+          item: { id: "u1", name: "Alice", role: "editor" },
+        },
+      ],
     });
 
     expect(result!.data.value).toHaveLength(1);
@@ -281,7 +295,14 @@ describe("vue/useAll", () => {
         { id: "u3", name: "Carol", score: 30 },
         { id: "u1", name: "Alice", score: 5 },
       ],
-      delta: [{ kind: 2, id: "u1", index: 2, item: { id: "u1", name: "Alice", score: 5 } }],
+      delta: [
+        {
+          kind: 2,
+          id: "u1",
+          index: 2,
+          item: { id: "u1", name: "Alice", score: 5 },
+        },
+      ],
     });
 
     expect(result!.data.value).toHaveLength(3);
@@ -331,6 +352,7 @@ describe("vue/useAll", () => {
     const result = await scope.run(() => useAllSuspense(makeQuery()))!;
 
     expect(result.data.value).toEqual([alice]);
+    expect(result.db).toBe(mocks.db);
     expect("isLoading" in result).toBe(false);
 
     scope.stop();

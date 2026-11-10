@@ -5,7 +5,9 @@ import type { BrowserWebSocket } from "./websocket.js";
 import { PostcardReader, PostcardWriter } from "./native-codec.js";
 import {
   CLIENT_WIRE_FEATURES,
+  FEATURE_HEARTBEAT,
   FEATURE_PAYLOAD_ZSTD,
+  HEARTBEAT_SILENCE_MS,
   MAX_WIRE_PROTOCOL_VERSION,
   MIN_WIRE_PROTOCOL_VERSION,
   WIRE_PROTOCOL_VERSION,
@@ -18,6 +20,7 @@ import {
   encodeWebSocketFrameBatch,
   isWireHello,
   isWireError,
+  isSocketDropWireError,
   peerIdentityForWebSocketAuth,
   policyClaimsForAdmittedWebSocket,
 } from "./websocket.js";
@@ -94,6 +97,49 @@ describe("websocket frame carrier", () => {
       code: number;
       reason: string;
     }>();
+  });
+
+  it("encodes a large frame among small ones whole, in order, and quickly", () => {
+    const leaf = new Uint8Array(1_000_000);
+    for (let i = 0; i < leaf.length; i += 1) leaf[i] = (i * 31) & 0xff;
+    const frames = [Uint8Array.from([1, 2, 3]), leaf, Uint8Array.from([4, 5])];
+    const batch = encodeWebSocketFrameBatch(frames);
+    leaf[0] = 99; // the batch holds its own copy
+    const decoded = decodeWebSocketFrameBatch(batch);
+    expect(decoded.map((frame) => frame.byteLength)).toEqual([3, 1_000_000, 2]);
+    expect(decoded[1]![0]).toBe(0);
+    expect(Buffer.from(decoded[1]!.subarray(1)).equals(Buffer.from(leaf.subarray(1)))).toBe(true);
+    expect([...decoded[2]!]).toEqual([4, 5]);
+    // A large value used to be pushed byte by byte: ~80 ms per MB on the
+    // event loop, over a second for these 16 MB. The bound leaves room for
+    // a busy runner.
+    const large = new Uint8Array(16_000_000);
+    const started = performance.now();
+    const timed = new PostcardWriter();
+    timed.bytes(large);
+    const encoded = timed.finish();
+    const took = performance.now() - started;
+    expect(encoded.byteLength).toBeGreaterThan(16_000_000);
+    expect(took).toBeLessThan(500);
+
+    // A Node Buffer is copied too, not shared.
+    const buffer = Buffer.alloc(1024, 7);
+    const fromBuffer = encodeWebSocketFrameBatch([buffer]);
+    buffer[0] = 99;
+    expect(decodeWebSocketFrameBatch(fromBuffer)[0]![0]).toBe(7);
+
+    // Scalars and short strings around a large value keep their order.
+    const writer = new PostcardWriter();
+    writer.u64(7);
+    writer.string("short");
+    writer.bytes(leaf);
+    writer.bool(true);
+    const reader = new PostcardReader(writer.finish());
+    expect(reader.u64()).toBe(7);
+    expect(reader.string()).toBe("short");
+    expect(reader.bytes().byteLength).toBe(leaf.length);
+    expect(reader.bool()).toBe(true);
+    expect(reader.done()).toBe(true);
   });
 
   it("encodes websocket messages as postcard batches of encoded frames", () => {
@@ -909,7 +955,8 @@ describe("websocket frame carrier", () => {
 
     expect(encoded[0]).toBe(1);
     const nonminimalTag = Uint8Array.from([0x81, 0x00, ...encoded.slice(1)]);
-    expect(() => isWireError(nonminimalTag)).toThrow("postcard u64 is not minimally encoded");
+    // Frames are told apart by their first byte, so this is no Error frame.
+    expect(isWireError(nonminimalTag)).toBe(false);
     expect(() => decodeWireError(nonminimalTag)).toThrow("postcard u64 is not minimally encoded");
 
     const unknownCode = encodeWireError(7, 3, "future code");
@@ -919,6 +966,152 @@ describe("websocket frame carrier", () => {
     const unknownRetry = encodeWireError(6, 4, "future retry");
     expect(() => isWireError(unknownRetry)).toThrow("unknown WireRetry discriminant 4");
     expect(() => decodeWireError(unknownRetry)).toThrow("unknown WireRetry discriminant 4");
+  });
+
+  describe("heartbeat", () => {
+    function heartbeatCarrier() {
+      // Records what the carrier sends; the test plays the server.
+      class SilentServerSocket extends MessageWebSocket {
+        sent: Uint8Array[] = [];
+        override send(data: Uint8Array | string): void {
+          if (data instanceof Uint8Array) this.sent.push(data);
+        }
+      }
+      let socket: SilentServerSocket | undefined;
+      const frames: Uint8Array[] = [];
+      const terminals: unknown[] = [];
+      const carrier = new WebSocketCarrier({
+        endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
+        peerIdentity: new Uint8Array(16),
+        onFrame: (frame) => frames.push(frame),
+        onTerminal: (error) => terminals.push(error),
+        WebSocket: class extends SilentServerSocket {
+          constructor(url: string) {
+            super(url, (created) => {
+              socket = created as SilentServerSocket;
+            });
+          }
+        },
+      });
+      return { carrier, socket: socket!, frames, terminals };
+    }
+    const heartbeat = encodeWebSocketFrameBatch([Uint8Array.of(7)]);
+
+    it("asks every server for a heartbeat, and keeps it from the runtime above", async () => {
+      vi.useFakeTimers();
+      try {
+        const { carrier, socket, frames, terminals } = heartbeatCarrier();
+        await vi.advanceTimersByTimeAsync(0);
+        const hello = decodeWebSocketFrameBatch(socket.sent.at(-1)!)[0]!;
+        const reader = new PostcardReader(hello);
+        reader.u64();
+        reader.u64();
+        reader.u64();
+        expect(reader.u64()).toBe(CLIENT_WIRE_FEATURES | FEATURE_HEARTBEAT);
+
+        socket.emitMessage(
+          encodeWebSocketFrameBatch([
+            encodeServerHello(1n, WIRE_PROTOCOL_VERSION, {
+              features: CLIENT_WIRE_FEATURES | FEATURE_HEARTBEAT,
+            }),
+          ]),
+        );
+        // The runtime above never hears of the feature or its frames.
+        await expect(carrier.ready()).resolves.toMatchObject({ features: CLIENT_WIRE_FEATURES });
+        for (let beat = 0; beat < 10; beat += 1) {
+          await vi.advanceTimersByTimeAsync(20_000);
+          socket.emitMessage(heartbeat);
+        }
+        await vi.advanceTimersByTimeAsync(0);
+        expect(frames).toEqual([]);
+        expect(terminals).toEqual([]);
+        expect(socket.closed).toBe(false);
+        carrier.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("gives a heartbeat link up once the server goes silent", async () => {
+      vi.useFakeTimers();
+      try {
+        const { socket, terminals } = heartbeatCarrier();
+        await vi.advanceTimersByTimeAsync(0);
+        socket.emitMessage(
+          encodeWebSocketFrameBatch([
+            encodeServerHello(1n, WIRE_PROTOCOL_VERSION, {
+              features: CLIENT_WIRE_FEATURES | FEATURE_HEARTBEAT,
+            }),
+          ]),
+        );
+        await vi.advanceTimersByTimeAsync(20_000);
+        socket.emitMessage(heartbeat);
+        // Then nothing at all, as from a half-open TCP link. Past the limit
+        // the silence is confirmed a moment later.
+        await vi.advanceTimersByTimeAsync(HEARTBEAT_SILENCE_MS);
+        expect(terminals).toEqual([]);
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(terminals).toEqual([
+          expect.objectContaining({ code: "websocket_silent", retry: "later" }),
+        ]);
+        expect(socket.closed).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("keeps a link whose held-back messages arrive once the silence is noticed", async () => {
+      vi.useFakeTimers();
+      try {
+        const { carrier, socket, terminals } = heartbeatCarrier();
+        await vi.advanceTimersByTimeAsync(0);
+        socket.emitMessage(
+          encodeWebSocketFrameBatch([
+            encodeServerHello(1n, WIRE_PROTOCOL_VERSION, {
+              features: CLIENT_WIRE_FEATURES | FEATURE_HEARTBEAT,
+            }),
+          ]),
+        );
+        // A frozen page: its timer fires first, then the heartbeats queued
+        // meanwhile are delivered.
+        await vi.advanceTimersByTimeAsync(HEARTBEAT_SILENCE_MS);
+        socket.emitMessage(heartbeat);
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(terminals).toEqual([]);
+        expect(socket.closed).toBe(false);
+        carrier.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("classes a silent link as a network drop, which clients retry", () => {
+      expect(isSocketDropWireError({ code: "websocket_silent", retry: "later", message: "" })).toBe(
+        true,
+      );
+      expect(isSocketDropWireError({ code: "websocket_closed", retry: "later", message: "" })).toBe(
+        true,
+      );
+      expect(isSocketDropWireError({ code: "protocol_error", retry: "never", message: "" })).toBe(
+        false,
+      );
+    });
+
+    it("never times out a server that sends no heartbeat", async () => {
+      vi.useFakeTimers();
+      try {
+        const { carrier, socket, terminals } = heartbeatCarrier();
+        await vi.advanceTimersByTimeAsync(0);
+        socket.emitMessage(encodeWebSocketFrameBatch([encodeServerHello(1n)]));
+        await carrier.ready();
+        await vi.advanceTimersByTimeAsync(10 * HEARTBEAT_SILENCE_MS);
+        expect(terminals).toEqual([]);
+        expect(socket.closed).toBe(false);
+        carrier.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   it("surfaces structured wire error frames without forwarding them as payload frames", async () => {
@@ -946,6 +1139,39 @@ describe("websocket frame carrier", () => {
 
     expect(frames).toEqual([]);
     expect(errors).toEqual([{ code: "auth_failed", retry: "after_auth", message: "expired" }]);
+  });
+
+  it("passes the parts of a split sync message on, whatever bytes follow their marker", async () => {
+    let socket: MessageWebSocket | undefined;
+    const frames: Uint8Array[] = [];
+    const errors: unknown[] = [];
+    const carrier = new WebSocketCarrier({
+      endpointUrl: "ws://127.0.0.1:4200/apps/app-a/ws",
+      peerIdentity: new Uint8Array(16),
+      onFrame: (frame) => frames.push(frame),
+      onError: (error) => errors.push(error),
+      WebSocket: class extends MessageWebSocket {
+        constructor(url: string) {
+          super(url, (created) => {
+            socket = created;
+          });
+        }
+      },
+    });
+    socket!.emitMessage(encodeWebSocketFrameBatch([encodeServerHello(1n)]));
+    await carrier.ready();
+
+    // A message too large for one frame travels as parts behind a marker
+    // byte (`encode_frames` in sync.rs). A last part whose bytes start with
+    // 0 reads as a non-minimal varint if taken for a postcard tag: a large
+    // query answer did, and the link closed for good.
+    const parts = [Uint8Array.of(0xff, 0x08, 0xca), Uint8Array.of(0xfe, 0x00, 0x00, 0x1a)];
+    socket!.emitMessage(encodeWebSocketFrameBatch(parts));
+    await Promise.resolve();
+
+    expect(errors).toEqual([]);
+    expect(frames).toEqual(parts);
+    expect(socket!.closed).toBe(false);
   });
 
   it("round-trips channel batches from Rust wire fixtures through the TS websocket codec", () => {

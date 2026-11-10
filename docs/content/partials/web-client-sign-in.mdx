@@ -1,0 +1,7 @@
+## Sign-in
+
+Both clients sign in the same way: they ask your main backend at `/jazz` who is signed in, with
+your app's own session cookie, and your backend's `authenticate` decides who that user is. The
+client asks on start, when the page regains focus and when another tab signs in or out. After your
+own sign-in or sign-out, call `reauthenticate()` (from `useJazzAuth()` in React) so the change shows
+at once. The browser never holds a Jazz key or token. See [How Auth Works](/docs/setup/auth/backend).

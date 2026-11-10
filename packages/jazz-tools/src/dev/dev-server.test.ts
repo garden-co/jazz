@@ -23,7 +23,7 @@ describe("dev-server re-export compatibility", () => {
   it("exports the same functions from dev/index.ts", async () => {
     const dev = await import("./index.js");
     expect(typeof dev.startLocalJazzServer).toBe("function");
-    expect(typeof dev.watchSchema).toBe("function");
+    expect(dev).not.toHaveProperty("watchSchema");
     expect(dev).not.toHaveProperty("pushSchema");
     expect(dev).not.toHaveProperty("pushPermissions");
     expect(dev).not.toHaveProperty("pushMigration");
@@ -78,6 +78,21 @@ describe("startLocalJazzServer via JazzServer", () => {
     },
   );
 
+  it("rejects the removed JWT options instead of ignoring them", async () => {
+    // A core admits only its app's backend; it verifies no user JWTs.
+    for (const removed of ["jwksUrl", "jwtIssuer", "jwtAudience"]) {
+      await expect(
+        JazzServer.start({
+          appId: "00000000-0000-0000-0000-000000000004",
+          inMemory: true,
+          adminSecret: "removed-jwt-admin",
+          backendSecret: "removed-jwt-backend",
+          [removed]: "https://issuer.example",
+        } as Parameters<typeof JazzServer.start>[0]),
+      ).rejects.toThrow(new RegExp(`unknown field \`${removed}\``));
+    }
+  });
+
   it("rejects direct NAPI startup on an occupied explicit port without killing the process", async () => {
     const blocker = createServer();
     await new Promise<void>((resolve, reject) => {
@@ -115,9 +130,12 @@ describe("startLocalJazzServer via JazzServer", () => {
     "boots a client with app, query, and raw schema sources",
     async () => {
       globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
-      const app = s.defineApp({
-        todos: s.table({ title: s.string(), done: s.boolean() }, {}),
-      });
+      const app = s.defineApp(
+        {
+          todos: s.table({ title: s.string(), done: s.boolean() }, {}),
+        },
+        { migrations: "none" },
+      );
       const permissions = s.definePermissions(app, ({ policy }) => {
         policy.todos.allowRead.always();
         policy.todos.allowInsert.always();

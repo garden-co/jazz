@@ -36,8 +36,9 @@ this document or public receipts.
   receipts, exact dependency versions and tarball size budgets.
 - Ensure RN payload packages are part of the fixed release group and published
   before the wrapper. Verify the exact tarballs that will be uploaded.
-- Smoke-test published preview packages as an adopter: `npm create jazz`, CLI
-  validation/deployment, local CLI server, authentication, write/read/delete of a
+- Check that `npm create jazz` from the preview prints the live agent brief
+  (https://jazz.tools/quickstart.md). Smoke-test published preview packages as an
+  adopter: CLI validation/deployment, local CLI server, authentication, write/read/delete of a
   specific row while another remains, reconnect and persistent reopen.
 - Include browser/worker and Android/iOS acceptance appropriate to changed code.
   For storage changes, run the published-version compatibility fixtures. Reuse a
@@ -106,7 +107,10 @@ this document or public receipts.
   packaging, then retry through the publisher's existing-version handling. Never
   republish different bytes under an existing version.
 - Verify every expected npm package/version, native payload, dependency and dist-tag
-  using registry reads and installation. Confirm the source tag matches the exact
+  using registry reads and installation. Since alpha.60 the publisher moves both
+  `alpha` and `latest` to the new version for every v2 package, so a plain
+  `npm install jazz-tools` gets v2 and Classic is `jazz-tools@0`. To roll `latest`
+  back, run `npm dist-tag add <pkg>@<previous> latest` for each package. Confirm the source tag matches the exact
   released source. Build artifacts alone are not proof of npm publication.
 - Promote the verified docs deployment. The publisher stages and promotes the
   Inspector itself; if its Inspector jobs fail, re-run the failed jobs on that

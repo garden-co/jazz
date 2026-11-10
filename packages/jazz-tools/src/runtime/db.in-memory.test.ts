@@ -15,7 +15,7 @@ const schema = {
 };
 
 type AppSchema = s.Schema<typeof schema>;
-const app: s.App<AppSchema> = s.defineApp(schema);
+const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
 type Note = s.RowOf<typeof app.notes>;
 
 const largeValueSchema = {
@@ -30,7 +30,15 @@ const largeValueSchema = {
   ),
 };
 type LargeValueAppSchema = s.Schema<typeof largeValueSchema>;
-const largeValues: s.App<LargeValueAppSchema> = s.defineApp(largeValueSchema);
+const largeValues: s.App<LargeValueAppSchema> = s.defineApp(largeValueSchema, {
+  migrations: "none",
+});
+
+const textSchema = {
+  pages: s.table({ body: s.string().merge("markdown") }, {}),
+};
+type TextAppSchema = s.Schema<typeof textSchema>;
+const texts: s.App<TextAppSchema> = s.defineApp(textSchema, { migrations: "none" });
 
 const optionalJsonSchema = {
   jobs: s.table(
@@ -42,7 +50,9 @@ const optionalJsonSchema = {
   ),
 };
 type OptionalJsonAppSchema = s.Schema<typeof optionalJsonSchema>;
-const optionalJson: s.App<OptionalJsonAppSchema> = s.defineApp(optionalJsonSchema);
+const optionalJson: s.App<OptionalJsonAppSchema> = s.defineApp(optionalJsonSchema, {
+  migrations: "none",
+});
 
 describe("createDb in-memory driver", () => {
   let db: Db | undefined;
@@ -61,6 +71,135 @@ describe("createDb in-memory driver", () => {
     // Opening the native client decodes and compiles the TypeScript-authored
     // source schema before this query can run.
     await expect(db.all(app.notes)).resolves.toEqual([]);
+  });
+
+  it("merges a text edit over a value its editor had not shown yet", async () => {
+    db = await createDb({
+      ...(await localAccountConfig("in-memory-text-edit-test")),
+      driver: { type: "memory" },
+    });
+    const { value: page } = db.insert(texts.pages, { body: "Hello world" });
+    // A merged value arrives in the store before the editor shows it...
+    await db.update(texts.pages, page.id, { body: "Hello there world" }).wait({ tier: "local" });
+    // ...and the editor, still showing "Hello world", types "!".
+    await db
+      .update(
+        texts.pages,
+        page.id,
+        { body: "Hello world!" },
+        { editedFrom: { body: "Hello world" } },
+      )
+      .wait({ tier: "local" });
+    const [read] = await db.all(texts.pages.where({ id: page.id }));
+    expect(read?.body).toBe("Hello there world!");
+
+    // An edit of the value the column holds is written as it is.
+    await db
+      .update(
+        texts.pages,
+        page.id,
+        { body: "Hi there world!" },
+        { editedFrom: { body: "Hello there world!" } },
+      )
+      .wait({ tier: "local" });
+    const [again] = await db.all(texts.pages.where({ id: page.id }));
+    expect(again?.body).toBe("Hi there world!");
+  });
+
+  it("merges a transaction's text edit over a value its editor had not shown yet", async () => {
+    db = await createDb({
+      ...(await localAccountConfig("in-memory-text-edit-transaction-test")),
+      driver: { type: "memory" },
+    });
+    const { value: page } = db.insert(texts.pages, { body: "Hello world" });
+    await db.update(texts.pages, page.id, { body: "Hello there world" }).wait({ tier: "local" });
+    const committed = await db.transaction((tx) => {
+      tx.update(
+        texts.pages,
+        page.id,
+        { body: "Hello world!" },
+        { editedFrom: { body: "Hello world" } },
+      );
+    });
+    await committed.wait({ tier: "local" });
+    const [read] = await db.all(texts.pages.where({ id: page.id }));
+    expect(read?.body).toBe("Hello there world!");
+  });
+
+  it("writes a column left undefined in editedFrom as usual", async () => {
+    db = await createDb({
+      ...(await localAccountConfig("in-memory-text-edit-undefined-test")),
+      driver: { type: "memory" },
+    });
+    const { value: page } = db.insert(texts.pages, { body: "Hello world" });
+    await db.update(texts.pages, page.id, { body: "Hello there" }).wait({ tier: "local" });
+    await db
+      .update(texts.pages, page.id, { body: "Bye" }, { editedFrom: { body: undefined } })
+      .wait({ tier: "local" });
+    const [read] = await db.all(texts.pages.where({ id: page.id }));
+    expect(read?.body).toBe("Bye");
+  });
+
+  it("refuses editedFrom it cannot honour", async () => {
+    const transformedSchema = {
+      pages: s.table(
+        {
+          body: s
+            .string()
+            .transform({ from: (value: string) => value, to: (value: string) => value })
+            .merge("markdown"),
+        },
+        {},
+      ),
+    };
+    const transformed: s.App<s.Schema<typeof transformedSchema>> = s.defineApp(transformedSchema, {
+      migrations: "none",
+    });
+    // A Db holds one schema: each app below gets its own.
+    const open = async (name: string) => {
+      await db?.shutdown();
+      db = await createDb({
+        ...(await localAccountConfig(`in-memory-text-edit-refusals-${name}`)),
+        driver: { type: "memory" },
+      });
+      return db;
+    };
+    await open("texts");
+    const { value: page } = db!.insert(texts.pages, { body: "Hello" });
+    // A value to edit from, but no text to write.
+    expect(() => db!.update(texts.pages, page.id, {}, { editedFrom: { body: "Hello" } })).toThrow(
+      'a string replacement for "body"',
+    );
+    // A column that does not merge text.
+    await open("plain");
+    const { value: note } = db!.insert(largeValues.documents, {
+      payload: new Uint8Array(),
+      body: "Hello",
+      metadata: {},
+      done: false,
+    });
+    await expect(
+      (async () =>
+        db!
+          .update(
+            largeValues.documents,
+            note.id,
+            { body: "Hello!" },
+            { editedFrom: { body: "Hello" } },
+          )
+          .wait({ tier: "local" }))(),
+    ).rejects.toThrow();
+    // A column with a transform.
+    await open("transformed");
+    const { value: other } = db!.insert(transformed.pages, { body: "Hello" });
+    expect(() =>
+      db!.update(
+        transformed.pages,
+        other.id,
+        { body: "Hello!" },
+        { editedFrom: { body: "Hello" } },
+      ),
+    ).toThrow("which has a transform");
   });
 
   it("can read and write data without connecting to a server", async () => {
@@ -359,12 +498,15 @@ describe("createDb in-memory driver", () => {
   });
 
   it("refuses splices on a range-selected column that a computed column makes it read whole", async () => {
-    const computedApp = s.defineApp({
-      documents: s.table(
-        { body: s.string() },
-        { preview: s.computed((row: { body: string }) => row.body.slice(0, 3)) },
-      ),
-    });
+    const computedApp = s.defineApp(
+      {
+        documents: s.table(
+          { body: s.string() },
+          { preview: s.computed((row: { body: string }) => row.body.slice(0, 3)) },
+        ),
+      },
+      { migrations: "none" },
+    );
     db = await createDb({
       ...(await localAccountConfig("in-memory-splices-whole-read-test")),
       driver: { type: "memory" },
@@ -390,10 +532,13 @@ describe("createDb in-memory driver", () => {
   });
 
   it("delivers splices for a hopped query's output rows", async () => {
-    const hopApp = s.defineApp({
-      documents: s.table({ body: s.string() }, {}),
-      links: s.table({ documentId: s.uuid() }, { document: s.rel("documents", "documentId") }),
-    });
+    const hopApp = s.defineApp(
+      {
+        documents: s.table({ body: s.string() }, {}),
+        links: s.table({ documentId: s.uuid() }, { document: s.rel("documents", "documentId") }),
+      },
+      { migrations: "none" },
+    );
     db = await createDb({
       ...(await localAccountConfig("in-memory-splices-hop-test")),
       driver: { type: "memory" },

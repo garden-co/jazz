@@ -16,7 +16,7 @@ const todoSchema = {
   ),
 };
 type TodoSchema = s.Schema<typeof todoSchema>;
-const app: s.App<TodoSchema> = s.defineApp(todoSchema);
+const app: s.App<TodoSchema> = s.defineApp(todoSchema, { migrations: "none" });
 
 const otherTodoSchema = {
   todos: s.table(
@@ -29,7 +29,7 @@ const otherTodoSchema = {
   ),
 };
 type OtherTodoSchema = s.Schema<typeof otherTodoSchema>;
-const otherApp: s.App<OtherTodoSchema> = s.defineApp(otherTodoSchema);
+const otherApp: s.App<OtherTodoSchema> = s.defineApp(otherTodoSchema, { migrations: "none" });
 
 const taggedTodoSchema = {
   tagged_todos: s.table(
@@ -41,7 +41,7 @@ const taggedTodoSchema = {
   ),
 };
 type TaggedTodoSchema = s.Schema<typeof taggedTodoSchema>;
-const taggedApp: s.App<TaggedTodoSchema> = s.defineApp(taggedTodoSchema);
+const taggedApp: s.App<TaggedTodoSchema> = s.defineApp(taggedTodoSchema, { migrations: "none" });
 
 const defaultsTodoSchema = {
   defaults_todos: s.table(
@@ -53,7 +53,9 @@ const defaultsTodoSchema = {
   ),
 };
 type DefaultsTodoSchema = s.Schema<typeof defaultsTodoSchema>;
-const defaultsApp: s.App<DefaultsTodoSchema> = s.defineApp(defaultsTodoSchema);
+const defaultsApp: s.App<DefaultsTodoSchema> = s.defineApp(defaultsTodoSchema, {
+  migrations: "none",
+});
 
 let db: Db;
 

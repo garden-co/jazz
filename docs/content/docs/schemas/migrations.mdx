@@ -1,11 +1,13 @@
 ---
 title: Migrations
-description: Change your schema while keeping older clients working.
+description: "Learn how to change your schema while older clients keep working."
 reviewedAt: "b29b48d1a"
 ---
 
-<Callout type="info" title="You can skip this first">
-  If you are trying to get your first app running, you can skip this page and return later.
+<Callout type="info" title="Before your first schema change">
+  You don't need migrations to get a first app running. Read this page before you change a schema
+  that has been deployed: a schema change with no migration leaves the backend refusing to start,
+  and recovering means rebuilding the old schema from your Git history.
 </Callout>
 
 ## Why Jazz migrations are different
@@ -35,44 +37,67 @@ In practice, this lets you:
 1. If this is the first migration you are creating, run:
 
    ```bash
-   pnpm dlx jazz-tools@alpha migrations create
+   npx jazz-tools migrations create
    ```
 
    This creates an initial snapshot of your schema in `migrations/snapshots/`. No migration file is created yet because there is no previous schema to diff against.
 
 2. **Edit `schema.ts`**&hairsp;—&hairsp;change the data shape as needed.
-3. **Validate locally**&hairsp;—&hairsp;optionally run `pnpm dlx jazz-tools@alpha validate` to surface
-   any policy diagnostics without publishing. `deploy` runs the same checks; `validate` is most
-   useful as a fast pre-publish sanity check or in CI.
+3. **Validate locally**&hairsp;—&hairsp;optionally run `npx jazz-tools validate` to surface
+   any policy diagnostics without publishing. Your main backend runs the same checks when it starts;
+   `validate` is most useful as a fast check before you deploy, or in CI.
 4. **Create a migration stub for the updated schema**&hairsp;—&hairsp;run:
 
    ```bash
-   pnpm dlx jazz-tools@alpha migrations create --name <your-migration-name>
+   npx jazz-tools migrations create --name <your-migration-name>
    ```
 
    By default, Jazz diffs the latest committed snapshot in `migrations/snapshots/` against the
    current schema and writes a stub migration file into `migrations/`. It also saves a snapshot of the generated schema.
 
 5. **Review and customise**&hairsp;—&hairsp;the migration, if needed (see below).
-6. **Deploy**&hairsp;—&hairsp;publish the schema, permissions, and required migrations:
+6. **Deploy your main backend**&hairsp;—&hairsp;restart it locally, or deploy it as usual. When it
+   starts, `createJazz` sends the schema, permissions and migrations your code imports to its store
+   as one bundle. There is no separate deploy or push command. If the bundle has no migration path
+   from the schema already in the store, `jazz.ready()` (and so the backend's first request)
+   rejects with an error naming the missing migration, which usually crashes the process at
+   startup. First deployments and permission-only changes need no migration.
 
-   ```bash
-   pnpm dlx jazz-tools@alpha deploy <appId>
-   ```
+   With several instances, roll out to one first and check it starts before replacing the rest,
+   and keep the previous version ready to roll back to.
 
-   1. Before publishing, it checks that the schema, permissions and any required migrations are present. First deployments and permission-only changes need no migration.
-   2. Publishes the current schema if the server does not already have it.
-   3. If the server is on an older schema hash, asks the server whether
-      it already has a migration path between the two hashes. If not, pushes the local migration
-      file that closes the gap (and fails with a helpful message if you haven't created one yet).
-   4. Publishes the current permissions, attached to the current schema hash.
+   Each deployment's sessions run under that deployment's own bundle, so two deployments can run
+   side by side, and rolling back your backend rolls back its permissions too.
 
-   A network failure can leave schemas or migrations stored without advancing the permissions
-   head. Retrying reuses stored artifacts. If another deploy wins the permissions-head check,
-   review that release before retrying yours.
+   Browser tabs opened before the deploy keep running the old app and its schema until they
+   reload; Jazz has no reload prompt yet, so add your own if you need one. Serve `index.html`
+   with `Cache-Control: no-cache`, or browsers can keep loading the old bundle even after a reload.
 
-Permission-only changes in `permissions.ts` don't need a migration but still need to be deployed:
-`pnpm dlx jazz-tools@alpha deploy <appId>`. See [Permissions](/docs/auth/permissions) for details.
+The `jazz-tools` CLI only scaffolds and checks migrations (`migrations create`, `validate`,
+`migrations graph`). It never publishes anything: only your main backend does.
+
+### Shipping migrations with your app
+
+`validate` and `migrations create` also regenerate `migrations/index.ts`. It bundles every schema version and
+every lens, and your app passes it to `defineApp`:
+
+```ts title="schema.ts"
+import { migrations } from "./migrations";
+
+export const app = s.defineApp(schema, { migrations });
+```
+
+Commit it with your schema. It changes with every migration, so merging two branches that each
+added one always conflicts there: take either side, then run `validate` to regenerate it. Clients use it to read and write data from any version, including
+before they first sync, so a client never has to rename or reshape stored data later. A client
+whose schema version is missing from the bundle refuses to open with an error telling you to
+regenerate it.
+
+Index changes (`indexOnly`, `compositeIndex`) don't need a migration either: they change how
+rows are found, not the rows, so the backend deploys them as they are.
+
+Permission-only changes in `permissions.ts` don't need a migration; they go live when your main
+backend restarts with them. See [Declarative Permissions](/docs/schemas/policies) for details.
 
 ## The migration file
 
@@ -84,7 +109,10 @@ in reverse.
   If the diff contains ambiguities (e.g. a column was removed and a same-typed column was added,
   which could be a rename), the generated lens is marked as a **draft**. Draft lenses will fail at
   startup if they are in the path to a live schema. You need to review the draft lens and resolve
-  the ambiguity before publishing.
+  the ambiguity before publishing. Renaming an **optional** column isn't detected yet: the stub
+  drops the old column and adds the new one without marking it a draft, and once deployed the values
+  are gone. Check every stub for a drop and an add in the same table, and replace them with
+  `m.renameFrom` when you meant a rename.
 </Callout>
 
 ### Generated stub
@@ -119,6 +147,59 @@ When a newer schema drops a column that older clients still expect, define a bac
   ../examples/docs/todo-server-ts/migrations/20260318-drop-legacy-priority-311995e9a178-73b65d082ab8.ts
 </include>
 
+### Operations
+
+A migration's `migrate` maps each changed table to its column operations; tables themselves are
+added, dropped and renamed next to it:
+
+```ts title="migrations/20260401-rename-and-split.ts"
+import { migration as m } from "jazz-tools";
+
+export default m.defineMigration({
+  migrate: {
+    todos: {
+      notes: m.renameFrom("description"), // same type, new name
+      priority: m.add.int({ default: 0 }), // a new column and its value for old rows
+      legacy_flag: m.drop.boolean({ backwardsDefault: false }), // what older clients read
+    },
+  },
+  renameTables: { projects: m.renameTableFrom("lists") },
+  createTables: { labels: true },
+  dropTables: { archived_todos: true },
+  from: {
+    /* the old schema's affected tables */
+  },
+  to: {
+    /* the new schema's affected tables */
+  },
+});
+```
+
+- `m.add.<type>({ default })` adds a column (`string`, `int`, `bigint`, `boolean`, `timestamp` and
+  the other column types). The default fills it for rows written under the older schema.
+- `m.drop.<type>({ backwardsDefault })` drops a column; older clients read `backwardsDefault`.
+- `m.renameFrom("oldName")` renames a column of the same type. Values carry over.
+- `renameTables`, `createTables` and `dropTables` cover tables that exist on only one side.
+
+After editing a stub, run `jazz-tools validate` (and your type checker): it rejects a migration that
+doesn't cover every change, while a stub with a `TODO` left in it can still pass type checks.
+
+### Changes that aren't supported yet
+
+- **Changing a column's type, or the variants of an enum.** The CLI refuses them. Adding a column
+  under a new name and dropping the old one works, but it does not carry values over: every row
+  gets the new column's default, with no warning. There is no value-mapping step yet.
+- **Making an optional column required.** There's no step for it yet, and adding a required column
+  while dropping the optional one resets every row to the default, as above.
+- **Moving data between tables.** A lens maps one table's rows; it can't copy values into another
+  table.
+
+For these, expand and contract over two releases. First add the new column or table next to the old
+one, have your app write both, and copy existing values with a
+[backend job](/docs/setup/backend-client). Once every row is copied and no client still needs the old
+shape, drop the old column in a later release. Keep the copy job in the release before the drop:
+once a release drops a column, code on that release can no longer read it.
+
 ## Adding relations to existing UUID columns
 
 To add a relationship using an existing `ownerId` UUID column, declare `owner: s.rel("users", "ownerId")` in the table's relationships and follow the migration workflow above. Existing UUID values stay unchanged; Jazz emits an explicit identity table lens, which preserves row values while making the relation available under the new schema.
@@ -131,54 +212,35 @@ For example, suppose your task app has a `tasks` table with a `title` column. Al
 
 ```text
 Original tasks
-├──add dueDate───→ Tasks with due dates (active on server)
-└──add priority──→ Tasks with priorities (local schema.ts)
+├──add dueDate───→ Tasks with due dates (Alice's backend)
+└──add priority──→ Tasks with priorities (Bob's backend)
 ```
 
-Although Jazz can read across schemas by applying lenses backwards, that route can discard values from the projected row. For example, a task written with a due date loses that field when read from the priorities schema. Adding `dueDate` again later along that route can supply a default instead of the task's original due date.
+Each deployment publishes its own bundle and its sessions run under it, so Alice's and Bob's
+backends (two preview deployments, say) can both serve the same data side by side. Nothing on the
+server becomes "current", and neither deployment blocks the other. A bundle's migration history
+must have a single root, which both branches share here.
 
-That's why Jazz prevents deploying a schema that's not connected to the currently active schema through a forward migration:
+Reading across the branches has a cost, though. Jazz reads a row written under another schema by
+applying lenses backwards to the common ancestor and forwards again, and that route can discard
+values. A task written with a due date loses that field when read from the priorities schema, and
+adding `dueDate` again later along that route supplies a default instead of the task's original due
+date.
 
-```text
-Cannot deploy local schema <priorities-schema-hash> from server schema <due-dates-schema-hash>: no forward migration path connects them.
+So while both branches run, each side sees the other's rows without the other's new column. When
+you're ready to ship, pick one branch or converge both into a merged schema.
 
-Choose one:
+### Picking one branch
 
-1. Revert to the common schema.
-   Restore the shared ancestor in schema.ts (and its permissions), then deploy it.
-   After that, restore your branch and deploy again. No reverse migration is needed.
+To leave Alice's due-date change behind, deploy Bob's backend and stop deploying Alice's. Rolling
+back works the same way: redeploy older code, and its sessions run under its own bundle again. No
+reverse migration is needed, and you shouldn't write one: it would create a cycle, which your main
+backend rejects on start.
 
-2. Merge both changes.
-   Update schema.ts to include both branches' changes and update permissions.ts.
-   Create a migration from each branch to that merged schema:
-     jazz-tools migrations create <your-app-id> --fromHash <due-dates-schema-hash>
-     jazz-tools migrations create <your-app-id> --fromHash <priorities-schema-hash>
-   Review both migrations, then deploy.
-```
-
-You can either return to the common ancestor before switching branches, or merge both changes.
-
-### Reverting to the common schema
-
-To leave Alice's due-date change behind and deploy Bob's priorities branch:
-
-1. Restore the original task schema in `schema.ts`, and make sure `permissions.ts` is valid
-   for it.
-2. Run `pnpm dlx jazz-tools@alpha deploy <appId>`. The original schema is an ancestor of
-   the active schema, so Jazz allows reactivating it without a new migration.
-3. Restore Bob's schema with `priority`.
-4. Run `pnpm dlx jazz-tools@alpha deploy <appId>` again. Bob's migration provides a forward
-   path from the now-active original schema to the priorities schema.
-
-Both original migrations remain in the graph. Reverting adds no reverse edge: only the active
-schema changes. Do not create a reverse migration to perform this revert; it would create a
-cycle, which deploy rejects.
-
-<Callout type="warn" title="Reverting changes what rows expose">
-  Reverting does not delete stored tasks or their column identities. Reads using the original or
-  priorities schema do not expose due dates. Clients still using the due-dates schema can continue
-  writing tasks with due dates. Returning to that schema can expose retained values again; reverting
-  is not a database reset.
+<Callout type="warn" title="Leaving a branch behind doesn't delete its data">
+  Rows keep their stored values and column identities. Reads using the original or priorities schema
+  don't expose due dates, but a backend that still runs the due-dates schema can keep writing them,
+  and returning to that schema exposes the retained values again.
 </Callout>
 
 ### Converging into a merged schema
@@ -194,8 +256,8 @@ Original tasks ┤                             ├──→ Due dates + prioriti
 Use the hashes shown by `migrations graph`:
 
 ```bash
-pnpm dlx jazz-tools@alpha migrations create <appId> --fromHash <due-dates-hash> --name add-priority-to-due-dates
-pnpm dlx jazz-tools@alpha migrations create <appId> --fromHash <priorities-hash> --name add-due-date-to-priorities
+npx jazz-tools migrations create <appId> --fromHash <due-dates-hash> --name add-priority-to-due-dates
+npx jazz-tools migrations create <appId> --fromHash <priorities-hash> --name add-due-date-to-priorities
 ```
 
 Both commands use the current `schema.ts` as their destination. Review the generated migrations:
@@ -203,35 +265,40 @@ Both commands use the current `schema.ts` as their destination. Review the gener
 - The migration from Alice's schema should preserve `dueDate` and introduce `priority`.
 - The migration from Bob's schema should preserve `priority` and introduce `dueDate`.
 
-And then deploy:
+And then deploy your main backend.
 
-```bash
-pnpm dlx jazz-tools@alpha deploy <appId>
-```
+<Callout type="warn">
+  In alpha.60 deploying a converged schema like this is refused at startup. Until that is fixed,
+  pick one branch and add the other branch's change as a new migration on top of it.
+</Callout>
 
-The merged schema can now be deployed whether due dates or priorities are currently active.
-Jazz validates that alternative forward paths agree on the values and column identities they
+Rows written under either branch now read with both columns intact. Jazz validates that alternative forward paths agree on the values and column identities they
 preserve or introduce.
 
 ## Visualizing the migration graph
 
-Run `jazz-tools migrations graph` to see the schemas and migrations:
+Run `jazz-tools migrations graph` to see the schemas and migrations. It reads the server's history,
+so it needs a Jazz Cloud app or a [`remote()`](/docs/setup/deployment/own-server#data-on-another-machine)
+store; against a backend's own `sqlite()` store it fails with a 404. The same holds for
+`--fromHash` and `--toHash` below when the hash isn't saved locally.
 
 ```sh
-pnpm dlx jazz-tools@alpha migrations graph <appId> --server-url <url> --admin-secret <secret>
+npx jazz-tools migrations graph <appId> --server-url <url> --admin-secret <secret>
 ```
 
 The graph includes all schemas and migrations present in the server and locally. Schemas and migrations that exist only on the server or locally are labelled accordingly.
-The graph also marks the server's current schema and the local `schema.ts`.
+The graph also marks the local `schema.ts` and, with "(latest bundle)", the schema of the bundle your
+backends published most recently.
 
 ## Choosing migration endpoints
 
-By default, `migrations create` compares the latest local snapshot with the current `schema.ts`.
+By default, `migrations create` compares the latest local snapshot with the current `schema.ts`. With
+no local snapshot, it starts from the latest bundle's schema.
 Use explicit schema hashes to choose different endpoints, for example when connecting schemas developed on separate branches:
 
 ```bash
-pnpm dlx jazz-tools@alpha migrations create <appId> --fromHash <fromHash>
-pnpm dlx jazz-tools@alpha migrations create <appId> --fromHash <fromHash> --toHash <toHash>
+npx jazz-tools migrations create <appId> --fromHash <fromHash>
+npx jazz-tools migrations create <appId> --fromHash <fromHash> --toHash <toHash>
 ```
 
 `--toHash` defaults to the current local schema. When a requested hash is not already saved locally, Jazz resolves it from the
@@ -240,17 +307,17 @@ provide the server URL and secret through `--server-url` and `--admin-secret` or
 
 ## Compiling the schema
 
-Use `schema compile` when working on a non-TypeScript Jazz application that needs to consume the schema written in TypeScript (e.g. when using our Rust bindings).
+Use `schema compile` when working on a non-TypeScript Jazz application that needs to consume the schema written in TypeScript.
 
 You don't need to run it as part of the normal migration workflow: `migrations create` saves
-the required snapshots, and `deploy` compiles the schema before publishing.
+the required snapshots, and your main backend compiles the schema when it starts.
 
-`pnpm dlx jazz-tools@alpha schema compile` prints the compiled schema as JSON to stdout. It
+`npx jazz-tools schema compile` prints the compiled schema as JSON to stdout. It
 also saves a snapshot of the schema in the local snapshot directory.
 
 ```bash
-pnpm dlx jazz-tools@alpha schema compile
-pnpm dlx jazz-tools@alpha schema compile --schema-dir ./packages/app
+npx jazz-tools schema compile
+npx jazz-tools schema compile --schema-dir ./packages/app
 ```
 
 The command compiles the current local `schema.ts`. To create migrations against a historical
@@ -266,15 +333,15 @@ schema, use `migrations create --fromHash <hash>`; it fetches and saves missing 
 `migrations create` uses flags rather than positional hashes. When it needs to resolve missing
 schema hashes from a server, pass `<appId>` as the leading positional argument.
 
-| Flag                   | Default                                   | Description                                      |
-| ---------------------- | ----------------------------------------- | ------------------------------------------------ |
-| `--schema-dir <path>`  | current directory                         | Path to app root containing `schema.ts`          |
-| `--migrations-dir <p>` | `./migrations`                            | Path to migrations directory and snapshot folder |
-| `--server-url <url>`   | `JAZZ_SERVER_URL`                         | Server URL used when resolving missing schema    |
-| `--admin-secret <sec>` | `JAZZ_ADMIN_SECRET`                       | Admin secret used when resolving missing schema  |
-| `--fromHash <hash>`    | local snapshot, else active server schema | Optional source schema hash                      |
-| `--toHash <hash>`      | current schema                            | Optional target schema hash                      |
-| `--name <name>`        | `unnamed`                                 | Optional migration filename label                |
+| Flag                   | Default                                                | Description                                      |
+| ---------------------- | ------------------------------------------------------ | ------------------------------------------------ |
+| `--schema-dir <path>`  | current directory                                      | Path to app root containing `schema.ts`          |
+| `--migrations-dir <p>` | `./migrations`                                         | Path to migrations directory and snapshot folder |
+| `--server-url <url>`   | `JAZZ_SERVER_URL`                                      | Server URL used when resolving missing schema    |
+| `--admin-secret <sec>` | `JAZZ_ADMIN_SECRET`                                    | Admin secret used when resolving missing schema  |
+| `--fromHash <hash>`    | latest local snapshot, else the latest bundle's schema | Optional source schema hash                      |
+| `--toHash <hash>`      | current schema                                         | Optional target schema hash                      |
+| `--name <name>`        | `unnamed`                                              | Optional migration filename label                |
 
 ## Next steps
 

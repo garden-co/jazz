@@ -15,6 +15,15 @@ use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 
 use common::{allow_all_policies, compile_schema};
 
+/// Enough rows that a full scan or a sort is worth an index.
+const ROWS: u16 = 1_100;
+
+fn row_id(n: u16) -> [u8; 16] {
+    let mut id = [1; 16];
+    id[..2].copy_from_slice(&(n + 1).to_be_bytes());
+    id
+}
+
 fn db() -> Db {
     let tasks = TableSchemaBuilder::new("tasks")
         .column("title", ColumnType::Text)
@@ -29,15 +38,18 @@ fn db() -> Db {
         },
     )))
     .unwrap();
-    for n in 0..40u8 {
+    for n in 0..ROWS {
         block_on(db.insert(
             "tasks",
             BTreeMap::from([
                 ("title".to_owned(), Value::String(format!("task {n}"))),
-                ("owner".to_owned(), Value::String(format!("user {}", n % 4))),
+                (
+                    "owner".to_owned(),
+                    Value::String(format!("user {}", n % 110)),
+                ),
             ]),
             InsertOptions {
-                row_id: Some(RowUuid::from_bytes([n + 1; 16])),
+                row_id: Some(RowUuid::from_bytes(row_id(n))),
                 ..Default::default()
             },
         ))
@@ -63,7 +75,7 @@ fn slow_queries_report_their_plan_and_the_index_that_would_help() {
     assert_eq!(run(&db, by_title.clone()), 1);
     assert_eq!(run(&db, by_title), 1);
     let ordered = Query::from("tasks").order_by("title", OrderDirection::Asc);
-    assert_eq!(run(&db, ordered), 40);
+    assert_eq!(run(&db, ordered), ROWS as usize);
     let by_owner =
         Query::from("tasks").filter(eq(col("owner"), lit(Value::String("user 1".into()))));
     assert_eq!(run(&db, by_owner), 10);
@@ -74,7 +86,7 @@ fn slow_queries_report_their_plan_and_the_index_that_would_help() {
     let find = |needle: &str| {
         shapes
             .iter()
-            .find(|shape| shape.sql.contains(needle) && shape.table == "tasks")
+            .find(|shape| common::unhashed(&shape.sql).contains(needle) && shape.table == "tasks")
             .unwrap_or_else(|| panic!("no shape with {needle}: {shapes:#?}"))
     };
     // The same query twice is one shape with two runs; its literal is a
@@ -85,12 +97,12 @@ fn slow_queries_report_their_plan_and_the_index_that_would_help() {
         .unwrap_or_else(|| panic!("{shapes:#?}"));
     assert!(!title.sql.contains("task 7"));
     assert_eq!(title.rows, 1);
-    assert!(title.scanned >= 39, "{title:#?}");
+    assert!(title.scanned >= u64::from(ROWS) - 1, "{title:#?}");
     let hint = title.hint().unwrap_or_else(|| panic!("{title:#?}"));
     assert!(hint.contains("scans all of tasks"), "{hint}");
 
     let ordered = find("ORDER BY t.\"title\" ASC");
-    assert_eq!(ordered.rows, 40);
+    assert_eq!(ordered.rows, u64::from(ROWS));
     assert!(
         ordered
             .hint()

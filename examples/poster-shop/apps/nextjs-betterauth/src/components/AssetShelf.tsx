@@ -12,7 +12,7 @@ import {
   Thumbnail,
   VStack,
 } from "@astryxdesign/core";
-import { useAll, useDb } from "jazz-tools/react";
+import { useAll } from "jazz-tools/react";
 import { ImagePlus } from "lucide-react";
 import { useState } from "react";
 import { app } from "@/schema";
@@ -41,8 +41,7 @@ export function AssetShelf({
   activeLayerId: string | null;
   onPlaced: (shapeId: string) => void;
 }) {
-  const db = useDb();
-  const { data: assets = [] } = useAll(
+  const { data: assets = [], db } = useAll(
     app.assets
       .where({ canvasId })
       .orderBy("name", "asc")

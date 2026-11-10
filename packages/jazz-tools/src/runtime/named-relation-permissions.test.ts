@@ -6,44 +6,47 @@ import { startLocalJazzServer } from "../testing/index.js";
 import { createJazzContext } from "../backend/create-jazz-context.js";
 import { localFirstAccountId } from "../accounts/local-first.js";
 
-const app = s.defineApp({
-  authors: s.table(
-    { owner: s.uuid(), editable: s.boolean(), insertable: s.boolean(), removable: s.boolean() },
-    {},
-  ),
-  posts: s.table(
-    { authorId: s.uuid().optional(), label: s.string() },
-    { writer: s.rel("authors", "authorId") },
-  ),
-  bundles: s.table(
-    { authorIds: s.array(s.uuid()), label: s.string() },
-    { writers: s.rel("authors", "authorIds") },
-  ),
-  resources: s.table({ label: s.string() }, { grants: s.reverse("grants", "asset") }),
-  collections: s.table({ label: s.string() }, { grants: s.reverse("grants", "assets") }),
-  grants: s.table(
-    {
-      resourceId: s.uuid().optional(),
-      collectionIds: s.array(s.uuid()),
-      owner: s.uuid(),
-      editable: s.boolean(),
-      insertable: s.boolean(),
-      removable: s.boolean(),
-    },
-    {
-      asset: s.rel("resources", "resourceId"),
-      assets: s.rel("collections", "collectionIds"),
-    },
-  ),
-});
+const app = s.defineApp(
+  {
+    authors: s.table(
+      { owner: s.uuid(), editable: s.boolean(), insertable: s.boolean(), removable: s.boolean() },
+      {},
+    ),
+    posts: s.table(
+      { authorId: s.uuid().optional(), label: s.string() },
+      { writer: s.rel("authors", "authorId") },
+    ),
+    bundles: s.table(
+      { authorIds: s.array(s.uuid()), label: s.string() },
+      { writers: s.rel("authors", "authorIds") },
+    ),
+    resources: s.table({ label: s.string() }, { grants: s.reverse("grants", "asset") }),
+    collections: s.table({ label: s.string() }, { grants: s.reverse("grants", "assets") }),
+    grants: s.table(
+      {
+        resourceId: s.uuid().optional(),
+        collectionIds: s.array(s.uuid()),
+        owner: s.uuid(),
+        editable: s.boolean(),
+        insertable: s.boolean(),
+        removable: s.boolean(),
+      },
+      {
+        asset: s.rel("resources", "resourceId"),
+        assets: s.rel("collections", "collectionIds"),
+      },
+    ),
+  },
+  { migrations: "none" },
+);
 const permissions = s.definePermissions(app, ({ policy, allowedTo, session, allOf }) => {
   for (const table of [policy.authors, policy.grants]) {
-    table.allowRead.where({ owner: session.user.account });
-    table.allowInsert.where({ owner: session.user.account, insertable: true });
+    table.allowRead.where({ owner: session.user });
+    table.allowInsert.where({ owner: session.user, insertable: true });
     table.allowUpdate
-      .whereOld({ owner: session.user.account, editable: true })
-      .whereNew({ owner: session.user.account, editable: true });
-    table.allowDelete.where({ owner: session.user.account, removable: true });
+      .whereOld({ owner: session.user, editable: true })
+      .whereNew({ owner: session.user, editable: true });
+    table.allowDelete.where({ owner: session.user, removable: true });
   }
   policy.posts.allowRead.where(allowedTo.read("writer"));
   policy.posts.allowInsert.where(allowedTo.insert("writer"));
@@ -71,8 +74,15 @@ it.each(["forward", "reverse"])(
     const server = await startLocalJazzServer({ appId, backendSecret, adminSecret });
     let context: ReturnType<typeof createJazzContext> | undefined;
     try {
-      await deploy({ appId, serverUrl: server.url, adminSecret, schema: app, permissions });
+      const { bundle } = await deploy({
+        appId,
+        serverUrl: server.url,
+        adminSecret,
+        schema: app,
+        permissions,
+      });
       context = createJazzContext({
+        bundle,
         appId,
         app,
         permissions,
@@ -307,16 +317,19 @@ it.each(["forward", "reverse"])(
 );
 
 it("rejects cycles in named reverse inheritance during schema validation", async () => {
-  const cyclic = s.defineApp({
-    lefts: s.table(
-      { rightId: s.uuid().optional() },
-      { right: s.rel("rights", "rightId"), incoming: s.reverse("rights", "left") },
-    ),
-    rights: s.table(
-      { leftId: s.uuid().optional() },
-      { left: s.rel("lefts", "leftId"), incoming: s.reverse("lefts", "right") },
-    ),
-  });
+  const cyclic = s.defineApp(
+    {
+      lefts: s.table(
+        { rightId: s.uuid().optional() },
+        { right: s.rel("rights", "rightId"), incoming: s.reverse("rights", "left") },
+      ),
+      rights: s.table(
+        { leftId: s.uuid().optional() },
+        { left: s.rel("lefts", "leftId"), incoming: s.reverse("lefts", "right") },
+      ),
+    },
+    { migrations: "none" },
+  );
   const cyclicPermissions = s.definePermissions(cyclic, ({ policy, allowedTo }) => {
     policy.lefts.allowRead.where(allowedTo.read("incoming"));
     policy.rights.allowRead.where(allowedTo.read("incoming"));

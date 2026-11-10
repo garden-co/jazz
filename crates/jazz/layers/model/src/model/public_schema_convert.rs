@@ -16,8 +16,8 @@ use jazz_types::records::{
 
 use crate::model::public_api::policy::{CmpOp, PolicyValue};
 use crate::model::public_schema::{
-    ColumnDescriptor, ColumnMergeStrategy, ColumnType, Operation, PolicyExpr, Schema, TableName,
-    TableSchema, Value,
+    ColumnDescriptor, ColumnMergeStrategy, ColumnType, HistoryRetention, Operation, PolicyExpr,
+    Schema, TableName, TableSchema, Value,
 };
 use crate::query::{
     RecursionBound, RelationColumnRef, RelationExpr, RelationJoinKind, RelationPredicate,
@@ -35,10 +35,22 @@ const PUBLIC_AUTH_MODE_SESSION_PATHS: &[&str] = &["authMode", "auth_mode"];
 const RESERVED_AGGREGATE_OUTPUT_PREFIX: &str = "__jazz_aggregate_";
 
 /// The columns every stored row table keeps beside the app's: its row key,
-/// branch, seq, state bits (deleted, no content), and what the authority
-/// keeps of an accepted upload (SPEC 4 §4.6). An app column cannot take
+/// branch, position (`_clock`: accepted or pending), a pending version's writer
+/// (`_writer`), state bits (deleted, no content), and what the authority keeps
+/// of an accepted upload (SPEC 4 §4.6), and `_partition`, the partition a sharded
+/// deployment stores each row under (SPEC 15). An app column cannot take
 /// their names.
-pub const RESERVED_ROW_COLUMNS: [&str; 7] = ["id", "rid", "_b", "_seq", "_st", "_base", "_cols"];
+pub const RESERVED_ROW_COLUMNS: [&str; 9] = [
+    "id",
+    "rid",
+    "_branch",
+    "_clock",
+    "_writer",
+    "_state",
+    "_base",
+    "_touched",
+    "_partition",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Error produced while compiling a developer-authored schema for the runtime.
@@ -151,7 +163,7 @@ fn validate_converted_schema(tables: &[CoreTableSchema]) -> Result<(), SchemaCon
             policy.validate_runtime(&schema).map_err(|error| {
                 err(
                     format!("$.{}.policies.select.using", table.name),
-                    format!("converted read policy is invalid: {error:?}"),
+                    format!("read policy is invalid: {error}"),
                 )
             })?;
         }
@@ -159,7 +171,7 @@ fn validate_converted_schema(tables: &[CoreTableSchema]) -> Result<(), SchemaCon
             policy.validate_runtime(&schema).map_err(|error| {
                 err(
                     format!("$.{}.policies.{label}", table.name),
-                    format!("converted write policy is invalid: {error:?}"),
+                    format!("write policy is invalid: {error}"),
                 )
             })?;
         }
@@ -657,6 +669,10 @@ fn convert_table(
         }
     }
     converted.merge_strategies = merge_strategies;
+    converted.history = table.history;
+    if table.history == HistoryRetention::Latest {
+        validate_latest_only(name, table)?;
+    }
     converted.read_policy = convert_optional_policy(
         schema,
         table,
@@ -716,10 +732,20 @@ fn convert_column(
         // deliberately distinct from text.
         converted.large_value_kind = crate::schema::LargeValueSemanticKind::Json;
     }
+    converted.enum_variants = enum_variants(&column.column_type);
     if let Some(default) = &column.default {
         converted.default = Some(convert_column_default(table, column, default)?);
     }
     Ok(converted)
+}
+
+/// The variants of an enum column, or of an array of enum values.
+fn enum_variants(column_type: &ColumnType) -> Option<Vec<String>> {
+    match column_type {
+        ColumnType::Enum { variants } => Some(variants.clone()),
+        ColumnType::Array { element } => enum_variants(element),
+        _ => None,
+    }
 }
 
 fn convert_column_default(
@@ -981,6 +1007,34 @@ fn validate_payload_enum_field(
         return Err(err(
             path,
             "payload enum v1 fields must be scalar columns; arrays, rows, and nested enums are not supported",
+        ));
+    }
+    Ok(())
+}
+
+/// A latest-only table keeps no superseded versions (SPEC 4 §4.9), so a
+/// feature that reads them is refused when the schema compiles.
+fn validate_latest_only(
+    name: &TableName,
+    table: &TableSchema,
+) -> Result<(), SchemaConversionError> {
+    if !table.branch_by.is_empty() {
+        return Err(err(
+            format!("$.{}.branchBy", name.as_str()),
+            "branchBy is not supported on latest-only tables yet: branch views read frozen bases \
+             from history",
+        ));
+    }
+    if let Some(column) = table.columns.columns.iter().find(|column| {
+        column
+            .merge_strategy
+            .is_some_and(ColumnMergeStrategy::is_text)
+    }) {
+        return Err(column_err(
+            name,
+            column.name.as_str(),
+            "text merging is not supported on latest-only tables yet: Core merges a write with \
+             the version its writer saw, which a latest-only table does not keep",
         ));
     }
     Ok(())
@@ -1886,6 +1940,10 @@ fn append_exists_rel_policy_clause(
     mut query: Query,
     rel: &RelationExpr,
 ) -> Result<Query, SchemaConversionError> {
+    let mut rel = rel.clone();
+    normalize_author_relation(&mut rel)
+        .map_err(|message| err(policy_path(table, path), message))?;
+    let rel = &rel;
     let mut lowered = lower_exists_rel(schema, table, path, rel)?;
     root_exists_rel_at_correlation(table, path, &mut lowered)?;
     let correlation_index = lowered
@@ -3033,7 +3091,8 @@ fn convert_policy_predicate(
             expr,
         )?))),
         PolicyExpr::Cmp { column, op, value } => {
-            let left = Operand::Column(column.clone());
+            let column = author_session_column(table, path, column, op, value)?;
+            let left = Operand::Column(column.into_owned());
             if matches!(value, PolicyValue::Literal(Value::Null)) {
                 // Match `session_where`: equality against the public NULL
                 // literal is the ergonomic spelling of a null test.
@@ -3155,11 +3214,153 @@ fn convert_policy_operand(
     }
 }
 
+/// The column an author record compared with a session value is
+/// compared by: `$createdBy` with `session.user` by its account (every
+/// identity linked to the account matches), `$createdBy.identity` with
+/// `session.identity` as itself. Any other pairing is refused, naming the
+/// forms that compare.
+fn author_session_column<'a>(
+    table: &TableName,
+    path: &str,
+    column: &'a str,
+    op: &CmpOp,
+    value: &PolicyValue,
+) -> Result<std::borrow::Cow<'a, str>, SchemaConversionError> {
+    use std::borrow::Cow;
+    let PolicyValue::SessionRef(session) = value else {
+        return Ok(Cow::Borrowed(column));
+    };
+    let ordered = matches!(op, CmpOp::Eq | CmpOp::Ne);
+    match author_column_for_session(column, ordered, session, &format!("{op:?}")) {
+        Ok(Some(column)) => Ok(Cow::Owned(column)),
+        Ok(None) => Ok(Cow::Borrowed(column)),
+        Err(message) => Err(err(policy_path(table, path), message)),
+    }
+}
+
+/// The shared rule for an author record (`$createdBy`, `$updatedBy`,
+/// `$deletedBy`, or one's `.identity`) compared with a session path:
+/// `Ok(Some(column))` names the column it compares by instead, `Ok(None)`
+/// keeps it, and `Err` names the forms that compare. `eq_or_ne` is whether
+/// the comparison is Eq or Ne; `op` names it otherwise.
+pub fn author_column_for_session(
+    column: &str,
+    eq_or_ne: bool,
+    session: &[String],
+    op: &str,
+) -> Result<Option<String>, String> {
+    let whole = match column {
+        "$createdBy" | "$updatedBy" | "$deletedBy" => true,
+        "$createdBy.identity" | "$updatedBy.identity" | "$deletedBy.identity" => false,
+        _ => return Ok(None),
+    };
+    if !eq_or_ne {
+        return Err(format!(
+            "an author record `{column}` only compares with Eq or Ne, not {op}"
+        ));
+    }
+    let session: Vec<&str> = session.iter().map(String::as_str).collect();
+    match (whole, session.as_slice()) {
+        (true, ["user"]) => Ok(Some(format!("{column}.account"))),
+        (false, ["identity"]) | (_, ["claims", ..]) => Ok(None),
+        _ => {
+            let record = column.trim_end_matches(".identity");
+            Err(format!(
+                "comparing `{column}` with `session.{}`: compare `{record}` with \
+                 `session.user` (the account) or `{record}.identity` with \
+                 `session.identity` (the exact login)",
+                session.join(".")
+            ))
+        }
+    }
+}
+
+/// Rewrite every author record compared with a session path inside a
+/// relation by [`author_column_for_session`], as plain policy comparisons
+/// are, so `{ $createdBy: session.user }` reads the same inside a relation.
+pub fn normalize_author_relation(rel: &mut RelationExpr) -> Result<(), String> {
+    match rel {
+        RelationExpr::TableScan { .. } => Ok(()),
+        RelationExpr::Filter { input, predicate } => {
+            normalize_author_relation(input)?;
+            normalize_author_relation_predicate(predicate)
+        }
+        RelationExpr::Union { inputs } => inputs
+            .iter_mut()
+            .try_for_each(|arm| normalize_author_relation(&mut arm.input)),
+        RelationExpr::Join { left, right, .. } => {
+            normalize_author_relation(left)?;
+            normalize_author_relation(right)
+        }
+        RelationExpr::Gather { seed, step, .. } => {
+            normalize_author_relation(seed)?;
+            normalize_author_relation(step)
+        }
+        RelationExpr::Project { input, .. }
+        | RelationExpr::Distinct { input, .. }
+        | RelationExpr::OrderBy { input, .. }
+        | RelationExpr::Offset { input, .. }
+        | RelationExpr::Limit { input, .. } => normalize_author_relation(input),
+    }
+}
+
+/// [`normalize_author_relation`] for one predicate.
+pub fn normalize_author_relation_predicate(
+    predicate: &mut RelationPredicate,
+) -> Result<(), String> {
+    match predicate {
+        RelationPredicate::Cmp {
+            left,
+            op,
+            right: RelationValueRef::SessionRef(session),
+        } => {
+            let eq_or_ne = matches!(
+                op,
+                crate::query::RelationCmpOp::Eq | crate::query::RelationCmpOp::Ne
+            );
+            if let Some(column) =
+                author_column_for_session(&left.column, eq_or_ne, session, &format!("{op:?}"))?
+            {
+                left.column = column;
+            }
+            Ok(())
+        }
+        RelationPredicate::And(children) | RelationPredicate::Or(children) => children
+            .iter_mut()
+            .try_for_each(normalize_author_relation_predicate),
+        RelationPredicate::Not(child) => normalize_author_relation_predicate(child),
+        _ => Ok(()),
+    }
+}
+
+/// The replacement for a session path `session.user` no longer has:
+/// `session.user` is the account itself and `session.identity` the exact
+/// login.
+pub(crate) fn removed_session_path(path: &[String]) -> Option<&'static str> {
+    let parts: Vec<&str> = path.iter().map(String::as_str).collect();
+    Some(match parts.as_slice() {
+        ["user", "account"] => "session.user, which is the account",
+        ["user", "identity"] => "session.identity, the exact login",
+        ["user", "identity", "issuer"] => "session.identity.issuer",
+        ["user", "identity", "subject"] => "session.identity.subject",
+        _ => return None,
+    })
+}
+
 fn convert_session_path_operand(
     table: &TableName,
     path: &str,
     path_segments: &[String],
 ) -> Result<Operand, SchemaConversionError> {
+    if let Some(replacement) = removed_session_path(path_segments) {
+        return Err(err(
+            policy_path(table, path),
+            format!(
+                "session.{} was removed: use {replacement}",
+                path_segments.join(".")
+            ),
+        ));
+    }
     if let Some(name) = crate::query::author_claim_path_key(path_segments) {
         return Ok(Operand::Claim(name));
     }
@@ -3179,7 +3380,7 @@ fn convert_session_path_operand(
     Err(err(
         policy_path(table, path),
         format!(
-            "core schema policies only support session.user, session.authMode, and provider claims through session.claims; got session.{}",
+            "core schema policies only support session.user, session.identity, session.authMode, and provider claims through session.claims; got session.{}",
             path_segments.join(".")
         ),
     ))
@@ -3460,6 +3661,70 @@ mod tests {
                 .map(|table| table.branch_by.len())
                 .sum::<usize>(),
             2
+        );
+    }
+
+    #[test]
+    fn latest_only_tables_compile_with_their_retention_as_a_compatible_version() {
+        let table = |latest: bool| {
+            let table = TableSchemaBuilder::new("presence")
+                .column("cursor", ColumnType::Json { schema: None })
+                .column_with_default("moves", ColumnType::Integer, Value::Integer(0));
+            let table = if latest { table.latest_only() } else { table };
+            SchemaBuilder::new().table(table).build()
+        };
+        let full = convert_public_schema(&table(false)).expect("full history compiles");
+        let latest = convert_public_schema(&table(true)).expect("latest-only compiles");
+
+        assert_eq!(full.tables()[0].history, HistoryRetention::Full);
+        assert_eq!(latest.tables()[0].history, HistoryRetention::Latest);
+        assert_ne!(
+            full.version_id(),
+            latest.version_id(),
+            "a store admits a retention change as a version of its own"
+        );
+        assert_eq!(
+            full.compatibility_id(),
+            latest.compatibility_id(),
+            "retention changes what nodes keep, not how rows are stored"
+        );
+    }
+
+    #[test]
+    fn latest_only_tables_refuse_branches_and_text_merges() {
+        let branched = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("presence")
+                    .column("workspace_id", ColumnType::Uuid)
+                    .branch_by("workspace_id")
+                    .latest_only(),
+            )
+            .build();
+        assert_eq!(
+            convert_public_schema(&branched)
+                .expect_err("a latest-only table cannot branch")
+                .to_string(),
+            "$.presence.branchBy: branchBy is not supported on latest-only tables yet: branch \
+             views read frozen bases from history"
+        );
+
+        let merged = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("presence")
+                    .column("note", ColumnType::Text)
+                    .latest_only(),
+            )
+            .build();
+        let mut merged = merged;
+        let table = merged.get_mut(&TableName::new("presence")).unwrap();
+        table.columns.columns[0].merge_strategy = Some(ColumnMergeStrategy::Markdown);
+        assert_eq!(
+            convert_public_schema(&merged)
+                .expect_err("a latest-only table cannot text-merge")
+                .to_string(),
+            "$.presence.note: text merging is not supported on latest-only tables yet: Core \
+             merges a write with the version its writer saw, which a latest-only table does not \
+             keep"
         );
     }
 
@@ -4745,7 +5010,6 @@ mod tests {
                                         column: "user_id".to_owned(),
                                         op: CmpOp::Eq,
                                         value: PolicyValue::SessionRef(vec![
-                                            "user".to_owned(),
                                             "identity".to_owned(),
                                             "subject".to_owned(),
                                         ]),

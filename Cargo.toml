@@ -7,7 +7,9 @@ members = [
   "crates/jazz/layers/model",
   "crates/jazz/layers/protocol",
   "crates/jazz/layers/types",
+  "crates/jazz-alpha59-alpha60-dump",
   "crates/jazz-compression",
+  "crates/jazz-text",
   "crates/wasm-tracing",
   "crates/jazz-wasm",
   "crates/jazz-native-transport",
@@ -37,7 +39,14 @@ members = [
   "examples/jamazon-warehouse/benchmarks",
   "examples/wequencer/benchmarks",
 ]
-exclude = ["examples/todo-server-rs", "examples/docs/todo-server-rs", "vendor/ruzstd"]
+exclude = [
+  "examples/todo-server-rs",
+  "examples/docs/todo-server-rs",
+  "vendor/ruzstd",
+  # The alpha59-alpha60 exporter and its test fixture, built inside an alpha.59
+  # checkout by their prepare.sh.
+  "dev/alpha59-alpha60",
+]
 
 [workspace.dependencies]
 jazz = { path = "crates/jazz", default-features = false }
@@ -46,6 +55,7 @@ jazz-model = { path = "crates/jazz/layers/model", default-features = false }
 jazz-protocol = { path = "crates/jazz/layers/protocol", default-features = false }
 jazz-types = { path = "crates/jazz/layers/types", default-features = false }
 jazz-compression = { path = "crates/jazz-compression", default-features = false }
+jazz-text = { path = "crates/jazz-text" }
 jazz-otel = { path = "crates/jazz-otel" }
 jazz-native-transport = { path = "crates/jazz-native-transport" }
 rustc-hash = "2.1.1"

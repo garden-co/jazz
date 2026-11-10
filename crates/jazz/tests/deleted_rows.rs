@@ -437,7 +437,6 @@ fn include_deleted_subscriptions_keep_the_read_policy() {
                                 column: "owner".to_owned(),
                                 op: CmpOp::Eq,
                                 value: PolicyValue::SessionRef(vec![
-                                    "user".to_owned(),
                                     "identity".to_owned(),
                                     "subject".to_owned(),
                                 ]),
@@ -581,7 +580,7 @@ impl Synced {
     fn connect(&mut self) {
         let (client_side, server_side) = duplex();
         self.upstream = Some(block_on(self.alice.connect_upstream(client_side)));
-        self.server.accept_subscriber(server_side, alice());
+        self.server.accept_subscriber(server_side, alice()).unwrap();
         self.alice
             .set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
     }

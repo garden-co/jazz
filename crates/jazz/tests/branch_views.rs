@@ -16,7 +16,7 @@ use jazz::tools::{
     TableSchemaBuilder,
 };
 
-use common::{allow_all_policies, compile_schema};
+use common::{allow_all_policies, compile_schema, physical_column};
 
 fn block_on<F: Future>(future: F) -> F::Output {
     let waker = Waker::noop();
@@ -282,11 +282,7 @@ fn branch_owner_policy() -> PolicyExpr {
             PolicyExpr::Cmp {
                 column: "owner".to_owned(),
                 op: CmpOp::Eq,
-                value: PolicyValue::SessionRef(vec![
-                    "user".to_owned(),
-                    "identity".to_owned(),
-                    "subject".to_owned(),
-                ]),
+                value: PolicyValue::SessionRef(vec!["identity".to_owned(), "subject".to_owned()]),
             },
         ])),
     }
@@ -2342,11 +2338,7 @@ fn branch_history_checks_inherited_policy_evidence_in_the_branch() {
     let owner_policy = PolicyExpr::Cmp {
         column: "owner".to_owned(),
         op: CmpOp::Eq,
-        value: PolicyValue::SessionRef(vec![
-            "user".to_owned(),
-            "identity".to_owned(),
-            "subject".to_owned(),
-        ]),
+        value: PolicyValue::SessionRef(vec!["identity".to_owned(), "subject".to_owned()]),
     };
     let schema = compile_schema(
         &SchemaBuilder::new()
@@ -3031,7 +3023,9 @@ fn a_tab_over_its_worker_edits_a_draft_frozen_at_its_capture() {
     tab.set_remote_link_hint(jazz::db::RemoteLinkHint::NoServer);
     let (client_side, server_side) = duplex_transport::duplex();
     block_on(tab.connect_upstream(client_side));
-    worker.accept_subscriber(server_side, AuthorSubject::for_test_bytes([0x63; 16]));
+    worker
+        .accept_subscriber(server_side, AuthorSubject::for_test_bytes([0x63; 16]))
+        .unwrap();
     let main = selector(0xe1);
     let draft = selector(0xe2);
     let title = |t: &str| BTreeMap::from([("title".into(), Value::String(t.into()))]);
@@ -3127,7 +3121,9 @@ fn a_tab_edits_a_draft_frozen_at_a_capture_it_awaits_after_updating_and_a_new_ta
     tab.set_remote_link_hint(jazz::db::RemoteLinkHint::NoServer);
     let (client_side, server_side) = duplex_transport::duplex();
     block_on(tab.connect_upstream(client_side));
-    worker.accept_subscriber(server_side, AuthorSubject::for_test_bytes([0x63; 16]));
+    worker
+        .accept_subscriber(server_side, AuthorSubject::for_test_bytes([0x63; 16]))
+        .unwrap();
     let pump = || {
         for _ in 0..8 {
             block_on(tab.tick()).unwrap();
@@ -3232,7 +3228,9 @@ fn a_tab_edits_a_draft_frozen_at_a_capture_it_awaits_after_updating_and_a_new_ta
     tab.set_remote_link_hint(jazz::db::RemoteLinkHint::NoServer);
     let (client_side, server_side) = duplex_transport::duplex();
     block_on(tab.connect_upstream(client_side));
-    worker.accept_subscriber(server_side, AuthorSubject::for_test_bytes([0x63; 16]));
+    worker
+        .accept_subscriber(server_side, AuthorSubject::for_test_bytes([0x63; 16]))
+        .unwrap();
     // As the bindings read: the store is empty, so the read asks the worker.
     let table = postcard::to_allocvec(&tab.table("todos")).unwrap();
     let read_of = |query: &[u8], opts: ReadOpts| {
@@ -3391,7 +3389,7 @@ fn synced_head_deletion_restores(schedule: u32) {
     let server = open(0x01, AuthorSubject::SYSTEM);
     let (client_side, server_side) = jazz::db::duplex();
     let _upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, author);
+    server.accept_subscriber(server_side, author).unwrap();
     client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
     // Step `n` of the schedule: 0 no sync, 1 one exchange, 2 a full pump.
     let sync = |step: u32| match schedule / 3u32.pow(step) % 3 {
@@ -3498,13 +3496,13 @@ fn a_remote_branch_read_keeps_the_rows_of_other_branches() {
     let worker = open(0x02, author);
     let (worker_side, server_side) = jazz::db::duplex();
     let _upstream = block_on(worker.connect_upstream(worker_side));
-    server.accept_subscriber(server_side, author);
+    server.accept_subscriber(server_side, author).unwrap();
     worker.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
     let client = open(0x03, author);
     client.set_non_durable_client();
     let (tab_side, owner_side) = jazz::db::duplex();
     let _owner = block_on(client.connect_upstream(tab_side));
-    worker.accept_subscriber(owner_side, author);
+    worker.accept_subscriber(owner_side, author).unwrap();
     client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
     let tick = || {
         block_on(client.tick()).unwrap();
@@ -3629,12 +3627,13 @@ fn a_branch_move_carries_json_stored_under_an_earlier_schema() {
     assert_eq!(moved[0].cell("payload"), Some(payload));
 }
 
-/// `_st` of `row`'s current version on the branch `selector(byte)` names,
+/// `_state` of `row`'s current version on the branch `selector(byte)` names,
 /// read raw from the store file.
 fn stored_state(directory: &std::path::Path, row: RowUuid, byte: u8) -> i64 {
     let conn = rusqlite::Connection::open(directory.join("jazz.sqlite")).unwrap();
+    let branch = physical_column(&conn, "todos", "branch_id");
     conn.query_row(
-        "SELECT _st FROM todos WHERE id = ?1 AND branch_id = ?2",
+        &format!("SELECT _state FROM todos WHERE id = ?1 AND {branch} = ?2"),
         rusqlite::params![row.0.as_bytes().to_vec(), [byte; 16].to_vec()],
         |r| r.get(0),
     )

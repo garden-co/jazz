@@ -1,0 +1,233 @@
+name: Release candidate npm tarballs
+
+# Attaches installable npm tarballs to a published release candidate
+# (v2.0.0-alpha.N-rc.M, from the "Release candidate" workflow) so adopters can
+# try the client packages before 2.0.0-alpha.N ships. Nothing goes to npm.
+#
+# It builds every published package at the candidate's tag (jazz-wasm,
+# jazz-napi with all its platform packages, jazz-rn with its Android and iOS
+# payloads, jazz-tools, create-jazz), stamps them <version>, and points their
+# internal dependencies at this release's asset URLs
+# (dev/artifacts/rc-tarballs.mjs). Installing the jazz-tools tarball by URL
+# then pulls in the rest. NPM-SHA256SUMS covers the tarballs, and the
+# release notes get the install lines. A final job installs jazz-tools from
+# the uploaded URL and loads it.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "A published candidate, e.g. 2.0.0-alpha.60-rc.2 (release v<version>)."
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-candidate-npm-${{ inputs.version }}
+  cancel-in-progress: false
+
+env:
+  GH_REPO: ${{ github.repository }}
+  VERSION: ${{ inputs.version }}
+  CACHE_SCOPE_REPOSITORY_ID: ${{ github.repository_id }}
+
+jobs:
+  resolve:
+    name: Resolve v${{ inputs.version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      - id: resolve
+        run: |
+          set -euo pipefail
+          if ! [[ "${VERSION}" =~ ^2\.0\.0-alpha\.[0-9]+-rc\.[0-9]+$ ]]; then
+            echo "::error::version must look like 2.0.0-alpha.N-rc.M, got '${VERSION}'"
+            exit 1
+          fi
+          release=$(gh release view "v${VERSION}" --json isDraft,isPrerelease,assets)
+          test "$(jq -r .isDraft <<<"${release}")" = false ||
+            { echo "::error::v${VERSION} is still a draft; its asset URLs are not public yet"; exit 1; }
+          test "$(jq -r .isPrerelease <<<"${release}")" = true ||
+            { echo "::error::v${VERSION} is not a prerelease"; exit 1; }
+          if jq -e --arg f "jazz-tools-${VERSION}.tgz" '.assets[] | select(.name == $f)' <<<"${release}" >/dev/null; then
+            echo "::error::v${VERSION} already carries npm tarballs"
+            exit 1
+          fi
+          sha=$(gh api "repos/${GH_REPO}/commits/v${VERSION}" --jq .sha)
+          echo "Building v${VERSION} at ${sha}"
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build Jazz packages
+    needs: resolve
+    uses: ./.github/workflows/build-jazz-packages.yml
+    secrets: inherit
+    with:
+      ref: ${{ needs.resolve.outputs.sha }}
+      include_rn: true
+
+  pack:
+    name: Pack and attach npm tarballs
+    needs: [resolve, build]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 10.14.0
+          run_install: false
+
+      - name: Write cache scope
+        run: echo "${CACHE_SCOPE_REPOSITORY_ID}" > .github-cache-scope
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            .github-cache-scope
+
+      - run: pnpm install --frozen-lockfile
+
+      # The candidate's commit can predate rc-tarballs.mjs, so take it from
+      # the commit this workflow runs from.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.sha }}
+          path: .rc-tools
+          sparse-checkout: dev/artifacts/rc-tarballs.mjs
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: pkg-jazz-tools
+          path: packages/jazz-tools
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: pkg-jazz-wasm
+          path: crates/jazz-wasm
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: pkg-jazz-napi
+          path: crates/jazz-napi
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: pkg-jazz-rn
+          path: crates/jazz-rn
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: pkg-create-jazz
+          path: packages/create-jazz
+
+      - name: Verify the built payloads
+        run: |
+          set -euo pipefail
+          test -f crates/jazz-wasm/pkg/jazz_wasm_bg.wasm
+          test -f crates/jazz-wasm/pkg/jazz_wasm.js
+          for platform in linux-x64-gnu linux-arm64-gnu darwin-x64 darwin-arm64 win32-x64-msvc; do
+            test -f "crates/jazz-napi/npm/${platform}/jazz-napi.${platform}.node"
+          done
+          test -f packages/jazz-tools/dist/index.js
+          test -f packages/jazz-tools/dist/backend/index.js
+          JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)" node dev/artifacts/rn-packages.mjs verify
+
+      - name: Stamp ${{ inputs.version }}
+        run: node .rc-tools/dev/artifacts/rc-tarballs.mjs stamp "${VERSION}"
+
+      # Bundled into jazz-tools' dist, as "Publish jazz-tools alpha" does.
+      - name: Stage inspector overlay assets into jazz-tools
+        run: |
+          pnpm --filter inspector run build:embedded
+          pnpm --filter jazz-tools run stage:inspector-overlay
+
+      - name: Pack
+        run: |
+          set -euo pipefail
+          out="${RUNNER_TEMP}/npm"
+          mkdir -p "${out}"
+          for pkg in jazz-wasm jazz-napi jazz-tools create-jazz; do
+            pnpm --filter "${pkg}" pack --pack-destination "${out}"
+          done
+          for dir in crates/jazz-napi/npm/*/; do
+            npm pack "${dir}" --pack-destination "${out}"
+          done
+          export JAZZ_NATIVE_RELAY_SOURCE_REVISION="$(git rev-parse HEAD)"
+          export JAZZ_NATIVE_RELAY_CARGO_NDK_VERSION="4.1.2"
+          node dev/artifacts/rn-packages.mjs pack "${out}"
+          rm -f "${out}/rn-packages.json"
+          node dev/artifacts/verify-packed-napi.mjs "${out}/jazz-napi-${VERSION}.tgz"
+          # Not `grep -q`: under pipefail its early exit makes tar fail with a write error.
+          tar -tf "${out}/jazz-tools-${VERSION}.tgz" > "${RUNNER_TEMP}/jazz-tools-files.txt"
+          grep -qx "package/dist/dev/inspector-overlay/embedded/embedded.html" "${RUNNER_TEMP}/jazz-tools-files.txt"
+          ls -la "${out}"
+
+      - name: Link the tarballs to this release
+        run: |
+          node .rc-tools/dev/artifacts/rc-tarballs.mjs link "${RUNNER_TEMP}/npm" \
+            "https://github.com/${GH_REPO}/releases/download/v${VERSION}"
+
+      - name: Upload and add install notes
+        run: |
+          set -euo pipefail
+          gh release upload "v${VERSION}" "${RUNNER_TEMP}"/npm/*.tgz "${RUNNER_TEMP}/npm/NPM-SHA256SUMS"
+          base="https://github.com/${GH_REPO}/releases/download/v${VERSION}"
+          gh release view "v${VERSION}" --json body --jq .body > "${RUNNER_TEMP}/notes.md"
+          cat >> "${RUNNER_TEMP}/notes.md" <<EOF
+
+          ## Try the client packages
+
+          These npm packages are attached here and are not on npm. Each tarball points at
+          its sibling assets, so one install pulls in jazz-wasm, jazz-napi and its
+          platform binary:
+
+          \`\`\`sh
+          npm install ${base}/jazz-tools-${VERSION}.tgz
+          # React Native apps also add:
+          npm install ${base}/jazz-rn-${VERSION}.tgz
+          \`\`\`
+
+          pnpm, yarn and bun take the same URLs. NPM-SHA256SUMS lists the tarballs' checksums.
+          EOF
+          gh release edit "v${VERSION}" --notes-file "${RUNNER_TEMP}/notes.md"
+
+  smoke:
+    name: Install jazz-tools from the release (${{ matrix.os }})
+    needs: pack
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 22
+
+      - name: npm install by URL and load
+        run: |
+          set -euo pipefail
+          mkdir app && cd app
+          npm init -y >/dev/null
+          npm install "https://github.com/${GH_REPO}/releases/download/v${VERSION}/jazz-tools-${VERSION}.tgz"
+          node -e 'for (const name of ["jazz-tools","jazz-wasm","jazz-napi"]) { const v = require(`./node_modules/${name}/package.json`).version; if (v !== process.env.VERSION) throw new Error(`${name} is ${v}`); }'
+          node -e 'require("jazz-napi"); console.log("jazz-napi loaded")'
+          node --input-type=module -e 'await import("jazz-tools"); await import("jazz-tools/backend"); console.log("jazz-tools loaded")'

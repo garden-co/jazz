@@ -7,7 +7,8 @@
 //!
 //! ```bash
 //! # Start a configured Jazz server with this example's schema and permissions.
-//! # Set JAZZ_APP_ID, JAZZ_SERVER_URL and JAZZ_JWT_TOKEN for an ordinary user.
+//! # Set JAZZ_APP_ID, JAZZ_SERVER_URL and JAZZ_BACKEND_SECRET (and optionally
+//! # TODO_USER_ID, the user this service acts as).
 //!
 //! # Then run the todo backend
 //! cargo run --manifest-path examples/todo-server-rs/Cargo.toml
@@ -38,7 +39,7 @@ use std::process::Command;
 use std::sync::Arc;
 
 use axum::Router;
-use jazz::tools::{AppContext, AppId, ClientStorage, Schema};
+use jazz::tools::{AppContext, AppId, ClientStorage, Schema, Session};
 use tokio::sync::broadcast;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
@@ -84,8 +85,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|_| "019d4349-2460-73fc-9e98-5d67c9697598".to_string());
     let server_url =
         std::env::var("JAZZ_SERVER_URL").unwrap_or_else(|_| "http://localhost:1625".to_string());
-    let jwt_token = std::env::var("JAZZ_JWT_TOKEN")
-        .map_err(|_| "set JAZZ_JWT_TOKEN to a valid ordinary-user JWT")?;
+    // This service is the app's backend: it holds the core's backend secret
+    // and acts as one user of the app.
+    let backend_secret = std::env::var("JAZZ_BACKEND_SECRET")
+        .map_err(|_| "set JAZZ_BACKEND_SECRET to the sync server's backend secret")?;
+    // The published permissions bundle (its hex id) this service's user
+    // session is pinned to, as createJazz pins the sessions it states: the
+    // core governs the session by it and refuses one without.
+    let bundle = std::env::var("JAZZ_BUNDLE")
+        .map_err(|_| "set JAZZ_BUNDLE to the permissions bundle the app published")?;
+    let user_id = std::env::var("TODO_USER_ID").unwrap_or_else(|_| "todo-service".to_string());
     let data_dir = std::env::var("TODO_DATA_DIR").unwrap_or_else(|_| "./todo-data".to_string());
     let port: u16 = std::env::var("TODO_PORT")
         .ok()
@@ -104,18 +113,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         schema.len()
     );
 
+    // The app's schema versions and lenses, as `jazz-tools validate` writes
+    // them beside schema.ts, so this client stores each version as the
+    // server does.
+    let migrations = jazz::tools::deployment::published::client_migrations_module(
+        &std::fs::read_to_string(format!("{schema_root}/migrations/index.ts"))?,
+    )?;
+
     // Create Jazz client
+    let app_id = AppId::from_string(&app_id).unwrap_or_else(|_| AppId::from_name(&app_id));
     let context = AppContext {
-        app_id: AppId::from_string(&app_id).unwrap_or_else(|_| AppId::from_name(&app_id)),
+        app_id,
         client_id: None,
         schema,
         server_url,
         data_dir: PathBuf::from(data_dir),
         storage: ClientStorage::Persistent,
         account_id: None,
-        jwt_token: Some(jwt_token),
-        backend_secret: None,
+        jwt_token: None,
+        backend_secret: Some(backend_secret),
+        // The user this service acts as, named as `createJazz` names its users.
+        backend_session: Some(Session::new("jazz:backend", user_id)),
+        bundle: Some(bundle),
         admin_secret: None,
+        migrations,
     };
 
     let client = TodoClient::connect(context).await?;

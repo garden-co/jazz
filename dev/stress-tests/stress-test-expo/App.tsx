@@ -1,6 +1,6 @@
 import * as React from "react";
 import { JazzProvider, type DbConfig } from "jazz-tools/react-native";
-import { ExpoAuthSecretStore } from "jazz-tools/expo";
+import { createAccountManager } from "jazz-tools/expo";
 import {
   ActivityIndicator,
   Platform,
@@ -14,33 +14,35 @@ import {
 import { TodoList } from "./src/TodoList";
 import { StressTest } from "./src/StressTest";
 
+// The app's backend (backend.ts) serves Jazz under /jazz.
 const defaultServerUrl = Platform.select({
-  android: "http://10.0.2.2:1625",
-  ios: "http://127.0.0.1:1625",
-  default: "http://127.0.0.1:1625",
+  android: "http://10.0.2.2:1625/jazz",
+  ios: "http://127.0.0.1:1625/jazz",
+  default: "http://127.0.0.1:1625/jazz",
 });
-
-const defaultAppId = "00000000-0000-0000-0000-000000000002";
 
 // Expo's Metro bundler inlines process.env.EXPO_PUBLIC_* at bundle time.
 // They must be accessed as literal process.env.KEY expressions — dynamic
 // lookups like globalThis.process.env[key] won't be replaced.
 declare const process: { env: Record<string, string | undefined> };
-const envAppId = process.env.EXPO_PUBLIC_JAZZ_APP_ID;
 const envServerUrl = process.env.EXPO_PUBLIC_JAZZ_SERVER_URL;
-const envAdminSecret = process.env.EXPO_PUBLIC_JAZZ_ADMIN_SECRET;
 
-function defaultConfig(secret: string, overrides: Partial<DbConfig> = {}): DbConfig {
-  const appId = overrides.appId ?? envAppId ?? defaultAppId;
+const accounts = new Map<string, ReturnType<typeof localFirstAccount>>();
 
-  return {
-    appId,
-    env: overrides.env ?? "dev",
-    serverUrl: overrides.serverUrl ?? envServerUrl ?? defaultServerUrl,
-    secret,
-    adminSecret: overrides.adminSecret ?? envAdminSecret,
-    ...overrides,
-  };
+/** This device's local-first guest of the app's backend. */
+function localFirstAccount(serverUrl: string) {
+  return createAccountManager({ serverUrl }).then(
+    (manager) => manager.getLoggedIn() ?? manager.createLocalFirst(),
+  );
+}
+
+function accountFor(serverUrl: string) {
+  let account = accounts.get(serverUrl);
+  if (!account) {
+    account = localFirstAccount(serverUrl);
+    accounts.set(serverUrl, account);
+  }
+  return account;
 }
 
 const styles = StyleSheet.create({
@@ -112,9 +114,13 @@ type AppProps = {
 };
 
 export default function App({ config, fallback }: AppProps = {}) {
-  const secret = React.use(ExpoAuthSecretStore.getOrCreateSecret());
+  const serverUrl = config?.serverUrl ?? envServerUrl ?? defaultServerUrl;
+  const account = React.use(accountFor(serverUrl));
   const configKey = JSON.stringify(config ?? {});
-  const resolvedConfig = React.useMemo(() => defaultConfig(secret, config), [configKey, secret]);
+  const resolvedConfig = React.useMemo(
+    () => ({ env: "dev", ...config, serverUrl, account }),
+    [configKey, serverUrl, account],
+  );
   const [activeTab, setActiveTab] = React.useState<Tab>("stress");
 
   return (

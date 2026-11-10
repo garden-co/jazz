@@ -1,5 +1,10 @@
 import type { AccountHandle } from "./state.js";
-import { accountRegistry, AccountAuthError } from "./enrollment.js";
+import {
+  accountRegistry,
+  AccountAuthError,
+  delegatedAccountBearer,
+  type AppBearer,
+} from "./enrollment.js";
 
 // Context admission is process-local and non-serializable. An accountId copied
 // into an ordinary low-level config must not select an account's local storage.
@@ -10,7 +15,7 @@ type AccountConfigBinding = {
 };
 const admitted = new WeakMap<
   object,
-  Readonly<{ id: string; registry: string; inspectorPort?: MessagePort }>
+  Readonly<{ id: string; registry: string; inspectorPort?: MessagePort; bearer?: AppBearer }>
 >();
 
 /** @internal Only the handle factory installs account-bound runtime configuration. */
@@ -18,7 +23,17 @@ export function admitAccountConfig(config: AccountConfigBinding, handle: Account
   const registry = accountRegistry(handle); // Reject forged and logged-out handles.
   if (config.accountId !== handle.id || config.accountRegistryAuthority !== registry)
     throw new AccountAuthError("invalid_account_handle");
-  admitted.set(config, { id: handle.id, registry });
+  const bearer = delegatedAccountBearer(handle, registry);
+  admitted.set(config, { id: handle.id, registry, ...(bearer ? { bearer } : {}) });
+}
+
+/**
+ * @internal The app's bearer for an admitted config whose account was signed
+ * in through the app's backend with one (a native app's sync connection).
+ */
+export function accountConfigBearer(config: AccountConfigBinding): AppBearer | undefined {
+  assertAccountConfig(config);
+  return admitted.get(config)?.bearer;
 }
 
 /** @internal Raw runtime entry points must not admit a caller-supplied account UUID. */

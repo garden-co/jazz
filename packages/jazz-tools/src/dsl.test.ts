@@ -483,7 +483,9 @@ describe("reserved table id", () => {
       // @ts-expect-error Exercise the runtime guard for untyped callers.
       expect(() => defineSchema({ items: { id } })).toThrow(/id.*reserved.*UUID row ID/);
       // @ts-expect-error Exercise the runtime guard for untyped callers.
-      expect(() => defineApp({ items: { id } })).toThrow(/id.*reserved.*UUID row ID/);
+      expect(() => defineApp({ items: { id } }, { migrations: "none" })).toThrow(
+        /id.*reserved.*UUID row ID/,
+      );
     },
   );
 
@@ -518,11 +520,14 @@ describe("reserved table names", () => {
   );
 
   it("keeps ordinary, prototype, and hyphenated table names usable", () => {
-    const app = defineApp({
-      normal: defineTable({ value: s.string() }, {}),
-      prototype: defineTable({ value: s.string() }, {}),
-      "hyphenated-name": defineTable({ value: s.string() }, {}),
-    });
+    const app = defineApp(
+      {
+        normal: defineTable({ value: s.string() }, {}),
+        prototype: defineTable({ value: s.string() }, {}),
+        "hyphenated-name": defineTable({ value: s.string() }, {}),
+      },
+      { migrations: "none" },
+    );
 
     expect(Object.keys(app.wasmSchema).sort()).toEqual(["hyphenated-name", "normal", "prototype"]);
     expect(JSON.parse(app.normal._build()).table).toBe("normal");

@@ -9,7 +9,11 @@ pub fn schemas_are_compatible(left: &Schema, right: &Schema) -> bool {
     let normalize = |schema: &Schema| {
         let mut schema = structural(schema.clone());
         for table in schema.values_mut() {
+            // Indexes change how nodes find rows, not the rows.
             table.indexed_columns = None;
+            table.composite_indexes = Vec::new();
+            // Retention changes what nodes keep, not the rows.
+            table.history = Default::default();
             table
                 .columns
                 .columns
@@ -127,8 +131,6 @@ pub(super) fn validate_compatible_graph(
     schemas: &BTreeMap<Hash, Schema>,
     migrations: &BTreeMap<Edge, Lens>,
     representatives: &BTreeMap<Hash, Hash>,
-    stored: &DeploymentCatalogue,
-    target: SchemaHash,
 ) -> Result<(), DeploymentError> {
     let nodes = representatives
         .values()
@@ -157,10 +159,12 @@ pub(super) fn validate_compatible_graph(
                     }
                 })
             };
-            if projection(previous)? != projection(lens)? {
+            let (first, second) = (projection(previous)?, projection(lens)?);
+            if first != second {
                 return Err(DeploymentError::ConflictingPaths {
                     first: vec![previous.source_hash, previous.target_hash],
                     second: vec![lens.source_hash, lens.target_hash],
+                    difference: super::projection_difference(&first, &second),
                 });
             }
         } else {
@@ -168,17 +172,6 @@ pub(super) fn validate_compatible_graph(
         }
     }
     let order = topological_order(&nodes, &edges)?;
-    if let Some(active) = stored.active_schema_hash {
-        let from = representatives[&active.0];
-        let to = representatives[&target.0];
-        let previously_published = stored
-            .schemas
-            .iter()
-            .any(|s| SchemaHash::compute(s) == target);
-        if !(connected(from, to, &edges) || previously_published && connected(to, from, &edges)) {
-            return Err(DeploymentError::UnreachableTarget { active, target });
-        }
-    }
     // Keep a single connected history, but allow multiple terminal branches.
     // In a DAG, a unique root reaches every node.
     let roots = nodes

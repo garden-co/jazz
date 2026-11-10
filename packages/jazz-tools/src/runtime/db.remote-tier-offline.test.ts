@@ -4,28 +4,25 @@ import { definePermissions } from "../permissions/index.js";
 import { createDb } from "./default-create-db.js";
 import { WriteWaitTimeoutError } from "./client.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
-import { deploy, startLocalJazzServer } from "../testing/index.js";
+import { startTestJazz } from "../testing/index.js";
 
 // A remote read uses the server's current query scope and waits while offline
 // (INV-API-32): only the authority confirms a remote result. The same rule is
 // pinned for tabs over a browser worker and for React Native foregrounds over
 // the native relay.
 it("waits for the server while offline and answers once it reconnects", async () => {
-  const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) });
+  const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) }, { migrations: "none" });
   const permissions = definePermissions(app, ({ policy }) => {
     policy.notes.allowRead.always();
     policy.notes.allowInsert.always();
   });
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  const server = await startTestJazz({
+    app: app,
+    permissions: permissions,
+    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+  });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
   try {
-    await deploy({
-      serverUrl: server.url,
-      appId: server.appId,
-      adminSecret: server.adminSecret,
-      schema: app,
-      permissions,
-    });
     db = await createDb(await localAccountConfig(server.appId, server.url));
     const settled = await db.insert(app.notes, { title: "settled" }).wait({ tier: "global" });
     expect(await db.all(app.notes, { tier: "remote" })).toEqual([settled]);
@@ -56,21 +53,18 @@ it("waits for the server while offline and answers once it reconnects", async ()
 // A Global wait outlives a disconnect (#3923): it settles once the write
 // reaches the server, and only a caller-chosen timeout ends it early.
 it("keeps a Global wait pending while offline unless the caller sets a timeout", async () => {
-  const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) });
+  const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) }, { migrations: "none" });
   const permissions = definePermissions(app, ({ policy }) => {
     policy.notes.allowRead.always();
     policy.notes.allowInsert.always();
   });
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  const server = await startTestJazz({
+    app: app,
+    permissions: permissions,
+    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+  });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
   try {
-    await deploy({
-      serverUrl: server.url,
-      appId: server.appId,
-      adminSecret: server.adminSecret,
-      schema: app,
-      permissions,
-    });
     db = await createDb(await localAccountConfig(server.appId, server.url));
     await db.insert(app.notes, { title: "online" }).wait({ tier: "global" });
 

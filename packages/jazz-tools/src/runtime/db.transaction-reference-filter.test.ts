@@ -4,13 +4,16 @@ import { createDb } from "./default-create-db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
 
 it("matches reference filters inside a transaction as it does outside", async () => {
-  const app = s.defineApp({
-    projects: s.table({ title: s.string() }, {}),
-    notes: s.table(
-      { projectId: s.uuid(), projectUuid: s.uuid() },
-      { project: s.rel("projects", "projectId") },
-    ),
-  });
+  const app = s.defineApp(
+    {
+      projects: s.table({ title: s.string() }, {}),
+      notes: s.table(
+        { projectId: s.uuid(), projectUuid: s.uuid() },
+        { project: s.rel("projects", "projectId") },
+      ),
+    },
+    { migrations: "none" },
+  );
   const db = await createDb(await localAccountConfig(`transaction-ref-${crypto.randomUUID()}`));
   try {
     const projectWrite = db.insert(app.projects, { title: "Project" });

@@ -1,12 +1,9 @@
 //! Validate a complete deployment before publishing its artifacts and activating it.
-use super::{
-    ServerRuntimeHandle, ServerState,
-    catalogue::DeploymentResponse,
-    routes::http::{PublishMigrationRequest, lower_migration},
-};
+use super::{ServerRuntimeHandle, ServerState, catalogue::DeploymentResponse};
 use crate::runtime::{CatalogueApplyError, StorageConfig};
 use axum::http::StatusCode;
 use jazz::schema::JazzSchema;
+use jazz::tools::deployment::published::{PublishMigrationRequest, lower_migration};
 use jazz::tools::{
     deployment::{self, DeploymentError},
     public_schema::{Schema, SchemaHash, TableName, TablePolicies},
@@ -21,7 +18,11 @@ pub(crate) struct DeployRequest {
     pub schemas: Vec<DeploySchema>,
     pub migrations: Vec<PublishMigrationRequest>,
     pub permissions: HashMap<TableName, TablePolicies>,
+    /// Confirms switching existing tables to latest-only history.
+    #[serde(default)]
+    pub allow_dropping_history: bool,
 }
+
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct DeploySchema {
     pub hash: String,
@@ -89,17 +90,21 @@ impl From<DeploymentError> for DeployError {
                 "migration_cycle",
                 serde_json::json!({"schemas":schemas.iter().map(ToString::to_string).collect::<Vec<_>>()}),
             ),
-            UnreachableTarget { active, target } => (
-                "unreachable_deployment_target",
-                serde_json::json!({"active":active.to_string(),"target":target.to_string()}),
-            ),
             DisconnectedGraph { roots } => (
                 "disconnected_migration_graph",
                 serde_json::json!({"roots":roots.iter().map(ToString::to_string).collect::<Vec<_>>()}),
             ),
-            ConflictingPaths { first, second } => (
+            ConflictingPaths {
+                first,
+                second,
+                difference,
+            } => (
                 "conflicting_paths",
-                serde_json::json!({"first":first.iter().map(ToString::to_string).collect::<Vec<_>>(),"second":second.iter().map(ToString::to_string).collect::<Vec<_>>()}),
+                serde_json::json!({"first":first.iter().map(ToString::to_string).collect::<Vec<_>>(),"second":second.iter().map(ToString::to_string).collect::<Vec<_>>(),"difference":difference}),
+            ),
+            DropsHistory { target, tables } => (
+                "drops_history",
+                serde_json::json!({"target":target.to_string(),"tables":tables.iter().map(|t| t.as_str()).collect::<Vec<_>>()}),
             ),
         };
         Self {
@@ -173,24 +178,29 @@ pub(crate) async fn deploy(
             schemas,
             migrations,
             permissions: request.permissions,
+            allow_dropping_history: request.allow_dropping_history,
         },
     )?;
-    let active = state
-        .catalogue
-        .active_schema_summary(&state.catalogue_store)
-        .map_err(DeployError::internal)?;
-    let revision = active
-        .map(|head| head.version)
-        .unwrap_or(0)
-        .checked_add(1)
-        .ok_or_else(|| DeployError::invalid("deployment revision overflow"))?;
     let staged = state
         .catalogue_store
-        .stage_deployment(&prepared, revision)
+        .stage_deployment(&prepared)
         .map_err(DeployError::invalid)?;
     if !staged.response.changed {
+        // Nothing to commit, but the runtime's view of the catalogue may be
+        // behind the store's: a deployment that committed and then failed
+        // before reloading it is retried here. Reloading is cheap, and a
+        // backend publishes its bundle once per boot.
+        if let Some(runtime) = state.runtime() {
+            runtime
+                .reload_catalogue()
+                .await
+                .map_err(DeployError::internal)?;
+        }
         return Ok(staged.response);
     }
+    let new_bundle = (!staged.put.bundles.is_empty())
+        .then(|| jazz::catalogue::BundleId::from_hex(&staged.response.bundle))
+        .flatten();
     let genesis = JazzSchema::new(&prepared.schemas()[0]).map_err(DeployError::invalid)?;
     let runtime = match state.runtime() {
         Some(runtime) => runtime,
@@ -203,9 +213,9 @@ pub(crate) async fn deploy(
             let probe =
                 ServerRuntimeHandle::start_with_storage(genesis.clone(), StorageConfig::InMemory)
                     .map_err(DeployError::internal)?;
-            let applied = match change(&probe, &prepared, staged.put.clone(), revision).await {
+            let applied = match change(&probe, &prepared, staged.put.clone()).await {
                 Ok(change) => probe
-                    .apply_catalogue(change)
+                    .apply_catalogue(change, None)
                     .await
                     .map_err(DeployError::from),
                 Err(error) => Err(error),
@@ -221,10 +231,15 @@ pub(crate) async fn deploy(
         .catalogue_store
         .check_unchanged(&staged)
         .map_err(DeployError::invalid)?;
-    let change = change(&runtime, &prepared, staged.put, revision).await?;
-    // The deployment's rows, admissions and activation commit together on
-    // the store's thread, or not at all.
-    let applied = runtime.apply_catalogue(change).await;
+    let change = change(&runtime, &prepared, staged.put).await?;
+    // The deployment's rows and admissions commit together on the store's
+    // thread, or not at all. New permissions reach every session at once:
+    // with a bundle new to this store, the same job ends the sessions pinned
+    // to other bundles, which reconnect and are pinned again by whichever
+    // backend serves them now. Publishing a known bundle again (a cold
+    // start, a rollback, a deployment running beside one that published the
+    // same permissions) ends no one.
+    let applied = runtime.apply_catalogue(change, new_bundle).await;
     state
         .catalogue_store
         .refresh()
@@ -233,16 +248,50 @@ pub(crate) async fn deploy(
     Ok(staged.response)
 }
 
-/// What applying `prepared` to `runtime`'s catalogue changes.
+/// Publish `source` (a schema carrying its permissions as table policies)
+/// as a permissions bundle, as `createJazz` does on boot: no permissions
+/// become current. Its hex bundle id.
+#[cfg(any(test, feature = "embedded-server"))]
+pub(crate) async fn publish_source_bundle(
+    state: Arc<ServerState>,
+    source: &Schema,
+) -> Result<String, String> {
+    let mut structural = source.clone();
+    for table in structural.values_mut() {
+        table.policies = TablePolicies::default();
+    }
+    let hash = jazz::tools::public_schema::SchemaHash::compute(&structural).to_string();
+    let permissions = source
+        .iter()
+        .map(|(name, table)| (*name, table.policies.clone()))
+        .collect();
+    let response = deploy(
+        state,
+        DeployRequest {
+            target_schema_hash: hash.clone(),
+            schemas: vec![DeploySchema {
+                hash,
+                schema: structural,
+            }],
+            migrations: Vec::new(),
+            permissions,
+            allow_dropping_history: false,
+        },
+    )
+    .await
+    .map_err(|error| error.body.to_string())?;
+    Ok(response.bundle)
+}
+
+/// What applying `prepared` to `runtime`'s catalogue changes: its rows,
+/// and the admission of its schemas. Nothing becomes current.
 async fn change(
     runtime: &ServerRuntimeHandle,
     prepared: &deployment::PreparedDeployment,
     put: jazz::catalogue::CataloguePut,
-    revision: u64,
 ) -> Result<jazz::catalogue::CatalogueChange, DeployError> {
     let stored = runtime.catalogue().await.map_err(DeployError::internal)?;
-    deployment::prepare_catalogue_change(prepared, &stored, put, revision)
-        .map_err(DeployError::invalid)
+    deployment::prepare_catalogue_change(prepared, &stored, put).map_err(DeployError::invalid)
 }
 
 impl From<CatalogueApplyError> for DeployError {

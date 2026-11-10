@@ -30,11 +30,7 @@ fn owned_by_session() -> PolicyExpr {
     PolicyExpr::Cmp {
         column: "owner".to_owned(),
         op: CmpOp::Eq,
-        value: PolicyValue::SessionRef(vec![
-            "user".to_owned(),
-            "identity".to_owned(),
-            "subject".to_owned(),
-        ]),
+        value: PolicyValue::SessionRef(vec!["identity".to_owned(), "subject".to_owned()]),
     }
 }
 
@@ -139,14 +135,14 @@ fn connect_recording(
         inner: client_side,
         sent: std::rc::Rc::clone(&sent),
     })));
-    server.accept_subscriber(server_side, author);
+    server.accept_subscriber(server_side, author).unwrap();
     sent
 }
 
 fn connect(client: &Db, server: &Db, author: AuthorSubject) {
     let (client_side, server_side) = duplex();
     block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, author);
+    server.accept_subscriber(server_side, author).unwrap();
 }
 
 fn count(db: &Db, table: &str) -> usize {

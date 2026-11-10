@@ -8,17 +8,18 @@
 export const LOCAL_ORIGIN = "http://localhost:3000";
 
 export const LOCAL_SECRETS = {
-  BACKEND_SECRET: "jamazon-warehouse-development-backend-secret",
   BETTER_AUTH_SECRET: "jamazon-warehouse-development-better-auth-secret-7Qm2Xv9Lr4Tz",
 } as const;
+
+/** The Jazz app id a local run uses when none is set. */
+export const LOCAL_APP_ID = "00000000-0000-0000-0000-00000000a4e5";
 
 export type SecretName = keyof typeof LOCAL_SECRETS;
 
 export interface ConfigEnv {
   NODE_ENV?: string;
   NEXT_PUBLIC_APP_ORIGIN?: string;
-  NEXT_PUBLIC_JAZZ_APP_ID?: string;
-  NEXT_PUBLIC_JAZZ_SERVER_URL?: string;
+  JAZZ_APP_ID?: string;
 }
 
 export interface ResolvedConfig {
@@ -26,7 +27,6 @@ export interface ResolvedConfig {
   /** Local defaults apply: a non-production process on a loopback origin. */
   isLocalOrigin: boolean;
   jazzAppId: string;
-  jazzServerUrl: string;
 }
 
 /** Resolve the public configuration, throwing for a production process without an origin. */
@@ -40,8 +40,7 @@ export function resolveConfig(env: ConfigEnv): ResolvedConfig {
   return {
     appOrigin,
     isLocalOrigin: !production && loopback,
-    jazzAppId: env.NEXT_PUBLIC_JAZZ_APP_ID || "jamazon-warehouse-local",
-    jazzServerUrl: env.NEXT_PUBLIC_JAZZ_SERVER_URL || "http://127.0.0.1:4200",
+    jazzAppId: env.JAZZ_APP_ID || LOCAL_APP_ID,
   };
 }
 
@@ -63,11 +62,10 @@ export function resolveSecret(
 const config = resolveConfig({
   NODE_ENV: process.env.NODE_ENV,
   NEXT_PUBLIC_APP_ORIGIN: process.env.NEXT_PUBLIC_APP_ORIGIN,
-  NEXT_PUBLIC_JAZZ_APP_ID: process.env.NEXT_PUBLIC_JAZZ_APP_ID,
-  NEXT_PUBLIC_JAZZ_SERVER_URL: process.env.NEXT_PUBLIC_JAZZ_SERVER_URL,
+  JAZZ_APP_ID: process.env.JAZZ_APP_ID,
 });
 
-export const { appOrigin, isLocalOrigin, jazzAppId, jazzServerUrl } = config;
+export const { appOrigin, isLocalOrigin, jazzAppId } = config;
 
 /** The origins Better Auth trusts: both loopback spellings in development. */
 export const trustedOrigins = isLocalOrigin
@@ -79,8 +77,20 @@ export function serverSecret(name: SecretName): string {
   return resolveSecret(config, name, process.env[name]);
 }
 
-/** Check every server secret at startup, so a misconfigured deployment fails before serving. */
+/**
+ * Where the Jazz data lives: on the sync server JAZZ_SERVER_URL names (such as
+ * Jazz Cloud), with the app's admin secret, or else in a local SQLite directory.
+ */
+export function jazzStore(env: Record<string, string | undefined> = process.env) {
+  const url = env.JAZZ_SERVER_URL;
+  if (!url) return { kind: "sqlite" as const, path: env.JAZZ_DATA_PATH || ".jazz" };
+  const secret = env.JAZZ_ADMIN_SECRET;
+  if (!secret) throw new Error("JAZZ_SERVER_URL needs JAZZ_ADMIN_SECRET");
+  return { kind: "remote" as const, url, secret };
+}
+
+/** Check the server configuration at startup, so a misconfigured deployment fails before serving. */
 export function assertServerConfiguration(): void {
-  serverSecret("BACKEND_SECRET");
   serverSecret("BETTER_AUTH_SECRET");
+  jazzStore();
 }

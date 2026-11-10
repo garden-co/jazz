@@ -19,10 +19,7 @@ async function setup(events: string[]) {
       createLocalFirst: () => old,
       restoreLocalFirst: () => old,
       logout: () => {},
-      registerJWT: async () => next,
-      loginJWT: async () => next,
-      loginOrRegisterJWT: async () => next,
-      linkJWT: async () => {
+      linkWithBackend: async () => {
         events.push("link");
         return next;
       },
@@ -62,14 +59,14 @@ describe("Svelte Jazz session", () => {
     const { session } = await setup(events);
     const factory = await import("../session/create-jazz-session.js");
     const create = vi
-      .spyOn(factory, "createJazzSession")
+      .spyOn(factory, "createJazzClient")
       .mockRejectedValueOnce(new Error("startup failed"))
       .mockResolvedValueOnce(session);
     const target = document.createElement("div");
     const component = mount(JazzSessionProvider, {
       target,
       props: {
-        config: { appId: "test", serverUrl: "http://localhost:1", initial: "local-first" },
+        config: { scope: "test", serverUrl: "http://localhost:1", initial: "local-first" },
         autoAttachDevTools: false,
         children: createRawSnippet(() => ({ render: () => "<p>Ready</p>" })),
         fallback: createRawSnippet(() => ({
@@ -114,7 +111,7 @@ describe("Svelte Jazz session", () => {
     });
     await settle();
     expect(target.textContent).toBe("Ready");
-    await session.linkJWT("token");
+    await session.linkWithBackend();
     await settle();
     expect(events.slice(0, 3)).toEqual(["detach", "shutdown:old", "link"]);
     expect(target.textContent).toBe("Ready");

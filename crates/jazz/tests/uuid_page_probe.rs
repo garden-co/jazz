@@ -34,7 +34,7 @@ fn open_db() -> Db {
                     .column("owner", ColumnType::Text)
                     .policies(read_and_allow_all_writes(session_eq(
                         "owner",
-                        &["user", "identity", "subject"],
+                        &["identity", "subject"],
                     ))),
             )
             .build(),

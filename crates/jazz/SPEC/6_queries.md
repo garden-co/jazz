@@ -329,9 +329,10 @@ inference, not generic or polymorphic parameter solving.
 Claims are a separate input channel. `Operand::Claim` is _not_
 client-supplied binding data: claim bindings are injected server-side from the
 subscriber's authenticated identity and admission/session claims by policy
-composition (ch. 7). `session.user` is the reserved structured admitted
-account/identity claim. Its non-null account author descriptor matches row
-provenance; accountless readers have no ownership authority. Provider claims
+composition (ch. 7). `session.user` is the reserved admitted account UUID
+claim and `session.identity` (with `identity.issuer`/`identity.subject`) the
+exact login; accountless readers have no `session.user` and no ownership
+authority. Provider claims
 such as `sub` and `user_id` retain their admission-defined values. Additional claim names are product/admission-defined
 and must come from the trusted admission/session context, never from ordinary
 query bindings.
@@ -590,7 +591,7 @@ preimage is `magic "JFRD" | version 1 | field_count:u32be |
 descriptor_len:u32be | Groove-record-descriptor | record_len:u32be |
 Groove-record`. The descriptor has the source-order payload types and the
 engine-owned names `flat_join_payload_0`, `flat_join_payload_1`, …, so user
-projection aliases do not affect it. `row_digest` is BLAKE3's derived-key hash
+projection aliases do not affect it. `row_digest` is the derived-key hash (SHA-256 over the length-prefixed context, then the input)
 of that preimage with context `jazz.flat-join-row-digest.v1`.
 
 For example, declared payload `(u64, string)` and values `(7, "blue")` have
@@ -1002,13 +1003,11 @@ are not marked deleted. Subscription deletion state is exposed through the
 revoking access to a row updates the subscription like any other change: a
 restoration replaces the deleted row with the live one, and a row whose read
 policy no longer holds, including because its granting row was deleted, leaves
-the result. Include-deleted reads of current tables differ by read path. Plain
-one-shot reads support only the current source and reject every other read
-view (branch views and snapshots) with a "not supported yet" error.
-Subscriptions, and transaction reads, which register as snapshot
-subscriptions, accept the current source and any snapshot; they reject branch
-views with a "not supported yet" error. History queries keep their own branch
-selection.
+the result. Include-deleted reads, one-shot or live, accept the current
+source and branch views; subscriptions and transaction reads, which register
+as snapshot subscriptions, accept snapshots too. A replica keeps a live
+branch-view read in its view upstream (ch. 8 §8.4, ch. 11 §11.5). History
+queries keep their own branch selection.
 
 Inside an open serializable transaction, `tx_query` records a binding-sensitive
 `PredicateRead` (`INV-QUERY-13`). The later phantom check (ch. 3,

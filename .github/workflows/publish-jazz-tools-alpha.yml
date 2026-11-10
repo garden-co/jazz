@@ -178,7 +178,7 @@ jobs:
           echo "release_pr_head_sha=${{ steps.gate.outputs.release_pr_head_sha }}"
 
   # Publication requires the release test tier on the exact tree being
-  # published: CI, starters E2E and RN device acceptance on the Version
+  # published: CI, examples E2E and RN device acceptance on the Version
   # Packages PR head, which changesets-release-pr.yml dispatches. Dry runs
   # build candidates before that tier has run, so they skip this gate.
   release-test-gate:
@@ -525,14 +525,6 @@ jobs:
           name: pkg-create-jazz
           path: packages/create-jazz
 
-      - name: Restore executable permissions on CLI binaries
-        run: |
-          chmod 755 \
-            packages/jazz-tools/bin/native/jazz-tools-darwin-arm64 \
-            packages/jazz-tools/bin/native/jazz-tools-darwin-x64 \
-            packages/jazz-tools/bin/native/jazz-tools-linux-arm64 \
-            packages/jazz-tools/bin/native/jazz-tools-linux-x64
-
       - name: Show release mode
         run: |
           case "${RELEASE_MODE}" in
@@ -694,33 +686,6 @@ jobs:
           tar -tf "${TARBALL}" | grep -q "package/bin/create-jazz.js"
           tar -tf "${TARBALL}" | grep -q "package/dist/index.js"
 
-      - name: Verify packed jazz-tools native binaries and runtime bootstrap
-        run: |
-          TMP_DIR=$(mktemp -d)
-          EXTRACT_DIR=$(mktemp -d)
-          pnpm --filter jazz-tools pack --pack-destination "${TMP_DIR}"
-          TARBALL=$(ls "${TMP_DIR}"/jazz-tools-*.tgz | head -n 1)
-          tar -xzf "${TARBALL}" -C "${EXTRACT_DIR}"
-          for bin in \
-            jazz-tools-darwin-arm64 \
-            jazz-tools-darwin-x64 \
-            jazz-tools-linux-arm64 \
-            jazz-tools-linux-x64; do
-            FILE="${EXTRACT_DIR}/package/bin/native/${bin}"
-            test -f "${FILE}" || { echo "Missing packed native binary ${bin}"; exit 1; }
-          done
-
-          case "$(uname -m)" in
-            x86_64) HOST_LINUX_BIN="jazz-tools-linux-x64" ;;
-            aarch64|arm64) HOST_LINUX_BIN="jazz-tools-linux-arm64" ;;
-            *)
-              echo "Unsupported linux runner architecture: $(uname -m)"
-              exit 1
-              ;;
-          esac
-
-          node packages/jazz-tools/scripts/verify-packed-runtime-bootstrap.mjs "${EXTRACT_DIR}/package"
-
       - name: Publish jazz-wasm (alpha tag)
         if: env.RELEASE_MODE == 'publish'
         run: |
@@ -764,7 +729,7 @@ jobs:
             pnpm --filter jazz-tools publish --tag alpha --access public --no-git-checks
           fi
 
-      - name: Publish create-jazz (alpha tag, promote latest)
+      - name: Publish create-jazz (alpha tag)
         if: env.RELEASE_MODE == 'publish'
         run: |
           CREATE_JAZZ_VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("packages/create-jazz/package.json","utf8")).version')
@@ -774,7 +739,110 @@ jobs:
             pnpm --filter create-jazz publish --tag alpha --access public --no-git-checks
           fi
 
-          npm dist-tag add "create-jazz@${CREATE_JAZZ_VERSION}" latest
+      # From alpha.60, a plain `npm install jazz-tools` gets v2 (Classic stays
+      # `jazz-tools@0`). Every v2 package moves `latest` to this version, after
+      # all of them are published, and never back to an older alpha. Each one
+      # waits until npm serves the new version, which can lag the upload. The
+      # React Native packages, the slowest to appear, are promoted by
+      # promote-rn-latest so they don't hold up the server binaries.
+      - name: Promote every non-RN v2 package to latest
+        if: env.RELEASE_MODE == 'publish'
+        run: node dev/artifacts/promote-latest.mjs core
+
+  # jazz-rn-android (~100 MB) took 85 minutes to appear on npm after alpha.60's
+  # upload. Waiting for it here, not in publish-npm, lets the server binaries
+  # and Inspector go out as soon as everything else is live.
+  promote-rn-latest:
+    name: Promote React Native packages to latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs:
+      - publish-npm
+    if: >-
+      always() &&
+      needs.publish-npm.result == 'success' &&
+      (inputs.mode || github.event.inputs.mode || 'publish') == 'publish'
+    timeout-minutes: 200
+    permissions:
+      contents: read
+    env:
+      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: .nvmrc
+          registry-url: https://registry.npmjs.org
+
+      - run: node dev/artifacts/promote-latest.mjs rn
+
+  # Jazz Cloud's images run the Linux server binary from the GitHub release:
+  # npm's jazz-tools carries no native binary. Attach both builds with their
+  # SHA256SUMS to the version's draft; "GitHub release" refuses to publish
+  # without them. Only "GitHub release" creates the draft (with its notes),
+  # so the two never race to create two: without one, this job fails and is
+  # re-run once the draft exists. A published release's assets are never
+  # replaced.
+  attach-server-binaries:
+    name: Attach server binaries to the GitHub release
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs:
+      - release-push-gate
+      - resolve-preview-artifacts
+      - publish-npm
+    if: >-
+      always() &&
+      needs.publish-npm.result == 'success' &&
+      (inputs.mode || github.event.inputs.mode || 'publish') == 'publish'
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts != 'true'
+        with:
+          pattern: jazz-tools-linux-*
+          merge-multiple: true
+          path: dist
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        if: needs.resolve-preview-artifacts.outputs.use_preview_artifacts == 'true'
+        with:
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.resolve-preview-artifacts.outputs.preview_run_id }}
+          pattern: jazz-tools-linux-*
+          merge-multiple: true
+          path: dist
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          test -s jazz-tools-linux-x64
+          test -s jazz-tools-linux-arm64
+          sha256sum jazz-tools-linux-x64 jazz-tools-linux-arm64 > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("packages/create-jazz/package.json","utf8")).version')
+          TAG="v${VERSION}"
+          if ! is_draft=$(gh release view "${TAG}" --json isDraft --jq .isDraft 2>/dev/null); then
+            echo "::error::No draft for ${TAG}. Create it with \"GitHub release\" (publish: false, with the notes), then re-run this job."
+            exit 1
+          fi
+          if [ "${is_draft}" != true ]; then
+            echo "::error::${TAG} is published; its server binaries are never replaced."
+            exit 1
+          fi
+          gh release upload "${TAG}" dist/jazz-tools-linux-x64 dist/jazz-tools-linux-arm64 dist/SHA256SUMS --clobber
 
   # Read-only check that the Inspector Vercel token can see its project. It runs
   # in candidate dry-runs too, so a broken token shows up before anything

@@ -3,25 +3,22 @@ import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
 import { createDb } from "./default-create-db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
-import { deploy, startLocalJazzServer } from "../testing/index.js";
+import { startTestJazz } from "../testing/index.js";
 
 it("keeps local reads available while another transaction waits for remote coverage", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
-  const app = s.defineApp({ entries: s.table({ title: s.string() }, {}) });
+  const app = s.defineApp({ entries: s.table({ title: s.string() }, {}) }, { migrations: "none" });
   const permissions = definePermissions(app, ({ policy }) => {
     policy.entries.allowRead.always();
     policy.entries.allowInsert.always();
   });
+  const server = await startTestJazz({
+    app: app,
+    permissions: permissions,
+    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+  });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    await deploy({
-      serverUrl: server.url,
-      appId: server.appId,
-      adminSecret: server.adminSecret,
-      schema: app,
-      permissions,
-    });
     const account = await localAccountConfig(server.appId, server.url);
     db = await createDb(account);
     const initial = db.insert(app.entries, { title: "Available offline" });

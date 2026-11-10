@@ -178,16 +178,13 @@ export * from "./accounts/exports.js";
 
 export { accountRegistryUrl } from "./accounts/context.js";
 
-export { createJazzSession, type JazzSessionConfig } from "./session/create-jazz-session.js";
+export { createJazzClient, type JazzClientConfig } from "./session/create-jazz-session.js";
 export type {
   JazzSession,
   JazzSessionActions,
   JazzSessionSnapshot,
   JazzSessionOperation,
-  NeedsLoginState,
 } from "./session/state.js";
-
-export * from "./session/auth-provider-exports.js";
 
 export type {
   ForwardRelationship,

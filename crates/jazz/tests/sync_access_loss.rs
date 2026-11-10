@@ -25,7 +25,7 @@ use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSch
 
 use common::{allow_all_policies, compile_schema, exists, outer_eq, session_eq};
 
-const ME: [&str; 3] = ["user", "identity", "subject"];
+const ME: [&str; 2] = ["identity", "subject"];
 
 /// Members read and post a room's messages.
 fn schema() -> JazzSchema {
@@ -106,7 +106,7 @@ fn seed(server: &Db, table: &str, row: RowUuid, values: BTreeMap<String, Value>)
 fn connect(server: &Db, client: &Db, who: AuthorSubject) -> Upstream {
     let (client_side, server_side) = duplex();
     let upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, who);
+    server.accept_subscriber(server_side, who).unwrap();
     upstream
 }
 

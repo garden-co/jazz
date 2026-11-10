@@ -1,0 +1,98 @@
+---
+title: Local-First Auth
+description: "Learn how to let users start offline with a recoverable account and link a real sign-in later."
+reviewedAt: "20017a2694"
+---
+
+A local-first account lets someone start using an app before signing up. Jazz derives its founding identity and account from a random signing root. Creating that account works offline. When it connects, the core verifies the signing proof and admits the deterministic account.
+
+## Client setup
+
+Configure a session once:
+
+```ts
+import { createJazzClient } from "jazz-tools/client";
+
+const jazz = await createJazzClient({
+  serverUrl: "/jazz",
+  initial: "local-first",
+  // Local data, so a guest keeps working offline once its first visit has reached the backend.
+  client: () => import("jazz-tools/local-first"),
+});
+```
+
+Your backend lets guests sync by returning `acceptLocalFirstAuth(request)` from `authenticate`
+for signed-out requests (an app with no sign-in passes `authenticate: acceptLocalFirstAuth`).
+Guests are refused otherwise. With `serverUrl: null`, Jazz stays on the device: no backend, one
+local-first account per browser profile.
+
+Session creation prepares crypto, restores usable saved selection, or creates a local-first account. Browser sessions retain signing roots in browser storage. Native hosts use an atomic, protected `AccountStore`. Creating a local-first account works offline once runtime assets are available. A first visit made while your backend is unreachable is not safe yet: the
+client stays thin, and a guest write made then can be lost on reload.
+
+Framework `JazzSessionProvider` and session hooks expose the same lifecycle. Account commands run outside contexts after ordinary graceful shutdown, which Jazz coordinates automatically. See [Lifecycle](/docs/setup/auth/backend#lifecycle). Lower-level account handles and client factories remain available when an app deliberately owns its own context lifecycle.
+
+## Backing up and restoring the secret
+
+A signing root is a credential. Possession allows acting as its local-first identity. Jazz represents it as `jazz-auth-v1:` followed by 43 unpadded base64url characters encoding 32 random bytes. Export it explicitly from a live local-first handle:
+
+```ts
+import { exportLocalFirstSecret } from "jazz-tools";
+import { RecoveryPhrase } from "jazz-tools/passphrase";
+
+const secret = exportLocalFirstSecret(jazz.getSnapshot().account!);
+const phrase = RecoveryPhrase.fromSecret(secret);
+```
+
+The recovery phrase encodes the same root; it is not a second password. Keep it out of logs and ordinary account-state UI. Export fails for external or logged-out handles, and secrets never appear in snapshots. Signing roots remain retained after logout so explicit recovery can restore them.
+
+### Recovery passphrase
+
+Restore through the session; it owns the graceful handoff:
+
+```ts
+await jazz.restoreLocalFirst(RecoveryPhrase.toSecret(userInput));
+```
+
+Session account transitions wait for pending writes to sync before replacing the client. Ordinary `jazz.close()` preserves local durability without requiring online sync.
+
+### Passkey backup
+
+Browser apps can wrap the same exported root with a passkey:
+
+```ts
+import { BrowserPasskeyBackup } from "jazz-tools/passkey-backup";
+
+const backup = new BrowserPasskeyBackup({
+  appName: "My App",
+  appHostname: "app.example",
+});
+await backup.backup(exportLocalFirstSecret(jazz.getSnapshot().account!), "My account");
+```
+
+`await backup.restore()` returns the root for `await jazz.restoreLocalFirst(secret)`. Pin the canonical production hostname when configuring a passkey backup; passkey availability and synchronization depend on the user's platform.
+
+## Signing up later
+
+When a local-first user signs up with your auth, call `await jazz.linkWithBackend()` after your
+sign-up has set its session. The client proves it owns the local-first account with its own key;
+your backend's `authenticate` names the new user, and Jazz links that user to the existing account.
+Jazz performs graceful shutdown, linking, and client replacement. The account ID stays the same, so
+account-based ownership remains valid, and earlier rows keep the identity that authored them.
+
+The user must not have a Jazz account of their own yet. If they do, the app chooses whether to
+sign in to that account (`loginWithBackend()`) or migrate data explicitly; Jazz never merges
+accounts. See [Other / Custom](/docs/setup/auth/custom#guests-who-sign-up) and
+[Lifecycle](/docs/setup/auth/backend#lifecycle) for failure and logout handling.
+
+## Permissions by auth mode
+
+Use `session.user`, the account, for stable ownership. Use `session.identity`, the exact issuer and subject, when a policy deliberately distinguishes linked identities. A local-first identity is authenticated by its signing key; it is not an unauthenticated guest.
+
+Claims from your backend can add application requirements, such as a verified role. They cannot replace the account assignment. Define those checks in [Declarative Permissions](/docs/schemas/policies), alongside ownership policies.
+
+## Use it without Jazz
+
+The keys, tokens, recovery phrases and passkey backup live in a self-contained module inside
+`jazz-tools` (re-exported as `jazz-tools/passphrase` and `jazz-tools/passkey-backup`) that doesn't
+depend on the rest of Jazz. Standalone packaging, so other apps can use it directly, is planned
+after alpha.60.

@@ -5,9 +5,11 @@ function App() {
   return (
     <JazzSessionProvider
       config={{
-        appId: "my-app",
-        serverUrl: "wss://your-jazz-server.example.com",
+        // Your backend's Jazz endpoint; the browser names no app.
+        serverUrl: "/jazz",
         initial: "local-first",
+        // Local data, so a guest works offline from its first visit.
+        client: () => import("jazz-tools/local-first"),
       }}
     >
       <YourApp />

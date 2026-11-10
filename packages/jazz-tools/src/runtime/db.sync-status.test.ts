@@ -6,9 +6,9 @@ import { WriteWaitTimeoutError } from "./client.js";
 import type { Db } from "./db.js";
 import type { SyncStatus } from "./sync-status.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
-import { deploy, startLocalJazzServer } from "../testing/index.js";
+import { startLocalJazzServer, startTestJazz } from "../testing/index.js";
 
-const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) });
+const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) }, { migrations: "none" });
 
 /** Resolve with the first status `matches` accepts, now or after a change. */
 function statusWhere(db: Db, matches: (status: SyncStatus) => boolean): Promise<SyncStatus> {
@@ -33,19 +33,16 @@ it("reports the link and pending uploads through a disconnect", async () => {
     policy.notes.allowRead.always();
     policy.notes.allowInsert.always();
   });
-  const server = await startLocalJazzServer({
-    allowLocalFirstAuth: true,
-    inMemory: true,
+  const server = await startTestJazz({
+    app: app,
+    permissions: permissions,
+    coreOptions: {
+      allowLocalFirstAuth: true,
+      inMemory: true,
+    },
   });
   let db: Db | undefined;
   try {
-    await deploy({
-      serverUrl: server.url,
-      appId: server.appId,
-      adminSecret: server.adminSecret,
-      schema: app,
-      permissions,
-    });
     db = await createDb(await localAccountConfig(server.appId, server.url));
     await db.insert(app.notes, { title: "online" }).wait({ tier: "global" });
     expect(await statusWhere(db, (status) => status.synced)).toEqual({

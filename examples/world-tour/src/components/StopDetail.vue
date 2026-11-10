@@ -65,25 +65,25 @@
 
 <script setup lang="ts">
 import { computed, reactive, ref } from "vue";
-import { useAll, useDb } from "jazz-tools/vue";
+import { useAll } from "jazz-tools/vue";
 import { app, type StopStatus, type StopWithVenue } from "../../schema.js";
 import { formatLongDate, fromDateInput, statusLabels, toDateInput } from "../lib/format.js";
 import { renderMarkdown } from "../lib/markdown.js";
-import { textToSave } from "../lib/text-rebase.js";
+import { saveStopEdit, type OpenedTexts } from "../lib/stop-edit.js";
 import { reportWriteError } from "../lib/write-errors.js";
 import Button from "./ui/Button.vue";
 
 const props = defineProps<{ stop: StopWithVenue }>();
 const emit = defineEmits<{ deleted: [] }>();
 
-const db = useDb();
-const { data: notes } = useAll(() => app.stopNotes.where({ stopId: props.stop.id }).limit(1));
+const { data: notes, db } = useAll(() => app.stopNotes.where({ stopId: props.stop.id }).limit(1));
 const note = computed(() => notes.value?.[0] ?? null);
 
 const editing = ref(false);
 const draft = reactive({ date: "", status: "confirmed" as StopStatus, description: "", notes: "" });
-// The texts when editing began, to tell the form's edits from a bandmate's.
-const opened = { description: "", notes: "" };
+// The texts as the form opened them: saving writes the form's texts as edits
+// of these (see saveStopEdit).
+const opened: OpenedTexts = { description: "", notes: "" };
 
 function startEdit() {
   opened.description = props.stop.publicDescription;
@@ -97,30 +97,15 @@ function startEdit() {
   editing.value = true;
 }
 
-// The stop and its private note change together, in one transaction.
 function save() {
-  const { id, bandId, date } = props.stop;
-  const existing = note.value;
   // Keep the show's time of day when only the day changes.
   const day = fromDateInput(draft.date);
-  day.setHours(date.getHours(), date.getMinutes());
-  // A bandmate may have edited the texts while the form was open; keep
-  // their edits rather than saving over them.
-  const description = textToSave(
-    opened.description,
-    draft.description,
-    props.stop.publicDescription,
-  );
-  const body = textToSave(opened.notes, draft.notes, existing?.body ?? "");
-  db.transaction((tx) => {
-    tx.update(app.stops, id, {
-      date: day,
-      status: draft.status,
-      publicDescription: description,
-    });
-    if (existing && body) tx.update(app.stopNotes, existing.id, { body });
-    else if (existing) tx.delete(app.stopNotes, existing.id);
-    else if (body) tx.insert(app.stopNotes, { stopId: id, bandId, body });
+  day.setHours(props.stop.date.getHours(), props.stop.date.getMinutes());
+  saveStopEdit(db, props.stop, note.value, opened, {
+    date: day,
+    status: draft.status,
+    description: draft.description,
+    notes: draft.notes,
   }).catch(reportWriteError);
   editing.value = false;
 }

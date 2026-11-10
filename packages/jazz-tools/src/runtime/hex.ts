@@ -56,3 +56,8 @@ export function parseUuidBytes(text: string): Uint8Array | undefined {
   }
   return bytes;
 }
+
+/** Canonical lowercase `8-4-4-4-12` UUID text for 16 bytes. */
+export function formatUuid(bytes: Uint8Array): string {
+  return formatUuidAt(bytes, 0);
+}

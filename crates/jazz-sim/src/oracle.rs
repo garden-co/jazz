@@ -119,7 +119,7 @@ impl Live {
                     self.updated += updated.len() as u64;
                     self.removed += removed.len() as u64;
                 }
-                SubscriptionEvent::Rejected { reason } => self.rejected = Some(reason),
+                SubscriptionEvent::Rejected { reason, .. } => self.rejected = Some(reason),
                 SubscriptionEvent::Closed => {}
             }
         }

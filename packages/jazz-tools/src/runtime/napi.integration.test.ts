@@ -14,7 +14,7 @@ import type { Db, QueryBuilder, TableProxy } from "./db.js";
 import { translateQuery } from "./query-adapter.js";
 import { loadCompiledSchema, type LoadedSchemaProject } from "../schema-loader.js";
 import { deploy as deployProject } from "../dev/catalogue-project.js";
-import { deploy, startLocalJazzServer, startTestJwtIssuer } from "../testing/index.js";
+import { deploy, startLocalJazzServer } from "../testing/index.js";
 import {
   createPersistentNapiNativeRuntimeAdapter,
   loadNapiModule,
@@ -124,15 +124,18 @@ const TEST_SCHEMA: WasmSchema = {
   },
 };
 
-const publicUnionApp = s.defineApp({
-  todos: s.table(
-    {
-      title: s.string(),
-      done: s.boolean(),
-    },
-    {},
-  ),
-});
+const publicUnionApp = s.defineApp(
+  {
+    todos: s.table(
+      {
+        title: s.string(),
+        done: s.boolean(),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+);
 
 const publicUnionPermissions = s.definePermissions(publicUnionApp, ({ policy }) => {
   policy.todos.allowRead.where({ done: false });
@@ -141,15 +144,18 @@ const publicUnionPermissions = s.definePermissions(publicUnionApp, ({ policy }) 
   policy.todos.allowDelete.always();
 });
 
-const publicUnionBigIntApp = s.defineApp({
-  metrics: s.table(
-    {
-      label: s.string(),
-      value: s.bigint(),
-    },
-    {},
-  ),
-});
+const publicUnionBigIntApp = s.defineApp(
+  {
+    metrics: s.table(
+      {
+        label: s.string(),
+        value: s.bigint(),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+);
 
 const TIMESTAMP_SCHEMA: WasmSchema = {
   projects: {
@@ -754,7 +760,6 @@ describe("NAPI integration", () => {
     let context: {
       asBackend(): Db;
       forSession(session: Session): Db;
-      forRequest(request: Request): Promise<Db>;
       shutdown(): Promise<void>;
     } | null = null;
 
@@ -762,7 +767,7 @@ describe("NAPI integration", () => {
       const { createJazzContext } = await import("../backend/create-jazz-context.js");
 
       const todoServerProject = await loadTodoServerProject();
-      await deploy({
+      const { bundle } = await deploy({
         serverUrl: server.url,
         appId,
         adminSecret,
@@ -774,6 +779,7 @@ describe("NAPI integration", () => {
 
       runtimeData = await createTempRuntimeData("jazz-napi-session-runtime-");
       context = createJazzContext({
+        bundle,
         appId,
         app: { wasmSchema: todoServerSchema },
         permissions: todoServerProject.permissions ?? {},
@@ -1162,21 +1168,16 @@ describe("NAPI integration", () => {
     const memberId = "00000000-0000-4000-8000-000000000001";
     const corporationId = randomUUID();
     const templateId = randomUUID();
-    const jwtIssuer = await startTestJwtIssuer();
     const server = await startLocalJazzServer({
       appId,
       backendSecret,
       adminSecret,
       schema: policyGraphSchema,
       permissions,
-      jwksUrl: jwtIssuer.jwksUrl,
-      jwtIssuer: jwtIssuer.issuer,
-      jwtAudience: jwtIssuer.audience,
     });
     let context: {
       asBackend(): Db;
       forSession(session: Session): Db;
-      forRequest(request: Request): Promise<Db>;
       shutdown(): Promise<void>;
     } | null = null;
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -1191,9 +1192,6 @@ describe("NAPI integration", () => {
         serverUrl: server.url,
         backendSecret,
         adminSecret,
-        jwksUrl: jwtIssuer.jwksUrl,
-        jwtIssuer: jwtIssuer.issuer,
-        jwtAudience: jwtIssuer.audience,
         env: "test",
       });
       await settleAsyncSyncWork();
@@ -1331,7 +1329,6 @@ describe("NAPI integration", () => {
       }
       await settleAsyncSyncWork();
       await server.stop();
-      await jwtIssuer.stop();
     }
   }, 60_000);
 
@@ -1387,11 +1384,9 @@ describe("NAPI integration", () => {
     const memberId = "00000000-0000-4000-8000-000000000001";
     const corporationId = randomUUID();
     const schemaDir = await createPolicyGraphPerfSchemaDir();
-    const jwtIssuer = await startTestJwtIssuer();
     let server: Awaited<ReturnType<typeof startLocalJazzServer>> | null = null;
     let context: {
       asBackend(): Db;
-      forRequest(request: Request): Promise<Db>;
       shutdown(): Promise<void>;
     } | null = null;
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -1404,9 +1399,6 @@ describe("NAPI integration", () => {
         backendSecret,
         adminSecret,
         dataDir,
-        jwksUrl: jwtIssuer.jwksUrl,
-        jwtIssuer: jwtIssuer.issuer,
-        jwtAudience: jwtIssuer.audience,
       });
       await deployProject({
         serverUrl: server.url,
@@ -1422,9 +1414,6 @@ describe("NAPI integration", () => {
         serverUrl: server.url,
         backendSecret,
         adminSecret,
-        jwksUrl: jwtIssuer.jwksUrl,
-        jwtIssuer: jwtIssuer.issuer,
-        jwtAudience: jwtIssuer.audience,
         env: "test",
       });
       await settleAsyncSyncWork();
@@ -1508,9 +1497,6 @@ describe("NAPI integration", () => {
         backendSecret,
         adminSecret,
         dataDir,
-        jwksUrl: jwtIssuer.jwksUrl,
-        jwtIssuer: jwtIssuer.issuer,
-        jwtAudience: jwtIssuer.audience,
       });
       context = createJazzContext({
         appId,
@@ -1520,9 +1506,6 @@ describe("NAPI integration", () => {
         serverUrl: server.url,
         backendSecret,
         adminSecret,
-        jwksUrl: jwtIssuer.jwksUrl,
-        jwtIssuer: jwtIssuer.issuer,
-        jwtAudience: jwtIssuer.audience,
         env: "test",
       });
       await settleAsyncSyncWork();
@@ -1556,7 +1539,6 @@ describe("NAPI integration", () => {
       if (server) {
         await server.stop();
       }
-      await jwtIssuer.stop();
       await rm(schemaDir, { recursive: true, force: true });
       await rm(dataDir, { recursive: true, force: true });
     }
@@ -1605,7 +1587,7 @@ describe("NAPI integration", () => {
           };
 
           type AppSchema = s.Schema<typeof schema>;
-          export const app: s.App<AppSchema> = s.defineApp(schema);
+          export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
         `,
       );
       await writeFile(
@@ -1696,7 +1678,7 @@ describe("NAPI integration", () => {
       const { createJazzContext } = await import("../backend/create-jazz-context.js");
 
       const todoServerProject = await loadTodoServerProject();
-      await deploy({
+      const { bundle } = await deploy({
         serverUrl: server.url,
         appId,
         adminSecret,
@@ -1708,6 +1690,7 @@ describe("NAPI integration", () => {
 
       runtimeData = await createTempRuntimeData("jazz-napi-null-update-runtime-");
       context = createJazzContext({
+        bundle,
         appId,
         app: { wasmSchema: todoServerSchema },
         permissions: todoServerProject.permissions ?? {},
@@ -1785,7 +1768,7 @@ describe("NAPI integration", () => {
     try {
       const { createJazzContext } = await import("../backend/create-jazz-context.js");
 
-      await deploy({
+      const { bundle } = await deploy({
         serverUrl: server.url,
         appId,
         adminSecret,
@@ -1795,6 +1778,7 @@ describe("NAPI integration", () => {
 
       writerRuntimeData = await createTempRuntimeData("jazz-napi-sync-writer-");
       writerContext = createJazzContext({
+        bundle,
         appId,
         app: { wasmSchema: TEST_SCHEMA },
         permissions: {},
@@ -1805,6 +1789,7 @@ describe("NAPI integration", () => {
       });
       readerRuntimeData = await createTempRuntimeData("jazz-napi-sync-reader-");
       readerContext = createJazzContext({
+        bundle,
         appId,
         app: { wasmSchema: TEST_SCHEMA },
         permissions: {},
@@ -1855,6 +1840,7 @@ describe("NAPI integration", () => {
       await cleanupTempRuntimeData(readerRuntimeData);
       readerRuntimeData = await createTempRuntimeData("jazz-napi-sync-reader-reopen-");
       readerContext = createJazzContext({
+        bundle,
         appId,
         app: { wasmSchema: TEST_SCHEMA },
         permissions: {},
