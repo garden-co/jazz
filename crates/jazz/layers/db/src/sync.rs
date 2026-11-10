@@ -9370,28 +9370,9 @@ impl Db {
         if client.transport.is_none() {
             return Ok(());
         }
-        let mut out = std::mem::take(&mut client.outbox);
-        // Commits staged since the last send go ahead of the reads asked
-        // since (and what was queued after them, in order). The server
-        // applies a session's messages in arrival order, so a read sees the
-        // writer's own earlier writes however its ticks are sliced.
-        let first_read = out
-            .iter()
-            .position(|m| matches!(m, SyncMessage::Read { .. }))
-            .unwrap_or(out.len());
-        let reads = out.split_off(first_read);
-        let wanted: Vec<ChunkRequest> = std::mem::take(&mut client.wanted)
-            .into_iter()
-            .filter(|r| !client.requested.contains(r) && !client.unavailable.contains(r))
-            .collect();
-        client.requested.extend(wanted.iter().cloned());
-        let spans = inner.chunks.take_spans();
-        let pulls = inner.pulls(wanted, &spans)?;
-        for batch in pulls.chunks(64) {
-            out.push(SyncMessage::ChunkRequests {
-                pulls: batch.to_vec(),
-            });
-        }
+        // What reads the store runs first, before anything is taken off
+        // the client's queues: a fault leaves them as they were
+        // ([`crate::pages`]).
         // A store that follows an authority already uploads to a new link
         // only once its `Welcome` showed the same authority: one whose store
         // was recreated, or another app's, would otherwise take commits of
@@ -9415,10 +9396,57 @@ impl Db {
         // nodes must be fetched first waits, and so do those after it.
         let mut pushes = Vec::with_capacity(commits.len());
         for commit in &commits {
-            match inner.pushes_for(commit)? {
-                Some(push) => pushes.push(push),
-                None => break,
+            match inner.pushes_for(commit) {
+                Ok(Some(push)) => pushes.push(push),
+                Ok(None) => break,
+                Err(error) => {
+                    let client = inner.client.as_mut().expect("client");
+                    commits.append(&mut client.unsent);
+                    client.unsent = commits;
+                    return Err(error);
+                }
             }
+        }
+        let client = inner.client.as_ref().expect("client");
+        let wanted: Vec<ChunkRequest> = client
+            .wanted
+            .iter()
+            .filter(|r| !client.requested.contains(r) && !client.unavailable.contains(r))
+            .cloned()
+            .collect();
+        let spans = inner.chunks.take_spans();
+        let pulls = match inner.pulls(wanted.clone(), &spans) {
+            Ok(pulls) => pulls,
+            Err(error) => {
+                inner.chunks.restore_spans(spans);
+                let client = inner.client.as_mut().expect("client");
+                commits.append(&mut client.unsent);
+                client.unsent = commits;
+                return Err(error);
+            }
+        };
+        let client = inner.client.as_mut().expect("client");
+        client.wanted.clear();
+        // Asked for now, but for what the pull found no tree for.
+        client.requested.extend(
+            wanted
+                .into_iter()
+                .filter(|request| !client.unavailable.contains(request)),
+        );
+        let mut out = std::mem::take(&mut client.outbox);
+        // Commits staged since the last send go ahead of the reads asked
+        // since (and what was queued after them, in order). The server
+        // applies a session's messages in arrival order, so a read sees the
+        // writer's own earlier writes however its ticks are sliced.
+        let first_read = out
+            .iter()
+            .position(|m| matches!(m, SyncMessage::Read { .. }))
+            .unwrap_or(out.len());
+        let reads = out.split_off(first_read);
+        for batch in pulls.chunks(64) {
+            out.push(SyncMessage::ChunkRequests {
+                pulls: batch.to_vec(),
+            });
         }
         let waiting = commits.split_off(pushes.len());
         let trusted = inner.identity.author == AuthorSubject::SYSTEM;
@@ -10786,6 +10814,9 @@ impl Db {
                 held.push_back(message);
                 continue;
             }
+            // What the ingress limit counted for this message, undone if
+            // it faults and is served again ([`crate::pages`]).
+            let ingress = self.inner.borrow().sessions[index].ingress;
             if let SyncMessage::PushChunks { nodes } = &message {
                 let bytes: usize = nodes.iter().map(|node| node.bytes.len()).sum();
                 let mut inner = self.inner.borrow_mut();
@@ -10858,7 +10889,9 @@ impl Db {
                 (Err(error), _) if crate::pages::is_fault(&error) => {
                     held.push_back(again.or(fetch).expect("a copy"));
                     held.extend(inbound);
-                    self.inner.borrow_mut().sessions[index].backlog = held;
+                    let session = &mut self.inner.borrow_mut().sessions[index];
+                    session.ingress = ingress;
+                    session.backlog = held;
                     return Err(error);
                 }
                 (Err(error), _)
@@ -13119,6 +13152,13 @@ impl Db {
                             expires,
                             &author,
                         );
+                        // A fault is not a failed node: the push is
+                        // served again once the page is in ([`crate::pages`]).
+                        if let Err(error) = &received
+                            && crate::pages::is_fault(error)
+                        {
+                            return received;
+                        }
                         if relay && received.is_ok() {
                             crate::large::mark_unpushed(
                                 &inner.conn,

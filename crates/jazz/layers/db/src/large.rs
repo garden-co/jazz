@@ -1008,6 +1008,15 @@ impl Chunks {
         std::mem::take(&mut self.state.lock().expect("chunk cache").spans)
     }
 
+    /// Put back spans [`Self::take_spans`] took for a pull that did not go
+    /// out (it faulted, [`crate::pages`]).
+    pub(crate) fn restore_spans(&self, spans: HashMap<[u8; 32], std::ops::Range<u64>>) {
+        let mut state = self.state.lock().expect("chunk cache");
+        for (root, span) in spans {
+            state.note_span(root, span);
+        }
+    }
+
     /// [`Self::run`] for a read of `value`'s logical bytes `range`: when
     /// it waits on absent nodes, the pull for them asks for the whole
     /// range at once.
