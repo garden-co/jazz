@@ -534,6 +534,10 @@ struct Inner {
     /// Errors the next ticks fail with, for tests of a tick driver.
     #[cfg(any(test, feature = "testing"))]
     failing_ticks: VecDeque<ErrorCode>,
+    /// Staged writes replayed into a transaction overlay so far: what tests
+    /// of staging cost count.
+    #[cfg(any(test, feature = "testing"))]
+    overlay_replays: usize,
     /// Large-value chunks: the cache the collation and decoders read.
     chunks: Arc<crate::large::Chunks>,
     /// Nodes a large-value edit consolidated, stored when the edited cell
@@ -1621,6 +1625,8 @@ impl Db {
                 kept_variants: BTreeMap::new(),
                 #[cfg(any(test, feature = "testing"))]
                 failing_ticks: VecDeque::new(),
+                #[cfg(any(test, feature = "testing"))]
+                overlay_replays: 0,
                 chunks,
                 pending_nodes: Vec::new(),
                 merging: false,
@@ -1946,6 +1952,13 @@ impl Db {
     }
 
     pub fn set_identity_claims(&self, identity: AuthorSubject, claims: BTreeMap<String, Value>) {
+        // A peek: a host repeats an identity's claims before each of its
+        // writes, and the store gate would undo an open transaction's
+        // cached overlay, so its next stage would replay every write it
+        // staged so far.
+        if self.inner.staging().claims.get(&identity) == Some(&claims) {
+            return;
+        }
         let mut inner = self.inner();
         inner.claims.insert(identity, claims);
         inner.refresh_identity(identity);
@@ -5383,7 +5396,7 @@ impl Inner {
     /// unit could have taken away is checked again against the unit's
     /// whole post-state (see [`Inner::post_state_pass`]).
     pub(crate) fn finish_checks(&self, seq: u64) -> Result<(), Error> {
-        self.finish_checks_after(seq, BTreeMap::new())
+        self.finish_checks_after(seq, Arc::default())
     }
 
     /// [`Inner::finish_checks`] for a unit that continues writes already
@@ -5392,25 +5405,28 @@ impl Inner {
     pub(crate) fn finish_checks_after(
         &self,
         seq: u64,
-        grounded: BTreeMap<String, BTreeSet<[u8; 16]>>,
+        grounded: Arc<GroundedRows>,
     ) -> Result<(), Error> {
         let pending = self.deferred.borrow_mut().take().unwrap_or_default();
         let mut grounded = grounded;
         for (table, rows) in std::mem::take(&mut *self.trusted_rows.borrow_mut()) {
-            grounded.entry(table).or_default().extend(rows);
+            Arc::make_mut(&mut grounded)
+                .entry(table)
+                .or_default()
+                .extend(rows);
         }
         self.ground_after(pending, seq, grounded)
     }
 
     fn ground(&self, pending: Vec<DeferredCheck>, seq: u64) -> Result<(), Error> {
-        self.ground_after(pending, seq, BTreeMap::new())
+        self.ground_after(pending, seq, Arc::default())
     }
 
     fn ground_after(
         &self,
         mut pending: Vec<DeferredCheck>,
         seq: u64,
-        mut grounded: BTreeMap<String, BTreeSet<[u8; 16]>>,
+        mut grounded: Arc<GroundedRows>,
     ) -> Result<(), Error> {
         // Each check runs under the schema its write was staged with.
         let mut live = Vec::with_capacity(pending.len());
@@ -5438,7 +5454,7 @@ impl Inner {
                 seq: self.own_pos(seq.saturating_sub(1)),
                 own: self.own_rank(seq),
                 extra: Vec::new(),
-                overlay: Some(CutOverlay::Grounded(Arc::new(grounded.clone()))),
+                overlay: Some(CutOverlay::Grounded(grounded.clone())),
             };
             let mut passed = Vec::new();
             let mut failed = Vec::new();
@@ -5455,16 +5471,23 @@ impl Inner {
             if !failed.is_empty() && passed.is_empty() {
                 return Err(write_check_denied(&failed[0]));
             }
+            drop(cut);
+            // Only a further round reads what this one grounded.
+            if failed.is_empty() {
+                rounds.extend(
+                    passed
+                        .into_iter()
+                        .map(|(check, tables)| (check, round, tables)),
+                );
+                break;
+            }
             for (check, tables) in passed {
                 let stored = check.schema.table(&check.table)?.stored.clone();
-                grounded
+                Arc::make_mut(&mut grounded)
                     .entry(stored)
                     .or_default()
                     .insert(*check.row.0.as_bytes());
                 rounds.push((check, round, tables));
-            }
-            if failed.is_empty() {
-                break;
             }
             pending = failed;
             round += 1;
@@ -8306,6 +8329,9 @@ struct Overlay {
     mark: usize,
 }
 
+/// Rows a unit's checks may take as evidence, by stored table.
+pub(crate) type GroundedRows = BTreeMap<String, BTreeSet<[u8; 16]>>;
+
 /// The store behind its one gate: every borrow first undoes a transaction
 /// handle's overlay, so nothing but that handle's next stage or read sees
 /// it.
@@ -8341,8 +8367,10 @@ struct Batch {
     kind: BatchKind,
     ops: Vec<(Rc<Schema>, StagedOp)>,
     /// The rows `ops` write, by stored table: a later staged write's
-    /// evidence (see [`Db::in_overlay`]).
-    rows: BTreeMap<String, BTreeSet<[u8; 16]>>,
+    /// evidence (see [`Db::in_overlay`]). Shared with that write's check
+    /// rather than copied, so a stage costs the same however many writes
+    /// came before it.
+    rows: Arc<GroundedRows>,
     /// What the batch's partial large-value updates built: descriptors
     /// derived from stored trees and the nodes consolidations prepared,
     /// trusted and stored whenever the staged writes apply.
@@ -8868,7 +8896,7 @@ impl Db {
             Batch {
                 kind,
                 ops: Vec::new(),
-                rows: BTreeMap::new(),
+                rows: Arc::default(),
                 edits: LargeEdits::default(),
                 uploads: Vec::new(),
             },
@@ -8876,9 +8904,22 @@ impl Db {
         Ok(())
     }
 
-    /// A fresh row id from this database's id source.
+    /// A fresh row id from this database's id source. Drawing one leaves
+    /// an open transaction's overlay applied: a host draws one per staged
+    /// insert, and undoing the overlay would make each stage replay the
+    /// batch.
     pub fn next_row_id(&self) -> RowUuid {
-        self.inner().ids.next_row_id()
+        self.inner.staging().ids.next_row_id()
+    }
+
+    /// How many staged writes have been replayed into transaction overlays:
+    /// staging a batch write by write replays each write at most once
+    /// unless something else used the store in between.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn overlay_replays_for_test(&self) -> usize {
+        // A peek: the store gate would undo the cached overlay.
+        self.inner.staging().overlay_replays
     }
 
     /// The open transaction `id`, mergeable or serializable.
@@ -9156,13 +9197,17 @@ impl Db {
                 let mut rows = batch.rows.clone();
                 if let Some(row) = op.row() {
                     let stored = &inner.schema.table(op.table())?.stored;
-                    if let Some(set) = rows.get_mut(stored) {
+                    if rows
+                        .get(stored)
+                        .is_some_and(|set| set.contains(row.0.as_bytes()))
+                        && let Some(set) = Arc::make_mut(&mut rows).get_mut(stored)
+                    {
                         set.remove(row.0.as_bytes());
                     }
                 }
                 rows
             }
-            None => BTreeMap::new(),
+            None => Arc::default(),
         };
         let live = inner
             .overlay
@@ -9185,6 +9230,10 @@ impl Db {
         if let Some(ops) = ops {
             inner.settle_overlay();
             begin_savepoint(&inner.conn, "overlay")?;
+            #[cfg(any(test, feature = "testing"))]
+            {
+                inner.overlay_replays += ops.len();
+            }
             let mark = inner.changed.borrow().len();
             if let Err(error) = inner.apply_all_checking(&ops, ops.len(), own) {
                 inner.clear_derived();
@@ -9302,6 +9351,10 @@ impl Db {
         };
         let own = inner.seq + 1;
         begin_savepoint(&inner.conn, "overlay")?;
+        #[cfg(any(test, feature = "testing"))]
+        {
+            inner.overlay_replays += ops.len();
+        }
         let mark = inner.changed.borrow().len();
         let result = inner
             .apply_with_edits(&ops, &edits, ops.len(), own)
@@ -9331,8 +9384,7 @@ impl Db {
         };
         let batch = inner.batches.get_mut(&id).expect("validated");
         if let Some((table, row)) = stored {
-            batch
-                .rows
+            Arc::make_mut(&mut batch.rows)
                 .entry(table)
                 .or_default()
                 .insert(*row.0.as_bytes());
