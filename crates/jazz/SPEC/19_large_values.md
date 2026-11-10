@@ -305,16 +305,51 @@ hold one value as different cells, so a policy that compares two
 large-capable columns can decide a row over 64 KiB differently on each.
 Values up to 64 KiB, the common case, have none of these limits.
 
+An ordinary authenticated SELECT policy has one bounded exception: `=` and
+`!=` against a longer literal compare verified logical content in a plain root
+query over unbranched tables. Boolean policy combinations and scalar
+inheritance keep their normal
+depth and identity semantics. Related inputs require a mandatory UUID equality
+against the row id or a leading declared index. NULL correlation keys are
+explicitly refused rather than interpreted as missing dependencies. Relation policies, array
+inheritance, joins, includes, partial projections, aggregates and history query shapes are refused
+by this path. Branched roots/dependencies and JSON columns are outside this
+text/bytea extension. Long-literal
+`IN` and ordinary query-filter comparisons remain
+unsupported; this is not a general content index or an accepted-read capability.
+
+The operation captures its dependency inputs and evaluates the real policy
+under the same governing schema, authenticated reader and main-connection SQLite snapshot.
+Policy descriptors are captured from that owning snapshot and charged as metadata;
+projected chunked values also resolve their descriptors from that snapshot.
+node bytes are then verified against those captured content hashes. A separate
+chunk reader cannot substitute a newer descriptor after epoch-ID reuse. Missing
+nodes still refuse rather than turn into negative evidence.
+It visits only query-selected roots and their indexed policy dependencies,
+before applying pagination. Preparation has cumulative limits of 512 row visits,
+8 MiB of row metadata, 1 MiB of literals, 8 MiB of logical content, 16 MiB of
+encoded chunks, 1,024 chunk requests, 65,536 preparation steps (policy visits,
+metadata fields and comparison input/cell visits), and 1,048,576 SQLite
+read-only instructions. At most 4,096 scratch answers are inserted with
+interruption disabled; the remaining read budget resumes for final evaluation. Duplicate
+visits and negative predicates consume the same budgets. Missing, corrupt or
+unknown logical values and any overflow refuse the whole operation; a limit
+does not truncate evidence or produce a partial grant. Temporary comparison
+answers are private to that operation and are rolled back on success or failure.
+These limits bound this additional policy work; they are not a new universal
+allocation bound for ordinary projection, SQLite or the host chunk store.
+
 These are limits, not a design commitment. A column flag that consolidates
 every write to a tail-free tree (making equality on that column exact, at the
 cost of cheap edits) is the planned escape hatch; content `contains` would
 need a write-time index (SQLite FTS5 with the trigram tokenizer runs on every
 target, Durable Objects included).
 
-The only Rust-side query work on chunked values is reading them: whole
-projections, partial selections (19.12), splices and deltas. Every query,
-trigger and schema object uses only SQLite built-ins and runs on any SQLite,
-Durable Objects included, and reads never write.
+Apart from the bounded SELECT-policy exception, Rust-side query work on chunked
+values is reading them: whole projections, partial selections (19.12), splices
+and deltas. Every query, trigger and schema object uses SQLite built-ins and
+runs on any SQLite, Durable Objects included. The exception uses connection-local
+TEMP answers; it changes no durable value, table encoding or storage format.
 
 `INV-CONTENT-1`: every read, edit and sync path goes through the one
 implementation in `jazz-db`, and every read returns the materialized logical
