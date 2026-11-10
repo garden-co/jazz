@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 
-use crate::ids::{AuthorSubject, RowUuid};
+use crate::ids::{AuthorSubject, GlobalPhysicalColumnId, GlobalPhysicalTableId, RowUuid};
 use crate::protocol::{
     BranchSelector, BranchViewBase, CurrentWriteSchema, LensOp, MigrationLens, ReadViewSourceSpec,
     SchemaVersion,
@@ -22,48 +22,59 @@ use rusqlite::{Connection, OptionalExtension, params_from_iter};
 
 pub use crate::options::{
     DbConfig, DbIdentity, DeleteOptions, Error, ErrorCode, ExactWriteTarget, InsertOptions,
-    ReadOpts, ReadTier, Reason, RestoreOptions, RowIdSource, SeededRowIdSource, UpdateOptions,
-    UpsertOptions, WriteIdentity, WriteTarget, block_on,
+    Migrations, ReadOpts, ReadTier, Reason, RestoreOptions, RowIdSource, SeededRowIdSource,
+    UpdateOptions, UpsertOptions, WriteIdentity, WriteTarget, block_on,
 };
 
-use crate::compile::{Compiled, Ctx, Cut, Session, View};
+use crate::compile::{Compiled, Ctx, Cut, Overlay as CutOverlay, Session, View};
 use crate::tools::{CmpOp, PolicyExpr};
 
 #[path = "candidates.rs"]
 mod candidates;
-#[path = "catalogue.rs"]
-mod catalogue;
-pub use catalogue::{CatalogueHeadV1, CatalogueSchemaV1};
-#[path = "catalogue_policy.rs"]
-mod catalogue_policy;
-pub use catalogue_policy::PolicyDescriptorV1;
 #[path = "fanout.rs"]
 mod fanout;
+#[path = "read_policy_literals.rs"]
+mod read_policy_literals;
 pub use fanout::FanoutStats;
 #[path = "large_ops.rs"]
 mod large_ops;
+pub(crate) use large_ops::byte_splices;
 pub use large_ops::{
-    JsonSetEdit, LargeValueStagingPolicy, LargeValueUpdate, LargeValueUpdatePage,
-    LargeValueUpdateSplice, StagedStreamingValue, StreamingMutationKind, StreamingValueUpload,
+    JsonSetEdit, LargeValueDeltaSplice, LargeValueStagingPolicy, LargeValueUpdate,
+    LargeValueUpdatePage, LargeValueUpdateSplice, StreamingMutationKind, StreamingValueUpload,
 };
 #[path = "sync.rs"]
 pub(crate) mod sync;
+
+#[path = "shard.rs"]
+pub mod shard;
 #[path = "transaction_reads.rs"]
 mod transaction_reads;
 pub use crate::names::LensEffects;
 pub use crate::options::{REMOTE_LINK_ATTEMPT_WINDOW, TickScheduler, TickUrgency};
 use crate::result_tree::{ResultNode, ResultRelation, ResultTree};
 pub use crate::values::CurrentRow;
+#[path = "accepted_read.rs"]
+mod accepted_read;
+#[path = "accepted_transactions.rs"]
+mod accepted_transactions;
 use crate::values::{
-    AuthorKey, Schema, Sql, Table, author_key, begin_savepoint, end_savepoint, from_sql,
-    in_savepoint, quote, storage, to_sql, unsupported,
+    AuthorKey, STATE_AS_SENT, STATE_DELETED, STATE_NO_CONTENT, Schema, Sql, Table, author_key,
+    begin_savepoint, cell_from_sql, column_from_sql, end_savepoint, in_savepoint, quote, storage,
+    to_sql, unsupported,
+};
+pub use accepted_read::{
+    AcceptedRead, AcceptedReadScope, AcceptedRowEvidence, AcceptedVersion, EncodedAcceptedRead,
 };
 pub use sync::{
-    BuiltOn, Cell as SyncCell, CorpusReader, FirstLoad, FrameJoiner, Image, LOCAL_BASE,
-    NON_DURABLE_BASE, RelationSnapshot, RemoteLinkHint, SYNC_ENCODING_PREFIX, SerializedReadResult,
-    SubscriberId, SyncMessage, Transport, TransportError, Upstream, WireBase, WireError, WireKind,
-    WireOp, WireTarget, WireTransport, WireTransportAdapter, WriteConflict, decode_message, duplex,
-    encode_frames, encode_message, validate_frame_batch_for_corpus,
+    ACCEPTED, AccessProof, Acting, BuiltOn, CatalogueCoverage, Cell as SyncCell, CellDelta,
+    CorpusReader, FirstLoad, FrameJoiner, Image, LocalEvidenceProvenance, LocalObservation,
+    LocalObservationCut, LocalSubmissionExport, LocalSubmissionRoute, MAX_SEQ, Outcome, PENDING,
+    Pos, ReadSpan, RejectedTransaction, RelationSnapshot, RemoteLinkHint, SerializedReadResult,
+    SubscriberId, SyncMessage, Transport, TransportError, TxName, Upstream, WireBase, WireChunk,
+    WireChunkRef, WireDelta, WireError, WireKind, WireOp, WirePull, WireTarget, WireTransport,
+    WireTransportAdapter, WireWrite, WriteConflict, decode_message, duplex, encode_frames,
+    validate_frame_batch_for_corpus,
 };
 
 /// Shape identity: equal for bindings of one query against one schema.
@@ -101,6 +112,44 @@ pub struct PreparedQuery {
 }
 
 impl PreparedQuery {
+    /// An unrelated requested subject does not replace the executing author's registry.
+    fn fixed_claims_for(&self, author: AuthorSubject) -> Option<&BTreeMap<String, Value>> {
+        self.request_claims
+            .as_ref()
+            .and_then(|(requested, claims)| (*requested == author).then_some(claims))
+    }
+
+    /// The same query without its window (limit and offset).
+    pub(crate) fn unwindowed(&self) -> PreparedQuery {
+        let mut query = self.query.clone();
+        query.limit = None;
+        query.offset = 0;
+        let shape = jazz_types::sha256::hash(format!("{:?}unwindowed", self.shape.0).as_bytes());
+        PreparedQuery {
+            query,
+            shape: Shape(short(shape)),
+            ..self.clone()
+        }
+    }
+
+    /// The same query narrowed to rows `ids`.
+    pub(crate) fn narrowed(&self, ids: &[RowUuid]) -> PreparedQuery {
+        use crate::query::{Operand, Predicate};
+        let mut query = self.query.clone();
+        query.filters.push(Predicate::In(
+            Operand::Column("id".to_owned()),
+            ids.iter()
+                .map(|id| Operand::Literal(Value::Uuid(id.0)))
+                .collect(),
+        ));
+        let shape = jazz_types::sha256::hash(format!("{query:?}").as_bytes());
+        PreparedQuery {
+            query,
+            shape: Shape(short(shape)),
+            ..self.clone()
+        }
+    }
+
     pub fn shape(&self) -> &Shape {
         &self.shape
     }
@@ -119,7 +168,7 @@ impl PreparedQuery {
         author: AuthorSubject,
         claims: BTreeMap<String, Value>,
     ) -> Self {
-        let mut hasher = blake3::Hasher::new();
+        let mut hasher = jazz_types::sha256::Hasher::new();
         hasher.update(&self.binding_id.0);
         hasher.update(format!("{author:?}{claims:?}").as_bytes());
         self.binding_id = Binding(short(hasher.finalize()));
@@ -128,7 +177,7 @@ impl PreparedQuery {
     }
 }
 
-fn short(hash: blake3::Hash) -> [u8; 16] {
+fn short(hash: jazz_types::sha256::Hash) -> [u8; 16] {
     hash.as_bytes()[..16].try_into().expect("16 bytes")
 }
 
@@ -136,7 +185,10 @@ fn short(hash: blake3::Hash) -> [u8; 16] {
 #[derive(Clone, Debug)]
 pub struct WriteHandle {
     row: RowUuid,
-    seq: u64,
+    /// Where the row version this write left is.
+    seq: Pos,
+    /// The local seq of the commit that wrote it.
+    tx: u64,
 }
 
 impl WriteHandle {
@@ -146,6 +198,11 @@ impl WriteHandle {
 
     /// The commit sequence number of the row version this write left.
     pub fn mergeable_tx_id(&self) -> u64 {
+        self.tx
+    }
+
+    /// The position of the row version this write left.
+    pub fn version(&self) -> Pos {
         self.seq
     }
 
@@ -180,6 +237,10 @@ pub struct SubscriptionOutputRow {
     pub row: CurrentRow,
     pub previous_index: Option<usize>,
     pub index: usize,
+    /// For an updated row, each [`ReadOpts::splices`] column's change from
+    /// the row's previous result, when both versions are still held and
+    /// readable. A column left out changed in a way the reader takes whole.
+    pub splices: Vec<(String, Vec<LargeValueDeltaSplice>)>,
 }
 
 impl std::ops::Deref for SubscriptionOutputRow {
@@ -223,20 +284,62 @@ pub enum SubscriptionEvent {
 }
 
 /// What a read observes: deletions and the branch view.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 struct ReadSpec {
+    // Bound by the executing Db, never copied from PreparedQuery.
+    governance: Governance,
     include_deleted: bool,
     /// A replica's `ReadTier::Remote` read: its pending local versions
-    /// (seqs from `LOCAL_BASE` up) are left out, and a row they changed
+    /// (at `_clock >= 1<<52`) are left out, and a row they changed
     /// reads as its settled version, as the server lists it. Unlike a
     /// [`ReadSpec::cut`] it stays live.
     settled_only: bool,
     view: Option<View>,
     cut: Option<Cut>,
+    /// The upstream position the read observes (see
+    /// [`Inner::visible_read`]).
+    position: Position,
+    /// Columns whose changes updated rows carry as splices
+    /// ([`ReadOpts::splices`]).
+    splices: Vec<String>,
+}
+
+/// The upstream position a replica's read observes. Its upstream settles
+/// each read apart (SPEC 8 §8.4), so its store can hold accepted versions
+/// past the position a result is settled through; a read naming a position
+/// reads as of it while the store does, plus this replica's own writes.
+#[derive(Clone, Debug, Default, PartialEq)]
+enum Position {
+    /// The store's current state: an authority's read, a session's read
+    /// served by this store, an internal one.
+    #[default]
+    Current,
+    /// What the replica knows its upstream through (`known`): its own
+    /// one-shot reads.
+    Known,
+    /// A one-shot read its upstream answered: as far as that answer's
+    /// settle (or the connection's, when further), so the rows it fetched
+    /// show even before the connection's position reaches them.
+    At(sync::Pos),
+    /// A live result's: the upstream read (by its key) it is a result of,
+    /// as far as its own settle (or the connection's, when further).
+    Remote(String),
 }
 
 impl ReadSpec {
-    fn of(opts: &ReadOpts, inner: &Inner) -> Result<Self, Error> {
+    fn new(governance: Governance) -> Self {
+        Self {
+            governance,
+            include_deleted: false,
+            settled_only: false,
+            view: None,
+            cut: None,
+            position: Position::Current,
+            splices: Vec::new(),
+        }
+    }
+
+    fn of(opts: &ReadOpts, inner: &Inner, governance: Governance) -> Result<Self, Error> {
         let mut cut = None;
         let view = match &opts.read_view.source {
             ReadViewSourceSpec::Current => None,
@@ -260,11 +363,21 @@ impl ReadSpec {
                 None
             }
         };
+        if opts.tier == ReadTier::Remote {
+            inner.check_not_stranded()?;
+        }
         Ok(Self {
+            governance,
             include_deleted: opts.read_view.include_deleted,
             settled_only: inner.client.is_some() && opts.tier == ReadTier::Remote,
             view,
             cut,
+            position: if inner.client.is_some() {
+                Position::Known
+            } else {
+                Position::Current
+            },
+            splices: opts.splices.clone(),
         })
     }
 
@@ -289,6 +402,7 @@ pub struct SubscriptionStream {
         Query,
         BTreeMap<String, Value>,
         bool,
+        ReadViewSourceSpec,
         sync::RemoteReach,
     )>,
 }
@@ -296,8 +410,13 @@ pub struct SubscriptionStream {
 impl Drop for SubscriptionStream {
     fn drop(&mut self) {
         self.dropped.set(self.dropped.get() + 1);
-        if let Some((inner, query, binding, include_deleted, reach)) = self.remote.take() {
-            Db { inner, view: None }.detach_remote(&query, &binding, include_deleted, reach);
+        if let Some((inner, query, binding, include_deleted, view, reach)) = self.remote.take() {
+            Db {
+                inner,
+                view: None,
+                governance: Governance::CurrentOwner,
+            }
+            .detach_remote(&query, &binding, include_deleted, &view, reach);
         }
     }
 }
@@ -377,11 +496,14 @@ pub struct SchemaPublication {
 
 struct Inner {
     conn: Connection,
-    /// One-way, owner-wide fence for new application mutations during close.
-    mutation_admission_closed: bool,
     retired: bool,
     scheduler: Option<Rc<dyn TickScheduler>>,
-    read_deadlines: Vec<Weak<web_time::Instant>>,
+    read_deadlines: Vec<Weak<sync::ReadDeadline>>,
+    /// One-way, owner-wide fence for new application mutations during close.
+    mutation_admission_closed: bool,
+    /// Errors the next ticks fail with, for tests of a tick driver.
+    #[cfg(any(test, feature = "testing"))]
+    failing_ticks: VecDeque<ErrorCode>,
     /// Large-value chunks: the cache the collation and decoders read.
     chunks: Arc<crate::large::Chunks>,
     /// Nodes a large-value edit consolidated, stored when the edited cell
@@ -397,12 +519,11 @@ struct Inner {
     /// built on (SPEC 4 §4.6), by (stored table, row, branch key): a text
     /// merge reads its base from it. Empty otherwise.
     merge_bases: HashMap<(String, RowUuid, Vec<u8>), sync::Built>,
-    /// The edits back to the values as sent the upload's text writes made
-    /// (see [`crate::text_merge::encode_in`]), by row version, stored column
-    /// first; empty for a write left as sent.
-    text_in: RefCell<
-        BTreeMap<(String, RowUuid, Vec<u8>), BTreeMap<String, Vec<crate::text_merge::Edit>>>,
-    >,
+    /// The values as sent of the upload's text writes, by row version and
+    /// stored column: for a write its merge changed, the value and its
+    /// bound cell (kept by [`Inner::record_as_sent`]); `None` for one left
+    /// as sent.
+    as_sent: RefCell<AsSent>,
     /// A transaction handle's staged writes left applied between its
     /// stages (see [`Db::in_overlay`]); undone by [`Store`] before any
     /// other use of the store.
@@ -410,11 +531,21 @@ struct Inner {
     /// Descriptors this store's own edit derived for the write in flight:
     /// trusted as built, so binding them re-validates nothing.
     derived: Vec<jazz_types::large_values::LargeValueRef>,
+    /// What the session whose commit is being applied holds (SPEC 19.4):
+    /// set while a synced commit applies, `None` for local writes.
+    pub(crate) possession: Option<crate::large::Possession>,
     /// Limits on local streaming uploads and on pushed nodes awaiting
     /// their commit.
     staging: LargeValueStagingPolicy,
     /// Dropped uploads queue cleanup without recursively borrowing the owner.
     upload_cleanup: Rc<RefCell<Vec<[u8; 32]>>>,
+    /// `conn.total_changes()` after the last large-value reclaim pass that
+    /// committed and left nothing queued: until a row changes again (a
+    /// trigger's change counts), a pass would find nothing. `None` runs the
+    /// next pass, as an opened store does, for work a crash left queued.
+    reclaimed_at: Option<u64>,
+    /// Large-value reclaim passes run (diagnostics).
+    reclaim_passes: u64,
     /// The staging ingress window: (start ms, encoded bytes admitted).
     ingress: RefCell<(u64, u64)>,
     /// The schema the current operation runs under: the owner's, or the
@@ -427,29 +558,62 @@ struct Inner {
     /// The stored tables: the union of every admitted schema, keyed and
     /// named by stored names.
     physical: Schema,
+    /// The current schema named by stored names, which replicated writes
+    /// apply under ([`Schema::stored_view`]), keyed by the owner it was
+    /// built from and how many stored columns there were.
+    stored_view: RefCell<Option<(*const Schema, usize, Rc<Schema>)>>,
     /// Admitted structural schemas with their version ids (hashing a
     /// whole schema is too slow to repeat per session per tick).
     admitted: Vec<(crate::ids::SchemaVersionId, JazzSchema)>,
     /// Where each admitted version stores its tables and columns.
     names: crate::names::Names,
     views: BTreeMap<SchemaViewId, JazzSchema>,
+    /// Published bundles sessions are pinned to, resolved: the write
+    /// version each selects and the schema its policies govern by.
+    bundles: HashMap<crate::catalogue::BundleId, (crate::ids::SchemaVersionId, Rc<Schema>)>,
+    /// Views governed by a bundle's policies (see `Inner::governed_view`),
+    /// by bundle, with the view each was built from.
+    bundle_views: RefCell<HashMap<crate::catalogue::BundleId, (Rc<Schema>, Rc<Schema>)>>,
     /// Open transaction batches, by id.
     batches: HashMap<OpenTransactionId, Batch>,
     identity: DbIdentity,
+    /// The node SYSTEM provenance names ([`crate::options::DbConfig::system_node`]).
+    system_node: crate::ids::NodeUuid,
     /// Provenance for the write being applied (set by `apply_as`).
     writer: Option<Stamp>,
     /// The commit seq and time of the last local stamp: writes of one commit
     /// share a time, and later commits get strictly later ones, so
     /// `$createdAt` orders this node's writes even within one millisecond.
     last_stamp: (u64, i64),
+    /// The newest commit HLC this store gave or saw (see
+    /// [`Inner::next_hlc`]). Apart from `last_stamp`: a clock seen from
+    /// another writer moves no `$createdAt`/`$updatedAt` this store stamps.
+    hlc_last: u64,
+    /// The order of each of this store's own commits it knows unsettled
+    /// (on a relay, of each session commit it carries too), by local seq:
+    /// its HLC is where the commit's versions are ([`Pos::pending`]), its
+    /// writer (node, tx) what history keeps them under (`_writer`).
+    pub(crate) own_order: HashMap<u64, sync::Order>,
+    /// A wall clock tests set (see `Db::set_clock_for_test`).
+    clock_for_test: Option<i64>,
     /// Interned author codes (see [`Inner::author_code`]), cached both ways.
     authors: RefCell<AuthorCodes>,
+    /// By stored table and whether into its history: the columns the last
+    /// image stored there had, and the insert that stores them. A sync
+    /// batch stores thousands of images of a few tables.
+    image_inserts: RefCell<HashMap<(String, bool), (Vec<String>, String)>>,
+    /// While a replica stores a message's images: their rows' current
+    /// images, read at once (see `Inner::begin_current_batch`).
+    current_batch: RefCell<Option<HashMap<(String, RowUuid, Vec<u8>), Option<sync::Image>>>>,
     ids: Box<dyn RowIdSource>,
+    /// The newest commit seq handed out: the authority's seq, or on a
+    /// replica its own commit counter (its commits' tx).
     seq: u64,
-    /// `seq` jumped to a replica's local base (`to`) from `from` without
-    /// handing either out: until a commit takes a seq, `from` is the high
-    /// water (see [`Db::seq_high_water`]).
-    base_jump: Option<(u64, u64)>,
+    /// The kind of this store's own versions: [`sync::PENDING`] on a
+    /// replica, [`sync::ACCEPTED`] (0) until it becomes one.
+    pub(crate) me: i64,
+    /// Its clock and holds as a shard ([`shard`]); inert unsharded.
+    pub(crate) shard: shard::ShardState,
     pub(crate) claims: HashMap<AuthorSubject, BTreeMap<String, Value>>,
     /// Live subscription groups and their invalidation index.
     fan: fanout::Fanout,
@@ -468,8 +632,15 @@ struct Inner {
     /// A replica whose store does not outlive it (a foreground over a
     /// durable relay): its local reads wait for the upstream's view too.
     non_durable: bool,
+    /// Rows the authority named as written for this replica's own commits
+    /// whose version was not this replica's image of them (see
+    /// `Inner::as_written_images`), asked for whole instead.
+    pub(crate) as_written_mismatches: u64,
     /// The global authority: what it settles is durable at `Global`.
     authority: bool,
+    /// Every session but SYSTEM's must be pinned to a published bundle
+    /// (see [`Db::require_session_pins`]).
+    pub(crate) pins_required: bool,
     /// Uploads the authority refused, by commit seq, kept for a host that
     /// reports them (see [`Db::track_upstream_rejections`]).
     upstream_rejections: Option<Vec<UpstreamRejection>>,
@@ -478,9 +649,11 @@ struct Inner {
     /// Each stored table's column positions, the codes authored-column
     /// bitmasks use (SPEC 4 §4.6), read on first use.
     column_codes: RefCell<HashMap<String, HashMap<String, u32>>>,
-    /// Sessions the server ended for what they sent, with why, until the
-    /// host takes them ([`Db::take_closed_subscribers`]).
-    closed: Vec<(sync::SubscriberId, Error)>,
+    /// Sessions the server ended, with why, until the host takes them
+    /// ([`Db::take_closed_subscribers`]). Kept only for a host that does
+    /// ([`Db::track_closed_subscribers`]), so that one which never takes
+    /// them does not accumulate them.
+    closed: Option<Vec<(sync::SubscriberId, Error)>>,
     /// Query statements that ran slow, until the host takes them
     /// ([`Db::take_slow_queries`]).
     slow: RefCell<crate::slow::SlowLog>,
@@ -488,15 +661,33 @@ struct Inner {
     accepted: u64,
     /// Rows written since the last server tick (only while serving).
     since_tick: Vec<(String, RowUuid, Vec<u8>)>,
-    /// Ops of the open local transaction, for upload.
-    capture: Vec<StagedOp>,
+    /// Ops of the open local transaction, for upload, by stored names.
+    pub(crate) capture: Vec<StagedOp>,
     /// Images a replica dropped since the last dispatch (evictions and
     /// rebases), for keyed invalidation.
     gone: RefCell<Vec<sync::Image>>,
+    /// The app's versions and lenses (see [`DbConfig::migrations`]): a
+    /// version this store lacks is admitted along them.
+    migrations: Migrations,
+    /// Whether `_jazz_withheld` exists (see `sync::WITHHELD_DDL`): branch
+    /// views over a base read it only then.
+    withheld: std::cell::Cell<bool>,
 }
 
 /// Large-value nodes one tick may reclaim.
 const RECLAIM_NODES_PER_TICK: usize = 256;
+
+/// Leaves one tick may move to, or delete from, the chunk store.
+const CHUNK_STORE_NODES_PER_TICK: usize = 256;
+
+/// [`Db::take_chunk_io`] or [`Db::finish_chunk_io`] on a store whose tick
+/// runs its chunk I/O itself.
+fn not_host_run() -> Error {
+    Error::new(
+        ErrorCode::Protocol,
+        "chunk I/O: this store runs its chunk I/O itself; open it with DbConfig::with_host_chunk_io to run it from the host",
+    )
+}
 
 /// File store settings.
 #[derive(Clone, Copy, Debug)]
@@ -550,6 +741,31 @@ pub struct Db {
     inner: Rc<Store>,
     /// `Some` for a schema-view handle: operations run under this schema.
     view: Option<Rc<Schema>>,
+    governance: Governance,
+}
+
+/// Policy provenance is selected by trusted handle/session construction,
+/// never inferred from the schema carrying an operation's names.
+#[derive(Clone, Debug)]
+enum Governance {
+    CurrentOwner,
+    Selected(Rc<Schema>, crate::catalogue::BundleId),
+}
+
+impl Governance {
+    fn key(&self) -> Option<crate::catalogue::BundleId> {
+        match self {
+            Self::CurrentOwner => None,
+            Self::Selected(_, bundle) => Some(*bundle),
+        }
+    }
+
+    fn policies(&self, inner: &Inner) -> Rc<Schema> {
+        match self {
+            Self::CurrentOwner => inner.owner.clone(),
+            Self::Selected(policies, _) => policies.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -587,6 +803,11 @@ fn who(identity: WriteIdentity) -> Who {
 pub(crate) struct AuthorCodes {
     codes: HashMap<AuthorKey, i64>,
     parts: HashMap<i64, AuthorKey>,
+    /// Codes found or interned inside an open transaction, with the
+    /// connection's rollback count then: one holds until a rollback, which
+    /// may have undone it. A sync batch interns a code per new author and
+    /// then finds it for every row that author wrote.
+    uncommitted: HashMap<AuthorKey, (i64, u64)>,
 }
 
 /// Who wrote a row version, and when (Unix ms).
@@ -649,12 +870,24 @@ fn stored_schema(conn: &Connection, jazz: &JazzSchema) -> Result<Schema, Error> 
                     .contains(&column.as_str())
             })
             .collect();
-        tables.insert(name.clone(), Table::stored_only(name, columns));
+        let mut table = Table::stored_only(name.clone(), columns);
+        // A large-capable column is one the large-value refcount triggers
+        // watch (`large::triggers`): its kind comes from the schemas unioned
+        // in.
+        let large = crate::large::stored_large_columns(conn, &name)?;
+        for column in &mut table.columns {
+            if large.contains(&column.stored) {
+                column.ty = ValueType::Nullable(Box::new(ValueType::String));
+            }
+        }
+        tables.insert(name, table);
     }
     Ok(Schema {
         tables,
         jazz: jazz.clone(),
+        version: jazz.version_id(),
         policies_from: None,
+        stored_names: false,
     })
 }
 
@@ -680,12 +913,6 @@ pub(crate) fn execute_script(conn: &Connection, script: &str) -> Result<(), Erro
     }
     Ok(())
 }
-
-/// Where the authority keeps, for a row version whose text merge changed
-/// its write's values, the edits back to the values as sent (SPEC 4 §4.3).
-const TEXT_IN_DDL: &str = "CREATE TABLE IF NOT EXISTS _jazz_text_in (t TEXT NOT NULL, \
-     id BLOB NOT NULL, k BLOB NOT NULL, seq INTEGER NOT NULL, node BLOB NOT NULL, \
-     edits BLOB NOT NULL, PRIMARY KEY (t, id, k, seq)) WITHOUT ROWID;";
 
 pub(crate) fn rejected(message: impl Into<String>) -> Error {
     Error::new(ErrorCode::WriteRejected, message)
@@ -735,6 +962,10 @@ enum Cells {
     Authored,
     Carried,
 }
+
+/// [`Inner::as_sent`]: per row version (stored table, row, branch key) and
+/// stored column, a merged write's value as sent and its bound cell.
+type AsSent = BTreeMap<(String, RowUuid, Vec<u8>), BTreeMap<String, Option<(Value, Sql)>>>;
 
 /// A mergeable commit that would move a row to another branch.
 fn branch_move() -> Error {
@@ -852,6 +1083,7 @@ fn normalize_relation(query: &Query, schema: &Schema) -> Result<Option<Query>, E
     }
     resolved.array_subqueries = query.array_subqueries.clone();
     resolved.select = query.select.clone();
+    resolved.partial = query.partial.clone();
     resolved.relation = None;
     Ok(Some(resolved))
 }
@@ -974,6 +1206,10 @@ pub const AUTHORIZATION_DENIED: &str = Reason::AuthorizationDenied.as_str();
 /// timestamp may be (SPEC 3, INV-TX-7).
 pub const SKEW_TOLERANCE_MS: i64 = 30_000;
 
+/// How far past its own clock a store counts an HLC it received (see
+/// [`Inner::observe_hlc`]): the shard offset bound.
+pub const HLC_SKEW_MS: u64 = shard::HLC_MAX_OFFSET_MS;
+
 /// The text leading the message of a write the authority refuses for a
 /// timestamp too far ahead (its reason is
 /// [`Reason::ClientClockTooFarAhead`], its code `WriteRejected`).
@@ -1003,7 +1239,7 @@ impl Db {
 
     /// A durable store in one SQLite file (WAL unless `options.journal`
     /// says otherwise). Reopening restores rows, history, the commit seq
-    /// and, for a replica, its pending uploads and shadow; they are resent
+    /// and, for a replica, its pending uploads and history baselines; they are resent
     /// on the next connection.
     pub async fn open_at(
         config: DbConfig,
@@ -1035,6 +1271,75 @@ impl Db {
     }
 
     fn open_on(
+        mut config: DbConfig,
+        conn: Connection,
+        path: Option<(&std::path::Path, Option<&'static str>)>,
+    ) -> Result<Self, Error> {
+        // A schema this store has not admitted is reached along the lenses
+        // the app ships: from a version it admitted, else from the first
+        // version, each admitted as the authority admits it.
+        let steps = {
+            let names = crate::names::Names::load(&conn)?;
+            migration_path(&config.migrations, &config.schema, |version| {
+                names.get(version).is_some()
+            })
+        };
+        let Some((first, _)) = steps.first() else {
+            if let Some(error) = outside_migrations(&config.migrations, &config.schema, |version| {
+                crate::names::Names::load(&conn)
+                    .map(|names| names.get(version).is_some())
+                    .unwrap_or(false)
+            }) {
+                return Err(error);
+            }
+            return Self::open_named(config, conn, path);
+        };
+        let target = std::mem::replace(&mut config.schema, first.clone());
+        let db = Self::open_named(config, conn, path)?;
+        db.admit_along_migrations(&target)?;
+        {
+            let mut inner = db.inner();
+            let owner = Rc::new(inner.named(&target));
+            inner.owner_version = target.version_id();
+            inner.schema = owner.clone();
+            inner.owner = owner;
+            inner.reset_everything();
+            // Pending writes upload under the version they were written
+            // in, and replay by the names of the one now current.
+            inner.client = None;
+            inner.load_client()?;
+        }
+        Ok(db)
+    }
+
+    /// Admit `schema` along the app's lenses when this store lacks it and
+    /// they lead to it from a version it admitted or from the first one
+    /// (SPEC 10.7); whether they did.
+    fn admit_along_migrations(&self, schema: &JazzSchema) -> Result<bool, Error> {
+        let steps = {
+            let inner = self.inner();
+            migration_path(&inner.migrations, schema, |version| {
+                inner.names.get(version).is_some()
+            })
+        };
+        let along = !steps.is_empty();
+        if !along {
+            let inner = self.inner();
+            if let Some(error) = outside_migrations(&inner.migrations, schema, |version| {
+                inner.names.get(version).is_some()
+            }) {
+                return Err(error);
+            }
+        }
+        for (schema, lenses) in steps {
+            if self.inner().names.get(&schema.version_id()).is_none() {
+                self.admit(schema, &lenses, None)?;
+            }
+        }
+        Ok(along)
+    }
+
+    fn open_named(
         config: DbConfig,
         conn: Connection,
         path: Option<(&std::path::Path, Option<&'static str>)>,
@@ -1047,12 +1352,27 @@ impl Db {
         // A version this file admitted keeps its names; another one is
         // named against the most recently admitted.
         let mut names = crate::names::Names::load(&conn)?;
+        // The newest version (one new to this file, or the one it admitted
+        // last) is current from now on; an older one (a server reopening
+        // under its genesis schema, before it activates its current one)
+        // leaves the tags as they are.
+        let version = config.schema.version_id();
+        let newest = names.get(&version).is_none() || names.latest_version() == Some(version);
+        // Every version an earlier process admitted is admitted again, with
+        // the names it was stored under.
+        let mut admitted = crate::catalogue::admitted(&conn)?;
         let schema = names.resolve(&config.schema, &[], names.latest())?;
-        let chunks = crate::large::Chunks::install(path)?;
+        names.check_branches(&schema)?;
+        names.check_types(&schema)?;
+        // Variants are tagged before any DDL: an enum default is its tag.
+        names.mint(&conn, &schema)?;
+        let chunks =
+            crate::large::Chunks::install(path, config.chunk_store.clone(), config.host_chunk_io)?;
         // Statements are keyed per table and verb; the default 16 entries
         // thrash as soon as a schema has a few tables.
         conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
         conn.execute_batch(crate::large::DDL).map_err(storage)?;
+        crate::large::open_offload(&conn, &chunks)?;
         // Nodes a transaction writes stay cached until it ends: until then
         // the reader connection cannot see them.
         let committed = chunks.clone();
@@ -1062,8 +1382,13 @@ impl Db {
         }))
         .map_err(storage)?;
         let rolled_back = chunks.clone();
-        conn.rollback_hook(Some(move || rolled_back.unpin()))
-            .map_err(storage)?;
+        // SQLite's own rollbacks (after a full disk, say) count too.
+        let rollback_key = crate::values::rollback_key(&conn);
+        conn.rollback_hook(Some(move || {
+            rolled_back.unpin();
+            crate::values::note_rollback(rollback_key);
+        }))
+        .map_err(storage)?;
         let fresh: i64 = conn
             // Durable Object SQLite keeps its own `_cf_*` tables in the file.
             .query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE '\\_jazz\\_%' ESCAPE '\\' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\'", [], |r| r.get(0))
@@ -1075,7 +1400,9 @@ impl Db {
             let mut physical = Schema {
                 tables: BTreeMap::new(),
                 jazz: config.schema.clone(),
+                version: config.schema.version_id(),
                 policies_from: None,
+                stored_names: false,
             };
             physical.union(&schema)?;
             physical
@@ -1089,16 +1416,26 @@ impl Db {
         conn.execute_batch(candidates::TEMP_DDL).map_err(storage)?;
         names.admit(&conn, &schema)?;
         conn.execute_batch(sync::SYNC_DDL).map_err(storage)?;
-        conn.execute_batch(catalogue::DDL).map_err(storage)?;
-        conn.execute_batch(catalogue_policy::DDL).map_err(storage)?;
-        // The commit seq resumes after the newest stored version.
+        let withheld: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = '_jazz_withheld'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(storage)?;
+        // The commit seq resumes after the newest version the store
+        // numbered as the authority (a replica's own counter resumes in
+        // `load_client`).
         let mut seq = 0u64;
         for table in physical.tables.keys() {
             for name in [table.clone(), format!("{table}__h")] {
                 let max: Option<i64> = conn
                     .cached_row(
-                        &format!("SELECT MAX(_seq) FROM {}", quote(&name)),
-                        [],
+                        &format!(
+                            "SELECT MAX(_clock) FROM {} WHERE _clock >= 0 AND _clock < ?1",
+                            quote(&name)
+                        ),
+                        [sync::band_start(sync::PENDING)],
                         |r| r.get(0),
                     )
                     .map_err(storage)?;
@@ -1108,45 +1445,74 @@ impl Db {
         // An accepted upload that wrote no rows still took a seq: its
         // dedupe entry records it.
         let settled: Option<i64> = conn
-            .cached_row("SELECT MAX(seq) FROM _jazz_settled", [], |r| r.get(0))
+            .cached_row(
+                "SELECT MAX(t) FROM _jazz_transactions WHERE t < ?1",
+                [sync::band_start(sync::PENDING)],
+                |r| r.get(0),
+            )
             .map_err(storage)?;
         seq = seq.max(settled.unwrap_or(0) as u64);
         let owner = Rc::new(schema.clone());
         let db = Self {
             view: None,
+            governance: Governance::CurrentOwner,
             inner: Rc::new(Store::new(Inner {
                 conn,
-                mutation_admission_closed: false,
                 retired: false,
                 scheduler: None,
                 read_deadlines: Vec::new(),
+                mutation_admission_closed: false,
+                #[cfg(any(test, feature = "testing"))]
+                failing_ticks: VecDeque::new(),
                 chunks,
                 pending_nodes: Vec::new(),
                 merging: false,
                 merge_bases: HashMap::new(),
-                text_in: RefCell::new(BTreeMap::new()),
+                as_sent: RefCell::new(BTreeMap::new()),
                 overlay: None,
                 derived: Vec::new(),
+                possession: None,
                 staging: LargeValueStagingPolicy::default(),
                 upload_cleanup: Rc::default(),
+                reclaimed_at: None,
+                reclaim_passes: 0,
                 ingress: RefCell::new((0, 0)),
                 schema: owner.clone(),
                 owner_version: owner.jazz.version_id(),
                 owner,
                 physical,
-                admitted: vec![(config.schema.version_id(), config.schema.clone())],
+                stored_view: RefCell::new(None),
+                admitted: {
+                    let version = config.schema.version_id();
+                    admitted.retain(|(id, _)| *id != version);
+                    admitted.push((version, config.schema.clone()));
+                    admitted
+                },
                 names,
                 views: BTreeMap::new(),
+                bundles: HashMap::new(),
+                bundle_views: RefCell::default(),
                 batches: HashMap::new(),
+                system_node: config.system_node.unwrap_or(config.identity.node),
                 identity: config.identity,
                 writer: None,
                 last_stamp: (0, 0),
+                hlc_last: 0,
+                own_order: HashMap::new(),
+                clock_for_test: None,
                 authors: RefCell::new(AuthorCodes::default()),
+                image_inserts: RefCell::default(),
+                current_batch: RefCell::default(),
                 ids: config
                     .id_source
                     .unwrap_or_else(|| Box::new(crate::options::ProductionRowIdSource)),
                 seq: 0,
-                base_jump: None,
+                me: 0,
+                shard: shard::ShardState::new(
+                    config
+                        .clock
+                        .unwrap_or_else(|| Box::new(shard::wall_clock_ms)),
+                ),
                 claims: HashMap::new(),
                 fan: fanout::Fanout::default(),
                 changed: RefCell::new(Vec::new()),
@@ -1158,25 +1524,35 @@ impl Db {
                 publications: Vec::new(),
                 client: None,
                 non_durable: false,
+                as_written_mismatches: 0,
                 authority: false,
+                pins_required: false,
                 upstream_rejections: None,
                 sessions: Vec::new(),
                 column_codes: RefCell::default(),
-                closed: Vec::new(),
+                closed: None,
                 slow: RefCell::default(),
                 accepted: 0,
                 since_tick: Vec::new(),
                 capture: Vec::new(),
                 gone: RefCell::new(Vec::new()),
+                migrations: config.migrations,
+                withheld: std::cell::Cell::new(withheld > 0),
             })),
         };
         {
             let mut inner = db.inner.borrow_mut();
+            // The newest schema is current: its declaration order is tag
+            // order.
+            if newest {
+                let owner = inner.owner.clone();
+                crate::values::in_savepoint(&inner.conn, "jazz_align", || {
+                    inner.align_tags(&owner)
+                })?;
+            }
             inner.seq = seq;
             inner.load_client()?;
-            if inner.client.is_some() {
-                inner.raise_to_local_base();
-            }
+            inner.load_shard()?;
         }
         Ok(db)
     }
@@ -1187,22 +1563,13 @@ impl Db {
     /// [`Db::seed_seq_floor`], so no transaction id is reused: the
     /// authority deduplicates uploads by id and would drop the new write.
     pub fn seq_high_water(&self) -> u64 {
-        let inner = self.inner.borrow();
-        match inner.base_jump {
-            Some((from, to)) if inner.seq == to => from,
-            _ => inner.seq,
-        }
+        self.inner.borrow().seq
     }
 
     /// Never hand out a commit seq at or below `floor`.
     pub fn seed_seq_floor(&self, floor: u64) {
         let mut inner = self.inner.borrow_mut();
         inner.seq = inner.seq.max(floor);
-        if let Some((from, to)) = &mut inner.base_jump
-            && floor <= *to
-        {
-            *from = (*from).max(floor);
-        }
     }
 
     /// Every SQLite store holds complete history; this one is also the
@@ -1215,9 +1582,52 @@ impl Db {
 
     /// Keep the uploads the authority refuses, for a host that tells its
     /// caller of the ones no wait claimed.
+    /// Refused commits of this store's own are kept in its retry store
+    /// until [`Db::discard_rejected_transaction`]; a reopened store that
+    /// still holds some tracks again and reports them anew.
     pub fn track_upstream_rejections(&self) {
         let mut inner = self.inner.borrow_mut();
         inner.upstream_rejections.get_or_insert_with(Vec::new);
+    }
+
+    /// Report again, through [`Db::take_upstream_rejections`], each refused
+    /// commit the retry store still holds and that is not already waiting
+    /// to be taken: for a host that could not deliver it before (no
+    /// listener yet). Does nothing unless refusals are tracked.
+    pub fn requeue_rejected_transactions(&self) -> Result<(), Error> {
+        let mut inner = self.inner.borrow_mut();
+        if inner.upstream_rejections.is_none() {
+            return Ok(());
+        }
+        let writer = *inner.identity.node.as_bytes();
+        let retained = inner.rejected_transactions()?;
+        let queued = inner.upstream_rejections.as_mut().expect("tracked");
+        for rejected in retained {
+            if !queued
+                .iter()
+                .any(|r| r.writer == writer && r.seq == rejected.seq)
+            {
+                queued.push(UpstreamRejection {
+                    writer,
+                    seq: rejected.seq,
+                    error: rejected.error,
+                    serializable: rejected.serializable,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// This store's own commits the authority refused, with their payloads,
+    /// oldest first (INV-TX-9). Kept only while
+    /// [`Db::track_upstream_rejections`] is on, until discarded.
+    pub fn rejected_transactions(&self) -> Result<Vec<RejectedTransaction>, Error> {
+        self.inner.borrow_mut().rejected_transactions()
+    }
+
+    /// Drop a refused commit's payload once its refusal was reported.
+    pub fn discard_rejected_transaction(&self, seq: u64) -> Result<(), Error> {
+        self.inner.borrow_mut().discard_rejected(seq)
     }
 
     /// The uploads the authority refused since the last call, by the node
@@ -1239,16 +1649,92 @@ impl Db {
         self.inner.borrow_mut().authority = true;
     }
 
+    /// Refuse every session but SYSTEM's that is not pinned to a published
+    /// bundle: a core serves its app only through createJazz, which pins
+    /// each session it opens, so no session is governed by this store's
+    /// own permissions.
+    pub fn require_session_pins(&self) {
+        self.inner.borrow_mut().pins_required = true;
+    }
+
     /// Whether this store is the global authority.
     pub fn is_authority(&self) -> bool {
         self.inner.borrow().authority
     }
 
+    /// The identity of table `table` of this handle's schema: the same
+    /// UUID on the authority and every replica of it, for the table's whole
+    /// life (a rename keeps it), and never another app's. `Ok(None)` when
+    /// the schema has no such table.
+    ///
+    /// Identities are the authority's: a replica answers once it has
+    /// mirrored the authority's catalogue with this schema version in it,
+    /// and fails with code `NotObserved` until then (a version only this
+    /// replica admitted has none yet).
+    pub fn table_identity(&self, table: &str) -> Result<Option<GlobalPhysicalTableId>, Error> {
+        Ok(self
+            .stored_identity(table, None)?
+            .map(GlobalPhysicalTableId))
+    }
+
+    /// The identity of column `column` of table `table` of this handle's
+    /// schema, as [`Db::table_identity`]. A column dropped and added again
+    /// keeps its identity only with the type it had; with another one it is
+    /// a new column.
+    pub fn column_identity(
+        &self,
+        table: &str,
+        column: &str,
+    ) -> Result<Option<GlobalPhysicalColumnId>, Error> {
+        Ok(self
+            .stored_identity(table, Some(column))?
+            .map(GlobalPhysicalColumnId))
+    }
+
+    fn stored_identity(
+        &self,
+        table: &str,
+        column: Option<&str>,
+    ) -> Result<Option<uuid::Uuid>, Error> {
+        let inner = self.inner();
+        let schema = inner.schema.clone();
+        let version = schema.jazz.version_id();
+        let namespace = inner.namespace()?;
+        let (Some(namespace), true) = (namespace, inner.names_confirmed(&version)) else {
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                "this store has not received its authority's catalogue for this schema version yet",
+            ));
+        };
+        let Some(table) = schema.tables.get(table) else {
+            return Ok(None);
+        };
+        Ok(match column {
+            None => Some(crate::names::identity(namespace, &table.stored, None)),
+            Some(column) => table
+                .columns
+                .iter()
+                .find(|c| c.name == column)
+                .map(|c| crate::names::identity(namespace, &table.stored, Some(&c.stored))),
+        })
+    }
+
     /// The shared state, set up to run under this handle's schema.
     fn inner(&self) -> std::cell::RefMut<'_, Inner> {
         let mut inner = self.inner.borrow_mut();
-        inner.schema = self.view.clone().unwrap_or_else(|| inner.owner.clone());
+        inner.schema = self.governing_schema(&inner);
         inner
+    }
+
+    /// Keep this handle's names while resolving its explicit policy source.
+    fn governing_schema(&self, inner: &Inner) -> Rc<Schema> {
+        match (&self.view, &self.governance) {
+            (None, _) => self.governance.policies(inner),
+            (Some(view), Governance::Selected(_, _)) => view.clone(),
+            (Some(view), Governance::CurrentOwner) => {
+                Rc::new((**view).clone().with_policies_of(inner.owner.clone()))
+            }
+        }
     }
 
     pub fn table(&self, table: impl Into<String>) -> Query {
@@ -1263,13 +1749,351 @@ impl Db {
 
     pub async fn tick(&self) -> Result<(), Error> {
         self.ensure_storage_owner_active()?;
+        #[cfg(any(test, feature = "testing"))]
+        if let Some(code) = self.inner().failing_ticks.pop_front() {
+            return Err(Error::new(code, "a tick failure injected by a test"));
+        }
         self.sync_tick()?;
-        let mut inner = self.inner();
-        inner.fan.collect();
-        inner.reclaim_large_values(RECLAIM_NODES_PER_TICK)?;
-        drop(inner);
+        {
+            let mut inner = self.inner();
+            inner.fan.collect();
+            inner.reclaim_large_values(RECLAIM_NODES_PER_TICK)?;
+        }
+        let result = self.pump_chunk_store().await;
         self.schedule_read_deadlines();
-        Ok(())
+        self.wake_read_deadlines();
+        self.flush_pending_tick();
+        result
+    }
+
+    /// Fetch the offloaded nodes reads wait on, move settled leaves to the
+    /// chunk store and delete reclaimed ones from it ([`crate::chunk_store`]),
+    /// unless the host runs that I/O. The fetches run first, so messages
+    /// held for those nodes are served before the puts start. A failed
+    /// operation is retried next tick; the first failure is returned once
+    /// the rest ran.
+    async fn pump_chunk_store(&self) -> Result<(), Error> {
+        let chunks = self.inner().chunks.clone();
+        if chunks.host_io() {
+            return Ok(());
+        }
+        let Some(store) = chunks.store().cloned() else {
+            return Ok(());
+        };
+        let Some(mut io) = self.begin_chunk_io(&chunks)? else {
+            return Ok(());
+        };
+        let wanted = std::mem::take(&mut io.fetch);
+        let any = !wanted.is_empty();
+        let mut fetched = self.fetch_from(&chunks, &*store, wanted).await;
+        if let Some(lease) = &mut io.lease {
+            // Fetched (or failed, and asked again by the read that needs it).
+            lease.unfetched.clear();
+        }
+        if any && fetched.is_ok() {
+            fetched = self.sync_tick();
+        }
+        // A fetch may have yielded while the physical owner retired. Do
+        // not dispatch the following puts/deletes for that owner.
+        self.ensure_storage_owner_active()?;
+        let done = io.run(&*store).await;
+        let applied = self.end_chunk_io(&chunks, done);
+        fetched.and(applied)
+    }
+
+    /// The next batch of chunk-store work, for a store opened
+    /// [`crate::options::DbConfig::with_host_chunk_io`]: `None` while the
+    /// last one is out or without a chunk store. Hand what running it came
+    /// to back with [`Self::finish_chunk_io`]; a batch dropped instead ends
+    /// there, and its work goes to the next one.
+    pub fn take_chunk_io(&self) -> Result<Option<crate::chunk_store::ChunkIo>, Error> {
+        self.ensure_storage_owner_active()?;
+        let chunks = self.inner().chunks.clone();
+        if !chunks.host_io() {
+            return Err(not_host_run());
+        }
+        if chunks.store().is_none() {
+            return Ok(None);
+        }
+        self.begin_chunk_io(&chunks)
+    }
+
+    /// Apply a batch [`Self::take_chunk_io`] handed out: fetched nodes are
+    /// installed and the reads and requests waiting on them run again,
+    /// moved leaves leave SQLite, deleted ones leave the queue. Failed
+    /// operations are retried in a later batch; the first failure is
+    /// returned once the rest are applied. A batch this store did not hand
+    /// out, or not the one out now, is refused.
+    pub fn finish_chunk_io(&self, done: crate::chunk_store::ChunkIoDone) -> Result<(), Error> {
+        self.ensure_storage_owner_active()?;
+        let chunks = self.inner().chunks.clone();
+        if !chunks.host_io() {
+            return Err(not_host_run());
+        }
+        let outstanding = chunks.outstanding();
+        let ours = done.io.lease.as_ref().is_some_and(|lease| {
+            std::ptr::eq(lease.chunks.as_ptr(), std::sync::Arc::as_ptr(&chunks))
+                && Some(lease.batch) == outstanding
+        });
+        if !ours {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                match outstanding {
+                    None => "chunk I/O: no batch is out to finish",
+                    Some(_) => "chunk I/O: this is not the batch that is out",
+                },
+            ));
+        }
+        self.end_chunk_io(&chunks, done)
+    }
+
+    /// Start a batch: what reads wait on, and (between SQLite transactions,
+    /// so the mark that a put may have landed is durable before it does)
+    /// settled leaves to put and reclaimed ones to delete.
+    fn begin_chunk_io(
+        &self,
+        chunks: &std::sync::Arc<crate::large::Chunks>,
+    ) -> Result<Option<crate::chunk_store::ChunkIo>, Error> {
+        let Some((batch, fetch)) = chunks.begin_fetch() else {
+            return Ok(None);
+        };
+        // From here the lease ends the batch however this returns.
+        let lease = crate::chunk_store::Lease {
+            chunks: std::sync::Arc::downgrade(chunks),
+            batch,
+            unfetched: fetch.clone(),
+        };
+        let mut io = crate::chunk_store::ChunkIo::unleased(fetch);
+        io.lease = Some(lease);
+        if chunks.offload_store().is_some() {
+            let inner = self.inner();
+            if inner.conn.is_autocommit() {
+                io.puts = crate::large::begin_offload(&inner.conn, CHUNK_STORE_NODES_PER_TICK)?;
+            }
+            io.deletes = crate::large::pending_deletes(&inner.conn, CHUNK_STORE_NODES_PER_TICK)?;
+        }
+        Ok(Some(io))
+    }
+
+    /// End a batch [`Self::begin_chunk_io`] started, once it is applied.
+    fn end_chunk_io(
+        &self,
+        chunks: &crate::large::Chunks,
+        mut done: crate::chunk_store::ChunkIoDone,
+    ) -> Result<(), Error> {
+        // Shared by host completion and the asynchronous tick pump.
+        // Refuse before installing fetched cache bytes or retrying reads.
+        self.ensure_storage_owner_active()?;
+        let lease = done.io.lease.take();
+        let applied = self.apply_chunk_io(chunks, done);
+        if let Some(mut lease) = lease {
+            // Fetches that failed are asked again by the reads that need them.
+            lease.unfetched.clear();
+        }
+        applied
+    }
+
+    fn apply_chunk_io(
+        &self,
+        chunks: &crate::large::Chunks,
+        done: crate::chunk_store::ChunkIoDone,
+    ) -> Result<(), Error> {
+        let crate::chunk_store::ChunkIoDone {
+            io,
+            fetched,
+            put,
+            deleted,
+        } = done;
+        let mut first = None;
+        let mut fetch_failed = None;
+        let any = !io.fetch.is_empty();
+        if any {
+            self.install_fetched(chunks, &io.fetch, fetched, &mut fetch_failed);
+        }
+        {
+            let inner = self.inner();
+            if !io.puts.is_empty() {
+                in_savepoint(&inner.conn, "jazz_lv_offloaded", || {
+                    for ((key, _), put) in io.puts.iter().zip(put) {
+                        match put {
+                            Ok(()) => crate::large::offloaded(&inner.conn, key)?,
+                            Err(error) => {
+                                first.get_or_insert(error);
+                            }
+                        }
+                    }
+                    Ok(())
+                })?;
+            }
+            if !io.deletes.is_empty() {
+                in_savepoint(&inner.conn, "jazz_lv_deleted", || {
+                    for (key, done) in io.deletes.iter().zip(deleted) {
+                        match done {
+                            Ok(()) => crate::large::deleted(&inner.conn, key)?,
+                            Err(error) => {
+                                first.get_or_insert(error);
+                            }
+                        }
+                    }
+                    Ok(())
+                })?;
+            }
+        }
+        if any && fetch_failed.is_none() {
+            // Messages held for those nodes are served now, not a tick later.
+            self.sync_tick()?;
+        }
+        fetch_failed.or(first).map_or(Ok(()), Err)
+    }
+
+    /// Install what the chunk store answered for `wanted`; reads waiting
+    /// on those nodes run again.
+    fn install_fetched(
+        &self,
+        chunks: &crate::large::Chunks,
+        wanted: &[jazz_types::large_values::chunks::ChunkRequest],
+        answers: Vec<Result<Option<bytes::Bytes>, Error>>,
+        first: &mut Option<Error>,
+    ) {
+        for (request, answer) in wanted.iter().zip(answers) {
+            if let Err(error) = answer.and_then(|bytes| chunks.install_from_store(request, bytes)) {
+                // Asked again by the next read that needs it.
+                first.get_or_insert(error);
+            }
+        }
+        self.inner().retry_awaiting();
+    }
+
+    /// Fetch `wanted` from the chunk store and install it.
+    async fn fetch_from(
+        &self,
+        chunks: &crate::large::Chunks,
+        store: &dyn crate::chunk_store::ChunkStore,
+        wanted: Vec<jazz_types::large_values::chunks::ChunkRequest>,
+    ) -> Result<(), Error> {
+        if wanted.is_empty() {
+            return Ok(());
+        }
+        let done = crate::chunk_store::ChunkIo::unleased(wanted)
+            .run(store)
+            .await;
+        self.ensure_storage_owner_active()?;
+        let mut first = None;
+        self.install_fetched(chunks, &done.io.fetch, done.fetched, &mut first);
+        first.map_or(Ok(()), Err)
+    }
+
+    /// [`Self::fetching`] over a fresh copy of `arg` per attempt; without a
+    /// chunk store `arg` is not copied.
+    async fn fetching_with<A: Clone, T>(
+        &self,
+        arg: A,
+        attempt: impl Fn(A) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        // A peek: the store gate would undo a transaction's cached overlay.
+        if self.inner.staging().chunks.store().is_none() {
+            return attempt(arg);
+        }
+        self.fetching(|| attempt(arg.clone())).await
+    }
+
+    /// Run `attempt` until it no longer waits on offloaded nodes that only
+    /// an asynchronous chunk store can answer, fetching them in between.
+    /// Without such a store (or while a tick's fetch runs) a wait is the
+    /// usual missing-chunks error.
+    async fn fetching<T>(&self, mut attempt: impl FnMut() -> Result<T, Error>) -> Result<T, Error> {
+        loop {
+            match attempt() {
+                Err(error) if crate::large::is_missing(&error) => {
+                    let chunks = self.inner().chunks.clone();
+                    let Some(store) = chunks.store().cloned().filter(|_| chunks.has_fetch()) else {
+                        return Err(error);
+                    };
+                    if chunks.host_io() {
+                        // Beside the host's batch, which may be out: a
+                        // node a read waits on is referenced, so no
+                        // delete in that batch removes it.
+                        let wanted = chunks.take_fetch();
+                        if wanted.is_empty() {
+                            return Err(error);
+                        }
+                        self.fetch_from(&chunks, &*store, wanted).await?;
+                        continue;
+                    }
+                    let Some((batch, wanted)) = chunks.begin_fetch() else {
+                        return Err(error);
+                    };
+                    // Ends the batch even if this future is dropped.
+                    let _lease = crate::chunk_store::Lease {
+                        chunks: std::sync::Arc::downgrade(&chunks),
+                        batch,
+                        unfetched: Vec::new(),
+                    };
+                    self.fetch_from(&chunks, &*store, wanted).await?;
+                }
+                result => return result,
+            }
+        }
+    }
+
+    /// Run this store's wall clock at `ms` (Unix ms) from now on, or the
+    /// real one again for `None`: what tests of time-ordered writes set
+    /// instead of sleeping.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn set_clock_for_test(&self, ms: Option<i64>) {
+        self.inner().clock_for_test = ms;
+    }
+
+    /// The versions open serializable transaction `id` recorded its reads
+    /// at, each pending one with the writer it names: what its commit is
+    /// validated by.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn read_set_for_test(
+        &self,
+        id: OpenTransactionId,
+    ) -> Vec<(RowUuid, Pos, Option<([u8; 16], u64)>)> {
+        match self.inner().batches.get(&id) {
+            Some(Batch {
+                kind: BatchKind::Serializable { reads, .. },
+                ..
+            }) => reads
+                .iter()
+                .flat_map(|read| read.rows.iter())
+                .map(|&(row, (at, writer))| (row, at, writer))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Set this store's last commit HLC, as if it had handed out `hlc`.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn set_hlc_for_test(&self, hlc: u64) {
+        self.inner().hlc_last = hlc;
+    }
+
+    /// Make the next ticks fail with `codes`, in order, before doing any
+    /// work: a tick driver's failure handling is exercised without
+    /// breaking the store.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn fail_next_ticks_for_test(&self, codes: impl IntoIterator<Item = ErrorCode>) {
+        self.inner().failing_ticks.extend(codes);
+    }
+
+    /// Where the current schema stores `table`'s `column`: (stored table,
+    /// stored column), the names a hand-built replicated write uses.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn stored_column_for_test(&self, table: &str, column: &str) -> (String, String) {
+        let inner = self.inner();
+        let table = inner
+            .owner
+            .table(table)
+            .expect("a table of the current schema");
+        (table.stored.clone(), table.stored_name(column).to_owned())
     }
 
     /// Diagnostics: stored large-value nodes, and roots referenced by cells.
@@ -1280,7 +2104,26 @@ impl Db {
             .conn
             .cached_row(
                 "SELECT (SELECT count(*) FROM _jazz_lv_node), \
-                 (SELECT count(*) FROM _jazz_lv_root WHERE durable > 0)",
+                 (SELECT count(*) FROM _jazz_lv_root WHERE refs > 0)",
+                [],
+                |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)),
+            )
+            .map_err(storage)
+    }
+
+    /// Diagnostics: large-value reclaim passes this store ran.
+    #[doc(hidden)]
+    pub fn large_value_reclaim_passes_for_test(&self) -> u64 {
+        self.inner().reclaim_passes
+    }
+
+    /// Diagnostics: (epochs, encoded edit bytes they hold).
+    #[doc(hidden)]
+    pub fn large_value_epochs_for_test(&self) -> Result<(u64, u64), Error> {
+        self.inner()
+            .conn
+            .cached_row(
+                "SELECT count(*), coalesce(sum(length(edits)), 0) FROM _jazz_lv_epoch",
                 [],
                 |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64)),
             )
@@ -1305,7 +2148,34 @@ impl Db {
     }
 
     pub async fn close(&self) -> Result<(), Error> {
+        self.retire_local_observation_capabilities();
         self.tick().await
+    }
+
+    /// Revoke the owner connection before releasing its external storage lease.
+    /// Retained views, streams and transports may still own Db clones, but none
+    /// may read or write this file after retirement. SQLite's authorizer also
+    /// expires statements already in the preparation cache. This is a one-way
+    /// runtime fence, not a stored application policy.
+    pub fn retire_storage_owner(&self) -> Result<(), Error> {
+        self.retire_local_observation_capabilities();
+        let mut inner = self.inner();
+        inner
+            .conn
+            .authorizer(Some(|_: rusqlite::hooks::AuthContext<'_>| {
+                rusqlite::hooks::Authorization::Deny
+            }))
+            .map_err(storage)?;
+        inner.retired = true;
+        Ok(())
+    }
+
+    pub(crate) fn ensure_storage_owner_active(&self) -> Result<(), Error> {
+        if self.inner.borrow().retired {
+            Err(Error::new(ErrorCode::Storage, "storage owner is retired"))
+        } else {
+            Ok(())
+        }
     }
 
     /// Permanently stop admitting application row mutations in this runtime
@@ -1318,41 +2188,8 @@ impl Db {
     /// an in-memory shutdown phase, not a stored policy or storage retirement;
     /// a new storage owner starts with mutation admission open.
     pub fn stop_mutation_admission(&self) {
+        self.retire_local_observation_capabilities();
         self.inner().mutation_admission_closed = true;
-    }
-
-    /// Revoke the owner connection before releasing its external storage lease.
-    /// Retained views, streams and transports may still own Db clones, but none
-    /// may read or write this file after retirement. SQLite's authorizer also
-    /// expires statements already in the preparation cache. This is a one-way
-    /// runtime fence, not a stored application policy.
-    pub fn retire_storage_owner(&self) -> Result<(), Error> {
-        let mut inner = self.inner();
-        inner
-            .conn
-            .authorizer(Some(|_: rusqlite::hooks::AuthContext<'_>| {
-                rusqlite::hooks::Authorization::Deny
-            }))
-            .map_err(storage)?;
-        inner.retired = true;
-        let reads: Vec<_> = inner
-            .batches
-            .values()
-            .map(|batch| batch.reads_state.clone())
-            .collect();
-        drop(inner);
-        for state in reads {
-            transaction_reads::close_pending_reads(&state);
-        }
-        Ok(())
-    }
-
-    pub(crate) fn ensure_storage_owner_active(&self) -> Result<(), Error> {
-        if self.inner.borrow().retired {
-            Err(Error::new(ErrorCode::Storage, "storage owner is retired"))
-        } else {
-            Ok(())
-        }
     }
 
     // ---- preparation ----------------------------------------------------
@@ -1366,7 +2203,8 @@ impl Db {
         identity: Option<AuthorSubject>,
     ) -> Result<(String, String), Error> {
         let inner = self.inner();
-        let compiled = inner.compile(prepared, identity, &ReadSpec::default())?;
+        let compiled =
+            inner.compile(prepared, identity, &ReadSpec::new(self.governance.clone()))?;
         let mut statement = inner
             .conn
             .prepare(&format!("EXPLAIN QUERY PLAN {}", compiled.sql))
@@ -1429,8 +2267,31 @@ impl Db {
         author: AuthorSubject,
         grounded: &[RowUuid],
     ) -> Result<String, Error> {
-        self.inner()
-            .explain_write_check(table, row, author, grounded)
+        let ids = grounded.iter().map(|id| *id.0.as_bytes()).collect();
+        let inner = self.inner();
+        let stored = inner.schema.table(table)?.stored.clone();
+        let overlay = CutOverlay::Grounded(Arc::new(BTreeMap::from([(stored, ids)])));
+        inner.explain_write_check(table, row, author, overlay)
+    }
+
+    /// Diagnostics: SQLite's query plan for the INSERT check of `row` of
+    /// `table` as `author` against a unit's post-state (every row the unit
+    /// wrote but `row`), as the post-state pass runs it.
+    #[doc(hidden)]
+    pub fn explain_post_state_check_plan(
+        &self,
+        table: &str,
+        row: RowUuid,
+        author: AuthorSubject,
+    ) -> Result<String, Error> {
+        let inner = self.inner();
+        let stored = inner.schema.table(table)?.stored.clone();
+        let overlay = CutOverlay::Except {
+            table: stored,
+            row: *row.0.as_bytes(),
+            key: Vec::new(),
+        };
+        inner.explain_write_check(table, row, author, overlay)
     }
 
     pub fn prepare_query(&self, query: &Query) -> Result<PreparedQuery, Error> {
@@ -1452,9 +2313,10 @@ impl Db {
         Ctx::new(&inner.schema, None, &session, &binding)
             .with_catalogue(&*inner)
             .compile_query(query, true)?;
-        let shape =
-            blake3::hash(format!("{query:?}{:?}", inner.schema.jazz.version_id()).as_bytes());
-        let bound = blake3::hash(format!("{binding:?}").as_bytes());
+        let shape = jazz_types::sha256::hash(
+            format!("{query:?}{:?}", inner.schema.jazz.version_id()).as_bytes(),
+        );
+        let bound = jazz_types::sha256::hash(format!("{binding:?}").as_bytes());
         Ok(PreparedQuery {
             query: query.clone(),
             binding,
@@ -1472,8 +2334,15 @@ impl Db {
         prepared: &PreparedQuery,
         opts: ReadOpts,
     ) -> Result<Vec<CurrentRow>, Error> {
-        let inner = self.inner();
-        inner.run(prepared, None, &ReadSpec::of(&opts, &inner)?)
+        self.fetching(|| {
+            let inner = self.inner();
+            inner.run(
+                prepared,
+                None,
+                &ReadSpec::of(&opts, &inner, self.governance.clone())?,
+            )
+        })
+        .await
     }
 
     /// Root rows with each array relation nested in a cell under its
@@ -1483,12 +2352,17 @@ impl Db {
         prepared: &PreparedQuery,
         roots: Vec<CurrentRow>,
     ) -> Result<Vec<CurrentRow>, Error> {
-        self.inner()
-            .nest_relations(prepared, None, &ReadSpec::default(), roots)
+        self.inner().nest_relations(
+            prepared,
+            None,
+            &ReadSpec::new(self.governance.clone()),
+            roots,
+        )
     }
 
     pub fn read(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
-        self.inner().run(prepared, None, &ReadSpec::default())
+        self.inner()
+            .run(prepared, None, &ReadSpec::new(self.governance.clone()))
     }
 
     pub async fn all_for_identity(
@@ -1498,7 +2372,11 @@ impl Db {
         identity: AuthorSubject,
     ) -> Result<Vec<CurrentRow>, Error> {
         let inner = self.inner();
-        inner.run(prepared, Some(identity), &ReadSpec::of(&opts, &inner)?)
+        inner.run(
+            prepared,
+            Some(identity),
+            &ReadSpec::of(&opts, &inner, self.governance.clone())?,
+        )
     }
 
     pub async fn all_result_tree(
@@ -1507,7 +2385,7 @@ impl Db {
         opts: ReadOpts,
     ) -> Result<ResultTree, Error> {
         let inner = self.inner();
-        let read = ReadSpec::of(&opts, &inner)?;
+        let read = ReadSpec::of(&opts, &inner, self.governance.clone())?;
         let roots = inner.run(prepared, None, &read)?;
         let mut tree = Vec::with_capacity(roots.len());
         for row in roots {
@@ -1552,17 +2430,29 @@ impl Db {
         identity: Option<AuthorSubject>,
         opts: ReadOpts,
     ) -> Result<SubscriptionStream, Error> {
-        let read = ReadSpec::of(&opts, &self.inner())?;
+        let read = ReadSpec::of(&opts, &self.inner(), self.governance.clone())?;
         let client = self.is_client();
         let non_durable = self.inner().non_durable;
+        // A branch view's head (and live base) is kept current upstream,
+        // over a frozen base too: only a snapshot is wholly this store's.
         let reach = client
-            .then(|| sync::remote_reach(&opts, non_durable, read.frozen()))
+            .then(|| sync::remote_reach(&opts, non_durable, read.cut.is_some()))
             .flatten();
         if reach.is_some() {
             self.remote_shape(&prepared.query)?;
         }
-        let remote =
-            reach.and_then(|reach| self.attach_remote(prepared, read.include_deleted, reach));
+        let view = opts.read_view.source.clone();
+        let attached = reach
+            .and_then(|reach| self.attach_remote(prepared, read.include_deleted, &view, reach));
+        // A live result reads as far as its own upstream read is settled.
+        let read = match &attached {
+            Some((key, _)) => ReadSpec {
+                position: Position::Remote(key.clone()),
+                ..read
+            },
+            None => read,
+        };
+        let remote = attached.map(|(_, flags)| flags);
         let settled = match (&remote, client) {
             (Some((answered, _, global)), _) => {
                 sync::SettledBy::Remote(answered.clone(), global.clone())
@@ -1588,7 +2478,22 @@ impl Db {
         };
         let include_deleted = read.include_deleted;
         let mut inner = self.inner();
-        let (queue, group) = inner.subscribe_member(prepared, identity, read, settled)?;
+        let (queue, group) = match inner.subscribe_member(prepared, identity, read, settled) {
+            Ok(member) => member,
+            Err(error) => {
+                drop(inner);
+                if let (Some(_), Some(reach)) = (&remote, reach) {
+                    self.detach_remote(
+                        &prepared.query,
+                        &prepared.binding,
+                        include_deleted,
+                        &view,
+                        reach,
+                    );
+                }
+                return Err(error);
+            }
+        };
         Ok(SubscriptionStream {
             queue,
             dropped: inner.fan.dropped.clone(),
@@ -1601,6 +2506,7 @@ impl Db {
                     prepared.query.clone(),
                     prepared.binding.clone(),
                     include_deleted,
+                    view,
                     reach,
                 )
             }),
@@ -1622,7 +2528,7 @@ impl Db {
         };
         let sql = format!(
             "SELECT \"$createdAt\", \"$createdBy\", COALESCE(\"$updatedAt\", \"$createdAt\"), \
-             COALESCE(\"$updatedBy\", \"$createdBy\") FROM {} WHERE id = ?1 ORDER BY _b LIMIT 1",
+             COALESCE(\"$updatedBy\", \"$createdBy\") FROM {} WHERE id = ?1 ORDER BY _branch LIMIT 1",
             quote(&table.stored)
         );
         let stamps: Option<(Option<i64>, Option<i64>, Option<i64>, Option<i64>)> = inner
@@ -1702,7 +2608,8 @@ impl Db {
             opts.row_id = Some(self.inner().ids.next_row_id());
         }
         let who = who(opts.identity);
-        self.write_op(StagedOp::Insert(table.to_owned(), cells, opts), who)
+        let op = StagedOp::Insert(table.to_owned(), cells, opts);
+        self.fetching_with(op, |op| self.write_op(op, who)).await
     }
 
     pub async fn update(
@@ -1713,7 +2620,8 @@ impl Db {
         opts: UpdateOptions,
     ) -> Result<WriteHandle, Error> {
         let who = who(opts.identity);
-        self.write_op(StagedOp::Update(table.to_owned(), row, cells, opts), who)
+        let op = StagedOp::Update(table.to_owned(), row, cells, opts);
+        self.fetching_with(op, |op| self.write_op(op, who)).await
     }
 
     pub async fn upsert(
@@ -1724,7 +2632,8 @@ impl Db {
         opts: UpsertOptions,
     ) -> Result<WriteHandle, Error> {
         let who = who(opts.identity);
-        self.write_op(StagedOp::Upsert(table.to_owned(), row, cells, opts), who)
+        let op = StagedOp::Upsert(table.to_owned(), row, cells, BTreeMap::new(), opts);
+        self.fetching_with(op, |op| self.write_op(op, who)).await
     }
 
     pub async fn delete(
@@ -1734,7 +2643,8 @@ impl Db {
         opts: DeleteOptions,
     ) -> Result<WriteHandle, Error> {
         let who = who(opts.identity);
-        self.write_op(StagedOp::Delete(table.to_owned(), row, opts), who)
+        let op = StagedOp::Delete(table.to_owned(), row, opts);
+        self.fetching_with(op, |op| self.write_op(op, who)).await
     }
 
     pub async fn restore(
@@ -1745,7 +2655,8 @@ impl Db {
         opts: RestoreOptions,
     ) -> Result<WriteHandle, Error> {
         let who = who(opts.identity);
-        self.write_op(StagedOp::Restore(table.to_owned(), row, content, opts), who)
+        let op = StagedOp::Restore(table.to_owned(), row, content, opts);
+        self.fetching_with(op, |op| self.write_op(op, who)).await
     }
 
     /// One write. On a client, a local (unauthenticated) write is also an
@@ -1770,10 +2681,16 @@ impl Db {
                 inner.clear_derived();
                 applied
             })?;
+            // A standalone write that changed nothing made no commit: its
+            // handle names the row's current version, which may be the
+            // newest commit's own seq, so recording it would upload a
+            // second commit under that commit's transaction id.
+            let committed = notify || self.inner().tx.is_some();
             // The upload record joins the write's SQLite transaction: if it
             // fails, `with_upload` rolls both back, and nobody has been told.
-            if let Err(error) =
-                self.record_upload(vec![op], handle.seq, sync::Kind::Mergeable, None)
+            if let Err(error) = committed
+                .then(|| self.record_upload(vec![op], handle.tx, sync::Kind::Mergeable, None))
+                .transpose()
             {
                 let mut inner = self.inner();
                 inner.seq = prior;
@@ -1816,21 +2733,22 @@ impl Db {
             let mut inner = self.inner();
             let (seq, standalone) = match &inner.tx {
                 Some((seq, _)) => (*seq, false),
-                None => (inner.seq + 1, true),
+                None => (inner.next_seq(), true),
             };
             begin_savepoint(&inner.conn, "w")?;
             let mark = inner.changed.borrow().len();
             match apply(&mut inner, seq) {
                 Ok(handle) => {
                     end_savepoint(&inner.conn, "w", true)?;
-                    if handle.seq == seq {
+                    let wrote = handle.seq == inner.own_pos(seq);
+                    if wrote {
                         if standalone {
-                            inner.seq = seq;
+                            inner.seq = inner.seq.max(seq);
                         } else if let Some((_, tables)) = &mut inner.tx {
                             tables.insert(table.to_owned());
                         }
                     }
-                    (standalone && handle.seq == seq, handle)
+                    (standalone && wrote, handle)
                 }
                 Err(error) => {
                     inner.changed.borrow_mut().truncate(mark);
@@ -1878,7 +2796,7 @@ impl Db {
             }
             begin_savepoint(&inner.conn, "tx")?;
             inner.changed.borrow_mut().clear();
-            let seq = inner.seq + 1;
+            let seq = inner.next_seq();
             if let Err(error) = inner.begin_candidate_callback(seq) {
                 inner.abandon_savepoint("tx")?;
                 return Err(error);
@@ -1907,7 +2825,9 @@ impl Db {
             match &result {
                 Ok(_) => {
                     if !tables.is_empty() {
-                        inner.seq = seq;
+                        // A hold or observe while the tx was open may have
+                        // moved seq past the one it drew.
+                        inner.seq = inner.seq.max(seq);
                     }
                     Some((seq, tables))
                 }
@@ -1922,7 +2842,8 @@ impl Db {
         let value = result?;
         let (seq, _) = changed.expect("committed");
         // The upload record joins the transaction's SQLite savepoint.
-        if let Err(error) = self.record_upload(captured, seq, sync::Kind::Mergeable, None) {
+        let recorded = self.record_stored_upload(captured, seq, sync::Kind::Mergeable, None);
+        if let Err(error) = recorded {
             let mut inner = self.inner();
             inner.seq = prior;
             inner.abandon_savepoint("tx")?;
@@ -1966,7 +2887,7 @@ impl Db {
             .find(|publication| publication.version.id == current.schema)
             .cloned()
             .ok_or_else(|| Error::new(ErrorCode::Schema, "schema version was not published"))?;
-        self.activate(publication.version.schema, &[publication.lens])
+        self.activate(publication.version.schema, &[publication.lens], None)
     }
 
     /// Make `schema` the current schema. The stored tables grow to hold it:
@@ -1975,7 +2896,7 @@ impl Db {
     /// keep their data. Changing a column's type is not supported yet, and a
     /// new required column needs a default.
     pub async fn activate_schema(&self, schema: JazzSchema) -> Result<(), Error> {
-        self.activate(schema, &[])
+        self.activate(schema, &[], None)
     }
 
     /// [`Db::activate_schema`], with the migration lenses into `schema`
@@ -1988,7 +2909,20 @@ impl Db {
         schema: JazzSchema,
         lenses: &[MigrationLens],
     ) -> Result<(), Error> {
-        self.activate(schema, lenses)
+        self.activate(schema, lenses, None)
+    }
+
+    /// [`Db::activate_schema_with_lenses`] as permissions revision
+    /// `revision` of the store's catalogue (see [`crate::catalogue`]): its
+    /// row records the schema and policies, and when they took effect. A
+    /// store without a server numbers its activations itself.
+    pub async fn activate_schema_at_revision(
+        &self,
+        revision: u64,
+        schema: JazzSchema,
+        lenses: &[MigrationLens],
+    ) -> Result<(), Error> {
+        self.activate(schema, lenses, Some(revision))
     }
 
     /// Admit `schema` without making it current: the stored tables grow to
@@ -2000,19 +2934,105 @@ impl Db {
         schema: JazzSchema,
         lenses: &[MigrationLens],
     ) -> Result<(), Error> {
-        self.admit(schema, lenses, false)
+        self.admit(schema, lenses, None)
     }
 
-    fn activate(&self, schema: JazzSchema, lenses: &[MigrationLens]) -> Result<(), Error> {
-        self.admit(schema, lenses, true)
+    fn activate(
+        &self,
+        schema: JazzSchema,
+        lenses: &[MigrationLens],
+        revision: Option<u64>,
+    ) -> Result<(), Error> {
+        self.admit(schema, lenses, Some(revision))
     }
 
+    /// Apply `change` to the store's catalogue in one transaction: publish
+    /// its rows, admit its versions in order, then make its schema current
+    /// at its revision. A change that fails anywhere leaves the file and
+    /// this database as they were.
+    pub async fn apply_catalogue(
+        &self,
+        change: crate::catalogue::CatalogueChange,
+    ) -> Result<(), Error> {
+        let saved = {
+            let inner = self.inner();
+            (
+                inner.physical.clone(),
+                inner.names.clone(),
+                inner.admitted.clone(),
+                inner.owner.clone(),
+                inner.owner_version,
+            )
+        };
+        begin_savepoint(&self.inner().conn, "jazz_catalogue")?;
+        let applied = (|| {
+            crate::catalogue::put(&self.inner().conn, &change.put)?;
+            for (schema, lenses) in change.admit {
+                self.admit(schema, &lenses, None)?;
+            }
+            if let Some((revision, schema, lenses)) = change.activate {
+                self.admit(schema, &lenses, Some(Some(revision)))?;
+            }
+            Ok(())
+        })();
+        let ended = end_savepoint(&self.inner().conn, "jazz_catalogue", applied.is_ok());
+        let result = applied.and(ended);
+        if result.is_err() {
+            let mut inner = self.inner();
+            let (physical, names, admitted, owner, owner_version) = saved;
+            inner.physical = physical;
+            inner.names = names;
+            inner.admitted = admitted;
+            inner.owner = owner;
+            inner.owner_version = owner_version;
+            inner.reset_everything();
+        }
+        result
+    }
+
+    /// Publish the bundle that selects `schema`'s structure as the write
+    /// schema, with `schema`'s policies, and return its id (see
+    /// [`crate::catalogue::bundle_id`]). Nothing is activated: sessions
+    /// pinned to it are governed by it. Publishing it again changes nothing.
+    pub async fn publish_bundle(
+        &self,
+        schema: &jazz_model::model::public_schema::Schema,
+    ) -> Result<crate::catalogue::BundleId, Error> {
+        let hash = crate::catalogue::structural_hash(schema);
+        let permissions = crate::catalogue::permissions_of(schema);
+        let id = crate::catalogue::bundle_id(&hash, &permissions)?;
+        let published_at = crate::catalogue::now_millis();
+        self.apply_catalogue(crate::catalogue::CatalogueChange {
+            put: crate::catalogue::CataloguePut {
+                bundles: vec![(hash, permissions, published_at)],
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .await?;
+        Ok(id)
+    }
+
+    /// The current schema, with its policies.
+    pub fn current_schema(&self) -> JazzSchema {
+        self.inner().owner.jazz.clone()
+    }
+
+    /// The store's catalogue: every schema, lens and permissions revision
+    /// it keeps (see [`crate::catalogue`]).
+    pub fn catalogue(&self) -> Result<crate::catalogue::CatalogueRows, Error> {
+        crate::catalogue::read(&self.inner().conn)
+    }
+
+    /// Admit `schema`; with `current`, also make it current, at that
+    /// permissions revision if one is given.
     fn admit(
         &self,
         schema: JazzSchema,
         lenses: &[MigrationLens],
-        make_current: bool,
+        current: Option<Option<u64>>,
     ) -> Result<(), Error> {
+        let make_current = current.is_some();
         {
             let mut inner = self.inner();
             let version = schema.version_id();
@@ -2031,6 +3051,18 @@ impl Db {
                 .iter()
                 .map(|(_, admitted)| inner.named(admitted))
                 .collect();
+            // Before a lens's defaults fill in: a branch column's default
+            // is the schema's own, so a replica that never saw the lens
+            // keys rows the same way.
+            inner.names.check_branches(&target)?;
+            inner.names.check_types(&target)?;
+            if make_current {
+                for table in target.tables.values() {
+                    if let Some(current) = inner.owner.by_stored(&table.stored) {
+                        check_branch_removal(current, table)?;
+                    }
+                }
+            }
             for table in target.tables.values_mut() {
                 let stored = inner.physical.tables.get(&table.stored);
                 for column in &mut table.columns {
@@ -2050,6 +3082,17 @@ impl Db {
                     }
                     if let Some(default) = defaults.get(&(table.name.clone(), column.name.clone()))
                     {
+                        // Rows are keyed by the schema's own default (see
+                        // `check_branches` above), so a lens may not key
+                        // them by another one.
+                        if table.branch_by.contains(&column.name)
+                            && column.default.as_ref() != Some(default)
+                        {
+                            return Err(unsupported(format!(
+                                "a lens default for branch column {}.{} other than its declared default",
+                                table.name, column.name
+                            )));
+                        }
                         column.default = Some(default.clone());
                     }
                     // A copy is filled from its source.
@@ -2062,34 +3105,25 @@ impl Db {
                     }
                 }
             }
-            let ddl = inner.physical.union(&target)?;
-            execute_script(&inner.conn, &ddl)?;
-            crate::array_index::install(&inner.conn, &target)?;
-            // A new copy holds its source's values, in every row version.
-            for cell in &cells {
-                if let crate::names::LensCellRule::Copy(source) = &cell.rule {
-                    for table in [cell.table.clone(), format!("{}__h", cell.table)] {
-                        inner
-                            .conn
-                            .execute(
-                                &format!(
-                                    "UPDATE {} SET {} = {}",
-                                    quote(&table),
-                                    quote(&cell.column),
-                                    quote(source)
-                                ),
-                                [],
-                            )
-                            .map_err(storage)?;
-                    }
-                }
-            }
-            let Inner { names, conn, .. } = &mut *inner;
-            names.admit(conn, &target)?;
-            names.record_lens_cells(conn, cells)?;
+            inner.write_admission(&target, cells, make_current)?;
             if make_current {
                 inner.owner_version = target.jazz.version_id();
                 inner.owner = Rc::new(target);
+                // Read policies that changed may read differently from
+                // here: a subscription resuming from before opens fresh.
+                let mut digest = jazz_types::sha256::Hasher::new();
+                for table in &inner.owner.jazz.runtime().tables {
+                    digest.update(format!("{}{:?}", table.name, table.read_policy).as_bytes());
+                }
+                let digest =
+                    u64::from_le_bytes(digest.finalize().as_bytes()[..8].try_into().unwrap());
+                crate::catalogue::record_activation(
+                    &inner.conn,
+                    current.flatten(),
+                    &inner.owner.jazz,
+                    digest,
+                    inner.seq,
+                )?;
             }
             if !inner
                 .admitted
@@ -2101,8 +3135,353 @@ impl Db {
         }
         let mut inner = self.inner();
         inner.reset_everything();
+        // Clients store rows by these names: they learn the new version
+        // before its rows.
+        for session in &mut inner.sessions {
+            session.owe_catalogue();
+        }
         Ok(())
     }
+}
+
+impl Inner {
+    /// Admit an upstream's versions under the names it stores them by
+    /// (see `SyncMessage::Catalogue`), so this replica stores rows as it
+    /// does. Stored names are derived alike on every store (SPEC 10.7), so
+    /// a version this store admitted has the upstream's names already; one
+    /// it names otherwise (admitted without the app's lenses) is not
+    /// supported yet, and nothing is renamed.
+    ///
+    /// It then keeps the authority's `namespace` (refusing an upstream of
+    /// another app) and the versions the authority `confirmed`. Returns
+    /// whether it took any version.
+    pub(crate) fn mirror_catalogue(
+        &mut self,
+        namespace: Option<[u8; 16]>,
+        versions: Vec<sync::CatalogueVersion>,
+        cells: Vec<sync::CatalogueCell>,
+        confirmed: &[([u8; 16], [u8; 16])],
+    ) -> Result<bool, Error> {
+        let known = self.namespace()?;
+        if let (Some(known), Some(namespace)) = (known, namespace)
+            && known != namespace
+        {
+            return Err(Error::new(
+                ErrorCode::Schema,
+                "the upstream's catalogue is another app's: this store keeps a different authority namespace",
+            ));
+        }
+        let mirrored = !versions.is_empty();
+        if mirrored {
+            self.mirror_versions(versions, cells)?;
+        }
+        let learned = known.is_none() && namespace.is_some();
+        if let (true, Some(namespace)) = (learned, namespace) {
+            self.persist_namespace(namespace)?;
+        }
+        let conn = &self.conn;
+        let told = self.names.confirm(conn, confirmed)? || learned;
+        // This store's own sessions (a worker's tabs) are told what it now
+        // knows of the authority's catalogue.
+        if told && !mirrored {
+            for session in &mut self.sessions {
+                session.owe_catalogue();
+            }
+        }
+        Ok(mirrored)
+    }
+
+    /// Take the upstream's versions, names and lens cells: whole or not at
+    /// all, in the file and in memory. A catalogue this store cannot take
+    /// (a stored column it keeps with another type) leaves it unchanged.
+    fn mirror_versions(
+        &mut self,
+        versions: Vec<sync::CatalogueVersion>,
+        cells: Vec<sync::CatalogueCell>,
+    ) -> Result<(), Error> {
+        let (physical, names, admitted) = (
+            self.physical.clone(),
+            self.names.clone(),
+            self.admitted.clone(),
+        );
+        let tags = self.names.tags().snapshot();
+        begin_savepoint(&self.conn, "jazz_mirror")?;
+        let mirrored = self.mirror_versions_steps(versions, cells);
+        let ended = end_savepoint(&self.conn, "jazz_mirror", mirrored.is_ok());
+        if let Err(error) = mirrored.and(ended) {
+            self.physical = physical;
+            self.names = names;
+            self.admitted = admitted;
+            self.names.tags().restore(tags);
+            return Err(error);
+        }
+        let owner = Rc::new(self.named(&self.owner.jazz));
+        self.schema = owner.clone();
+        self.owner = owner;
+        self.reset_everything();
+        // This store's own sessions (a worker's tabs) are sent the versions
+        // it just took.
+        for session in &mut self.sessions {
+            session.owe_catalogue();
+        }
+        Ok(())
+    }
+
+    fn mirror_versions_steps(
+        &mut self,
+        versions: Vec<sync::CatalogueVersion>,
+        cells: Vec<sync::CatalogueCell>,
+    ) -> Result<(), Error> {
+        use crate::names::{LensCell, LensCellRule};
+        let cells: Vec<LensCell> = cells
+            .into_iter()
+            .map(|cell| LensCell {
+                table: cell.table,
+                column: cell.column,
+                since: crate::ids::SchemaVersionId::from_bytes(cell.since),
+                rule: match cell.source {
+                    Some(source) => LensCellRule::Copy(source),
+                    None => LensCellRule::Dropped(Sql::from(&cell.default)),
+                },
+            })
+            .collect();
+        let entries: Vec<(
+            crate::ids::SchemaVersionId,
+            crate::values::StoredNames,
+            JazzSchema,
+        )> = versions
+            .into_iter()
+            .map(|entry| {
+                let names = crate::values::StoredNames {
+                    tables: entry
+                        .names
+                        .into_iter()
+                        .map(|(table, stored, columns)| {
+                            (table, (stored, columns.into_iter().collect()))
+                        })
+                        .collect(),
+                };
+                (entry.schema.id, names, entry.schema.schema)
+            })
+            .collect();
+        let mut fresh = std::collections::HashSet::new();
+        for (version, names, _) in &entries {
+            match self.names.get(version) {
+                Some(local) if local == names => {}
+                Some(_) => {
+                    return Err(unsupported(format!(
+                        "schema version {}, which this store stores otherwise than its upstream (it was opened without the app's lenses into it),",
+                        uuid::Uuid::from_bytes(*version.as_bytes())
+                    )));
+                }
+                None => {
+                    fresh.insert(*version);
+                }
+            }
+        }
+        for (version, names, schema) in entries {
+            let jazz = if version == self.owner_version {
+                self.owner.jazz.clone()
+            } else {
+                schema
+            };
+            let target = Schema::stored_as(&jazz, &names, self.names.tags());
+            // A copy is filled once, when its version is first admitted.
+            let fills = if fresh.contains(&version) {
+                cells
+                    .iter()
+                    .filter(|cell| cell.since == version)
+                    .cloned()
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            // The authority stores a column under a name this store keeps
+            // with another type (each re-added it while apart): its values
+            // are never read as this store's.
+            self.names.check_types(&target)?;
+            self.write_admission(&target, fills, version == self.owner_version)?;
+            if !self.admitted.iter().any(|(id, _)| *id == version) {
+                self.admitted.push((version, jazz));
+            }
+        }
+        let conn = &self.conn;
+        self.names.record_lens_cells(conn, cells)
+    }
+
+    /// An upstream image as this store keeps it: `None` for a table it
+    /// does not store, without columns it does not (an upstream's that no
+    /// version this replica knows names).
+    pub(crate) fn stored_image(&self, mut image: sync::Image) -> Option<sync::Image> {
+        let table = self.physical.by_stored(&image.table)?;
+        image
+            .cells
+            .retain(|(name, _)| name.starts_with('$') || table.by_stored(name).is_some());
+        Some(image)
+    }
+
+    /// Write an admitted version's stored tables and columns, its lens
+    /// copies, names, lens cells and enum tags: whole or not at all, in the
+    /// file and in memory. A `current` target (the schema made current)
+    /// has its enum columns' tags put in its declaration order.
+    fn write_admission(
+        &mut self,
+        target: &Schema,
+        cells: Vec<crate::names::LensCell>,
+        current: bool,
+    ) -> Result<(), Error> {
+        let (physical, names) = (self.physical.clone(), self.names.clone());
+        let tags = self.names.tags().snapshot();
+        begin_savepoint(&self.conn, "jazz_admit")?;
+        let written = self.write_admission_steps(target, cells, current);
+        let ended = end_savepoint(&self.conn, "jazz_admit", written.is_ok());
+        let written = written.and(ended);
+        if written.is_err() {
+            self.physical = physical;
+            self.names = names;
+            self.names.tags().restore(tags);
+        }
+        written
+    }
+
+    fn write_admission_steps(
+        &mut self,
+        target: &Schema,
+        cells: Vec<crate::names::LensCell>,
+        current: bool,
+    ) -> Result<(), Error> {
+        // Variants are tagged before any DDL, so an enum column added with
+        // a default stores the default's tag. A new copy starts with its
+        // source's tags.
+        for cell in &cells {
+            if let crate::names::LensCellRule::Copy(source) = &cell.rule {
+                self.names
+                    .copy_tags(&self.conn, &cell.table, source, &cell.column)?;
+            }
+        }
+        self.names.mint(&self.conn, target)?;
+        // The current schema's declaration order is tag order, before any
+        // DDL, so a column added with a default stores the default's tag.
+        if current {
+            self.align_tags(target)?;
+        }
+        let ddl = self.physical.union(target)?;
+        execute_script(&self.conn, &ddl)?;
+        crate::array_index::install(&self.conn, target)?;
+        // A new copy holds its source's values, in every row version.
+        for cell in &cells {
+            if let crate::names::LensCellRule::Copy(source) = &cell.rule {
+                self.fill_copy(&cell.table, &cell.column, source)?;
+            }
+        }
+        self.names.admit(&self.conn, target)?;
+        self.names.record_lens_cells(&self.conn, cells)
+    }
+
+    /// Fill copy `column` of stored table `table`, in every row version,
+    /// from `source`. An enum copy's tags are its own: a source cell is
+    /// mapped to the copy's tag for the same name, which is the same tag
+    /// unless the copy's column had tags before.
+    fn fill_copy(&self, table: &str, column: &str, source: &str) -> Result<(), Error> {
+        let (from, to) = (
+            self.names.tags().column(table, source),
+            self.names.tags().column(table, column),
+        );
+        let arms: String = {
+            let (from, to) = (from.borrow(), to.borrow());
+            from.iter()
+                .filter_map(|(tag, name)| {
+                    let copied = to.tag(name)?;
+                    (copied != tag).then(|| format!(" WHEN {tag} THEN {copied}"))
+                })
+                .collect()
+        };
+        self.write_enum_cells(table, column, source, &arms)
+    }
+
+    /// Renumber the tags of every enum column of `schema` (the current
+    /// schema) so its declared variants are in tag order (see
+    /// [`crate::names::Names::align`]), rewriting each changed column's
+    /// cells in every row version.
+    fn align_tags(&self, schema: &Schema) -> Result<(), Error> {
+        for table in schema.tables.values() {
+            for column in &table.columns {
+                let Some(variants) = &column.variants else {
+                    continue;
+                };
+                let changed =
+                    self.names
+                        .align(&self.conn, &table.stored, &column.stored, variants)?;
+                // A column not stored yet has no cells.
+                let stored = self
+                    .physical
+                    .tables
+                    .get(&table.stored)
+                    .is_some_and(|t| t.columns.iter().any(|c| c.stored == column.stored));
+                if changed.is_empty() || !stored {
+                    continue;
+                }
+                let arms: String = changed
+                    .iter()
+                    .map(|(old, new)| format!(" WHEN {old} THEN {new}"))
+                    .collect();
+                self.write_enum_cells(&table.stored, &column.stored, &column.stored, &arms)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Set enum column `column` of stored table `table`, in every row
+    /// version, to `source`'s cells with each tag `arms` (`WHEN old THEN
+    /// new` arms) names mapped.
+    fn write_enum_cells(
+        &self,
+        table: &str,
+        column: &str,
+        source: &str,
+        arms: &str,
+    ) -> Result<(), Error> {
+        let array = self
+            .names
+            .stored_type(table, source)
+            .is_some_and(crate::values::is_array_type);
+        for stored in [table.to_owned(), format!("{table}__h")] {
+            let source_sql = format!("{}.{}", quote(&stored), quote(source));
+            let value = match (arms.is_empty(), array) {
+                (true, _) => source_sql,
+                (false, false) => format!("(CASE {source_sql}{arms} ELSE {source_sql} END)"),
+                (false, true) => format!(
+                    "CASE WHEN {source_sql} IS NULL THEN NULL ELSE (SELECT json_group_array(\
+                     CASE j.value{arms} ELSE j.value END ORDER BY j.key) \
+                     FROM json_each({source_sql}) AS j) END"
+                ),
+            };
+            self.conn
+                .execute(
+                    &format!("UPDATE {} SET {} = {value}", quote(&stored), quote(column)),
+                    [],
+                )
+                .map_err(storage)?;
+        }
+        Ok(())
+    }
+}
+
+/// A version made current may not drop a branch column of the current
+/// one (SPEC 4, INV-BVIEW-19): an older version admitted beside it names
+/// that column by its default. The other branch-column changes are refused
+/// for every admitted version ([`crate::names::Names::check_branches`]).
+fn check_branch_removal(current: &Table, next: &Table) -> Result<(), Error> {
+    for column in &current.branch_by {
+        let stored = current.stored_name(column);
+        if !next.columns.iter().any(|c| c.stored == stored) {
+            return Err(unsupported(format!(
+                "removing branch column {}.{column}",
+                next.name
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Whether a policy reads rows besides the one it decides on.
@@ -2268,30 +3647,57 @@ impl MergeableTx<'_> {
     }
 }
 
+// The compiler names the captured governing schema, not this Inner's ambient
+// handle schema. Use the same authority-confirmed namespace/stored-name proof
+// as Db::table_identity; a local schema or caller claim cannot mint an identity.
+impl crate::compile::CatalogueIdentityLookup for Inner {
+    fn table_identity(
+        &self,
+        version: crate::ids::SchemaVersionId,
+        table: &str,
+    ) -> Result<uuid::Uuid, Error> {
+        let namespace = self.namespace()?;
+        let (Some(namespace), true) = (namespace, self.names_confirmed(&version)) else {
+            return Err(Error::new(
+                ErrorCode::Query,
+                "CatalogueTableIdentityV1 requires the authority's catalogue for the governing schema version",
+            ));
+        };
+        let stored = self.names.get(&version)
+            .and_then(|names| names.tables.get(table))
+            .ok_or_else(|| Error::new(
+                ErrorCode::Query,
+                format!("CatalogueTableIdentityV1 has no accepted table `{table}` in governing schema {version:?}"),
+            ))?;
+        Ok(crate::names::identity(namespace, &stored.0, None))
+    }
+}
+
 impl Drop for Inner {
     fn drop(&mut self) {
         // An abandoned handle's overlay never reaches the file.
         self.settle_overlay();
         // Before `conn` closes, so it closes last and checkpoints the WAL.
         self.chunks.close_reader();
+        crate::values::forget_tag_undo(&self.conn);
     }
 }
 
 impl Inner {
-    fn require_mutation_admission(&self) -> Result<(), Error> {
-        if self.mutation_admission_closed {
-            return Err(Error::new(
-                ErrorCode::Storage,
-                "database is closing or closed",
+    fn require_attribution_backend(&self) -> Result<(), Error> {
+        if self.identity.author != AuthorSubject::SYSTEM {
+            return Err(unsupported(
+                "backend-attributed transactions outside a SYSTEM backend",
             ));
         }
         Ok(())
     }
 
-    fn require_attribution_backend(&self) -> Result<(), Error> {
-        if self.identity.author != AuthorSubject::SYSTEM {
-            return Err(unsupported(
-                "backend-attributed transactions outside a SYSTEM backend",
+    fn require_mutation_admission(&self) -> Result<(), Error> {
+        if self.mutation_admission_closed {
+            return Err(Error::new(
+                ErrorCode::Storage,
+                "database is closing or closed",
             ));
         }
         Ok(())
@@ -2305,11 +3711,180 @@ impl Inner {
     }
 
     /// An admitted schema under the names this store keeps it by.
+    /// Published bundle `id`, resolved: the write version it selects and
+    /// that version governed by the bundle's policies. `None` when this
+    /// store has no such bundle, or has not admitted its write schema.
+    pub(crate) fn bundle(
+        &mut self,
+        id: &crate::catalogue::BundleId,
+    ) -> Result<Option<(crate::ids::SchemaVersionId, Rc<Schema>)>, Error> {
+        if let Some(found) = self.bundles.get(id) {
+            return Ok(Some(found.clone()));
+        }
+        let Some((hash, permissions)) = crate::catalogue::bundle(&self.conn, id)? else {
+            return Ok(None);
+        };
+        let Some((version, structural)) = self
+            .admitted
+            .iter()
+            .find(|(_, schema)| crate::catalogue::structural_hash(schema.public_schema()) == hash)
+        else {
+            return Ok(None);
+        };
+        let mut public = structural.public_schema().clone();
+        for (name, table) in public.iter_mut() {
+            table.policies = permissions.get(name).cloned().unwrap_or_default();
+        }
+        let governing = JazzSchema::new(&public).map_err(|error| {
+            Error::new(
+                ErrorCode::Schema,
+                format!("bundle {id} does not compile: {error}"),
+            )
+        })?;
+        let resolved = (*version, Rc::new(self.named(&governing)));
+        self.bundles.insert(*id, resolved.clone());
+        Ok(Some(resolved))
+    }
+
     fn named(&self, schema: &JazzSchema) -> Schema {
         match self.names.get(&schema.version_id()) {
-            Some(names) => Schema::stored_as(schema, names),
-            None => Schema::new(schema),
+            Some(names) => Schema::stored_as(schema, names, self.names.tags()),
+            None => Schema::new(schema, self.names.tags()),
         }
+    }
+
+    /// The current schema named by stored names: the schema replicated
+    /// writes travel and apply by (see [`Schema::stored_view`]).
+    pub(crate) fn stored_view(&self) -> Rc<Schema> {
+        let columns = self
+            .physical
+            .tables
+            .values()
+            .map(|table| table.columns.len() + 1)
+            .sum();
+        let owner = Rc::as_ptr(&self.owner);
+        let mut cached = self.stored_view.borrow_mut();
+        if let Some((built, count, view)) = &*cached
+            && *built == owner
+            && *count == columns
+        {
+            return view.clone();
+        }
+        let view = Rc::new(Schema::stored_view(&self.owner, &self.physical));
+        *cached = Some((owner, columns, view.clone()));
+        view
+    }
+
+    /// `op`, written through `schema`, as it travels: by the stored names
+    /// of its table and cells. An insert carries every column `schema`
+    /// declares (its default, or null), so its receiver, which applies it
+    /// under [`Inner::stored_view`], fills only what that version lacks.
+    pub(crate) fn stored_op(&self, op: StagedOp, schema: &Schema) -> Result<StagedOp, Error> {
+        if schema.stored_names {
+            return Ok(op);
+        }
+        let table = schema.table(op.table())?;
+        let stored = |cells: BTreeMap<String, Value>| -> BTreeMap<String, Value> {
+            cells
+                .into_iter()
+                .map(|(name, value)| (table.stored_name(&name).to_owned(), value))
+                .collect()
+        };
+        let name = table.stored.clone();
+        // The columns this version's lineage dropped, with their backwards
+        // defaults: a receiver cannot tell which lenses a writer descends
+        // from, so the writer names them (SPEC 8.9).
+        let version = if std::ptr::eq(schema, &*self.owner) {
+            self.owner_version
+        } else {
+            schema.jazz.version_id()
+        };
+        let mut dropped = BTreeMap::new();
+        if self.names.has_lens_cells() {
+            let physical = self.physical.tables.get(&table.stored);
+            for (column, default) in self.names.lens_cells(&version, table).1 {
+                let Some(stored) = physical.and_then(|physical| physical.column(&column)) else {
+                    continue;
+                };
+                let value = crate::values::column_from_sql(stored, default.as_ref(), &self.chunks)?
+                    .unwrap_or(Value::Nullable(None));
+                dropped.insert(column, value);
+            }
+        }
+        // What a write that creates its row gives the columns it leaves out:
+        // its version's defaults (branch columns stay as given: the target,
+        // or else the column's immutable default, keys the row,
+        // INV-BVIEW-19) and the dropped columns' backwards defaults.
+        let created = |cells: &BTreeMap<String, Value>| -> BTreeMap<String, Value> {
+            let mut created = BTreeMap::new();
+            for column in &table.columns {
+                if cells.contains_key(&column.name) || table.branch_by.contains(&column.name) {
+                    continue;
+                }
+                let value = match &column.default {
+                    Some(default) => default.clone(),
+                    None if column.nullable() => Value::Nullable(None),
+                    None => continue,
+                };
+                created.insert(column.stored.clone(), value);
+            }
+            created.extend(dropped.clone());
+            created
+        };
+        // Branch selectors name branch columns too.
+        let selector = |selector: BranchSelector| BranchSelector {
+            values: selector
+                .values
+                .into_iter()
+                .map(|(name, value)| (table.stored_name(&name).to_owned(), value))
+                .collect(),
+        };
+        let exact = |target: ExactWriteTarget| match target {
+            ExactWriteTarget::Root => ExactWriteTarget::Root,
+            ExactWriteTarget::Branch(branch) => ExactWriteTarget::Branch(selector(branch)),
+        };
+        let view = |target: WriteTarget| match target {
+            WriteTarget::Root => WriteTarget::Root,
+            WriteTarget::BranchView { head, base } => WriteTarget::BranchView {
+                head: selector(head),
+                base: base.map(|base| match base {
+                    BranchViewBase::Current(base) => BranchViewBase::Current(selector(base)),
+                    BranchViewBase::Snapshot { branch, snapshot } => BranchViewBase::Snapshot {
+                        branch: selector(branch),
+                        snapshot,
+                    },
+                }),
+            },
+        };
+        Ok(match op {
+            StagedOp::Insert(_, cells, mut opts) => {
+                opts.target = exact(opts.target);
+                let created = created(&cells);
+                let mut cells = stored(cells);
+                cells.extend(created);
+                StagedOp::Insert(name, cells, opts)
+            }
+            StagedOp::Update(_, row, cells, mut opts) => {
+                opts.target = view(opts.target);
+                StagedOp::Update(name, row, stored(cells), opts)
+            }
+            StagedOp::Upsert(_, row, cells, mut extra, mut opts) => {
+                opts.target = view(opts.target);
+                extra.extend(created(&cells));
+                StagedOp::Upsert(name, row, stored(cells), extra, opts)
+            }
+            StagedOp::Delete(_, row, mut opts) => {
+                opts.target = view(opts.target);
+                StagedOp::Delete(name, row, opts)
+            }
+            StagedOp::Restore(_, row, cells, mut opts) => {
+                opts.target = exact(opts.target);
+                StagedOp::Restore(name, row, cells.map(stored), opts)
+            }
+            StagedOp::Move(_, from, to, row) => {
+                StagedOp::Move(name, selector(from), selector(to), row)
+            }
+        })
     }
 
     /// The lens cells the lenses into `target` make on this store: a copy
@@ -2433,11 +4008,9 @@ impl Inner {
         prepared: &PreparedQuery,
         identity: Option<AuthorSubject>,
     ) -> (Option<Session>, Session) {
-        let claims_for = |author: AuthorSubject| match &prepared.request_claims {
-            Some((requested, claims)) if *requested == author => {
-                Session::for_author(author, claims.clone())
-            }
-            _ => self.session(author),
+        let claims_for = |author: AuthorSubject| match prepared.fixed_claims_for(author) {
+            Some(claims) => Session::for_author(author, claims.clone()),
+            None => self.session(author),
         };
         let policy = identity.map(claims_for);
         let claims = policy
@@ -2453,8 +4026,9 @@ impl Inner {
         read: &ReadSpec,
     ) -> Result<Compiled, Error> {
         let (policy, claims) = self.read_sessions(prepared, identity);
+        let schema = self.read_schema(prepared, read);
         let compiled = self
-            .read_ctx(prepared, policy.as_ref(), &claims, read)
+            .read_ctx(prepared, &schema, policy.as_ref(), &claims, read)
             .compile_query(&prepared.query, read.include_deleted)?;
         if self.candidate_read_evidence.is_some() && !compiled.preps.is_empty() {
             return Err(unsupported(
@@ -2464,20 +4038,31 @@ impl Inner {
         Ok(compiled)
     }
 
+    fn read_schema(&self, prepared: &PreparedQuery, read: &ReadSpec) -> Rc<Schema> {
+        let names = prepared.schema.as_ref().unwrap_or(&self.owner);
+        Rc::new(
+            (**names)
+                .clone()
+                .with_policies_of(read.governance.policies(self)),
+        )
+    }
+
     /// The compile context of a read of `prepared` (or of one of its
     /// relations) as `policy`, with `claims`, per `read`.
     pub(crate) fn read_ctx<'s>(
         &'s self,
         prepared: &'s PreparedQuery,
+        schema: &'s Schema,
         policy: Option<&'s Session>,
         claims: &'s Session,
         read: &ReadSpec,
     ) -> Ctx<'s> {
-        let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
         Ctx::new(schema, policy, claims, &prepared.binding)
+            .with_ordinary_policy_literals()
             .with_catalogue(self)
             .with_candidate_evidence(self.candidate_read_evidence)
             .with_view(read.view.clone())
+            .with_withheld(self.withheld.get())
             .with_cut(read.cut.clone(), read.settled_only)
             .with_history_origin(self.history_origin())
     }
@@ -2506,38 +4091,80 @@ impl Inner {
         read: &ReadSpec,
     ) -> Result<(Vec<CurrentRow>, BTreeSet<String>), Error> {
         let mut compiled = self.compile(prepared, identity, read)?;
-        let rows = self.execute(&compiled, &prepared.query.table)?;
-        // Array relations are part of a subscription's dependencies.
-        let schema = prepared.schema.as_ref().unwrap_or(&self.owner);
-        fn arrays(
-            schema: &Schema,
-            out: &mut BTreeSet<String>,
-            list: &[crate::query::ArraySubquery],
-        ) -> Result<(), Error> {
-            for array in list {
-                out.insert(schema.stored_table(&array.table)?.to_owned());
-                arrays(schema, out, &array.nested_arrays)?;
-            }
-            Ok(())
+        // Array relations are part of a subscription's dependencies, and
+        // of the tables its cut is decided over.
+        let tables = self.with_relation_tables(prepared, identity, read, &compiled.tables)?;
+        let visible = self.visible_read(read, &tables);
+        if let std::borrow::Cow::Owned(visible) = &visible {
+            compiled = self.compile(prepared, identity, visible)?;
         }
-        arrays(
-            schema,
-            &mut compiled.tables,
-            &prepared.query.array_subqueries,
-        )?;
-        Ok((rows, compiled.tables))
+        let rows = self.execute_policy_literals(prepared, identity, &visible, &compiled)?;
+        Ok((rows, tables))
+    }
+
+    /// Compile every child shape under the executing context, without reading
+    /// rows. Nested filters and SELECT policies contribute their real tables.
+    fn relation_read_tables(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        read: &ReadSpec,
+    ) -> Result<BTreeSet<String>, Error> {
+        let (policy, claims) = self.read_sessions(prepared, identity);
+        let schema = self.read_schema(prepared, read);
+        let mut pending: Vec<_> = prepared
+            .query
+            .array_subqueries
+            .iter()
+            .map(|array| (prepared.query.table.as_str(), array))
+            .collect();
+        let mut tables = BTreeSet::new();
+        while let Some((parent, array)) = pending.pop() {
+            tables.extend(
+                self.read_ctx(prepared, &schema, policy.as_ref(), &claims, read)
+                    .child_read_tables(parent, array)?,
+            );
+            pending.extend(
+                array
+                    .nested_arrays
+                    .iter()
+                    .map(|nested| (array.table.as_str(), nested)),
+            );
+        }
+        Ok(tables)
+    }
+
+    /// Root and recursively compiled relation dependencies share one visibility cut.
+    pub(crate) fn with_relation_tables(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        read: &ReadSpec,
+        tables: &BTreeSet<String>,
+    ) -> Result<BTreeSet<String>, Error> {
+        let mut out = tables.clone();
+        out.extend(self.relation_read_tables(prepared, identity, read)?);
+        Ok(out)
     }
 
     fn execute(&self, compiled: &Compiled, table: &str) -> Result<Vec<CurrentRow>, Error> {
+        self.execute_with_policy_snapshot(compiled, table, false)
+    }
+
+    fn execute_with_policy_snapshot(
+        &self,
+        compiled: &Compiled,
+        table: &str,
+        policy_snapshot: bool,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        if !compiled.policy_literals.is_empty() {
+            return Err(unsupported(
+                "ordinary long-literal policy requires its bounded read context",
+            ));
+        }
         let started = web_time::Instant::now();
         let mut run = crate::slow::Run::default();
-        let rows = self.with_preps(&compiled.preps, |ties| {
-            let sql = match &compiled.ranked_sql {
-                Some(ranked) if ties => ranked,
-                _ => &compiled.sql,
-            };
-            self.execute_sql(sql, compiled, table, &mut run)
-        })?;
+        let rows = self.execute_sql(&compiled.sql, compiled, table, &mut run, policy_snapshot)?;
         run.elapsed = started.elapsed();
         let mut slow = self.slow.borrow_mut();
         if slow.is_slow(run.elapsed) {
@@ -2570,36 +4197,13 @@ impl Inner {
         Ok(plan.join("\n"))
     }
 
-    /// Answer `preps` into `_jazz_lv_scratch`, run `body` (told whether a
-    /// rank prep found chunked values sharing a sort key), then clear the
-    /// answers. Statements that need no prep run directly.
-    pub(crate) fn with_preps<T>(
-        &self,
-        preps: &[crate::compile::Prep],
-        body: impl FnOnce(bool) -> Result<T, Error>,
-    ) -> Result<T, Error> {
-        if preps.is_empty() {
-            return body(false);
-        }
-        // The answers are scratch rows: undone with the savepoint either way.
-        begin_savepoint(&self.conn, "jazz_scratch")?;
-        let result = (|| {
-            let mut ties = false;
-            for prep in preps {
-                ties |= crate::large::answer(&self.conn, &self.chunks, prep)?;
-            }
-            body(ties)
-        })();
-        end_savepoint(&self.conn, "jazz_scratch", false)?;
-        result
-    }
-
     fn execute_sql(
         &self,
         sql: &str,
         compiled: &Compiled,
         table: &str,
         run: &mut crate::slow::Run,
+        policy_snapshot: bool,
     ) -> Result<Vec<CurrentRow>, Error> {
         let mut statement = self.conn.prepare_cached(sql).map_err(storage)?;
         // Cached statements keep counting across runs: start this one at 0.
@@ -2609,7 +4213,7 @@ impl Inner {
         let types: Arc<[ValueType]> = compiled
             .projection
             .iter()
-            .map(|(_, ty)| ty.clone())
+            .map(|(_, ty, _)| ty.clone())
             .collect();
         let mut rows = statement
             .query(params_from_iter(compiled.params.iter()))
@@ -2622,16 +4226,15 @@ impl Inner {
         let mut arms: Vec<Arc<str>> = Vec::new();
         while let Some(row) = rows.next().map_err(storage)? {
             let id: Vec<u8> = if compiled.aggregate {
-                let key = match row.get_ref(0).map_err(storage)? {
-                    ValueRef::Text(cell) => format!("{:?}", self.chunks.materialize(cell)?),
-                    cell => format!("{:?}", Sql::from(cell)),
-                };
-                blake3::hash(key.as_bytes()).as_bytes()[..16].to_vec()
+                // A group's key: the group-by cell, a chunked one by its
+                // identity (SPEC 19.11).
+                let key = format!("{:?}", Sql::from(row.get_ref(0).map_err(storage)?));
+                jazz_types::sha256::hash(key.as_bytes()).as_bytes()[..16].to_vec()
             } else {
                 row.get(0).map_err(storage)?
             };
-            let seq: i64 = row.get(1).map_err(storage)?;
-            let deleted: i64 = row.get(2).map_err(storage)?;
+            let at = Pos::from_t(row.get(1).map_err(storage)?);
+            let state: i64 = row.get(2).map_err(storage)?;
             // A flat join: the root's version, then each joined row and
             // its version.
             let flat = compiled.joined > 0;
@@ -2684,9 +4287,20 @@ impl Inner {
                 .projection
                 .iter()
                 .enumerate()
-                .map(|(i, (name, ty))| {
+                .map(|(i, (name, ty, tags))| {
                     let cell = row.get_ref(first + i).map_err(storage)?;
-                    match from_sql(ty, cell, &self.chunks) {
+                    let value = match compiled.partial.get(i).and_then(Option::as_ref) {
+                        Some(part) => self.partial_cell(ty, cell, part),
+                        None if policy_snapshot => crate::values::policy_snapshot_cell_from_sql(
+                            &self.conn,
+                            ty,
+                            tags.as_ref(),
+                            cell,
+                            &self.chunks,
+                        ),
+                        None => cell_from_sql(ty, tags.as_ref(), cell, &self.chunks),
+                    };
+                    match value {
                         Err(error) if crate::large::is_missing(&error) => {
                             blocked = true;
                             Ok((name.clone(), None))
@@ -2695,14 +4309,23 @@ impl Inner {
                     }
                 })
                 .collect::<Result<Vec<_>, Error>>()?;
+            let writer = if compiled.writer {
+                let w: Vec<u8> = row
+                    .get(first + compiled.projection.len())
+                    .map_err(storage)?;
+                Some(Arc::from(w))
+            } else {
+                None
+            };
             out.push(CurrentRow {
                 table: names.clone(),
                 id: RowUuid(
                     uuid::Uuid::from_slice(&id)
                         .map_err(|e| Error::new(ErrorCode::Storage, e.to_string()))?,
                 ),
-                seq: seq as u64,
-                deleted: deleted != 0,
+                seq: at,
+                writer,
+                deleted: state & STATE_DELETED != 0,
                 cells: Arc::new(cells),
                 types: types.clone(),
                 joined,
@@ -2731,6 +4354,17 @@ impl Inner {
         if prepared.query.array_subqueries.is_empty() {
             return Ok(roots);
         }
+        // Related rows read as of the cut the roots were read through (the
+        // same decision, over the same tables; a cut read is its own).
+        let visible;
+        let read = if read.position != Position::Current && read.cut.is_none() {
+            let compiled = self.compile(prepared, identity, read)?;
+            let tables = self.with_relation_tables(prepared, identity, read, &compiled.tables)?;
+            visible = self.visible_read(read, &tables).into_owned();
+            &visible
+        } else {
+            read
+        };
         roots
             .into_iter()
             .map(|row| {
@@ -2754,7 +4388,7 @@ impl Inner {
         prepared: &PreparedQuery,
         identity: Option<AuthorSubject>,
         read: &ReadSpec,
-    ) -> Result<Vec<(RowUuid, u64)>, Error> {
+    ) -> Result<Vec<(RowUuid, sync::Rank)>, Error> {
         let roots = self.run(prepared, identity, read)?;
         let mut out = versions(&roots);
         if !prepared.query.array_subqueries.is_empty() {
@@ -2770,7 +4404,24 @@ impl Inner {
                 child_versions(&node, &mut out);
             }
         }
-        Ok(out)
+        out.into_iter()
+            .map(|(_, row, at, writer)| Ok((row, Self::read_rank(at, writer))))
+            .collect()
+    }
+
+    /// A version a read returned, with its writer when pending: two
+    /// writers' versions of a row can share a position. The read carries
+    /// the writer of the version its cut picked, current or in history.
+    /// Aggregates and history reads return only accepted versions, so a
+    /// pending version without a writer should not occur; one is named by
+    /// [`sync::NO_WRITER`] as a fail-safe, and its commit conflicts rather
+    /// than validating against another writer's version.
+    fn read_rank(at: Pos, writer: Option<Arc<[u8]>>) -> sync::Rank {
+        if at.accepted() {
+            return (at, None);
+        }
+        let writer = writer.as_deref().and_then(sync::writer_of_bytes);
+        (at, Some(writer.unwrap_or(sync::NO_WRITER)))
     }
 
     /// A row with its array relations, read as the row was: through the
@@ -2787,20 +4438,21 @@ impl Inner {
         let mut relations = BTreeMap::new();
         for array in arrays {
             let (policy, claims) = self.read_sessions(prepared, identity);
-            let ctx = || self.read_ctx(prepared, policy.as_ref(), &claims, read);
+            let schema = self.read_schema(prepared, read);
+            let ctx = || self.read_ctx(prepared, &schema, policy.as_ref(), &claims, read);
             let parent = if array.outer_column == "id" {
                 Value::Uuid(row.id.0)
             } else {
-                let (sql, params, ty) = ctx().compile_cell(table, &array.outer_column, row.id)?;
+                let (sql, params, ty, tags) =
+                    ctx().compile_cell(table, &array.outer_column, row.id)?;
                 let cell: Option<Sql> = self
                     .conn
                     .cached_row(&sql, params_from_iter(params.iter()), |r| r.get(0))
                     .optional()
                     .map_err(storage)?;
                 match cell {
-                    Some(cell) => {
-                        from_sql(&ty, cell.as_ref(), &self.chunks)?.unwrap_or(Value::Nullable(None))
-                    }
+                    Some(cell) => cell_from_sql(&ty, tags.as_ref(), cell.as_ref(), &self.chunks)?
+                        .unwrap_or(Value::Nullable(None)),
                     None => Value::Nullable(None),
                 }
             };
@@ -2824,20 +4476,43 @@ impl Inner {
 
     // ---- write primitives ---------------------------------------------
 
+    /// Where this store's own commit `seq` writes its versions: the
+    /// authority's seq, or pending at the commit's HLC on a replica.
+    pub(crate) fn own_pos(&self, seq: u64) -> Pos {
+        if self.me == sync::ACCEPTED {
+            Pos::at(seq)
+        } else {
+            Pos::pending(self.commit_hlc(seq))
+        }
+    }
+
+    /// Own commit `seq`'s version: its position and, pending, its writer.
+    pub(crate) fn own_rank(&self, seq: u64) -> sync::Rank {
+        let at = self.own_pos(seq);
+        if at.accepted() {
+            return (at, None);
+        }
+        let writer = match self.own_order.get(&seq) {
+            Some(&(_, node, tx)) => (node, tx),
+            None => (*self.identity.node.as_bytes(), seq),
+        };
+        (at, Some(writer))
+    }
+
     fn existing(
         &self,
         table: &str,
         row: RowUuid,
         key: &[u8],
-    ) -> Result<Option<(u64, bool)>, Error> {
+    ) -> Result<Option<(Pos, bool)>, Error> {
         let sql = format!(
-            "SELECT _seq, _del FROM {} WHERE id = ?1 AND _b = ?2",
+            "SELECT _clock, (_state & {STATE_DELETED}) <> 0 FROM {} WHERE id = ?1 AND _branch = ?2",
             quote(table)
         );
         match self.conn.cached_row(
             &sql,
             rusqlite::params![row.0.as_bytes().to_vec(), key],
-            |r| Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? != 0)),
+            |r| Ok((Pos::from_t(r.get(0)?), r.get::<_, i64>(1)? != 0)),
         ) {
             Ok(found) => Ok(Some(found)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -2853,61 +4528,92 @@ impl Inner {
         row: RowUuid,
         key: &[u8],
         cut: Option<&Cut>,
-    ) -> Result<Option<(u64, bool)>, Error> {
+    ) -> Result<Option<(Pos, bool)>, Error> {
         let current = self.existing(table, row, key)?;
         let Some(cut) = cut else {
             return Ok(current);
         };
         if let Some((seq, _)) = current
-            && cut.sees(seq)
+            && cut.sees(self.current_rank(table, row, key, seq)?)
         {
             return Ok(current);
         }
-        let Some(version) = self.version_at(table, row, key, cut)? else {
+        let Some((version, w)) = self.version_at(table, row, key, cut)? else {
             return Ok(None);
         };
         let sql = format!(
-            "SELECT _del FROM {} WHERE id = ?1 AND _b = ?2 AND _seq = ?3",
+            "SELECT (_state & {STATE_DELETED}) <> 0 FROM {} WHERE id = ?1 AND _branch = ?2 \
+             AND _clock = ?3 AND _writer = ?4",
             quote(&format!("{table}__h"))
         );
         let deleted: i64 = self
             .conn
             .cached_row(
                 &sql,
-                rusqlite::params![row.0.as_bytes().to_vec(), key, version as i64],
+                rusqlite::params![row.0.as_bytes().to_vec(), key, version.t(), w],
                 |r| r.get(0),
             )
             .map_err(storage)?;
         Ok(Some((version, deleted != 0)))
     }
 
-    /// The newest superseded version of a row that `cut` sees.
+    /// A row's current version at `at` as a cut names it: with its writer,
+    /// when pending.
+    pub(crate) fn current_rank(
+        &self,
+        table: &str,
+        row: RowUuid,
+        key: &[u8],
+        at: Pos,
+    ) -> Result<sync::Rank, Error> {
+        if at.accepted() {
+            return Ok((at, None));
+        }
+        Ok((
+            at,
+            sync::writer_of_bytes(&self.current_writer(table, row, key, at)?),
+        ))
+    }
+
+    /// The newest superseded version of a row that `cut` sees: its
+    /// position and writer (`_writer`).
     fn version_at(
         &self,
         table: &str,
         row: RowUuid,
         key: &[u8],
         cut: &Cut,
-    ) -> Result<Option<u64>, Error> {
-        let extra = cut
+    ) -> Result<Option<(Pos, Vec<u8>)>, Error> {
+        // Positions are integers and writers fixed-width bytes, so the
+        // named versions are inlined.
+        let extra: String = cut
             .extra
             .iter()
-            .map(u64::to_string)
-            .collect::<Vec<_>>()
-            .join(", ");
+            .map(|(at, writer)| match writer.filter(|_| !at.accepted()) {
+                None => format!(" OR _clock = {}", at.t()),
+                Some((node, tx)) => format!(
+                    " OR (_clock = {} AND _writer = X'{}')",
+                    at.t(),
+                    sync::writer_bytes(node, tx)
+                        .iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect::<String>()
+                ),
+            })
+            .collect();
         let sql = format!(
-            "SELECT MAX(_seq) FROM {} WHERE id = ?1 AND _b = ?2 AND (_seq <= ?3 OR _seq IN ({extra}))",
+            "SELECT _clock, _writer FROM {} WHERE id = ?1 AND _branch = ?2 AND (_state & {STATE_AS_SENT}) = 0 \
+             AND (_clock <= ?3{extra}) ORDER BY _clock DESC, _writer DESC LIMIT 1",
             quote(&format!("{table}__h"))
         );
-        let version: Option<i64> = self
-            .conn
+        self.conn
             .cached_row(
                 &sql,
-                rusqlite::params![row.0.as_bytes().to_vec(), key, cut.seq as i64],
-                |r| r.get(0),
+                rusqlite::params![row.0.as_bytes().to_vec(), key, cut.seq.t()],
+                |r| Ok((Pos::from_t(r.get(0)?), r.get(1)?)),
             )
-            .map_err(storage)?;
-        Ok(version.map(|v| v as u64))
+            .optional()
+            .map_err(storage)
     }
 
     /// Resolve which stored row a patch-style write addresses.
@@ -2915,13 +4621,16 @@ impl Inner {
         let at = |key: Vec<u8>, cells: BTreeMap<String, Value>| -> Result<Located, Error> {
             Ok(match self.existing(&table.stored, row, &key)? {
                 Some((seq, deleted)) => Located::Row { key, seq, deleted },
-                None => Located::Absent { cells },
+                None => {
+                    self.refuse_withheld(table, row, &key)?;
+                    Located::Absent { cells }
+                }
             })
         };
         match target {
             Target::Root if table.branch_by.is_empty() => at(Vec::new(), BTreeMap::new()),
             Target::Root => {
-                let sql = format!("SELECT _b FROM {} WHERE id = ?1", quote(&table.stored));
+                let sql = format!("SELECT _branch FROM {} WHERE id = ?1", quote(&table.stored));
                 let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
                 let keys: Vec<Vec<u8>> = statement
                     .query_map([row.0.as_bytes().to_vec()], |r| r.get(0))
@@ -2957,6 +4666,7 @@ impl Inner {
                         deleted,
                     });
                 }
+                self.refuse_withheld(table, row, &head_key)?;
                 if let Some(base) = base {
                     let base_key = table.selector_key(base)?;
                     if base_key != head_key
@@ -2974,6 +4684,19 @@ impl Inner {
                 Ok(Located::Absent { cells: head_cells })
             }
         }
+    }
+
+    /// A write to a version this replica may not read (a branch view hides
+    /// the row, SPEC 8.4) is refused: it would land over a version nobody
+    /// here can see.
+    fn refuse_withheld(&self, table: &Table, row: RowUuid, key: &[u8]) -> Result<(), Error> {
+        if self.is_withheld(&table.stored, row, key)? {
+            return Err(rejected(format!(
+                "row {} of `{}` is hidden here: its version on this branch is not readable",
+                row.0, table.name
+            )));
+        }
+        Ok(())
     }
 
     /// Evaluate a policy SQL boolean against one stored row.
@@ -2997,17 +4720,31 @@ impl Inner {
         cut: Option<Cut>,
         policy: impl FnOnce(&mut Ctx<'_>) -> Result<String, Error>,
     ) -> Result<bool, Error> {
-        let (sql, params, preps) = self.policy_check(table, row, key, cut, policy)?;
-        let value: i64 = self.with_preps(&preps, |_| {
-            self.conn
-                .cached_row(&sql, params_from_iter(params.iter()), |r| r.get(0))
-                .map_err(storage)
-        })?;
-        Ok(value != 0)
+        self.holds_counting(table, row, key, cut, policy)
+            .map(|(holds, _)| holds)
+    }
+
+    /// [`Inner::holds_at`], also returning what of a write check's overlay
+    /// the check read.
+    fn holds_counting(
+        &self,
+        table: &Table,
+        row: RowUuid,
+        key: &[u8],
+        cut: Option<Cut>,
+        policy: impl FnOnce(&mut Ctx<'_>) -> Result<String, Error>,
+    ) -> Result<(bool, OverlayRead), Error> {
+        let (sql, params, read) = self.policy_check(table, row, key, cut, policy)?;
+        let value: i64 = self
+            .conn
+            .cached_row(&sql, params_from_iter(params.iter()), |r| r.get(0))
+            .map_err(storage)?;
+        Ok((value != 0, read))
     }
 
     /// The statement [`Inner::holds_at`] runs: the policy SQL boolean for
-    /// one stored row, its parameters, and the preps it needs.
+    /// one stored row, its parameters, and what of the cut's overlay it
+    /// reads.
     fn policy_check(
         &self,
         table: &Table,
@@ -3015,45 +4752,61 @@ impl Inner {
         key: &[u8],
         cut: Option<Cut>,
         policy: impl FnOnce(&mut Ctx<'_>) -> Result<String, Error>,
-    ) -> Result<(String, Vec<Sql>, Vec<crate::compile::Prep>), Error> {
+    ) -> Result<(String, Vec<Sql>, OverlayRead), Error> {
+        self.policy_check_in(&self.schema, table, row, key, cut, policy)
+    }
+
+    /// [`Inner::policy_check`], its policy compiled in `schema`.
+    fn policy_check_in(
+        &self,
+        schema: &Schema,
+        table: &Table,
+        row: RowUuid,
+        key: &[u8],
+        cut: Option<Cut>,
+        policy: impl FnOnce(&mut Ctx<'_>) -> Result<String, Error>,
+    ) -> Result<(String, Vec<Sql>, OverlayRead), Error> {
         let binding = BTreeMap::new();
         let claims = Session::default();
-        let mut ctx = Ctx::new(&self.schema, None, &claims, &binding)
+        let mut ctx = Ctx::new(schema, None, &claims, &binding)
             .with_catalogue(self)
             .with_cut(cut, false)
             .with_candidate_evidence(self.candidate_read_evidence);
         let condition = policy(&mut ctx)?;
-        let preps = std::mem::take(&mut ctx.preps);
+        let read = OverlayRead {
+            rows: ctx.overlaid_rows,
+            tables: std::mem::take(&mut ctx.overlay_tables),
+        };
         let mut params = ctx.params;
         params.push(Sql::Blob(row.0.as_bytes().to_vec()));
         params.push(Sql::Blob(key.to_vec()));
         let sql = format!(
-            "SELECT COALESCE({condition}, 0) FROM {} AS a WHERE a.id = ?{} AND a._b = ?{}",
+            "SELECT COALESCE({condition}, 0) FROM {} AS a WHERE a.id = ?{} AND a._branch = ?{}",
             quote(&table.stored),
             params.len() - 1,
             params.len()
         );
-        Ok((sql, params, preps))
+        Ok((sql, params, read))
     }
 
     /// SQLite's plan for the INSERT check a unit ending now would run on
     /// `row` (SPEC 7): its policy reads committed state, overlaid with the
-    /// `grounded` rows of the same table, as a later round sees them.
+    /// unit's rows `overlay` names.
     fn explain_write_check(
         &self,
         table: &str,
         row: RowUuid,
         author: AuthorSubject,
-        grounded: &[RowUuid],
+        overlay: CutOverlay,
     ) -> Result<String, Error> {
         let table = self.schema.table(table)?;
-        let own = self.seq + 1;
-        let ids = grounded.iter().map(|id| *id.0.as_bytes()).collect();
+        let own = self.own_rank(self.seq + 1);
         let cut = Cut {
-            seq: self.seq,
+            unsettled: false,
+            seq: self.own_pos(self.seq),
             own,
             extra: Vec::new(),
-            grounded: Some(Arc::new(BTreeMap::from([(table.stored.clone(), ids)]))),
+            overlay: Some(overlay),
         };
         let session = self.session(author);
         let (sql, params, _) = self.policy_check(table, row, &[], Some(cut), |ctx| {
@@ -3077,6 +4830,7 @@ impl Inner {
     /// the policy's other rows are each read as of `cut`.
     fn holds_as_of(
         &self,
+        schema: &Schema,
         table: &Table,
         row: RowUuid,
         key: &[u8],
@@ -3085,117 +4839,66 @@ impl Inner {
     ) -> Result<bool, Error> {
         let binding = BTreeMap::new();
         let claims = Session::default();
-        let mut ctx = Ctx::new(&self.schema, None, &claims, &binding)
+        let mut ctx = Ctx::new(schema, None, &claims, &binding)
             .with_catalogue(self)
             .with_cut(Some(cut), false);
         let condition = policy(&mut ctx)?;
         let source = ctx.source(table)?;
-        let preps = std::mem::take(&mut ctx.preps);
         let mut params = ctx.params;
         params.push(Sql::Blob(row.0.as_bytes().to_vec()));
         params.push(Sql::Blob(key.to_vec()));
         let sql = format!(
-            "SELECT COALESCE({condition}, 0) FROM {source} AS a WHERE a.id = ?{} AND a._b = ?{}",
+            "SELECT COALESCE({condition}, 0) FROM {source} AS a WHERE a.id = ?{} AND a._branch = ?{}",
             params.len() - 1,
             params.len()
         );
-        let value: Option<i64> = self.with_preps(&preps, |_| {
-            self.conn
-                .cached_row(&sql, params_from_iter(params.iter()), |r| r.get(0))
-                .optional()
-                .map_err(storage)
-        })?;
+        let value: Option<i64> = self
+            .conn
+            .cached_row(&sql, params_from_iter(params.iter()), |r| r.get(0))
+            .optional()
+            .map_err(storage)?;
         Ok(value.is_some_and(|value| value != 0))
     }
 
-    /// Whether `author` may `operation` the version of `row` at `seq`, with
+    /// Whether `author` may `operation` the version of `row` at `at`, with
     /// the policy's other rows as they stood then too.
+    /// Whether `author` may `operation` the version of `row` at `at`, by
+    /// `schema`'s policies (`table` is `schema`'s).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn check_version(
         &self,
+        schema: &Schema,
         table: &Table,
         row: RowUuid,
         key: &[u8],
-        seq: u64,
+        at: sync::Rank,
         author: AuthorSubject,
         operation: Operation,
     ) -> Result<bool, Error> {
         let session = self.session(author);
-        self.holds_as_of(table, row, key, Cut::at(seq), |ctx| {
+        // A pending version by its writer: another writer's can share its
+        // position.
+        let cut = match at.1.filter(|_| !at.0.accepted()) {
+            Some(_) => Cut {
+                seq: Pos::from_t(at.0.t() - 1),
+                own: at,
+                ..Cut::default()
+            },
+            None => Cut::at(at.0),
+        };
+        if operation == Operation::Select
+            && self.candidate_read_evidence.is_none()
+            && let Some(answer) =
+                self.ordinary_select_point(schema, table, row, key, author, Some(cut.clone()))?
+        {
+            return Ok(answer);
+        }
+        self.holds_as_of(schema, table, row, key, cut, |ctx| {
             ctx.operation_policy(table, operation, "a", &session)
         })
     }
 
-    /// The current version of each of `ids`' rows in `table`: (id, branch
-    /// key, seq, deleted, readable by `author`), in one query per chunk
-    /// instead of one policy check per row.
-    pub(crate) fn versions_readable(
-        &self,
-        table: &Table,
-        author: Option<AuthorSubject>,
-        ids: &[[u8; 16]],
-    ) -> Result<Vec<([u8; 16], Vec<u8>, u64, bool, bool)>, Error> {
-        let binding = BTreeMap::new();
-        let claims = Session::default();
-        let mut ctx = Ctx::new(&self.schema, None, &claims, &binding).with_catalogue(self);
-        let condition = match author {
-            Some(author) => {
-                let session = self.session(author);
-                ctx.operation_policy(table, Operation::Select, "a", &session)?
-            }
-            None => "1".to_owned(),
-        };
-        let preps = std::mem::take(&mut ctx.preps);
-        let base = ctx.params;
-        self.with_preps(&preps, |_| self.versions_in(table, &condition, &base, ids))
-    }
-
-    fn versions_in(
-        &self,
-        table: &Table,
-        condition: &str,
-        base: &[Sql],
-        ids: &[[u8; 16]],
-    ) -> Result<Vec<([u8; 16], Vec<u8>, u64, bool, bool)>, Error> {
-        let mut out = Vec::new();
-        for chunk in ids.chunks(500) {
-            let mut params = base.to_vec();
-            params.push(crate::compile::json_ids(
-                chunk.iter().map(|id| id.as_slice()),
-            ));
-            let sql = format!(
-                "SELECT a.id, a._b, a._seq, a._del, COALESCE({condition}, 0) FROM {} AS a \
-                 WHERE a.id IN (SELECT unhex(value) FROM json_each(?{}))",
-                quote(&table.stored),
-                params.len()
-            );
-            let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
-            let rows = statement
-                .query_map(params_from_iter(params.iter()), |r| {
-                    let id: Vec<u8> = r.get(0)?;
-                    let seq: i64 = r.get(2)?;
-                    let deleted: i64 = r.get(3)?;
-                    let can: i64 = r.get(4)?;
-                    Ok((
-                        id,
-                        r.get::<_, Vec<u8>>(1)?,
-                        seq as u64,
-                        deleted != 0,
-                        can != 0,
-                    ))
-                })
-                .map_err(storage)?;
-            for row in rows {
-                let (id, key, seq, deleted, can) = row.map_err(storage)?;
-                let Ok(id) = <[u8; 16]>::try_from(id.as_slice()) else {
-                    continue;
-                };
-                out.push((id, key, seq, deleted, can));
-            }
-        }
-        Ok(out)
-    }
-
-    fn check(
+    pub(crate) fn check(
         &self,
         table: &Table,
         row: RowUuid,
@@ -3203,13 +4906,38 @@ impl Inner {
         author: AuthorSubject,
         operation: Operation,
     ) -> Result<bool, Error> {
-        if self.defer_candidate_check(table, row, key, author, table.policy(operation))? {
+        self.check_in(&self.schema, table, row, key, author, operation)
+    }
+
+    /// [`Inner::check`] by `schema`'s policies (`table` is `schema`'s).
+    pub(crate) fn check_in(
+        &self,
+        schema: &Schema,
+        table: &Table,
+        row: RowUuid,
+        key: &[u8],
+        author: AuthorSubject,
+        operation: Operation,
+    ) -> Result<bool, Error> {
+        if operation == Operation::Select
+            && self.candidate_read_evidence.is_none()
+            && let Some(answer) =
+                self.ordinary_select_point(schema, table, row, key, author, None)?
+        {
+            return Ok(answer);
+        }
+        if self.defer_candidate_check(schema, table, row, key, author, table.policy(operation))? {
             return Ok(true);
         }
         let session = self.session(author);
-        self.holds(table, row, key, |ctx| {
+        let (sql, params, _) = self.policy_check_in(schema, table, row, key, None, |ctx| {
             ctx.operation_policy(table, operation, "a", &session)
-        })
+        })?;
+        let value: i64 = self
+            .conn
+            .cached_row(&sql, params_from_iter(params.iter()), |r| r.get(0))
+            .map_err(storage)?;
+        Ok(value != 0)
     }
 
     /// Check a write's own policy as SPEC 7 has it: on committed state
@@ -3234,7 +4962,7 @@ impl Inner {
                 .using
                 .as_ref()),
         };
-        if self.defer_candidate_check(table, row, key, author, clause)? {
+        if self.defer_candidate_check(&self.schema, table, row, key, author, clause)? {
             return Ok(());
         }
         let deferred = DeferredCheck {
@@ -3243,6 +4971,7 @@ impl Inner {
             key: key.to_vec(),
             author,
             check,
+            replaces: false,
         };
         if let Some(pending) = self.deferred.borrow_mut().as_mut() {
             // A row's first write decides which policy its unit's end state
@@ -3273,6 +5002,9 @@ impl Inner {
     /// passes is grounded, and from the next round on its row shows its
     /// end state to the others. A write that never passes rejects the
     /// unit. A row the unit leaves deleted has no end state to check.
+    /// Once every write is grounded, a write whose pass the rest of the
+    /// unit could have taken away is checked again against the unit's
+    /// whole post-state (see [`Inner::post_state_pass`]).
     pub(crate) fn finish_checks(&self, seq: u64) -> Result<(), Error> {
         let pending = self.deferred.borrow_mut().take().unwrap_or_default();
         self.ground(pending, seq)
@@ -3281,82 +5013,245 @@ impl Inner {
     fn ground(&self, mut pending: Vec<DeferredCheck>, seq: u64) -> Result<(), Error> {
         let schema = self.schema.clone();
         let mut live = Vec::with_capacity(pending.len());
-        for check in pending.drain(..) {
+        let several = pending.len() > 1;
+        for mut check in pending.drain(..) {
             let table = schema.table(&check.table)?;
             if !self.is_deleted_version(table, check.row, &check.key)? {
+                // Only a unit of several writes has a post-state pass.
+                check.replaces = several
+                    && (matches!(check.check, WriteCheck::WithCheck { .. })
+                        || self.was_live_before(table, check.row, &check.key, seq)?);
                 live.push(check);
             }
         }
         let mut pending = live;
         let mut grounded: BTreeMap<String, BTreeSet<[u8; 16]>> = BTreeMap::new();
+        // Each write with the round it passed in and the tables its policy
+        // reads through the overlay.
+        let mut rounds: Vec<(DeferredCheck, usize, BTreeSet<String>)> =
+            Vec::with_capacity(pending.len());
+        let mut round = 0;
+        let mut evidence = EvidenceBudget::default();
         loop {
             let cut = Cut {
-                seq: seq.saturating_sub(1),
-                own: seq,
+                unsettled: false,
+                seq: self.own_pos(seq.saturating_sub(1)),
+                own: self.own_rank(seq),
                 extra: Vec::new(),
-                grounded: Some(Arc::new(grounded.clone())),
+                overlay: Some(CutOverlay::Grounded(Arc::new(grounded.clone()))),
             };
             let mut passed = Vec::new();
             let mut failed = Vec::new();
             for check in pending {
-                let table = schema.table(&check.table)?;
-                let session = self.session(check.author);
-                let holds =
-                    self.holds_at(table, check.row, &check.key, Some(cut.clone()), |ctx| {
-                        match check.check {
-                            WriteCheck::Insert => {
-                                ctx.operation_policy(table, Operation::Insert, "a", &session)
-                            }
-                            WriteCheck::Restore => {
-                                ctx.operation_policy(table, Operation::Update, "a", &session)
-                            }
-                            // Without a WITH CHECK, the new row must pass
-                            // USING, as in Postgres.
-                            WriteCheck::WithCheck { .. } => {
-                                let update = &table.policies.update;
-                                let clause = update.with_check.as_ref().or(update.using.as_ref());
-                                ctx.policy_clause(clause, table, "a", &session)
-                            }
-                        }
-                    })?;
+                let (holds, tables) =
+                    self.write_check_holds(&schema, &check, cut.clone(), &mut evidence)?;
                 if holds {
-                    passed.push(check);
+                    passed.push((check, tables));
                 } else {
                     failed.push(check);
                 }
             }
-            if failed.is_empty() {
-                return Ok(());
+            if !failed.is_empty() && passed.is_empty() {
+                return Err(write_check_denied(&failed[0]));
             }
-            if passed.is_empty() {
-                let check = &failed[0];
-                return Err(match check.check {
-                    WriteCheck::Insert => denied(format_args!(
-                        "INSERT policy denied the new row in `{}`",
-                        check.table
-                    )),
-                    WriteCheck::WithCheck { upsert } => denied(format_args!(
-                        "{} policy (WITH CHECK) denied the new row",
-                        if upsert { "UPSERT" } else { "UPDATE" }
-                    )),
-                    WriteCheck::Restore => denied("RESTORE policy denied the restored row"),
-                });
-            }
-            for check in passed {
+            for (check, tables) in passed {
                 let stored = schema.table(&check.table)?.stored.clone();
                 grounded
                     .entry(stored)
                     .or_default()
                     .insert(*check.row.0.as_bytes());
+                rounds.push((check, round, tables));
+            }
+            if failed.is_empty() {
+                break;
             }
             pending = failed;
+            round += 1;
         }
+        self.post_state_pass(&schema, rounds, seq, &mut evidence)
+    }
+
+    /// Check `check`'s policy on the rows `cut` shows. Also returns the
+    /// stored tables the policy read through the cut's overlay.
+    fn write_check_holds(
+        &self,
+        schema: &Schema,
+        check: &DeferredCheck,
+        cut: Cut,
+        evidence: &mut EvidenceBudget,
+    ) -> Result<(bool, BTreeSet<String>), Error> {
+        let table = schema.table(&check.table)?;
+        let session = self.session(check.author);
+        let (holds, read) =
+            self.holds_counting(table, check.row, &check.key, Some(cut), |ctx| {
+                match check.check {
+                    WriteCheck::Insert => {
+                        ctx.operation_policy(table, Operation::Insert, "a", &session)
+                    }
+                    WriteCheck::Restore => {
+                        ctx.operation_policy(table, Operation::Update, "a", &session)
+                    }
+                    // Without a WITH CHECK, the new row must pass USING, as in
+                    // Postgres.
+                    WriteCheck::WithCheck { .. } => {
+                        let update = &table.policies.update;
+                        let clause = update.with_check.as_ref().or(update.using.as_ref());
+                        ctx.policy_clause(clause, table, "a", &session)
+                    }
+                }
+            })?;
+        evidence.charge(read.rows)?;
+        Ok((holds, read.tables))
+    }
+
+    /// The unit is accepted only if every write's policy also holds on the
+    /// state the whole unit leaves behind (SPEC 7, INV-RLS-9): committed
+    /// state overlaid with every write of the unit but the row under
+    /// check, which is never evidence for itself. A write is checked again
+    /// only when a table its policy reads holds a write grounded with or
+    /// after it that could have taken its pass away: any write, under a
+    /// policy that is not monotone in the rows present, or else one that
+    /// replaced a row's earlier content. A unit that only adds rows under
+    /// monotone policies is checked once per write.
+    ///
+    /// The post-state overlays every live row of the unit, so it binds no
+    /// id list: a re-check reaches the unit's rows through the policy's
+    /// correlated keys, like committed ones, and reads none of them
+    /// wholesale. It is not charged to the evidence budget.
+    fn post_state_pass(
+        &self,
+        schema: &Schema,
+        rounds: Vec<(DeferredCheck, usize, BTreeSet<String>)>,
+        seq: u64,
+        evidence: &mut EvidenceBudget,
+    ) -> Result<(), Error> {
+        // Per stored table and round: how many writes passed in it, and
+        // how many of those replaced a row's earlier content; then suffix
+        // sums, so index `r` counts the writes grounded in round `r` or
+        // later.
+        let last = rounds.iter().map(|(_, r, _)| *r).max().unwrap_or(0);
+        let mut later: HashMap<String, (Vec<usize>, Vec<usize>)> = HashMap::new();
+        let mut stored_of = Vec::with_capacity(rounds.len());
+        for (check, round, _) in &rounds {
+            let stored = schema.table(&check.table)?.stored.clone();
+            let (written, replaced) = later
+                .entry(stored.clone())
+                .or_insert_with(|| (vec![0; last + 2], vec![0; last + 2]));
+            written[*round] += 1;
+            if check.replaces {
+                replaced[*round] += 1;
+            }
+            stored_of.push(stored);
+        }
+        for (written, replaced) in later.values_mut() {
+            for r in (0..=last).rev() {
+                written[r] += written[r + 1];
+                replaced[r] += replaced[r + 1];
+            }
+        }
+        let mut monotone: HashMap<(String, u8), bool> = HashMap::new();
+        for ((check, round, tables), stored) in rounds.iter().zip(&stored_of) {
+            // The writes grounded with or after this one, in the tables its
+            // policy reads, other than its own.
+            let (mut others, mut others_replacing) = (0, 0);
+            for table in tables {
+                if let Some((written, replaced)) = later.get(table) {
+                    others += written[*round];
+                    others_replacing += replaced[*round];
+                }
+            }
+            if tables.contains(stored) {
+                others -= 1;
+                others_replacing -= usize::from(check.replaces);
+            }
+            if others == 0 {
+                continue;
+            }
+            if others_replacing == 0 {
+                let key = (check.table.clone(), check.check.kind());
+                let grows = match monotone.get(&key) {
+                    Some(grows) => *grows,
+                    None => {
+                        let grows = self.write_policy_is_monotone(schema, check)?;
+                        monotone.insert(key, grows);
+                        grows
+                    }
+                };
+                if grows {
+                    continue;
+                }
+            }
+            let cut = Cut {
+                unsettled: false,
+                seq: self.own_pos(seq.saturating_sub(1)),
+                own: self.own_rank(seq),
+                extra: Vec::new(),
+                overlay: Some(CutOverlay::Except {
+                    table: stored.clone(),
+                    row: *check.row.0.as_bytes(),
+                    key: check.key.clone(),
+                }),
+            };
+            if !self.write_check_holds(schema, check, cut, evidence)?.0 {
+                return Err(write_check_denied(check));
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether `check`'s policy can only go from denied to allowed as rows
+    /// are added: then a pass survives the unit's later inserts and
+    /// restores, and only its updates can take it away.
+    fn write_policy_is_monotone(
+        &self,
+        schema: &Schema,
+        check: &DeferredCheck,
+    ) -> Result<bool, Error> {
+        let table = schema.table(&check.table)?;
+        let governing = schema.policies_from.as_deref().unwrap_or(schema);
+        let Some(table) = governing.by_stored(&table.stored) else {
+            return Ok(true);
+        };
+        let policy = match check.check {
+            WriteCheck::Insert => table.policy(Operation::Insert),
+            WriteCheck::Restore => table.policy(Operation::Update),
+            WriteCheck::WithCheck { .. } => {
+                let update = &table.policies.update;
+                update.with_check.as_ref().or(update.using.as_ref())
+            }
+        };
+        Ok(policy.is_none_or(|policy| {
+            policy_is_monotone(governing, table, policy, &mut BTreeSet::new())
+        }))
+    }
+
+    /// Whether the row was live in the state a unit written at `seq` was
+    /// made over.
+    fn was_live_before(
+        &self,
+        table: &Table,
+        row: RowUuid,
+        key: &[u8],
+        seq: u64,
+    ) -> Result<bool, Error> {
+        let before = self.own_pos(seq.saturating_sub(1));
+        let cut = Cut {
+            unsettled: false,
+            seq: before,
+            own: self.own_rank(seq.saturating_sub(1)),
+            extra: Vec::new(),
+            overlay: None,
+        };
+        Ok(matches!(
+            self.existing_at(&table.stored, row, key, Some(&cut))?,
+            Some((_, false))
+        ))
     }
 
     /// Whether `row`'s current version on branch `key` is a tombstone.
     fn is_deleted_version(&self, table: &Table, row: RowUuid, key: &[u8]) -> Result<bool, Error> {
         let sql = format!(
-            "SELECT _del FROM {} WHERE id = ?1 AND _b = ?2",
+            "SELECT (_state & {STATE_DELETED}) <> 0 FROM {} WHERE id = ?1 AND _branch = ?2",
             quote(&table.stored)
         );
         let deleted: Option<i64> = self
@@ -3379,7 +5274,7 @@ impl Inner {
         author: AuthorSubject,
         clause: Option<&crate::tools::PolicyExpr>,
     ) -> Result<bool, Error> {
-        if self.defer_candidate_check(table, row, key, author, clause)? {
+        if self.defer_candidate_check(&self.schema, table, row, key, author, clause)? {
             return Ok(true);
         }
         let session = self.session(author);
@@ -3403,7 +5298,7 @@ impl Inner {
     /// system writes to the node that made them).
     pub(crate) fn stamp_author(&self) -> AuthorSubject {
         match self.identity.author {
-            AuthorSubject::SYSTEM => AuthorSubject::system_at(self.identity.node),
+            AuthorSubject::SYSTEM => AuthorSubject::system_at(self.system_node),
             author => author,
         }
     }
@@ -3412,8 +5307,16 @@ impl Inner {
     /// this small integer instead of repeating them in every version;
     /// codes are local to this database and resolved back at egress.
     pub(crate) fn author_code(&self, key: &AuthorKey) -> Result<i64, Error> {
-        if let Some(code) = self.authors.borrow().codes.get(key) {
-            return Ok(*code);
+        {
+            let authors = self.authors.borrow();
+            if let Some(code) = authors.codes.get(key) {
+                return Ok(*code);
+            }
+            if let Some((code, rollbacks)) = authors.uncommitted.get(key)
+                && *rollbacks == crate::values::rollbacks(&self.conn)
+            {
+                return Ok(*code);
+            }
         }
         let (account, issuer, subject) = key;
         let account = account.as_bytes().to_vec();
@@ -3441,14 +5344,19 @@ impl Inner {
         Ok(code)
     }
 
-    /// Cache an author's code, but only once it is committed: one interned
-    /// inside a savepoint (a transaction overlay, a batch that may fail) is
-    /// undone by its rollback, and its code may then go to another author.
+    /// Cache an author's code. One interned inside a savepoint (a
+    /// transaction overlay, a batch that may fail) is undone by its
+    /// rollback, and its code may then go to another author: until it is
+    /// committed it holds only while no rollback happened.
     fn remember_author(&self, key: &AuthorKey, code: i64) {
+        let mut authors = self.authors.borrow_mut();
         if self.conn.is_autocommit() {
-            let mut authors = self.authors.borrow_mut();
+            authors.uncommitted.remove(key);
             authors.codes.insert(key.clone(), code);
             authors.parts.insert(code, key.clone());
+        } else {
+            let rollbacks = crate::values::rollbacks(&self.conn);
+            authors.uncommitted.insert(key.clone(), (code, rollbacks));
         }
     }
 
@@ -3480,19 +5388,44 @@ impl Inner {
                     table.name
                 )));
             }
-            if table.column(name).is_none() {
+            let Some(column) = table.column(name) else {
                 return Err(rejected(format!("unknown column `{}.{name}`", table.name)));
+            };
+            if let Some(variants) = &column.variants {
+                for variant in crate::values::enum_names(&cells[name]) {
+                    if !variants.iter().any(|v| v == variant) {
+                        return Err(rejected(format!(
+                            "`{}.{name}`: `{variant}` is not one of its variants",
+                            table.name
+                        )));
+                    }
+                }
             }
         }
         Ok(())
     }
 
     /// Delete up to `budget` large-value nodes no cell or branch references.
+    /// A pass runs only when one could find work: a row changed since the
+    /// last pass that emptied the queue, or an upload was dropped.
     fn reclaim_large_values(&mut self, budget: usize) -> Result<usize, Error> {
+        if self.reclaimed_at == Some(self.conn.total_changes())
+            && self.upload_cleanup.borrow().is_empty()
+        {
+            return Ok(0);
+        }
+        self.reclaim_passes += 1;
+        self.reclaimed_at = None;
         self.release_dropped_uploads()?;
-        in_savepoint(&self.conn, "reclaim", || {
+        let deleted = in_savepoint(&self.conn, "reclaim", || {
             crate::large::reclaim(&self.conn, &self.chunks, budget)
-        })
+        })?;
+        // A pass inside an open transaction may yet roll back, and one
+        // that ran out of budget left work queued: both run again.
+        if self.conn.is_autocommit() && !crate::large::reclaim_queued(&self.conn)? {
+            self.reclaimed_at = Some(self.conn.total_changes());
+        }
+        Ok(deleted)
     }
 
     /// A written cell must be of its column's type: writes from any replica
@@ -3527,6 +5460,53 @@ impl Inner {
         Ok(())
     }
 
+    /// A cell for stored column `column` of stored table `table` written
+    /// as plain SQL keeps a value (a lens's cell, an image from another
+    /// store): an enum variant's name as its tag here.
+    pub(crate) fn enum_cell(&self, table: &str, column: &str, cell: Sql) -> Result<Sql, Error> {
+        let Sql::Text(text) = &cell else {
+            return Ok(cell);
+        };
+        let Some(ty) = self
+            .names
+            .stored_type(table, column)
+            .filter(|ty| crate::values::is_enum_type(ty))
+        else {
+            return Ok(cell);
+        };
+        // The cell is the value as plain SQL stores it: a name, or a JSON
+        // array of them.
+        let value = if crate::values::is_array_type(ty) {
+            let json: serde_json::Value = serde_json::from_slice(text)
+                .map_err(|e| Error::new(ErrorCode::Storage, format!("array cell: {e}")))?;
+            let serde_json::Value::Array(items) = json else {
+                return Ok(cell);
+            };
+            Value::Array(
+                items
+                    .into_iter()
+                    .map(|item| match item {
+                        serde_json::Value::String(name) => Value::String(name),
+                        _ => Value::Nullable(None),
+                    })
+                    .collect(),
+            )
+        } else {
+            Value::String(String::from_utf8_lossy(text).into_owned())
+        };
+        self.enum_value_cell(table, column, &value)
+    }
+
+    /// Enum `value` as stored enum column `column` of stored table
+    /// `table`'s cell: its variants' tags there, interned if new.
+    fn enum_value_cell(&self, table: &str, column: &str, value: &Value) -> Result<Sql, Error> {
+        self.names
+            .intern(&self.conn, table, column, &crate::values::enum_names(value))?;
+        let tags = self.names.tags().column(table, column);
+        let cell = crate::values::enum_cell(&tags.borrow(), value)?;
+        Ok(cell.unwrap_or(Sql::Null))
+    }
+
     fn bind_value(value: &Value) -> Result<Sql, Error> {
         to_sql(value)?.ok_or_else(|| unsupported("storing NaN"))
     }
@@ -3536,11 +5516,26 @@ impl Inner {
     /// transaction and the cell holds their descriptor.
     fn bind_cell(
         &self,
+        table: &Table,
         column: &crate::values::Column,
         value: &Value,
         cells: Cells,
     ) -> Result<Sql, Error> {
         Self::check_cell(column, value, cells)?;
+        if column.is_enum() {
+            // Every variant a version declares has a tag; a write's are
+            // checked against them, but a lens or merge may still carry a
+            // removed one.
+            self.names.intern(
+                &self.conn,
+                &table.stored,
+                &column.stored,
+                &crate::values::enum_names(value),
+            )?;
+            return column
+                .cell_sql(value)?
+                .ok_or_else(|| unsupported("storing NaN"));
+        }
         let mut inner = value;
         while let Value::Nullable(Some(value)) = inner {
             inner = value;
@@ -3559,10 +5554,10 @@ impl Inner {
         let prepared = jazz_types::large_values::prepare(crate::large::kind(column), logical)
             .map_err(|e| rejected(format!("`{}`: {e}", column.name)))?;
         crate::large::store(&self.conn, &self.chunks, &prepared, self.client.is_some())?;
-        let prefix = crate::large::sort_prefix(crate::large::kind(column), logical);
-        Ok(Sql::Text(crate::large::chunked_cell(
+        Ok(Sql::Integer(crate::large::intern(
+            &self.conn,
+            &self.chunks,
             &prepared.value_ref,
-            &prefix,
         )?))
     }
 
@@ -3593,6 +5588,15 @@ impl Inner {
         } else if self.derived.contains(large) {
             // Derived here from a stored tree by an append or splice.
             complete = self.client.is_none();
+        } else if let Some(possession) = &self.possession
+            && !crate::large::possessed(&self.conn, &self.chunks, large, possession)?
+        {
+            // Answered as for absent nodes: no oracle for what this store
+            // holds for others (SPEC 19.9).
+            return Err(rejected(format!(
+                "`{}`: the large-value descriptor names chunks this store does not hold",
+                column.name
+            )));
         } else if self.client.is_some() {
             // A replica's tree may be only partly fetched: the authority
             // checks the value when it admits the write.
@@ -3622,27 +5626,40 @@ impl Inner {
             })?;
             json.check_text(text, &column.name).map_err(rejected)?;
         }
-        crate::large::settle_receipts(&self.conn, &large.root.locator)?;
+        if let Some(possession) = &self.possession {
+            possession.settle.borrow_mut().push(large.root.object_hash);
+        }
         self.large_cell(large)
+    }
+
+    /// Settle the receipts of the trees the applied commit's cells proved
+    /// (SPEC 19.4): only after all its cells, which may share nodes.
+    pub(crate) fn settle_possession(&self) -> Result<(), Error> {
+        let Some(possession) = &self.possession else {
+            return Ok(());
+        };
+        for root in possession.settle.take() {
+            crate::large::settle_receipts(&self.conn, &root, &possession.author)?;
+        }
+        Ok(())
     }
 
     /// The cell of a chunked value this store holds the chunks for. A value
     /// an edit shrank to the inline threshold is stored inline, so each
-    /// logical value has exactly one cell and equality compares cells.
+    /// logical value has exactly one inline cell.
     pub(crate) fn large_cell(
         &self,
         large: &jazz_types::large_values::LargeValueRef,
     ) -> Result<Sql, Error> {
-        use jazz_types::large_values::LargeValueKind;
         if large.byte_length <= jazz_types::large_values::INLINE_VALUE_MAX_BYTES as u64 {
             let bytes = self.chunks.value_bytes(large)?;
-            return Ok(Sql::Text(match large.kind {
-                LargeValueKind::Bytes => crate::large::inline_bytes(&bytes),
-                LargeValueKind::String | LargeValueKind::Json => bytes,
-            }));
+            return Ok(crate::large::inline_cell(large.kind, bytes));
         }
-        let prefix = self.chunks.prefix(large)?;
-        Ok(Sql::Text(crate::large::chunked_cell(large, &prefix)?))
+        Ok(Sql::Integer(crate::large::intern(
+            &self.conn,
+            &self.chunks,
+            large,
+        )?))
     }
 
     /// Every stored column of `table`, including ones only other schema
@@ -3667,7 +5684,7 @@ impl Inner {
             return Ok(None);
         };
         let sql = format!(
-            "SELECT {} FROM {} WHERE id = ?1 AND _b = ?2",
+            "SELECT {} FROM {} WHERE id = ?1 AND _branch = ?2",
             quote(&column.stored),
             quote(&table.stored)
         );
@@ -3681,7 +5698,7 @@ impl Inner {
             .optional()
             .map_err(storage)?;
         match cell {
-            Some(cell) => from_sql(&column.ty, cell.as_ref(), &self.chunks),
+            Some(cell) => column_from_sql(column, cell.as_ref(), &self.chunks),
             None => Ok(None),
         }
     }
@@ -3697,7 +5714,7 @@ impl Inner {
         let (table_name, cells) = match op {
             StagedOp::Insert(t, c, _)
             | StagedOp::Update(t, _, c, _)
-            | StagedOp::Upsert(t, _, c, _) => (t.clone(), c),
+            | StagedOp::Upsert(t, _, c, _, _) => (t.clone(), c),
             StagedOp::Restore(t, _, Some(c), _) => (t.clone(), c),
             _ => return Ok(edits),
         };
@@ -3734,7 +5751,7 @@ impl Inner {
     pub(crate) fn counter_deltas(&self, op: &mut StagedOp) -> Result<(), Error> {
         let (table_name, row, cells, target) = match op {
             StagedOp::Update(t, r, c, o) => (t.clone(), *r, c, &o.target),
-            StagedOp::Upsert(t, r, c, o) => (t.clone(), *r, c, &o.target),
+            StagedOp::Upsert(t, r, c, _, o) => (t.clone(), *r, c, &o.target),
             _ => return Ok(()),
         };
         let schema = self.schema.clone();
@@ -3793,6 +5810,9 @@ impl Inner {
                 MergeStrategy::Lww => continue,
                 MergeStrategy::Text | MergeStrategy::Markdown | MergeStrategy::Html => {
                     match self.text_merged(table, row, held, at, column, value)? {
+                        Some(merged) if column.nullable() => {
+                            Value::Nullable(Some(Box::new(Value::String(merged))))
+                        }
                         Some(merged) => Value::String(merged),
                         None => continue,
                     }
@@ -3822,10 +5842,9 @@ impl Inner {
     /// A text write merged on the authority (SPEC 4 §4.3): when a version
     /// its writer never saw authored the column, the merge of the value it
     /// was built on, the value held and its own; `None` keeps its value as
-    /// sent. Every text write of an upload notes the edits back from what is
-    /// stored to its value as sent (none when unmerged): a later write
-    /// built on it, in the same upload or a later one, was built on that
-    /// value.
+    /// sent. Every text write of an upload notes its value as sent (none
+    /// when unmerged): a later write built on it, in the same upload or a
+    /// later one, was built on that value.
     fn text_merged(
         &self,
         table: &Table,
@@ -3843,26 +5862,24 @@ impl Inner {
             return Ok(None);
         };
         let merged = self.text_merge(table, row, held, (key, seq), built, column, value)?;
-        let sent = match &merged {
-            Some((merged, incoming)) => crate::text_merge::edits(
-                column.merge.text_format().expect("a text strategy"),
-                merged,
-                incoming,
-            ),
-            None => Vec::new(),
+        let (merged, sent) = match merged {
+            Some((merged, cell)) => (Some(merged), Some((value.clone(), cell))),
+            None => (None, None),
         };
-        self.text_in
+        self.as_sent
             .borrow_mut()
             .entry(version)
             .or_default()
             .insert(column.stored.clone(), sent);
-        Ok(merged.map(|(merged, _)| merged))
+        Ok(merged)
     }
 
-    /// [`Self::text_merged`]'s merge, with the write's value: `None` when
-    /// there is nothing to merge or the merge leaves the value as sent. The
-    /// fast path reads no value: whether to merge is decided first, from
-    /// the row's `_base` and `_cols` alone.
+    /// [`Self::text_merged`]'s merge, with the write's value bound as its
+    /// cell: `None` when there is nothing to merge or the merge leaves the
+    /// value as sent. The fast path reads no value: whether to merge is
+    /// decided first, from the row's `_base` and `_touched` alone. The write's
+    /// value is bound before it is read, so a descriptor naming chunks its
+    /// writer does not possess is refused (SPEC 19.4), merged or not.
     #[allow(clippy::too_many_arguments)]
     fn text_merge(
         &self,
@@ -3873,179 +5890,177 @@ impl Inner {
         built: sync::Built,
         column: &crate::values::Column,
         value: &Value,
-    ) -> Result<Option<(String, String)>, Error> {
+    ) -> Result<Option<(String, Sql)>, Error> {
         let Some(held) = held else {
             return Ok(None);
         };
+        // A clear (a NULL write) is never merged, and an edit that a clear
+        // overtook stands as sent: either way the later write wins.
+        if matches!(value, Value::Nullable(None)) {
+            return Ok(None);
+        }
         let current = |db: &Self| -> Result<Option<String>, Error> {
-            db.cell_at(table, row, held, &column.name)?
-                .map(|current| db.logical_text(&column.name, &current))
-                .transpose()
+            Ok(match db.cell_at(table, row, held, &column.name)? {
+                Some(current) => db.optional_text(&column.name, &current)?,
+                None => None,
+            })
         };
         let earlier = self
-            .text_in
+            .as_sent
             .borrow()
             .get(&(table.stored.clone(), row, key.to_vec()))
             .and_then(|columns| columns.get(&column.stored).cloned());
         let (base, current) = match earlier {
-            // Built on an earlier write of the same upload, as sent.
+            // Built on an earlier write of the same upload, as sent: what
+            // is held when that write was left as sent.
             Some(sent) => {
                 let Some(current) = current(self)? else {
                     return Ok(None);
                 };
-                (crate::text_merge::apply(&current, &sent)?, current)
+                match sent {
+                    Some((sent, _)) => (self.logical_text(&column.name, &sent)?, current),
+                    None => (current.clone(), current),
+                }
             }
             None => {
-                let Some((base, on)) =
+                let Some(base) =
                     self.merge_base((&table.stored, row, key), built, seq, &column.stored)?
                 else {
                     return Ok(None);
                 };
-                let Some(base) = from_sql(&column.ty, base.as_ref(), &self.chunks)? else {
-                    return Ok(None);
+                // A NULL base merges as "": additions to an empty optional
+                // column are all kept, as they are over an empty string.
+                let base = match column_from_sql(column, base.as_ref(), &self.chunks)? {
+                    Some(base) => self.optional_text(&column.name, &base)?.unwrap_or_default(),
+                    None if column.nullable() => String::new(),
+                    None => return Ok(None),
                 };
-                let mut base = self.logical_text(&column.name, &base)?;
-                // A base on a commit is its value as sent, not as merged.
-                if let Some(on) = on {
-                    base = crate::text_merge::apply(
-                        &base,
-                        &self.sent_edits((&table.stored, row, key), on, &column.stored)?,
-                    )?;
-                }
                 let Some(current) = current(self)? else {
                     return Ok(None);
                 };
                 (base, current)
             }
         };
+        let cell = self.bind_cell(table, column, value, Cells::Authored)?;
         let incoming = self.logical_text(&column.name, value)?;
         let format = column.merge.text_format().expect("a text strategy");
-        let merged = crate::text_merge::merge3(format, &base, &current, &incoming);
-        Ok((merged != incoming).then_some((merged, incoming)))
+        let merged = jazz_text::merge3(format, &base, &current, &incoming);
+        Ok((merged != incoming).then_some((merged, cell)))
     }
 
-    /// The edits back from stored column `column`'s value at version `seq`
-    /// of a row to the value its write sent; none when it was not merged.
-    fn sent_edits(
-        &self,
-        (table, row, key): (&str, RowUuid, &[u8]),
-        seq: u64,
-        column: &str,
-    ) -> Result<Vec<crate::text_merge::Edit>, Error> {
-        if !self.text_in_exists()? {
-            return Ok(Vec::new());
-        }
-        let sent: Option<Vec<u8>> = self
-            .conn
-            .cached_row(
-                "SELECT edits FROM _jazz_text_in WHERE t = ?1 AND id = ?2 AND k = ?3 AND seq = ?4",
-                rusqlite::params![table, row.0.as_bytes().to_vec(), key, seq as i64],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(storage)?;
-        let Some(sent) = sent else {
-            return Ok(Vec::new());
-        };
-        Ok(crate::text_merge::decode_in(&sent)?
-            .into_iter()
-            .find(|(name, _)| name == column)
-            .map(|(_, edits)| edits)
-            .unwrap_or_default())
-    }
-
-    /// Keep, for each row version the upload at `seq` wrote, the edits its
-    /// text merges made back to the values as sent (`_jazz_text_in`, made
-    /// on the first merge that changes a value), and drop the entries its
-    /// sender `node` can no longer build on.
+    /// Keep, for each row version the upload at `seq` wrote whose text
+    /// merge changed a value, that version as its writer sent it (SPEC 4
+    /// §4.3): in `__h` at `_clock` = minus its own `_clock` with [`STATE_AS_SENT`] set, its
+    /// merged columns holding their values as sent and every other cell
+    /// the version's. A later write chained on it merges over these values
+    /// ([`Inner::merge_base`]); no read takes it for a version.
     ///
-    /// Only a commit's own sender builds on it unsettled, and its commits
-    /// arrive in order. Once one of them writes a row over an accepted
-    /// version (or over none), every later one it sends is built on that
-    /// write or a newer one, and a chain walk stops at the first accepted
-    /// version: its older entries for the row are dead. So a row keeps
-    /// entries only for its writers' current unsettled chains.
-    pub(crate) fn record_text_in(
+    /// First drop the as-sent versions its sender `node` can no longer
+    /// build on. Only a commit's own sender builds on it unsettled, and its
+    /// commits arrive in order. Once one of them writes a row over an
+    /// accepted version (or over none), every later one it sends is built
+    /// on that write or a newer one, and a chain walk stops at the first
+    /// accepted version: the sender's older as-sent versions of the row
+    /// are dead. So a row keeps them only for its writers' current
+    /// unsettled chains.
+    pub(crate) fn record_as_sent(
         &self,
         seq: u64,
         node: [u8; 16],
         built: &HashMap<(String, RowUuid, Vec<u8>), sync::Built>,
         rows: &[(String, RowUuid, Vec<u8>)],
     ) -> Result<(), Error> {
-        let text_in = std::mem::take(&mut *self.text_in.borrow_mut());
-        let mut exists = self.text_in_exists()?;
-        if exists {
-            for row_key @ (table, row, key) in rows {
-                if matches!(built.get(row_key), Some(sync::Built::On(_))) {
-                    continue;
-                }
-                self.exec(
-                    "DELETE FROM _jazz_text_in WHERE t = ?1 AND id = ?2 AND k = ?3 AND node = ?4",
-                    rusqlite::params![table, row.0.as_bytes().to_vec(), key, node.to_vec()],
-                )
-                .map_err(storage)?;
-            }
-        }
-        for ((table, row, key), edits) in text_in {
-            let entries: Vec<_> = edits
-                .into_iter()
-                .filter(|(_, edits)| !edits.is_empty())
-                .collect();
-            if entries.is_empty() {
+        for row_key @ (stored, row, key) in rows {
+            if matches!(built.get(row_key), Some(sync::Built::On(_))) {
                 continue;
             }
-            if !exists {
-                self.conn.execute_batch(TEXT_IN_DDL).map_err(storage)?;
-                exists = true;
-            }
             self.exec(
-                "INSERT OR REPLACE INTO _jazz_text_in (t, id, k, node, seq, edits) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                rusqlite::params![
-                    table,
-                    row.0.as_bytes().to_vec(),
-                    key,
-                    node.to_vec(),
-                    seq as i64,
-                    crate::text_merge::encode_in(&entries)
-                ],
+                &format!(
+                    "DELETE FROM {} WHERE id = ?1 AND _branch = ?2 AND _clock < 0 \
+                     AND (_state & {STATE_AS_SENT}) <> 0 AND EXISTS (SELECT 1 FROM _jazz_transactions AS s \
+                     JOIN _jazz_nodes AS n ON n.n = s.n WHERE s.t = -_clock AND n.node = ?3)",
+                    quote(&format!("{stored}__h"))
+                ),
+                rusqlite::params![row.0.as_bytes().to_vec(), key, node.to_vec()],
             )
             .map_err(storage)?;
+        }
+        let as_sent = std::mem::take(&mut *self.as_sent.borrow_mut());
+        for ((stored, row, key), columns) in as_sent {
+            let Some(table) = self.physical.tables.get(&stored) else {
+                continue;
+            };
+            let mut values = vec![
+                Sql::Blob(row.0.as_bytes().to_vec()),
+                Sql::Blob(key),
+                Sql::Integer(self.own_pos(seq).t()),
+            ];
+            let mut sent = BTreeMap::new();
+            for (name, value) in columns {
+                let Some((_, cell)) = value else {
+                    continue;
+                };
+                values.push(cell);
+                sent.insert(name, values.len());
+            }
+            if sent.is_empty() {
+                continue;
+            }
+            let columns = self.columns_list(table);
+            let cells: String = table
+                .stored()
+                .map(|c| match sent.get(&c.stored) {
+                    Some(at) => format!(", ?{at}"),
+                    None => format!(", {}", quote(&c.stored)),
+                })
+                .collect();
+            let sql = format!(
+                "INSERT INTO {} (id, _branch, _clock, _writer, _state, _base, _touched{columns}) \
+                 SELECT id, _branch, -_clock, _writer, _state | {STATE_AS_SENT}, NULL, NULL{cells} FROM {} \
+                 WHERE id = ?1 AND _branch = ?2 AND _clock = ?3",
+                quote(&format!("{stored}__h")),
+                quote(&stored),
+            );
+            self.exec(&sql, params_from_iter(values.iter()))
+                .map_err(storage)?;
         }
         Ok(())
     }
 
-    /// Whether `_jazz_text_in` exists yet (it is made on the first merge
-    /// that changes a value).
-    fn text_in_exists(&self) -> Result<bool, Error> {
-        self.conn
-            .cached_row(
-                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = '_jazz_text_in'",
-                [],
-                |r| r.get::<_, i64>(0),
-            )
-            .map(|n| n > 0)
-            .map_err(storage)
+    /// How many as-sent versions ([`STATE_AS_SENT`]) the store keeps.
+    #[cfg(feature = "testing")]
+    pub(crate) fn as_sent_versions(&self) -> Result<u64, Error> {
+        let mut count = 0;
+        for stored in self.physical.tables.keys() {
+            let n: i64 = self
+                .conn
+                .cached_row(
+                    &format!(
+                        "SELECT count(*) FROM {} WHERE (_state & {STATE_AS_SENT}) <> 0",
+                        quote(&format!("{stored}__h"))
+                    ),
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(storage)?;
+            count += n as u64;
+        }
+        Ok(count)
     }
 
-    /// How many `_jazz_text_in` entries the store keeps.
-    #[cfg(feature = "testing")]
-    pub(crate) fn text_in_entries(&self) -> Result<u64, Error> {
-        if !self.text_in_exists()? {
-            return Ok(0);
+    /// [`Self::logical_text`] of a cell that may be NULL (`None`).
+    fn optional_text(&self, column: &str, value: &Value) -> Result<Option<String>, Error> {
+        match value {
+            Value::Nullable(None) => Ok(None),
+            value => self.logical_text(column, value).map(Some),
         }
-        self.conn
-            .cached_row("SELECT count(*) FROM _jazz_text_in", [], |r| {
-                r.get::<_, i64>(0)
-            })
-            .map(|n| n as u64)
-            .map_err(storage)
     }
 
     /// The whole string a text column's value holds.
     fn logical_text(&self, column: &str, value: &Value) -> Result<String, Error> {
         match value {
             Value::String(text) => Ok(text.clone()),
+            Value::Nullable(Some(value)) => self.logical_text(column, value),
             Value::Large(large) => String::from_utf8(self.chunks.value_bytes(large)?)
                 .map_err(|_| rejected(format!("`{column}` holds a value that is not UTF-8"))),
             _ => Err(rejected(format!("`{column}` is not a string"))),
@@ -4055,20 +6070,37 @@ impl Inner {
     /// Copy the row's current image into its history before it is
     /// superseded (history holds superseded images only).
     fn snapshot(&self, table: &Table, row: RowUuid, key: &[u8], seq: u64) -> Result<(), Error> {
-        let columns = self.columns_list(table);
-        let sql = format!(
-            "INSERT INTO {} (id, _b, _seq, _del, _c, _base, _cols{columns}) \
-             SELECT id, _b, _seq, _del, _c, _base, _cols{columns} FROM {} WHERE id = ?1 AND _b = ?2 AND _seq <> ?3",
-            quote(&format!("{}__h", table.stored)),
-            quote(&table.stored)
-        );
+        let id = row.0.as_bytes().to_vec();
+        let current: Option<(i64, Vec<u8>)> = self
+            .conn
+            .cached_row(
+                &format!(
+                    "SELECT _clock, _writer FROM {} WHERE id = ?1 AND _branch = ?2",
+                    quote(&table.stored)
+                ),
+                rusqlite::params![id, key],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(storage)?;
+        let Some((at, w)) = current.map(|(t, w)| (Pos::from_t(t), w)) else {
+            return Ok(());
+        };
         // An image written earlier in the same commit is not superseded
         // history: history holds committed images only.
-        self.exec(
-            &sql,
-            rusqlite::params![row.0.as_bytes().to_vec(), key, seq as i64],
-        )
-        .map_err(storage)?;
+        if at == self.own_pos(seq) && w == self.own_writer_at(seq) {
+            return Ok(());
+        }
+        let columns = self.columns_list(table);
+        let sql = format!(
+            "INSERT INTO {} (id, _branch, _clock, _writer, _state, _base, _touched{columns}) \
+             SELECT id, _branch, _clock, _writer, _state, _base, _touched{columns} FROM {} \
+             WHERE id = ?1 AND _branch = ?2",
+            quote(&format!("{}__h", table.stored)),
+            quote(&table.stored),
+        );
+        self.exec(&sql, rusqlite::params![id, key])
+            .map_err(storage)?;
         Ok(())
     }
 
@@ -4090,13 +6122,20 @@ impl Inner {
         let source = match at {
             None => Some(quote(&table.stored)),
             Some(cut) => match self.existing(&table.stored, row, from)? {
-                Some((current, _)) if cut.sees(current) => Some(quote(&table.stored)),
+                Some((current, _))
+                    if cut.sees(self.current_rank(&table.stored, row, from, current)?) =>
+                {
+                    Some(quote(&table.stored))
+                }
                 _ => self
                     .version_at(&table.stored, row, from, cut)?
-                    .map(|version| {
+                    .map(|(version, w)| {
                         format!(
-                            "(SELECT * FROM {} WHERE _seq = {version})",
-                            quote(&format!("{}__h", table.stored))
+                            "(SELECT * FROM {} WHERE _clock = {} AND _writer = X'{}' AND id = ?3 \
+                             AND _branch = ?4)",
+                            quote(&format!("{}__h", table.stored)),
+                            version.t(),
+                            w.iter().map(|b| format!("{b:02x}")).collect::<String>()
                         )
                     }),
             },
@@ -4107,13 +6146,19 @@ impl Inner {
                 table.name
             )));
         };
+        // The copy keeps the base's deletion and authored no content.
         let sql = format!(
-            "INSERT INTO {name} (id, _b, _seq, _del, _c{columns}) SELECT id, ?1, ?2, _del, 0{columns} \
-             FROM {source} WHERE id = ?3 AND _b = ?4",
-            name = quote(&table.stored)
+            "INSERT INTO {name} (id, _branch, _clock, _writer, _state{columns}) \
+             SELECT id, ?1, ?2, ?5, _state | {STATE_NO_CONTENT}{columns} \
+             FROM {source} WHERE id = ?3 AND _branch = ?4",
+            name = quote(&table.stored),
         );
-        self.exec(&sql, rusqlite::params![to, seq as i64, id, from])
-            .map_err(storage)?;
+        let w = self.own_writer_at(seq);
+        self.exec(
+            &sql,
+            rusqlite::params![to, self.own_pos(seq).t(), id, from, w],
+        )
+        .map_err(storage)?;
         self.set_cells(table, row, to, head_cells, Cells::Carried, seq, None, false)
     }
 
@@ -4132,28 +6177,37 @@ impl Inner {
         deleted: Option<bool>,
         content: bool,
     ) -> Result<(), Error> {
-        // Right-hand sides read the row before this update: `_seq` is still
+        // Right-hand sides read the row before this update: `_clock` is still
         // the previous version's.
         // What a new version was built on is the authority's to write
         // (SPEC 4 §4.6).
+        let mut values = vec![Sql::Integer(self.own_pos(seq).t())];
+        let deletion = match deleted {
+            Some(deleted) => {
+                values.push(Sql::Integer(if deleted { STATE_DELETED } else { 0 }));
+                format!("?{}", values.len())
+            }
+            None => format!("(_state & {STATE_DELETED})"),
+        };
+        // The no-content bit stays set only while no write of the commit
+        // authored content.
+        let no_content = if content { 0 } else { STATE_NO_CONTENT };
+        values.push(Sql::Blob(self.own_writer_at(seq)));
         let mut sets = vec![
-            "_seq = ?1".to_owned(),
-            "_base = NULL, _cols = NULL".to_owned(),
+            "_clock = ?1".to_owned(),
+            format!("_writer = ?{}", values.len()),
+            "_base = NULL, _touched = NULL".to_owned(),
             format!(
-                "_c = CASE WHEN _seq = ?1 THEN max(_c, {content}) ELSE {content} END",
-                content = content as u8
+                "_state = (CASE WHEN _clock = ?1 THEN _state & {no_content} ELSE {no_content} END) \
+                 | {deletion}"
             ),
         ];
-        let mut values = vec![Sql::Integer(seq as i64)];
-        if let Some(deleted) = deleted {
-            values.push(Sql::Integer(deleted as i64));
-            sets.push(format!("_del = ?{}", values.len()));
-        }
         for (name, value) in cells {
-            values.push(match table.column(name) {
-                Some(column) => self.bind_cell(column, value, source)?,
+            let cell = match table.column(name) {
+                Some(column) => self.bind_cell(table, column, value, source)?,
                 None => Self::bind_value(value)?,
-            });
+            };
+            values.push(cell);
             sets.push(format!(
                 "{} = ?{}",
                 quote(table.stored_name(name)),
@@ -4167,7 +6221,7 @@ impl Inner {
         values.push(Sql::Blob(row.0.as_bytes().to_vec()));
         values.push(Sql::Blob(key.to_vec()));
         let sql = format!(
-            "UPDATE {} SET {} WHERE id = ?{} AND _b = ?{}",
+            "UPDATE {} SET {} WHERE id = ?{} AND _branch = ?{}",
             quote(&table.stored),
             sets.join(", "),
             values.len() - 1,
@@ -4179,6 +6233,15 @@ impl Inner {
             .borrow_mut()
             .push((table.stored.clone(), row, key.to_vec()));
         Ok(())
+    }
+
+    /// The writer of a version commit `seq` writes: none for an accepted one.
+    fn own_writer_at(&self, seq: u64) -> Vec<u8> {
+        if self.own_pos(seq).accepted() {
+            Vec::new()
+        } else {
+            self.own_writer(seq)
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4211,9 +6274,21 @@ impl Inner {
                 }
             }
         }
+        // A replicated insert from a version without a branch column keys
+        // its row by that column's immutable default (INV-BVIEW-19).
+        if schema.stored_names {
+            for column in &table.branch_by {
+                if !cells.contains_key(column)
+                    && let Some(default) = table.column(column).and_then(|c| c.default.clone())
+                {
+                    cells.insert(column.clone(), default);
+                }
+            }
+        }
         let key = table.row_branch_key(&cells);
         let row = row_id.unwrap_or_else(|| self.ids.next_row_id());
         let cells = self.merged_cells(table, row, None, None, cells)?;
+        self.refuse_withheld(table, row, &key)?;
         match self.existing(&table.stored, row, &key)? {
             Some((_, true)) => return Err(row_already_deleted(row)),
             Some((_, false)) => return Err(row_already_exists(row)),
@@ -4221,39 +6296,84 @@ impl Inner {
         }
         // Most stores have no lens cells; the owner's version is cached
         // (hashing a schema per insert would dominate a large batch's replay).
-        let (copies, dropped) = if self.names.has_lens_cells() {
+        let (copies, dropped) = if !self.names.has_lens_cells() {
+            Default::default()
+        } else if schema.stored_names {
+            let copies = self
+                .names
+                .stored_copies(&table.stored, |column| cells.contains_key(column));
+            (copies, Vec::new())
+        } else {
             let version = if Rc::ptr_eq(&schema, &self.owner) {
                 self.owner_version
             } else {
                 schema.jazz.version_id()
             };
             self.names.lens_cells(&version, table)
-        } else {
-            Default::default()
         };
-        let mut names = vec!["id".to_owned(), "_b".to_owned(), "_seq".to_owned()];
+        let mut names = vec![
+            "id".to_owned(),
+            "_branch".to_owned(),
+            "_clock".to_owned(),
+            "_writer".to_owned(),
+        ];
         let mut values = vec![
             Sql::Blob(row.0.as_bytes().to_vec()),
             Sql::Blob(key.clone()),
-            Sql::Integer(seq as i64),
+            Sql::Integer(self.own_pos(seq).t()),
+            Sql::Blob(self.own_writer_at(seq)),
         ];
         for column in &table.columns {
-            let value = match (cells.get(&column.name), &column.default) {
-                (Some(value), _) => self.bind_cell(column, value, source)?,
-                (None, Some(default)) => self.bind_cell(column, default, Cells::Authored)?,
-                (None, None) if column.nullable() => Sql::Null,
+            let given = match (cells.get(&column.name), &column.default) {
+                (Some(value), _) => Some((value, source)),
+                // A replicated insert names every column its writer's
+                // version declares, and the backwards defaults of columns
+                // its lineage dropped: one it leaves out, a later version
+                // added, so the stored column's own default or a copy fills
+                // it. Only a required column nothing fills is refused.
+                (None, default)
+                    if schema.stored_names
+                        && (default.is_some()
+                            || column.nullable()
+                            || copies.iter().any(|(_, copy)| *copy == column.stored)) =>
+                {
+                    continue;
+                }
+                (None, Some(default)) => Some((default, Cells::Authored)),
+                (None, None) if column.nullable() => None,
                 (None, None) => {
                     return Err(missing_required(table_name, &column.name));
                 }
             };
+            let value = match given {
+                Some((value, cells)) => self.bind_cell(table, column, value, cells)?,
+                None => Sql::Null,
+            };
             for (_, copy) in copies.iter().filter(|(c, _)| *c == column.name) {
                 names.push(quote(copy));
-                values.push(value.clone());
+                // An enum copy's tags are its own.
+                values.push(match given {
+                    Some((given, _)) if column.is_enum() => {
+                        self.enum_value_cell(&table.stored, copy, given)?
+                    }
+                    _ => value.clone(),
+                });
             }
             names.push(quote(&column.stored));
             values.push(value);
         }
         for (stored, default) in dropped {
+            let default = self.enum_cell(&table.stored, &stored, default)?;
+            names.push(quote(&stored));
+            values.push(default);
+        }
+        // An enum column this version leaves out whose `DEFAULT` tag is
+        // stale takes its default by name.
+        for (stored, default) in self.names.enum_defaults(&table.stored) {
+            if names.contains(&quote(&stored)) {
+                continue;
+            }
+            let default = self.enum_value_cell(&table.stored, &stored, &Value::String(default))?;
             names.push(quote(&stored));
             values.push(default);
         }
@@ -4278,7 +6398,11 @@ impl Inner {
         if let Some(author) = self.checked(who) {
             self.write_check(table, row, &key, author, WriteCheck::Insert, seq)?;
         }
-        Ok(WriteHandle { row, seq })
+        Ok(WriteHandle {
+            row,
+            seq: self.own_pos(seq),
+            tx: seq,
+        })
     }
 
     /// The session a write's operation policies (USING, WITH CHECK,
@@ -4356,17 +6480,21 @@ impl Inner {
         Ok(())
     }
 
+    /// An update, or with `created` an upsert, which gives the columns
+    /// `cells` leaves out `created`'s values if it creates the row.
     #[allow(clippy::too_many_arguments)]
     fn patch(
         &mut self,
         table_name: &str,
         row: RowUuid,
         cells: BTreeMap<String, Value>,
+        created: Option<BTreeMap<String, Value>>,
         target: &Target,
         who: Who,
         seq: u64,
-        upsert: bool,
     ) -> Result<WriteHandle, Error> {
+        let upsert = created.is_some();
+        let created = created.unwrap_or_default();
         let verb = if upsert { "UPSERT" } else { "UPDATE" };
         let schema = self.schema.clone();
         let table = schema.table(table_name)?;
@@ -4390,6 +6518,9 @@ impl Inner {
             Located::Absent { cells: branch, .. } if upsert => {
                 let mut cells = cells;
                 cells.extend(branch);
+                for (column, value) in created {
+                    cells.entry(column).or_insert(value);
+                }
                 return self.insert(
                     table_name,
                     cells,
@@ -4420,7 +6551,7 @@ impl Inner {
                 deleted: true,
                 seq: current,
                 ..
-            } if !self.merging && (!upsert || current != seq) => {
+            } if !self.merging && (!upsert || current != self.own_pos(seq)) => {
                 return Err(row_already_deleted(row));
             }
             Located::Row {
@@ -4429,11 +6560,14 @@ impl Inner {
                 deleted,
             } => {
                 let mut cells = cells;
-                let staged_tombstone = deleted && upsert && current == seq;
+                let staged_tombstone = deleted && upsert && current == self.own_pos(seq);
                 if staged_tombstone {
                     // Every column is written, as by an insert: nothing
                     // of the deleted version carries over.
                     reinserted = true;
+                    for (column, value) in created {
+                        cells.entry(column).or_insert(value);
+                    }
                     for column in &table.columns {
                         // Branch columns are the row's key and stay.
                         if cells.contains_key(&column.name)
@@ -4452,7 +6586,11 @@ impl Inner {
                     self.authorize_patch(table, row, &key, &who, verb)?;
                 }
                 if cells.is_empty() && !staged_tombstone {
-                    return Ok(WriteHandle { row, seq: current });
+                    return Ok(WriteHandle {
+                        row,
+                        seq: current,
+                        tx: self.own_seq_at((current, None)).unwrap_or(current.seq),
+                    });
                 }
                 let held = (!staged_tombstone).then_some(&key[..]);
                 let cells = self.merged_cells(table, row, held, Some((&key, seq)), cells)?;
@@ -4501,7 +6639,11 @@ impl Inner {
                 seq,
             )?;
         }
-        Ok(WriteHandle { row, seq })
+        Ok(WriteHandle {
+            row,
+            seq: self.own_pos(seq),
+            tx: seq,
+        })
     }
 
     fn update(
@@ -4513,19 +6655,24 @@ impl Inner {
         who: Who,
         seq: u64,
     ) -> Result<WriteHandle, Error> {
-        self.patch(table, row, cells, target, who, seq, false)
+        self.patch(table, row, cells, None, target, who, seq)
     }
 
+    /// Upsert `cells` into `row`; if it creates the row, `created` fills
+    /// the columns `cells` leaves out (a replicated upsert's writer's
+    /// defaults, see `stored_op`).
+    #[allow(clippy::too_many_arguments)]
     fn upsert(
         &mut self,
         table: &str,
         row: RowUuid,
         cells: BTreeMap<String, Value>,
+        created: BTreeMap<String, Value>,
         target: &Target,
         who: Who,
         seq: u64,
     ) -> Result<WriteHandle, Error> {
-        self.patch(table, row, cells, target, who, seq, true)
+        self.patch(table, row, cells, Some(created), target, who, seq)
     }
 
     fn delete(
@@ -4600,7 +6747,11 @@ impl Inner {
                 )));
             }
         }
-        Ok(WriteHandle { row, seq })
+        Ok(WriteHandle {
+            row,
+            seq: self.own_pos(seq),
+            tx: seq,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4667,7 +6818,11 @@ impl Inner {
         if let Some(author) = self.checked(who) {
             self.write_check(table, row, &key, author, WriteCheck::Restore, seq)?;
         }
-        Ok(WriteHandle { row, seq })
+        Ok(WriteHandle {
+            row,
+            seq: self.own_pos(seq),
+            tx: seq,
+        })
     }
 }
 
@@ -4688,6 +6843,150 @@ struct DeferredCheck {
     key: Vec<u8>,
     author: AuthorSubject,
     check: WriteCheck,
+    /// Whether the write replaces content its row had before the unit: an
+    /// update, or an insert or restore over a row the unit deleted first.
+    /// A write that only adds a row to what policies read does not.
+    replaces: bool,
+}
+
+impl WriteCheck {
+    fn kind(&self) -> u8 {
+        match self {
+            WriteCheck::Insert => 0,
+            WriteCheck::WithCheck { .. } => 1,
+            WriteCheck::Restore => 2,
+        }
+    }
+}
+
+/// The most rows of its own writes a unit's write checks may read, summed
+/// over every check (SPEC 7): past it, the unit is rejected as not
+/// supported yet instead of being decided at unbounded cost.
+const WRITE_CHECK_EVIDENCE_BUDGET: usize = 262_144;
+
+/// What of a write check's overlay its policy read.
+struct OverlayRead {
+    /// Grounded rows bound into the check (see [`Ctx::overlaid_rows`]).
+    rows: usize,
+    /// Stored tables read through the overlay.
+    tables: BTreeSet<String>,
+}
+
+/// The rows of its own writes a unit's write checks have read so far.
+#[derive(Default)]
+struct EvidenceBudget {
+    read: usize,
+}
+
+impl EvidenceBudget {
+    fn charge(&mut self, rows: usize) -> Result<(), Error> {
+        self.read = self.read.saturating_add(rows);
+        if self.read > WRITE_CHECK_EVIDENCE_BUDGET {
+            return Err(rejected(format!(
+                "Reading more than {WRITE_CHECK_EVIDENCE_BUDGET} rows of a transaction's own \
+                 writes in its write-policy checks is not supported yet"
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn write_check_denied(check: &DeferredCheck) -> Error {
+    match check.check {
+        WriteCheck::Insert => denied(format_args!(
+            "INSERT policy denied the new row in `{}`",
+            check.table
+        )),
+        WriteCheck::WithCheck { upsert } => denied(format_args!(
+            "{} policy (WITH CHECK) denied the new row",
+            if upsert { "UPSERT" } else { "UPDATE" }
+        )),
+        WriteCheck::Restore => denied("RESTORE policy denied the restored row"),
+    }
+}
+
+/// Whether `policy` (of `table`) can only go from denied to allowed as rows
+/// are added to the tables it reads. A `NOT` over anything that reads rows
+/// is non-monotone, as is a relation that can drop rows when others appear
+/// (a left join, an offset or a limit). Inherited policies are followed; a
+/// cycle adds nothing new.
+fn policy_is_monotone(
+    schema: &Schema,
+    table: &Table,
+    policy: &PolicyExpr,
+    seen: &mut BTreeSet<(String, u8)>,
+) -> bool {
+    let inherited = |schema: &Schema,
+                     target: Option<&Table>,
+                     operation: Operation,
+                     seen: &mut BTreeSet<(String, u8)>| {
+        let Some(target) = target else {
+            return true;
+        };
+        if !seen.insert((target.name.clone(), operation as u8)) {
+            return true;
+        }
+        target
+            .policy(operation)
+            .is_none_or(|policy| policy_is_monotone(schema, target, policy, seen))
+    };
+    match policy {
+        PolicyExpr::Not(inner) => !policy_reads_other_rows(inner),
+        PolicyExpr::And(parts) | PolicyExpr::Or(parts) => parts
+            .iter()
+            .all(|part| policy_is_monotone(schema, table, part, seen)),
+        PolicyExpr::Exists {
+            table: target,
+            condition,
+        } => {
+            let target = schema.tables.get(target).unwrap_or(table);
+            policy_is_monotone(schema, target, condition, seen)
+        }
+        PolicyExpr::ExistsRel { rel } => relation_is_monotone(rel),
+        PolicyExpr::Inherits {
+            operation,
+            via_column,
+            ..
+        } => {
+            let target = table
+                .references
+                .get(via_column)
+                .and_then(|name| schema.tables.get(name));
+            inherited(schema, target, *operation, seen)
+        }
+        PolicyExpr::InheritsReferencing {
+            operation,
+            source_table,
+            ..
+        } => inherited(schema, schema.tables.get(source_table), *operation, seen),
+        _ => true,
+    }
+}
+
+fn relation_is_monotone(rel: &crate::query::RelationExpr) -> bool {
+    use crate::query::{RelationExpr, RelationJoinKind};
+    match rel {
+        RelationExpr::TableScan { .. } => true,
+        RelationExpr::Filter { input, .. }
+        | RelationExpr::Project { input, .. }
+        | RelationExpr::Distinct { input, .. }
+        | RelationExpr::OrderBy { input, .. } => relation_is_monotone(input),
+        RelationExpr::Union { inputs } => inputs.iter().all(|arm| relation_is_monotone(&arm.input)),
+        RelationExpr::Join {
+            left,
+            right,
+            join_kind,
+            ..
+        } => {
+            matches!(join_kind, RelationJoinKind::Inner)
+                && relation_is_monotone(left)
+                && relation_is_monotone(right)
+        }
+        RelationExpr::Gather { seed, step, .. } => {
+            relation_is_monotone(seed) && relation_is_monotone(step)
+        }
+        RelationExpr::Offset { .. } | RelationExpr::Limit { .. } => false,
+    }
 }
 
 /// Which branch a write addresses.
@@ -4736,7 +7035,7 @@ impl Target {
 enum Located {
     Row {
         key: Vec<u8>,
-        seq: u64,
+        seq: Pos,
         deleted: bool,
     },
     Inherited {
@@ -4764,7 +7063,16 @@ pub struct MergeableTxHandle<'a> {
 pub(crate) enum StagedOp {
     Insert(String, BTreeMap<String, Value>, InsertOptions),
     Update(String, RowUuid, BTreeMap<String, Value>, UpdateOptions),
-    Upsert(String, RowUuid, BTreeMap<String, Value>, UpsertOptions),
+    /// The fourth field is what the upsert gives the columns it leaves
+    /// out if it creates the row, by stored names: a replicated upsert's
+    /// writer's defaults (see `Inner::stored_op`); empty on a local one.
+    Upsert(
+        String,
+        RowUuid,
+        BTreeMap<String, Value>,
+        BTreeMap<String, Value>,
+        UpsertOptions,
+    ),
     Delete(String, RowUuid, DeleteOptions),
     Restore(
         String,
@@ -4833,7 +7141,7 @@ impl Inner {
                 continue;
             }
             let sql = format!(
-                "SELECT {} FROM {} WHERE id = ?1 AND _b = ?2 AND _del = 0",
+                "SELECT {} FROM {} WHERE id = ?1 AND _branch = ?2 AND (_state & {STATE_DELETED}) = 0",
                 quote(&column.stored),
                 quote(&t.stored)
             );
@@ -4845,7 +7153,7 @@ impl Inner {
                     |r| r.get(0),
                 )
                 .map_err(|_| rejected(format!("move source {row:?} does not exist")))?;
-            let value = from_sql(&column.ty, cell.as_ref(), &self.chunks)?;
+            let value = column_from_sql(column, cell.as_ref(), &self.chunks)?;
             if let Some(value) = value {
                 cells.insert(column.name.clone(), value);
             }
@@ -4892,7 +7200,11 @@ impl MergeableTxHandle<'_> {
         self.ops
             .borrow_mut()
             .push(StagedOp::Insert(table.to_owned(), cells, opts));
-        Ok(WriteHandle { row, seq: 0 })
+        Ok(WriteHandle {
+            row,
+            seq: Pos::default(),
+            tx: 0,
+        })
     }
 
     pub async fn update(
@@ -4917,9 +7229,13 @@ impl MergeableTxHandle<'_> {
         opts: UpsertOptions,
     ) -> Result<(), Error> {
         self.db.inner().require_mutation_admission()?;
-        self.ops
-            .borrow_mut()
-            .push(StagedOp::Upsert(table.to_owned(), row, cells, opts));
+        self.ops.borrow_mut().push(StagedOp::Upsert(
+            table.to_owned(),
+            row,
+            cells,
+            BTreeMap::new(),
+            opts,
+        ));
         Ok(())
     }
 
@@ -4997,7 +7313,7 @@ impl MergeableTxHandle<'_> {
                             )
                             .await
                             .map(drop)?,
-                        StagedOp::Upsert(t, r, c, o) => db
+                        StagedOp::Upsert(t, r, c, _, o) => db
                             .upsert(
                                 &t,
                                 r,
@@ -5057,7 +7373,10 @@ impl SchemaViewId {
     fn for_schema(schema: &JazzSchema) -> Self {
         let bytes =
             serde_json::to_vec(schema.public_schema()).expect("public schema always serializes");
-        Self(blake3::derive_key("jazz typed schema view id v1", &bytes))
+        Self(jazz_types::sha256::derive_key(
+            "jazz typed schema view id v1",
+            &bytes,
+        ))
     }
 }
 
@@ -5121,17 +7440,98 @@ fn same_tables(
 }
 
 impl Db {
+    /// A handle that reads and writes as a sync session declaring schema
+    /// `version` is served: by that admitted version's names, governed by
+    /// the current schema's policies. `None` while `version` is not
+    /// admitted.
+    pub fn governed_view(&self, version: crate::ids::SchemaVersionId) -> Option<Db> {
+        let view = self.inner.borrow().governed(version)?;
+        Some(Db {
+            inner: self.inner.clone(),
+            view: Some(view),
+            governance: Governance::CurrentOwner,
+        })
+    }
+
+    /// [`Self::governed_view`] for a session pinned to published bundle
+    /// `bundle` (see [`Self::check_session_pin`]): governed by the
+    /// bundle's policies instead of the current schema's. Without a bundle
+    /// it is [`Self::governed_view`]. `None` while `version` is not
+    /// admitted or the bundle does not resolve.
+    pub fn pinned_view(
+        &self,
+        version: crate::ids::SchemaVersionId,
+        bundle: Option<&crate::catalogue::BundleId>,
+    ) -> Result<Option<Db>, Error> {
+        let Some(bundle) = bundle else {
+            return Ok(self.governed_view(version));
+        };
+        let mut inner = self.inner.borrow_mut();
+        let Some((_, governing)) = inner.bundle(bundle)? else {
+            return Ok(None);
+        };
+        let Some(view) = inner.governed_by(version, governing.clone()) else {
+            return Ok(None);
+        };
+        drop(inner);
+        Ok(Some(Db {
+            inner: self.inner.clone(),
+            view: Some(view),
+            governance: Governance::Selected(governing, *bundle),
+        }))
+    }
+
+    /// Ship more of the app's versions and lenses (see
+    /// [`DbConfig::with_migrations`]): a client learns an app's migrations
+    /// when it first sees the app, not only when it opens.
+    pub fn add_migrations(&self, migrations: Migrations) {
+        let mut inner = self.inner();
+        for schema in migrations.schemas {
+            let version = schema.version_id();
+            if !inner
+                .migrations
+                .schemas
+                .iter()
+                .any(|s| s.version_id() == version)
+            {
+                inner.migrations.schemas.push(schema);
+            }
+        }
+        for lens in migrations.lenses {
+            if !inner
+                .migrations
+                .lenses
+                .iter()
+                .any(|l| l.source == lens.source && l.target == lens.target)
+            {
+                inner.migrations.lenses.push(lens);
+            }
+        }
+    }
+
     /// Register a typed schema view. The handle shares this owner's store,
     /// batches, clock and subscriptions; it reads and writes its own columns
     /// of the physical tables, which hold the union of every admitted view.
     pub async fn register_schema_view(&self, schema: JazzSchema) -> Result<Db, Error> {
+        // A version the app's lenses lead to is admitted as the authority
+        // admits it, not named against the current one.
+        self.admit_along_migrations(&schema)?;
         let logical = {
             let mut inner = self.inner.borrow_mut();
             let version = schema.version_id();
-            if let Some((_, admitted)) = inner.admitted.iter().find(|(id, _)| *id == version) {
-                if !same_tables(admitted, &schema, |l, r| {
-                    l.read_policy == r.read_policy && l.write_policies == r.write_policies
-                }) {
+            if let Some((_, admitted)) = inner.admitted.iter_mut().find(|(id, _)| *id == version) {
+                let same_policies =
+                    |l: &crate::schema::TableSchema, r: &crate::schema::TableSchema| {
+                        l.read_policy == r.read_policy && l.write_policies == r.write_policies
+                    };
+                // A version mirrored from the upstream's catalogue travels
+                // without its policies: the view brings them.
+                if !same_tables(admitted, &schema, same_policies)
+                    && same_tables(admitted, &schema.without_permissions(), same_policies)
+                {
+                    *admitted = schema.clone();
+                }
+                if !same_tables(admitted, &schema, same_policies) {
                     return Err(schema_error(
                         "schema view policy metadata conflicts with its admitted structural schema",
                     ));
@@ -5150,24 +7550,29 @@ impl Db {
                 if inner.names.get(&version).is_none() {
                     check_direct_lens(&inner.owner.jazz, &schema)?;
                 }
-                inner.admitted.push((version, schema.clone()));
             }
             let base = inner.owner.names();
             let logical = inner.names.resolve(&schema, &[], Some(&base))?;
-            let ddl = inner.physical.union(&logical)?;
-            execute_script(&inner.conn, &ddl)?;
-            crate::array_index::install(&inner.conn, &logical)?;
-            let Inner { names, conn, .. } = &mut *inner;
-            names.admit(conn, &logical)?;
+            inner.names.check_branches(&logical)?;
+            inner.names.check_types(&logical)?;
+            inner.write_admission(&logical, Vec::new(), false)?;
+            if !inner.admitted.iter().any(|(id, _)| *id == version) {
+                inner.admitted.push((version, schema.clone()));
+            }
             inner
                 .views
                 .entry(SchemaViewId::for_schema(&schema))
                 .or_insert(schema);
             logical
         };
+        let logical = match &self.governance {
+            Governance::CurrentOwner => logical,
+            Governance::Selected(policies, _) => logical.with_policies_of(policies.clone()),
+        };
         Ok(Db {
             inner: self.inner.clone(),
             view: Some(Rc::new(logical)),
+            governance: self.governance.clone(),
         })
     }
 
@@ -5204,15 +7609,51 @@ struct Overlay {
 /// The store behind its one gate: every borrow first undoes a transaction
 /// handle's overlay, so nothing but that handle's next stage or read sees
 /// it.
-struct Store(RefCell<Inner>);
+struct Store(
+    RefCell<Inner>,
+    // Invalidates owner-local observation cuts and trusted in-process routes.
+    std::cell::Cell<u64>,
+    RefCell<Vec<u64>>,
+    // A host wake requested while Inner is borrowed by a callback.
+    std::cell::Cell<bool>,
+);
 
 impl Store {
     fn new(inner: Inner) -> Self {
-        Self(RefCell::new(inner))
+        Self(
+            RefCell::new(inner),
+            std::cell::Cell::new(0),
+            RefCell::new(Vec::new()),
+            std::cell::Cell::new(false),
+        )
+    }
+
+    /// A callback can drop a read while the store is borrowed. Keep that
+    /// cleanup outside Inner until the next exclusive borrow can apply it.
+    fn cancel_fetch(&self, id: u64) -> bool {
+        if let Ok(mut inner) = self.0.try_borrow_mut() {
+            inner
+                .client
+                .as_mut()
+                .is_some_and(|client| client.forget_once(id))
+        } else {
+            self.2.borrow_mut().push(id);
+            true
+        }
+    }
+
+    fn flush_cancelled_fetches(&self, inner: &mut Inner) {
+        let cancelled = std::mem::take(&mut *self.2.borrow_mut());
+        if let Some(client) = inner.client.as_mut() {
+            for id in cancelled {
+                client.forget_once(id);
+            }
+        }
     }
 
     fn borrow_mut(&self) -> std::cell::RefMut<'_, Inner> {
         let mut inner = self.0.borrow_mut();
+        self.flush_cancelled_fetches(&mut inner);
         inner.settle_overlay();
         inner
     }
@@ -5221,6 +7662,7 @@ impl Store {
         // A borrow already held means the overlay was undone when it was
         // taken.
         if let Ok(mut inner) = self.0.try_borrow_mut() {
+            self.flush_cancelled_fetches(&mut inner);
             inner.settle_overlay();
         }
         self.0.borrow()
@@ -5228,21 +7670,31 @@ impl Store {
 
     /// The store with a handle's overlay kept for its next stage.
     fn staging(&self) -> std::cell::RefMut<'_, Inner> {
-        self.0.borrow_mut()
+        let mut inner = self.0.borrow_mut();
+        self.flush_cancelled_fetches(&mut inner);
+        inner
     }
 }
 
 struct Batch {
     kind: BatchKind,
     reads_state: Rc<RefCell<transaction_reads::ReadState>>,
+    accepted: Option<accepted_transactions::AcceptedScope>,
+    // Ordinary replica reads keep their own-client mode. Authority evidence
+    // authenticates this exact opened owner independently in the same batch.
+    client_evidence_owner: Option<DbIdentity>,
     /// None retains the ordinary per-operation identity contract.
     identity: Option<WriteIdentity>,
-    uploads: Vec<Rc<large_ops::UploadLease>>,
     ops: Vec<(Rc<Schema>, StagedOp)>,
+    /// Original scope captured at each successful stage, before names lower.
+    observation_provenance: Vec<Option<sync::SubmissionProvenance>>,
     /// What the batch's partial large-value updates built: descriptors
     /// derived from stored trees and the nodes consolidations prepared,
     /// trusted and stored whenever the staged writes apply.
     edits: LargeEdits,
+    /// Leases of the streamed values the batch's writes hold: their chunks
+    /// stay until the batch commits or is dropped.
+    uploads: Vec<crate::db::large_ops::UploadLease>,
 }
 
 impl Batch {
@@ -5262,7 +7714,7 @@ pub(crate) struct LargeEdits {
 
 /// An admitted read's boundary in the batch's append-only staging buffers.
 /// Capturing lengths retains no copy of unrelated staged writes.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct BatchPrefix {
     ops: usize,
     derived: usize,
@@ -5283,11 +7735,11 @@ enum BatchKind {
     Mergeable,
     /// Serializable: reads see the store as of `snapshot` plus the batch's
     /// own writes; each read's snapshot result is kept for validation.
-    /// On a client the snapshot is pinned by the first read that reaches
-    /// the authority (the authority's state then), or stays the replica's
-    /// known cut when the first read answers offline.
+    /// On a client the first successful read pins the snapshot: the
+    /// authority's state for an answered remote read, or the replica's
+    /// known cut for a LocalOnly read or a LocalFirst offline fallback.
     Serializable {
-        snapshot: u64,
+        snapshot: Pos,
         reads: Vec<ReadRecord>,
         pinned: bool,
         /// On a client, its own commits still unsettled at begin: the
@@ -5301,7 +7753,12 @@ enum BatchKind {
 struct ReadRecord {
     prepared: PreparedQuery,
     include_deleted: bool,
-    rows: Vec<(RowUuid, u64)>,
+    rows: Vec<(RowUuid, sync::Rank)>,
+    // Evaluation provenance for admitting mixed accepted reads. Ordinary
+    // transactions retain their existing validation behaviour.
+    scope: AcceptedReadScope,
+    schema: [u8; 16],
+    accepted_evidence: bool,
 }
 
 /// An upload the authority refused: the node and local seq of the commit
@@ -5319,16 +7776,27 @@ fn conflict(message: impl Into<String>) -> Error {
     Error::new(ErrorCode::TransactionConflict, message)
 }
 
-fn versions(rows: &[CurrentRow]) -> Vec<(RowUuid, u64)> {
-    rows.iter().map(|row| (row.id, row.seq)).collect()
+/// A read row's version: its table, row, position and writer, when the
+/// read carried it.
+type ReadVersion = (Arc<str>, RowUuid, Pos, Option<Arc<[u8]>>);
+
+fn versions(rows: &[CurrentRow]) -> Vec<ReadVersion> {
+    rows.iter()
+        .map(|row| (row.table.clone(), row.id, row.seq, row.writer.clone()))
+        .collect()
 }
 
 /// The versions of a relation tree's child rows, depth first.
-fn child_versions(node: &ResultNode, out: &mut Vec<(RowUuid, u64)>) {
+fn child_versions(node: &ResultNode, out: &mut Vec<ReadVersion>) {
     for relation in node.relations.values() {
         if let ResultRelation::Array(children) = relation {
             for child in children {
-                out.push((child.row.id, child.row.seq));
+                out.push((
+                    child.row.table.clone(),
+                    child.row.id,
+                    child.row.seq,
+                    child.row.writer.clone(),
+                ));
                 child_versions(child, out);
             }
         }
@@ -5426,15 +7894,107 @@ impl Inner {
         self.apply_as(op, who, seq)
     }
 
+    /// Wall-clock Unix ms (or the one a test set).
+    pub(crate) fn now_ms(&self) -> i64 {
+        self.clock_for_test.unwrap_or_else(|| {
+            web_time::SystemTime::now()
+                .duration_since(web_time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as i64)
+        })
+    }
+
+    /// The clock commit HLCs read (Unix ms): this store's configured clock
+    /// (`DbConfig::with_clock`), or the one a test set.
+    fn hlc_clock_ms(&self) -> u64 {
+        self.clock_for_test
+            .map_or_else(|| (self.shard.clock)(), |ms| ms.max(0) as u64)
+    }
+
+    /// The next commit HLC: after every one this store gave or saw, and
+    /// not before its wall clock.
+    pub(crate) fn next_hlc(&mut self) -> u64 {
+        let next = self.peek_hlc();
+        self.hlc_last = next;
+        next
+    }
+
+    /// The HLC a commit begun now would take ([`Inner::next_hlc`]).
+    pub(crate) fn peek_hlc(&self) -> u64 {
+        // Past the last a pending `_clock` holds, commits share it and order by
+        // writer and tx.
+        self.hlc_last
+            .saturating_add(1)
+            .max(shard::hlc(self.hlc_clock_ms()))
+            .min(sync::MAX_SEQ)
+    }
+
+    /// `seen` as this store counts an HLC it was sent: no further ahead
+    /// than [`HLC_SKEW_MS`] past its own clock, and never past the last a
+    /// pending `_clock` holds.
+    pub(crate) fn bounded_hlc(&self, seen: u64) -> u64 {
+        let ceiling = shard::hlc(self.hlc_clock_ms().saturating_add(HLC_SKEW_MS));
+        seen.min(ceiling).min(sync::MAX_SEQ)
+    }
+
+    /// Hold this store's HLC past one it received (a position or a commit
+    /// clock), so a commit it makes after seeing that orders after it. A
+    /// received HLC counts no further ahead than [`HLC_SKEW_MS`] past this
+    /// store's wall clock: a writer's clock far ahead cannot carry this
+    /// store's commits with it.
+    pub(crate) fn observe_hlc(&mut self, seen: u64) {
+        self.hlc_last = self.hlc_last.max(self.bounded_hlc(seen));
+    }
+
+    /// Give commit `seq` its HLC if it has none yet: its writes are at it,
+    /// written by this store's node as tx `seq`.
+    fn stamp_commit(&mut self, seq: u64) {
+        if self.me != sync::ACCEPTED && !self.own_order.contains_key(&seq) {
+            let hlc = self.next_hlc();
+            let node = *self.identity.node.as_bytes();
+            self.own_order.insert(seq, (hlc, node, seq));
+        }
+    }
+
+    /// Commit `seq`'s HLC, or the one a commit begun now would take.
+    pub(crate) fn commit_hlc(&self, seq: u64) -> u64 {
+        self.own_order
+            .get(&seq)
+            .map_or_else(|| self.peek_hlc(), |order| order.0)
+    }
+
+    /// Commit `seq`'s writer, as history keeps it (`_writer`).
+    pub(crate) fn own_writer(&self, seq: u64) -> Vec<u8> {
+        match self.own_order.get(&seq) {
+            Some(&(_, node, tx)) => sync::writer_bytes(node, tx),
+            None => sync::writer_bytes(*self.identity.node.as_bytes(), seq),
+        }
+    }
+
+    /// Which of this store's own commits (on a relay, or of the session
+    /// commits it carries) wrote version `at`: by its writer, or with none
+    /// given, the latest in order at its position.
+    pub(crate) fn own_seq_at(&self, at: sync::Rank) -> Option<u64> {
+        let (pos, writer) = at;
+        if pos.accepted() || self.me == sync::ACCEPTED {
+            return None;
+        }
+        self.own_order
+            .iter()
+            .filter(|(_, order)| {
+                order.0 == pos.seq
+                    && writer.is_none_or(|(node, tx)| (order.1, order.2) == (node, tx))
+            })
+            .max_by_key(|(_, order)| **order)
+            .map(|(seq, _)| *seq)
+    }
+
     /// Apply one write as `who`: policies apply for a session identity.
     fn apply_as(&mut self, op: &StagedOp, who: Who, seq: u64) -> Result<WriteHandle, Error> {
         let author = match who {
             Who::Session(author) | Who::Attributed(author) => author,
             Who::Local => self.stamp_author(),
         };
-        let now = web_time::SystemTime::now()
-            .duration_since(web_time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_millis() as i64);
+        let now = self.now_ms();
         if let Some(session) = self.checked(who) {
             Self::admit_session_write(op, session, now)?;
         }
@@ -5442,12 +8002,13 @@ impl Inner {
         let at = if seq == last_seq {
             last_at
         } else {
-            now.max(last_at + 1)
+            now.max(last_at.saturating_add(1))
         };
         self.last_stamp = (seq, at);
         // An explicit timestamp (a backfill) stamps this write alone; the
         // clock's monotonic stamps go on.
         let at = op.updated_at_ms().map_or(at, |ms| ms as i64);
+        self.stamp_commit(seq);
         self.writer = Some(Stamp {
             at,
             author: self.author_code(&author_key(&author))?,
@@ -5490,9 +8051,9 @@ impl Inner {
                 let target = Target::of(&o.target, self)?;
                 self.update(&t, r, c, &target, who, seq)
             }
-            StagedOp::Upsert(t, r, c, o) => {
+            StagedOp::Upsert(t, r, c, created, o) => {
                 let target = Target::of(&o.target, self)?;
-                self.upsert(&t, r, c, &target, who, seq)
+                self.upsert(&t, r, c, created, &target, who, seq)
             }
             StagedOp::Delete(t, r, o) => {
                 let target = Target::of(&o.target, self)?;
@@ -5547,32 +8108,55 @@ impl Inner {
         result
     }
 
-    /// On a replica, the newest version of `row` the authority settled
-    /// (pending local versions sit above [`sync::LOCAL_BASE`]).
+    /// On a replica, the newest version of `row` the authority settled.
     fn settled_seq(&self, table: &str, row: RowUuid) -> Result<Option<u64>, Error> {
         let sql = format!(
-            "SELECT MAX(_seq) FROM {} WHERE id = ?1 AND _seq < ?2",
-            quote(table)
+            "SELECT MAX(_clock) FROM {} WHERE id = ?1 AND _clock >= 0 AND _clock < {}",
+            quote(table),
+            sync::band_start(sync::PENDING)
         );
-        self.conn
-            .cached_row(
-                &sql,
-                rusqlite::params![row.0.as_bytes().to_vec(), sync::LOCAL_BASE as i64],
-                |r| r.get::<_, Option<i64>>(0),
-            )
-            .map(|seq| seq.map(|seq| seq as u64))
-            .map_err(storage)
-    }
-
-    /// The newest committed version of `row` in stored table `table` on
-    /// any branch.
-    fn newest_seq(&self, table: &str, row: RowUuid) -> Result<Option<u64>, Error> {
-        let sql = format!("SELECT MAX(_seq) FROM {} WHERE id = ?1", quote(table));
         self.conn
             .cached_row(&sql, [row.0.as_bytes().to_vec()], |r| {
                 r.get::<_, Option<i64>>(0)
             })
             .map(|seq| seq.map(|seq| seq as u64))
+            .map_err(storage)
+    }
+
+    /// [`Self::newest_seq`] with its writer, when pending.
+    pub(crate) fn newest_version(
+        &self,
+        table: &str,
+        row: RowUuid,
+    ) -> Result<Option<sync::Rank>, Error> {
+        let sql = format!(
+            "SELECT _clock, _branch FROM {} WHERE id = ?1 ORDER BY _clock DESC LIMIT 1",
+            quote(table)
+        );
+        let newest: Option<(i64, Vec<u8>)> = self
+            .conn
+            .cached_row(&sql, [row.0.as_bytes().to_vec()], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .optional()
+            .map_err(storage)?;
+        newest
+            .map(|(t, key)| self.current_rank(table, row, &key, Pos::from_t(t)))
+            .transpose()
+    }
+
+    /// The newest committed version of `row` in stored table `table` on
+    /// any branch.
+    pub(crate) fn newest_seq(&self, table: &str, row: RowUuid) -> Result<Option<Pos>, Error> {
+        let sql = format!(
+            "SELECT _clock FROM {} WHERE id = ?1 ORDER BY _clock DESC LIMIT 1",
+            quote(table)
+        );
+        self.conn
+            .cached_row(&sql, [row.0.as_bytes().to_vec()], |r| {
+                Ok(Pos::from_t(r.get(0)?))
+            })
+            .optional()
             .map_err(storage)
     }
 }
@@ -5584,20 +8168,53 @@ pub struct TxRef<'a> {
 }
 
 impl Db {
+    /// Open a replica's ordinary serializable snapshot with a separate
+    /// accepted-evidence scope for its actual owner. This is not a delegated
+    /// session or an authority-side policy bypass, and cannot upgrade a batch.
+    pub async fn begin_client_evidence_transaction(
+        &self,
+        id: OpenTransactionId,
+    ) -> Result<(), Error> {
+        let owner = {
+            let inner = self.inner.borrow();
+            if inner.client.is_none()
+                || inner.authority
+                || matches!(
+                    inner.identity.author,
+                    AuthorSubject::System | AuthorSubject::SystemAt(_)
+                )
+            {
+                return Err(unsupported(
+                    "own-client evidence requires an unprivileged replica",
+                ));
+            }
+            inner.identity
+        };
+        self.begin_serializable(id).await?;
+        self.inner
+            .borrow_mut()
+            .batches
+            .get_mut(&id)
+            .expect("opened")
+            .client_evidence_owner = Some(owner);
+        Ok(())
+    }
+
     pub async fn begin_mergeable(&self, id: OpenTransactionId) -> Result<(), Error> {
         self.begin(id, BatchKind::Mergeable)
     }
 
     /// A serializable transaction: snapshot reads, validated at commit.
-    /// On a client the snapshot is the server seq the replica is known
-    /// complete through.
+    /// On a client the snapshot is the position its server served it
+    /// complete through, plus its own unsettled commits: never positions it
+    /// numbered itself, which would hold every authority version.
     pub async fn begin_serializable(&self, id: OpenTransactionId) -> Result<(), Error> {
         let (snapshot, own) = {
             let inner = self.inner.borrow();
-            let snapshot = inner
-                .client
-                .as_ref()
-                .map_or(inner.seq, |client| client.known);
+            let snapshot = match &inner.client {
+                Some(client) => Pos::at(client.known),
+                None => inner.frontier(),
+            };
             (snapshot, inner.unsettled_own())
         };
         self.begin(
@@ -5680,6 +8297,12 @@ impl Db {
             .batches
             .get(&id)
             .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
+        Self::check_client_evidence_owner(&inner, batch)?;
+        if batch.client_evidence_owner.is_some() && requested != WriteIdentity::Database {
+            return Err(rejected(
+                "own-client evidence cannot select another write identity",
+            ));
+        }
         match batch.identity {
             None => Ok(requested),
             Some(bound) if requested == WriteIdentity::Database || requested == bound => Ok(bound),
@@ -5698,10 +8321,13 @@ impl Db {
             Batch {
                 kind,
                 reads_state: Rc::new(RefCell::new(transaction_reads::ReadState::default())),
+                accepted: None,
+                client_evidence_owner: None,
                 identity: None,
-                uploads: Vec::new(),
                 ops: Vec::new(),
+                observation_provenance: Vec::new(),
                 edits: LargeEdits::default(),
+                uploads: Vec::new(),
             },
         );
         Ok(())
@@ -5762,6 +8388,7 @@ impl Db {
     ) -> Result<TxReceipt, Error> {
         let batch = self.take_batch(id)?;
         batch.reads_state.borrow().check_commit()?;
+        self.check_accepted_batch(&batch)?;
         let BatchKind::Serializable {
             snapshot,
             reads,
@@ -5787,11 +8414,11 @@ impl Db {
                 for (schema, op) in &batch.ops {
                     if let Some(row) = op.row()
                         && inner
-                            .newest_seq(schema.stored_table(op.table())?, row)?
-                            .is_some_and(|seq| {
-                                seq >= LOCAL_BASE
-                                    && !own.contains(&seq)
-                                    && !landed.values().any(|&at| at == seq)
+                            .newest_version(schema.stored_table(op.table())?, row)?
+                            .is_some_and(|at| {
+                                let ours = inner.own_seq_at(at).is_some_and(|tx| own.contains(&tx))
+                                    || landed.values().any(|&landed| landed == at.0);
+                                !(at.0.accepted() || ours)
                             })
                     {
                         return Err(conflict(
@@ -5806,7 +8433,7 @@ impl Db {
                     if let Some(row) = op.row()
                         && inner
                             .settled_seq(schema.stored_table(op.table())?, row)?
-                            .is_some_and(|seq| seq > *snapshot)
+                            .is_some_and(|seq| Pos::at(seq) > *snapshot)
                     {
                         return Err(conflict(
                             "row visible parent changed since transaction write was staged",
@@ -5824,18 +8451,25 @@ impl Db {
             {
                 let inner = self.inner();
                 for read in reads {
+                    // A sparse replica cannot certify an authority result.
+                    // Keep this predicate in WireRead for authority validation.
+                    if read.accepted_evidence {
+                        continue;
+                    }
                     let spec = ReadSpec {
                         include_deleted: read.include_deleted,
-                        ..ReadSpec::default()
+                        ..ReadSpec::new(self.governance.clone())
                     };
                     let now = inner.read_versions(&read.prepared, batch.reader(), &spec)?;
                     let changed = now.len() != read.rows.len()
                         || now.iter().zip(&read.rows).any(|(now, then)| {
                             now.0 != then.0
                                 || (now.1 != then.1
-                                    && !(own.contains(&then.1)
-                                        && (now.1 < LOCAL_BASE
-                                            || landed.get(&then.1) == Some(&now.1))))
+                                    && !(inner.own_seq_at(then.1).is_some_and(|tx| {
+                                        own.contains(&tx)
+                                            && (now.1.0.accepted()
+                                                || landed.get(&tx) == Some(&now.1.0))
+                                    })))
                         });
                     if changed {
                         return Err(conflict(
@@ -5844,35 +8478,52 @@ impl Db {
                     }
                 }
             }
-            let reads = reads
-                .iter()
-                .map(|read| sync::WireRead {
-                    query: read.prepared.query.clone(),
-                    binding: read.prepared.binding.clone(),
-                    include_deleted: read.include_deleted,
-                    rows: read
-                        .rows
-                        .iter()
-                        .map(|(row, seq)| (*row.0.as_bytes(), *seq))
-                        .collect(),
-                })
-                .collect();
+            let reads = {
+                let inner = self.inner();
+                let reads = reads
+                    .iter()
+                    .map(|read| {
+                        Ok(sync::WireRead {
+                            version: *read
+                                .prepared
+                                .schema
+                                .as_ref()
+                                .map_or(inner.owner_version, |schema| schema.version)
+                                .as_bytes(),
+                            query: read.prepared.query.clone(),
+                            binding: read.prepared.binding.clone(),
+                            include_deleted: read.include_deleted,
+                            rows: read
+                                .rows
+                                .iter()
+                                .map(|(row, at)| {
+                                    let (by, seq) = inner.read_version(*at);
+                                    (*row.0.as_bytes(), by, seq)
+                                })
+                                .collect(),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, Error>>()?;
+                debug_assert!(snapshot.accepted(), "a snapshot is the authority's");
+                reads
+            };
             return self.commit_ops(
                 &batch,
                 sync::Kind::Serializable {
-                    snapshot: *snapshot,
+                    snapshot: snapshot.seq,
                     reads,
                     own: own.clone(),
                 },
             );
         }
         {
+            let policies = self.view_policies();
             let inner = self.inner();
             for (schema, op) in &batch.ops {
                 if let Some(row) = op.row()
                     && inner
                         .newest_seq(schema.stored_table(op.table())?, row)?
-                        .is_some_and(|seq| seq > *snapshot)
+                        .is_some_and(|at| at > *snapshot)
                 {
                     return Err(conflict(
                         "row visible parent changed since transaction write was staged",
@@ -5882,9 +8533,16 @@ impl Db {
             for read in reads {
                 let spec = ReadSpec {
                     include_deleted: read.include_deleted,
-                    ..ReadSpec::default()
+                    ..ReadSpec::new(self.governance.clone())
                 };
-                if inner.read_versions(&read.prepared, batch.reader(), &spec)? != read.rows {
+                let governed;
+                let prepared = if read.accepted_evidence {
+                    governed = inner.governed_accepted_query(&read.prepared, policies.clone())?;
+                    &governed
+                } else {
+                    &read.prepared
+                };
+                if inner.read_versions(prepared, batch.reader(), &spec)? != read.rows {
                     return Err(conflict(
                         "a row read by the transaction changed since its snapshot",
                     ));
@@ -5895,6 +8553,7 @@ impl Db {
     }
 
     fn commit_ops(&self, batch: &Batch, kind: sync::Kind) -> Result<TxReceipt, Error> {
+        crate::db::large_ops::renew_upload_leases(&self.inner(), &batch.uploads)?;
         self.with_upload(|| self.commit_ops_now(batch, kind))
     }
 
@@ -5903,7 +8562,7 @@ impl Db {
         let ops = &batch.ops;
         let (seq, prior, mark) = {
             let mut inner = self.inner();
-            let seq = inner.seq + 1;
+            let seq = inner.next_seq();
             begin_savepoint(&inner.conn, "commit_batch")?;
             let mark = inner.changed.borrow().len();
             inner.defer_checks();
@@ -5936,19 +8595,29 @@ impl Db {
             end_savepoint(&inner.conn, "commit_batch", true)?;
             let prior = inner.seq;
             if !ops.is_empty() || kind.validates_reads() {
-                inner.seq = seq;
+                inner.seq = inner.seq.max(seq);
             }
             (seq, prior, mark)
         };
         // `commit_ops` holds the upload record and the commit in one SQLite
         // transaction and rolls both back on an error.
-        if let Err(error) = self.record_upload_with_identity(
-            ops.iter().map(|(_, op)| op.clone()).collect(),
-            seq,
-            kind,
-            None,
-            batch.identity,
-        ) {
+        // Each op travels by stored names, so one transaction may write
+        // through views of several versions.
+        let recorded = ops
+            .iter()
+            .map(|(schema, op)| self.inner().stored_op(op.clone(), schema))
+            .collect::<Result<Vec<_>, _>>()
+            .and_then(|ops| {
+                self.record_stored_upload_with_provenance(
+                    ops,
+                    seq,
+                    kind,
+                    None,
+                    Some(&batch.observation_provenance),
+                    batch.identity,
+                )
+            });
+        if let Err(error) = recorded {
             let mut inner = self.inner();
             inner.seq = prior;
             inner.changed.borrow_mut().truncate(mark);
@@ -5974,12 +8643,19 @@ impl Db {
         read: impl FnOnce(&mut Inner, Option<Cut>) -> Result<R, Error>,
     ) -> Result<R, Error> {
         let mut inner = self.inner.staging();
-        inner.schema = self.view.clone().unwrap_or_else(|| inner.owner.clone());
+        inner.schema = self.governing_schema(&inner);
         let batch = inner
             .batches
             .get(&id)
             .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
+        Self::check_client_evidence_owner(&inner, batch)?;
         let staged = batch.ops.len();
+        let marked_batch = batch.ops.iter().any(|(schema, _)| {
+            schema
+                .policy_schema()
+                .jazz
+                .may_have_authorized_created_insert_sources()
+        });
         let live = inner
             .overlay
             .as_ref()
@@ -6033,8 +8709,19 @@ impl Db {
             None => Ok(()),
         };
         inner.clear_derived();
-        let result =
-            applied.and_then(|()| read(&mut inner, snapshot.map(|cut| Cut { own, ..cut })));
+        let result = applied.and_then(|()| {
+            let publication = inner.own_rank(own);
+            let cut = snapshot.map(|cut| Cut {
+                own: publication,
+                ..cut
+            });
+            let accepted = cut
+                .as_ref()
+                .map_or_else(|| inner.own_pos(inner.seq), |cut| cut.seq);
+            inner.with_candidate_read_evidence(marked_batch, accepted, publication, |inner| {
+                read(inner, cut)
+            })
+        });
         let keep = joins && result.is_ok();
         if !keep {
             inner.changed.borrow_mut().truncate(mark);
@@ -6049,19 +8736,34 @@ impl Db {
         result
     }
 
-    /// A pending read evaluates only the writes admitted before it first
-    /// waited for authority coverage. Ordinary staging keeps its cached overlay.
+    /// Run `read` over the batch's writes staged before `prefix` was
+    /// captured, so a read that waited (for authority coverage, or behind a
+    /// cancelled read) does not see writes staged meanwhile. When nothing
+    /// was staged since, this is [`Self::in_overlay`] and keeps its cached
+    /// overlay; otherwise the prefix is replayed in a throwaway savepoint,
+    /// which undoes the cached overlay, so the next stage replays the batch.
     fn in_overlay_prefix<R>(
         &self,
         id: OpenTransactionId,
         prefix: BatchPrefix,
         read: impl FnOnce(&mut Inner, Option<Cut>) -> Result<R, Error>,
     ) -> Result<R, Error> {
+        // Peek without the store gate, which would undo the cached overlay.
+        let grown = self
+            .inner
+            .staging()
+            .batches
+            .get(&id)
+            .is_none_or(|batch| batch.prefix() != prefix);
+        if !grown {
+            return self.in_overlay(id, None, read);
+        }
         let mut inner = self.inner();
         let batch = inner
             .batches
             .get(&id)
             .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?;
+        Self::check_client_evidence_owner(&inner, batch)?;
         let unavailable = || {
             Error::new(
                 ErrorCode::NotObserved,
@@ -6096,9 +8798,25 @@ impl Db {
         let own = inner.seq + 1;
         begin_savepoint(&inner.conn, "overlay")?;
         let mark = inner.changed.borrow().len();
+        let marked_batch = ops.iter().any(|(schema, _)| {
+            schema
+                .policy_schema()
+                .jazz
+                .may_have_authorized_created_insert_sources()
+        });
         let result = inner.candidate_unit(&ops, own, snapshot.is_some(), true, |inner| {
             inner.apply_with_edits(&ops, &edits, ops.len(), own)?;
-            read(inner, snapshot.map(|cut| Cut { own, ..cut }))
+            let publication = inner.own_rank(own);
+            let cut = snapshot.map(|cut| Cut {
+                own: publication,
+                ..cut
+            });
+            let accepted = cut
+                .as_ref()
+                .map_or_else(|| inner.own_pos(inner.seq), |cut| cut.seq);
+            inner.with_candidate_read_evidence(marked_batch, accepted, publication, |inner| {
+                read(inner, cut)
+            })
         });
         inner.changed.borrow_mut().truncate(mark);
         end_savepoint(&inner.conn, "overlay", false)?;
@@ -6116,12 +8834,10 @@ impl Db {
             .map_err(|error| self.serializable_write_conflict(id, &op, error))?;
         let mut inner = self.inner.staging();
         let schema = self.view.clone().unwrap_or_else(|| inner.owner.clone());
-        inner
-            .batches
-            .get_mut(&id)
-            .expect("validated")
-            .ops
-            .push((schema, op));
+        let provenance = inner.observation_submission(&schema, &op, &self.governance);
+        let batch = inner.batches.get_mut(&id).expect("validated");
+        batch.ops.push((schema, op));
+        batch.observation_provenance.push(provenance);
         Ok(())
     }
 
@@ -6151,8 +8867,8 @@ impl Db {
         };
         let moved = inner.serializable_cut(*snapshot, own).and_then(|cut| {
             Ok(inner
-                .newest_seq(table, row)?
-                .is_some_and(|seq| !cut.sees(seq)))
+                .newest_version(table, row)?
+                .is_some_and(|version| !cut.sees(version)))
         });
         match moved {
             Ok(true) => conflict("a row written by the transaction changed since its snapshot"),
@@ -6178,7 +8894,7 @@ impl Db {
         let marks = {
             let mut inner = self.inner.staging();
             inner.require_mutation_admission()?;
-            inner.schema = self.view.clone().unwrap_or_else(|| inner.owner.clone());
+            inner.schema = self.governing_schema(&inner);
             let chunked = inner.chunk_large_cells(&mut op)?;
             edits.pending_nodes.extend(chunked.pending_nodes);
             let batch = inner
@@ -6200,12 +8916,40 @@ impl Db {
         staged
     }
 
+    /// Keep a streamed value's upload lease for as long as batch `id` is
+    /// open.
+    pub(crate) fn hold_upload(
+        &self,
+        id: OpenTransactionId,
+        lease: crate::db::large_ops::UploadLease,
+    ) -> Result<(), Error> {
+        self.inner
+            .staging()
+            .batches
+            .get_mut(&id)
+            .ok_or_else(|| rejected(format!("transaction {id:?} is not open")))?
+            .uploads
+            .push(lease);
+        Ok(())
+    }
+
     fn record_read(
         &self,
         id: OpenTransactionId,
         prepared: &PreparedQuery,
         include_deleted: bool,
     ) -> Result<(), Error> {
+        // A mergeable read records nothing: peek without the store gate,
+        // so the batch's cached overlay stays for its next stage or read.
+        if !matches!(
+            self.inner.staging().batches.get(&id),
+            Some(Batch {
+                kind: BatchKind::Serializable { .. },
+                ..
+            })
+        ) {
+            return Ok(());
+        }
         let mut inner = self.inner();
         let Some(
             batch @ Batch {
@@ -6220,9 +8964,17 @@ impl Db {
         let read = ReadSpec {
             include_deleted,
             cut: Some(inner.serializable_cut(*snapshot, own)?),
-            ..ReadSpec::default()
+            ..ReadSpec::new(self.governance.clone())
         };
         let rows = inner.read_versions(prepared, identity, &read)?;
+        let scope = inner.accepted_scope_of(prepared, identity.unwrap_or(inner.identity.author));
+        let schema = *prepared
+            .schema
+            .as_ref()
+            .unwrap_or(&inner.owner)
+            .jazz
+            .version_id()
+            .as_bytes();
         if let Some(Batch {
             kind: BatchKind::Serializable { reads, pinned, .. },
             ..
@@ -6235,6 +8987,9 @@ impl Db {
                 prepared: prepared.clone(),
                 include_deleted,
                 rows,
+                scope,
+                schema,
+                accepted_evidence: false,
             });
         }
         Ok(())
@@ -6242,6 +8997,14 @@ impl Db {
 }
 
 impl TxRef<'_> {
+    /// Stage one write, fetching what an asynchronous chunk store holds for
+    /// it first if it needs that.
+    async fn stage(&self, op: StagedOp) -> Result<(), Error> {
+        self.db
+            .fetching_with(op, |op| self.db.stage(self.id, op))
+            .await
+    }
+
     pub async fn insert(
         &self,
         table: &str,
@@ -6254,9 +9017,13 @@ impl TxRef<'_> {
             None => self.db.inner.staging().ids.next_row_id(),
         };
         opts.row_id = Some(row);
-        self.db
-            .stage(self.id, StagedOp::Insert(table.to_owned(), cells, opts))?;
-        Ok(WriteHandle { row, seq: 0 })
+        self.stage(StagedOp::Insert(table.to_owned(), cells, opts))
+            .await?;
+        Ok(WriteHandle {
+            row,
+            seq: Pos::default(),
+            tx: 0,
+        })
     }
 
     pub async fn update(
@@ -6266,11 +9033,13 @@ impl TxRef<'_> {
         cells: BTreeMap<String, Value>,
         opts: UpdateOptions,
     ) -> Result<WriteHandle, Error> {
-        self.db.stage(
-            self.id,
-            StagedOp::Update(table.to_owned(), row, cells, opts),
-        )?;
-        Ok(WriteHandle { row, seq: 0 })
+        self.stage(StagedOp::Update(table.to_owned(), row, cells, opts))
+            .await?;
+        Ok(WriteHandle {
+            row,
+            seq: Pos::default(),
+            tx: 0,
+        })
     }
 
     pub async fn upsert(
@@ -6280,11 +9049,19 @@ impl TxRef<'_> {
         cells: BTreeMap<String, Value>,
         opts: UpsertOptions,
     ) -> Result<WriteHandle, Error> {
-        self.db.stage(
-            self.id,
-            StagedOp::Upsert(table.to_owned(), row, cells, opts),
-        )?;
-        Ok(WriteHandle { row, seq: 0 })
+        self.stage(StagedOp::Upsert(
+            table.to_owned(),
+            row,
+            cells,
+            BTreeMap::new(),
+            opts,
+        ))
+        .await?;
+        Ok(WriteHandle {
+            row,
+            seq: Pos::default(),
+            tx: 0,
+        })
     }
 
     pub async fn delete(
@@ -6293,9 +9070,13 @@ impl TxRef<'_> {
         row: RowUuid,
         opts: DeleteOptions,
     ) -> Result<WriteHandle, Error> {
-        self.db
-            .stage(self.id, StagedOp::Delete(table.to_owned(), row, opts))?;
-        Ok(WriteHandle { row, seq: 0 })
+        self.stage(StagedOp::Delete(table.to_owned(), row, opts))
+            .await?;
+        Ok(WriteHandle {
+            row,
+            seq: Pos::default(),
+            tx: 0,
+        })
     }
 
     /// Undelete `row`, optionally with replacement content.
@@ -6306,11 +9087,13 @@ impl TxRef<'_> {
         content: Option<BTreeMap<String, Value>>,
         opts: RestoreOptions,
     ) -> Result<WriteHandle, Error> {
-        self.db.stage(
-            self.id,
-            StagedOp::Restore(table.to_owned(), row, content, opts),
-        )?;
-        Ok(WriteHandle { row, seq: 0 })
+        self.stage(StagedOp::Restore(table.to_owned(), row, content, opts))
+            .await?;
+        Ok(WriteHandle {
+            row,
+            seq: Pos::default(),
+            tx: 0,
+        })
     }
 
     pub async fn all_prepared(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
@@ -6356,11 +9139,17 @@ impl TxRef<'_> {
         tier: ReadTier,
     ) -> Result<Vec<CurrentRow>, Error> {
         let identity = {
-            let inner = self.db.inner();
+            let inner = self.db.inner.staging();
             let batch = inner
                 .batches
                 .get(&self.id)
                 .ok_or_else(|| rejected("transaction is not open"))?;
+            Db::check_client_evidence_owner(&inner, batch)?;
+            if batch.client_evidence_owner.is_some()
+                && (identity.is_some() || prepared.request_claims.is_some())
+            {
+                return Err(rejected("own-client evidence cannot select a read session"));
+            }
             if batch.identity.is_some() {
                 let reader = batch.reader();
                 let author = reader.unwrap_or(AuthorSubject::SYSTEM);
@@ -6390,12 +9179,16 @@ impl TxRef<'_> {
                 identity
             }
         };
+        self.db
+            .check_mixed_accepted_read(self.id, prepared, identity)?;
         let guard = self.db.transaction_read_guard(self.id)?;
         // Capture before waiting: later writes must not leak into this read's
         // admitted prefix while an earlier read selects the shared snapshot.
+        // Peeks skip the store gate, which would undo the cached overlay.
         let prefix = self
             .db
-            .inner()
+            .inner
+            .staging()
             .batches
             .get(&self.id)
             .ok_or_else(|| rejected("transaction is not open"))?
@@ -6418,7 +9211,7 @@ impl TxRef<'_> {
         // Except for LocalOnly, a client hydrates a serializable read from
         // the authority at the snapshot first. LocalFirst may answer from
         // the replica when the link cannot answer.
-        let snapshot = match self.db.inner.borrow().batches.get(&self.id) {
+        let snapshot = match self.db.inner.staging().batches.get(&self.id) {
             Some(Batch {
                 kind:
                     BatchKind::Serializable {
@@ -6510,12 +9303,14 @@ impl TxRef<'_> {
                 *pinned = true;
             }
         }
+        self.db
+            .check_mixed_accepted_read(self.id, prepared, identity)?;
         // Relations nest inside the overlay, so they see staged rows too.
         let rows = self.db.in_overlay_prefix(self.id, prefix, |inner, cut| {
             let read = ReadSpec {
                 include_deleted,
                 cut,
-                ..ReadSpec::default()
+                ..ReadSpec::new(self.db.governance.clone())
             };
             let roots = inner.run(prepared, identity, &read)?;
             inner.nest_relations(prepared, identity, &read, roots)
@@ -6586,5 +9381,293 @@ impl Db {
             tx: self.tx_ref(id),
             committed: false,
         })
+    }
+}
+
+/// The versions, each with the lenses into it, a store passes through to
+/// reach `target` along `migrations`: starting at a version it `admitted`
+/// (else at a version no lens leads to), ending at `target`. Empty when the
+/// store admitted `target` or no such path exists.
+/// Why a store shipping the app's `migrations` may not take `schema`: it
+/// has not admitted it, and they do not lead to it, so it would name it
+/// otherwise than the server does (SPEC 10.7). None for a store shipping
+/// none (an authority, a tool reading any version) and for the empty schema.
+fn outside_migrations(
+    migrations: &Migrations,
+    schema: &JazzSchema,
+    admitted: impl Fn(&crate::ids::SchemaVersionId) -> bool,
+) -> Option<Error> {
+    let version = schema.version_id();
+    let shipped = migrations.schemas.iter().any(|s| s.version_id() == version)
+        || migrations.lenses.iter().any(|lens| lens.target == version);
+    if migrations.schemas.is_empty()
+        || shipped
+        || schema.runtime().tables.is_empty()
+        || admitted(&version)
+    {
+        return None;
+    }
+    Some(schema_error(format!(
+        "schema version {} is not among the app's migrations: regenerate them \
+         (`jazz-tools validate`) and pass them to the client",
+        uuid::Uuid::from_bytes(*version.as_bytes())
+    )))
+}
+
+/// The versions to admit, each with the lens it is admitted along, to
+/// reach `target` along the app's migrations: every store takes the same
+/// path, so each derives the names its authority did (SPEC 10.7).
+///
+/// Of several lenses into a version, every source is admitted first and
+/// the version is named by the lens from the smallest one, as the
+/// authority's `Names::resolve` picks it. A version no lens leads into but
+/// compatible with one some lens does (the same tables and columns, see
+/// `compatibility_id`) is reached from that one by an empty lens, as
+/// deployment connects them.
+fn migration_path(
+    migrations: &Migrations,
+    target: &JazzSchema,
+    admitted: impl Fn(&crate::ids::SchemaVersionId) -> bool,
+) -> Vec<(JazzSchema, Vec<MigrationLens>)> {
+    fn walk(
+        migrations: &Migrations,
+        schema: &JazzSchema,
+        admitted: &dyn Fn(&crate::ids::SchemaVersionId) -> bool,
+        visiting: &mut BTreeSet<crate::ids::SchemaVersionId>,
+    ) -> Option<Vec<(JazzSchema, Vec<MigrationLens>)>> {
+        let version = schema.version_id();
+        if admitted(&version) {
+            return Some(vec![(schema.clone(), Vec::new())]);
+        }
+        if !visiting.insert(version) {
+            return None;
+        }
+        let path = step(migrations, schema, admitted, visiting);
+        visiting.remove(&version);
+        path
+    }
+    fn step(
+        migrations: &Migrations,
+        schema: &JazzSchema,
+        admitted: &dyn Fn(&crate::ids::SchemaVersionId) -> bool,
+        visiting: &mut BTreeSet<crate::ids::SchemaVersionId>,
+    ) -> Option<Vec<(JazzSchema, Vec<MigrationLens>)>> {
+        let version = schema.version_id();
+        let source_of = |id: crate::ids::SchemaVersionId| {
+            migrations.schemas.iter().find(|s| s.version_id() == id)
+        };
+        let mut into: Vec<&MigrationLens> = migrations
+            .lenses
+            .iter()
+            .filter(|lens| lens.target == version)
+            .collect();
+        into.sort_by_key(|lens| lens.source);
+        if !into.is_empty() {
+            // Every lens's source is admitted first, as on the authority,
+            // so this version is named by the lens from the smallest one
+            // and refused where the lenses disagree (`Names::resolve`). A
+            // lens from a version the app's migrations lack leaves no
+            // path: without it this version could be named otherwise.
+            let mut path: Vec<(JazzSchema, Vec<MigrationLens>)> = Vec::new();
+            for lens in &into {
+                let source = source_of(lens.source)?;
+                for step in walk(migrations, source, admitted, visiting)? {
+                    let version = step.0.version_id();
+                    if !path.iter().any(|(s, _)| s.version_id() == version) {
+                        path.push(step);
+                    }
+                }
+            }
+            path.push((
+                schema.clone(),
+                into.iter().map(|lens| (*lens).clone()).collect(),
+            ));
+            return Some(path);
+        }
+        // No lens leads here: from the smallest compatible version one
+        // leads into (or this store admitted), by an empty lens.
+        let compatibility = schema.compatibility_id();
+        let mut anchors: Vec<&JazzSchema> = migrations
+            .schemas
+            .iter()
+            .filter(|s| s.version_id() != version && s.compatibility_id() == compatibility)
+            .filter(|s| {
+                let id = s.version_id();
+                admitted(&id) || migrations.lenses.iter().any(|lens| lens.target == id)
+            })
+            .collect();
+        anchors.sort_by_key(|s| s.version_id());
+        for anchor in anchors {
+            let Ok(empty) = MigrationLens::new(anchor.version_id(), version, Vec::new()) else {
+                continue;
+            };
+            if let Some(mut path) = walk(migrations, anchor, admitted, visiting) {
+                path.push((schema.clone(), vec![empty]));
+                return Some(path);
+            }
+        }
+        // A first version: admitted without a lens.
+        Some(vec![(schema.clone(), Vec::new())])
+    }
+    if admitted(&target.version_id()) {
+        return Vec::new();
+    }
+    let mut visiting = BTreeSet::new();
+    match walk(migrations, target, &admitted, &mut visiting) {
+        Some(path) if path.len() > 1 || !path[0].1.is_empty() => path,
+        _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod storage_owner_chunk_tests {
+    use super::*;
+    use crate::chunk_store::{ChunkStore, NodeKey, StoreFuture};
+    use bytes::Bytes;
+
+    struct NoIo;
+    impl ChunkStore for NoIo {
+        fn put<'a>(&'a self, _: &'a NodeKey, _: &'a [u8]) -> StoreFuture<'a, ()> {
+            Box::pin(async { panic!("no external I/O in this completion test") })
+        }
+        fn get<'a>(&'a self, _: &'a NodeKey) -> StoreFuture<'a, Option<Bytes>> {
+            Box::pin(async { panic!("no external I/O in this completion test") })
+        }
+        fn delete<'a>(&'a self, _: &'a NodeKey) -> StoreFuture<'a, ()> {
+            Box::pin(async { panic!("no external I/O in this completion test") })
+        }
+    }
+
+    /// Alice's late result cannot populate a retired cache, even when SQLite
+    /// later rejects completion. White-box because a retired public read must
+    /// itself refuse and therefore cannot reveal an accidental cache install.
+    /// Bob's live-owner control installs the same authenticated chunk bytes.
+    #[test]
+    fn retired_owner_chunk_completion_does_not_install_cache() {
+        use jazz_types::large_values::{self as lv, LargeValueKind, chunks::ChunkRequest};
+        for retired in [false, true] {
+            let db = crate::options::block_on(Db::open(
+                DbConfig::new(
+                    JazzSchema::new(&jazz_model::model::public_schema::Schema::new()).unwrap(),
+                    DbIdentity {
+                        node: crate::ids::NodeUuid::from_bytes([72; 16]),
+                        author: AuthorSubject::SYSTEM,
+                    },
+                )
+                .with_chunk_store(Arc::new(NoIo))
+                .with_host_chunk_io(),
+            ))
+            .unwrap();
+            let chunks = db.inner().chunks.clone();
+            let prepared =
+                lv::prepare(LargeValueKind::String, b"a fetched chunk held by the host").unwrap();
+            assert!(chunks.value_bytes(&prepared.value_ref).is_err());
+            let mut io = db.take_chunk_io().unwrap().unwrap();
+            // Isolate the completion/cache boundary with real hash-verified
+            // prepared chunks; public fetch admission is covered separately.
+            io.fetch = prepared
+                .staged_chunks
+                .iter()
+                .map(|c| ChunkRequest {
+                    object_hash: c.node_ref.object_hash.0,
+                })
+                .collect();
+            let answers = prepared
+                .staged_chunks
+                .iter()
+                .map(|c| Ok(Some(Bytes::from(c.encoded.clone()))))
+                .collect();
+            let done = io.done(answers, Vec::new(), Vec::new()).unwrap();
+            if retired {
+                db.retire_storage_owner().unwrap();
+            }
+            let result = db.finish_chunk_io(done);
+            if retired {
+                assert!(
+                    chunks.value_bytes(&prepared.value_ref).is_err(),
+                    "retired owner installed fetched cache bytes"
+                );
+                assert_eq!(result.unwrap_err().code, ErrorCode::Storage);
+            } else {
+                result.unwrap();
+                assert_eq!(
+                    chunks.value_bytes(&prepared.value_ref).unwrap(),
+                    b"a fetched chunk held by the host"
+                );
+            }
+            assert!(
+                chunks.outstanding().is_none(),
+                "lease cleanup still completes"
+            );
+        }
+    }
+
+    /// Alice retires while a direct read awaits object-store bytes. Inspect
+    /// the cache internally because the public retired read must itself fail.
+    #[test]
+    fn retired_owner_inflight_fetch_does_not_install_cache() {
+        use jazz_types::large_values::{self as lv, LargeValueKind, chunks::ChunkRequest};
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
+        struct Reply(Vec<Bytes>);
+        impl ChunkStore for Reply {
+            fn put<'a>(&'a self, _: &'a NodeKey, _: &'a [u8]) -> StoreFuture<'a, ()> {
+                panic!("fetch only")
+            }
+            fn delete<'a>(&'a self, _: &'a NodeKey) -> StoreFuture<'a, ()> {
+                panic!("fetch only")
+            }
+            fn get<'a>(&'a self, key: &'a NodeKey) -> StoreFuture<'a, Option<Bytes>> {
+                let bytes = self
+                    .0
+                    .iter()
+                    .find(|bytes| lv::object_hash(bytes).0 == key.hash)
+                    .cloned();
+                let mut yielded = false;
+                Box::pin(std::future::poll_fn(move |cx| {
+                    if !yielded {
+                        yielded = true;
+                        cx.waker().wake_by_ref();
+                        Poll::Pending
+                    } else {
+                        Poll::Ready(Ok(bytes.clone()))
+                    }
+                }))
+            }
+        }
+        let db = block_on(Db::open(DbConfig::new(
+            JazzSchema::new(&jazz_model::model::public_schema::Schema::new()).unwrap(),
+            DbIdentity {
+                node: crate::ids::NodeUuid::from_bytes([75; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+        )))
+        .unwrap();
+        let chunks = db.inner().chunks.clone();
+        let prepared = lv::prepare(LargeValueKind::String, b"late direct fetch").unwrap();
+        let store = Reply(
+            prepared
+                .staged_chunks
+                .iter()
+                .map(|c| Bytes::from(c.encoded.clone()))
+                .collect(),
+        );
+        let wanted = prepared
+            .staged_chunks
+            .iter()
+            .map(|c| ChunkRequest {
+                object_hash: c.node_ref.object_hash.0,
+            })
+            .collect();
+        let mut fetch = Box::pin(db.fetch_from(&chunks, &store, wanted));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(fetch.as_mut().poll(&mut cx).is_pending());
+        db.retire_storage_owner().unwrap();
+        let result = block_on(fetch);
+        assert!(
+            chunks.value_bytes(&prepared.value_ref).is_err(),
+            "inflight read installed bytes after retirement"
+        );
+        assert_eq!(result.unwrap_err().code, ErrorCode::Storage);
     }
 }

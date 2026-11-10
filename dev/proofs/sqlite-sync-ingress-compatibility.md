@@ -1,9 +1,11 @@
 # SQLite semantic ingress validation
 
-Each semantic frame is one complete, canonical postcard `SyncMessage`. The
+Each reassembled semantic message is one complete, canonical postcard `SyncMessage`. The
 shared decoder checks the existing logical-message size budget, consumes all
 input and rejects alternate varint spellings using `decode_postcard_exact`.
-NAPI and WASM validate every frame in a batch before queueing any of it. The
+NAPI and WASM stage fragment reassembly and validate each completed message
+in a batch before queueing any of it. A rejected batch preserves the previous
+reassembly state; accepted messages are decoded once. The
 server closes the malformed session; independent sessions remain usable.
 
 The existing `Unsubscribe { id: 128 }` field bytes remain `01 80 01`. An appended

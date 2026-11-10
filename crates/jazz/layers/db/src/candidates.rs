@@ -5,7 +5,7 @@ use super::*;
 use crate::compile::{CandidateEvidence, PermissionEvidence};
 
 // Connection-local scratch data, never persisted or sent to another runtime.
-pub(super) const TEMP_DDL: &str = "CREATE TEMP TABLE IF NOT EXISTS _jazz_candidate_created_v1(t TEXT NOT NULL,id BLOB NOT NULL,PRIMARY KEY(t,id)) WITHOUT ROWID; CREATE TEMP TABLE IF NOT EXISTS _jazz_candidate_qualified_v1(t TEXT NOT NULL,id BLOB NOT NULL,PRIMARY KEY(t,id)) WITHOUT ROWID;";
+pub(super) const TEMP_DDL: &str = "CREATE TEMP TABLE IF NOT EXISTS _jazz_candidate_created_v1(t TEXT NOT NULL,id BLOB NOT NULL,PRIMARY KEY(t,id)) WITHOUT ROWID; CREATE TEMP TABLE IF NOT EXISTS _jazz_candidate_qualified_v1(t TEXT NOT NULL,id BLOB NOT NULL,PRIMARY KEY(t,id)) WITHOUT ROWID; CREATE TEMP TABLE IF NOT EXISTS _jazz_candidate_lv_v2(slot INTEGER NOT NULL,cell INTEGER NOT NULL,v BLOB,PRIMARY KEY(slot,cell)) WITHOUT ROWID;";
 const MAX_PROOF_WORK: usize = 16_384;
 type Coordinate = (String, RowUuid);
 
@@ -31,11 +31,63 @@ fn charge(budget: &mut usize, cost: usize) -> Result<(), Error> {
     Ok(())
 }
 
+fn candidate_root_target(op: &StagedOp) -> bool {
+    match op {
+        StagedOp::Insert(.., opts) => matches!(opts.target, ExactWriteTarget::Root),
+        StagedOp::Restore(.., opts) => matches!(opts.target, ExactWriteTarget::Root),
+        StagedOp::Update(.., opts) => matches!(opts.target, WriteTarget::Root),
+        StagedOp::Upsert(.., opts) => matches!(opts.target, WriteTarget::Root),
+        StagedOp::Delete(.., opts) => matches!(opts.target, WriteTarget::Root),
+        StagedOp::Move(..) => false,
+    }
+}
+
 impl Inner {
+    /// Keep accepted-only policy evidence during a cached overlay read, just
+    /// as during prefix replay. Never qualify staged witnesses or change an
+    /// ordinary own-client read or an unmarked batch.
+    pub(super) fn with_candidate_read_evidence<T>(
+        &mut self,
+        marked_batch: bool,
+        accepted: Pos,
+        publication: sync::Rank,
+        read: impl FnOnce(&mut Self) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        if self.client.is_some() || !marked_batch {
+            return read(self);
+        }
+        let previous = self.candidate_read_evidence.replace(CandidateEvidence {
+            accepted,
+            publication,
+            post: false,
+        });
+        let result = read(self);
+        self.candidate_read_evidence = previous;
+        result
+    }
+
+    /// Physical absence is only an INSERT-witness eligibility fence. It grants
+    /// no read/write authority: the normal policy/read-set checks still decide
+    /// the operation. Like the former MAX(_seq) lookup, any current branch or
+    /// tombstone makes the coordinate existing, regardless of policy visibility.
+    fn candidate_coordinate_absent(&self, table: &str, row: RowUuid) -> Result<bool, Error> {
+        self.conn
+            .cached_row(
+                &format!(
+                    "SELECT NOT EXISTS(SELECT 1 FROM {} WHERE id=?1)",
+                    quote(table)
+                ),
+                [row.as_bytes().as_slice()],
+                |r| r.get(0),
+            )
+            .map_err(storage)
+    }
+
     /// Capture the exact policy and root image at the normal check site. The
     /// executor resolves its dependencies only after the complete unit exists.
     pub(super) fn defer_candidate_check(
         &self,
+        schema: &Schema,
         table: &Table,
         row: RowUuid,
         key: &[u8],
@@ -48,7 +100,7 @@ impl Inner {
         let mut statement = self
             .conn
             .prepare_cached(&format!(
-                "SELECT * FROM {} WHERE id=?1 AND _b=?2",
+                "SELECT * FROM {} WHERE id=?1 AND _branch=?2",
                 quote(&table.stored)
             ))
             .map_err(storage)?;
@@ -74,7 +126,7 @@ impl Inner {
             ));
         }
         checks.push(DeferredCheck {
-            schema: self.schema.clone(),
+            schema: Rc::new(schema.clone()),
             table: table.name.clone(),
             coordinate: (table.stored.clone(), row),
             author,
@@ -87,12 +139,9 @@ impl Inner {
     /// Callback transactions are mergeable. They collect exact check images
     /// until the callback ends but never promote new rows to witnesses.
     pub(super) fn begin_candidate_callback(&mut self, seq: u64) -> Result<(), Error> {
-        if self.client.is_some()
-            || !self
-                .admitted
-                .iter()
-                .any(|(_, schema)| schema.may_have_authorized_created_insert_sources())
-        {
+        // Db::inner selects this executing handle's actual governing schema.
+        // An unrelated admitted marked view cannot change ordinary callbacks.
+        if self.client.is_some() || !marked(&self.schema) {
             return Ok(());
         }
         self.conn
@@ -102,8 +151,8 @@ impl Inner {
             .map_err(storage)?;
         *self.candidate_checks.borrow_mut() = Some(Vec::new());
         self.candidate_read_evidence = Some(CandidateEvidence {
-            accepted: self.seq,
-            publication: seq,
+            accepted: self.own_pos(self.seq),
+            publication: self.own_rank(seq),
             post: false,
         });
         self.candidate_callback_budget = Some(MAX_PROOF_WORK);
@@ -166,7 +215,7 @@ impl Inner {
             let table = schema.table(op.table())?;
             if let Some(row) = op.row()
                 && matches!(op, StagedOp::Insert(..) | StagedOp::Upsert(..))
-                && self.newest_seq(&table.stored, row)?.is_none()
+                && self.candidate_coordinate_absent(&table.stored, row)?
             {
                 self.conn
                     .execute(
@@ -205,6 +254,17 @@ impl Inner {
         provisional: bool,
         apply: impl FnOnce(&mut Self) -> Result<T, Error>,
     ) -> Result<T, Error> {
+        // This opt-in capability supports root targets only, including at
+        // optimistic replica staging. Unmarked schemas retain their existing
+        // branch behavior.
+        if ops.iter().any(|(schema, _)| marked(schema))
+            && ops.iter().any(|(_, op)| !candidate_root_target(op))
+        {
+            return Err(Error::new(
+                ErrorCode::Schema,
+                "creation-aware permission units require root write targets; branch views and moves are unsupported",
+            ));
+        }
         if self.client.is_some() {
             return apply(self);
         }
@@ -241,7 +301,7 @@ impl Inner {
             }
             *counts.entry(coordinate.clone()).or_default() += 1;
             if matches!(op, StagedOp::Insert(..) | StagedOp::Upsert(..))
-                && self.newest_seq(&table.stored, row)?.is_none()
+                && self.candidate_coordinate_absent(&table.stored, row)?
             {
                 created.insert(coordinate);
             }
@@ -260,8 +320,8 @@ impl Inner {
                 .map_err(storage)?;
         }
         let scope = CandidateEvidence {
-            accepted: self.seq,
-            publication: seq,
+            accepted: self.own_pos(self.seq),
+            publication: self.own_rank(seq),
             post: false,
         };
         *self.candidate_checks.borrow_mut() = Some(Vec::new());
@@ -614,7 +674,10 @@ impl Inner {
             let bound = format!("?{}", ctx.params.len());
             let source = ctx.candidate_source(target, created, column, &bound)?;
             let params = ctx.params;
-            let sql = format!("SELECT * FROM {source} WHERE _del=0 LIMIT {}", *budget + 1);
+            let sql = format!(
+                "SELECT * FROM {source} WHERE (_state & {STATE_DELETED})=0 LIMIT {}",
+                *budget + 1
+            );
             let mut statement = self.conn.prepare_cached(&sql).map_err(storage)?;
             let names = statement
                 .column_names()
@@ -714,14 +777,6 @@ impl Inner {
         inputs: &[PolicyInput],
         body: impl FnOnce() -> Result<T, Error>,
     ) -> Result<T, Error> {
-        if preps
-            .iter()
-            .any(|prep| matches!(prep, crate::compile::Prep::Rank { .. }))
-        {
-            return Err(unsupported(
-                "rank preparations in candidate-created permission proofs",
-            ));
-        }
         self.with_bounded_preps(preps, inputs, |_| body())
     }
 
@@ -744,8 +799,7 @@ impl Inner {
             for prep in preps {
                 let columns = match prep {
                     crate::compile::Prep::Class { columns, .. } => columns.clone(),
-                    crate::compile::Prep::Match { table, column, .. }
-                    | crate::compile::Prep::Rank { table, column, .. } => {
+                    crate::compile::Prep::Match { table, column, .. } => {
                         vec![(table.clone(), column.clone())]
                     }
                 };
@@ -753,19 +807,23 @@ impl Inner {
                 for (table, root) in inputs {
                     for (name, value) in root {
                         if columns.iter().any(|(t, c)| t == table && c == name)
-                            && let Sql::Text(bytes) = value
+                            && let Sql::Integer(cell) = value
                         {
-                            cells.insert(bytes.clone());
+                            cells.insert(*cell);
                         }
                     }
                 }
-                ties |= crate::large::answer_cells(&self.conn, &self.chunks, prep, &cells)?;
+                ties |=
+                    crate::large::answer_candidate_cells(&self.conn, &self.chunks, prep, &cells)?;
             }
             body(ties)
         })();
         for prep in preps {
             self.conn
-                .execute("DELETE FROM _jazz_lv_scratch WHERE slot=?1", [prep.slot()])
+                .execute(
+                    "DELETE FROM _jazz_candidate_lv_v2 WHERE slot=?1",
+                    [prep.slot()],
+                )
                 .map_err(storage)?;
         }
         self.conn

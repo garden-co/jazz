@@ -190,9 +190,7 @@ fn status(host: &mut NativeRelayHost, foreground: u64) -> (bool, Option<String>)
 }
 
 fn connected(host: &NativeRelayHost, scope: &RelayScope) -> bool {
-    host.private_scope_workers[scope]
-        .connected
-        .load(Ordering::Acquire)
+    host.private_scope_workers[scope].connected()
 }
 
 /// Losing an established upstream link that the worker is retrying is

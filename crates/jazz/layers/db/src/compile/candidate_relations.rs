@@ -22,6 +22,9 @@ impl Ctx<'_> {
             outer: Some((outer, "candidate_root")),
             frontier: None,
             session,
+            // Keep the captured root correlation in the bounded evidence walk;
+            // ordinary lifted-key optimisations do not apply to this scope.
+            key: None,
         };
         let rel = self.relation(relation, &scope)?;
         self.rel_selects(&rel, "1", None, &[])?;
@@ -218,31 +221,32 @@ impl Ctx<'_> {
         let history = quote(&format!("{}__h", table.stored));
         let key = quote(table.stored_name(&bound.column));
         let value = &bound.value;
-        let accepted = self.bind(Sql::Integer(evidence.accepted as i64));
-        let publication = self.bind(Sql::Integer(evidence.publication as i64));
+        let accepted = self.bind(Sql::Integer(evidence.accepted.t()));
         let current_from = format!("{current} AS {alias}{lookup}");
         if evidence.post {
+            let publication = self.candidate_publication(alias, evidence.publication);
             let stored = self.bind(Sql::Text(table.stored.as_bytes().to_vec()));
             return Ok(vec![(
                 current_from,
                 format!(
-                    "{alias}.{key}={value} AND ({alias}._seq<={accepted} OR {alias}._seq={publication}) AND NOT EXISTS (SELECT 1 FROM _jazz_candidate_created_v1 x WHERE x.t={stored} AND x.id={alias}.id)"
+                    "{alias}.{key}={value} AND ({alias}._clock<={accepted} OR ({publication})) AND NOT EXISTS (SELECT 1 FROM _jazz_candidate_created_v1 x WHERE x.t={stored} AND x.id={alias}.id)"
                 ),
             )]);
         }
         let changed = self.alias("rel_changed");
-        let seq_index = quote(&format!("{}__by_seq", table.stored));
+        let changed_publication = self.candidate_publication(&changed, evidence.publication);
+        let clock_index = quote(&format!("{}__by_clock", table.stored));
         Ok(vec![
             (
                 current_from,
-                format!("{alias}.{key}={value} AND {alias}._seq<={accepted}"),
+                format!("{alias}.{key}={value} AND {alias}._clock<={accepted}"),
             ),
             (
                 format!(
-                    "{current} AS {changed} INDEXED BY {seq_index} CROSS JOIN {history} AS {alias}"
+                    "{current} AS {changed} INDEXED BY {clock_index} CROSS JOIN {history} AS {alias}"
                 ),
                 format!(
-                    "{changed}._seq={publication} AND {alias}.id={changed}.id AND {alias}._b={changed}._b AND {alias}.{key}={value} AND {alias}._seq=(SELECT MAX(prior._seq) FROM {history} AS prior WHERE prior.id={changed}.id AND prior._b={changed}._b AND prior._seq<={accepted})"
+                    "({changed_publication}) AND {alias}.id={changed}.id AND {alias}._branch={changed}._branch AND {alias}.{key}={value} AND ({alias}._clock,{alias}._writer)=(SELECT prior._clock,prior._writer FROM {history} AS prior WHERE prior.id={changed}.id AND prior._branch={changed}._branch AND prior._clock<={accepted} AND (prior._state & {STATE_AS_SENT})=0 ORDER BY prior._clock DESC,prior._writer DESC LIMIT 1)"
                 ),
             ),
         ])

@@ -369,15 +369,17 @@ fn connect(replica: &Db, server: &Db, identity: AuthorSubject) -> Rc<RefCell<Vec
         inner: up,
         sent: sent.clone(),
     })));
-    server.accept_subscriber_with_claims(
-        down,
-        identity,
-        if identity == AuthorSubject::SYSTEM {
-            Some(BTreeMap::new())
-        } else {
-            Some(claims(&identity.principal_parts().1))
-        },
-    );
+    server
+        .accept_subscriber_with_claims(
+            down,
+            identity,
+            if identity == AuthorSubject::SYSTEM {
+                Some(BTreeMap::new())
+            } else {
+                Some(claims(&identity.principal_parts().1))
+            },
+        )
+        .unwrap();
     replica.set_remote_link_hint(RemoteLinkHint::Live);
     sent
 }
@@ -418,12 +420,13 @@ fn delegated_remote_reads_fail_before_sending_an_unscoped_fetch() {
         assert!(error.message.contains("scoped coverage"));
     }
     assert!(read(&replica, tx).is_empty());
-    assert!(
-        !sent
-            .borrow()
-            .iter()
-            .any(|m| matches!(m, SyncMessage::Fetch { .. }))
-    );
+    assert!(!sent.borrow().iter().any(|m| matches!(
+        m,
+        SyncMessage::Read {
+            span: jazz::db::ReadSpan::Once { .. },
+            ..
+        }
+    )));
     replica.abandon_transaction_handle(tx).unwrap();
 }
 
@@ -479,7 +482,9 @@ fn read_only_commits_preserve_session_identity_and_connection_trust() {
         let replica = open(2, AuthorSubject::SYSTEM);
         let (up, down) = duplex();
         let upstream = block_on(replica.connect_upstream(up));
-        server.accept_subscriber(down, AuthorSubject::SYSTEM);
+        server
+            .accept_subscriber(down, AuthorSubject::SYSTEM)
+            .unwrap();
         let query = replica.prepare_query(&Query::from("notes")).unwrap();
         let bootstrap = OpenTransactionId::new();
         block_on(replica.begin_serializable(bootstrap)).unwrap();
@@ -521,15 +526,14 @@ fn read_only_commits_preserve_session_identity_and_connection_trust() {
             .iter()
             .find_map(|message| match message {
                 SyncMessage::Commit {
-                    author,
-                    session,
+                    acting: jazz::db::Acting::Session { author, claims },
                     ops,
                     ..
-                } if ops.is_empty() => Some((author, session)),
+                } if ops.is_empty() => Some((author, claims)),
                 _ => None,
             })
             .expect("read-only commit was uploaded");
-        assert_eq!(commit_author.as_deref(), Some(author("alice").canonical()));
-        assert_eq!(session.as_ref(), Some(&claims("alice")));
+        assert_eq!(commit_author, author("alice").canonical());
+        assert_eq!(session, &claims("alice"));
     }
 }

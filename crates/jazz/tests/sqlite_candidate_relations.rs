@@ -174,7 +174,7 @@ fn open_with_relation(indexed: bool, relation: RelationExpr) -> Db {
     )))
     .unwrap();
     db.set_authority();
-    db.initialize_authority_catalogue().unwrap();
+    assert!(db.table_identity("resources").unwrap().is_some());
     db
 }
 fn fields(recipient: uuid::Uuid, child: u128, parent: u128) -> BTreeMap<String, Value> {
@@ -659,7 +659,7 @@ fn recursive_chunked_preparation_does_not_read_unrelated_values() {
     {
         let db = block_on(Db::open_at(config(), &path, Default::default())).unwrap();
         db.set_authority();
-        db.initialize_authority_catalogue().unwrap();
+        assert!(db.table_identity("resources").unwrap().is_some());
         let mut values = fields(id(90).0, 91, 92);
         values.insert("label".into(), Value::String("unrelated".repeat(10_000)));
         block_on(db.insert(

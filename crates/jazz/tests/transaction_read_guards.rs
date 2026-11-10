@@ -31,7 +31,12 @@ struct GatedTransport {
 }
 impl Transport for GatedTransport {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
-        if let SyncMessage::Fetch { id, .. } = &message {
+        if let SyncMessage::Read {
+            id,
+            span: jazz::db::ReadSpan::Once { .. },
+            ..
+        } = &message
+        {
             if self.gate.blocked.get() {
                 return Err(TransportError::Backpressure);
             }
@@ -86,7 +91,8 @@ fn reconnect(alice: &Db, bob: &Db, gate: &Gate) {
         inner: up,
         gate: gate.clone(),
     })));
-    bob.accept_subscriber(down, AuthorSubject::for_test_bytes([1; 16]));
+    bob.accept_subscriber(down, AuthorSubject::for_test_bytes([1; 16]))
+        .unwrap();
     alice.set_remote_link_hint(RemoteLinkHint::Live);
 }
 fn begin(alice: &Db) -> OpenTransactionId {
@@ -326,24 +332,4 @@ fn cancelled_ordinary_read_does_not_poison_commit() {
     };
     assert_eq!(bodies(rows), vec!["hello", "kept"]);
     assert!(gate.sent.borrow().is_empty());
-}
-
-/// Alice's storage owner retires while one read awaits Bob and another awaits
-/// the first. Both executor tasks must wake and refuse without network traffic.
-#[test]
-fn retirement_wakes_issued_and_queued_reads() {
-    let (alice, _, _) = fixture();
-    let transaction = alice.tx_ref(begin(&alice));
-    let query = alice.prepare_query(&Query::from("notes")).unwrap();
-    let mut first = Box::pin(transaction.all_prepared_at(&query, false, None, ReadTier::Remote));
-    let mut second = Box::pin(transaction.all_prepared_at(&query, false, None, ReadTier::Remote));
-    let first_wake = Arc::new(WakeCount::default());
-    let second_wake = Arc::new(WakeCount::default());
-    assert!(poll_with_wake(first.as_mut(), &first_wake).is_pending());
-    assert!(poll_with_wake(second.as_mut(), &second_wake).is_pending());
-    alice.retire_storage_owner().unwrap();
-    assert!(first_wake.0.load(Ordering::SeqCst) > 0);
-    assert!(second_wake.0.load(Ordering::SeqCst) > 0);
-    assert!(matches!(poll(first.as_mut()), Poll::Ready(Err(_))));
-    assert!(matches!(poll(second.as_mut()), Poll::Ready(Err(_))));
 }

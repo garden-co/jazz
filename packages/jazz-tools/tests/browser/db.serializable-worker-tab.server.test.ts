@@ -16,12 +16,15 @@ import {
   waitForCondition,
   withTimeout,
 } from "./support.js";
-import { getJazzServerInfo } from "./testing-server.js";
+import { getJazzServerInfo, startJazzApp } from "./testing-server.js";
 
-const app = schema.defineApp({
-  seats: schema.table({ show: schema.string(), holder: schema.string() }, {}),
-  audit: schema.table({ note: schema.string() }, {}),
-});
+const app = schema.defineApp(
+  {
+    seats: schema.table({ show: schema.string(), holder: schema.string() }, {}),
+    audit: schema.table({ note: schema.string() }, {}),
+  },
+  { migrations: "none" },
+);
 
 const permissions = schema.definePermissions(app, ({ policy }) => [
   policy.seats.allowRead.always(),
@@ -37,14 +40,9 @@ afterEach(async () => {
 });
 
 async function setup(label: string) {
-  const server = await getJazzServerInfo(uniqueDbName(label));
-  await deploy({
-    appId: server.appId,
-    serverUrl: server.serverUrl,
-    adminSecret: server.adminSecret,
-    schema: app.wasmSchema,
-    permissions,
-  });
+  const core = await getJazzServerInfo(uniqueDbName(label));
+  await deploy({ ...core, schema: app.wasmSchema, permissions });
+  const server = await startJazzApp(core, { schema: app.wasmSchema, permissions });
   const open = async (persistent: boolean): Promise<Db> =>
     ctx.track(
       await createBrowserTestDb({

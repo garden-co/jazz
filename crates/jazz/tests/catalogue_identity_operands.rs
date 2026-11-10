@@ -1,14 +1,11 @@
-//! Catalogue policy values come from accepted manifests, never session claims.
+//! Catalogue policy values come from authority-confirmed stored names, never session claims.
 mod common;
 use jazz::db::{
     Db, DbConfig, DbIdentity, ErrorCode, InsertOptions, ReadOpts, ReadTier, UpdateOptions,
     WriteIdentity, block_on, duplex,
 };
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::protocol::{
-    CatalogueSnapshot, CurrentWriteSchema, LensOp, MigrationLens, PhysicalIdentityManifest,
-    SchemaLineagePublication, SchemaVersion, TableLens,
-};
+use jazz::protocol::{LensOp, MigrationLens, TableLens};
 use jazz::query::{
     Query, RelationCmpOp, RelationColumnRef, RelationExpr, RelationPredicate, RelationValueRef,
 };
@@ -51,31 +48,22 @@ fn schema(table: &str, policy: PolicyExpr) -> JazzSchema {
             .build(),
     )
 }
-fn snapshot(schema: JazzSchema) -> CatalogueSnapshot {
-    CatalogueSnapshot {
-        genesis_physical_identities: PhysicalIdentityManifest::allocate(&schema),
-        schemas: vec![SchemaVersion::new(schema.clone())],
-        lineages: vec![],
-        current_write_schema: CurrentWriteSchema {
-            revision: 1,
-            schema: schema.version_id(),
-        },
-    }
-}
-fn open(node: u8, schema: JazzSchema) -> Db {
+fn open_as(node: u8, schema: JazzSchema, author: AuthorSubject) -> Db {
     block_on(Db::open(DbConfig::new(
         schema,
         DbIdentity {
             node: NodeUuid::from_bytes([node; 16]),
-            author: AuthorSubject::SYSTEM,
+            author,
         },
     )))
     .unwrap()
 }
-fn authority(snapshot: &CatalogueSnapshot) -> Db {
-    let db = open(3, snapshot.schemas[0].schema.clone());
+fn open(node: u8, schema: JazzSchema) -> Db {
+    open_as(node, schema, AuthorSubject::SYSTEM)
+}
+fn authority(schema: JazzSchema) -> Db {
+    let db = open(3, schema);
     db.set_authority();
-    db.install_authority_catalogue(snapshot).unwrap();
     db
 }
 fn cells(scope: uuid::Uuid, text: &str) -> BTreeMap<String, Value> {
@@ -122,7 +110,7 @@ fn spoof(db: &Db, scope: uuid::Uuid) {
 fn connect(client: &Db, server: &Db, author: AuthorSubject) {
     let (a, b) = duplex();
     block_on(client.connect_upstream(a));
-    server.accept_subscriber(b, author);
+    server.accept_subscriber(b, author).unwrap();
 }
 fn turn(dbs: &[&Db]) {
     for db in dbs {
@@ -147,8 +135,7 @@ fn drive<T>(dbs: &[&Db], future: impl Future<Output = T>) -> T {
 /// supplies matching spoofed claims for a different stored scope.
 #[test]
 fn uuid_policy_and_lowered_operand_ignore_spoofed_claims() {
-    let snapshot = snapshot(schema("documents", intrinsic("documents")));
-    let db = authority(&snapshot);
+    let db = authority(schema("documents", intrinsic("documents")));
     let scope = db.table_identity("documents").unwrap().unwrap().0;
     let fake = uuid::Uuid::new_v4();
     let good = seed(&db, "documents", scope, "accepted");
@@ -174,8 +161,7 @@ fn uuid_policy_and_lowered_operand_ignore_spoofed_claims() {
 /// a rejected scope reassignment rolls back and cannot replace the accepted row.
 #[test]
 fn insert_and_update_use_accepted_scope_ids() {
-    let snapshot = snapshot(schema("documents", intrinsic("documents")));
-    let db = authority(&snapshot);
+    let db = authority(schema("documents", intrinsic("documents")));
     let scope = db.table_identity("documents").unwrap().unwrap().0;
     let fake = uuid::Uuid::new_v4();
     spoof(&db, fake);
@@ -224,73 +210,70 @@ fn insert_and_update_use_accepted_scope_ids() {
 /// Missing metadata never becomes a true IS NULL or a provider-claim fallback.
 #[test]
 fn every_policy_value_form_uses_metadata_and_missing_metadata_rejects() {
-    let id = uuid::Uuid::from_bytes([0x31; 16]);
-    let literal = PublicValue::Uuid(ObjectId::from_uuid(id));
-    let cases = vec![
-        (intrinsic("documents"), true),
-        (
-            PolicyExpr::In {
-                column: "scopeId".into(),
-                session_path: path("documents"),
-            },
-            true,
-        ),
-        (
-            PolicyExpr::InList {
-                column: "scopeId".into(),
-                values: vec![PolicyValue::SessionRef(path("documents"))],
-            },
-            true,
-        ),
-        (
-            PolicyExpr::SessionCmp {
-                path: path("documents"),
-                op: CmpOp::Eq,
-                value: literal.clone(),
-            },
-            true,
-        ),
-        (
-            PolicyExpr::SessionInList {
-                path: path("documents"),
-                values: vec![literal.clone()],
-            },
-            true,
-        ),
-        (
-            PolicyExpr::SessionIsNotNull {
-                path: path("documents"),
-            },
-            true,
-        ),
-        (
-            PolicyExpr::SessionIsNull {
-                path: path("documents"),
-            },
-            false,
-        ),
-        (
-            PolicyExpr::SessionContains {
-                path: path("documents"),
-                value: literal,
-            },
-            false,
-        ),
-    ];
-    for (policy, visible) in cases {
-        let mut snapshot = snapshot(schema("documents", policy));
-        snapshot
-            .genesis_physical_identities
-            .tables
-            .get_mut("documents")
-            .unwrap()
-            .id
-            .0 = id;
-        let db = authority(&snapshot);
+    // A real authority allocates its namespace; policies cannot choose its UUID.
+    // Exercise each original predicate against that genuine identity.
+    for case in 0..8 {
+        let db = authority(schema("documents", PolicyExpr::True));
+        let id = db.table_identity("documents").unwrap().unwrap().0;
+        let literal = PublicValue::Uuid(ObjectId::from_uuid(id));
+        let mut cases = vec![
+            (intrinsic("documents"), true),
+            (
+                PolicyExpr::In {
+                    column: "scopeId".into(),
+                    session_path: path("documents"),
+                },
+                true,
+            ),
+            (
+                PolicyExpr::InList {
+                    column: "scopeId".into(),
+                    values: vec![PolicyValue::SessionRef(path("documents"))],
+                },
+                true,
+            ),
+            (
+                PolicyExpr::SessionCmp {
+                    path: path("documents"),
+                    op: CmpOp::Eq,
+                    value: literal.clone(),
+                },
+                true,
+            ),
+            (
+                PolicyExpr::SessionInList {
+                    path: path("documents"),
+                    values: vec![literal.clone()],
+                },
+                true,
+            ),
+            (
+                PolicyExpr::SessionIsNotNull {
+                    path: path("documents"),
+                },
+                true,
+            ),
+            (
+                PolicyExpr::SessionIsNull {
+                    path: path("documents"),
+                },
+                false,
+            ),
+            (
+                PolicyExpr::SessionContains {
+                    path: path("documents"),
+                    value: literal,
+                },
+                false,
+            ),
+        ];
+        let (policy, visible) = cases.swap_remove(case);
+        let configured = schema("documents", policy);
+        block_on(db.activate_schema_with_lenses(configured.clone(), &[])).unwrap();
         seed(&db, "documents", id, "row");
         spoof(&db, id);
         assert_eq!(ids(&db, "documents").len(), usize::from(visible));
-        let unaccepted = open(1, snapshot.schemas[0].schema.clone());
+        let unaccepted = open(1, configured);
         seed(&unaccepted, "documents", id, "row");
         spoof(&unaccepted, id);
         let prepared = unaccepted.prepare_query(&Query::from("documents")).unwrap();
@@ -325,12 +308,12 @@ fn malformed_and_unknown_intrinsics_never_fall_back_to_null() {
             "malformed paths must fail during schema admission"
         );
     }
-    let db = authority(&snapshot(schema(
+    let db = authority(schema(
         "documents",
         PolicyExpr::SessionIsNull {
             path: path("unknown"),
         },
-    )));
+    ));
     seed(&db, "documents", uuid::Uuid::new_v4(), "row");
     let prepared = db.prepare_query(&Query::from("documents")).unwrap();
     let error = block_on(db.all_for_identity(&prepared, ReadOpts::default(), alice())).unwrap_err();
@@ -410,7 +393,7 @@ fn nested_inherited_and_relational_policies_bind_the_policy_schema() {
                 )
                 .build(),
         );
-        let db = authority(&snapshot(schema));
+        let db = authority(schema);
         let scope = db.table_identity("documents").unwrap().unwrap().0;
         let good = block_on(db.insert(
             "documents",
@@ -459,16 +442,15 @@ fn nested_inherited_and_relational_policies_bind_the_policy_schema() {
 #[test]
 fn cold_sync_and_subscription_updates_use_catalogue_policies() {
     let schema = schema("documents", intrinsic("documents"));
-    let snapshot = snapshot(schema.clone());
-    let server = authority(&snapshot);
+    let server = authority(schema.clone());
     let scope = server.table_identity("documents").unwrap().unwrap().0;
     let good = seed(&server, "documents", scope, "good");
     seed(&server, "documents", uuid::Uuid::new_v4(), "bad");
-    let alice_db = open(1, schema);
+    let alice_db = open_as(1, schema, alice());
     connect(&alice_db, &server, alice());
     drive(
         &[&alice_db, &server],
-        alice_db.cover_catalogue("documents", None),
+        alice_db.cover_catalogue_with_timeout(None, 5_000).unwrap(),
     )
     .unwrap();
     let prepared = alice_db.prepare_query(&Query::from("documents")).unwrap();
@@ -513,16 +495,15 @@ fn cold_sync_and_subscription_updates_use_catalogue_policies() {
 #[test]
 fn renamed_policy_schema_governs_old_client_views_and_live_subscriptions() {
     let source = schema("documents", intrinsic("documents"));
-    let mut snapshot = snapshot(source.clone());
-    let server = authority(&snapshot);
+    let server = authority(source.clone());
     let scope = server.table_identity("documents").unwrap().unwrap().0;
     let good = seed(&server, "documents", scope, "good");
     let fixed = block_on(server.register_schema_view(source.clone())).unwrap();
-    let client = open(1, source.clone());
+    let client = open_as(1, source.clone(), alice());
     connect(&client, &server, alice());
     drive(
         &[&client, &server],
-        client.cover_catalogue("documents", None),
+        client.cover_catalogue_with_timeout(None, 5_000).unwrap(),
     )
     .unwrap();
     let query = client.prepare_query(&Query::from("documents")).unwrap();
@@ -555,31 +536,14 @@ fn renamed_policy_schema_governs_old_client_views_and_live_subscriptions() {
         }],
     )
     .unwrap();
-    let publication = SchemaLineagePublication::author_from_prior(
-        &source,
-        &snapshot.genesis_physical_identities,
-        SchemaVersion::new(target.clone()),
-        lens.clone(),
-        Vec::<String>::new(),
-        Vec::<String>::new(),
-    )
-    .unwrap();
-    snapshot.schemas.push(SchemaVersion::new(target.clone()));
-    snapshot.lineages.push((1, publication));
     // The native runtime publishes the descriptor before activating its policies.
     block_on(server.admit_schema_with_lenses(target.clone(), std::slice::from_ref(&lens))).unwrap();
-    server.install_authority_catalogue(&snapshot).unwrap();
     block_on(server.activate_schema_with_lenses(target.clone(), &[lens])).unwrap();
-    snapshot.current_write_schema = CurrentWriteSchema {
-        revision: 2,
-        schema: target.version_id(),
-    };
-    server.install_authority_catalogue(&snapshot).unwrap();
     assert_eq!(ids(&server, "tasks"), vec![good]);
     assert_eq!(ids(&fixed, "documents"), vec![good]);
     drive(
         &[&client, &server],
-        client.cover_catalogue("documents", None),
+        client.cover_catalogue_with_timeout(None, 5_000).unwrap(),
     )
     .unwrap();
     for _ in 0..6 {
@@ -609,8 +573,28 @@ fn renamed_policy_schema_governs_old_client_views_and_live_subscriptions() {
 /// Alice's policy checks reject until that exact descriptor is published.
 #[test]
 fn registering_an_unpublished_view_cannot_supply_policy_identities() {
-    let db = authority(&snapshot(schema("documents", intrinsic("documents"))));
-    let view = block_on(db.register_schema_view(schema("drafts", intrinsic("drafts")))).unwrap();
+    // A current authority confirms every schema it admits, including a view.
+    // The unconfirmed view must therefore belong to its replica: the initial
+    // namespace is genuine, but the authority has never admitted `drafts`.
+    let initial = schema("documents", intrinsic("documents"));
+    let server = authority(initial.clone());
+    let db = open(1, initial);
+    connect(&db, &server, AuthorSubject::SYSTEM);
+    drive(
+        &[&db, &server],
+        db.cover_catalogue_with_timeout(None, 5_000).unwrap(),
+    )
+    .unwrap();
+    // Select the locally admitted policy version too. An unselected extra
+    // table has no governing SELECT policy and correctly denies before it
+    // evaluates any operand; that is a different refusal boundary.
+    let drafts = schema("drafts", intrinsic("drafts"));
+    block_on(db.activate_schema(drafts.clone())).unwrap();
+    let view = block_on(db.register_schema_view(drafts)).unwrap();
+    assert_eq!(
+        view.table_identity("drafts").unwrap_err().code,
+        ErrorCode::NotObserved
+    );
     seed(&view, "drafts", uuid::Uuid::new_v4(), "unpublished");
     let prepared = view.prepare_query(&Query::from("drafts")).unwrap();
     let error =
@@ -622,7 +606,7 @@ fn registering_an_unpublished_view_cannot_supply_policy_identities() {
 /// for both parent lookup and child policies, ignoring Mallory's spoofed claims.
 #[test]
 fn nested_reads_keep_the_accepted_catalogue_identity() {
-    let db = authority(&snapshot(schema("documents", intrinsic("documents"))));
+    let db = authority(schema("documents", intrinsic("documents")));
     let scope = db.table_identity("documents").unwrap().unwrap().0;
     let mut expected = vec![
         seed(&db, "documents", scope, "first"),

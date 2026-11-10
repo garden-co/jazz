@@ -11,7 +11,7 @@ import { openConfig, queryFromTable } from "./native-runtime/native-codec.js";
 import { testAuthorBytes } from "./testing/account-fixtures.js";
 import { hasJazzWasmBuild, loadWasmModuleForTest } from "./testing/wasm-runtime-test-utils.js";
 
-const app = s.defineApp({ notes: s.table({ text: s.string() }, {}) });
+const app = s.defineApp({ notes: s.table({ text: s.string() }, {}) }, { migrations: "none" });
 const node = new Uint8Array(16).fill(83);
 const author = testAuthorBytes("sqlite-reopen-alice");
 type Db = Awaited<ReturnType<typeof loadWasmModuleForTest>>["WasmDb"]["prototype"];

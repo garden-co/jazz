@@ -5,9 +5,12 @@ import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { Jazz, JazzError } from "./index.js";
 
-const app = s.defineApp({
-  todos: s.table({ title: s.string(), done: s.boolean() }, {}),
-});
+const app = s.defineApp(
+  {
+    todos: s.table({ title: s.string(), done: s.boolean() }, {}),
+  },
+  { migrations: "none" },
+);
 
 class Oops extends Data.TaggedError("Oops")<{}> {}
 
@@ -292,5 +295,22 @@ describe("Jazz Effect service", { timeout: 30_000 }, () => {
     );
 
     expect(Option.isSome(state)).toBe(true);
+  });
+
+  it("streams the sync status and waits for sync", async () => {
+    const result = await run(
+      await jazzLayer("sync-status"),
+      Effect.gen(function* () {
+        const jazz = yield* Jazz;
+        yield* jazz.insert(app.todos, { title: "milk", done: false });
+        // A local-only Db uploads nothing, so it is synced at once.
+        yield* jazz.waitForSync({ timeoutMs: 5_000 });
+        return yield* Stream.runCollect(Stream.take(jazz.syncStatus, 1));
+      }),
+    );
+
+    expect([...result]).toEqual([
+      { link: { state: "local-only" }, pendingUploads: 0, synced: true },
+    ]);
   });
 });

@@ -13,25 +13,26 @@ fn schema() -> Schema {
                 .build(),
         )
         .unwrap(),
+        &crate::values::TagRegistry::default(),
     )
 }
 fn connection() -> Connection {
     let conn = Connection::open_in_memory().unwrap();
     conn.execute_batch(
-        "CREATE TABLE grants(id BLOB NOT NULL, _b BLOB NOT NULL, _seq INTEGER NOT NULL, targets TEXT, PRIMARY KEY(id,_b));
-         CREATE TABLE grants__h(id BLOB NOT NULL, _b BLOB NOT NULL, _seq INTEGER NOT NULL, targets TEXT, PRIMARY KEY(id,_b,_seq));"
+        "CREATE TABLE grants(id BLOB NOT NULL, _branch BLOB NOT NULL, _clock INTEGER NOT NULL, _writer BLOB NOT NULL DEFAULT x'', _state INTEGER NOT NULL DEFAULT 0, targets TEXT, PRIMARY KEY(id,_branch));
+         CREATE TABLE grants__h(id BLOB NOT NULL, _branch BLOB NOT NULL, _clock INTEGER NOT NULL, _writer BLOB NOT NULL DEFAULT x'', _state INTEGER NOT NULL DEFAULT 0, targets TEXT, PRIMARY KEY(id,_branch,_clock,_writer));"
     ).unwrap();
     conn
 }
 fn key_rows(conn: &Connection) -> Vec<(String, i64, String, String, i64)> {
-    conn.prepare("SELECT hex(member),kind,hex(id),hex(branch),seq FROM \"_jazz_array_members_v1_6:grants_7:targets\" ORDER BY member,kind,id,branch,seq")
+    conn.prepare("SELECT hex(member),kind,hex(id),hex(branch),clock FROM \"_jazz_array_members_v2_6:grants_7:targets\" ORDER BY member,kind,id,branch,clock,writer")
         .unwrap().query_map([], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))
         .unwrap().collect::<rusqlite::Result<_>>().unwrap()
 }
 fn put(conn: &Connection, history: bool, seq: i64, targets: &str) {
     let table = if history { "grants__h" } else { "grants" };
     conn.execute(
-        &format!("INSERT INTO {table}(id,_b,_seq,targets) VALUES(?1,?2,?3,?4)"),
+        &format!("INSERT INTO {table}(id,_branch,_clock,targets) VALUES(?1,?2,?3,?4)"),
         rusqlite::params![vec![0x11u8; 16], Vec::<u8>::new(), seq, targets],
     )
     .unwrap();
@@ -42,13 +43,13 @@ const TARGETS: &str =
 /// Alice's derived index has fixed DDL bytes and raw UUID keys. Physical
 /// inspection is necessary to pin this durable role independently of queries.
 #[test]
-fn uuid_array_index_v1_pins_ddl_and_member_bytes() {
+fn uuid_array_index_v2_pins_ddl_and_member_bytes() {
     let schema = schema();
     let table = schema.table("grants").unwrap();
     let name = name(table, "targets").unwrap();
     assert_eq!(
         ddl(table, "targets", &name).as_bytes(),
-        include_bytes!("../../../fixtures/sqlite_uuid_array_index_v1.sql")
+        include_bytes!("../../../fixtures/sqlite_uuid_array_index_v2.sql")
     );
     let conn = connection();
     install(&conn, &schema).unwrap();
@@ -57,7 +58,7 @@ fn uuid_array_index_v1_pins_ddl_and_member_bytes() {
         key_rows(&conn),
         vec![("22".repeat(16), 0, "11".repeat(16), String::new(), 7)]
     );
-    let plan: String = conn.query_row("EXPLAIN QUERY PLAN SELECT id FROM \"_jazz_array_members_v1_6:grants_7:targets\" WHERE member=?1 AND kind=0",[vec![0x22;16]],|r|r.get(3)).unwrap();
+    let plan: String = conn.query_row("EXPLAIN QUERY PLAN SELECT id FROM \"_jazz_array_members_v2_6:grants_7:targets\" WHERE member=?1 AND kind=0",[vec![0x22;16]],|r|r.get(3)).unwrap();
     assert!(
         plan.contains("SEARCH") && plan.contains("PRIMARY KEY"),
         "{plan}"
@@ -74,7 +75,7 @@ fn membership_tracks_history_updates_deletes_and_rollback_atomically() {
     put(&conn, false, 7, TARGETS);
     put(&conn, true, 7, TARGETS);
     conn.execute(
-        "UPDATE grants SET _seq=8,targets=?1",
+        "UPDATE grants SET _clock=8,targets=?1",
         ["[\"33333333-3333-3333-3333-333333333333\"]"],
     )
     .unwrap();
@@ -86,7 +87,7 @@ fn membership_tracks_history_updates_deletes_and_rollback_atomically() {
         ]
     );
     let accepted = key_rows(&conn);
-    conn.execute_batch("SAVEPOINT rejected; UPDATE grants SET _seq=9,targets='[]'; DELETE FROM grants__h; ROLLBACK TO rejected; RELEASE rejected;").unwrap();
+    conn.execute_batch("SAVEPOINT rejected; UPDATE grants SET _clock=9,targets='[]'; DELETE FROM grants__h; ROLLBACK TO rejected; RELEASE rejected;").unwrap();
     assert_eq!(key_rows(&conn), accepted);
     conn.execute_batch("DELETE FROM grants__h").unwrap();
     assert_eq!(
@@ -107,11 +108,11 @@ fn installation_backfills_once_and_rolls_back_partial_ddl() {
     let schema = schema();
     put(&conn, false, 8, TARGETS);
     put(&conn, true, 7, TARGETS);
-    conn.execute_batch("CREATE TRIGGER \"_jazz_array_members_v1_6:grants_7:targets_0_update\" AFTER UPDATE ON grants BEGIN SELECT 1; END;").unwrap();
+    conn.execute_batch("CREATE TRIGGER \"_jazz_array_members_v2_6:grants_7:targets_0_update\" AFTER UPDATE ON grants BEGIN SELECT 1; END;").unwrap();
     assert!(install(&conn, &schema).is_err());
-    let partial:i64=conn.query_row("SELECT COUNT(*) FROM sqlite_schema WHERE name='_jazz_array_members_v1_6:grants_7:targets'",[],|r|r.get(0)).unwrap();
+    let partial:i64=conn.query_row("SELECT COUNT(*) FROM sqlite_schema WHERE name='_jazz_array_members_v2_6:grants_7:targets'",[],|r|r.get(0)).unwrap();
     assert_eq!(partial, 0);
-    conn.execute_batch("DROP TRIGGER \"_jazz_array_members_v1_6:grants_7:targets_0_update\"")
+    conn.execute_batch("DROP TRIGGER \"_jazz_array_members_v2_6:grants_7:targets_0_update\"")
         .unwrap();
     install(&conn, &schema).unwrap();
     assert_eq!(
@@ -131,4 +132,50 @@ fn installation_backfills_once_and_rolls_back_partial_ddl() {
     assert!(members(&Sql::Text(b"[]".to_vec())).unwrap().is_empty());
     assert!(members(&Sql::Null).unwrap().is_empty());
     assert!(members(&Sql::Text(b"[7]".to_vec())).is_err());
+}
+
+/// Alice and Bob can have historical images at the same pending clock. Their
+/// writer keys stay distinct; the negative-clock as-sent shadow is not proof
+/// evidence. Physical inspection is required to observe those internal keys.
+#[test]
+fn pending_writers_are_distinct_and_as_sent_shadows_are_excluded() {
+    let conn = connection();
+    install(&conn, &schema()).unwrap();
+    for writer in [vec![1u8; 24], vec![2u8; 24]] {
+        conn.execute(
+            "INSERT INTO grants__h(id,_branch,_clock,_writer,targets) VALUES(?1,x'',7,?2,?3)",
+            rusqlite::params![vec![0x11u8; 16], writer, TARGETS],
+        )
+        .unwrap();
+    }
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM \"_jazz_array_members_v2_6:grants_7:targets\" WHERE clock=7",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 2);
+    conn.execute("INSERT INTO grants__h(id,_branch,_clock,_writer,_state,targets) VALUES(?1,x'',-7,?2,?3,?4)",rusqlite::params![vec![0x11u8;16],vec![3u8;24],STATE_AS_SENT,TARGETS]).unwrap();
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM \"_jazz_array_members_v2_6:grants_7:targets\"",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 2);
+    conn.execute(
+        "UPDATE grants__h SET _state=?1 WHERE _writer=?2",
+        rusqlite::params![STATE_AS_SENT, vec![1u8; 24]],
+    )
+    .unwrap();
+    let writers: Vec<Vec<u8>> = conn
+        .prepare("SELECT writer FROM \"_jazz_array_members_v2_6:grants_7:targets\"")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(writers, vec![vec![2u8; 24]]);
 }

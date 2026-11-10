@@ -1,3 +1,4 @@
+import { fetchFor } from "../runtime/in-process-transport.js";
 import { runtimeSchemaJsonReplacer } from "../drivers/schema-wire.js";
 import type {
   ColumnType,
@@ -157,6 +158,27 @@ export async function fetchStoredPermissions(
   };
 }
 
+/** A permissions bundle the core has published: what sessions pin to. */
+export interface PublishedBundle {
+  bundle: string;
+  schemaHash: string;
+  publishedAt: number;
+  permissions: Record<string, TablePolicies>;
+}
+
+/** Every bundle the core has published, oldest first. */
+export async function fetchPublishedBundles(
+  serverUrl: string,
+  options: FetchStoredPermissionsOptions,
+): Promise<PublishedBundle[]> {
+  const body = (await fetchAdminJson(
+    appScopedUrl(serverUrl, options.appId, "admin/bundles"),
+    options.adminSecret,
+    "Bundles",
+  )) as { bundles?: PublishedBundle[] };
+  return body.bundles ?? [];
+}
+
 export type PublishedMigrationValue =
   | { type: "Integer"; value: number }
   | { type: "BigInt"; value: bigint | string | number }
@@ -253,6 +275,8 @@ export interface DeploymentResponse {
     schemas: string[];
     migrations: Array<{ fromHash: string; toHash: string }>;
   };
+  /** The published bundle's id: what a backend pins its sessions to. */
+  bundle: string;
 }
 
 export class DeploymentError extends Error {
@@ -271,7 +295,10 @@ export async function publishDeployment(
   serverUrl: string,
   options: { appId: string; adminSecret: string } & DeploymentArtifacts,
 ): Promise<DeploymentResponse> {
-  const response = await fetch(appScopedUrl(serverUrl, options.appId, "admin/deploy"), {
+  // A core that predates bundles has no `/bundles` route, so it refuses the
+  // publish instead of activating it.
+  const deployUrl = appScopedUrl(serverUrl, options.appId, "admin/bundles");
+  const response = await fetchFor(deployUrl)(deployUrl, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

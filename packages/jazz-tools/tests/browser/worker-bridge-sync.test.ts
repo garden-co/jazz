@@ -24,7 +24,7 @@ import {
 } from "./support.js";
 import { createDb as createPublicDb } from "../../src/runtime/default-create-db.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
-import { getJazzServerJwtForUser } from "./testing-server.js";
+import { jazzAppUser } from "./testing-server.js";
 import { type BrowserInspectorControlRequest } from "../../src/runtime/native-runtime/browser-worker-protocol.js";
 import {
   listWorkerContexts,
@@ -490,26 +490,22 @@ describe("SharedWorker bridge with IndexedDB", () => {
     unsub();
   }, 60000);
 
-  it("delivers an initial scoped subscription snapshot for jwt-backed synced rows", async () => {
-    const { appId, serverUrl } =
-      await publishSyncServerSchemaAndPermissions("subscribe-initial-jwt");
+  it("delivers an initial scoped subscription snapshot for backend-signed-in synced rows", async () => {
+    const backend = await publishSyncServerSchemaAndPermissions("subscribe-initial-backend");
     const db = track(
       await createDb({
-        appId,
+        ...(await jazzAppUser(backend, "subscribe-initial-backend")),
         driver: {
           type: "persistent",
-          dbName: uniqueDbName("subscribe-initial-jwt"),
+          dbName: uniqueDbName("subscribe-initial-backend"),
         },
-        serverUrl,
-        jwtToken: await getJazzServerJwtForUser("subscribe-initial-jwt", undefined, appId),
-        registerJwt: true,
       }),
     );
 
     const insertedIds: string[] = [];
     for (let i = 0; i < 120; i += 1) {
       const { id } = await db
-        .insert(todos, { title: `seeded-jwt-${i}`, done: i % 2 === 0 })
+        .insert(todos, { title: `seeded-backend-${i}`, done: i % 2 === 0 })
         .wait({ tier: "local" });
       insertedIds.push(id);
     }
@@ -526,13 +522,13 @@ describe("SharedWorker bridge with IndexedDB", () => {
       async () =>
         received.some((rows) => rows.length === 1 && rows[0]?.id === targetId && rows[0]?.title),
       8000,
-      "JWT-backed seeded row should appear in initial scoped subscription snapshot",
+      "Backend-signed-in seeded row should appear in initial scoped subscription snapshot",
     );
 
     const last = received[received.length - 1];
     expect(last).toHaveLength(1);
     expect(last[0].id).toBe(targetId);
-    expect(last[0].title).toBe("seeded-jwt-0");
+    expect(last[0].title).toBe("seeded-backend-0");
 
     unsub();
   }, 60000);

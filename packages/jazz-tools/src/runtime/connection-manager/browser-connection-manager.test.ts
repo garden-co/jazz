@@ -6,6 +6,8 @@ import { BrowserWorkerUnresponsiveError } from "../native-runtime/browser-worker
 import type { BrowserWorkerConnection, BrowserWorkerConnectionContext } from "../runtime-source.js";
 import { BrowserConnectionManager } from "./browser-connection-manager.js";
 import type { DbForConnection } from "./types.js";
+import type { RemoteLinkState } from "../remote-link-state.js";
+import type { LinkStatus } from "../sync-status.js";
 
 function deferred() {
   let resolve!: () => void;
@@ -1384,6 +1386,49 @@ describe("BrowserConnectionManager explicit transport transitions", () => {
     callbacks?.onExplicitOfflineChange?.(false);
     await reconnected;
     expect(manager.isExplicitlyOffline()).toBe(false);
+  });
+
+  it("reports a worker that has not dialled yet as connecting, not local-only", () => {
+    const connection = {
+      ready: vi.fn(async () => undefined),
+      disconnect: vi.fn(async () => undefined),
+      reconnect: vi.fn(async () => undefined),
+      openInspectorControlPort: vi.fn(async () => ({}) as MessagePort),
+    } as unknown as BrowserWorkerConnection;
+    let callbacks:
+      | { onRemoteLinkChange?: (state: RemoteLinkState, link?: LinkStatus) => void }
+      | undefined;
+    const host = {
+      config: { serverUrl: "https://example.test" },
+      isShuttingDown: false,
+      runtimeSource: {
+        createBrowserWorkerConnection: vi.fn((input) => {
+          callbacks = input;
+          return connection;
+        }),
+      },
+      markUnauthenticated: vi.fn(),
+      clearAuthError: vi.fn(),
+      clearAuthenticatedInspectorLocalReads: vi.fn(),
+    } as unknown as DbForConnection;
+    const manager = new BrowserConnectionManager(host);
+    (
+      manager as unknown as {
+        onClientCreated(input: {
+          schemaKey: string;
+          schema: Record<string, never>;
+          client: JazzClient;
+        }): void;
+      }
+    ).onClientCreated({ schemaKey: "empty", schema: {}, client: {} as JazzClient });
+
+    // The worker reports local-only until its transport is requested, for
+    // example while it waits for a credential.
+    callbacks?.onRemoteLinkChange?.("none", { state: "local-only" });
+    expect(manager.linkStatus()).toEqual({ state: "connecting" });
+
+    callbacks?.onRemoteLinkChange?.("connected", { state: "connected" });
+    expect(manager.linkStatus()).toEqual({ state: "connected" });
   });
 
   it("waits for worker transport state only while a follower is attaching", async () => {

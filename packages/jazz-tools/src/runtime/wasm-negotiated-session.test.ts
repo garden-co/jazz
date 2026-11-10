@@ -6,7 +6,7 @@ import { FEATURE_AUXILIARY_CHUNKS, WIRE_PROTOCOL_VERSION } from "./native-runtim
 import { testAuthorBytes } from "./testing/account-fixtures.js";
 import { hasJazzWasmBuild, loadWasmModuleForTest } from "./testing/wasm-runtime-test-utils.js";
 
-const app = s.defineApp({ notes: s.table({ text: s.string() }, {}) });
+const app = s.defineApp({ notes: s.table({ text: s.string() }, {}) }, { migrations: "none" });
 
 async function fixture(name: string) {
   const { WasmDb } = await loadWasmModuleForTest();

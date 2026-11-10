@@ -77,7 +77,7 @@ fn open(key: &str, indexed: bool, include_created: bool) -> Db {
     )))
     .unwrap();
     db.set_authority();
-    db.initialize_authority_catalogue().unwrap();
+    assert!(db.table_identity("sources").unwrap().is_some());
     db
 }
 fn source() -> BTreeMap<String, Value> {

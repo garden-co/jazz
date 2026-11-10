@@ -10,7 +10,7 @@ extern "C" {
 #endif
 
 /* The relay ABI this header describes (Rust `NATIVE_RELAY_ABI_V1`). */
-#define JAZZ_NATIVE_RELAY_ABI_VERSION 3
+#define JAZZ_NATIVE_RELAY_ABI_VERSION 4
 
 /*
  * Return the shared native relay ABI version embedded in this artifact.
@@ -53,6 +53,14 @@ jazz_native_relay_status jazz_native_relay_mint_local_first_token(
     const uint8_t *seed, size_t seed_len,
     const uint8_t *audience, size_t audience_len,
     uint64_t ttl_seconds, uint64_t now_seconds,
+    jazz_native_relay_bytes *out);
+
+/* Stateless text anchors and ranges (jazz-text). request is UTF-8 JSON
+ * {"op": "captureAnchor" | "resolveAnchor" | "captureRange" | "resolveRange", ...};
+ * out receives the result as UTF-8 JSON. Release it with
+ * jazz_native_relay_bytes_free. */
+jazz_native_relay_status jazz_native_relay_text_anchors(
+    const uint8_t *request, size_t request_len,
     jazz_native_relay_bytes *out);
 
 typedef struct jazz_native_relay_host jazz_native_relay_host;

@@ -137,9 +137,8 @@ it("uses native defaults and the native session factory for ergonomic props", as
   await act(async () => {
     await Promise.resolve();
   });
-  expect(mocks.createJazzSession).toHaveBeenCalledWith(
-    expect.objectContaining({ initial: "local-first" }),
-  );
+  expect(mocks.createJazzSession).toHaveBeenCalledOnce();
+  expect(mocks.createJazzSession.mock.calls[0][0].initial).toBeUndefined();
   expect(view.container.querySelector("native-pressable")?.textContent).toBe("Try again");
   expect(view.container.querySelector("section, p, button")).toBeNull();
 });

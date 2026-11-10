@@ -16,10 +16,10 @@ code that defines its format.
   bytes are a cross-release contract.
 - `result-key.json`: result-key sidecar addresses (`jazz-types` `object.rs`).
 - `snapshot_ref_v1.json`: snapshot reference codec.
-- `sqlite_sync_wire_v1.json`: historical unversioned SQLite sync frames, retained
-  for rejection checks.
-- `sqlite_sync_wire_v4.json`, `sqlite_catalogue_wire_v4.json`: versioned SQLite sync
-  and catalogue fixtures; see [the v4 contract](sqlite_sync_wire_v4.md).
+- `sqlite_sync_wire_v1.json`: the sync wire corpus (`sync_wire_corpus.rs`,
+  `wire-frame-artifact-corpus.test.ts`).
+- `thin_wire_v1.json`: thin client request and response frames (`jazz-protocol`
+  `thin.rs`, `thin/wire.test.ts`).
 - `websocket_prelude_v1.json`: WebSocket v1 admission preludes (the one JSON
   message before binary wire frames).
 - `wire_frame_artifact_corpus_v6.json`, `wire_hello_frames_v6.json`,
@@ -27,3 +27,11 @@ code that defines its format.
 - `sqlite-storage-v1/`: stores written by storage format 1 (see its README).
 - `pre-sqlite/`: stores from before storage format 1, which must be refused
   (see its README).
+
+- `observation_scope_v1.json`, `local_observation_v1.sql`: owner-local provenance
+  hashes, full-u64 forward references and additive SQLite evidence/cleanup
+  contracts (`dev/proofs/owner-local-observation-v1.md`).
+
+- `catalogue_identity_operand_v1.md`: reserved policy path and lowered operand bytes,
+  pinned by `catalogue_identity_operands.rs`; identities use the authority-confirmed
+  governing schema names, never caller claims.

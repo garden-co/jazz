@@ -27,7 +27,12 @@ struct GatedTransport {
 }
 impl Transport for GatedTransport {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
-        if let SyncMessage::Fetch { id, .. } = &message {
+        if let SyncMessage::Read {
+            id,
+            span: jazz::db::ReadSpan::Once { .. },
+            ..
+        } = &message
+        {
             if self.gate.blocked.get() {
                 return Err(TransportError::Backpressure);
             }
@@ -82,7 +87,8 @@ fn reconnect(alice: &Db, bob: &Db, gate: &Gate) {
         inner: up,
         gate: gate.clone(),
     })));
-    bob.accept_subscriber(down, AuthorSubject::for_test_bytes([1; 16]));
+    bob.accept_subscriber(down, AuthorSubject::for_test_bytes([1; 16]))
+        .unwrap();
     alice.set_remote_link_hint(RemoteLinkHint::Live);
 }
 fn begin(alice: &Db) -> OpenTransactionId {
@@ -280,4 +286,38 @@ fn late_cancelled_reply_does_not_complete_sibling() {
     );
     assert_rows(finish(&alice, &bob, sibling.as_mut()).unwrap());
     assert_eq!(gate.sent.borrow().len(), 2);
+}
+
+/// Alice's coverage callback cancels another read while the database evaluates
+/// Bob's answerability. Cancellation must not panic under that borrowed store,
+/// and only Alice's surviving request may reach Bob when capacity returns.
+#[test]
+fn cancellation_inside_coverage_callback_defers_fetch_cleanup() {
+    let (alice, bob, gate) = fixture();
+    let query = postcard::to_allocvec(&Query::from("notes")).unwrap();
+    let mut first = Box::pin(alice.all_serialized_query(
+        &query,
+        ReadOpts::for_read_tier(ReadTier::Remote),
+        None,
+        None,
+        None,
+    ));
+    assert!(poll(first.as_mut()).is_pending());
+    let cancelled = RefCell::new(Some(first));
+    let budget = || {
+        drop(cancelled.borrow_mut().take());
+        false
+    };
+    let mut sibling = Box::pin(alice.all_serialized_query(
+        &query,
+        ReadOpts::for_read_tier(ReadTier::Remote),
+        None,
+        None,
+        Some(&budget),
+    ));
+    assert!(poll(sibling.as_mut()).is_pending());
+    assert!(cancelled.borrow().is_none());
+    gate.blocked.set(false);
+    assert_rows(finish(&alice, &bob, sibling.as_mut()).unwrap());
+    assert_eq!(gate.sent.borrow().len(), 1, "cancelled read reached Bob");
 }

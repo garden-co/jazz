@@ -4,7 +4,7 @@ import { createAccountDbWithRuntimeSource } from "../accounts/context.js";
 import { createAccountManager } from "../accounts/create-account-manager.js";
 import { DefaultRuntimeSource } from "./default-runtime-source.js";
 import type { RuntimeClientContext } from "./runtime-source.js";
-import type { JazzClient, TransactionalRuntime } from "./client.js";
+import type { JazzClient } from "./client.js";
 import type { Db } from "./db.js";
 import { beginDbTransactionAfter } from "./db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
@@ -19,9 +19,12 @@ class PreparationSource extends DefaultRuntimeSource {
   }
 }
 
-const app = s.defineApp({
-  documents: s.table({ payload: s.bytes(), label: s.string().default("untitled") }, {}),
-});
+const app = s.defineApp(
+  {
+    documents: s.table({ payload: s.bytes(), label: s.string().default("untitled") }, {}),
+  },
+  { migrations: "none" },
+);
 let db: Db;
 let source: PreparationSource;
 beforeEach(async () => {
@@ -40,10 +43,7 @@ afterEach(async () => {
 it.each(["ready", "rejected", "cancelled"])(
   "owns deferred snapshot admission through wait (%s)",
   async (outcome) => {
-    const opening = vi.spyOn(
-      source.client.getRuntime() as TransactionalRuntime,
-      "beginTransaction",
-    );
+    const opening = vi.spyOn(source.client.getRuntime(), "beginTransaction");
     let release!: () => void;
     let entered!: () => void;
     const started = new Promise<void>((resolve) => {
@@ -88,7 +88,7 @@ it.each(["ready", "rejected", "cancelled"])(
 );
 
 it("does not enter the runtime after shutdown during admission", async () => {
-  const opening = vi.spyOn(source.client.getRuntime() as TransactionalRuntime, "beginTransaction");
+  const opening = vi.spyOn(source.client.getRuntime(), "beginTransaction");
   let release!: () => void;
   let entered!: () => void;
   const started = new Promise<void>((resolve) => {
@@ -112,7 +112,7 @@ it("does not enter the runtime after shutdown during admission", async () => {
 });
 
 it("does not enter a discarded runtime after suspended admission", async () => {
-  const opening = vi.spyOn(source.client.getRuntime() as TransactionalRuntime, "beginTransaction");
+  const opening = vi.spyOn(source.client.getRuntime(), "beginTransaction");
   let release!: () => void;
   let entered!: () => void;
   const started = new Promise<void>((resolve) => {
@@ -162,10 +162,7 @@ it.each(["selection", "logout"])(
       source,
     );
     await db.all(app.documents, { tier: "local-first" });
-    const opening = vi.spyOn(
-      source.client.getRuntime() as TransactionalRuntime,
-      "beginTransaction",
-    );
+    const opening = vi.spyOn(source.client.getRuntime(), "beginTransaction");
     let release!: () => void;
     let entered!: () => void;
     const started = new Promise<void>((resolve) => {

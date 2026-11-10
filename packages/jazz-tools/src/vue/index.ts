@@ -19,13 +19,13 @@ export { useOne, useOneSuspense, type UseOneResult, type UseOneSuspenseResult } 
 export { useLocalFirstAuth, type UseLocalFirstAuth } from "./use-local-first-auth.js";
 export type { DurabilityTier, QueryOptions, RuntimeSourcesConfig } from "../runtime/index.js";
 
-export {
-  createAccountManager,
-  type AccountManagerConfig,
-} from "../accounts/create-account-manager.js";
+export { createAccountManager } from "../web/lazy-local-first.js";
+export type { AccountManagerConfig } from "../accounts/create-account-manager.js";
 export * from "../accounts/exports.js";
 
 export { useAccountState } from "./use-account-state.js";
+export { useSyncStatus } from "./use-sync-status.js";
+export type { LinkStatus, SyncStatus } from "../runtime/sync-status.js";
 
 export { createJazzSession, type JazzSessionConfig } from "../session/create-jazz-session.js";
 export type {
@@ -42,4 +42,4 @@ export {
 } from "./session.js";
 
 export { JazzProvider, useJazzAuth, type JazzProviderProps, type UseJazzAuth } from "./app.js";
-export { betterAuth, jwtAuth, type JazzAuth } from "../session/app.js";
+export type { JazzUser } from "../session/app.js";

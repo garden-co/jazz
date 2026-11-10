@@ -41,7 +41,10 @@ use jazz::protocol::{BranchSelector, LensOp, MigrationLens, TableLens};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
-use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+use jazz::tools::{
+    ColumnMergeStrategy, ColumnType, OpenTransactionId, SchemaBuilder, TableName,
+    TableSchemaBuilder,
+};
 use jazz::tx::DurabilityTier;
 use sha2::{Digest, Sha256};
 
@@ -52,10 +55,12 @@ use common::{allow_all_policies, compile_schema};
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures");
 const SERVER_FILE: &str = "sqlite-storage-v1/server.sqlite.gz.base64";
 const CLIENT_FILE: &str = "sqlite-storage-v1/client.sqlite.gz.base64";
-/// SHA-256 of the decoded SQLite files. The corpus is immutable: a new
-/// storage format gets a new corpus beside this one.
-const SERVER_SHA256: &str = "6aae47878059b47093afc06b5ecc6a18dbca0853b5b24755797066b889be669c";
-const CLIENT_SHA256: &str = "8374c55121244ad7cd6777e0d1dc0393bf21824186eec1e8fc0d546e31b9f457";
+/// SHA-256 of the decoded SQLite files. Until alpha.60 ships, a format-1
+/// change re-runs the producer and re-pins these; after that the corpus is
+/// immutable and a new storage format gets a new corpus beside it (see
+/// `fixtures/sqlite-storage-v1/README.md`).
+const SERVER_SHA256: &str = "4ed6e440fe4f74dbc745011475e0892f5d3543a73ffdde8bcc68f86336ed4bbf";
+const CLIENT_SHA256: &str = "9c819e575adcf9cd04d31f49ac6c9f68aebadc23d6d451488cd794c602259273";
 
 const SERVER_NODE: [u8; 16] = [0xa0; 16];
 const CLIENT_NODE: [u8; 16] = [0xc0; 16];
@@ -90,6 +95,24 @@ fn draft_branch() -> BranchSelector {
     BranchSelector::new([("branch_id", Value::Uuid(uuid::Uuid::from_bytes([0xbb; 16])))])
 }
 
+/// The branch `draft_branch()` is viewed over.
+fn draft_base() -> BranchSelector {
+    BranchSelector::new([("branch_id", Value::Uuid(uuid::Uuid::from_bytes([0xba; 16])))])
+}
+
+/// The client's view of the drafts: the draft branch over its base.
+fn draft_view() -> ReadOpts {
+    ReadOpts::default().branch_view(
+        draft_branch(),
+        Some(jazz::protocol::BranchViewBase::Current(draft_base())),
+    )
+}
+
+/// `who`'s subject, as a draft's `owner`.
+fn subject(who: AuthorSubject) -> Value {
+    Value::String(who.principal_parts().1)
+}
+
 /// Deterministic letters.
 fn text(seed: u64, len: usize) -> String {
     let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
@@ -110,35 +133,71 @@ fn blob(n: u8) -> Vec<u8> {
 }
 
 /// `projects(name)`, `documents(project -> projects, title, body, blob,
-/// rank)` with an index on `title`, and `drafts(branch_id, title)`
-/// branched by `branch_id`. `title_column` names `documents.title`.
+/// rank, status: enum)` with an index on `title` and a text-merging `body`, and
+/// `drafts(branch_id, title, owner)` branched by `branch_id`, readable when
+/// it has no owner or the reader owns it. `title_column` names
+/// `documents.title`.
 fn schema(title_column: &str) -> JazzSchema {
-    compile_schema(
-        &SchemaBuilder::new()
-            .table(
-                TableSchemaBuilder::new("projects")
-                    .column("name", ColumnType::Text)
-                    .policies(allow_all_policies()),
-            )
-            .table(
-                TableSchemaBuilder::new("documents")
-                    .fk_column("project", "projects")
-                    .column(title_column, ColumnType::Text)
-                    .column("body", ColumnType::Text)
-                    .column("blob", ColumnType::Bytea)
-                    .column_with_default("rank", ColumnType::BigInt, jazz::tools::Value::BigInt(0))
-                    .index_only([title_column])
-                    .policies(allow_all_policies()),
-            )
-            .table(
-                TableSchemaBuilder::new("drafts")
-                    .column("branch_id", ColumnType::Uuid)
-                    .column("title", ColumnType::Text)
-                    .branch_by("branch_id")
-                    .policies(allow_all_policies()),
-            )
-            .build(),
-    )
+    use jazz::tools::{CmpOp, PolicyExpr, PolicyValue, TablePolicies};
+    let owned = PolicyExpr::Or(vec![
+        PolicyExpr::IsNull {
+            column: "owner".to_owned(),
+        },
+        PolicyExpr::Cmp {
+            column: "owner".to_owned(),
+            op: CmpOp::Eq,
+            value: PolicyValue::SessionRef(vec![
+                "user".to_owned(),
+                "identity".to_owned(),
+                "subject".to_owned(),
+            ]),
+        },
+    ]);
+    let mut schema = SchemaBuilder::new()
+        .table(
+            TableSchemaBuilder::new("projects")
+                .column("name", ColumnType::Text)
+                .policies(allow_all_policies()),
+        )
+        .table(
+            TableSchemaBuilder::new("documents")
+                .fk_column("project", "projects")
+                .column(title_column, ColumnType::Text)
+                .column("body", ColumnType::Text)
+                .column("blob", ColumnType::Bytea)
+                .column_with_default("rank", ColumnType::BigInt, jazz::tools::Value::BigInt(0))
+                .column_with_default(
+                    "status",
+                    ColumnType::Enum {
+                        variants: ["draft", "review", "published"].map(str::to_owned).to_vec(),
+                    },
+                    jazz::tools::Value::Text("draft".to_owned()),
+                )
+                .index_only([title_column])
+                .policies(allow_all_policies()),
+        )
+        .table(
+            TableSchemaBuilder::new("drafts")
+                .column("branch_id", ColumnType::Uuid)
+                .column("title", ColumnType::Text)
+                .nullable_column("owner", ColumnType::Text)
+                .branch_by("branch_id")
+                .policies(
+                    TablePolicies::new()
+                        .with_select(owned)
+                        .with_insert(PolicyExpr::True)
+                        .with_update(Some(PolicyExpr::True), PolicyExpr::True)
+                        .with_delete(PolicyExpr::True),
+                ),
+        )
+        .build();
+    let documents = schema.get_mut(&TableName::new("documents")).unwrap();
+    for column in &mut documents.columns.columns {
+        if column.name == "body" {
+            *column = column.clone().merge_strategy(ColumnMergeStrategy::Text);
+        }
+    }
+    compile_schema(&schema)
 }
 
 /// The schema the client and the first server version use.
@@ -392,6 +451,7 @@ fn produce_sqlite_storage_corpus_v1() {
                 ("body", string("short")),
                 ("blob", Value::Bytes(blob(2))),
                 ("rank", Value::I64(5)),
+                ("status", string("published")),
             ],
         );
         update_as(
@@ -432,7 +492,7 @@ fn produce_sqlite_storage_corpus_v1() {
         // its writes never reach the server before it quits.
         let (client_side, server_side) = duplex();
         let _upstream = block_on(client.connect_upstream(client_side));
-        server.accept_subscriber(server_side, user(3));
+        server.accept_subscriber(server_side, user(3)).unwrap();
         let streams: Vec<_> = ["projects", "documents"]
             .into_iter()
             .map(|table| {
@@ -440,7 +500,60 @@ fn produce_sqlite_storage_corpus_v1() {
                 block_on(client.subscribe(&query, ReadOpts::default())).unwrap()
             })
             .collect();
+        // A row of the draft's base that the draft overrides with a version
+        // the client may not read: its view hides the row, and the client
+        // keeps a marker of it (`_jazz_withheld`).
+        block_on(server.insert(
+            "drafts",
+            cells(&[("title", string("Shared"))]),
+            InsertOptions {
+                row_id: Some(draft(2)),
+                target: ExactWriteTarget::Branch(draft_base()),
+                updated_at_ms: at(15),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        block_on(server.update(
+            "drafts",
+            draft(2),
+            cells(&[("owner", subject(user(1)))]),
+            UpdateOptions {
+                target: jazz::db::WriteTarget::BranchView {
+                    head: draft_branch(),
+                    base: Some(jazz::protocol::BranchViewBase::Current(draft_base())),
+                },
+                updated_at_ms: at(16),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        let drafts = client.prepare_query(&Query::from("drafts")).unwrap();
+        let _view = block_on(client.subscribe(&drafts, draft_view())).unwrap();
         pump(&[&client, &server]);
+        // A text edit the server merges with one it made meanwhile: it keeps
+        // the client's write as sent beside the merged version.
+        update_as(
+            &client,
+            "documents",
+            document(2),
+            user(3),
+            13,
+            &[("body", string("short, edited!"))],
+        );
+        update_as(
+            &server,
+            "documents",
+            document(2),
+            user(1),
+            14,
+            &[("body", string("Short, edited"))],
+        );
+        drive(
+            &[&client, &server],
+            client.wait_for_pending_writes(DurabilityTier::Global),
+        )
+        .unwrap();
         insert_as(
             &client,
             "projects",
@@ -473,6 +586,20 @@ fn produce_sqlite_storage_corpus_v1() {
         )
         .expect_err("the server refuses a write from the future");
         assert_eq!(refused.reason, Some(Reason::ClientClockTooFarAhead));
+        // A serializable transaction reads project 1 now; it inserts
+        // two after the writes below, and commits with them, never
+        // reaching the server: one pending commit of two ops and a read,
+        // each stored as its own row.
+        let tx = OpenTransactionId::new();
+        block_on(client.begin_serializable(tx)).unwrap();
+        let projects = client
+            .prepare_query(&Query::from("projects").filter(eq(col("id"), lit(uuid(project(1))))))
+            .unwrap();
+        drive(
+            &[&client, &server],
+            client.tx_ref(tx).all_prepared(&projects),
+        )
+        .unwrap();
         insert_as(
             &client,
             "projects",
@@ -489,6 +616,20 @@ fn produce_sqlite_storage_corpus_v1() {
             11,
             &[("title", string("Notes (offline)"))],
         );
+        for (n, name) in [(8, "Serial A"), (9, "Serial B")] {
+            block_on(client.tx_ref(tx).insert(
+                "projects",
+                cells(&[("name", string(name))]),
+                InsertOptions {
+                    row_id: Some(project(n)),
+                    updated_at_ms: at(u64::from(n) + 7),
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
+        }
+        // Committed with the server not ticking, so it stays pending.
+        block_on(client.commit_serializable_handle(tx)).unwrap();
         drop(streams);
 
         // Then the server renames a column.
@@ -566,8 +707,26 @@ fn expected_projects(with_client_writes: bool) -> Rows {
     ];
     if with_client_writes {
         expected.push(expect(project(4), &[("name", string("Pending"))]));
+        expected.push(expect(project(8), &[("name", string("Serial A"))]));
+        expected.push(expect(project(9), &[("name", string("Serial B"))]));
     }
     expected
+}
+
+/// (tx, part, items) of each list the client corpus's pending commits keep
+/// in `_jazz_pending_items`.
+fn pending_items(path: &Path) -> Vec<(i64, i64, i64)> {
+    let conn = rusqlite::Connection::open(path).unwrap();
+    let mut statement = conn
+        .prepare(
+            "SELECT tx, part, count(*) FROM _jazz_pending_items GROUP BY tx, part ORDER BY tx, part",
+        )
+        .unwrap();
+    statement
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
 }
 
 fn expected_documents(title: &str, offline_edit: bool) -> Rows {
@@ -585,6 +744,7 @@ fn expected_documents(title: &str, offline_edit: bool) -> Rows {
                 ("body", string(&text(1, LARGE))),
                 ("blob", Value::Bytes(blob(1))),
                 ("rank", Value::I64(0)),
+                ("status", string("draft")),
             ],
         ),
         expect(
@@ -592,9 +752,10 @@ fn expected_documents(title: &str, offline_edit: bool) -> Rows {
             &[
                 ("project", uuid(project(2))),
                 (title, string(notes)),
-                ("body", string("short, edited")),
+                ("body", string("Short, edited!")),
                 ("blob", Value::Bytes(blob(2))),
                 ("rank", Value::I64(5)),
+                ("status", string("published")),
             ],
         ),
         expect(
@@ -605,6 +766,7 @@ fn expected_documents(title: &str, offline_edit: bool) -> Rows {
                 ("body", string("v2")),
                 ("blob", Value::Bytes(blob(4))),
                 ("rank", Value::I64(0)),
+                ("status", string("draft")),
             ],
         ),
     ]
@@ -625,6 +787,30 @@ fn assert_server_corpus(server: &Db, with_client_writes: bool) {
         rows(&old, Query::from("documents"), ReadOpts::default()).unwrap(),
         expected_documents("title", with_client_writes)
     );
+    // The enum sorts in the order its variants were added and filters by
+    // name.
+    let by_status = rows(
+        server,
+        Query::from("documents")
+            .order_by("status", OrderDirection::Desc)
+            .select(["status"]),
+        ReadOpts::default(),
+    )
+    .unwrap();
+    let ids: Vec<RowUuid> = by_status.iter().map(|(id, _)| *id).collect();
+    assert_eq!(ids, [document(2), document(1), document(4)]);
+    let published = rows(
+        server,
+        Query::from("documents")
+            .filter(eq(col("status"), lit(string("published"))))
+            .select(["status"]),
+        ReadOpts::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        published,
+        vec![expect(document(2), &[("status", string("published"))])]
+    );
     // History: both versions of project 1, oldest first.
     let history = rows(
         server,
@@ -639,6 +825,32 @@ fn assert_server_corpus(server: &Db, with_client_writes: bool) {
         .map(|(_, cells)| cells[0].1.clone())
         .collect();
     assert_eq!(names, [Some(string("Alpha")), Some(string("Alpha 2"))]);
+    // The merged text edit: its value as sent is kept, but never listed,
+    // until its writer's next write to the row (the offline title edit) is
+    // built on an accepted version.
+    assert_eq!(
+        server.as_sent_versions_for_test().unwrap(),
+        u64::from(!with_client_writes)
+    );
+    let bodies: Vec<_> = rows(
+        server,
+        Query::from("history.documents")
+            .filter(eq(col("id"), lit(uuid(document(2)))))
+            .select(["body"]),
+        ReadOpts::default(),
+    )
+    .unwrap()
+    .into_iter()
+    .map(|(_, cells)| cells[0].1.clone().unwrap())
+    .collect();
+    let mut expected = ["short", "short, edited", "Short, edited", "Short, edited!"]
+        .map(string)
+        .to_vec();
+    if with_client_writes {
+        // The client's offline title edit, a version of its own.
+        expected.push(string("Short, edited!"));
+    }
+    assert_eq!(bodies, expected);
     // The branch row, through its branch.
     assert_eq!(
         rows(
@@ -647,7 +859,10 @@ fn assert_server_corpus(server: &Db, with_client_writes: bool) {
             ReadOpts::default().branch_view(draft_branch(), None),
         )
         .unwrap(),
-        vec![expect(draft(1), &[("title", string("On a branch"))])]
+        vec![
+            expect(draft(1), &[("title", string("On a branch"))]),
+            expect(draft(2), &[("title", string("Shared"))]),
+        ]
     );
 }
 
@@ -656,6 +871,13 @@ fn pinned_sqlite_corpus_reopens_and_accepts_current_writes() {
     let dir = scratch("reopen");
     let server_path = install(SERVER_FILE, SERVER_SHA256, &dir);
     let client_path = install(CLIENT_FILE, CLIENT_SHA256, &dir);
+    // Three pending commits: two of one op, and the serializable one of two
+    // ops and one read.
+    let lists: Vec<_> = pending_items(&client_path)
+        .into_iter()
+        .map(|(_, part, items)| (part, items))
+        .collect();
+    assert_eq!(lists, [(0, 1), (0, 1), (0, 2), (1, 1)], "pinned layout");
     {
         let server = open_server(&server_path).unwrap();
         assert_server_corpus(&server, false);
@@ -672,10 +894,18 @@ fn pinned_sqlite_corpus_reopens_and_accepts_current_writes() {
                 expect(document(2), &[("title", string("Notes (offline)"))]),
             ]
         );
+        // Its view of the drafts still hides the row the draft overrides
+        // with a version it may not read.
+        let mut view = draft_view();
+        view.tier = ReadTier::LocalOnly;
+        assert_eq!(
+            rows(&client, Query::from("drafts").select(["title"]), view).unwrap(),
+            vec![expect(draft(1), &[("title", string("On a branch"))])]
+        );
         // Its pending uploads are resent and land on the server.
         let (client_side, server_side) = duplex();
         let _upstream = block_on(client.connect_upstream(client_side));
-        server.accept_subscriber(server_side, user(3));
+        server.accept_subscriber(server_side, user(3)).unwrap();
         drive(
             &[&client, &server, &client],
             client.wait_for_pending_writes(DurabilityTier::Global),
@@ -723,7 +953,10 @@ fn pinned_sqlite_corpus_reopens_and_accepts_current_writes() {
         .collect();
     assert_eq!(
         names,
-        ["Alpha 2", "Beta", "Gamma", "Pending", "Delta", "Epsilon"].map(string)
+        [
+            "Alpha 2", "Beta", "Gamma", "Pending", "Delta", "Epsilon", "Serial A", "Serial B"
+        ]
+        .map(string)
     );
     let ranks = rows(
         &server,
@@ -742,19 +975,67 @@ fn pinned_sqlite_corpus_reopens_and_accepts_current_writes() {
         .collect();
     assert_eq!(
         names,
-        ["Alpha 2", "Beta", "Gamma", "Pending", "Epsilon"].map(string)
+        [
+            "Alpha 2", "Beta", "Gamma", "Pending", "Epsilon", "Serial A", "Serial B"
+        ]
+        .map(string)
     );
 }
 
+/// The server stores `documents.status` as tags in the order the variants
+/// were declared, and the client mirrored the same tags.
+#[test]
+fn pinned_corpus_stores_enum_tags() {
+    let dir = scratch("enum-tags");
+    for (file, sha256) in [(SERVER_FILE, SERVER_SHA256), (CLIENT_FILE, CLIENT_SHA256)] {
+        let path = install(file, sha256, &dir);
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let tags: Vec<(i64, String)> = conn
+            .prepare("SELECT tag, name FROM _jazz_enum_tags ORDER BY tag")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            tags,
+            [
+                (0, "draft".into()),
+                (1, "review".into()),
+                (2, "published".into())
+            ],
+            "{file}"
+        );
+        let (table, column): (String, String) = conn
+            .query_row("SELECT tbl, col FROM _jazz_enum_tags LIMIT 1", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        let cells: Vec<String> = conn
+            .prepare(&format!(
+                "SELECT DISTINCT typeof(\"{column}\") FROM \"{table}\""
+            ))
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(cells, ["integer"], "{file}");
+    }
+}
+
 /// The server's recorded fates are format 1 too: the rejected commit's fate
-/// still decodes, with its reason name, from `_jazz_applied`.
+/// still decodes, with its reason name, from `_jazz_transactions`.
 #[test]
 fn pinned_server_corpus_keeps_a_rejected_fate_with_its_reason() {
     let dir = scratch("fates");
     let server_path = install(SERVER_FILE, SERVER_SHA256, &dir);
     let conn = rusqlite::Connection::open(&server_path).unwrap();
     let mut statement = conn
-        .prepare("SELECT node, result FROM _jazz_applied ORDER BY node, tx")
+        .prepare(
+            "SELECT n.node, t.result FROM _jazz_transactions t JOIN _jazz_nodes n USING (n) \
+             WHERE t.result IS NOT NULL ORDER BY n.node, t.tx",
+        )
         .unwrap();
     let fates: Vec<(Vec<u8>, Result<(), WireError>)> = statement
         .query_map([], |row| Ok((row.get(0)?, row.get::<_, Vec<u8>>(1)?)))
@@ -826,6 +1107,12 @@ fn another_storage_format_is_refused_without_changing_the_file() {
         ("older", "UPDATE _jazz_format SET version = 0"),
         // Tables but no stamp: not a file Jazz wrote.
         ("unstamped", "DROP TABLE _jazz_format"),
+        // A development format-1 store from before the catalogue was rows:
+        // stored names keyed by version id.
+        (
+            "versioned names",
+            "ALTER TABLE _jazz_names ADD COLUMN version BLOB",
+        ),
     ] {
         let path = edited_server_corpus(name, sql);
         let before = digest_tree(&path);

@@ -1,4 +1,4 @@
-//! Derived membership role `jazz.sqlite.uuid-array-index.v1`.
+//! Derived membership role `jazz.sqlite.uuid-array-index.v2`.
 //! Current and historical images have separate kinds so moving an image to
 //! history cannot erase its membership when the current image is replaced.
 use std::collections::BTreeSet;
@@ -7,7 +7,7 @@ use rusqlite::Connection;
 
 use crate::options::{Error, ErrorCode};
 use crate::records::ValueType;
-use crate::values::{Schema, Sql, Table, quote, storage};
+use crate::values::{STATE_AS_SENT, Schema, Sql, Table, quote, storage};
 
 pub(crate) fn uuid_array(table: &Table, column: &str) -> bool {
     let Some(column) = table.column(column) else {
@@ -33,7 +33,7 @@ pub(crate) fn name(table: &Table, column: &str) -> Option<String> {
     }
     let stored = table.stored_name(column);
     Some(format!(
-        "_jazz_array_members_v1_{}:{}_{}:{}",
+        "_jazz_array_members_v2_{}:{}_{}:{}",
         table.stored.len(),
         table.stored,
         stored.len(),
@@ -46,7 +46,7 @@ fn ddl(table: &Table, column: &str, name: &str) -> String {
     let row_index = quote(&format!("{name}_row"));
     let column = quote(table.stored_name(column));
     let mut sql = format!(
-        "CREATE TABLE {index} (member BLOB NOT NULL CHECK(length(member)=16), kind INTEGER NOT NULL CHECK(kind IN(0,1)), id BLOB NOT NULL CHECK(length(id)=16), branch BLOB NOT NULL, seq INTEGER NOT NULL CHECK(seq>0), PRIMARY KEY(member,kind,id,branch,seq)) WITHOUT ROWID;\nCREATE INDEX {row_index} ON {index}(kind,id,branch,seq);\n"
+        "CREATE TABLE {index} (member BLOB NOT NULL CHECK(length(member)=16), kind INTEGER NOT NULL CHECK(kind IN(0,1)), id BLOB NOT NULL CHECK(length(id)=16), branch BLOB NOT NULL, clock INTEGER NOT NULL CHECK(clock>=0), writer BLOB NOT NULL, PRIMARY KEY(member,kind,id,branch,clock,writer)) WITHOUT ROWID;\nCREATE INDEX {row_index} ON {index}(kind,id,branch,clock,writer);\n"
     );
     for (kind, source) in [
         (0, table.stored.clone()),
@@ -55,18 +55,18 @@ fn ddl(table: &Table, column: &str, name: &str) -> String {
         let source = quote(&source);
         let add = |row: &str, from: &str| {
             format!(
-                "INSERT OR IGNORE INTO {index}(member,kind,id,branch,seq) SELECT unhex(replace(e.value,'-','')), {kind}, {row}.id, {row}._b, {row}._seq FROM {from}json_each({row}.{column}) e WHERE e.type='text' AND length(unhex(replace(e.value,'-','')))=16;"
+                "INSERT OR IGNORE INTO {index}(member,kind,id,branch,clock,writer) SELECT unhex(replace(e.value,'-','')), {kind}, {row}.id, {row}._branch, {row}._clock, {row}._writer FROM {from}json_each({row}.{column}) e WHERE ({row}._state & {STATE_AS_SENT})=0 AND e.type='text' AND length(unhex(replace(e.value,'-','')))=16;"
             )
         };
         let remove = format!(
-            "DELETE FROM {index} WHERE kind={kind} AND id=old.id AND branch=old._b AND seq=old._seq;"
+            "DELETE FROM {index} WHERE kind={kind} AND id=old.id AND branch=old._branch AND clock=old._clock AND writer=old._writer;"
         );
         for (suffix, event, body) in [
             ("insert", "INSERT".to_owned(), add("new", "")),
             ("delete", "DELETE".to_owned(), remove.clone()),
             (
                 "update",
-                format!("UPDATE OF {column},id,_b,_seq"),
+                format!("UPDATE OF {column},id,_branch,_clock,_writer,_state"),
                 format!("{remove} {}", add("new", "")),
             ),
         ] {
@@ -100,16 +100,16 @@ pub(crate) fn install(conn: &Connection, schema: &Schema) -> Result<(), Error> {
             if exists {
                 continue;
             }
-            conn.execute_batch("SAVEPOINT jazz_uuid_array_index_v1")
+            conn.execute_batch("SAVEPOINT jazz_uuid_array_index_v2")
                 .map_err(storage)?;
             let result = crate::db::execute_script(conn, &ddl(table, &column.name, &name));
             if result.is_err() {
                 conn.execute_batch(
-                    "ROLLBACK TO jazz_uuid_array_index_v1; RELEASE jazz_uuid_array_index_v1",
+                    "ROLLBACK TO jazz_uuid_array_index_v2; RELEASE jazz_uuid_array_index_v2",
                 )
                 .map_err(storage)?;
             } else {
-                conn.execute_batch("RELEASE jazz_uuid_array_index_v1")
+                conn.execute_batch("RELEASE jazz_uuid_array_index_v2")
                     .map_err(storage)?;
             }
             result?;

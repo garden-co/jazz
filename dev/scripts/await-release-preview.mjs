@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 /**
- * Starters E2E on a release head tests the release preview's packages: the
+ * Examples E2E on a release head tests the release preview's packages: the
  * exact bytes publish-jazz-tools-alpha.yml later publishes. changesets-release-pr
- * dispatches the preview and Starters E2E together, so wait for the preview run
+ * dispatches the preview and Examples E2E together, so wait for the preview run
  * of this commit to succeed and report its run ID (`run_id` step output).
  *
  * With PREVIEW_RUN_ID set (a manual dispatch), use that run instead of looking
  * it up, but still require it to be a preview of this commit and branch that
- * succeeded: a green Starters run at HEAD_SHA satisfies the release gate, so it
+ * succeeded: a green Examples E2E run at HEAD_SHA satisfies the release gate, so it
  * must never have tested another commit's packages.
  */
 import { appendFileSync } from "node:fs";
@@ -16,7 +16,7 @@ export const PREVIEW_WORKFLOW = "preview-jazz-tools-alpha-release.yml";
 
 /**
  * Why a preview run cannot stand for this commit, or undefined when it can. Both
- * the looked-up and the pinned run go through this, so Starters picks a run the
+ * the looked-up and the pinned run go through this, so Examples E2E picks a run the
  * way publish's resolve-preview-artifacts does: same workflow, SHA and branch.
  */
 export function previewRunMismatch(run, { headSha, headBranch }) {
