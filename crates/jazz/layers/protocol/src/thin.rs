@@ -230,6 +230,9 @@ pub enum ThinOp {
     /// thin-backend-scope-v1. Only an authenticated SYSTEM connection may
     /// supply a per-operation session or attribution. Nested envelopes are
     /// refused; the inner bytes encode one complete ThinRequest with the same id.
+    /// Begin binds the transaction's permission scope and attribution; subsequent
+    /// operations must retain that scope (reads need not repeat attribution).
+    /// This uses the existing envelope encoding; older servers reject scoped Begin.
     BackendScopeV1 {
         /// JSON binding write context, or a serialized session for reads.
         #[serde(with = "serde_bytes")]

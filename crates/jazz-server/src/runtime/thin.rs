@@ -33,7 +33,7 @@ use super::{Outbound, Owner, SESSION_QUEUE_BUDGET, ServerSession, ThinIngress};
 
 /// An operation's authority and provenance are separate: attribution
 /// keeps SYSTEM permission checks while crediting the named author.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct RequestScope {
     identity: AuthorSubject,
     claims: Option<BTreeMap<String, Value>>,
@@ -79,6 +79,8 @@ fn backend_scope(context: &[u8]) -> Result<RequestScope, ThinBody> {
 
 /// A transaction a thin session began and has not ended.
 struct ThinTransaction {
+    /// Authority and provenance fixed at begin, including backend-scoped sessions.
+    scope: RequestScope,
     serializable: bool,
     /// The first staged write refused for its row's state: the commit
     /// reports it instead of committing.
@@ -701,12 +703,6 @@ async fn serve_thin(owner: &Db, thin: &mut ThinState, id: u64, op: ThinOp) -> Op
         ) {
             return Some(argument("nested or schema backend scope is unsupported"));
         }
-        if matches!(
-            request.op,
-            ThinOp::Begin { .. } | ThinOp::Commit { .. } | ThinOp::Rollback { .. }
-        ) {
-            return Some(argument("Backend thin transactions are not supported yet"));
-        }
         execution = match backend_scope(&context) {
             Ok(scope) => scope,
             Err(error) => return Some(error),
@@ -715,6 +711,39 @@ async fn serve_thin(owner: &Db, thin: &mut ThinState, id: u64, op: ThinOp) -> Op
     } else {
         op
     };
+    // Every operation on an open batch must retain its admitted authority.
+    // Reads omit attribution, but still use the same permission identity/claims.
+    let transaction = match &op {
+        ThinOp::Query { transaction, .. }
+        | ThinOp::Insert { transaction, .. }
+        | ThinOp::Update { transaction, .. }
+        | ThinOp::Upsert { transaction, .. }
+        | ThinOp::Delete { transaction, .. }
+        | ThinOp::Restore { transaction, .. }
+        | ThinOp::UpdateLargeValues { transaction, .. }
+        | ThinOp::BeginStream { transaction, .. } => transaction.as_deref(),
+        ThinOp::Commit { transaction } | ThinOp::Rollback { transaction } => {
+            Some(transaction.as_str())
+        }
+        _ => None,
+    };
+    if let Some(transaction) = transaction {
+        let bound = match session_transaction(thin, transaction) {
+            Ok((_, state)) => &state.scope,
+            Err(error) => return Some(error),
+        };
+        let matches = if matches!(op, ThinOp::Query { .. }) {
+            execution.identity == bound.identity && execution.claims == bound.claims
+        } else {
+            execution == *bound
+        };
+        if !matches {
+            return Some(argument(
+                "operation scope does not match the open transaction's bound scope",
+            ));
+        }
+        execution = bound.clone();
+    }
     if let ThinOp::Schema { schema } = op {
         // The version a replica built against this schema would declare.
         let version = match decode_schema(&schema) {
@@ -1294,6 +1323,7 @@ async fn serve_thin_op(
                     thin.transactions.insert(
                         open,
                         ThinTransaction {
+                            scope: execution.clone(),
                             serializable,
                             refused: None,
                         },

@@ -19,7 +19,7 @@ for (const [name, args, packaged] of [
   ["values", ["--sync"], false],
   ["server-core", [], false],
 ] as const) {
-  // Crash needs a replica writer: createJazz's thin client cannot begin transactions.
+  // Crash needs a replica writer: the DO authority cannot hold transaction overlays.
   // Scopes still expects transactions to begin; managed storage now rejects them early.
   it.skipIf(name === "crash" || name === "scopes")(`DO ${name}`, async () => {
     try {

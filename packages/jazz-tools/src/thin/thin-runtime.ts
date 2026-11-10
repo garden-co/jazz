@@ -10,7 +10,7 @@ import { unreadableTargetError } from "../runtime/native-runtime/native-error-co
  * bindings take them, and the server binds every write and read to the
  * session. Not supported: writes while offline beyond the reconnect that
  * follows. Authenticated backend connections can additionally supply per-request
- * permission scopes and attribution; their application transactions remain deferred.
+ * permission scopes and attribution, including transactions bound to that scope.
  */
 import type {
   InsertValues,
@@ -198,6 +198,8 @@ type LiveQuery = {
 };
 
 type OpenTransaction = {
+  /** Permission scope and attribution captured at begin, reused at completion. */
+  backendContext?: string;
   kind: TransactionKind;
   /** The begin and every staged write: the commit waits for their answers. */
   requests: Promise<ThinBody>[];
@@ -1116,21 +1118,22 @@ export class ThinRuntime implements Runtime {
     id: OpenTransactionId,
     sessionJson?: string | null,
   ): OpenTransactionId {
-    if (this.backend)
-      throw new ThinRemoteError("query", "Backend thin transactions are not supported yet");
     this.refuseOtherSession(sessionJson, "Begin transaction");
     if (this.closed) throw new Error("Begin transaction failed: the thin runtime is closed");
     if (this.transactions.has(id)) {
       throw new Error(`Begin transaction failed: transaction ${id} has already been opened`);
     }
     // The server binds the transaction to this connection's session.
+    const backendContext = this.backend ? (sessionJson ?? "{}") : undefined;
     const { answer: begun, oneShot: begin } = this.requestWith({
+      backendContext,
       type: "begin",
       transaction: id,
       kind,
     });
     begun.catch(() => undefined);
     this.transactions.set(id, {
+      backendContext,
       kind,
       requests: [begun],
       staged: false,
@@ -1158,9 +1161,17 @@ export class ThinRuntime implements Runtime {
     // A staged write the server refused outright fails the commit; one its
     // row's state refused is the commit's own rejection, from the server.
     return Promise.all(transaction.requests).then(
-      () => this.write({ type: "commit", transaction: id }, transaction.rows),
+      () =>
+        this.write(
+          { type: "commit", transaction: id, backendContext: transaction.backendContext },
+          transaction.rows,
+        ),
       (error: unknown) => {
-        void this.request({ type: "rollback", transaction: id }).catch(() => undefined);
+        void this.request({
+          type: "rollback",
+          transaction: id,
+          backendContext: transaction.backendContext,
+        }).catch(() => undefined);
         throw error;
       },
     );
@@ -1176,7 +1187,11 @@ export class ThinRuntime implements Runtime {
     this.transactions.delete(id);
     // The server already abandoned a lost transaction.
     if (transaction.lost) return true;
-    await this.request({ type: "rollback", transaction: id });
+    await this.request({
+      type: "rollback",
+      transaction: id,
+      backendContext: transaction.backendContext,
+    });
     return true;
   }
 

@@ -265,3 +265,145 @@ fn suspended_thin_reads_preserve_order_progress_and_cancellation() {
         });
     }
 }
+
+/// Alice's backend transaction cannot be read, written, or completed as Mallory,
+/// SYSTEM, or another connection. Dropping Alice's session abandons the batch.
+/// This lower-level test sends forged wire envelopes that the public transaction
+/// facade cannot produce, to check the server's scope boundary independently.
+#[test]
+fn backend_transactions_bind_scope_and_connection() {
+    block_on(async {
+        let source = SchemaBuilder::new()
+            .table(TableSchema::builder("notes").column("title", ColumnType::Text))
+            .build();
+        let db = Rc::new(
+            Db::open(config(JazzSchema::new(&source).unwrap()))
+                .await
+                .unwrap(),
+        );
+        db.set_authority();
+        let (output, _received) = tokio_mpsc::unbounded_channel();
+        let new_session = || {
+            ThinState::new(
+                db.clone(),
+                AuthorSubject::SYSTEM,
+                None,
+                None,
+                output.clone(),
+                Arc::default(),
+            )
+        };
+        let mut alice = new_session();
+        let mut mallory = new_session();
+        let schema = || ThinOp::Schema {
+            schema: serde_json::to_vec(&source).unwrap(),
+        };
+        assert!(matches!(
+            serve_thin(&db, &mut alice, 0, schema()).await,
+            Some(ThinBody::Ok)
+        ));
+        assert!(matches!(
+            serve_thin(&db, &mut mallory, 0, schema()).await,
+            Some(ThinBody::Ok)
+        ));
+        const TX: &str = "0190f3e4000070008000000000000010";
+        let context = |user: &str, team: &str| {
+            serde_json::to_vec(&serde_json::json!({
+                "issuer": "https://example.com", "user_id": user, "claims": {"team": team}
+            }))
+            .unwrap()
+        };
+        let scoped = |context: Vec<u8>, op| ThinOp::BackendScopeV1 {
+            context,
+            request: encode_frame(&WireFrame::ThinRequest(ThinRequest { id: 1, op })).unwrap(),
+        };
+        assert!(matches!(
+            serve_thin(
+                &db,
+                &mut alice,
+                1,
+                scoped(
+                    context("alice", "one"),
+                    ThinOp::Begin {
+                        transaction: TX.to_owned(),
+                        kind: "mergeable".to_owned()
+                    }
+                )
+            )
+            .await,
+            Some(ThinBody::Ok)
+        ));
+        let query = || ThinOp::Query {
+            query: postcard::to_allocvec(&jazz::query::Query::from("notes")).unwrap(),
+            options: Vec::new(),
+            transaction: Some(TX.to_owned()),
+        };
+        for op in [
+            query(),
+            ThinOp::Insert {
+                table: "notes".to_owned(),
+                cells: Vec::new(),
+                options: Vec::new(),
+                transaction: Some(TX.to_owned()),
+            },
+            ThinOp::Commit {
+                transaction: TX.to_owned(),
+            },
+            ThinOp::Rollback {
+                transaction: TX.to_owned(),
+            },
+        ] {
+            let answer =
+                serve_thin(&db, &mut alice, 1, scoped(context("mallory", "one"), op)).await;
+            assert!(
+                matches!(answer, Some(ThinBody::Error { message, .. }) if message.contains("bound scope"))
+            );
+        }
+        for op in [query(), scoped(context("alice", "two"), query())] {
+            assert!(matches!(serve_thin(&db, &mut alice, 1, op).await,
+                Some(ThinBody::Error { message, .. }) if message.contains("bound scope")));
+        }
+        assert!(
+            matches!(serve_thin(&db, &mut mallory, 1, scoped(context("alice", "one"), query())).await,
+            Some(ThinBody::Error { message, .. }) if message.contains("not open in this session"))
+        );
+        // Refused operations leave Alice's original transaction usable.
+        assert!(matches!(
+            serve_thin(
+                &db,
+                &mut alice,
+                1,
+                scoped(
+                    context("alice", "one"),
+                    ThinOp::Rollback {
+                        transaction: TX.to_owned()
+                    }
+                )
+            )
+            .await,
+            Some(ThinBody::Ok)
+        ));
+        assert!(matches!(
+            serve_thin(
+                &db,
+                &mut alice,
+                1,
+                scoped(
+                    context("alice", "one"),
+                    ThinOp::Begin {
+                        transaction: TX.to_owned(),
+                        kind: "mergeable".to_owned()
+                    }
+                )
+            )
+            .await,
+            Some(ThinBody::Ok)
+        ));
+        drop(alice);
+        db.begin_mergeable(open_transaction(TX).unwrap())
+            .await
+            .unwrap();
+        db.abandon_transaction_handle(open_transaction(TX).unwrap())
+            .unwrap();
+    });
+}

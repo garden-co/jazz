@@ -46,7 +46,8 @@ packaging uses none of them. The production workspace lives in
 The scope check currently fails because it expects an empty staged transaction
 to succeed, but managed storage now rejects transaction begin until persistent
 overlays are implemented. The crash test also stops at `beginTransaction()`
-because the backend now uses a thin client, whose transactions are unsupported.
+because backend transactions execute on the authority, whose managed storage
+does not yet support persistent overlays.
 Both tests are temporarily skipped in Vitest; their assertions remain unchanged.
 Do not interpret a subset passing as a full conformance pass.
 
@@ -55,7 +56,7 @@ see the [existing plan](../../../../crates/jazz-wasm/durable-object/PLAN.md).
 DO integers are limited to ±(2^53−1); REAL values retain IEEE-754 behavior.
 Thin requests may span frames, within 8 MiB per session and 16 MiB aggregate
 DO ingress reservations. Incomplete requests expire after 90 seconds without a
-part; over-budget input is refused. Backend transactions remain unsupported. Worker applications
+part; over-budget input is refused. Backend transactions remain unsupported on DO storage; native stores support them. Worker applications
 use `jazz-tools/backend` with `nodejs_compat`, request-owned clients and
 WebSockets; their HTTP-stream fallback and text-anchor helpers are unsupported.
 Keep deployed behavior and performance claims separate from local results.

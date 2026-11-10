@@ -29,6 +29,19 @@ try {
   jazz = createJazz({ app, permissions, store: remote({ url, appId, secret }) });
   await jazz.ready();
   console.log("createJazz ready");
+  for (const transaction of [
+    jazz.db.transaction.bind(jazz.db),
+    jazz.db.serializableTransaction.bind(jazz.db),
+  ]) {
+    await assert.rejects(
+      transaction((tx) => {
+        tx.insert(app.notes, { title: "unsupported overlay" });
+      }).then((receipt) => receipt.wait({ tier: "global" })),
+      /Persistent transaction overlays on managed SQL storage/,
+    );
+  }
+  assert.deepEqual(await jazz.db.all(app.notes), []);
+
   for (const headers of [
     {},
     { "x-jazz-backend-credential": secret },
