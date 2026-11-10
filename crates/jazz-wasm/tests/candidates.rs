@@ -1,11 +1,15 @@
-//! SQLite candidate authorization exercised through the real browser ABI.
+//! Public WASM clients exchange canonical frames with a real Rust authority.
+//! The authority-local selected-session case covers the shared host in WASM,
+//! not an unavailable public JS backend-authority wrapper.
 #![cfg(target_arch = "wasm32")]
 use futures_util::FutureExt;
-use jazz::binding_host::{OpenConfig as Config, OpenIdentity as Identity};
+use jazz::binding_host::{self, Binding, Link, OpenConfig as Config, OpenIdentity as Identity};
+use jazz::db::{Db, DbIdentity};
 use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::records::{OwnedRecord, RecordDescriptor, Value, ValueType};
 use jazz::tools::{
-    ColumnType, OpenTransactionId, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder,
+    ColumnType, OpenTransactionId, PolicyExpr, Schema, SchemaBuilder, TablePolicies,
+    TableSchemaBuilder,
 };
 use jazz_wasm::{WasmDb, WasmWrite};
 use wasm_bindgen::{JsCast, JsValue};
@@ -15,7 +19,7 @@ wasm_bindgen_test_configure!(run_in_browser);
 fn alice() -> AuthorSubject {
     AuthorSubject::authenticated("https://issuer.example", "alice").unwrap()
 }
-fn open(node: u8, authority: bool) -> WasmDb {
+fn candidate_schema() -> Schema {
     let schema = SchemaBuilder::new()
         .table(
             TableSchemaBuilder::new("nodes")
@@ -40,26 +44,40 @@ fn open(node: u8, authority: bool) -> WasmDb {
                 ),
         )
         .build();
-    let config = postcard::to_allocvec(&Config {
+    schema
+}
+fn config(node: u8) -> Vec<u8> {
+    postcard::to_allocvec(&Config {
         identity: Identity {
             node: NodeUuid::from_bytes([node; 16]),
             author: alice(),
         },
         row_id_seed: Some(node.into()),
-        history_complete: authority,
+        history_complete: false,
         initial_sync_flush_every: None,
         migrations: None,
         system_node: None,
     })
-    .unwrap();
-    if authority {
-        WasmDb::open_memory_as_backend(serde_json::to_vec(&schema).unwrap(), config)
-    } else {
-        WasmDb::open_memory(serde_json::to_vec(&schema).unwrap(), config)
-    }
     .unwrap()
 }
-fn stage(db: &WasmDb, tx: &str, id: u8, parent: u8, seed: bool) {
+fn client(node: u8, schema: &Schema) -> WasmDb {
+    let db = WasmDb::open_memory(serde_json::to_vec(schema).unwrap(), config(node)).unwrap();
+    db.set_remote_link_hint("no-server".into()).unwrap();
+    db
+}
+async fn authority(node: u8, schema: &Schema, selected_session_host: bool) -> Binding {
+    let (schema, config) =
+        binding_host::decode_open(&serde_json::to_vec(schema).unwrap(), &config(node)).unwrap();
+    let identity: DbIdentity = config.identity.into();
+    let db = Db::open(binding_host::db_config(schema, &config, identity))
+        .await
+        .unwrap();
+    // This is the real trusted Rust host role, distinct from backend identity.
+    // The original Alice identity and schema remain unchanged; no SYSTEM open.
+    db.set_authority();
+    Binding::new(db, identity, selected_session_host)
+}
+fn node_cells(parent: u8, seed: bool) -> Vec<u8> {
     let descriptor =
         RecordDescriptor::new([("parent", ValueType::Uuid), ("seed", ValueType::Bool)]);
     let cells = descriptor
@@ -68,28 +86,42 @@ fn stage(db: &WasmDb, tx: &str, id: u8, parent: u8, seed: bool) {
             Value::Bool(seed),
         ])
         .unwrap();
-    let cells =
-        jazz::binding_codec::encode_named_cells(&OwnedRecord::new(cells, descriptor)).unwrap();
+    jazz::binding_codec::encode_named_cells(&OwnedRecord::new(cells, descriptor)).unwrap()
+}
+fn stage(db: &WasmDb, tx: &str, id: u8, parent: u8, seed: bool) {
     db.upsert_in_transaction(
         tx.into(),
         "nodes".into(),
         vec![id; 16],
-        cells,
+        node_cells(parent, seed),
         JsValue::NULL,
     )
     .unwrap();
 }
-fn rows(db: &WasmDb) -> usize {
-    let value = db
+fn stage_host(db: &Binding, tx: &str, id: u8, parent: u8, seed: bool) {
+    db.upsert_in_transaction(
+        tx,
+        "nodes",
+        &[id; 16],
+        &node_cells(parent, seed),
+        &serde_json::Value::Null,
+    )
+    .unwrap();
+}
+async fn host_rows(db: &Binding, table: &str) -> usize {
+    let author = alice().canonical();
+    let bytes = db
         .all(
-            postcard::to_allocvec(&jazz::query::Query::from("nodes")).unwrap(),
-            js_sys::JSON::parse(r#"{"tier":"local-only"}"#).unwrap(),
+            postcard::to_allocvec(&jazz::query::Query::from(table)).unwrap(),
+            &serde_json::json!({"tier":"local-only"}),
             None,
+            Some(author.as_bytes()),
             None,
-            JsValue::NULL,
         )
+        .unwrap()
+        .await
         .unwrap();
-    jazz::binding_codec::decode_rows(&js_sys::Uint8Array::new(&value).to_vec())
+    jazz::binding_codec::decode_rows(&bytes)
         .unwrap()
         .iter()
         .map(|batch| batch.rows.len())
@@ -101,18 +133,33 @@ fn method(value: &JsValue, name: &str) -> js_sys::Function {
         .dyn_into()
         .unwrap()
 }
-fn transfer(from: &JsValue, to: &JsValue) {
-    let frames = method(from, "recvWireFrames").call0(from).unwrap();
-    method(to, "sendWireFrames").call1(to, &frames).unwrap();
+fn client_to_authority(client: &JsValue, authority: &Link) {
+    let frames = js_sys::Array::from(&method(client, "recvWireFrames").call0(client).unwrap());
+    authority
+        .receive_checked(
+            frames
+                .iter()
+                .map(|frame| js_sys::Uint8Array::new(&frame).to_vec()),
+        )
+        .unwrap();
+}
+fn authority_to_client(authority: &Link, client: &JsValue) {
+    let frames = js_sys::Array::new();
+    for frame in authority.take_outbound() {
+        frames.push(&js_sys::Uint8Array::from(frame.as_slice()).into());
+    }
+    method(client, "sendWireFrames")
+        .call1(client, &frames)
+        .unwrap();
 }
 /// Alice's browser sends a reverse-order unit to Bob. The ordinary authenticated
 /// link admits the seeded graph and atomically rejects an ungrounded cycle.
 #[wasm_bindgen_test]
 async fn browser_wire_candidates_require_an_independent_seed() {
     for seeded in [true, false] {
-        let client = open(1, false);
-        client.set_remote_link_hint("no-server".into()).unwrap();
-        let bob = open(2, true);
+        let schema = candidate_schema();
+        let client = client(1, &schema);
+        let bob = authority(2, &schema, false).await;
         let tx = OpenTransactionId::new().to_string();
         client
             .begin_transaction(tx.clone(), "serializable".into(), None, None, None)
@@ -125,12 +172,7 @@ async fn browser_wire_candidates_require_an_independent_seed() {
         let up = JsFuture::from(client.connect_upstream().unwrap())
             .await
             .unwrap();
-        let down = JsFuture::from(
-            bob.accept_subscriber(alice().canonical().as_bytes().to_vec(), JsValue::NULL, None)
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+        let down = bob.accept_subscriber(alice(), Default::default()).unwrap();
         let settled = settle_browser(&client, &bob, &up, &down, &write, 20).await;
         assert_eq!(settled.is_ok(), seeded, "{settled:?}");
         if let Err(error) = settled {
@@ -139,34 +181,33 @@ async fn browser_wire_candidates_require_an_independent_seed() {
                 "{error:?}"
             );
         }
-        assert_eq!(rows(&bob), if seeded { 2 } else { 0 });
-        assert_eq!(rows(&client), if seeded { 2 } else { 0 });
+        assert_eq!(host_rows(&bob, "nodes").await, if seeded { 2 } else { 0 });
+        assert_eq!(count_table(&client, "nodes"), if seeded { 2 } else { 0 });
         JsFuture::from(client.close()).await.unwrap();
-        JsFuture::from(bob.close()).await.unwrap();
+        bob.close().await.unwrap();
     }
 }
-/// A trusted browser host binding still enforces Alice's selected session
-/// policies and the same independent proof for an authority-local transaction.
+/// Shared Rust host Binding compiled for WASM preserves the original selected-
+/// Alice authority-local contract. The original case name is retained; this
+/// does not claim a public JS backend-authority wrapper.
 #[wasm_bindgen_test]
 async fn browser_backend_session_candidates_use_the_same_proof() {
     for seeded in [true, false] {
-        let bob = open(3, true);
+        let bob = authority(3, &candidate_schema(), true).await;
         let tx = OpenTransactionId::new().to_string();
         bob.begin_transaction(
-            tx.clone(),
-            "serializable".into(),
-            Some(alice().canonical().as_bytes().to_vec()),
-            None,
+            &tx,
+            "serializable",
+            Some(alice().canonical().as_bytes()),
             None,
         )
         .unwrap();
-        stage(&bob, &tx, 1, 2, false);
-        stage(&bob, &tx, 2, 1, seeded);
-        let result = bob.commit_transaction(tx, Some("serializable".into()));
+        stage_host(&bob, &tx, 1, 2, false);
+        stage_host(&bob, &tx, 2, 1, seeded);
+        let result = bob.commit_transaction(&tx, Some("serializable"));
         if seeded {
-            JsFuture::from(result.unwrap().wait("global".into(), None).unwrap())
-                .await
-                .unwrap();
+            let write = result.unwrap();
+            bob.wait_for_write(&write, "global").unwrap().await.unwrap();
         } else {
             let error = match result {
                 Err(error) => error,
@@ -174,12 +215,12 @@ async fn browser_backend_session_candidates_use_the_same_proof() {
             };
             assert!(format!("{error:?}").contains("authorization_denied"));
         }
-        assert_eq!(rows(&bob), if seeded { 2 } else { 0 });
-        JsFuture::from(bob.close()).await.unwrap();
+        assert_eq!(host_rows(&bob, "nodes").await, if seeded { 2 } else { 0 });
+        bob.close().await.unwrap();
     }
 }
 
-fn inherited_browser(node: u8, authority: bool) -> WasmDb {
+fn inherited_schema() -> Schema {
     let outer = |column: &str, parent: &str| {
         PolicyExpr::eq_session(column, vec!["__jazz_outer_row".into(), parent.into()])
     };
@@ -252,28 +293,7 @@ fn inherited_browser(node: u8, authority: bool) -> WasmDb {
                 ),
         )
         .build();
-    let config = postcard::to_allocvec(&Config {
-        identity: Identity {
-            node: NodeUuid::from_bytes([node; 16]),
-            author: alice(),
-        },
-        row_id_seed: Some(node.into()),
-        history_complete: authority,
-        initial_sync_flush_every: None,
-        migrations: None,
-        system_node: None,
-    })
-    .unwrap();
-    let db = if authority {
-        WasmDb::open_memory_as_backend(serde_json::to_vec(&schema).unwrap(), config)
-    } else {
-        WasmDb::open_memory(serde_json::to_vec(&schema).unwrap(), config)
-    }
-    .unwrap();
-    if !authority {
-        db.set_remote_link_hint("no-server".into()).unwrap();
-    }
-    db
+    schema
 }
 fn named_stage(db: &WasmDb, tx: &str, table: &str, id: u8, cells: &[(&str, Value)]) {
     let descriptor = RecordDescriptor::new(cells.iter().map(|(name, value)| {
@@ -315,9 +335,9 @@ fn count_table(db: &WasmDb, table: &str) -> usize {
 }
 async fn settle_browser(
     client: &WasmDb,
-    bob: &WasmDb,
+    bob: &Binding,
     up: &JsValue,
-    down: &JsValue,
+    down: &Link,
     write: &WasmWrite,
     max_ticks: usize,
 ) -> Result<(), JsValue> {
@@ -327,9 +347,9 @@ async fn settle_browser(
     let mut settled = Box::pin(JsFuture::from(write.wait("global".into(), None).unwrap()));
     for _ in 0..max_ticks {
         JsFuture::from(client.tick()).await.unwrap();
-        transfer(up, down);
-        JsFuture::from(bob.tick()).await.unwrap();
-        transfer(down, up);
+        client_to_authority(up, down);
+        bob.tick().await.unwrap();
+        authority_to_client(down, up);
         JsFuture::from(client.tick()).await.unwrap();
         if let Some(result) = settled.as_mut().now_or_never() {
             return result.map(|_| ());
@@ -342,17 +362,13 @@ async fn settle_browser(
 /// grant rejects atomically; inherited chunked comparisons use exact evidence.
 #[wasm_bindgen_test]
 async fn browser_inherited_grants_preserve_creation_and_acceptance_boundaries() {
-    let client = inherited_browser(7, false);
-    let bob = inherited_browser(8, true);
+    let schema = inherited_schema();
+    let client = client(7, &schema);
+    let bob = authority(8, &schema, false).await;
     let up = JsFuture::from(client.connect_upstream().unwrap())
         .await
         .unwrap();
-    let down = JsFuture::from(
-        bob.accept_subscriber(alice().canonical().as_bytes().to_vec(), JsValue::NULL, None)
-            .unwrap(),
-    )
-    .await
-    .unwrap();
+    let down = bob.accept_subscriber(alice(), Default::default()).unwrap();
     let scope = "a".repeat(70 * 1024);
     for (number, new_root, initial, accepted) in [
         (1, true, true, true),
@@ -410,10 +426,10 @@ async fn browser_inherited_grants_preserve_creation_and_acceptance_boundaries() 
             );
         }
     }
-    assert_eq!(count_table(&bob, "nodes"), 1);
-    assert_eq!(count_table(&bob, "admins"), 1);
-    assert_eq!(count_table(&bob, "records"), 2);
+    assert_eq!(host_rows(&bob, "nodes").await, 1);
+    assert_eq!(host_rows(&bob, "admins").await, 1);
+    assert_eq!(host_rows(&bob, "records").await, 2);
     assert_eq!(count_table(&client, "records"), 2);
     JsFuture::from(client.close()).await.unwrap();
-    JsFuture::from(bob.close()).await.unwrap();
+    bob.close().await.unwrap();
 }
