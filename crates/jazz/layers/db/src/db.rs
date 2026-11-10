@@ -31,6 +31,8 @@ use crate::tools::{CmpOp, PolicyExpr};
 
 #[path = "fanout.rs"]
 mod fanout;
+#[path = "read_policy_literals.rs"]
+mod read_policy_literals;
 pub use fanout::FanoutStats;
 #[path = "large_ops.rs"]
 mod large_ops;
@@ -4026,6 +4028,7 @@ impl Inner {
         read: &ReadSpec,
     ) -> Ctx<'s> {
         Ctx::new(schema, policy, claims, &prepared.binding)
+            .with_ordinary_policy_literals()
             .with_catalogue(self)
             .with_view(read.view.clone())
             .with_withheld(self.withheld.get())
@@ -4064,7 +4067,7 @@ impl Inner {
         if let std::borrow::Cow::Owned(visible) = &visible {
             compiled = self.compile(prepared, identity, visible)?;
         }
-        let rows = self.execute(&compiled, &prepared.query.table)?;
+        let rows = self.execute_policy_literals(prepared, identity, &visible, &compiled)?;
         Ok((rows, tables))
     }
 
@@ -4114,9 +4117,23 @@ impl Inner {
     }
 
     fn execute(&self, compiled: &Compiled, table: &str) -> Result<Vec<CurrentRow>, Error> {
+        self.execute_with_policy_snapshot(compiled, table, false)
+    }
+
+    fn execute_with_policy_snapshot(
+        &self,
+        compiled: &Compiled,
+        table: &str,
+        policy_snapshot: bool,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        if !compiled.policy_literals.is_empty() {
+            return Err(unsupported(
+                "ordinary long-literal policy requires its bounded read context",
+            ));
+        }
         let started = web_time::Instant::now();
         let mut run = crate::slow::Run::default();
-        let rows = self.execute_sql(&compiled.sql, compiled, table, &mut run)?;
+        let rows = self.execute_sql(&compiled.sql, compiled, table, &mut run, policy_snapshot)?;
         run.elapsed = started.elapsed();
         let mut slow = self.slow.borrow_mut();
         if slow.is_slow(run.elapsed) {
@@ -4155,6 +4172,7 @@ impl Inner {
         compiled: &Compiled,
         table: &str,
         run: &mut crate::slow::Run,
+        policy_snapshot: bool,
     ) -> Result<Vec<CurrentRow>, Error> {
         let mut statement = self.conn.prepare_cached(sql).map_err(storage)?;
         // Cached statements keep counting across runs: start this one at 0.
@@ -4242,6 +4260,13 @@ impl Inner {
                     let cell = row.get_ref(first + i).map_err(storage)?;
                     let value = match compiled.partial.get(i).and_then(Option::as_ref) {
                         Some(part) => self.partial_cell(ty, cell, part),
+                        None if policy_snapshot => crate::values::policy_snapshot_cell_from_sql(
+                            &self.conn,
+                            ty,
+                            tags.as_ref(),
+                            cell,
+                            &self.chunks,
+                        ),
                         None => cell_from_sql(ty, tags.as_ref(), cell, &self.chunks),
                     };
                     match value {
@@ -4829,6 +4854,12 @@ impl Inner {
             },
             None => Cut::at(at.0),
         };
+        if operation == Operation::Select
+            && let Some(answer) =
+                self.ordinary_select_point(schema, table, row, key, author, Some(cut.clone()))?
+        {
+            return Ok(answer);
+        }
         self.holds_as_of(schema, table, row, key, cut, |ctx| {
             ctx.operation_policy(table, operation, "a", &session)
         })
@@ -4855,6 +4886,12 @@ impl Inner {
         author: AuthorSubject,
         operation: Operation,
     ) -> Result<bool, Error> {
+        if operation == Operation::Select
+            && let Some(answer) =
+                self.ordinary_select_point(schema, table, row, key, author, None)?
+        {
+            return Ok(answer);
+        }
         let session = self.session(author);
         let (sql, params, _) = self.policy_check_in(schema, table, row, key, None, |ctx| {
             ctx.operation_policy(table, operation, "a", &session)

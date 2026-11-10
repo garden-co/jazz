@@ -13,7 +13,8 @@
 //! refcount triggers and every compiled query use only SQL built-ins and
 //! run on any SQLite (vanilla builds such as Cloudflare D1 or Durable
 //! Objects included): no collation, no functions. Queries never read a
-//! chunked value's bytes: such a cell equals only itself, takes part in no
+//! chunked value's bytes, except the bounded SELECT-policy path which binds
+//! a descriptor to the owning snapshot. Ordinary filters compare cells, taking part in no
 //! range or `contains`, and sorts before every inline value (SPEC 19.5).
 //! Epochs and chunks live in the same
 //! database, so a row, its epoch and the chunks they reference commit in
@@ -1053,9 +1054,19 @@ impl Chunks {
 
     fn read_attempt<T>(
         &self,
+        attempt: impl FnMut(&mut ChunkInputs) -> Result<T, AttemptError>,
+        read: impl Fn(usize),
+        span: Option<(&LargeValueRef, std::ops::Range<u64>)>,
+    ) -> Result<T, Error> {
+        self.read_attempt_metered(attempt, read, span, &mut |_| Ok(()))
+    }
+
+    fn read_attempt_metered<T>(
+        &self,
         mut attempt: impl FnMut(&mut ChunkInputs) -> Result<T, AttemptError>,
         read: impl Fn(usize),
         span: Option<(&LargeValueRef, std::ops::Range<u64>)>,
+        meter: &mut impl FnMut(Option<usize>) -> Result<(), Error>,
     ) -> Result<T, Error> {
         let mut inputs = ChunkInputs::default();
         loop {
@@ -1066,8 +1077,10 @@ impl Chunks {
                     let mut absent = Vec::new();
                     let mut fetching = Vec::new();
                     for request in inputs.take_missing_chunks() {
+                        meter(None)?;
                         match self.get(&request)? {
                             Local::Found(bytes) => {
+                                meter(Some(bytes.len()))?;
                                 read(bytes.len());
                                 inputs.install_verified_chunk(request, bytes)
                             }
@@ -1101,6 +1114,21 @@ impl Chunks {
             Logical::Inline(bytes) => Ok(bytes.to_vec()),
             Logical::Chunked(value) => self.value_bytes(&value),
         }
+    }
+
+    /// Materialize only the descriptor already bound by the policy caller
+    /// to its main-connection snapshot; never re-resolve a numeric epoch here.
+    pub(crate) fn policy_literal_bytes(
+        &self,
+        value: &LargeValueRef,
+        meter: &mut impl FnMut(Option<usize>) -> Result<(), Error>,
+    ) -> Result<Vec<u8>, Error> {
+        self.read_attempt_metered(
+            |inputs| lv::materialize_attempt(value, inputs),
+            |_| {},
+            Some((value, 0..value.byte_length)),
+            meter,
+        )
     }
 
     /// The whole logical value of a descriptor.
@@ -2182,6 +2210,48 @@ pub(crate) fn reclaim(conn: &Connection, chunks: &Chunks, budget: usize) -> Resu
     Ok(deleted)
 }
 
+/// A new ordinary policy answer binds its descriptor to the same connection
+/// and snapshot as the captured row. Epoch ROWIDs may be reused after reclaim;
+/// a cold independent chunk reader must not choose that newer epoch instead.
+pub(crate) fn policy_literal_descriptor_at(
+    conn: &Connection,
+    cell: i64,
+    meter: &mut impl FnMut(usize) -> Result<(), Error>,
+) -> Result<LargeValueRef, Error> {
+    let (id, n) = split(cell)?;
+    let found: Option<(Vec<u8>, Vec<u8>, i64)> = conn
+        .prepare_cached("SELECT base, edits, count FROM _jazz_lv_epoch WHERE id = ?1")
+        .and_then(|mut statement| {
+            statement
+                .query_row([id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                .optional()
+        })
+        .map_err(storage)?;
+    let (base, edits, count) = found.ok_or_else(|| corrupt(lv::Error::MalformedScalar))?;
+    meter(
+        base.len()
+            .checked_add(edits.len())
+            .ok_or_else(|| corrupt(lv::Error::MalformedScalar))?,
+    )?;
+    let count = usize::try_from(count).map_err(|_| corrupt(lv::Error::MalformedScalar))?;
+    if n > count {
+        return Err(corrupt(lv::Error::MalformedScalar));
+    }
+    let mut value = lv::decode_large_value_ref(&base).map_err(corrupt)?;
+    let (tail, cursor) = epoch::decode_edits(
+        value.kind,
+        value.byte_length,
+        value.utf16_length,
+        &edits,
+        Some(n),
+    )
+    .map_err(corrupt)?;
+    value.edit_tail = tail;
+    value.byte_length = cursor.len;
+    value.utf16_length = value.utf16_length.map(|_| cursor.utf16_len);
+    Ok(value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2245,6 +2315,92 @@ mod tests {
         let prepared = lv::prepare(kind, logical).unwrap();
         store(conn, chunks, &prepared, false).unwrap();
         Sql::Integer(intern(conn, chunks, &prepared.value_ref).unwrap())
+    }
+
+    /// Lower-level storage test: no public query API can force epoch
+    /// reclamation/reuse between metadata reads. Alice pins her main SQLite
+    /// cut; Bob reclaims an unreferenced epoch and reuses its integer ID.
+    /// A cold chunk reader sees Bob's descriptor, but Alice's policy route
+    /// must materialize the old, hash-bound content and then advance normally.
+    #[test]
+    fn policy_literal_descriptor_keeps_owning_cut_across_epoch_id_reuse() {
+        let directory =
+            std::env::temp_dir().join(format!("policy-descriptor-cut-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("snapshot.sqlite");
+        let alice = Connection::open(&path).unwrap();
+        alice.pragma_update(None, "journal_mode", "WAL").unwrap();
+        alice.execute_batch(DDL).unwrap();
+        let seed = Chunks::install(Some((&path, None)), None, false).unwrap();
+        let before = text(181, 70 * 1024);
+        let after = text(182, 70 * 1024);
+        let Sql::Integer(cell) = chunked(&alice, &seed, LargeValueKind::String, &before) else {
+            panic!("chunked cell")
+        };
+        drop(seed);
+        let cold = Chunks::install(Some((&path, None)), None, false).unwrap();
+        alice
+            .execute_batch("SAVEPOINT policy_descriptor_cut")
+            .unwrap();
+        let mut metadata = 0usize;
+        let first = policy_literal_descriptor_at(&alice, cell, &mut |n| {
+            metadata += n;
+            Ok(())
+        })
+        .unwrap();
+        assert!(metadata > 0);
+        let bob = Connection::open(&path).unwrap();
+        let bob_chunks = Chunks::install(Some((&path, None)), None, false).unwrap();
+        // Normal reclamation frees the epoch. Zero node budget deliberately
+        // retains its content-addressed nodes so the old cut is still readable.
+        reclaim(&bob, &bob_chunks, 0).unwrap();
+        let Sql::Integer(reused) = chunked(&bob, &bob_chunks, LargeValueKind::String, &after)
+        else {
+            panic!("chunked cell")
+        };
+        assert_eq!(cell, reused, "the control must really reuse the epoch ID");
+        let advanced = cold.descriptor(cell).unwrap();
+        assert_ne!(
+            first.root.object_hash, advanced.root.object_hash,
+            "the separate reader must really see Bob's epoch"
+        );
+        let captured = policy_literal_descriptor_at(&alice, cell, &mut |_| Ok(())).unwrap();
+        assert_eq!(captured.root.object_hash, first.root.object_hash);
+        assert_eq!(
+            cold.policy_literal_bytes(&captured, &mut |_| Ok(()))
+                .unwrap(),
+            before
+        );
+        assert_eq!(
+            crate::values::policy_snapshot_cell_from_sql(
+                &alice,
+                &crate::records::ValueType::String,
+                None,
+                ValueRef::Integer(cell),
+                &cold
+            )
+            .unwrap(),
+            Some(crate::records::Value::String(
+                String::from_utf8(before.clone()).unwrap()
+            ))
+        );
+        assert_eq!(
+            cold.policy_literal_bytes(&advanced, &mut |_| Ok(()))
+                .unwrap(),
+            after
+        );
+        alice
+            .execute_batch("ROLLBACK TO policy_descriptor_cut; RELEASE policy_descriptor_cut")
+            .unwrap();
+        let current = policy_literal_descriptor_at(&alice, cell, &mut |_| Ok(())).unwrap();
+        assert_eq!(current.root.object_hash, advanced.root.object_hash);
+        assert_eq!(
+            cold.policy_literal_bytes(&current, &mut |_| Ok(()))
+                .unwrap(),
+            after
+        );
+        // Keep this tiny owned fixture for exact failure/reproduction evidence;
+        // the normal test TMPDIR lives inside the charged checkout.
     }
 
     /// Every physical form of a value: inline, chunked, and chunked as a

@@ -25,6 +25,18 @@ use crate::values::{
 
 mod history;
 
+/// A logical comparison in an ordinary SELECT policy. This records a question,
+/// never an authorization capability or an accepted/candidate visibility cut.
+#[derive(Clone)]
+pub(crate) struct PolicyLiteral {
+    pub slot: usize,
+    pub table: String,
+    pub column: String,
+    pub literal: Vec<u8>,
+    pub op: CmpOp,
+    pub bytes: bool,
+}
+
 /// Inherits chains with no explicit bound unroll this deep.
 pub(crate) const DEFAULT_INHERITS_DEPTH: usize = 10;
 /// Fixpoint gathers carry a depth column only as a runaway guard.
@@ -238,6 +250,9 @@ pub struct Ctx<'a> {
     /// rows keeps it rather than listing every row the policy grants.
     lift_row_keys: bool,
     next_alias: usize,
+    ordinary_policy_literals: bool,
+    ordinary_select_policy_scope: bool,
+    pub(crate) policy_literals: Vec<PolicyLiteral>,
 }
 
 /// A frozen snapshot: every version at or before position `seq`, plus the
@@ -329,6 +344,7 @@ pub struct Compiled {
     /// The part each projected column is read in, if only a part
     /// (SPEC 19.12); empty when none is.
     pub partial: Vec<Option<crate::query::Part>>,
+    pub(crate) policy_literals: Vec<PolicyLiteral>,
 }
 
 impl<'a> Ctx<'a> {
@@ -355,11 +371,20 @@ impl<'a> Ctx<'a> {
             overlay_tables: BTreeSet::new(),
             lift_row_keys: false,
             next_alias: 0,
+            ordinary_policy_literals: false,
+            ordinary_select_policy_scope: false,
+            policy_literals: Vec::new(),
         }
     }
 
     pub fn with_catalogue(mut self, catalogue: &'a dyn CatalogueIdentityLookup) -> Self {
         self.catalogue = Some(catalogue);
+        self
+    }
+
+    /// Enable only the executor's separately bounded ordinary policy path.
+    pub(crate) fn with_ordinary_policy_literals(mut self) -> Self {
+        self.ordinary_policy_literals = true;
         self
     }
 
@@ -832,6 +857,7 @@ impl<'a> Ctx<'a> {
         Ok(Compiled {
             sql,
             partial: Vec::new(),
+            policy_literals: self.policy_literals,
             params: self.params,
             projection,
             tables: self.tables,
@@ -923,6 +949,7 @@ impl<'a> Ctx<'a> {
         };
         Ok(Compiled {
             sql: statement(&order),
+            policy_literals: self.policy_literals,
             params: self.params,
             projection,
             tables: self.tables,
@@ -1083,6 +1110,7 @@ impl<'a> Ctx<'a> {
         );
         Ok(Compiled {
             sql,
+            policy_literals: self.policy_literals,
             params: self.params,
             projection,
             tables: self.tables,
@@ -1348,6 +1376,7 @@ impl<'a> Ctx<'a> {
         Ok(Compiled {
             sql,
             partial: Vec::new(),
+            policy_literals: self.policy_literals,
             params: self.params,
             projection,
             tables: self.tables,
@@ -1550,6 +1579,7 @@ impl<'a> Ctx<'a> {
         let schema = self.schema;
         let mut compiled = Compiled {
             sql: statement(&order),
+            policy_literals: self.policy_literals,
             params: self.params,
             projection,
             tables: self.tables,
@@ -1926,12 +1956,18 @@ impl<'a> Ctx<'a> {
         if session.system {
             return Ok("1".to_owned());
         }
-        self.under_policy_schema(table, |ctx, table| match table.policy(operation) {
+        let ordinary_previous = std::mem::replace(
+            &mut self.ordinary_select_policy_scope,
+            operation == Operation::Select,
+        );
+        let result = self.under_policy_schema(table, |ctx, table| match table.policy(operation) {
             None => Ok("0".to_owned()),
             Some(policy) => {
                 ctx.policy_expr(policy, table, alias, None, session, DEFAULT_INHERITS_DEPTH)
             }
-        })
+        });
+        self.ordinary_select_policy_scope = ordinary_previous;
+        result
     }
 
     /// Compile a policy of `table` under the schema whose names its policies
@@ -3554,6 +3590,55 @@ impl Ctx<'_> {
             .is_some_and(|literal| literal.len() > jazz_types::large_values::INLINE_VALUE_MAX_BYTES)
             && matches!(op, CmpOp::Eq | CmpOp::Ne)
         {
+            if self.ordinary_policy_literals && self.ordinary_select_policy_scope {
+                let literal = literal_of(value).expect("checked");
+                let declared = self
+                    .schema
+                    .by_stored(&column.table)
+                    .and_then(|table| table.stored().find(|c| c.stored == column.column))
+                    .ok_or_else(|| {
+                        unsupported("ordinary logical policy column is not in its governing schema")
+                    })?;
+                if declared.json {
+                    return Err(unsupported("ordinary long-literal JSON policy comparison"));
+                }
+                let mut ty = &declared.ty;
+                while let ValueType::Nullable(inner) = ty {
+                    ty = inner;
+                }
+                let bytes = matches!(ty, ValueType::Bytes);
+                if bytes != matches!(value, Sql::Blob(_)) {
+                    return Err(unsupported(
+                        "ordinary long-literal policy requires matching text or bytea types",
+                    ));
+                }
+                let total = self
+                    .policy_literals
+                    .iter()
+                    .map(|p| p.literal.len())
+                    .sum::<usize>();
+                if literal.len() > 1024 * 1024 || total > 1024 * 1024 - literal.len() {
+                    return Err(unsupported(
+                        "ordinary read-policy literal budget exceeds 1 MiB",
+                    ));
+                }
+                let slot = self.policy_literals.len() + 1;
+                self.policy_literals.push(PolicyLiteral {
+                    slot,
+                    table: column.table.clone(),
+                    column: column.column.clone(),
+                    literal: literal.to_vec(),
+                    op: op.clone(),
+                    bytes,
+                });
+                // Missing answers never become a grant, including for != or
+                // NOT: the executor must answer every discovered cell first.
+                return Ok(format!(
+                    "(CASE WHEN {} THEN (SELECT answer FROM _jazz_read_policy_literal_v1 WHERE slot={slot} AND cell={c}) ELSE {} END)",
+                    crate::large::chunked_sql(c),
+                    cmp_plain(op, c, p)
+                ));
+            }
             return Err(long_literal(column));
         }
         Ok(large_against(op, c, p))

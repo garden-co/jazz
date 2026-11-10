@@ -3673,8 +3673,9 @@ impl Inner {
         let session = self.session(author);
         let binding = BTreeMap::new();
         let claims = crate::compile::Session::default();
-        let mut ctx =
-            crate::compile::Ctx::new(schema, None, &claims, &binding).with_catalogue(self);
+        let mut ctx = crate::compile::Ctx::new(schema, None, &claims, &binding)
+            .with_catalogue(self)
+            .with_ordinary_policy_literals();
         ctx.operation_policy(table, Operation::Select, "a", &session)?;
         let mut tables = ctx.tables;
         tables.remove(&table.stored);

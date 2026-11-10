@@ -383,10 +383,14 @@ impl Inner {
         let visible = self.visible_read(&read, &tables);
         let applied = cut_of(&visible);
         let run = match &visible {
-            Cow::Borrowed(_) => self.execute(&compiled, &prepared.query.table),
+            Cow::Borrowed(_) => {
+                self.execute_policy_literals(prepared, identity, &visible, &compiled)
+            }
             Cow::Owned(visible) => self
                 .compile(prepared, identity, visible)
-                .and_then(|compiled| self.execute(&compiled, &prepared.query.table)),
+                .and_then(|compiled| {
+                    self.execute_policy_literals(prepared, identity, visible, &compiled)
+                }),
         };
         let (rows, awaiting) =
             match run.and_then(|rows| self.nest_relations(prepared, identity, &visible, rows)) {
@@ -990,6 +994,11 @@ impl Inner {
             Ok(compiled) => compiled,
             Err(error) => return Some(Err(error)),
         };
+        // A dependency may lie outside these changed root ids. Re-run the
+        // full bounded policy operation, including every input and its cut.
+        if !narrowed.policy_literals.is_empty() {
+            return None;
+        }
         let fresh = match self.execute(&narrowed, &group.prepared.query.table) {
             Ok(rows) => rows,
             Err(error) => return Some(Err(error)),

@@ -399,6 +399,41 @@ pub(crate) fn cell_from_sql(
     }
 }
 
+/// Only the bounded ordinary-policy executor uses this decoder. Its
+/// projected chunked values bind to the owning SQLite snapshot as well as
+/// its policy answers. Other decoder callers keep their existing path;
+/// this helper does not select identity, admission or evidence mode.
+pub(crate) fn policy_snapshot_cell_from_sql(
+    conn: &rusqlite::Connection,
+    ty: &ValueType,
+    tags: Option<&ColumnTags>,
+    cell: ValueRef<'_>,
+    chunks: &crate::large::Chunks,
+) -> Result<Option<Value>, Error> {
+    if tags.is_some() {
+        return cell_from_sql(ty, tags, cell, chunks);
+    }
+    if let ValueType::Nullable(inner) = ty {
+        return Ok(Some(match cell {
+            ValueRef::Null => Value::Nullable(None),
+            cell => Value::Nullable(
+                policy_snapshot_cell_from_sql(conn, inner, None, cell, chunks)?.map(Box::new),
+            ),
+        }));
+    }
+    if let (ValueType::String | ValueType::Bytes, ValueRef::Integer(cell)) = (ty, cell) {
+        let descriptor = crate::large::policy_literal_descriptor_at(conn, cell, &mut |_| Ok(()))?;
+        let bytes = chunks.value_bytes(&descriptor)?;
+        let inline = if matches!(ty, ValueType::String) {
+            ValueRef::Text(&bytes)
+        } else {
+            ValueRef::Blob(&bytes)
+        };
+        return from_sql(ty, inline, chunks);
+    }
+    cell_from_sql(ty, tags, cell, chunks)
+}
+
 /// Decode a SQLite cell by the column's declared type, reading a chunked
 /// large value's chunks. `None` is a NULL in a non-nullable column, which
 /// only an unwritten cell can hold.
