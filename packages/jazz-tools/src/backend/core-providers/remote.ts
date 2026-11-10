@@ -25,7 +25,7 @@ export type BackendCredential = () => string | Promise<string>;
  * talk only to your backend: it decides who each user is, and the core
  * trusts it to say so. The secret never leaves your server.
  */
-function remoteConfig(
+export function remoteConfig(
   options:
     | { url: string; appId: string; secret: string }
     | { url: string; appId: string; backendCredential: BackendCredential },
@@ -70,10 +70,12 @@ export function openRemoteCore(
     url: string;
     backendCredential: BackendCredential;
     secrets?: { adminSecret: string; backendSecret: string };
+    /** Host-specific authenticated upgrade. The socket is returned open. */
+    openWebSocket?: (url: string, headers: string[][], signal: AbortSignal) => Promise<WebSocket>;
   },
 ): JazzCore {
   const socketUrl = `${target.url.replace(/^http/, "ws")}/apps/${encodeURIComponent(appId)}/ws`;
-  if (!globalThis.WebSocket) {
+  if (!globalThis.WebSocket && !target.openWebSocket) {
     throw new Error("remote() needs a global WebSocket (Node 22 or newer)");
   }
   // Node's WebSocket (undici) takes upgrade headers as a second argument.
@@ -139,19 +141,37 @@ export function openRemoteCore(
     let ws: WebSocket | undefined;
     const queued: Uint8Array[] = [];
     let ended = false;
+    let queuedBytes = 0;
+    const abort = new AbortController();
     const finish = (code: number, reason: string) => {
       if (ended) return;
       ended = true;
+      queued.length = 0;
+      queuedBytes = 0;
+      abort.abort();
+      try {
+        if (ws && ws.readyState < 2) ws.close();
+      } catch {
+        /* Already closing. */
+      }
       onEvent(null, { kind: "close", code, reason });
     };
     credentialHeaders(access)
-      .then((headers) => {
+      .then(async (headers) => {
         if (ended) return;
-        ws = new NativeWebSocket(url, { headers: Object.fromEntries(headers) });
+        ws = target.openWebSocket
+          ? await target.openWebSocket(url, headers, abort.signal)
+          : new NativeWebSocket(url, { headers: Object.fromEntries(headers) });
+        if (ended) {
+          ws.close();
+          return;
+        }
         ws.binaryType = "arraybuffer";
-        ws.addEventListener("open", () => {
+        const flush = () => {
+          queuedBytes = 0;
           for (const data of queued.splice(0)) ws!.send(data as Uint8Array<ArrayBuffer>);
-        });
+        };
+        ws.addEventListener("open", flush);
         ws.addEventListener("message", (event) => {
           const data =
             typeof event.data === "string"
@@ -160,14 +180,10 @@ export function openRemoteCore(
           onEvent(null, { kind: "message", data });
         });
         ws.addEventListener("close", (event) => finish(event.code, event.reason));
+        if (ws.readyState === 1) flush();
         // A failed opening connection must end so the link can retry.
         ws.addEventListener("error", () => {
           finish(1006, "connection to the core failed");
-          try {
-            ws?.close();
-          } catch {
-            // Already closing.
-          }
         });
       })
       // A failing credential hook, or a socket that can't even be created.
@@ -178,11 +194,21 @@ export function openRemoteCore(
       send(data) {
         if (ended) return false;
         if (ws?.readyState === 1) ws.send(data as Uint8Array<ArrayBuffer>);
-        else queued.push(data);
+        else {
+          if (data.byteLength > 8 * 1024 * 1024 - queuedBytes) {
+            finish(1009, "core opening queue exceeded 8 MiB");
+            return false;
+          }
+          queuedBytes += data.byteLength;
+          queued.push(data.slice());
+        }
         return true;
       },
       close() {
         ended = true;
+        abort.abort();
+        queued.length = 0;
+        queuedBytes = 0;
         ws?.close();
       },
     };

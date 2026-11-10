@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { onVercelHost } from "./vercel-store.js";
+import { onVercelHost } from "../runtime-environment.js";
 import { files, type BlobStore } from "../blobs.js";
 import type { JazzCoreProvider } from "./core-provider.js";
 import { openInProcessCore } from "./in-process.js";

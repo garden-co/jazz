@@ -40,6 +40,10 @@
       "types": "./dist/e2ee/native.d.ts",
       "default": "./dist/e2ee/native.js"
     },
+    "./backend/worker": {
+      "types": "./dist/backend/worker/index.d.ts",
+      "default": "./dist/backend/worker/index.js"
+    },
     "./backend": {
       "types": "./dist/backend/index.d.ts",
       "default": "./dist/backend/index.js"

@@ -797,9 +797,7 @@ capture-snapshot request). No stored or sync-record encoding changes.
 Local packaged-host checks cover backend writes/reads and reconnect/restart;
 the account suite additionally checks thin runtime selection, user-policy
 refusals, attribution, subscriptions and refusal of a public client's forged
-backend scope. Worker-hosted `createJazz()` still needs a separate runtime-safe
-entry point and request-lifetime integration; removing the replica alone does
-not implement that entry point.
+backend scope. The Worker entry and its invocation lifetime are described below.
 
 Validation on 2026-11-09: 102 native createJazz/thin integration tests passed,
 plus 46 context/wire unit tests and the Rust envelope byte fixture. TypeScript
@@ -809,3 +807,79 @@ remote-core diagnostic test was excluded from the final pass after reproducing
 its missing-URL failure with both the old NAPI client and the thin client; its
 expectations are unchanged. No deployed Cloudflare or Worker-entry-point claim
 is made by these checks.
+
+## Worker-hosted createJazz
+
+`jazz-tools/backend/worker` exports `createJazz`, `remote`, `schema` and the
+shared authentication helpers. Enable Cloudflare's `nodejs_compat` flag; this
+entry uses supported Node crypto and Buffer APIs, but no NAPI, local database,
+Node listener or Vercel SDK. Import the schema DSL from this entry as well to
+avoid pulling browser-runtime initialization from the general package entry.
+
+Provision the core separately with the Node `durableObjects()` provider. Inside
+the application Worker, `remote({ url, appId, secret })` connects to that existing
+core. Its authenticated socket upgrade uses Worker `fetch()` and the returned
+WebSocket. Cloudflare provisioning credentials are not needed in this Worker.
+This implementation uses the core's URL, not a namespace/service binding.
+
+Create and close the client within each invocation. Share schema/configuration,
+not a live Jazz client or its sockets across requests:
+
+```ts
+import { createJazz, remote } from "jazz-tools/backend/worker";
+import { app, permissions } from "./app.js";
+
+export default {
+  async fetch(request, env, ctx) {
+    const jazz = createJazz({
+      app,
+      permissions,
+      store: remote({
+        url: env.JAZZ_CORE_URL,
+        appId: env.JAZZ_APP_ID,
+        secret: env.JAZZ_CORE_SECRET,
+      }),
+      // Supply your application's authentication callback here.
+    });
+    let upgraded = false;
+    try {
+      // Application handlers can also await jazz.db.all(...), forReqUser(...), etc.
+      const response = await jazz.handle(request, ctx);
+      upgraded = response.status === 101;
+      return response;
+    } finally {
+      if (!upgraded) await jazz.close();
+    }
+  },
+};
+```
+
+`handle(request, ctx)` adapts incoming WebSocketPair events into the existing
+Jazz admission/protocol path. A successful upgrade retains its client until
+socket close/error and schedules cleanup with `ctx.waitUntil`. Ordinary HTTP
+requests and custom database handlers await their work and close before returning.
+The HTTP-stream fallback needs state across requests and is explicitly refused
+(501); WebSocket capability probes do not advertise it. Backend transactions,
+DO split thin requests and durable large values retain their existing limitations.
+Worker text-anchor helpers are unsupported. Node attachment APIs remain available
+only from the Node entry.
+
+Publication, authentication, account routes, user scopes and thin request
+handling are shared with Node. Node retains local native validation; the Worker
+relies on the authority's atomic schema/migration/permission validation during
+publication. It does not run a second schema validator or database engine.
+No durable or wire encoding changes are introduced by this host extraction.
+
+```sh
+# Requires built jazz-tools JS and the current packaged DO host; included in test.mjs host/all.
+node dev/durable-objects/native-sqlite/harness/test-worker-backend.mjs
+```
+
+Validated in local workerd on 2026-11-09: four concurrent request-owned clients,
+fresh reads of committed writes, account authentication, permission-scoped reads,
+attributed writes, valid and forged incoming WebSocket admission, and explicit
+stream refusal. The test bundles the real Worker entry and checks that native
+engines and Node/Vercel socket dependencies are absent. Node regression coverage:
+102 createJazz/thin integration tests and 46 context/wire tests passed; the known
+remote-core diagnostic test remains excluded with its expectations unchanged.
+These checks do not establish deployed application-Worker behavior or performance.

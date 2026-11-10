@@ -36,29 +36,6 @@ updates of rows, epochs, chunks and reference counts. Native hosts may retain
 separate readers. Keep S3 and Vercel Blob behavior intact through shared
 blob-store abstractions; include Worker-compatible blob I/O where needed.
 
-## 8.6 Thin clients for Node and Worker backends — in progress
-
-Node `createJazz()` now uses one shared thin runtime for its backend database;
-there is no NAPI in-memory replica behind `jazz.db`. Native authorities still
-use NAPI. The production DO host serves ordinary thin reads, writes and
-subscriptions through the shared server engine. Backend requests carry an
-explicit authenticated permission/attribution context; public clients cannot
-use it. See the README for the versioned wire addition and validation.
-
-Backend application transactions fail explicitly for now. Existing ordinary
-thin-client transactions on native authorities retain their implementation;
-managed storage refuses transaction begin until section 5 is implemented.
-DO host input currently accepts whole thin requests only; split large requests
-are refused explicitly. Durable large-value storage remains section 7.
-
-Reuse this same thin runtime in a Worker-compatible `createJazz()` entry point.
-Separate native imports and Node server attachment from shared publication,
-authentication and routes; adapt authenticated WebSocket upgrades and
-request-scoped connection lifetimes. Provision the DO host through deployment
-tooling and connect through an existing namespace binding inside the Worker.
-Validate concurrent requests without sharing request-owned I/O. The Worker
-entry point is not implemented by switching the backend client alone.
-
 ## 9. Additional lifecycle work — deferred
 
 Retain the existing restart, lost-upload/acknowledgement, deployed upgrade and
@@ -86,8 +63,9 @@ use same-base CodSpeed comparisons for native end-to-end claims.
 
 ## Delivery order
 
-Node backend thin clients and ordinary DO thin hosting are implemented. Next
-reuse that client in Worker-hosted `createJazz()` (section 8.6).
+Node and Worker `createJazz()` now use the shared thin client; local Worker
+HTTP/WebSocket integration is validated (see README). Deployment of the
+application Worker is not yet validated.
 Transaction overlays (section 5) and durable chunks (section 7) remain deferred.
 Keep current integration tests as regression coverage; further lifecycle
 expansion is deferred. Do not claim full DO transaction or large-value support

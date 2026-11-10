@@ -15,7 +15,7 @@ cloudflare      Disposable real deployment: reconnect, upgrade and persistence.
                 Requires CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN.
 
 Builds selected WASM hosts (FAST=1 locally) and the storage suite's native client.
-The host/cloudflare suites also require the repository's built NAPI artifacts.
+The host suite also builds backend JavaScript. Host/cloudflare require built NAPI artifacts.
 --no-build uses existing artifacts; use only when they match current source.
 Focused test scripts remain runnable directly; see README.md for their contracts.`);
   process.exit(0);
@@ -55,6 +55,8 @@ async function run(label, command, argv, overrides = {}) {
 const host = suite === "host" || suite === "all";
 const storage = suite === "storage" || suite === "all";
 if (!args.includes("--no-build")) {
+  if (host)
+    await run("build backend JavaScript", "pnpm", ["--dir", "packages/jazz-tools", "exec", "tsc"]);
   if (host || suite === "cloudflare")
     await run("build production host", process.execPath, [
       "packages/jazz-tools/scripts/bundle-durable-object-worker.mjs",
@@ -83,7 +85,7 @@ if (host) {
     "run",
     "src/backend/core-providers/durable-objects.test.ts",
   ]);
-  for (const name of ["create-jazz", "accounts", "lifecycle", "crash"])
+  for (const name of ["create-jazz", "worker-backend", "accounts", "lifecycle", "crash"])
     await run(name, process.execPath, [`${harness}test-${name}.mjs`]);
 }
 if (storage) {
