@@ -7,47 +7,34 @@ import { Code as InlineCode } from "@astryxdesign/core/Code";
 import { Link } from "@astryxdesign/core/Link";
 import { Text } from "@astryxdesign/core/Text";
 import { Callout, Code } from "@/components/docs/mdx-client";
-import { Tab, Tabs } from "./tabs";
 import { type GeneratedApp, storeGeneratedApp } from "@/lib/generated-app-store";
 
 const JAZZ_CLOUD_SYNC_URL = "https://v2.sync.jazz.tools/";
 
-const BUNDLER_ITEMS = ["Vite", "Next.js", "SvelteKit", "Expo"] as const;
-type Bundler = (typeof BUNDLER_ITEMS)[number];
-
-// Client-exposed env var prefix per bundler, matching the dev plugins.
-// SvelteKit covers both SvelteKit itself and Svelte+Vite via jazzSvelteKit.
-const CLIENT_PREFIX: Record<Bundler, string> = {
-  Vite: "VITE_",
-  "Next.js": "NEXT_PUBLIC_",
-  SvelteKit: "PUBLIC_",
-  Expo: "EXPO_PUBLIC_",
-};
-
-function envBlockFor(bundler: Bundler, app: GeneratedApp): string {
-  const prefix = CLIENT_PREFIX[bundler];
+// Everything stays in the backend's environment: browsers only talk to /jazz.
+function envBlockFor(app: GeneratedApp): string {
   return [
-    `${prefix}JAZZ_APP_ID="${app.appId}"`,
-    `${prefix}JAZZ_SERVER_URL="${JAZZ_CLOUD_SYNC_URL}"`,
+    `JAZZ_APP_ID="${app.appId}"`,
+    `JAZZ_SERVER_URL="${JAZZ_CLOUD_SYNC_URL}"`,
     `JAZZ_ADMIN_SECRET="${app.adminSecret}"`,
-    `BACKEND_SECRET="${app.backendSecret}"`,
   ].join("\n");
 }
 
 function CredentialsBlock({ app }: { app: GeneratedApp }) {
-  return (
-    <Tabs groupId="jazz-bundler" items={[...BUNDLER_ITEMS]} persist updateAnchor>
-      {BUNDLER_ITEMS.map((bundler) => (
-        <Tab key={bundler} value={bundler}>
-          <Code language="env" code={envBlockFor(bundler, app)} />
-        </Tab>
-      ))}
-    </Tabs>
-  );
+  return <Code language="env" code={envBlockFor(app)} />;
 }
 
 function ConfigBlock({ app }: { app: GeneratedApp }) {
-  const code = `{\n  appId: "${app.appId}",\n  serverUrl: "https://v2.sync.jazz.tools/",\n}`;
+  const code = [
+    `createJazz({`,
+    `  // app, permissions, authenticate ...`,
+    `  store: remote({`,
+    `    appId: process.env.JAZZ_APP_ID!,`,
+    `    url: process.env.JAZZ_SERVER_URL!,`,
+    `    secret: process.env.JAZZ_ADMIN_SECRET!,`,
+    `  }),`,
+    `});`,
+  ].join("\n");
   return <Code language="ts" code={code} />;
 }
 
@@ -109,7 +96,7 @@ export function GenerateAppId() {
       <CredentialsBlock app={app} />
 
       <Text as="p" display="block" color="secondary">
-        Use this config in your app:
+        Use them in your backend:
       </Text>
       <ConfigBlock app={app} />
     </div>

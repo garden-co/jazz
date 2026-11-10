@@ -1,44 +1,42 @@
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { schema as s } from "../schema-namespace.js";
 import { definePermissions } from "../permissions/index.js";
-import { createJazzSession } from "../backend/index.js";
 import { createDb } from "./default-create-db.js";
 import type { Db } from "./db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
-import { deploy, startLocalJazzServer } from "../testing/index.js";
+import { startTestJazz } from "../testing/index.js";
 
 // garden-co/jazz#3778: `gather` honours `start` and `maxDepth` for a backend
 // client and for a user client whose rows are behind a read policy.
-const app = s.defineApp({
-  todos: s.table(
-    {
-      title: s.string(),
-      done: s.boolean(),
-      owner: s.uuid(),
-      parent_id: s.uuid().optional(),
-    },
-    { parent: s.rel("todos", "parent_id") },
-  ),
-});
+const app = s.defineApp(
+  {
+    todos: s.table(
+      {
+        title: s.string(),
+        done: s.boolean(),
+        owner: s.uuid(),
+        parent_id: s.uuid().optional(),
+      },
+      { parent: s.rel("todos", "parent_id") },
+    ),
+  },
+  { migrations: "none" },
+);
 const permissions = definePermissions(app, ({ policy, session }) => {
-  policy.todos.allowRead.where({ owner: session.user.account });
-  policy.todos.allowInsert.where({ owner: session.user.account });
+  policy.todos.allowRead.where({ owner: session.user });
+  policy.todos.allowInsert.where({ owner: session.user });
 });
 
-let server: Awaited<ReturnType<typeof startLocalJazzServer>>;
-let backendSession: Awaited<ReturnType<typeof createJazzSession>>;
+let server: Awaited<ReturnType<typeof startTestJazz>>;
 let backend: Db;
 let user: Db;
 const ids: Record<string, string> = {};
 
 beforeAll(async () => {
-  server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
-  await deploy({
-    serverUrl: server.url,
-    appId: server.appId,
-    adminSecret: server.adminSecret,
-    schema: app,
-    permissions,
+  server = await startTestJazz({
+    app: app,
+    permissions: permissions,
+    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
   });
   const account = await localAccountConfig(server.appId, server.url);
   user = await createDb(account);
@@ -61,23 +59,12 @@ beforeAll(async () => {
       .wait({ tier: "global" });
     ids[name] = row.id;
   }
-  backendSession = await createJazzSession({
-    appId: server.appId,
-    app,
-    permissions,
-    serverUrl: server.url,
-    driver: { type: "memory" },
-    initial: { backendSecret: server.backendSecret },
-  });
-  const snapshot = backendSession.getSnapshot();
-  if (!snapshot.client) throw snapshot.error ?? new Error(snapshot.status);
-  backend = snapshot.client.db;
+  // The app's own backend database.
+  backend = server.jazz.db;
 }, 60_000);
 
 afterAll(async () => {
   await user?.shutdown();
-  await backendSession?.getSnapshot().client?.shutdown({ waitForSync: false });
-  await backendSession?.close();
   await server?.stop();
 });
 

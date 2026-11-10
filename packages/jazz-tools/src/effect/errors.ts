@@ -46,6 +46,23 @@ export class JazzWriteRejected extends Data.TaggedError("JazzWriteRejected")<{
   }
 }
 
+/**
+ * The request's user has no Jazz account yet, so there is no one to act as
+ * (`NoJazzAccountError` on the plain backend). They get one when they sign in
+ * from a client, when a local-first guest links to them, or when the backend
+ * calls `createAccountFor`.
+ */
+export class JazzNoAccount extends Data.TaggedError("JazzNoAccount")<{
+  /** The user, as the app's `authenticate` names them. */
+  readonly userId: string;
+  /** The operation that needed the account, such as `"forReqUser"`. */
+  readonly operation: string;
+}> {
+  override get message(): string {
+    return `Jazz ${this.operation} failed: user ${JSON.stringify(this.userId)} has no Jazz account yet`;
+  }
+}
+
 /** @internal */
 export const toJazzError =
   (operation: string) =>

@@ -23,7 +23,7 @@ use common::{compile_schema, exists, outer_eq, read_and_allow_all_writes, sessio
 #[path = "common/duplex_transport.rs"]
 mod duplex_transport;
 
-const ME: [&str; 3] = ["user", "identity", "subject"];
+const ME: [&str; 2] = ["identity", "subject"];
 
 /// Games readable through a participant row naming the reader, and the
 /// participant rows readable by the participant.
@@ -110,7 +110,7 @@ impl Fixture {
     fn connect(&self, client: &Db) -> Upstream {
         let (client_side, server_side) = duplex_transport::duplex();
         let upstream = block_on(client.connect_upstream(client_side));
-        self.core.accept_subscriber(server_side, alice());
+        self.core.accept_subscriber(server_side, alice()).unwrap();
         upstream
     }
 

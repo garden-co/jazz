@@ -1,5 +1,5 @@
+import { shippedMigrations } from "../client-migrations.js";
 import { copyAccountConfigAdmission } from "../../accounts/config-capability.js";
-import { NativeRuntimeAdapter } from "../native-runtime/native-runtime-adapter.js";
 import { getRuntimeSchemaCacheKey } from "../../drivers/schema-wire.js";
 import type { WasmSchema } from "../../drivers/types.js";
 import { setCredentialRenewal } from "../client.js";
@@ -49,9 +49,13 @@ function getPolicyStrippedSchema(schema: WasmSchema): WasmSchema {
 
 /** Readiness required by an operation, independent of read or write tiers.
  * `runtime` admits local work, including browser worker initialization.
+ * `upload` also waits out an explicit disconnect, but never for the server
+ * link itself: a write's Global wait holds through an outage or a credential
+ * refusal something renews, and only the runtime's wait decides when it
+ * ends (#3923).
  * `server` also waits for the configured server transport to be available.
  */
-export type ConnectionRequirement = "runtime" | "server";
+export type ConnectionRequirement = "runtime" | "upload" | "server";
 
 export interface ConnectionManagerClientInput {
   schemaKey: string;
@@ -127,6 +131,7 @@ export abstract class ConnectionManager {
     const client = runtimeSource.createClient({
       config: runtimeConfig,
       schema: runtimeSchema,
+      migrations: shippedMigrations(schema),
       onAuthFailure: (reason) => this.host.markUnauthenticated(reason),
       foregroundNodeLease: this.foregroundNodeLease,
     });
@@ -318,8 +323,7 @@ export abstract class ConnectionManager {
   async waitForSync(signal?: AbortSignal): Promise<void> {
     const runtime = this.getCurrentClient()?.getRuntime();
     if (!runtime || this.linkStatus().state === "local-only") return;
-    if (!(runtime instanceof NativeRuntimeAdapter))
-      throw new Error("Runtime does not support waiting for sync");
+    if (!runtime.waitForPendingWrites) throw new Error("Runtime does not support waiting for sync");
     await runtime.waitForPendingWrites("global", {
       throughOutage: true,
       signal,
@@ -412,7 +416,7 @@ export abstract class ConnectionManager {
   async waitForPendingWrites(): Promise<void> {
     const runtime = this.getCurrentClient()?.getRuntime();
     if (!runtime) return;
-    if (!(runtime instanceof NativeRuntimeAdapter))
+    if (!runtime.waitForPendingWrites)
       throw new Error("Runtime does not support graceful sync shutdown");
     await runtime.waitForPendingWrites("global");
   }

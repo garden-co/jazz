@@ -25,11 +25,7 @@ import {
 import { Db, resolveDefaultPersistentDbName, type QueryBuilder } from "../../src/runtime/db.js";
 import { createInspectorLocalQueryOptions as inspectorLocalQueryOptions } from "../../src/internal/inspector-query.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
-import {
-  createJazzServerTransportControl,
-  getJazzServerJwtForUser,
-  stopJazzServer,
-} from "./testing-server.js";
+import { createJazzServerTransportControl, jazzAppUser, stopJazzServer } from "./testing-server.js";
 import {
   createRemoteBrowserDb,
   insertRemoteBrowserDbRow,
@@ -1200,30 +1196,22 @@ describe("SharedWorker bridge with IndexedDB", () => {
   });
 
   it("fans out auth loss and accepts same-principal refresh from either tab", async () => {
-    const { appId, serverUrl } = await publishSyncServerSchemaAndPermissions("auth-fanout");
+    const backend = await publishSyncServerSchemaAndPermissions("auth-fanout");
     const dbName = uniqueDbName("auth-fanout");
     const userId = "00000000-0000-0000-0000-00000000fa01";
-    const validJwt = await getJazzServerJwtForUser(userId, undefined, appId);
-    const invalidJwt = makeStructurallyValidJwt(userId);
+    const user = await jazzAppUser(backend, userId);
 
-    const dbA = track(
-      await createDb({
-        appId,
-        serverUrl,
-        jwtToken: validJwt,
-        registerJwt: true,
-        driver: { type: "persistent", dbName },
-      }),
-    );
-    const dbB = track(
-      await createDb({
-        appId,
-        serverUrl,
-        jwtToken: validJwt,
-        registerJwt: true,
-        driver: { type: "persistent", dbName },
-      }),
-    );
+    const dbA = track(await createDb({ ...user, driver: { type: "persistent", dbName } }));
+    const dbB = track(await createDb({ ...user, driver: { type: "persistent", dbName } }));
+    const signedIn = dbA.getAuthState().session?.identity;
+    const invalidJwt = makeStructurallyValidJwt(userId, signedIn?.issuer);
+    const signedInSession = {
+      account_id: user.account.id,
+      issuer: user.account.identity.issuer,
+      user_id: user.account.identity.subject,
+      claims: {},
+      authMode: "external" as const,
+    };
     dbA.insert(todos, { title: "first-tab-init", done: false });
     await withTimeout(
       dbA.all(allTodos, { tier: "local-first" }),
@@ -1240,8 +1228,10 @@ describe("SharedWorker bridge with IndexedDB", () => {
     expect(dbA.getAuthState().error).toBeUndefined();
     expect(dbB.getAuthState().error).toBeUndefined();
 
-    // Each account context renews a refused credential by itself, so the
-    // loss can be short-lived: record it rather than poll for it.
+    // The server's refusal reaches the tab that sent the token and, through
+    // the worker, the other tab: record it rather than poll for it. Under
+    // the app's backend, the reason is what its sync route reports for a
+    // token it can't verify; the fan-out is what matters here.
     const errorsA: (string | undefined)[] = [];
     const errorsB: (string | undefined)[] = [];
     const stopA = dbA.onAuthChanged((state) => errorsA.push(state.error));
@@ -1249,24 +1239,25 @@ describe("SharedWorker bridge with IndexedDB", () => {
     dbA.updateAuthToken(invalidJwt);
 
     await waitForCondition(
-      async () => errorsA.includes("invalid"),
+      async () => errorsA.some((error) => error !== undefined),
       20000,
       "First tab should turn unauthenticated when the server rejects its JWT",
     );
+    const refusal = errorsA.find((error) => error !== undefined);
     await waitForCondition(
-      async () => errorsB.includes("invalid"),
+      async () => errorsB.includes(refusal),
       20000,
       "Second tab should turn unauthenticated through the worker auth fan-out",
     );
     stopA();
     stopB();
 
-    dbB.updateAuthToken(validJwt);
+    dbB.updateCookieSession(signedInSession);
 
     await waitForCondition(
       async () => dbB.getAuthState().error === undefined,
       20000,
-      "Second tab should recover after submitting a same-principal token refresh",
+      "Second tab should recover after returning to the backend's session",
     );
     await waitForCondition(
       async () => dbA.getAuthState().error === undefined,
@@ -1276,27 +1267,17 @@ describe("SharedWorker bridge with IndexedDB", () => {
   }, 60000);
 
   it("returns an existing worker row to a fresh local follower after a rejected principal change", async () => {
-    const { appId, serverUrl } = await publishSyncServerSchemaAndPermissions(
+    const backend = await publishSyncServerSchemaAndPermissions(
       "cold-local-follower-principal-guard",
     );
     const dbName = uniqueDbName("cold-local-follower-principal-guard");
-    const aliceJwt = await getJazzServerJwtForUser(
-      "00000000-0000-0000-0000-00000000ca11",
-      undefined,
-      appId,
-    );
-    const bobJwt = await getJazzServerJwtForUser(
+    const alice = await jazzAppUser(backend, "00000000-0000-0000-0000-00000000ca11");
+    // Never sent: the guard refuses Bob's principal before any connection sees it.
+    const bobJwt = makeStructurallyValidJwt(
       "00000000-0000-0000-0000-00000000cb22",
-      undefined,
-      appId,
+      alice.account.identity.issuer,
     );
-    const config = {
-      appId,
-      serverUrl,
-      jwtToken: aliceJwt,
-      registerJwt: true,
-      driver: { type: "persistent" as const, dbName },
-    };
+    const config = { ...alice, driver: { type: "persistent" as const, dbName } };
     const owner = track(await createDb(config));
     let follower: Db | null = null;
     try {
@@ -1359,28 +1340,15 @@ describe("SharedWorker bridge with IndexedDB", () => {
   }, 60_000);
 
   it("rejects a principal-changing live auth update before local or worker state changes", async () => {
-    const { appId, serverUrl } =
-      await publishSyncServerSchemaAndPermissions("live-auth-owner-guard");
+    const backend = await publishSyncServerSchemaAndPermissions("live-auth-owner-guard");
     const dbName = uniqueDbName("live-auth-owner-guard");
-    const aliceJwt = await getJazzServerJwtForUser(
-      "00000000-0000-0000-0000-00000000aa11",
-      undefined,
-      appId,
-    );
-    const bobJwt = await getJazzServerJwtForUser(
+    const alice = await jazzAppUser(backend, "00000000-0000-0000-0000-00000000aa11");
+    // Never sent: the guard refuses Bob's principal before any connection sees it.
+    const bobJwt = makeStructurallyValidJwt(
       "00000000-0000-0000-0000-00000000bb22",
-      undefined,
-      appId,
+      alice.account.identity.issuer,
     );
-    const db = track(
-      await createDb({
-        appId,
-        serverUrl,
-        jwtToken: aliceJwt,
-        registerJwt: true,
-        driver: { type: "persistent", dbName },
-      }),
-    );
+    const db = track(await createDb({ ...alice, driver: { type: "persistent", dbName } }));
     try {
       const knownAliceRow = await db
         .insert(todos, { title: "known Alice local row", done: false })

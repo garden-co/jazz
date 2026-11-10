@@ -39,7 +39,7 @@ const schema = {
 };
 
 type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema);
+export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
 `;
 }
 
@@ -49,7 +49,7 @@ import { schema as s } from ${JSON.stringify(new URL(indexImportPath, import.met
 import { app } from "./schema.ts";
 
 export default s.definePermissions(app, ({ policy, session }) => [
-  policy.todos.allowRead.where({ ownerId: session.user.identity.subject }),
+  policy.todos.allowRead.where({ ownerId: session.identity.subject }),
 ]);
 `;
 }
@@ -117,7 +117,7 @@ describe("dev catalogue runtime schema identity", () => {
         )
         .indexOnly(["fileId", "status"]),
     };
-    const app = s.defineApp(schema);
+    const app = s.defineApp(schema, { migrations: "none" });
     await createNapiNativeRuntimeAdapter(app.wasmSchema, {});
 
     expect(serializeRuntimeSchema(app.wasmSchema)).toContain("__jazzRuntimeSchema");
@@ -142,10 +142,10 @@ describe("dev catalogue push behavior", () => {
             JSON.stringify({
               schemas: kind === "initial" ? [] : [hash],
               migrations: [],
-              activeSchemaHash: kind === "initial" ? null : hash,
+              latestBundleSchemaHash: kind === "initial" ? null : hash,
             }),
           );
-        expect(input.endsWith("/admin/deploy")).toBe(true);
+        expect(input.endsWith("/admin/bundles")).toBe(true);
         body = JSON.parse(String(init?.body));
         return new Response(
           JSON.stringify({
@@ -188,11 +188,14 @@ describe("dev catalogue push behavior", () => {
 
   it("deploy rejects policies compiled against an outdated schema before contacting the server", async () => {
     const { deploy } = await import("./catalogue.js");
-    const oldApp = s.defineApp({ todos: s.table({ owner: s.string() }, {}) });
+    const oldApp = s.defineApp(
+      { todos: s.table({ owner: s.string() }, {}) },
+      { migrations: "none" },
+    );
     const permissions = s.definePermissions(oldApp, ({ policy, session }) => {
-      policy.todos.allowRead.where({ owner: session.user.identity.subject });
+      policy.todos.allowRead.where({ owner: session.identity.subject });
     });
-    const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) });
+    const app = s.defineApp({ todos: s.table({ title: s.string() }, {}) }, { migrations: "none" });
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
     await expect(
@@ -229,7 +232,7 @@ describe("dev catalogue push behavior", () => {
         appId: APP_ID,
         serverUrl: SERVER_URL,
         adminSecret: ADMIN_SECRET,
-        schema: s.defineApp({ todos: s.table({ title: s.string() }, {}) }),
+        schema: s.defineApp({ todos: s.table({ title: s.string() }, {}) }, { migrations: "none" }),
       }),
     ).rejects.toThrow("explicit permissions bundle");
     expect(fetchMock).not.toHaveBeenCalled();

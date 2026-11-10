@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, type Snippet } from 'svelte';
-  import { createJazzSession, type JazzSessionConfig } from '../session/create-jazz-session.js';
+  import { createJazzClient, type JazzClientConfig } from '../session/create-jazz-session.js';
   import type { JazzSession, JazzSessionSnapshot } from '../session/state.js';
   import type { JazzClient } from './create-jazz-client.js';
   import JazzSessionClientProvider from './JazzSessionClientProvider.svelte';
@@ -11,7 +11,7 @@
     children: Snippet;
     fallback?: Snippet;
     autoAttachDevTools?: boolean;
-  } & ({ session: JazzSession<JazzClient>; config?: never } | { config: JazzSessionConfig; session?: never });
+  } & ({ session: JazzSession<JazzClient>; config?: never } | { config: JazzClientConfig; session?: never });
   let { session, config, children, fallback, autoAttachDevTools = true }: Props = $props();
   let owned = $state.raw<JazzSession<JazzClient>>();
   let cancelled = false;
@@ -29,7 +29,7 @@
     if (attempt) return attempt;
     if (!config) return Promise.resolve();
     publish({ status: 'transitioning' });
-    attempt = createJazzSession(config).then(async (value) => {
+    attempt = createJazzClient(config).then(async (value) => {
       created = value;
       if (cancelled) await value.close();
       else owned = value;
@@ -46,8 +46,8 @@
     getSnapshot: () => startup,
     subscribe: (listener) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
     createLocalFirst: unavailable, restoreLocalFirst: unavailable,
-      becomeBackend: unavailable,
-    registerJWT: unavailable, loginJWT: unavailable, loginOrRegisterJWT: unavailable, linkJWT: unavailable,
+      loginWithBackend: unavailable,
+      linkWithBackend: unavailable,
     logout: unavailable, retry: start,
     close: async () => { cancelled = true; publish({ status: 'closed' }); await created?.close(); },
   });

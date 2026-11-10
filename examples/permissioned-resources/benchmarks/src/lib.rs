@@ -232,7 +232,7 @@ fn resource_policy(access_table: &str) -> PolicyExpr {
         &[("administrator", PublicValue::Boolean(false))],
         GROUP_ACCESS,
         "user_id",
-        &["user", "account"],
+        &["user"],
         "group_id",
     )
 }
@@ -554,7 +554,7 @@ fn apply_event(rows: &mut BTreeSet<RowUuid>, event: SubscriptionEvent) {
                 rows.insert(row.row.row_uuid());
             }
         }
-        SubscriptionEvent::Rejected { reason } => {
+        SubscriptionEvent::Rejected { reason, .. } => {
             panic!("subscription rejected unexpectedly: {reason:?}")
         }
         SubscriptionEvent::Closed => {}
@@ -959,14 +959,17 @@ fn run_cold(
             bytes: Rc::new(RefCell::new(0)),
         }))),
     );
-    let subscriber = seeded.core.accept_subscriber(
-        Box::new(WireTransportAdapter::current(ZstdFrames {
-            outbound: down,
-            inbound: up,
-            bytes: Rc::clone(&bytes),
-        })),
-        author,
-    );
+    let subscriber = seeded
+        .core
+        .accept_subscriber(
+            Box::new(WireTransportAdapter::current(ZstdFrames {
+                outbound: down,
+                inbound: up,
+                bytes: Rc::clone(&bytes),
+            })),
+            author,
+        )
+        .unwrap();
     let connect_ms = start.elapsed().as_millis();
 
     let subscribe_start = Instant::now();
@@ -1154,15 +1157,18 @@ fn run_cold_via_relay(
     let wire = relay.wire().expect("relay upstream");
     let pending = Rc::new(RefCell::new(VecDeque::new()));
     let bytes = Rc::new(RefCell::new(0));
-    let subscriber = seeded.core.accept_subscriber(
-        Box::new(WireTransportAdapter::current(CoreToRelay {
-            pending: Rc::clone(&pending),
-            received: VecDeque::new(),
-            wire: wire.clone(),
-            bytes: Rc::clone(&bytes),
-        })),
-        author,
-    );
+    let subscriber = seeded
+        .core
+        .accept_subscriber(
+            Box::new(WireTransportAdapter::current(CoreToRelay {
+                pending: Rc::clone(&pending),
+                received: VecDeque::new(),
+                wire: wire.clone(),
+                bytes: Rc::clone(&bytes),
+            })),
+            author,
+        )
+        .unwrap();
     let client = relay
         .attach_client(
             DbIdentity {

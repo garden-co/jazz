@@ -26,7 +26,7 @@ use jazz::tools::{
 
 use common::{compile_schema, exists, outer_eq, session_eq};
 
-const ME: [&str; 3] = ["user", "identity", "subject"];
+const ME: [&str; 2] = ["identity", "subject"];
 
 fn me(column: &str) -> PolicyExpr {
     session_eq(column, &ME)
@@ -82,7 +82,7 @@ fn replica(schema: JazzSchema, server: &Db, node: u8, author: AuthorSubject) -> 
     .unwrap();
     let (client_side, server_side) = duplex_transport::duplex();
     block_on(db.connect_upstream(client_side));
-    server.accept_subscriber(server_side, author);
+    server.accept_subscriber(server_side, author).unwrap();
     db.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
     db
 }

@@ -7,21 +7,12 @@ import {
   useDb as useCoreDb,
   useJazzClient as useCoreJazzClient,
   useSession,
-  type CreateJazzClient,
+  type OpenJazzClient,
 } from "../react-core/provider.js";
 import { ConfiguredJazzAppProvider, type JazzAppViewProps } from "../react-core/app.js";
-import type { JazzAuth } from "../session/app.js";
-import { createJazzSession, type JazzSessionConfig } from "../session/create-jazz-session.js";
-import { createJazzClient, type JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
+import { createJazzClient, type JazzClientConfig } from "../session/create-jazz-session.js";
+import type { JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
 import { DevToolsAutoAttach } from "./devtools-auto-attach.js";
-
-// In dev builds, pull in a generated module that withJazz (next.ts/vite.ts/...)
-// rewrites on every schema push. The bundler tracks this as a dependency of the
-// React provider, so any push to the file forces a full reload of the host app
-// without each framework plugin needing its own dev-server WebSocket wiring.
-if (process.env.NODE_ENV === "development" && typeof window !== "undefined") {
-  import("jazz-tools/_dev/schema-hash").catch(() => {});
-}
 
 export { JazzClientProvider, type JazzClientProviderProps } from "../react-core/provider.js";
 
@@ -31,8 +22,12 @@ interface JazzClientContextValue {
   shutdown: CreatedJazzClient["shutdown"];
 }
 
-const createClient: CreateJazzClient = (config) =>
-  createJazzClient(config) as Promise<CreatedJazzClient>;
+// A provider given an explicit `config` opens the local-first client. It loads
+// on first use, so apps on the (default) thin client never bundle it eagerly.
+const createClient: OpenJazzClient = async (config) => {
+  const { openJazzClient } = await import("../web/create-jazz-client.js");
+  return (await openJazzClient(config)) as CreatedJazzClient;
+};
 
 type JazzProviderCommonProps = {
   fallback?: ReactNode;
@@ -41,9 +36,8 @@ type JazzProviderCommonProps = {
   autoAttachDevTools?: boolean;
 };
 
-export type JazzAppProviderProps = JazzSessionConfig &
+export type JazzAppProviderProps = JazzClientConfig &
   JazzAppViewProps<CreatedJazzClient> & {
-    auth?: JazzAuth;
     autoAttachDevTools?: boolean;
   };
 export type JazzProviderProps =
@@ -72,7 +66,7 @@ function ConfiguredJazzProvider({
       : config;
 
   return (
-    <CoreJazzProvider config={effectiveConfig} fallback={fallback} createJazzClient={createClient}>
+    <CoreJazzProvider config={effectiveConfig} fallback={fallback} openJazzClient={createClient}>
       {shouldAutoAttach ? <DevToolsAutoAttach /> : null}
       {children}
     </CoreJazzProvider>
@@ -99,21 +93,20 @@ export { useSession };
 
 export type { JazzClientContextValue };
 
-function ApplicationJazzProvider({
-  auth,
-  children,
-  signedOut,
-  loading,
-  error,
-  autoAttachDevTools,
-  ...config
-}: JazzAppProviderProps) {
+function ApplicationJazzProvider(props: JazzAppProviderProps) {
+  // Every other prop is client config, which reaches the browser worker:
+  // a React element there fails to clone, far from its cause.
+  if ("fallback" in props) {
+    throw new Error(
+      "<JazzProvider serverUrl=…> shows `loading` while it starts and `signedOut` while no one is signed in; it has no `fallback` prop (that is <JazzSessionProvider>'s and <JazzProvider config={…}>'s).",
+    );
+  }
+  const { children, signedOut, loading, error, autoAttachDevTools, ...config } = props;
   const shouldAutoAttach = process.env.NODE_ENV !== "production" && autoAttachDevTools !== false;
   return (
     <ConfiguredJazzAppProvider
-      config={{ ...config, initial: config.initial ?? (auth ? undefined : "local-first") }}
-      auth={auth}
-      createJazzSession={createJazzSession}
+      config={config}
+      createJazzClient={createJazzClient}
       signedOut={signedOut}
       loading={loading === undefined ? <p role="status">Loading…</p> : loading}
       error={

@@ -13,7 +13,7 @@ import {
   Spinner,
   VStack,
 } from "@astryxdesign/core";
-import { useAll, useSession } from "jazz-tools/react";
+import { useAll, useJazzAuth, useSession } from "jazz-tools/react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { app } from "@/schema";
 import { AssetShelf } from "@/src/components/AssetShelf";
@@ -76,8 +76,9 @@ export function PosterStudio({
 }) {
   const session = useSession();
   const { data: authSession } = authClient.useSession();
+  const { reauthenticate } = useJazzAuth();
   const { data: canvases, error: canvasesError } = useAll(app.canvases);
-  const author = session?.user.account ?? null;
+  const author = session?.user ?? null;
   // The poster the user picked in this visit; until then the invited poster,
   // else the one open before a reload (not whichever syncs first). The
   // remembered poster is read once the account is known, which can be after
@@ -155,7 +156,9 @@ export function PosterStudio({
             label="Sign out"
             variant="ghost"
             clickAction={async () => {
+              // Signs out of Better Auth, then Jazz follows the backend's answer.
               await authClient.signOut();
+              await reauthenticate();
               window.location.assign("/");
             }}
           />

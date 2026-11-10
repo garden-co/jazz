@@ -56,7 +56,7 @@ where
             .unwrap_or_else(|| {
                 panic!("subscription stream closed while waiting for {description}")
             });
-        if let SubscriptionStreamItem::Rejected { reason } = item {
+        if let SubscriptionStreamItem::Rejected { reason, .. } = item {
             panic!("subscription rejected while waiting for {description}: {reason:?}");
         }
 

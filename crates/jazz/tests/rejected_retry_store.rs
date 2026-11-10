@@ -30,11 +30,7 @@ fn schema() -> JazzSchema {
     let mine = PolicyExpr::Cmp {
         column: "owner".to_owned(),
         op: CmpOp::Eq,
-        value: PolicyValue::SessionRef(vec![
-            "user".to_owned(),
-            "identity".to_owned(),
-            "subject".to_owned(),
-        ]),
+        value: PolicyValue::SessionRef(vec!["identity".to_owned(), "subject".to_owned()]),
     };
     compile_schema(
         &SchemaBuilder::new()
@@ -74,7 +70,7 @@ fn authority() -> Db {
 fn connect(client: &Db, server: &Db) {
     let (client_side, server_side) = duplex_transport::duplex();
     block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, alice());
+    server.accept_subscriber(server_side, alice()).unwrap();
 }
 
 fn pump(client: &Db, server: &Db) {
@@ -166,7 +162,7 @@ fn the_originating_store_keeps_a_refused_payload_until_it_is_reported() {
     };
     assert_eq!((table.as_str(), written), ("notes", row.0.as_bytes()));
     assert_eq!(
-        cells.get("title"),
+        cells.get(&common::stored(&client, "notes", "title")),
         Some(&Value::String("in bob's name".into()))
     );
     assert!(server.rejected_transactions().unwrap().is_empty());

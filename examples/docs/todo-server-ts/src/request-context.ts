@@ -1,58 +1,57 @@
-import type { Request, Response } from "express";
-import type { JazzClient } from "jazz-tools/backend";
+import type { Jazz } from "jazz-tools/backend";
 import { app as schemaApp } from "../schema.js";
 
-declare const client: JazzClient;
+declare const jazz: Jazz;
 
-function sendQueryError(res: Response): void {
-  res.status(500).json({ error: "Failed to query todos" });
+function queryError(): Response {
+  return Response.json({ error: "Failed to query todos" }, { status: 500 });
 }
 
 // #region backend-request-handler-ts
-export async function listTodosForRequester(req: Request, res: Response): Promise<void> {
+export async function listTodosForRequester(request: Request): Promise<Response> {
   try {
-    const requester = await client.forRequest(req);
+    const requester = await jazz.forReqUser(request);
     const rows = await requester.all(schemaApp.todos.where({ done: true }));
-    res.json(rows);
+    return Response.json(rows);
   } catch {
-    sendQueryError(res);
+    return queryError();
   }
 }
 // #endregion backend-request-handler-ts
 
 // #region permissions-simple-ts
-export async function listTodosWithSimplePolicy(req: Request, res: Response): Promise<void> {
+export async function listTodosWithSimplePolicy(request: Request): Promise<Response> {
   try {
-    const requester = await client.forRequest(req);
+    const requester = await jazz.forReqUser(request);
     const rows = await requester.all(schemaApp.todos.where({ done: false }));
-    res.json(rows);
+    return Response.json(rows);
   } catch {
-    sendQueryError(res);
+    return queryError();
   }
 }
 // #endregion permissions-simple-ts
 
 // #region permissions-inherits-ts
 export async function listTodosWithInheritedPolicy(
-  req: Request<{ projectId: string }>,
-  res: Response,
-): Promise<void> {
+  request: Request,
+  projectId: string,
+): Promise<Response> {
   try {
-    const requester = await client.forRequest(req);
-    const rows = await requester.all(schemaApp.todos.where({ projectId: req.params.projectId }));
-    res.json(rows);
+    const requester = await jazz.forReqUser(request);
+    const rows = await requester.all(schemaApp.todos.where({ projectId }));
+    return Response.json(rows);
   } catch {
-    sendQueryError(res);
+    return queryError();
   }
 }
 // #endregion permissions-inherits-ts
 
 // #region backend-attribution-ts
-export async function createAttributedHandles(req: Request) {
+export async function createAttributedHandles(request: Request) {
   return {
-    backendDb: client.db,
-    requesterDb: await client.forRequest(req),
-    attributedRequestDb: await client.withAttributionForRequest(req),
+    backendDb: jazz.db,
+    requesterDb: await jazz.forReqUser(request),
+    attributedRequestDb: await jazz.withAttribution(request),
   };
 }
 // #endregion backend-attribution-ts

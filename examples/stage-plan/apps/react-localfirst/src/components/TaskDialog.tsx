@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { useAll, useDb } from "jazz-tools/react";
+import { useEffect, useState } from "react";
+import { useAll } from "jazz-tools/react";
 import { Avatar } from "@astryxdesign/core/Avatar";
 import { Button } from "@astryxdesign/core/Button";
 import { Dialog, DialogHeader } from "@astryxdesign/core/Dialog";
@@ -26,7 +26,6 @@ import {
   type CrewMember,
 } from "../model/actions.js";
 import { useMe } from "../model/me.js";
-import { rebaseText } from "../model/text-rebase.js";
 import { ActivityFeed } from "./ActivityFeed.js";
 
 type TaskWithTime = Task & { $updatedAt: Date };
@@ -77,15 +76,15 @@ function TaskDetail({
   crew: CrewMember[];
   onClose: () => void;
 }) {
-  const db = useDb();
   const me = useMe();
   const [title, setTitle] = useState(task.title);
   const [notes, setNotes] = useState(task.notes ?? "");
-  // The notes when you started typing, to tell your edits from a crewmate's.
-  const notesBase = useRef(task.notes ?? "");
+  // The notes as they were when you started typing: the save is an edit of
+  // them, so a crewmate's edit that arrived meanwhile is merged, not undone.
+  const [notesBase, setNotesBase] = useState<string | null>(task.notes ?? null);
   const [comment, setComment] = useState("");
   const [canDelete, setCanDelete] = useState(false);
-  const { data: comments = [] } = useAll(
+  const { data: comments = [], db } = useAll(
     app.comments
       .where({ taskId: task.id })
       .select("*", "$createdAt")
@@ -121,9 +120,7 @@ function TaskDetail({
   };
   const commitNotes = () => {
     setFocused(null);
-    const next = rebaseText(notesBase.current, notes, task.notes ?? "");
-    setNotes(next);
-    if (next !== (task.notes ?? "")) updateTaskNotes(db, task, next);
+    if (notes !== (notesBase ?? "")) updateTaskNotes(db, task, notes, notesBase);
   };
 
   const crewOptions = [
@@ -186,7 +183,7 @@ function TaskDetail({
               value={notes}
               onChange={setNotes}
               onFocus={() => {
-                notesBase.current = task.notes ?? "";
+                setNotesBase(task.notes ?? null);
                 setFocused("notes");
               }}
               onBlur={commitNotes}

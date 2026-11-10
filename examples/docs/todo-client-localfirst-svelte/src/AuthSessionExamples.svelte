@@ -1,15 +1,14 @@
 <script lang="ts">
-	import { getDb, getSession, QuerySubscription } from 'jazz-tools/svelte';
+	import { getSession, QuerySubscription } from 'jazz-tools/svelte';
 	import { app } from '../session-app.js';
 
-  const db = getDb();
 
   // #region auth-session-svelte-hook
   const session = getSession();
   // #endregion auth-session-svelte-hook
 
   // #region auth-session-svelte-user
-  const sessionUser = $derived(session.current?.user.account ?? null);
+  const sessionUser = $derived(session.current?.user ?? null);
   // #endregion auth-session-svelte-user
 
   // #region auth-session-svelte-query
@@ -22,7 +21,7 @@
   function addOwnedTodo(title: string) {
     if (!sessionUser) return;
 
-    db.insert(app.todos, {
+    ownedTodos.db.insert(app.todos, {
       title,
       done: false,
       owner_id: sessionUser,

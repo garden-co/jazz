@@ -132,3 +132,40 @@ fn validate_relation_policy_value(value: &RelationValueRef) -> Result<(), String
 fn relation_policy_literal(literal: &serde_json::Value) -> Result<Value, serde_json::Error> {
     serde_json::from_value(literal.clone())
 }
+
+#[cfg(test)]
+mod tests {
+    use jazz::tools::public_schema::{
+        PolicyExpr, RelationExpr, RelationUnionArm, TableName, TablePolicies,
+    };
+
+    #[test]
+    fn malformed_relation_union_labels_are_refused() {
+        let leaf = || RelationExpr::TableScan {
+            table: String::from("todos"),
+            alias: None,
+        };
+        for labels in [
+            vec!["".to_owned()],
+            vec!["duplicate".to_owned(), "duplicate".to_owned()],
+            vec!["contains\0nul".to_owned()],
+            vec!["x".repeat(4097)],
+        ] {
+            let permissions = std::collections::HashMap::from([(
+                TableName::new("todos"),
+                TablePolicies::new().with_select(PolicyExpr::ExistsRel {
+                    rel: RelationExpr::Union {
+                        inputs: labels
+                            .into_iter()
+                            .map(|label| RelationUnionArm {
+                                label,
+                                input: leaf(),
+                            })
+                            .collect(),
+                    },
+                }),
+            )]);
+            assert!(super::validate_permissions_relations(&permissions).is_err());
+        }
+    }
+}

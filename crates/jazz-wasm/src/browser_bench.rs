@@ -1,6 +1,6 @@
 //! Browser store comparison probes (`browser-bench` feature, never in the
-//! shipping bundle): the same workload on the IndexedDB and OPFS VFSes, or
-//! in memory, timed from inside the worker.
+//! shipping bundle): the same workload on the IndexedDB VFS or in memory,
+//! timed from inside the worker.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -71,7 +71,7 @@ fn ms(start: Instant) -> f64 {
     start.elapsed().as_secs_f64() * 1000.0
 }
 
-/// Open `{ backend: "indexeddb" | "opfs" | "memory", path? }`.
+/// Open `{ backend: "indexeddb" | "memory", path? }`.
 #[wasm_bindgen(js_name = browserBenchOpen)]
 pub async fn browser_bench_open(storage: JsValue) -> Result<JsValue, JsValue> {
     let memory = js_sys::Reflect::get(&storage, &JsValue::from_str("backend"))?
@@ -191,7 +191,10 @@ pub async fn browser_bench_close() -> Result<JsValue, JsValue> {
     };
     let start = Instant::now();
     if let Some(store) = &store {
-        store.flush().await?;
+        store
+            .flush()
+            .await
+            .map_err(|error| JsValue::from_str(&error))?;
     }
     let flush_ms = ms(start);
     db.close().await.map_err(err)?;

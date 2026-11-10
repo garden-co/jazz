@@ -1,0 +1,60 @@
+---
+title: Edit Metadata
+description: "Learn how to read who created and changed a row, and when, through magic columns like $createdBy and $createdAt."
+---
+
+You can select and filter on Jazz's magic columns just like other columns. They are omitted from
+`select("*")`, so opt in explicitly when you want them.
+
+## Edit metadata columns
+
+- `$createdBy`&hairsp;—&hairsp;the Jazz principal that created the row
+- `$createdAt`&hairsp;—&hairsp;when the row was first created
+- `$updatedBy`&hairsp;—&hairsp;the Jazz principal that last updated the row
+- `$updatedAt`&hairsp;—&hairsp;when the row was last updated
+
+`$createdBy` and `$updatedBy` are a `RowAuthor`: `{ account, identity: { issuer, subject } }`.
+`account` is the Jazz account; `identity.subject` is the `userId` your `authenticate` returned for a
+backend sign-in.
+
+Anyone who can read a row can read its `$createdBy` and `$updatedBy`, including
+`identity.subject`, and so can anyone who can read its [history](/docs/reading/history). If your
+`authenticate` returns an email or another personal value as `userId`, every reader of the user's
+rows sees it. Return an opaque id (your auth's user id, not the email) when author identity is
+sensitive.
+
+These are useful for showing authorship, when a row last changed, or building "my created items"
+views without storing duplicate ownership fields.
+
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
+  <Tab value="TypeScript">
+    <include cwd lang="ts">
+      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-edit-metadata-magic-columns-ts
+    </include>
+  </Tab>
+  <Tab value="Effect">
+    <include cwd lang="ts">
+      ../examples/docs/todo-effect/src/docs-snippets.ts#reading-edit-metadata-magic-columns-effect
+    </include>
+  </Tab>
+</Tabs>
+
+See [Declarative Permissions](/docs/schemas/policies) for policy examples using `$createdBy` and the other
+magic columns.
+
+## Deletion metadata columns
+
+After `.includeDeleted()`, you can select, filter, and sort by `$deletedAt` and `$deletedBy`.
+They return the winning deletion's authored timestamp as a `Date` and author as a `RowAuthor`, or `null` for live and restored rows.
+
+```ts
+const deletedTasks = await db.all(
+  app.tasks
+    .includeDeleted()
+    .where({ $deletedAt: { isNull: false } })
+    .select("title", "$deletedAt", "$deletedBy"),
+);
+```
+
+For [history rows](/docs/reading/history#deleted-rows), every version shares
+the logical row's current deletion timestamp and author.

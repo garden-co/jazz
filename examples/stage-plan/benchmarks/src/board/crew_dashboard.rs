@@ -24,10 +24,10 @@ fn schema() -> JazzSchema {
             .table(
                 TableSchemaBuilder::new("teams")
                     .column("member", ColumnType::Uuid)
-                    .policies(TablePolicies::new().with_select(PolicyExpr::eq_session(
-                        "member",
-                        vec!["user".into(), "account".into()],
-                    ))),
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::eq_session("member", vec!["user".into()])),
+                    ),
             )
             .table(
                 TableSchemaBuilder::new("tasks")
@@ -49,7 +49,7 @@ fn schema() -> JazzSchema {
 fn connect(upstream: &Db, downstream: &Db, author: AuthorSubject) {
     let (client, server) = jazz::db::duplex();
     block_on(downstream.connect_upstream(client));
-    upstream.accept_subscriber(server, author);
+    upstream.accept_subscriber(server, author).unwrap();
 }
 fn open(schema: &JazzSchema, tag: u8, author: AuthorSubject, core: bool) -> Db {
     let config = DbConfig::new(
@@ -237,7 +237,7 @@ impl FanoutFixture {
                         }
                         self.settled[index] = settled;
                     }
-                    SubscriptionEvent::Rejected { reason } => {
+                    SubscriptionEvent::Rejected { reason, .. } => {
                         panic!("dashboard rejected: {reason:?}")
                     }
                     SubscriptionEvent::Closed => panic!("dashboard closed"),

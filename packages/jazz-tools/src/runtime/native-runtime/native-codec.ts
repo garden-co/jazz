@@ -13,7 +13,9 @@ import {
 } from "./native-row-codec.js";
 import { parseCanonicalAuthorSubject } from "../author-id.js";
 import { exactSignedI64 } from "./exact-integer.js";
+import { runtimeSchemaJsonReplacer } from "../../drivers/schema-wire.js";
 import { encodeRelationQueryPostcard, type RelExpr } from "../../ir.js";
+import type { ClientMigrations } from "../client-migrations.js";
 
 const fatalUtf8Decoder = new Utf8Decoder({ fatal: true });
 
@@ -101,6 +103,8 @@ export function openConfig(
   historyComplete = false,
   initialSyncFlushEvery?: number,
   selfSignedClientProof?: NativeSelfSignedClientProof,
+  migrations?: ClientMigrations,
+  systemNode?: Uint8Array,
 ): Uint8Array {
   const writer = new PostcardWriter();
   writer.bytes(node);
@@ -116,9 +120,20 @@ export function openConfig(
   } else {
     writer.some((value) => value.u64(initialSyncFlushEvery));
   }
-  // The native binding keeps a trailing `backend_credential` slot solely to
-  // reject legacy raw ingress. New configs must never serialize one.
-  writer.none();
+  // The app's versions and migrations, as JSON the binding lowers into the
+  // lenses its store opens along (SPEC 10.7).
+  if (migrations == null) {
+    writer.none();
+  } else {
+    writer.some((value) => value.bytes(clientMigrationsBytes(migrations)));
+  }
+  // The node SYSTEM provenance names, when a backend's runtime node is drawn
+  // fresh per open but its subject stays stable.
+  if (systemNode == null) {
+    writer.none();
+  } else {
+    writer.some((value) => value.bytes(systemNode));
+  }
   return writer.finish();
 }
 
@@ -567,11 +582,37 @@ export function rowCount(batches: NativeRowBatch[]): number {
   return batches.reduce((sum, batch) => sum + batch.rows.length, 0);
 }
 
+/** Byte strings at least this long are copied whole, not byte by byte. */
+const POSTCARD_WHOLE_BYTES = 64;
+
 export class PostcardWriter {
+  /** Single bytes written since the last part. */
   private chunks: number[] = [];
+  /** What was written before `chunks`, in order. */
+  private parts: Uint8Array[] = [];
+  private partsBytes = 0;
 
   finish(): Uint8Array {
-    return Uint8Array.from(this.chunks);
+    if (this.parts.length === 0) return Uint8Array.from(this.chunks);
+    this.flushChunks();
+    const out = new Uint8Array(this.partsBytes);
+    let offset = 0;
+    for (const part of this.parts) {
+      out.set(part, offset);
+      offset += part.byteLength;
+    }
+    return out;
+  }
+
+  private flushChunks(): void {
+    if (this.chunks.length === 0) return;
+    this.pushPart(Uint8Array.from(this.chunks));
+    this.chunks = [];
+  }
+
+  private pushPart(part: Uint8Array): void {
+    this.parts.push(part);
+    this.partsBytes += part.byteLength;
   }
 
   u64(value: number | bigint): void {
@@ -638,9 +679,15 @@ export class PostcardWriter {
 
   bytes(value: Uint8Array, withLength = true): void {
     if (withLength) this.u64(value.length);
-    for (let offset = 0; offset < value.length; offset += 16_384) {
-      this.chunks.push(...value.subarray(offset, offset + 16_384));
+    if (value.length < POSTCARD_WHOLE_BYTES) {
+      for (const byte of value) this.chunks.push(byte);
+      return;
     }
+    // A large value (a large-value leaf, a frame in a batch) is copied
+    // whole: pushing it byte by byte took ~80 ms per MB. `new Uint8Array`
+    // copies even a Node Buffer, whose slice() would share its memory.
+    this.flushChunks();
+    this.pushPart(new Uint8Array(value));
   }
 
   vec(writeItem: (writer: PostcardWriter, index: number) => void, length: number): void {
@@ -797,6 +844,11 @@ export function assertBytes(value: unknown, label: string): Uint8Array {
     return Uint8Array.from(value);
   }
   throw new Error(`expected ${label} to be bytes`);
+}
+
+/** An app's migrations as the bindings take them (JSON). */
+export function clientMigrationsBytes(migrations: ClientMigrations): Uint8Array {
+  return utf8(JSON.stringify(migrations, runtimeSchemaJsonReplacer));
 }
 
 export function utf8(value: string): Uint8Array {

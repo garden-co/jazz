@@ -4,7 +4,7 @@ import { userEvent } from "vitest/browser";
 import { createRoot, type Root } from "react-dom/client";
 import type { QueryBuilder, QueryOptions } from "../../src/runtime/db.js";
 import {
-  createJazzClient as createPublicJazzClient,
+  openJazzClient as createPublicJazzClient,
   type JazzClient,
 } from "../../src/react/create-jazz-client.js";
 import { acquireBrowserTestAccount } from "./account-fixtures.js";
@@ -100,7 +100,7 @@ function useSuspenseResult<T extends { id: string }>(
   query?: QueryBuilder<T>,
   options?: QueryOptions,
 ) {
-  return { data: useAllSuspense(query, options), error: undefined, isLoading: false };
+  return { data: useAllSuspense(query, options).data, error: undefined, isLoading: false };
 }
 
 function useNonSuspenseResult<T extends { id: string }>(

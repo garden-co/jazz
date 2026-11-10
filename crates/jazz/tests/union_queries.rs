@@ -311,7 +311,7 @@ fn union_arm_labels_must_be_unique_and_unions_do_not_nest() {
 #[test]
 fn every_union_arm_applies_the_read_policy() {
     let db = open(
-        schema(Some(session_eq("owner", &["user", "identity", "subject"]))),
+        schema(Some(session_eq("owner", &["identity", "subject"]))),
         1,
     );
     let reader = AuthorSubject::for_test_bytes([0xb0; 16]);
@@ -556,7 +556,7 @@ fn pump(server: &Db, client: &Db) {
 #[test]
 fn a_synced_union_ships_every_arms_rows_under_the_readers_policy() {
     let server = open(
-        schema(Some(session_eq("owner", &["user", "identity", "subject"]))),
+        schema(Some(session_eq("owner", &["identity", "subject"]))),
         0,
     );
     let reader = AuthorSubject::for_test_bytes([0xb0; 16]);
@@ -566,12 +566,12 @@ fn a_synced_union_ships_every_arms_rows_under_the_readers_policy() {
     insert(&server, 3, "gamma", true, "someone else");
     insert(&server, 4, "delta", true, &me);
     let client = open(
-        schema(Some(session_eq("owner", &["user", "identity", "subject"]))),
+        schema(Some(session_eq("owner", &["identity", "subject"]))),
         1,
     );
     let (client_side, server_side) = duplex();
     let _ = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, reader);
+    server.accept_subscriber(server_side, reader).unwrap();
 
     let query = union(
         vec![

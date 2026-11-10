@@ -31,7 +31,7 @@ use common::{allow_all_policies, compile_schema, exists, outer_eq, session_eq};
 
 const CLIENTS: usize = 4;
 const ROOMS: usize = 3;
-const ME: [&str; 3] = ["user", "identity", "subject"];
+const ME: [&str; 2] = ["identity", "subject"];
 
 fn user(n: usize) -> AuthorSubject {
     AuthorSubject::for_test_bytes([0x40 + n as u8; 16])
@@ -198,7 +198,9 @@ impl Net {
         let (client_side, server_side) = duplex();
         let client = &mut self.clients[index];
         client.upstream = Some(block_on(client.db.connect_upstream(client_side)));
-        self.server.accept_subscriber(server_side, user(client.who));
+        self.server
+            .accept_subscriber(server_side, user(client.who))
+            .unwrap();
     }
 
     fn pump(&self) {
@@ -301,7 +303,7 @@ impl Net {
                     polled.is_ready(),
                     "client {} write {} has no fate after syncing",
                     client.who,
-                    tx - jazz::db::LOCAL_BASE
+                    tx
                 );
                 rejected += matches!(polled, std::task::Poll::Ready(Err(_))) as usize;
             }

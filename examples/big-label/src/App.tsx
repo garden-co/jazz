@@ -59,7 +59,7 @@ export function Operations({
 }) {
   const session = useSession();
   const route = useRoute();
-  const account = session?.user.account;
+  const account = session?.user;
   // Every label this account belongs to: an indexed lookup on the denormalized userId.
   const { data: memberships, isLoading } = useAll(
     account

@@ -7,7 +7,9 @@ import { resolve } from "node:path";
 import { topologyReceipt } from "./vitest-receipts.mjs";
 import {
   jazzServerInfo,
-  jazzServerJwtForUser,
+  jazzAppFront,
+  jazzAppRequest,
+  jazzAppUser,
   stopJazzServerByUrl,
 } from "../../../../packages/jazz-tools/tests/browser/testing-server-node.js";
 
@@ -36,7 +38,6 @@ export default defineConfig({
     include: ["react", "react-dom/client", "react/jsx-dev-runtime"],
   },
   define: {
-    "process.env.NEXT_PUBLIC_JAZZ_APP_ID": JSON.stringify("record-player-browser-tests"),
     "process.env.NEXT_PUBLIC_JAZZ_SERVER_URL": "undefined",
   },
   plugins: [wasm(), topLevelAwait(), react()],
@@ -59,8 +60,10 @@ export default defineConfig({
         jazzBrowserTopologyLog,
         jazzServerInfo: async (_context, appId) => jazzServerInfo(appId),
         jazzServerStop: async (_context, serverUrl) => stopJazzServerByUrl(serverUrl),
-        jazzServerJwtForUser: async (_context, userId, claims, appId) =>
-          jazzServerJwtForUser(userId, claims, appId),
+        jazzAppFront: async (_context, coreUrl, app) => jazzAppFront(coreUrl, app),
+        jazzAppUser: async (_context, frontUrl, userId, claims) =>
+          jazzAppUser(frontUrl, userId, claims),
+        jazzAppRequest: async (_context, url, init) => jazzAppRequest(url, init),
       },
     },
     setupFiles: ["tests/browser/setup-react.ts"],

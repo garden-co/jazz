@@ -15,8 +15,45 @@ export declare class E2EeSodiumStream {
 }
 export type E2eeSodiumStream = E2EeSodiumStream
 
+export declare class JazzCore {
+  /** Open the core's storage and serve it in this process. */
+  static open(options: { appId: string; backendSecret: string; adminSecret: string; dataDir?: string; inMemory?: boolean; blobs?: "files" | "s3" | "sqlite"; blobsDir?: string; s3Bucket?: string; s3Region?: string; s3Endpoint?: string; s3Prefix?: string; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string }): Promise<JazzCore>
+  /**
+   * Route one HTTP request. `url` is the path and query, as the core's
+   * router sees them (`/apps/<appId>/...` or `/health`).
+   */
+  handle(method: string, url: string, headers: Array<Array<string>>, body: Buffer): Promise<JazzCoreResponse>
+  /**
+   * Start a sync session over a socket the host upgraded. `onEvent` gets
+   * each message for the client and, last, the close.
+   */
+  openSocket(headers: Array<Array<string>>, onEvent: (err: Error | null, event: JazzCoreSocketEvent) => void): JazzCoreSocket
+  /**
+   * Start a sync session for a client in this process. Unlike
+   * `openSocket` it has no handshake deadline: the client's Hello waits on
+   * this event loop, which synchronous work can hold for seconds.
+   */
+  openInProcessSocket(onEvent: (err: Error | null, event: JazzCoreSocketEvent) => void): JazzCoreSocket
+  /** Close every session and the storage. */
+  close(): Promise<void>
+}
+
+/** The host's handle on one session. */
+export declare class JazzCoreSocket {
+  /** Pass one binary message from the client. False once the session ended. */
+  send(data: Uint8Array): boolean
+  /**
+   * `send`, resolving once the session has read enough of the messages
+   * before it. A host that awaits it before reading more from its client
+   * holds a fast client back instead of queueing all it sends.
+   */
+  sendWithRoom(data: Uint8Array): Promise<boolean>
+  /** The client's socket closed. */
+  close(): void
+}
+
 export declare class JazzServer {
-  static start(options: { appId: string; backendSecret: string; adminSecret: string; port?: number; host?: string; dataDir?: string; inMemory?: boolean; jwksUrl?: string; jwtIssuer?: string; jwtAudience?: string; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string; schema?: Buffer | Uint8Array | number[] }): Promise<JazzServer>
+  static start(options: { appId: string; backendSecret?: string; adminSecret?: string; port?: number; host?: string; dataDir?: string; inMemory?: boolean; allowLocalFirstAuth?: boolean; telemetryCollectorUrl?: string; schema?: Buffer | Uint8Array | number[]; trustedWorkload?: { issuer: string; audience: string; subject: string } }): Promise<JazzServer>
   get appId(): string
   get url(): string
   get port(): number
@@ -62,7 +99,7 @@ export declare class NapiDb {
   deleteInTransaction(openTransactionId: string, table: string, rowId: Uint8Array, options?: DeleteOptions | undefined | null): void
   restore(table: string, rowId: Uint8Array, cells?: Uint8Array | undefined | null, options?: RestoreOptions | undefined | null): Write
   restoreInTransaction(openTransactionId: string, table: string, rowId: Uint8Array, cells?: Uint8Array | undefined | null, options?: RestoreOptions | undefined | null): void
-  beginStreamingMutation(table: string, rowId: Uint8Array, cells: Uint8Array, column: string, mutation?: string | undefined | null, author?: Uint8Array | undefined | null, attribution?: Uint8Array | undefined | null, updatedAtMs?: number | undefined | null, head?: JsonValue | undefined | null, base?: JsonValue | undefined | null): StreamingMutation
+  beginStreamingMutation(table: string, rowId: Uint8Array, cells: Uint8Array, column: string, mutation?: string | undefined | null, author?: Uint8Array | undefined | null, attribution?: Uint8Array | undefined | null, updatedAtMs?: number | undefined | null, head?: JsonValue | undefined | null, base?: JsonValue | undefined | null, transaction?: string | undefined | null): StreamingMutation
   static openMemory(schema: Uint8Array, config: Uint8Array): NapiDb
   /**
    * Open a deliberate backend runtime. Unlike the public raw-open entrypoint,
@@ -84,8 +121,11 @@ export declare class NapiDb {
    */
   static openPersistentAsBackend(dataPath: string, schema: Uint8Array, config: Uint8Array): NapiDb
   static openPersistentWithSelfSignedProof(dataPath: string, schema: Uint8Array, config: Uint8Array, token: string, appId: string, claimedAuthor: string): NapiDb
-  /** Register and return a typed view backed by this same runtime owner. */
-  registerSchema(schema: Uint8Array): NapiDb
+  /**
+   * Register and return a typed view backed by this same runtime owner,
+   * of an app shipping `migrations` (its bundle as JSON).
+   */
+  registerSchema(schema: Uint8Array, migrations?: Uint8Array | undefined | null): NapiDb
   /** Begin one owner-wide transaction. */
   beginTransaction(openTransactionId: string, kind: string, author?: Uint8Array | undefined | null, attribution?: Uint8Array | undefined | null): void
   /** Commit an owner-wide transaction by id and optional kind. */
@@ -206,10 +246,27 @@ export declare class PendingNativeRead {
   cancel(): void
 }
 
+/**
+ * A core [`serve_core`] started. The host owns the process's signals and
+ * calls [`ServedCore::stop`] to drain it; dropping it without a stop drains
+ * it too.
+ */
+export declare class ServedCore {
+  /** Start the controlled shutdown: refuse new work, drain, then close. */
+  stop(): void
+  /**
+   * Resolves once the core has stopped; rejects if it failed. Only one
+   * caller may wait.
+   */
+  closed(): Promise<void>
+}
+
 /** A large value uploaded in chunks, then published as one row mutation. */
 export declare class StreamingMutation {
   push(chunk: Uint8Array): void
   finish(): Write
+  /** Stage the value's row mutation in the transaction it began in. */
+  finishInTransaction(): void
   abort(): boolean
 }
 
@@ -221,15 +278,6 @@ export declare class Subscription {
   readAll(): Array<SubscriptionEvent>
   drain(): Array<SubscriptionEvent>
   close(): boolean
-}
-
-export declare class TestJwtIssuer {
-  static start(): Promise<TestJwtIssuer>
-  get jwksUrl(): string
-  get issuer(): string
-  get audience(): string
-  jwtForUser(userId: string, claims?: Record<string, unknown> | undefined, options?: { expiresInSeconds?: number; issuer?: string } | undefined): string
-  stop(): Promise<void>
 }
 
 /**
@@ -254,6 +302,13 @@ export declare class Transport {
    * what is due. Returns the number of frames waiting to be sent.
    */
   tick(): number
+  /**
+   * Why the database dropped this upstream link on its own, with the
+   * core's stable `code` (`authority_changed` for a server whose store
+   * was recreated), or `null` while the link stands. The host stops the
+   * link with it rather than retry.
+   */
+  upstreamRefusal(): UpstreamRefusal | null
   close(): boolean
 }
 
@@ -286,6 +341,19 @@ export declare class Write {
   wait(tier: string, observeOnly?: boolean | undefined | null): Promise<undefined>
   close(): boolean
 }
+
+/** The anchor at `position` (UTF-16 code units) of `text`. */
+export declare function captureTextAnchor(text: string, version: number | undefined | null, position: number, side: JsonValue): JsonValue
+
+/** The range `start..end` (UTF-16 code units) of `text`. */
+export declare function captureTextRange(text: string, version: number | undefined | null, start: number, end: number): JsonValue
+
+/**
+ * Check an app's shipped migrations (the `ClientMigrations` JSON) leading
+ * to the schema hash `target` as a deployment to a new authority would,
+ * without opening a database. `jazz-tools validate` runs it.
+ */
+export declare function checkClientMigrations(migrations: string, target: string): void
 
 export interface DeleteOptions {
   author?: Uint8Array
@@ -339,6 +407,20 @@ export interface InsertOptions {
   updatedAtMs?: number
 }
 
+export interface JazzCoreResponse {
+  status: number
+  headers: Array<Array<string>>
+  body: Buffer
+}
+
+export interface JazzCoreSocketEvent {
+  /** `"message"` or `"close"`. */
+  kind: string
+  data?: Uint8Array
+  code?: number
+  reason?: string
+}
+
 /**
  * Any JSON-compatible value crossing the native JavaScript boundary.
  *
@@ -355,12 +437,26 @@ export declare function mintLocalFirstToken(seedB64: string, audience: string, t
 /** Exact build/ABI fingerprint for the generated native artifact. */
 export declare function nativeArtifactFingerprint(): string
 
+/** Where `anchor` lands in `text`: `{ position, confidence, ambiguous }`. */
+export declare function resolveTextAnchor(anchor: JsonValue, text: string, version?: number | undefined | null): JsonValue
+
+/** Where `range` lands in `text`: `{ start, end, confidence, ambiguous }`. */
+export declare function resolveTextRange(range: JsonValue, text: string, version?: number | undefined | null): JsonValue
+
 export interface RestoreOptions {
   author?: Uint8Array
   attribution?: Uint8Array
   branch?: JsonValue
   updatedAtMs?: number
 }
+
+/**
+ * Serve a production core (the `jazz_server::run` shell: connection and
+ * memory limits, graceful drain) until [`ServedCore::stop`]. One per
+ * process at a time: the cores would share the process's storage cache
+ * budget, so a second call fails until the first core has stopped.
+ */
+export declare function serveCore(options: { appId: string; port: number; dataDir: string; blobs: { kind: "sqlite" } | { kind: "files"; dir?: string } | { kind: "s3"; bucket?: string; region?: string; endpoint?: string; prefix?: string; roleFromWorkload?: boolean; environment?: string } | { kind: "vercel-blob"; storeId?: string; prefix?: string; tokenFromWorkload?: boolean; environment?: string }; trustedWorkload?: { issuer: string; audience: string; subject: string }; backendSecret?: string; adminSecret?: string; allowLocalFirstAuth?: boolean; shutdownTimeoutSecs?: number; maxConnections?: number; memoryLimitBytes?: number }): ServedCore
 
 /** Owned libsodium device encryption keys. */
 export interface SodiumDeviceKeyPair {
@@ -411,6 +507,14 @@ export interface UpsertOptions {
   head?: JsonValue
   base?: JsonValue
   updatedAtMs?: number
+}
+
+/** Why the database dropped an upstream link (see `Transport.upstreamRefusal`). */
+export interface UpstreamRefusal {
+  /** The core's stable error code. */
+  code: string
+  /** What the core said, as an error's message. */
+  message: string
 }
 
 /** Validate a schema and its embedded permissions without opening a database. */

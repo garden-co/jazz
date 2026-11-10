@@ -17,7 +17,7 @@ Invariant digest:
 - `INV-DATA-2`: `NodeAlias` and `SchemaVersionAlias` MUST be node-local storage aliases allocated in `jazz_nodes` and `jazz_schema_versions`; all egress from stored rows MUST resolve aliases back to `NodeUuid` and `SchemaVersionId`.
 - `INV-DATA-3`: Persisted system authors MUST use the reserved nil account UUID, `urn:jazz:system` issuer, and originating node UUID subject; this provenance MUST NOT grant the internal SYSTEM policy-bypass capability, and external admission MUST reject the reserved account and issuer.
 - `INV-DATA-4`: `TxTime` MUST encode physical milliseconds in the high 46 bits and a logical counter in the low 18 bits. Its unsigned packed order is its canonical ordering. Its internal allocator MUST advance the physical component on logical exhaustion and return a typed overflow only after exhausting the final packed value.
-- `INV-DATA-5`: A `TxId` MUST identify a transaction as `(time: TxTime, node: NodeUuid)`; each concurrently transaction-issuing runtime MUST hold one serializable `NodeUuid` before it mints, and a node may be reused only after an explicit clean handoff durably records that runtime's complete minted-HLC high-water; a failed, dropped, or otherwise uncertain lease is permanently retired. Stored transaction rows MUST use primary key `(time, node_id)` where `node_id` is the local alias for the wire `NodeUuid`.
+- `INV-DATA-5`: A `TxId` MUST identify a transaction as `(time: TxTime, node: NodeUuid)`; each concurrently transaction-issuing runtime MUST hold one exclusive `NodeUuid` before it mints; every node a host mints for a runtime, pooled or not, MUST be a random version-4 UUID (RFC 9562) (stable configured nodes are exempt: a persistent store's deterministic node and a server's fixed authority node; nodes an earlier build pooled are reused as they are), and a pooled node may be reissued only after an explicit clean handoff durably records that runtime's complete minted high-water; a failed, dropped, or otherwise uncertain lease is permanently retired. Stored transaction rows MUST use primary key `(time, node_id)` where `node_id` is the local alias for the wire `NodeUuid`.
 - `INV-DATA-6`: `SchemaVersionId` MUST be UUIDv5 over `JazzSchema::canonical_bytes()` in namespace `SCHEMA_VERSION_NAMESPACE`.
 - `INV-DATA-7`: Canonical schema identity MUST change when a column's `MergeStrategy` changes.
 - `INV-DATA-9`: A declared `MergeStrategy::Counter` MUST be accepted only on non-nullable integer columns. Public `Integer` and `BigInt` columns lower to `I32` and `I64`; internal schemas may use `U8`, `U16`, `U32`, `U64`, `I32`, or `I64`.
@@ -75,8 +75,8 @@ delivery can recognize its own transactions.
 
 A foreground runtime is a separate live transaction issuer, even when it is
 paired with a durable relay. Its host gives it an exclusive foreground-node
-lease before its first write. The lease starts with either a new CSPRNG node and
-zero high-water or a node returned by a prior _clean_ handoff together with the
+lease before its first write. The lease starts with either a new random
+version-4 UUID node and zero high-water or a node returned by a prior _clean_ handoff together with the
 exact HLC high-water reported by that runtime's native core. The runtime must
 seed its HLC at or above that high-water, and the high-water includes every
 minted transaction, including one later rolled back or never submitted. On
@@ -189,6 +189,16 @@ therefore a new schema version that goes through ordinary catalogue lineage
 publication (ch. 10), which backfills the new index for existing rows; it is
 never a silent in-place respelling of the stored schema.
 `crates/jazz/tests/composite_indexes.rs` pins a plain and two composite ids.
+A schema with a latest-only table (ch. 4 §4.9) is encoded under its own
+domain tag, `jazz-schema-latest-only-tables`: a `u64` count and each such
+table's length-prefixed name in name order, then the bytes the schema would
+have without it. A retention change is therefore a version of its own, which
+a store admits like any other, and a write prunes by the version it was
+written under; every schema that keeps full history keeps its id. The
+compatibility id leaves retention out, as it leaves out merge strategies: it
+does not change how a row is stored, so such versions share stored names and
+join by an empty lens. The public structural `SchemaHash` covers `history`
+only when a table is latest-only, likewise.
 The canonical bytes deliberately do **not** include read/write
 policies: policies are runtime/catalogue metadata attached to a storage schema
 version, so publishing permissions for the same tables can refresh authorization

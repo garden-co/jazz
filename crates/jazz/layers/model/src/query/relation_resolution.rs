@@ -964,6 +964,14 @@ fn relation_value_to_operand(value: &RelationValueRef) -> Result<Operand, QueryE
         }
         RelationValueRef::Param(name) => Ok(Operand::Param(name.clone())),
         RelationValueRef::SessionRef(path) => {
+            if let Some(replacement) =
+                crate::model::public_schema_convert::removed_session_path(path)
+            {
+                return Err(relation_unification_error(format!(
+                    "session.{} was removed: use {replacement}",
+                    path.join(".")
+                )));
+            }
             if let Some(name) = crate::query::author_claim_path_key(path) {
                 return Ok(Operand::Claim(name));
             }
@@ -973,7 +981,7 @@ fn relation_value_to_operand(value: &RelationValueRef) -> Result<Operand, QueryE
                     Ok(Operand::Claim(provider_claim_operand_key(name)))
                 }
                 _ => Err(relation_unification_error(
-                    "session refs support session.user and session.claims[\"name\"]",
+                    "session refs support session.user, session.identity, and session.claims[\"name\"]",
                 )),
             }
         }

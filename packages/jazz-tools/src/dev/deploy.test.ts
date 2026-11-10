@@ -5,7 +5,7 @@ import { computeSchemaHash, deploy } from "./catalogue.js";
 import type { DeploymentRequest } from "./catalogue-api.js";
 
 const server = { appId: "deploy-test", serverUrl: "http://localhost:1625", adminSecret: "test" };
-const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) });
+const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) }, { migrations: "none" });
 const reply = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
 afterEach(() => vi.unstubAllGlobals());
 
@@ -19,11 +19,11 @@ it("deploys once per invocation and re-fetches the graph on the next invocation"
       calls.push(input.split("/admin/")[1]!);
       if (input.endsWith("/migrations/graph"))
         return reply({
-          activeSchemaHash: stored ? hash : null,
+          latestBundleSchemaHash: stored ? hash : null,
           schemas: stored ? [hash] : [],
           migrations: [],
         });
-      expect(input).toBe(`${server.serverUrl}/apps/${server.appId}/admin/deploy`);
+      expect(input).toBe(`${server.serverUrl}/apps/${server.appId}/admin/bundles`);
       expect(init?.headers).toMatchObject({ "X-Jazz-Admin-Secret": "test" });
       const body = JSON.parse(String(init?.body)) as DeploymentRequest;
       expect(body).toEqual({
@@ -42,18 +42,18 @@ it("deploys once per invocation and re-fetches the graph on the next invocation"
   );
   expect((await deploy({ ...server, schema: app, permissions: {} })).changed).toBe(true);
   expect((await deploy({ ...server, schema: app, permissions: {} })).changed).toBe(false);
-  expect(calls).toEqual(["migrations/graph", "deploy", "migrations/graph", "deploy"]);
+  expect(calls).toEqual(["migrations/graph", "bundles", "migrations/graph", "bundles"]);
 });
 
 it("surfaces server validation failures without retrying or publishing individual artifacts", async () => {
   const hash = await computeSchemaHash(app.wasmSchema);
   const fetchMock = vi.fn(async (input: string) => {
     if (input.endsWith("/migrations/graph"))
-      return reply({ activeSchemaHash: hash, schemas: [hash], migrations: [] });
-    expect(input.endsWith("/admin/deploy")).toBe(true);
+      return reply({ latestBundleSchemaHash: hash, schemas: [hash], migrations: [] });
+    expect(input.endsWith("/admin/bundles")).toBe(true);
     return reply(
       {
-        code: "unreachable_deployment_target",
+        code: "disconnected_migration_graph",
         error: "a concurrent deployment added another branch",
       },
       422,
@@ -67,10 +67,16 @@ it("surfaces server validation failures without retrying or publishing individua
 });
 
 it("includes historical schemas and multiple migrations in a single request", async () => {
-  const middle = s.defineApp({ notes: s.table({ title: s.string(), a: s.string() }, {}) });
-  const target = s.defineApp({
-    notes: s.table({ title: s.string(), a: s.string(), b: s.string() }, {}),
-  });
+  const middle = s.defineApp(
+    { notes: s.table({ title: s.string(), a: s.string() }, {}) },
+    { migrations: "none" },
+  );
+  const target = s.defineApp(
+    {
+      notes: s.table({ title: s.string(), a: s.string(), b: s.string() }, {}),
+    },
+    { migrations: "none" },
+  );
   const hashes = await Promise.all(
     [app, middle, target].map((app) => computeSchemaHash(app.wasmSchema)),
   );
@@ -90,8 +96,8 @@ it("includes historical schemas and multiple migrations in a single request", as
     "fetch",
     vi.fn(async (input: string, init?: RequestInit) => {
       if (input.endsWith("/migrations/graph"))
-        return reply({ activeSchemaHash: hashes[0], schemas: [hashes[0]], migrations: [] });
-      expect(input.endsWith("/admin/deploy")).toBe(true);
+        return reply({ latestBundleSchemaHash: hashes[0], schemas: [hashes[0]], migrations: [] });
+      expect(input.endsWith("/admin/bundles")).toBe(true);
       const body = JSON.parse(String(init?.body)) as DeploymentRequest;
       expect(body.schemas.map((schema) => schema.hash).sort()).toEqual(hashes.slice(1).sort());
       expect(body.migrations.map(({ fromHash, toHash }) => [fromHash, toHash])).toEqual([
@@ -119,7 +125,7 @@ it("includes historical schemas and multiple migrations in a single request", as
 
 it("preserves bigint and byte defaults in the deployment JSON", async () => {
   const to = { notes: s.table({ title: s.string(), count: s.bigint(), data: s.bytes() }, {}) };
-  const target = s.defineApp(to);
+  const target = s.defineApp(to, { migrations: "none" });
   const fromHash = await computeSchemaHash(app.wasmSchema);
   const migration = m.defineMigration({
     from: { notes: s.table({ title: s.string() }, {}) },
@@ -135,8 +141,8 @@ it("preserves bigint and byte defaults in the deployment JSON", async () => {
     "fetch",
     vi.fn(async (input: string, init?: RequestInit) => {
       if (input.endsWith("/migrations/graph"))
-        return reply({ activeSchemaHash: fromHash, schemas: [fromHash], migrations: [] });
-      expect(input.endsWith("/admin/deploy")).toBe(true);
+        return reply({ latestBundleSchemaHash: fromHash, schemas: [fromHash], migrations: [] });
+      expect(input.endsWith("/admin/bundles")).toBe(true);
       const body = JSON.parse(String(init?.body));
       expect(body.migrations[0].forward[0].operations).toEqual([
         {

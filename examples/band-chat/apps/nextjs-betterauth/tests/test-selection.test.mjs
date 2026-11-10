@@ -21,7 +21,13 @@ test("the Node package gate excludes browser-only topology receipts", () => {
 });
 
 test("the topology browser project provides the complete Jazz server command contract", () => {
-  for (const command of ["jazzServerInfo", "jazzServerStop", "jazzServerJwtForUser"]) {
+  for (const command of [
+    "jazzServerInfo",
+    "jazzServerStop",
+    "jazzAppFront",
+    "jazzAppUser",
+    "jazzAppRequest",
+  ]) {
     assert.match(browserConfig, new RegExp(`\\b${command}\\s*:`));
   }
 });

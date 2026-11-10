@@ -10,7 +10,7 @@ import type { Server } from "node:http";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
-import { createJazzSession, type BackendJwtPublicKey, type Db } from "jazz-tools/backend";
+import { createJazz, fromJWT, remote, sqlite, type Db } from "jazz-tools/backend";
 import { app as schemaApp } from "../schema.js";
 import permissions from "../permissions.js";
 
@@ -39,7 +39,6 @@ export interface TodoServer {
   app: Application;
   db: Db;
   shutdown: () => Promise<void>;
-  flush: () => void;
 }
 
 export interface RunningServer extends TodoServer {
@@ -49,14 +48,26 @@ export interface RunningServer extends TodoServer {
 }
 
 export interface TodoServerConfig {
+  /** The directory Jazz keeps its SQLite data in. */
   dataPath?: string;
-  appId?: string;
+  /** A Jazz core elsewhere to keep the data in instead, with its app id and admin secret. */
   serverUrl?: string;
-  backendSecret?: string;
+  appId?: string;
   adminSecret?: string;
+  /** The JWKS endpoint and issuer of the identity provider whose JWTs this API accepts. */
   jwksUrl?: string;
-  jwtPublicKey?: BackendJwtPublicKey;
-  allowLocalFirstAuth?: boolean;
+  jwtIssuer?: string;
+}
+
+/** The parts of an Express request `authenticate` reads, as a fetch Request. */
+function toRequest(req: Request): globalThis.Request {
+  const headers = new Headers();
+  for (const [name, value] of Object.entries(req.headers)) {
+    for (const item of [value ?? []].flat()) headers.append(name, item);
+  }
+  return new globalThis.Request(`http://${req.headers.host ?? "localhost"}${req.originalUrl}`, {
+    headers,
+  });
 }
 
 // ============================================================================
@@ -70,51 +81,60 @@ export interface TodoServerConfig {
  * @returns TodoServer with app, db, and shutdown function
  */
 export async function createServer(config: TodoServerConfig = {}): Promise<TodoServer> {
-  const dbPath = config.dataPath ?? join(mkdtempSync(join(tmpdir(), "jazz-todo-")), "jazz.db");
-  const appId = config.appId ?? process.env.JAZZ_APP_ID ?? "todo-server-ts";
+  const dataPath = config.dataPath ?? mkdtempSync(join(tmpdir(), "jazz-todo-"));
   const serverUrl = config.serverUrl ?? process.env.JAZZ_SERVER_URL?.trim();
-  const backendSecret = config.backendSecret ?? process.env.JAZZ_BACKEND_SECRET?.trim();
+  const appId = config.appId ?? process.env.JAZZ_APP_ID?.trim();
+  const adminSecret = config.adminSecret ?? process.env.JAZZ_ADMIN_SECRET?.trim();
   const jwksUrl = config.jwksUrl ?? process.env.JAZZ_JWKS_URL?.trim();
-  const jwtPublicKey = config.jwtPublicKey ?? process.env.JAZZ_JWT_PUBLIC_KEY?.trim();
-  const allowLocalFirstAuth =
-    config.allowLocalFirstAuth ??
-    (process.env.JAZZ_ALLOW_LOCAL_FIRST_AUTH === undefined
-      ? undefined
-      : ["true", "1", "yes", "on", "y"].includes(
-          process.env.JAZZ_ALLOW_LOCAL_FIRST_AUTH.trim().toLowerCase(),
-        ));
-  const writeTier = serverUrl ? "global" : "local";
+  const jwtIssuer = config.jwtIssuer ?? process.env.JAZZ_JWT_ISSUER?.trim();
 
-  if (!serverUrl || !backendSecret) {
-    throw new Error(
-      "JAZZ_SERVER_URL and JAZZ_BACKEND_SECRET are required for the upstream-backed server example.",
-    );
+  if (serverUrl && (!appId || !adminSecret)) {
+    throw new Error("JAZZ_SERVER_URL needs JAZZ_APP_ID and JAZZ_ADMIN_SECRET");
+  }
+  if (Boolean(jwksUrl) !== Boolean(jwtIssuer)) {
+    throw new Error("JAZZ_JWKS_URL and JAZZ_JWT_ISSUER go together");
   }
 
   // #region context-setup-ts-backend
-  const session = await createJazzSession({
-    appId,
+  // Who a request is, your backend decides: here, the subject of a JWT
+  // your identity provider signed. Without one configured, nobody is signed in.
+  const authenticate =
+    jwksUrl && jwtIssuer
+      ? fromJWT({ jwksUrl, issuer: jwtIssuer, audience: false })
+      : async () => null;
+
+  const jazz = createJazz({
     app: schemaApp,
     permissions,
-    driver: { type: "persistent", dataPath: dbPath },
-    serverUrl,
-    initial: { backendSecret },
-    jwksUrl,
-    jwtPublicKey,
-    allowLocalFirstAuth,
-    env: "dev",
+    // Jazz Cloud (or your own core), or SQLite in this process.
+    store: serverUrl
+      ? remote({ url: serverUrl, appId: appId!, secret: adminSecret! })
+      : sqlite({ path: dataPath }),
+    authenticate,
   });
-  const snapshot = session.getSnapshot();
-  if (snapshot.status !== "ready" || !snapshot.client) {
-    throw snapshot.error ?? new Error("Backend session is not ready");
-  }
-  const client = snapshot.client;
-  const db = client.db;
+  // The backend's own database, with backend permissions.
+  const db = jazz.db;
   // #endregion context-setup-ts-backend
 
   // Create Express app
   const app = express();
   app.use(express.json());
+
+  // Sign in: returns the caller's Jazz account, creating it on their first
+  // sign-in. Jazz never creates one by itself on the backend; this API has
+  // no browser client (and so no local-first guest to link), so it does.
+  app.post("/sign-in", async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const user = await authenticate(toRequest(req));
+      if (!user) {
+        res.status(401).json({ error: "Unauthorized" });
+        return;
+      }
+      res.json({ account: await jazz.createAccountFor(user.userId) });
+    } catch (e) {
+      next(e);
+    }
+  });
 
   // Track active SSE connections for live updates
   const sseConnections = new Set<Response>();
@@ -167,7 +187,7 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
         done: false,
         owner_id: body.owner_id ?? "93c209ee-dbae-5071-a90d-02f8c0bbcf6a",
       });
-      await inserted.wait({ tier: writeTier });
+      await inserted.wait({ tier: "global" });
 
       res.status(201).json(inserted.value);
 
@@ -181,15 +201,17 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
   // Verify the caller before checking that the requested account is their own.
   app.get("/todos/as/:userId", async (req: Request, res: Response, next: NextFunction) => {
     try {
-      const userDb = await client.forRequest(req).catch(() => undefined);
-      if (!userDb) {
+      const request = toRequest(req);
+      const account = await jazz.accountFor(request);
+      if (!account) {
         res.status(401).json({ error: "Unauthorized" });
         return;
       }
-      if (userDb.getAuthState().session?.user.account !== req.params.userId) {
+      if (account !== req.params.userId) {
         res.status(403).json({ error: "Account mismatch" });
         return;
       }
+      const userDb = await jazz.forReqUser(request);
       const todos = await userDb.all(schemaApp.todos);
       res.json(todos);
     } catch (e) {
@@ -257,7 +279,7 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
         return;
       }
 
-      await db.update(schemaApp.todos, id, updates).wait({ tier: writeTier });
+      await db.update(schemaApp.todos, id, updates).wait({ tier: "global" });
 
       // Fetch updated todo
       const todo = await db.one(schemaApp.todos.where({ id }));
@@ -279,7 +301,7 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
     try {
       const { id } = req.params;
 
-      await db.delete(schemaApp.todos, id).wait({ tier: writeTier });
+      await db.delete(schemaApp.todos, id).wait({ tier: "global" });
       res.status(204).send();
 
       // Notify SSE connections
@@ -304,10 +326,7 @@ export async function createServer(config: TodoServerConfig = {}): Promise<TodoS
     app,
     db,
     shutdown: async () => {
-      await session.close();
-    },
-    flush: () => {
-      client.flush();
+      await jazz.close();
     },
   };
 }

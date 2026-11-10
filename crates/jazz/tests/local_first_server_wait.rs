@@ -98,7 +98,9 @@ fn fresh_client(node: u8) -> Db {
 fn connect(client: &Db, server: &Db) {
     let (client_transport, server_transport) = duplex();
     let _upstream = block_on(client.connect_upstream(client_transport));
-    let _subscriber = server.accept_subscriber(server_transport, AuthorSubject::SYSTEM);
+    let _subscriber = server
+        .accept_subscriber(server_transport, AuthorSubject::SYSTEM)
+        .unwrap();
 }
 
 fn turn(client: &Db, server: Option<&Db>) {
@@ -504,4 +506,44 @@ fn a_remote_read_on_an_unadmitted_schema_version_fails_with_the_reason() {
             .contains("awaiting published catalogue admission"),
         "{error:?}"
     );
+}
+
+/// A read asked while the first connection is still being attempted goes
+/// out on that connection once it attaches: the request was never sent on
+/// an earlier link, so nothing about it was lost.
+///
+/// ```text
+/// alice (empty, attempting) ─ one-shot (wait 60 s) ─ connect ══ server(a..j) ─► a..j
+/// ```
+#[test]
+fn a_read_asked_before_the_first_connection_waits_for_its_answer() {
+    let server = seeded_server();
+    let alice = fresh_client(0x75);
+    alice.set_remote_link_hint(RemoteLinkHint::Attempting);
+    let bytes = postcard::to_allocvec(&items()).expect("encode query");
+    let read = alice.all_serialized_query(&bytes, first_load_remote_wait(LONG), None, None, None);
+    let mut read = pin!(read);
+    let mut context = Context::from_waker(Waker::noop());
+    for _ in 0..3 {
+        assert!(
+            read.as_mut().poll(&mut context).is_pending(),
+            "the read waits for the connection being attempted"
+        );
+        turn(&alice, None);
+    }
+    connect(&alice, &server);
+    alice.set_remote_link_hint(RemoteLinkHint::Live);
+    for _ in 0..MAX_TURNS {
+        if let Poll::Ready(result) = read.as_mut().poll(&mut context) {
+            let SerializedReadResult::Rows(rows) = result.expect("one-shot read") else {
+                panic!("items is a row query");
+            };
+            let mut rows: Vec<RowUuid> = rows.iter().map(|row| row.row_uuid()).collect();
+            rows.sort();
+            assert_eq!(rows, all_rows(), "the answer of the server it connected to");
+            return;
+        }
+        turn(&alice, Some(&server));
+    }
+    panic!("one-shot read did not complete within {MAX_TURNS} owner turns");
 }

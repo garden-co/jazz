@@ -16,7 +16,7 @@ import { app, MAX_FOLDER_DEPTH } from "./schema.js";
  */
 
 export default s.definePermissions(app, ({ allOf, anyOf, allowedTo, policy, session }) => {
-  const me = session.user.account;
+  const me = session.user;
   const depth = { maxDepth: MAX_FOLDER_DEPTH };
 
   // A profile's id is its account id. A name is visible to its account and

@@ -23,7 +23,7 @@
 //! file on tick; their metadata stays.
 
 use crate::values::CachedRow;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
@@ -110,7 +110,7 @@ CREATE TABLE IF NOT EXISTS _jazz_lv_upload_node (id BLOB NOT NULL, hash BLOB NOT
 CREATE INDEX IF NOT EXISTS _jazz_lv_upload_node_hash ON _jazz_lv_upload_node (hash);
 CREATE TABLE IF NOT EXISTS _jazz_lv_reclaim (root BLOB PRIMARY KEY) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS _jazz_lv_via (root BLOB PRIMARY KEY, tbl TEXT NOT NULL, \
- id BLOB NOT NULL, key BLOB NOT NULL, seq INTEGER NOT NULL) WITHOUT ROWID;
+ id BLOB NOT NULL, key BLOB NOT NULL, t INTEGER NOT NULL) WITHOUT ROWID;
 CREATE TRIGGER IF NOT EXISTS _jazz_lv_root_unreferenced AFTER UPDATE OF refs ON _jazz_lv_root \
  WHEN NEW.refs = 0 BEGIN \
  INSERT INTO _jazz_lv_reclaim (root) SELECT NEW.root \
@@ -250,13 +250,30 @@ fn key(hash: &[u8]) -> Result<NodeKey, Error> {
 }
 
 /// Whether `ty` (or the type a nullable wraps) is stored by this module.
+/// An enum column never is: it stores tags, and a name is never long (it
+/// is one of the column's variants).
 pub(crate) fn large_capable(column: &Column) -> bool {
     use crate::records::ValueType;
+    if column.is_enum() {
+        return false;
+    }
     let mut ty = &column.ty;
     while let ValueType::Nullable(inner) = ty {
         ty = inner;
     }
     matches!(ty, ValueType::String | ValueType::Bytes)
+}
+
+/// The most logical bytes a value of `column` keeps inline; a longer one
+/// is chunked. Text-merge columns chunk early
+/// ([`lv::TEXT_MERGE_INLINE_MAX_BYTES`]), every other column at
+/// [`lv::INLINE_VALUE_MAX_BYTES`].
+pub(crate) fn inline_max(column: &Column) -> usize {
+    if column.merge.text_format().is_some() {
+        lv::TEXT_MERGE_INLINE_MAX_BYTES
+    } else {
+        lv::INLINE_VALUE_MAX_BYTES
+    }
 }
 
 /// The column's declared kind.
@@ -510,7 +527,14 @@ pub(crate) struct Chunks {
     /// Where settled leaf bytes live when not in the file
     /// ([`crate::chunk_store`]).
     store: Option<Arc<dyn ChunkStore>>,
+    /// The host runs chunk-store I/O ([`crate::db::Db::take_chunk_io`]),
+    /// not the tick.
+    host_io: bool,
 }
+
+/// Batch ids, unique in the process, so a batch handed back to a store
+/// that did not hand it out is refused.
+static NEXT_BATCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 struct State {
     nodes: HashMap<[u8; 32], Cached>,
@@ -532,11 +556,23 @@ struct State {
     /// Offloaded nodes a statement needed that the chunk store could not
     /// answer at once: the next fetch reads them.
     fetch: BTreeSet<ChunkRequest>,
-    /// Offloaded nodes the chunk store answered it does not hold.
-    lost: BTreeSet<ChunkRequest>,
-    /// A fetch is running: one at a time, so a delete never overtakes the
-    /// put it undoes.
-    pumping: bool,
+    /// Offloaded nodes a fetch is out for, in either of a host's lanes or
+    /// a read's own: not handed to another fetch until it lands
+    /// ([`Chunks::landed`]) or is dropped ([`Chunks::want_again`]). A read
+    /// that waits on one while it is out keeps it in `fetch`.
+    in_flight: BTreeSet<ChunkRequest>,
+    /// Offloaded nodes the host's last batch failed to fetch, with why:
+    /// reads that need them are refused with that error rather than left
+    /// waiting, until the next batch starts and asks again. A store that
+    /// failed for a while (a token, a permission, the network) serves
+    /// again once it is fixed.
+    failed: BTreeMap<ChunkRequest, Error>,
+    /// The batch of chunk-store work that is out, if one is: one at a
+    /// time, so a delete never overtakes the put it undoes.
+    batch: Option<u64>,
+    /// Counts fetches answered (installed or failed) and failures
+    /// forgotten: a read that waited on offloaded nodes may answer now.
+    answered: u64,
 }
 
 /// Where a node's verified bytes are.
@@ -578,6 +614,7 @@ impl Chunks {
     pub(crate) fn install(
         path: Option<(&std::path::Path, Option<&'static str>)>,
         store: Option<Arc<dyn ChunkStore>>,
+        host_io: bool,
     ) -> Result<Arc<Self>, Error> {
         let reader = match path {
             None => None,
@@ -603,10 +640,13 @@ impl Chunks {
                 demand: BTreeSet::new(),
                 spans: HashMap::new(),
                 fetch: BTreeSet::new(),
-                lost: BTreeSet::new(),
-                pumping: false,
+                in_flight: BTreeSet::new(),
+                failed: BTreeMap::new(),
+                batch: None,
+                answered: 0,
             }),
             store,
+            host_io,
         });
         Ok(chunks)
     }
@@ -638,11 +678,37 @@ impl Chunks {
         self.store.as_ref()
     }
 
+    /// Whether the host runs chunk-store I/O.
+    pub(crate) fn host_io(&self) -> bool {
+        self.host_io
+    }
+
     /// The chunk store settled leaves move to, if they move: a store in
     /// memory keeps its nodes in its cache whatever holds them, so it keeps
     /// them in SQLite too.
     pub(crate) fn offload_store(&self) -> Option<&Arc<dyn ChunkStore>> {
         self.store.as_ref().filter(|_| !self.in_memory())
+    }
+
+    /// Want `requests` again: their fetch was dropped before it was
+    /// answered.
+    pub(crate) fn want_again(&self, requests: Vec<ChunkRequest>) {
+        let mut state = self.state.lock().expect("chunk cache");
+        for request in &requests {
+            state.in_flight.remove(request);
+        }
+        state.fetch.extend(requests);
+    }
+
+    /// The fetches of `requests` were answered (installed, or failed): they
+    /// are no longer out, and what waited on them has its answer.
+    pub(crate) fn landed(&self, requests: &[ChunkRequest]) {
+        let mut state = self.state.lock().expect("chunk cache");
+        state.answered += 1;
+        for request in requests {
+            state.in_flight.remove(request);
+            state.fetch.remove(request);
+        }
     }
 
     /// Record that a read waits on an offloaded node.
@@ -651,45 +717,100 @@ impl Chunks {
         state.fetch.insert(request.clone());
     }
 
-    /// Whether reads wait on nodes only the chunk store can answer.
+    /// Whether reads wait on nodes only the chunk store can answer, to be
+    /// fetched or out.
     pub(crate) fn has_fetch(&self) -> bool {
-        !self.state.lock().expect("chunk cache").fetch.is_empty()
+        let state = self.state.lock().expect("chunk cache");
+        !state.fetch.is_empty() || !state.in_flight.is_empty()
     }
 
-    /// Start a fetch: the nodes reads are waiting on, or `None` if another
-    /// fetch is running. With nothing waiting, nodes kept for earlier
-    /// waiting reads may be evicted again.
-    pub(crate) fn begin_fetch(&self) -> Option<Vec<ChunkRequest>> {
+    /// Start a batch: its id and the nodes reads are waiting on, or `None`
+    /// if another batch is out. With nothing waiting, nodes kept for
+    /// earlier waiting reads may be evicted again.
+    /// `fetches: false` takes none of them (the host holds its fetches
+    /// back), and keeps what was kept.
+    pub(crate) fn begin_fetch(&self, fetches: bool) -> Option<(u64, Vec<ChunkRequest>)> {
         let mut state = self.state.lock().expect("chunk cache");
-        if state.pumping {
+        if state.batch.is_some() {
             return None;
         }
-        state.pumping = true;
-        if state.fetch.is_empty() {
+        let batch = NEXT_BATCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        state.batch = Some(batch);
+        if !fetches {
+            return Some((batch, Vec::new()));
+        }
+        if state.fetch.is_empty() && state.in_flight.is_empty() {
             for node in state.nodes.values_mut() {
                 node.held = false;
             }
             state.evict();
         }
-        Some(std::mem::take(&mut state.fetch).into_iter().collect())
+        Some((batch, state.take_wanted()))
     }
 
-    /// End a fetch [`Self::begin_fetch`] started.
-    pub(crate) fn end_fetch(&self) {
-        self.state.lock().expect("chunk cache").pumping = false;
+    /// The nodes reads wait on, for a read that fetches them itself. Unlike
+    /// [`Self::begin_fetch`] this runs beside a host's batch: a fetch never
+    /// reorders a put and the delete that undoes it.
+    pub(crate) fn take_fetch(&self) -> Vec<ChunkRequest> {
+        self.state.lock().expect("chunk cache").take_wanted()
     }
 
-    /// Install what the chunk store answered for an offloaded node.
+    /// [`State::answered`].
+    pub(crate) fn answered(&self) -> u64 {
+        self.state.lock().expect("chunk cache").answered
+    }
+
+    /// The batch that is out, if one is.
+    pub(crate) fn outstanding(&self) -> Option<u64> {
+        self.state.lock().expect("chunk cache").batch
+    }
+
+    /// End `batch`, which [`Self::begin_fetch`] started; `unfetched` (what
+    /// it was to fetch and did not) is fetched by the next one. Puts it
+    /// marked are picked again by the next batch, and deletes stay queued
+    /// until one succeeds, so a batch that ends without running loses
+    /// nothing.
+    pub(crate) fn end_fetch(&self, batch: u64, unfetched: Vec<ChunkRequest>) {
+        let mut state = self.state.lock().expect("chunk cache");
+        if state.batch == Some(batch) {
+            state.batch = None;
+            for request in &unfetched {
+                state.in_flight.remove(request);
+            }
+            state.fetch.extend(unfetched);
+        }
+    }
+
+    /// Forget the last batch's failed fetches, so reads of them ask again;
+    /// whether there were any.
+    pub(crate) fn clear_failed(&self) -> bool {
+        let mut state = self.state.lock().expect("chunk cache");
+        let any = !state.failed.is_empty();
+        state.failed.clear();
+        if any {
+            state.answered += 1;
+        }
+        any
+    }
+
+    /// Refuse reads of `request` with `error` until the next batch starts:
+    /// the host's batch failed to fetch it.
+    pub(crate) fn fetch_failed(&self, request: &ChunkRequest, error: Error) {
+        let mut state = self.state.lock().expect("chunk cache");
+        state.failed.insert(request.clone(), error);
+    }
+
+    /// Install what the chunk store answered for an offloaded node; one it
+    /// answered it does not hold is data loss.
     pub(crate) fn install_from_store(
         &self,
         request: &ChunkRequest,
         bytes: Option<Bytes>,
     ) -> Result<(), Error> {
-        let mut state = self.state.lock().expect("chunk cache");
         let Some(bytes) = bytes else {
-            state.lost.insert(request.clone());
-            return Ok(());
+            return Err(lost());
         };
+        let mut state = self.state.lock().expect("chunk cache");
         if lv::object_hash(&bytes).0 != request.object_hash {
             return Err(corrupt(lv::Error::ObjectHashMismatch));
         }
@@ -932,18 +1053,15 @@ impl Chunks {
         }
         let bytes = if bytes.is_empty() {
             // Offloaded: its bytes are in the chunk store.
-            if state.lost.contains(request) {
-                return Err(lost());
+            if let Some(error) = state.failed.get(request) {
+                return Err(error.clone());
             }
             let Some(store) = &self.store else {
                 return Err(unconfigured());
             };
             match store.get_now(&NodeKey::from(request)) {
                 None => return Ok(Local::Fetching),
-                Some(Ok(None)) => {
-                    state.lost.insert(request.clone());
-                    return Err(lost());
-                }
+                Some(Ok(None)) => return Err(lost()),
                 Some(Err(error)) => return Err(error),
                 Some(Ok(Some(bytes))) => bytes,
             }
@@ -1070,6 +1188,18 @@ impl Chunks {
 }
 
 impl State {
+    /// The nodes reads want that no fetch is out for, now out. Those
+    /// already out stay wanted: they are answered when theirs lands.
+    fn take_wanted(&mut self) -> Vec<ChunkRequest> {
+        let in_flight = &self.in_flight;
+        let (out, wanted): (BTreeSet<_>, BTreeSet<_>) = std::mem::take(&mut self.fetch)
+            .into_iter()
+            .partition(|request| in_flight.contains(request));
+        self.fetch = out;
+        self.in_flight.extend(wanted.iter().cloned());
+        wanted.into_iter().collect()
+    }
+
     /// Widen the span the next pull of `root`'s tree asks for.
     fn note_span(&mut self, root: [u8; 32], span: std::ops::Range<u64>) {
         self.spans
@@ -1562,14 +1692,28 @@ pub(crate) fn settle_receipts(
 }
 
 /// Drop receipts that expired by `now`; their nodes are reclaimed unless a
-/// commit referenced them meanwhile.
+/// commit referenced them meanwhile. Servers run this every tick: a cached
+/// probe, and the writes only once a receipt expired.
 pub(crate) fn expire_receipts(conn: &Connection, now: i64) -> Result<(), Error> {
-    conn.execute_batch(&format!(
+    let expired: bool = conn
+        .cached_row(
+            "SELECT EXISTS (SELECT 1 FROM _jazz_lv_receipt WHERE expires <= ?1)",
+            [now],
+            |r| r.get(0),
+        )
+        .map_err(storage)?;
+    if !expired {
+        return Ok(());
+    }
+    conn.prepare_cached(
         "INSERT OR IGNORE INTO _jazz_lv_reclaim (root) \
-         SELECT hash FROM _jazz_lv_receipt WHERE expires <= {now}; \
-         DELETE FROM _jazz_lv_receipt WHERE expires <= {now};"
-    ))
-    .map_err(storage)
+         SELECT hash FROM _jazz_lv_receipt WHERE expires <= ?1",
+    )
+    .and_then(|mut statement| statement.execute([now]))
+    .and_then(|_| conn.prepare_cached("DELETE FROM _jazz_lv_receipt WHERE expires <= ?1"))
+    .and_then(|mut statement| statement.execute([now]))
+    .map_err(storage)?;
+    Ok(())
 }
 
 struct Stored<'a> {
@@ -1753,14 +1897,15 @@ pub(crate) struct Via {
     pub table: String,
     pub id: [u8; 16],
     pub key: Vec<u8>,
-    pub seq: u64,
+    /// The version's position here (as `Image::at`).
+    pub at: crate::db::sync::Pos,
 }
 
 /// Record that `root` arrived in `via`, the version later pulls of its
 /// nodes cite.
 pub(crate) fn record_via(conn: &Connection, root: &[u8; 32], via: &Via) -> Result<(), Error> {
     conn.prepare_cached(
-        "INSERT OR REPLACE INTO _jazz_lv_via (root, tbl, id, key, seq) \
+        "INSERT OR REPLACE INTO _jazz_lv_via (root, tbl, id, key, t) \
          VALUES (?1, ?2, ?3, ?4, ?5)",
     )
     .and_then(|mut statement| {
@@ -1769,7 +1914,7 @@ pub(crate) fn record_via(conn: &Connection, root: &[u8; 32], via: &Via) -> Resul
             via.table,
             via.id.as_slice(),
             via.key,
-            via.seq as i64
+            via.at.t()
         ])
     })
     .map_err(storage)?;
@@ -1785,7 +1930,7 @@ const UPWARD_WALK: usize = 4096;
 /// stored parent or a descriptor).
 pub(crate) fn via_of(conn: &Connection, hash: &[u8; 32]) -> Result<Option<([u8; 32], Via)>, Error> {
     let mut via = conn
-        .prepare_cached("SELECT tbl, id, key, seq FROM _jazz_lv_via WHERE root = ?1")
+        .prepare_cached("SELECT tbl, id, key, t FROM _jazz_lv_via WHERE root = ?1")
         .map_err(storage)?;
     let mut parents = conn
         .prepare_cached("SELECT parent FROM _jazz_lv_edge WHERE child = ?1")
@@ -1807,17 +1952,16 @@ pub(crate) fn via_of(conn: &Connection, hash: &[u8; 32]) -> Result<Option<([u8; 
             })
             .optional()
             .map_err(storage)?;
-        if let Some((table, id, key, seq)) = found
+        if let Some((table, id, key, t)) = found
             && let Ok(id) = <[u8; 16]>::try_from(id.as_slice())
         {
-            let seq = seq as u64;
             return Ok(Some((
                 hash,
                 Via {
                     table,
                     id,
                     key,
-                    seq,
+                    at: crate::db::sync::Pos::from_t(t),
                 },
             )));
         }
@@ -2016,6 +2160,14 @@ fn named_nodes(
     Ok(out)
 }
 
+/// Whether nodes wait in the reclaim queue.
+pub(crate) fn reclaim_queued(conn: &Connection) -> Result<bool, Error> {
+    conn.cached_row("SELECT EXISTS (SELECT 1 FROM _jazz_lv_reclaim)", [], |r| {
+        r.get(0)
+    })
+    .map_err(storage)
+}
+
 /// Delete up to `budget` unreferenced nodes. A root is reclaimed once no
 /// epoch references it and no parent branch holds it; deleting a branch
 /// releases its children, which are reclaimed in turn. Returns the number
@@ -2134,7 +2286,7 @@ mod tests {
 
     fn chunks() -> (Connection, Arc<Chunks>) {
         let conn = Connection::open_in_memory().unwrap();
-        let chunks = Chunks::install(None, None).unwrap();
+        let chunks = Chunks::install(None, None, false).unwrap();
         conn.execute_batch(DDL).unwrap();
         (conn, chunks)
     }
@@ -2314,8 +2466,10 @@ mod tests {
             policies: Default::default(),
             indexes: Vec::new(),
             branch_by: Vec::new(),
+            branch_key_names: Vec::new(),
             provenance: Vec::new(),
             stored_provenance: Vec::new(),
+            latest_only: false,
         };
         let column = Column {
             name: "body".to_owned(),
@@ -2324,6 +2478,8 @@ mod tests {
             default: None,
             json: false,
             json_type: None,
+            variants: None,
+            tags: None,
             merge: Default::default(),
         };
         conn.execute_batch(&triggers(&table, &[&column], None))
@@ -2371,8 +2527,10 @@ mod tests {
             policies: Default::default(),
             indexes: Vec::new(),
             branch_by: Vec::new(),
+            branch_key_names: Vec::new(),
             provenance: Vec::new(),
             stored_provenance: Vec::new(),
+            latest_only: false,
         };
         let column = |name: &str| Column {
             name: name.to_owned(),
@@ -2381,6 +2539,8 @@ mod tests {
             default: None,
             json: false,
             json_type: None,
+            variants: None,
+            tags: None,
             merge: Default::default(),
         };
         let (a, b, c) = (column("a"), column("b"), column("c"));
@@ -2669,7 +2829,7 @@ mod tests {
         let conn = Connection::open(&path).unwrap();
         let store: Arc<dyn ChunkStore> =
             Arc::new(crate::chunk_store::FileChunkStore::new(dir.join("chunks")).unwrap());
-        let chunks = Chunks::install(Some((&path, None)), Some(store.clone())).unwrap();
+        let chunks = Chunks::install(Some((&path, None)), Some(store.clone()), false).unwrap();
         conn.execute_batch(DDL).unwrap();
         open_offload(&conn, &chunks).unwrap();
         conn.execute_batch(
@@ -2685,8 +2845,10 @@ mod tests {
             policies: Default::default(),
             indexes: Vec::new(),
             branch_by: Vec::new(),
+            branch_key_names: Vec::new(),
             provenance: Vec::new(),
             stored_provenance: Vec::new(),
+            latest_only: false,
         };
         let column = Column {
             name: "body".to_owned(),
@@ -2695,6 +2857,8 @@ mod tests {
             default: None,
             json: false,
             json_type: None,
+            variants: None,
+            tags: None,
             merge: Default::default(),
         };
         conn.execute_batch(&triggers(&table, &[&column], None))
@@ -2791,7 +2955,7 @@ mod tests {
             leaves
         );
         assert_eq!(o.count("SELECT count(*) FROM _jazz_lv_offload"), 0);
-        let cold = Chunks::install(Some((&o.path, None)), Some(o.store.clone())).unwrap();
+        let cold = Chunks::install(Some((&o.path, None)), Some(o.store.clone()), false).unwrap();
         assert_eq!(cold.materialize(cell.as_ref()).unwrap(), logical);
         assert!(cold.take_demand().is_empty());
         // A second value keeps its leaves when the first goes.
@@ -2868,7 +3032,7 @@ mod tests {
         let cell = o.insert(2, &prepared);
         assert!(o.delete_pending().is_empty());
         assert_eq!(keys(&begin_offload(&o.conn, 1_000).unwrap()), keys(&batch));
-        let cold = Chunks::install(Some((&o.path, None)), Some(o.store.clone())).unwrap();
+        let cold = Chunks::install(Some((&o.path, None)), Some(o.store.clone()), false).unwrap();
         assert_eq!(cold.materialize(cell.as_ref()).unwrap(), logical);
     }
 

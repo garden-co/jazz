@@ -20,10 +20,7 @@ use jazz_testkit::{enroll_test_context, wait_for_global_txs, wait_for_subscripti
 use tempfile::TempDir;
 
 fn schema() -> jazz::tools::Schema {
-    let owner = PolicyExpr::eq_session(
-        "owner",
-        vec!["user".into(), "identity".into(), "subject".into()],
-    );
+    let owner = PolicyExpr::eq_session("owner", vec!["identity".into(), "subject".into()]);
     let policies = TablePolicies::new()
         .with_insert(owner.clone())
         .with_select(owner);
@@ -97,9 +94,8 @@ async fn enrolled_native_audio_survives_offline_reopen() {
             let wav = pcm_wav();
             let path = directory.path().join("interview.wav");
             std::fs::write(&path, &wav).unwrap();
-            let mut context = server.make_client_context_for_user(schema.clone(), "alice");
+            let mut context = server.make_user_context(schema.clone(), "alice");
             context.admin_secret = None;
-            context.backend_secret = None;
             context.storage = ClientStorage::Persistent;
             context.data_dir = directory.path().join("project");
             enroll_test_context(&mut context).await.unwrap();
@@ -172,9 +168,8 @@ async fn enrolled_native_audio_survives_offline_reopen() {
                 .unwrap();
             assert!(full_materializations_for_test() - before >= 1);
 
-            let mut bob_context = server.make_client_context_for_user(schema, "bob");
+            let mut bob_context = server.make_user_context(schema, "bob");
             bob_context.admin_secret = None;
-            bob_context.backend_secret = None;
             enroll_test_context(&mut bob_context).await.unwrap();
             let bob = JazzClient::connect_with_native_transport(bob_context, connector.clone())
                 .await

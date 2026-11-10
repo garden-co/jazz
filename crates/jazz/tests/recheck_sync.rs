@@ -26,7 +26,7 @@ use jazz::tx::DurabilityTier;
 
 use common::{allow_all_policies, compile_schema, exists, outer_eq, session_eq};
 
-const ME: [&str; 3] = ["user", "identity", "subject"];
+const ME: [&str; 2] = ["identity", "subject"];
 
 fn me(column: &str) -> PolicyExpr {
     session_eq(column, &ME)
@@ -84,7 +84,7 @@ fn authority(schema: JazzSchema) -> Db {
 fn connect(db: &Db, server: &Db, author: AuthorSubject) -> Upstream {
     let (client_side, server_side) = duplex_transport::duplex();
     let upstream = block_on(db.connect_upstream(client_side));
-    server.accept_subscriber(server_side, author);
+    server.accept_subscriber(server_side, author).unwrap();
     db.set_remote_link_hint(RemoteLinkHint::Live);
     upstream
 }
@@ -169,7 +169,7 @@ fn deltas(stream: &mut SubscriptionStream) -> (Vec<RowUuid>, Vec<RowUuid>) {
                 added.extend(a.iter().map(|row| row.row_uuid()));
                 removed.extend(r.iter().map(|row| row.row_uuid));
             }
-            SubscriptionEvent::Rejected { reason } => panic!("subscription rejected: {reason}"),
+            SubscriptionEvent::Rejected { reason, .. } => panic!("subscription rejected: {reason}"),
             SubscriptionEvent::Closed => {}
         }
     }
@@ -296,14 +296,16 @@ fn each_connection_writes_under_its_own_claims() {
         let db = block_on(Db::open(config(schema(), node, alice()))).unwrap();
         let (client_side, server_side) = duplex_transport::duplex();
         block_on(db.connect_upstream(client_side));
-        server.accept_subscriber_with_claims(
-            server_side,
-            alice(),
-            Some(BTreeMap::from([(
-                jazz::query::provider_claim_key("role"),
-                text(role),
-            )])),
-        );
+        server
+            .accept_subscriber_with_claims(
+                server_side,
+                alice(),
+                Some(BTreeMap::from([(
+                    jazz::query::provider_claim_key("role"),
+                    text(role),
+                )])),
+            )
+            .unwrap();
         db
     };
     let editor = device(0xa1, "editor");

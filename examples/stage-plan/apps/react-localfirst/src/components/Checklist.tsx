@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useAll, useDb } from "jazz-tools/react";
+import { useAll } from "jazz-tools/react";
 import { Button } from "@astryxdesign/core/Button";
 import { CheckboxInput } from "@astryxdesign/core/CheckboxInput";
 import { EmptyState } from "@astryxdesign/core/EmptyState";
@@ -20,7 +20,6 @@ type Filter = "all" | "open" | "done";
  * private (see permissions.ts), save instantly and sync to your other devices.
  */
 export function Checklist() {
-  const db = useDb();
   const me = useMe();
   const [title, setTitle] = useState("");
   const [search, setSearch] = useState("");
@@ -30,7 +29,7 @@ export function Checklist() {
   let query = app.checklistItems.where({ ownerAccount: me.account });
   if (search.trim()) query = query.where({ title: { contains: search.trim() } });
   if (filter !== "all") query = query.where({ done: filter === "done" });
-  const { data: items } = useAll(query.orderBy("title", "asc"));
+  const { data: items, db } = useAll(query.orderBy("title", "asc"));
 
   return (
     <Page title="Checklist" description="Your own list for show day. Only you can see it.">
