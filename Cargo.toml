@@ -101,7 +101,7 @@ codegen-units = 256
 # symbols (SQLite engine, no RocksDB): 16.7 MB -> 9.9 MB executable, 7.2 MB ->
 # 4.8 MB gzip, device `.a` 69.6 MB -> 21.1 MB. Full table in
 # https://github.com/garden-co/jazz/pull/3016.
-# ponytail: `debug`/`strip` are already the `release` defaults, so they are not
+# `debug`/`strip` are already the `release` defaults, so they are not
 # restated; the `.a` ships as built (nothing in the normal pipeline strips it)
 # and the inherited `debug = false` is what keeps debuginfo out.
 [profile.release-mobile]

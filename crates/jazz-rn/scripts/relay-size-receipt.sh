@@ -4,7 +4,7 @@
 # -dead_strip discard everything unreachable from that public ABI, then report
 # the fully stripped and gzipped bytes. This is an upper bound on what the relay
 # adds to an app's arm64 slice, not an App Store Connect download/install size.
-# ponytail: iOS device slice only; an Android/ELF receipt is a follow-up tracked in #3008.
+# iOS device slice only; an Android/ELF receipt is a follow-up tracked in #3008.
 set -euo pipefail
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
