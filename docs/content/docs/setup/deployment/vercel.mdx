@@ -79,8 +79,8 @@ switches to an HTTP stream on its own.
 
 ## Large values
 
-Large values, such as files and long streams, are stored in chunks outside the core's database.
-On Vercel, `vercel()` picks where they go:
+Large values, such as files and long streams, are stored in chunks, which can live outside the
+core's database. On Vercel, `vercel()` picks where they go:
 
 - **Vercel Blob**, when a Blob store is connected to the project (the Storage tab in the Vercel
   dashboard sets `BLOB_STORE_ID`). A store created through the Vercel API or CLI sets only
@@ -119,7 +119,9 @@ to each environment". Both `vercelBlob()` and `s3()` also take a `prefix`, by de
 `jazz/<store id>/`.
 
 Where large values go is a one-way choice. A core that started on SQLite can move to Vercel Blob
-or S3 later: connect a store and redeploy. Every other change, including disconnecting or swapping
+or S3 later: connect a store and redeploy. The core then moves the chunks already in its SQLite file
+to the new store in the background, which uses compute and storage operations until it's done; how
+long that takes depends on how much is stored in SQLite. Every other change, including disconnecting or swapping
 the Blob store, moving between Vercel Blob and S3, or moving back to SQLite, is not supported yet
 and the core refuses to start.
 
