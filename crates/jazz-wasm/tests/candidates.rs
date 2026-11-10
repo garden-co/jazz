@@ -109,7 +109,7 @@ fn stage_host(db: &Binding, tx: &str, id: u8, parent: u8, seed: bool) {
     .unwrap();
 }
 async fn host_rows(db: &Binding, table: &str) -> usize {
-    let author = alice().canonical();
+    let author = alice().canonical().to_string();
     let bytes = db
         .all(
             postcard::to_allocvec(&jazz::query::Query::from(table)).unwrap(),
