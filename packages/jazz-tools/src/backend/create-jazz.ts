@@ -73,7 +73,13 @@ export {
   type S3BlobStore,
   type VercelBlobStore,
 } from "./blobs.js";
-import { isSameAdmission, recheckEvery } from "./session-recheck.js";
+import {
+  isSameAdmission,
+  RECHECK_FAILURES_BEFORE_END,
+  recheckEvery,
+  recheckFailedWarning,
+  type RecheckFailures,
+} from "./session-recheck.js";
 import { NoJazzAccountError } from "./no-account-error.js";
 import { RequestAuthenticationError } from "./request-auth.js";
 import { optionalPeerImportError } from "./optional-peer.js";
@@ -318,6 +324,24 @@ export interface CreateJazzOptions {
    * header). Return null for a signed-out request. Jazz calls it when a
    * browser signs in or opens a sync session, and in `forReqUser`.
    *
+   * Decide from `request` alone. Jazz also calls it again later for each
+   * open sync session (every `recheckSeconds`), from a timer: outside your
+   * framework's request scope, with the request that opened the session and
+   * its cookies from then. Helpers that read the current request from
+   * context throw there; in Next.js that is `cookies()`, `headers()` and the
+   * auth helpers built on them (AuthKit's `withAuth()`, NextAuth's `auth()`,
+   * Clerk's `auth()`). Pass `request.headers` to your auth library instead,
+   * as in the example below. A cookie your auth rotates (a short-lived
+   * access token) is the opening one on a re-check: read the user from the
+   * longer-lived session it belongs to.
+   *
+   * ```ts
+   * authenticate: async (request) => {
+   *   const session = await auth.api.getSession({ headers: request.headers });
+   *   return session ? { userId: session.user.id } : null;
+   * },
+   * ```
+   *
    * Local-first guests are refused unless it returns
    * `acceptLocalFirstAuth(request)` for them; an app with no sign-in passes
    * `authenticate: acceptLocalFirstAuth`. Without `authenticate`, only
@@ -354,6 +378,12 @@ export interface CreateJazzOptions {
    * the new claims, so this bounds how long a claims change takes to reach
    * an open session. Defaults to 60 seconds; 0 turns it off, and changes
    * then wait for the session to end (`sessionTtlSeconds`).
+   *
+   * A re-check calls `authenticate` from a timer, outside your framework's
+   * request scope, with the request that opened the session (see
+   * `authenticate`). A re-check that throws is logged once per session and
+   * asked again next time; 3 in a row end the session as a refusal does,
+   * so an `authenticate` that can't answer there fails closed.
    */
   recheckSeconds?: number;
   /**
@@ -1734,6 +1764,19 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         onEvent(null, { kind: "close", code: 1008, reason: "authenticate again" });
         end();
       };
+      // A re-check whose `authenticate` throws says so once per session,
+      // and enough of them in a row end it as a refusal does: one that can't
+      // answer outside a request (Next.js's `cookies()`) would otherwise keep
+      // the session open past a sign-out, silently.
+      const failures: RecheckFailures = {
+        failed: (error, inARow) => {
+          if (inARow === 1) console.warn(recheckFailedWarning(error), error);
+          if (inARow === RECHECK_FAILURES_BEFORE_END)
+            console.warn(
+              `createJazz: ended an open sync session after ${inARow} failed re-checks in a row; the client reconnects and authenticate is asked afresh.`,
+            );
+        },
+      };
       const admittedUser = admitted.user;
       if (admittedUser && every > 0) {
         // Signed out, someone else, or the same user with other claims.
@@ -1741,10 +1784,11 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
           every,
           async () => isSameAdmission(admittedUser, await authenticate(request)),
           authenticateAgain,
+          failures,
         );
       } else if (admitted.guest && every > 0) {
         // The app may stop letting guests in (or this one): ask again, as for users.
-        recheck = recheckEvery(every, () => acceptsGuest(request), authenticateAgain);
+        recheck = recheckEvery(every, () => acceptsGuest(request), authenticateAgain, failures);
       }
       socket = core.openSocket(headerPairs(request.headers), onEvent, admitted.access);
       return socket.send(admitted.prelude);
