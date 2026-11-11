@@ -8160,6 +8160,9 @@ impl Db {
                          deploy it to the server",
                     )));
                 }
+                // The caller may cancel another read from its budget callback.
+                // Release the store so that read can clean up its own request.
+                drop(inner);
                 if expired() {
                     return Poll::Ready(Err(Error::new(
                         ErrorCode::NotObserved,

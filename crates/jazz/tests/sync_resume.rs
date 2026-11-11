@@ -1036,6 +1036,60 @@ fn cancelled_one_shot_reads_release_request_state() {
     }
 }
 
+/// Alice's coverage callback cancels another ordinary one-shot read before
+/// Bob's server answers. The surviving read must finish without a borrow panic.
+/// Internal request counts distinguish cleanup from merely ignoring an answer.
+#[test]
+fn a_coverage_callback_can_cancel_another_one_shot_read() {
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+    let server = seeded(1);
+    let client = open(1, alice());
+    let (up, down, _) = pipe();
+    block_on(client.connect_upstream(up));
+    server.accept_subscriber(down, alice()).unwrap();
+    pump(&server, &client);
+    let query = postcard::to_allocvec(&Query::from("messages")).unwrap();
+    let mut context = Context::from_waker(Waker::noop());
+    let mut first = Box::pin(client.all_serialized_query(
+        &query,
+        ReadOpts::for_read_tier(ReadTier::Remote),
+        None,
+        None,
+        None,
+    ));
+    assert!(first.as_mut().poll(&mut context).is_pending());
+    assert_eq!(client.pending_once_state_for_test(), (1, 1, 1));
+    let cancelled = RefCell::new(Some(first));
+    let budget = || {
+        drop(cancelled.borrow_mut().take());
+        false
+    };
+    let mut sibling = Box::pin(client.all_serialized_query(
+        &query,
+        ReadOpts::for_read_tier(ReadTier::Remote),
+        None,
+        None,
+        Some(&budget),
+    ));
+    assert!(sibling.as_mut().poll(&mut context).is_pending());
+    assert!(cancelled.borrow().is_none());
+    assert_eq!(client.pending_once_state_for_test(), (1, 1, 1));
+    for _ in 0..32 {
+        pump(&server, &client);
+        if let Poll::Ready(result) = sibling.as_mut().poll(&mut context) {
+            let jazz::db::SerializedReadResult::Rows(rows) = result.unwrap() else {
+                panic!("expected ordinary rows");
+            };
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].row_uuid(), id(3, 0));
+            assert_eq!(client.pending_once_state_for_test(), (0, 0, 0));
+            return;
+        }
+    }
+    panic!("surviving read did not settle");
+}
+
 /// Alice's tab reads LocalFirst through Bob's worker while its authority link
 /// keeps dropping. Background refreshes have no waiting future to clean them.
 /// Internal counts verify that query clones are released, which results cannot show.
