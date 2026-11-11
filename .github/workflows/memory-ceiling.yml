@@ -1,0 +1,109 @@
+name: Example memory ceiling
+
+# How much data each example app can hold, in its own units, before the sync
+# server or a client crosses a fixed memory budget. See
+# dev/benchmarks/memory-ceiling/README.md.
+#
+# Not CodSpeed: a ceiling is a search that answers in app units (labels,
+# releases), not a timed function, and one run takes up to an hour of
+# growing data, restarting the server and bisecting. It runs nightly and on
+# demand, never per merge.
+#
+# It measures shipped builds: the npm release (default: the `alpha` dist-tag)
+# installed as published, the `jazz-tools server` binary from that version's
+# GitHub release (an asset since alpha.60, no longer in the npm package) and
+# its jazz-napi runtime. Nothing is compiled here. A dispatch can name an
+# exact version. pkg.pr.new previews have no release binary, so they are not
+# supported yet.
+
+on:
+  schedule:
+    - cron: "41 2 * * *"
+  workflow_dispatch:
+    inputs:
+      jazz-tools:
+        description: "npm version or dist-tag of jazz-tools (its GitHub release provides the server)"
+        default: alpha
+      jazz-napi:
+        description: "npm version or dist-tag of jazz-napi (blank: same as jazz-tools)"
+        default: ""
+      adapters:
+        description: "Space-separated adapter paths"
+        default: examples/big-label/benchmarks/memory-ceiling.ts
+      server-budget:
+        description: "Server memory budget (default tenant pod limit)"
+        default: 1GiB
+      client-budget:
+        description: "Client memory budget"
+        default: 512MiB
+
+permissions:
+  contents: read
+
+concurrency:
+  group: memory-ceiling-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  ceiling:
+    name: Memory ceiling
+    # 4 cores and 16 GB, like the machines the numbers in the README came
+    # from; the budgets, not the runner, bound what the processes may use.
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 180
+    env:
+      JAZZ_TOOLS_SPEC: ${{ inputs.jazz-tools || 'alpha' }}
+      JAZZ_NAPI_SPEC: ${{ inputs.jazz-napi || '' }}
+      ADAPTERS: ${{ inputs.adapters || 'examples/big-label/benchmarks/memory-ceiling.ts' }}
+      MEMCEIL_SERVER_BUDGET: ${{ inputs.server-budget || '1GiB' }}
+      MEMCEIL_CLIENT_BUDGET: ${{ inputs.client-budget || '512MiB' }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: .nvmrc
+      - name: Install the release under test
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          case "$JAZZ_TOOLS_SPEC$JAZZ_NAPI_SPEC" in
+            *http*) echo "::error::pkg.pr.new previews are not supported yet: they have no release server binary." && exit 1 ;;
+          esac
+          napi="${JAZZ_NAPI_SPEC:-$JAZZ_TOOLS_SPEC}"
+          mkdir -p "$RUNNER_TEMP/jazz-release"
+          cd "$RUNNER_TEMP/jazz-release"
+          echo '{"private":true}' > package.json
+          npm install --no-audit --no-fund "jazz-tools@$JAZZ_TOOLS_SPEC" "jazz-napi@$napi"
+          version=$(node -p 'require("jazz-tools/package.json").version')
+          gh release download "v$version" -R "$GITHUB_REPOSITORY" -p jazz-tools-linux-x64 -p SHA256SUMS
+          grep ' jazz-tools-linux-x64$' SHA256SUMS | sha256sum -c -
+          chmod +x jazz-tools-linux-x64
+          echo "jazz-tools $version, jazz-napi $(node -p 'require("jazz-napi/package.json").version')"
+      - name: Find each app's ceiling
+        run: |
+          for adapter in $ADAPTERS; do
+            node dev/benchmarks/memory-ceiling/run.mjs \
+              --app "$adapter" \
+              --packages "$RUNNER_TEMP/jazz-release/node_modules" \
+              --server-bin "$RUNNER_TEMP/jazz-release/jazz-tools-linux-x64" \
+              --max-minutes 75 \
+              --out "$RUNNER_TEMP/memory-ceiling/$(basename "$(dirname "$(dirname "$adapter")")")"
+          done
+      - name: Summarize
+        if: always()
+        run: |
+          for summary in "$RUNNER_TEMP"/memory-ceiling/*/summary.md; do
+            [ -f "$summary" ] && cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: memory-ceiling-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/memory-ceiling/**/*.json
+            ${{ runner.temp }}/memory-ceiling/**/*.md
+            ${{ runner.temp }}/memory-ceiling/**/*.log
+            ${{ runner.temp }}/memory-ceiling/**/*.pb.gz
+          retention-days: 30
