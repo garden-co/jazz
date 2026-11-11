@@ -50,7 +50,7 @@ fn a_long_note_keeps_both_sides_scattered_edits() {
 
 #[test]
 fn past_the_work_budget_the_later_write_wins() {
-    let (reconnect, later) = text_merge::over_budget(1_000_000);
+    let (reconnect, later) = text_merge::over_budget(300_000);
     assert_eq!(converged(reconnect), later);
 }
 

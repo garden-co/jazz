@@ -4,10 +4,17 @@
 //! because the examples page matches results by exact name; `metadata.ts`
 //! documents each timed iteration.
 //!
-//! BandBook is a Notion-style workspace: members own pages, belong to
-//! workspaces, and may read their own pages plus those of workspaces they were
-//! admitted to. The fixture is the former policy-scoped documents workload
-//! (documents = pages, organizations = workspaces, owners = members).
+//! The page benchmarks: BandBook is a Notion-style workspace: members own
+//! pages, belong to workspaces, and may read their own pages plus those of
+//! workspaces they were admitted to. The fixture is the former policy-scoped
+//! documents workload (documents = pages, organizations = workspaces, owners =
+//! members).
+//!
+//! The text merge benchmarks (`band_book_text_*`): an authority and two
+//! devices in one process, merging offline edits to one song sheet's Markdown
+//! body; the fixture is in `src/text_merge.rs`. Each sample is one reconnect
+//! on fresh inputs, with no warm-up: it is the first merge those databases
+//! do, as it is for a device coming back online.
 
 use jazz_example_band_book_benchmark::text_merge;
 use jazz_example_band_book_benchmark::{Fixture, Page, Policy, QUERY_OWNER, user};

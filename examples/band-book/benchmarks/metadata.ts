@@ -29,13 +29,14 @@ const oneShot = (name: string, title: string, predicate: string): BenchmarkMetad
 const textSource = "examples/band-book/benchmarks/benches/walltime.rs";
 const textNightlySource = "examples/band-book/benchmarks/benches/text_merge.rs";
 const textFixture =
-  'An authority and two devices in one process, connected over in-memory transports, all subscribed to a `songSheets` table whose `body` column is `s.string().merge("markdown")`, as in the app. A song paragraph is a 270-character lyric with Markdown emphasis; a long note is generated prose with Markdown runs and a line break every 40 words.';
+  'An authority and two devices in one process, connected over in-memory transports, all subscribed to a one-column `songSheets` table whose `body` is `s.string().merge("markdown")`, the column type of song sheets in the app. The table has no workspace or page columns, and its policies allow every read and write. A song paragraph is a 270-character lyric with Markdown emphasis; a long note is generated prose with Markdown runs and a line break every 40 words.';
 const textStorage = "In-memory databases on every replica (no file I/O)";
 const textIncludes = [
   "The device reconnecting, uploading its pending writes and each one settling at the authority (Global tier), merged where it missed a version",
   "Delivery of the result to both devices",
 ];
 const textExcludes = [
+  "Permission checks: the fixture table allows every read and write",
   "Seeding the sheet, taking the devices offline and making the edits",
   "The other device's write, accepted before the timed reconnect",
   "Network: transports are in-memory queues",
@@ -89,7 +90,7 @@ const textMergeBenchmarks: BenchmarkMetadata[] = [
   },
   ...[100_000, 1_000_000].map((bytes) => ({
     name: `band_book_text_long_note[${bytes}]`,
-    title: `BandBook · merge two offline edits to a ${bytes / 1_000} KB note`,
+    title: `BandBook · merge two offline edits to a ${bytes >= 1_000_000 ? `${bytes / 1_000_000} MB` : `${bytes / 1_000} KB`} note`,
     description: `Two devices made 200 scattered word insertions each to a ${bytes.toLocaleString("en-US")}-byte tour note while offline, interleaved through the note. The first has reconnected; the second reconnects and its write is merged, keeping all 400 insertions.`,
     fixture: textFixture,
     storage: textStorage,
