@@ -56,7 +56,7 @@ async function setup(label: string) {
         serverUrl: control.url,
         account,
         driver: { type: "persistent", dbName },
-        runtimeSources: { brokerWorkerUrl },
+        runtimeSources: { brokerWorkerUrl, wasmVersion: "durable-sdk-a5366daa" },
       }),
     );
   const tab = await reopen();
