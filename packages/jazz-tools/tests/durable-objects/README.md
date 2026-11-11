@@ -49,7 +49,9 @@ stage or read replays the batch in one `transactionSync` scope and rolls it
 back, and commit applies it in one scope. Cost is a replay per stage or read,
 so it grows with batch size. Chunked large values are read through the DO's
 own SQL connection with a bounded cache, so they survive restarts. The
-`scopes` and `crash` tests run again.
+`scopes` test runs again. `crash` stays skipped: its transaction now commits
+on the DO, but after the SIGKILL the thin writer raises an uncaught
+`ThinConnectionLostError` and the harness exits.
 
 An incremental transaction overlay (no per-operation replay), chunk storage
 in R2 and hibernation remain deferred;

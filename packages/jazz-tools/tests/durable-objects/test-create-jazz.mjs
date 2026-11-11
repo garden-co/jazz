@@ -8,12 +8,19 @@ import { createServerHarness } from "./server-runtime.mjs";
 const { createJazz, remote } = await tsImport("../../src/backend/index.ts", import.meta.url);
 const { schema: s } = await tsImport("../../src/index.ts", import.meta.url);
 const wire = await tsImport("../../src/runtime/native-runtime/websocket.ts", import.meta.url);
-const app = s.defineApp({ notes: s.table({ title: s.string() }, {}) }, { migrations: "none" });
+const app = s.defineApp(
+  { notes: s.table({ title: s.string() }, {}), drafts: s.table({ title: s.string() }, {}) },
+  { migrations: "none" },
+);
 const permissions = s.definePermissions(app, ({ policy }) => {
   policy.notes.allowRead.never();
   policy.notes.allowInsert.never();
   policy.notes.allowUpdate.never();
   policy.notes.allowDelete.never();
+  policy.drafts.allowRead.never();
+  policy.drafts.allowInsert.never();
+  policy.drafts.allowUpdate.never();
+  policy.drafts.allowDelete.never();
 });
 const appId = randomUUID();
 const secret = "create-jazz-do-test";
@@ -29,17 +36,24 @@ try {
   jazz = createJazz({ app, permissions, store: remote({ url, appId, secret }) });
   await jazz.ready();
   console.log("createJazz ready");
-  for (const transaction of [
-    jazz.db.transaction.bind(jazz.db),
-    jazz.db.serializableTransaction.bind(jazz.db),
+  // Mergeable and serializable transactions commit on the DO authority:
+  // managed storage replays each open batch in one transactionSync scope.
+  for (const [kind, transaction] of [
+    ["mergeable", jazz.db.transaction.bind(jazz.db)],
+    ["serializable", jazz.db.serializableTransaction.bind(jazz.db)],
   ]) {
-    await assert.rejects(
-      transaction((tx) => {
-        tx.insert(app.notes, { title: "unsupported overlay" });
-      }).then((receipt) => receipt.wait({ tier: "global" })),
-      /Persistent transaction overlays on managed SQL storage/,
-    );
+    const receipt = await transaction((tx) => {
+      tx.insert(app.drafts, { title: `${kind} a` });
+      tx.insert(app.drafts, { title: `${kind} b` });
+    });
+    await receipt.wait({ tier: "global" });
   }
+  assert.deepEqual((await jazz.db.all(app.drafts)).map((row) => row.title).sort(), [
+    "mergeable a",
+    "mergeable b",
+    "serializable a",
+    "serializable b",
+  ]);
   assert.deepEqual(await jazz.db.all(app.notes), []);
 
   for (const headers of [

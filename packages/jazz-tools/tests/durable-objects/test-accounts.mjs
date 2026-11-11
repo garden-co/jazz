@@ -74,12 +74,12 @@ try {
   );
   // The backend client is thin; authority and attribution survive that change.
   assert.equal(jazz.db.currentRuntime().constructor.name, "ThinRuntime");
-  await assert.rejects(async () => {
-    await jazz.db.transaction((tx) => {
-      tx.insert(app.notes, { title: "unsupported transaction" });
-    });
-  }, /Backend thin transactions are not supported yet/);
-  assert.deepEqual(await jazz.db.all(app.notes.where({ title: "unsupported transaction" })), []);
+  // A backend thin transaction commits atomically on the DO authority.
+  const receipt = await jazz.db.transaction((tx) => {
+    tx.insert(app.notes, { title: "backend transaction" });
+  });
+  await receipt.wait({ tier: "global" });
+  assert.equal((await jazz.db.all(app.notes.where({ title: "backend transaction" }))).length, 1);
   const attributed = await jazz.withAttribution(new Request("https://app.example/test"));
   const deliveries = [];
   const userDeliveries = [];
