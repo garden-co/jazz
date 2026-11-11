@@ -64,6 +64,33 @@ fn begin(db: &Db) -> OpenTransactionId {
     id
 }
 
+fn poll<T>(f: Pin<&mut impl Future<Output = T>>) -> Poll<T> {
+    f.poll(&mut Context::from_waker(Waker::noop()))
+}
+fn exchange(alice: &Db, bob: &Db) {
+    for _ in 0..4 {
+        block_on(alice.tick()).unwrap();
+        block_on(bob.tick()).unwrap();
+    }
+}
+fn fixture() -> (Db, Db) {
+    let alice = open(1);
+    let bob = open(2);
+    bob.set_authority();
+    connect(&alice, &bob);
+    alice.set_remote_link_hint(RemoteLinkHint::Live);
+    exchange(&alice, &bob);
+    (alice, bob)
+}
+fn texts(rows: Vec<CurrentRow>) -> Vec<String> {
+    rows.into_iter()
+        .map(|row| match row.cell("text") {
+            Some(Value::String(body)) => body,
+            other => panic!("unexpected text: {other:?}"),
+        })
+        .collect()
+}
+
 /// Alice admits ordinary reads before and after a staged update, while Bob's
 /// authority has not answered either read. Each read sees its own prefix, even
 /// for chunked text; commit still publishes all later writes.
@@ -218,33 +245,6 @@ fn ordinary_queued_read_keeps_its_prefix_after_predecessor_cancellation() {
     );
 }
 
-fn poll<T>(f: Pin<&mut impl Future<Output = T>>) -> Poll<T> {
-    f.poll(&mut Context::from_waker(Waker::noop()))
-}
-fn exchange(alice: &Db, bob: &Db) {
-    for _ in 0..4 {
-        block_on(alice.tick()).unwrap();
-        block_on(bob.tick()).unwrap();
-    }
-}
-fn fixture() -> (Db, Db) {
-    let alice = open(1);
-    let bob = open(2);
-    bob.set_authority();
-    connect(&alice, &bob);
-    alice.set_remote_link_hint(RemoteLinkHint::Live);
-    exchange(&alice, &bob);
-    (alice, bob)
-}
-fn bodies(rows: Vec<CurrentRow>) -> Vec<String> {
-    rows.into_iter()
-        .map(|row| match row.cell("text") {
-            Some(Value::String(body)) => body,
-            other => panic!("unexpected text: {other:?}"),
-        })
-        .collect()
-}
-
 /// Alice starts a predicate read before committing a staged row while Bob has
 /// not answered. A serializable commit must not publish without that read.
 /// Alice: stage -> poll read -> commit; Bob: read still unanswered.
@@ -274,7 +274,7 @@ fn commit_cannot_publish_while_an_admitted_read_is_unfinished() {
     assert!(
         !matches!(result, Poll::Ready(Ok(_))) && rows.is_empty(),
         "unfinished read was bypassed: commit={result:?}, published={:?}",
-        bodies(rows)
+        texts(rows)
     );
 }
 
@@ -295,7 +295,7 @@ fn abandoned_read_cannot_attach_to_a_reused_transaction_id() {
     assert!(
         result.is_err(),
         "abandoned read returned rows from a reused transaction: {:?}",
-        result.map(bodies)
+        result.map(texts)
     );
 }
 
@@ -329,12 +329,12 @@ fn concurrent_first_reads_do_not_lose_rows_from_the_pinned_snapshot() {
     assert!(poll(second.as_mut()).is_pending());
     exchange(&alice, &bob);
     assert_eq!(
-        bodies(drive(&[&alice, &bob], first.as_mut()).unwrap()),
+        texts(drive(&[&alice, &bob], first.as_mut()).unwrap()),
         ["a"]
     );
     let second = drive(&[&alice, &bob], second.as_mut()).unwrap();
     assert_eq!(
-        bodies(second),
+        texts(second),
         ["old-b"],
         "successful read lost a row present at the transaction snapshot"
     );
@@ -399,5 +399,51 @@ fn cancelling_an_admitted_read_wakes_outside_borrows_and_allows_commit() {
         ReadOpts::default(),
     ))
     .unwrap();
-    assert_eq!(bodies(rows), ["staged"]);
+    assert_eq!(texts(rows), ["staged"]);
+}
+
+/// Alice's pending read moves to another task before abandonment. Its latest
+/// task is woken, and its superseded task waker is no longer retained.
+#[test]
+fn pending_read_replaces_its_task_waker() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use std::task::Wake;
+    #[derive(Default)]
+    struct CountWake(AtomicUsize);
+    impl Wake for CountWake {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let (alice, _bob) = fixture();
+    let id = begin(&alice);
+    let tx = alice.tx_ref(id);
+    let query = alice.prepare_query(&Query::from("notes")).unwrap();
+    let mut read = Box::pin(tx.all_prepared_at(&query, false, None, ReadTier::Remote));
+    let previous = Arc::new(CountWake::default());
+    let old = Arc::downgrade(&previous);
+    let waker = Waker::from(previous);
+    assert!(
+        read.as_mut()
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending()
+    );
+    drop(waker);
+    let current = Arc::new(CountWake::default());
+    let waker = Waker::from(current.clone());
+    assert!(
+        read.as_mut()
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending()
+    );
+    assert!(
+        old.upgrade().is_none(),
+        "superseded task waker is still retained"
+    );
+    alice.abandon_transaction_handle(id).unwrap();
+    assert_eq!(current.0.load(Ordering::SeqCst), 1);
+    assert!(matches!(poll(read.as_mut()), Poll::Ready(Err(_))));
 }
