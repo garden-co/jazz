@@ -54,9 +54,10 @@ const workloadSpecs = {
   "band-chat": nativeExample("band-chat"),
   "band-book": {
     ...nativeExample("band-book"),
-    // The rest of the policy sweep: the other arms and the 10k table. Also
-    // one band's workspace opens against another band's requests on a server.
-    nightly: { benches: ["nightly", "contention"], env: {}, timeout: 25 },
+    // The rest of the policy sweep (the other arms and the 10k table), one
+    // band's workspace opens against another band's requests on a server,
+    // and the song sheet text merges beyond one paragraph.
+    nightly: { benches: ["nightly", "contention", "text_merge"], env: {}, timeout: 35 },
   },
   "world-tour": nativeExample("world-tour"),
   wequencer: nativeExample("wequencer"),

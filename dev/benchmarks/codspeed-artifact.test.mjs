@@ -457,7 +457,7 @@ test("the nightly suite measures only the nightly extras, never a merge case", a
   assert.equal(buildArgs("stage-plan", "nightly").join(" "), native("stage-plan", ["nightly"]));
   assert.equal(
     buildArgs("band-book", "nightly").join(" "),
-    native("band-book", ["nightly", "contention"]),
+    native("band-book", ["nightly", "contention", "text_merge"]),
   );
   assert.equal(
     buildArgs("big-label", "nightly").join(" "),
