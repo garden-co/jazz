@@ -8494,24 +8494,39 @@ struct Batch {
 /// Per-batch identity and admission order; an old future never observes a reused ID.
 #[derive(Default)]
 struct TransactionReads {
-    queue: VecDeque<Rc<()>>,
-    wakers: Vec<Waker>,
+    queue: VecDeque<Rc<TransactionReadTicket>>,
     closed: bool,
+}
+
+impl TransactionReads {
+    fn take_wakers(&self) -> Vec<Waker> {
+        self.queue
+            .iter()
+            .filter_map(|ticket| ticket.waker.borrow_mut().take())
+            .collect()
+    }
+}
+
+/// Keep at most the current task's waker for each admitted read.
+#[derive(Default)]
+struct TransactionReadTicket {
+    waker: RefCell<Option<Waker>>,
 }
 
 struct TransactionRead {
     state: Rc<RefCell<TransactionReads>>,
-    ticket: Rc<()>,
+    ticket: Rc<TransactionReadTicket>,
 }
 
 impl Drop for TransactionRead {
     fn drop(&mut self) {
         let wakers = {
             let mut state = self.state.borrow_mut();
+            let wakers = state.take_wakers();
             state
                 .queue
                 .retain(|ticket| !Rc::ptr_eq(ticket, &self.ticket));
-            std::mem::take(&mut state.wakers)
+            wakers
         };
         for waker in wakers {
             waker.wake();
@@ -8523,7 +8538,7 @@ fn close_transaction_reads(state: &Rc<RefCell<TransactionReads>>) {
     let wakers = {
         let mut state = state.borrow_mut();
         state.closed = true;
-        std::mem::take(&mut state.wakers)
+        state.take_wakers()
     };
     for waker in wakers {
         waker.wake();
@@ -9855,7 +9870,7 @@ impl TxRef<'_> {
         };
         let guard = TransactionRead {
             state,
-            ticket: Rc::new(()),
+            ticket: Rc::default(),
         };
         guard
             .state
@@ -9866,12 +9881,18 @@ impl TxRef<'_> {
         let mut reading = std::pin::pin!(reading);
         std::future::poll_fn(|cx| {
             {
-                let mut state = guard.state.borrow_mut();
+                let state = guard.state.borrow();
                 if state.closed {
                     return Poll::Ready(Err(rejected("transaction is no longer open")));
                 }
-                if !state.wakers.iter().any(|waker| waker.will_wake(cx.waker())) {
-                    state.wakers.push(cx.waker().clone());
+                {
+                    let mut waker = guard.ticket.waker.borrow_mut();
+                    if waker
+                        .as_ref()
+                        .is_none_or(|prior| !prior.will_wake(cx.waker()))
+                    {
+                        *waker = Some(cx.waker().clone());
+                    }
                 }
                 if !state
                     .queue
