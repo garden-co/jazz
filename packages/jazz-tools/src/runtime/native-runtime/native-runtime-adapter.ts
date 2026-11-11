@@ -1,3 +1,17 @@
+import { toError } from "../util.js";
+import {
+  RemoteDurableTransaction,
+  type DurableOwnerRequest,
+} from "./durable-initialization-remote.js";
+import {
+  InitializationCapabilityError,
+  assertInitializationStatusBound,
+  createInitializationSeal,
+  decodeInitializationStatuses,
+  type InitializationSeal,
+  type InitializationTransactionStatus,
+  type ReservedTxId,
+} from "../provisional-initialization.js";
 import {
   validateAcceptedReadTimeout,
   isAcceptedReadCapability,
@@ -305,6 +319,12 @@ type NativeDb = {
     author?: Uint8Array,
     claims?: Record<string, unknown>,
   ): NativeReadResult | Promise<NativeReadResult>;
+  enableInitializationJournal?(): void;
+  prepareInitializationInsert?(id: string, table: string, row: Uint8Array): void;
+  sealInitializationTransaction?(id: string): string;
+  publishInitializationTransaction?(token: string): Write;
+  cancelInitializationTransaction?(token: string): void;
+  initializationTransactionStatus?(ids: string[]): string;
   commitTransaction(openTransactionId: string, kind?: TransactionKind): Write;
   rollbackTransaction(openTransactionId: string): void;
   all(
@@ -1783,6 +1803,18 @@ export class NativeRuntimeAdapter implements Runtime {
     _writeContext?: string | null,
     objectId?: string | null,
   ): InsertResult {
+    const remote = this.durableTransaction(_writeContext);
+    if (remote) {
+      const row = this.previewInsert(table, values, objectId ?? undefined);
+      remote.enqueue({
+        operation: "insert",
+        table,
+        rowId: row.id,
+        values,
+        context: _writeContext!,
+      });
+      return { ...row, kind: "staged", openTransactionId: remote.id };
+    }
     this.assertMutationAdmission("Insert");
     const suppliedRowId = objectId ? parseUuid(objectId) : undefined;
     const writeSession = sessionFromWriteContext(_writeContext);
@@ -1956,6 +1988,18 @@ export class NativeRuntimeAdapter implements Runtime {
     values: InsertValues,
     writeContext?: string | null,
   ): InsertResult {
+    const remote = this.durableTransaction(writeContext);
+    if (remote) {
+      const row = this.previewInsert(table, values, objectId);
+      remote.enqueue({
+        operation: "restore",
+        table,
+        rowId: objectId,
+        values,
+        context: writeContext!,
+      });
+      return { ...row, kind: "staged", openTransactionId: remote.id };
+    }
     this.assertMutationAdmission("Restore");
     const rowId = parseUuid(objectId);
     const writeSession = sessionFromWriteContext(writeContext);
@@ -2001,6 +2045,17 @@ export class NativeRuntimeAdapter implements Runtime {
     values: Record<string, Value>,
     writeContext?: string | null,
   ): MutationResult {
+    const remote = this.durableTransaction(writeContext);
+    if (remote) {
+      remote.enqueue({
+        operation: "update",
+        table,
+        rowId: objectId,
+        values,
+        context: writeContext!,
+      });
+      return { kind: "staged", openTransactionId: remote.id };
+    }
     this.assertMutationAdmission("Update");
     const rowId = parseUuid(objectId);
     const writeSession = sessionFromWriteContext(writeContext);
@@ -2113,6 +2168,17 @@ export class NativeRuntimeAdapter implements Runtime {
     values: InsertValues,
     writeContext?: string | null,
   ): MutationResult {
+    const remote = this.durableTransaction(writeContext);
+    if (remote) {
+      remote.enqueue({
+        operation: "upsert",
+        table,
+        rowId: objectId,
+        values,
+        context: writeContext!,
+      });
+      return { kind: "staged", openTransactionId: remote.id };
+    }
     this.assertMutationAdmission("Upsert");
     const rowId = parseUuid(objectId);
     const definition = this.table(table);
@@ -2160,6 +2226,11 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   delete(table: string, objectId: string, writeContext?: string | null): MutationResult {
+    const remote = this.durableTransaction(writeContext);
+    if (remote) {
+      remote.enqueue({ operation: "delete", table, rowId: objectId, context: writeContext! });
+      return { kind: "staged", openTransactionId: remote.id };
+    }
     this.assertMutationAdmission("Delete");
     this.table(table);
     const rowId = parseUuid(objectId);
@@ -2414,8 +2485,22 @@ export class NativeRuntimeAdapter implements Runtime {
     return id;
   }
 
-  commitTransaction(openTransactionId: OpenTransactionId): TxId {
-    if (this !== this.ownerRuntime) return this.ownerRuntime.commitTransaction(openTransactionId);
+  commitTransaction(
+    openTransactionId: OpenTransactionId,
+    onPublished?: (tx: TxId) => void,
+  ): TxId | Promise<TxId> {
+    const remote = this.ownerRuntime.durableTransactions.get(openTransactionId);
+    if (remote) {
+      const request = this.ownerRuntime.initializationCommandOwner;
+      if (!request) throw new Error("Durable commit owner retired");
+      return remote.commit().then((tx) => {
+        this.ownerRuntime.durableWrites.set(tx, { request, remote });
+        this.ownerRuntime.durableTransactions.delete(openTransactionId);
+        return tx;
+      });
+    }
+    if (this !== this.ownerRuntime)
+      return this.ownerRuntime.commitTransaction(openTransactionId, onPublished);
     if (this.closed) {
       throw new Error("Commit transaction failed: native runtime is closed");
     }
@@ -2434,10 +2519,11 @@ export class NativeRuntimeAdapter implements Runtime {
       kind: pending.kind,
       state: "committed",
     });
+    const txId = recordWrite(write, this.writes);
+    onPublished?.(txId);
     this.pumpSubscriptions();
     this.scheduleServerPump();
     this.notifyPeerTransportWork();
-    const txId = recordWrite(write, this.writes);
     if (this.nonDurableClient) this.trackLocalSettlement(txId);
     return txId;
   }
@@ -2451,6 +2537,44 @@ export class NativeRuntimeAdapter implements Runtime {
       return this.ownerRuntime.waitForTransaction(txId, tier, options);
     }
     if (typeof txId !== "string") txId = await txId;
+    const durable = this.durableWrites.get(txId);
+    if (durable) {
+      const { signal } = options;
+      signal?.throwIfAborted();
+      if (this.closed || this.initializationCommandOwner !== durable.request)
+        throw new Error("Durable write owner connection retired");
+      if (tier !== "local" && tier !== "global") throw new Error("Invalid durable write wait tier");
+      const prior = signal ? this.durableWaitIntents.get(signal) : undefined;
+      const waitId = prior?.waitId ?? crypto.randomUUID();
+      let waiting = true;
+      const abort = () => {
+        if (!waiting) return;
+        void durable
+          .request({ operation: "cancel-wait", waitId })
+          .catch((error) => this.reportLocalRelayError(toError(error)));
+      };
+      signal?.addEventListener("abort", abort, { once: true });
+      const completion = durable.request({ operation: "wait", transactionId: txId, waitId, tier });
+      void completion.catch(() => {});
+      let abortWake: (() => void) | undefined;
+      const ended = new Promise<never>((_, reject) => {
+        if (!signal) return;
+        abortWake = () => reject(signal.reason);
+        signal.addEventListener("abort", abortWake, { once: true });
+        if (signal.aborted) abortWake();
+      });
+      try {
+        await Promise.race([Promise.all([completion, options.ready]), ended]);
+      } finally {
+        waiting = false;
+        signal?.removeEventListener("abort", abort);
+        if (abortWake) signal?.removeEventListener("abort", abortWake);
+        if (signal && this.durableWaitIntents.get(signal)?.waitId === waitId)
+          this.durableWaitIntents.delete(signal);
+        durable.remote.forgetWait(waitId);
+      }
+      return;
+    }
     const write = this.writes.get(txId);
     if (!write) {
       throw new Error(`Wait for transaction failed: unknown transaction ${txId}`);
@@ -2510,6 +2634,7 @@ export class NativeRuntimeAdapter implements Runtime {
           );
         }
         if ((await Promise.race(wakes)) === "settled") {
+          signal?.throwIfAborted();
           this.pumpSubscriptions();
           return;
         }
@@ -2528,6 +2653,12 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   rollbackTransaction(openTransactionId: OpenTransactionId): Promise<boolean> {
+    const remote = this.ownerRuntime.durableTransactions.get(openTransactionId);
+    if (remote)
+      return remote.cancel().then(() => {
+        this.ownerRuntime.durableTransactions.delete(openTransactionId);
+        return true;
+      });
     if (this !== this.ownerRuntime) return this.ownerRuntime.rollbackTransaction(openTransactionId);
     const pending = this.pendingTxs.get(openTransactionId);
     if (!pending) {
@@ -2551,7 +2682,19 @@ export class NativeRuntimeAdapter implements Runtime {
     openTransactionId: OpenTransactionId,
     sessionJson: string | null | undefined,
     timeoutMs: number,
+    signal?: AbortSignal,
   ): Promise<AcceptedRows<RowState>> {
+    const remote = this.ownerRuntime.durableTransactions.get(openTransactionId);
+    if (remote) {
+      signal?.throwIfAborted();
+      return remote.run({
+        operation: "accepted-query",
+        query: queryJson,
+        session: sessionJson,
+        timeoutMs,
+      }) as Promise<AcceptedRows<RowState>>;
+    }
+    signal?.throwIfAborted();
     validateAcceptedReadTimeout(timeoutMs);
     if (this.closed || this.ownerRuntime.closed) throw new Error("Native runtime is closed");
     const pending = this.pendingTxs.get(openTransactionId);
@@ -2582,7 +2725,7 @@ export class NativeRuntimeAdapter implements Runtime {
       pending.readCapability === "client-accepted-evidence" ? undefined : boundSession?.claims,
     );
     // Existing read cancellation and owner close/discard machinery owns this.
-    const decoded = decodeAcceptedRead(await this.awaitNativeRead(read));
+    const decoded = decodeAcceptedRead(await this.awaitNativeRead(read, undefined, signal));
     const rows = rowsFromBatches(
       decoded.batches,
       this.schema,
@@ -2596,7 +2739,20 @@ export class NativeRuntimeAdapter implements Runtime {
     sessionJson?: string | null,
     tier?: string | null,
     optionsJson?: string | null,
+    signal?: AbortSignal,
   ): Promise<unknown> {
+    const remote = this.durableTransaction(optionsJson);
+    if (remote) {
+      signal?.throwIfAborted();
+      return remote.run({
+        operation: "query",
+        query: queryJson,
+        session: sessionJson,
+        tier,
+        options: optionsJson!,
+      });
+    }
+    signal?.throwIfAborted();
     if (this.closed || this.ownerRuntime.closed) throw new Error("Native runtime is closed");
     assertSupportedReadOptions(tier, optionsJson);
     this.noteFirstLoadWait(optionsJson);
@@ -2623,7 +2779,13 @@ export class NativeRuntimeAdapter implements Runtime {
     this.emitQueryCoverageTrace("attach");
     if (queryHasArraySubqueries(coreQueryJson)) {
       if (pendingTx) {
-        const payload = await this.readRowsForContextAsync(query, opts, readContext, pendingTx.id);
+        const payload = await this.readRowsForContextAsync(
+          query,
+          opts,
+          readContext,
+          pendingTx.id,
+          signal,
+        );
         this.emitQueryCoverageTrace("covered");
         return rowsFromRelationSnapshot(
           readRelationSnapshot(payload),
@@ -2631,7 +2793,13 @@ export class NativeRuntimeAdapter implements Runtime {
           subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns,
         );
       }
-      const payload = await this.readRowsForContextAsync(query, opts, readContext);
+      const payload = await this.readRowsForContextAsync(
+        query,
+        opts,
+        readContext,
+        undefined,
+        signal,
+      );
       this.emitQueryCoverageTrace("covered");
       return rowsFromRelationSnapshot(
         readRelationSnapshot(payload),
@@ -2640,7 +2808,7 @@ export class NativeRuntimeAdapter implements Runtime {
       );
     }
     const projectedColumns = subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns;
-    const rows = await this.readPlainRows(query, opts, session ?? undefined, pendingTx);
+    const rows = await this.readPlainRows(query, opts, session ?? undefined, pendingTx, signal);
     this.emitQueryCoverageTrace("covered");
     return rowsFromBatches(readRowBatches(rows), this.schema, projectedColumns);
   }
@@ -3409,9 +3577,10 @@ export class NativeRuntimeAdapter implements Runtime {
     opts: unknown,
     session: RuntimeSession | undefined,
     pendingTx: PendingTx | undefined,
+    signal?: AbortSignal,
   ): Promise<Uint8Array> {
     const context = this.nativeReadContext(session, pendingTx);
-    return this.readRowsForContextAsync(query, opts, context, pendingTx?.id);
+    return this.readRowsForContextAsync(query, opts, context, pendingTx?.id, signal);
   }
 
   /**
@@ -3445,10 +3614,12 @@ export class NativeRuntimeAdapter implements Runtime {
     opts: unknown,
     context: NativeReadContext,
     openTransactionId?: OpenTransactionId,
+    signal?: AbortSignal,
   ): Promise<Uint8Array> {
     return this.awaitNativeRead(
       this.startRowsForContext(query, opts, context, openTransactionId),
       (opts as { tier?: string }).tier,
+      signal,
     );
   }
 
@@ -3515,7 +3686,10 @@ export class NativeRuntimeAdapter implements Runtime {
     signal?: AbortSignal,
   ): Promise<Uint8Array> {
     const result = await started;
-    if (!isPendingNativeRead(result)) return result;
+    if (!isPendingNativeRead(result)) {
+      signal?.throwIfAborted();
+      return result;
+    }
     const cancel = () => result.cancel();
     this.ownerRuntime.pendingNativeReadCancels.add(cancel);
     try {
@@ -4719,6 +4893,359 @@ export class NativeRuntimeAdapter implements Runtime {
     for (const waiter of waiters) {
       if (waiter.active) waiter.resolve();
     }
+  }
+
+  private readonly initializationSeals = new WeakMap<
+    InitializationSeal,
+    { token: string; id: OpenTransactionId }
+  >();
+
+  private initializationStatusOwner?: (
+    ids: readonly ReservedTxId[],
+  ) => Promise<readonly InitializationTransactionStatus[]>;
+
+  private initializationCommandOwner?: DurableOwnerRequest;
+
+  private storageOwnerAdmission?: () => Promise<void>;
+
+  private readonly durableTransactions = new Map<OpenTransactionId, RemoteDurableTransaction>();
+
+  private readonly durableSeals = new WeakMap<InitializationSeal, RemoteDurableTransaction>();
+
+  private readonly durableWrites = new Map<
+    TxId,
+    { request: DurableOwnerRequest; remote: RemoteDurableTransaction }
+  >();
+
+  private readonly durableWaitIntents = new WeakMap<
+    AbortSignal,
+    { remote: RemoteDurableTransaction; waitId: string }
+  >();
+
+  /** Private readiness of the actual worker open, not accepted/history evidence. */
+  setStorageOwnerAdmission(admit: () => Promise<void>): () => void {
+    const owner = this.ownerRuntime;
+    owner.storageOwnerAdmission = admit;
+    return () => {
+      if (owner.storageOwnerAdmission === admit) owner.storageOwnerAdmission = undefined;
+    };
+  }
+
+  /** Wait for the admitted durable worker's physical open; never a server verdict. */
+  async waitForStorageOwner(): Promise<void> {
+    const owner = this.ownerRuntime;
+    if (this.closed || owner.closed) throw new Error("Storage owner is closed");
+    if (!owner.nonDurableClient) return;
+    const admit = owner.storageOwnerAdmission;
+    if (!admit) throw new Error("No admitted durable worker owns this foreground runtime");
+    await admit();
+    if (this.closed || owner.closed || owner.storageOwnerAdmission !== admit)
+      throw new Error("Storage owner admission was retired");
+    // Pending journal validity is checked separately by the real native
+    // owner when BEFORE-BEGIN admission enables/opens its batch.
+  }
+
+  /** @internal Installed only by the admitted durable host transport. */
+  setInitializationStatusOwner(
+    owner: (ids: readonly ReservedTxId[]) => Promise<readonly InitializationTransactionStatus[]>,
+  ): void {
+    this.ownerRuntime.initializationStatusOwner = owner;
+  }
+
+  /** Installed only by this foreground's actual admitted worker connection. */
+  setInitializationCommandOwner(request: DurableOwnerRequest): () => void {
+    const owner = this.ownerRuntime;
+    owner.initializationCommandOwner = request;
+    return () => {
+      if (owner.initializationCommandOwner === request)
+        owner.initializationCommandOwner = undefined;
+    };
+  }
+
+  /** Preserve an actual public wait already registered before remote publication. */
+  registerTransactionWaitIntent(
+    id: OpenTransactionId,
+    tier: "local" | "global",
+    signal: AbortSignal,
+  ): () => void {
+    const owner = this.ownerRuntime;
+    if (signal.aborted) return () => {};
+    const remote = owner.durableTransactions.get(id);
+    if (!remote) return () => {};
+    const waitId = crypto.randomUUID();
+    if (!remote.registerWait(waitId, tier, signal)) return () => {};
+    owner.durableWaitIntents.set(signal, { remote, waitId });
+    const release = () => {
+      signal.removeEventListener("abort", release);
+      if (owner.durableWaitIntents.get(signal)?.waitId !== waitId) return;
+      owner.durableWaitIntents.delete(signal);
+      if (remote.waitWasSubmitted(waitId)) {
+        const request = owner.initializationCommandOwner;
+        if (request)
+          void request({ operation: "cancel-wait", waitId }).catch((error) =>
+            owner.reportLocalRelayError(toError(error)),
+          );
+      }
+      remote.forgetWait(waitId);
+    };
+    signal.addEventListener("abort", release, { once: true });
+    return release;
+  }
+
+  /** Select the durable owner BEFORE native opening; ordinary transactions stay local. */
+  beginTransactionOnDurableOwner(
+    kind: TransactionKind,
+    id: OpenTransactionId,
+    sessionJson: string | null | undefined,
+    readCapability: TransactionReadCapability,
+    beforeBegin?: () => Promise<void>,
+  ): Promise<void> | undefined {
+    const owner = this.ownerRuntime;
+    const request = owner.initializationCommandOwner;
+    if (!owner.nonDurableClient || !request) return undefined;
+    if (kind !== "serializable" || !isAcceptedReadCapability(readCapability))
+      throw new Error("Durable initialization requires explicit serializable accepted admission");
+    if (owner.durableTransactions.has(id) || owner.pendingTxs.has(id) || owner.completedTxs.has(id))
+      throw new Error("Durable transaction ID has already been opened");
+    const assertCurrent = () => {
+      if (this.closed || owner.closed || owner.initializationCommandOwner !== request)
+        throw new Error("Durable transaction connection owner retired");
+    };
+    assertCurrent();
+    const remote = new RemoteDurableTransaction(
+      id,
+      {
+        operation: "begin",
+        openTransactionId: id,
+        schema: this.schema,
+        context: sessionJson,
+        readCapability,
+      },
+      request,
+      assertCurrent,
+      beforeBegin,
+    );
+    owner.durableTransactions.set(id, remote);
+    return remote.ready;
+  }
+
+  private durableTransaction(encoded?: string | null): RemoteDurableTransaction | undefined {
+    const id = txIdFromContext(encoded);
+    return id ? this.ownerRuntime.durableTransactions.get(id) : undefined;
+  }
+
+  /** Internal worker boundary: compare the admitted scope, never install caller claims. */
+  assertInitializationOwnerContext(
+    sessionJson: string | null | undefined,
+    expectedClaims: Record<string, unknown>,
+  ): void {
+    if (
+      this.closed ||
+      this.ownerRuntime.closed ||
+      this.ownerRuntime.nonDurableClient ||
+      this.trustedBackend ||
+      this.readAuthorizationHost === "trusted-serving"
+    )
+      throw new Error("Initialization requires its live authenticated durable client owner");
+    const session = sessionFromWriteContext(sessionJson);
+    if (this.backendAttribution(sessionJson) || session?.backendAuthority)
+      throw new Error("Initialization cannot select backend attribution");
+    if (
+      session &&
+      (!sameBytes(session.identity, this.peerIdentity) ||
+        canonicalJson(session.claims) !== canonicalJson(sessionClaims(expectedClaims, session)))
+    )
+      throw new Error("Initialization session differs from the admitted durable owner");
+  }
+
+  /** Open on this same owner before any callback read or physical staging. */
+  async openInitializationTransaction(
+    id: OpenTransactionId,
+    sessionJson: string | null | undefined,
+    readCapability: TransactionReadCapability,
+    expectedClaims: Record<string, unknown>,
+    assertCurrent: () => void,
+  ): Promise<void> {
+    if (!isAcceptedReadCapability(readCapability))
+      throw new Error("Initialization requires the explicit accepted-read opening capability");
+    assertCurrent();
+    this.assertInitializationOwnerContext(sessionJson, expectedClaims);
+    let begun = false;
+    try {
+      await this.enableInitializationJournal();
+      assertCurrent();
+      await this.runWhenCoreIdle(() => {
+        assertCurrent();
+        this.assertInitializationOwnerContext(sessionJson, expectedClaims);
+        this.beginTransaction("serializable", id, sessionJson, readCapability);
+        begun = true;
+        assertCurrent();
+      });
+      assertCurrent();
+    } catch (error) {
+      if (begun) {
+        try {
+          await this.rollbackTransaction(id);
+        } catch (cleanup) {
+          throw new AggregateError([error, cleanup], "Initialization opening and rollback failed");
+        }
+      }
+      throw error;
+    }
+  }
+
+  /** Selective opt-in on this actual durable owner, before opening its batch. */
+  async enableInitializationJournal(): Promise<void> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.enableInitializationJournal();
+    if (this.closed || this.nonDurableClient)
+      throw new InitializationCapabilityError("durable initialization journal owner");
+    const operation = this.db.enableInitializationJournal;
+    if (!operation) throw new InitializationCapabilityError("enableInitializationJournal");
+    await this.runWhenCoreIdle(() => {
+      if (this.closed) throw new Error("Initialization owner is closed");
+      operation.call(this.db);
+    });
+    if (this.closed) throw new Error("Initialization owner was closed during journal admission");
+  }
+
+  async recordInitializationInsertAbsence(
+    id: OpenTransactionId,
+    table: string,
+    rowId: string,
+  ): Promise<void> {
+    const remote = this.ownerRuntime.durableTransactions.get(id);
+    if (remote) {
+      await remote.run({ operation: "prepare-insert", table, rowId });
+      return;
+    }
+    const pending = this.pendingTxs.get(id);
+    if (
+      this.closed ||
+      this.ownerRuntime.closed ||
+      this.ownerRuntime.nonDurableClient ||
+      pending?.kind !== "serializable"
+    )
+      throw new Error("Initialization requires an open durable owner transaction");
+    const operation = this.db.prepareInitializationInsert;
+    if (!operation) throw new InitializationCapabilityError("prepareInitializationInsert");
+    operation.call(this.db, id, table, parseUuid(rowId));
+  }
+
+  async sealInitializationTransaction(id: OpenTransactionId): Promise<InitializationSeal> {
+    const remote = this.ownerRuntime.durableTransactions.get(id);
+    if (remote) {
+      const seal = await remote.seal();
+      this.ownerRuntime.durableSeals.set(seal, remote);
+      return seal;
+    }
+    if (this !== this.ownerRuntime) return this.ownerRuntime.sealInitializationTransaction(id);
+    const pending = this.pendingTxs.get(id);
+    if (this.closed || pending?.kind !== "serializable")
+      throw new Error("Initialization requires an open exclusive transaction");
+    const operation = this.db.sealInitializationTransaction;
+    if (
+      !operation ||
+      !this.db.publishInitializationTransaction ||
+      !this.db.cancelInitializationTransaction
+    )
+      throw new InitializationCapabilityError("seal/publish/cancelInitializationTransaction");
+    if (this.nonDurableClient)
+      throw new InitializationCapabilityError("durable initialization transaction owner");
+    const encoded = operation.call(this.db, id);
+    if (typeof encoded !== "string") throw new Error("Invalid native initialization seal response");
+    const nativeSeal: unknown = JSON.parse(encoded);
+    if (
+      !isRecord(nativeSeal) ||
+      typeof nativeSeal.token !== "string" ||
+      !nativeSeal.token ||
+      typeof nativeSeal.reservedTxId !== "string"
+    )
+      throw new Error("Invalid native initialization seal response");
+    const seal = createInitializationSeal(nativeSeal.reservedTxId);
+    this.pendingTxs.delete(id);
+    this.initializationSeals.set(seal, { token: nativeSeal.token, id });
+    return seal;
+  }
+
+  async publishInitializationTransaction(
+    seal: InitializationSeal,
+    onPublished?: (tx: TxId) => void,
+  ): Promise<TxId> {
+    const remote = this.ownerRuntime.durableSeals.get(seal);
+    if (remote) {
+      this.ownerRuntime.durableSeals.delete(seal);
+      const request = this.ownerRuntime.initializationCommandOwner;
+      if (!request) throw new Error("Durable publication owner retired");
+      const tx = await remote.publish();
+      this.ownerRuntime.durableWrites.set(tx, { request, remote });
+      this.ownerRuntime.durableTransactions.delete(remote.id);
+      return tx;
+    }
+    if (this !== this.ownerRuntime)
+      return this.ownerRuntime.publishInitializationTransaction(seal, onPublished);
+    const owned = this.initializationSeals.get(seal);
+    if (this.closed || !owned)
+      throw new Error("Initialization seal is foreign, closed or already consumed");
+    this.initializationSeals.delete(seal);
+    const write = this.db.publishInitializationTransaction!(owned.token);
+    this.completedTxs.set(owned.id, { kind: "serializable", state: "committed" });
+    // Native Write.txId has the existing TransactionId encoding. Keep the
+    // reserved coordinate as the journal/status lookup alias for this exact
+    // native write; neither its original native identity nor fate is changed.
+    const txId = seal.reservedTxId as unknown as TxId;
+    this.writes.set(txId, write);
+    onPublished?.(txId);
+    this.pumpSubscriptions();
+    this.scheduleServerPump();
+    this.notifyPeerTransportWork();
+    if (this.nonDurableClient) this.trackLocalSettlement(txId);
+    return txId;
+  }
+
+  async cancelInitializationTransaction(seal: InitializationSeal): Promise<void> {
+    const remote = this.ownerRuntime.durableSeals.get(seal);
+    if (remote) {
+      this.ownerRuntime.durableSeals.delete(seal);
+      try {
+        await remote.cancel();
+      } finally {
+        this.ownerRuntime.durableTransactions.delete(remote.id);
+      }
+      return;
+    }
+    if (this !== this.ownerRuntime) return this.ownerRuntime.cancelInitializationTransaction(seal);
+    const owned = this.initializationSeals.get(seal);
+    if (this.closed || !owned)
+      throw new Error("Initialization seal is foreign, closed or already consumed");
+    this.initializationSeals.delete(seal);
+    await this.db.cancelInitializationTransaction!(owned.token);
+    this.completedTxs.set(owned.id, { kind: "serializable", state: "rolled_back" });
+  }
+
+  async initializationTransactionStatus(
+    ids: readonly ReservedTxId[],
+  ): Promise<readonly InitializationTransactionStatus[]> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.initializationTransactionStatus(ids);
+    assertInitializationStatusBound(ids);
+    if (this.closed) throw new Error("Initialization status owner is closed");
+    if (this.initializationStatusOwner) return this.initializationStatusOwner(ids);
+    if (this.nonDurableClient)
+      throw new InitializationCapabilityError("admitted durable initialization status owner");
+    return decodeInitializationStatuses(this.initializationTransactionStatusEncoded(ids), ids);
+  }
+
+  /** Private worker transport forwards the actual named native envelope. */
+  initializationTransactionStatusEncoded(ids: readonly ReservedTxId[]): string {
+    assertInitializationStatusBound(ids);
+    if (this.closed || this.ownerRuntime.closed || this.ownerRuntime.nonDurableClient)
+      throw new Error("Initialization status requires its live durable owner");
+    const operation = this.db.initializationTransactionStatus;
+    if (!operation) throw new InitializationCapabilityError("initializationTransactionStatus");
+    const encoded = operation.call(this.db, [...ids]);
+    if (typeof encoded !== "string")
+      throw new Error("Invalid native initialization status response");
+    decodeInitializationStatuses(encoded, ids);
+    return encoded;
   }
 }
 

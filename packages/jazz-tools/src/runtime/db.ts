@@ -1661,7 +1661,12 @@ export async function runInTransaction<TResult, TKind extends TransactionKind>(
     }
     throw error;
   });
-  return createTransactionWriteResult(transaction, resolvedValue, txId, resultClient());
+  const ownerClient = resultClient();
+  ownerClient.bindTransactionWait(
+    getDbTxHandleBinding(transaction, "result").openTransactionId,
+    txId,
+  );
+  return createTransactionWriteResult(transaction, resolvedValue, txId, ownerClient);
 }
 
 /**
@@ -1789,6 +1794,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
             () => ownerClient.commitTransaction(openTransactionId).txId,
           )
         : ownerClient.commitTransaction(openTransactionId).txId;
+    ownerClient.bindTransactionWait(openTransactionId, txId);
     this.committing = true;
     const finishCommit = () => {
       this.committing = false;

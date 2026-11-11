@@ -1,3 +1,5 @@
+import { DurableInitializationOwner } from "./durable-initialization-owner.js";
+import type { ReservedTxId } from "../runtime/provisional-initialization.js";
 import { createOpenTransactionId, type TxId } from "../runtime/client.js";
 import type { WasmDb } from "jazz-wasm";
 import { loadWasmModule, type WasmModule } from "../runtime/wasm-loader.js";
@@ -104,6 +106,7 @@ type RuntimeContext = {
   fingerprint: string;
   options: BrowserWorkerInitOptions;
   peers: Map<string, TabPeer>;
+  initializationTransactions: DurableInitializationOwner;
   admissionClaims: Set<symbol>;
   pendingAdmissionTasks: number;
   runtime: NativeRuntimeAdapter | null;
@@ -1050,6 +1053,7 @@ function createContext(
     fingerprint,
     options,
     peers: new Map(),
+    initializationTransactions: new DurableInitializationOwner(),
     admissionClaims: new Set(),
     pendingAdmissionTasks: 0,
     runtime: null,
@@ -1278,6 +1282,7 @@ function cleanupFailedContext(context: RuntimeContext): void {
   context.disposeAuxiliaryTrace = null;
   if (contexts.get(context.key) === context) contexts.delete(context.key);
   try {
+    context.initializationTransactions.discard();
     runtime?.discard();
   } finally {
     try {
@@ -1596,7 +1601,7 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
                 throw new Error("Invalid Inspector edit operation");
             }
           }
-          txId = activeRuntime.commitTransaction(tx);
+          txId = await activeRuntime.commitTransaction(tx);
         } catch (error) {
           try {
             await activeRuntime.rollbackTransaction(tx);
@@ -1723,6 +1728,7 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
           result(peer, message.id, undefined, {
             peerAuthority,
             workerRealmId,
+            durableOwnerOpened: peer.context.pageStore !== null,
             ...(peer.inspectorAttachment
               ? { inspectorAttachmentPhysicalDbName: peer.context.options.dbName }
               : {}),
@@ -1732,6 +1738,186 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
         } finally {
           if (unownedSubscriber) await activeRuntime.retirePeerTransport(unownedSubscriber);
         }
+      });
+      return;
+    }
+    if (message.type === "initialization-owner") {
+      if (!Number.isSafeInteger(message.id) || message.id < 0)
+        throw new Error("Invalid durable transaction request ID");
+      const context = peer.context;
+      const command = message.command;
+      const host = context.initializationTransactions;
+      if (command.operation === "begin") {
+        await enqueueTransportTransition(context, async () => {
+          const subscriber = peer.subscriber;
+          const pump = peer.pump;
+          const claims = structuredClone(context.options.sessionClaims);
+          const scope = {
+            appId: context.options.appId,
+            dbName: context.options.dbName,
+            storageOwner: context.options.storageOwner,
+            authSessionKey: context.options.authSessionKey,
+          };
+          const assertCurrent = () => {
+            if (
+              !subscriber ||
+              !pump ||
+              peer.subscriber !== subscriber ||
+              peer.pump !== pump ||
+              context.peers.get(peer.tabId) !== peer ||
+              context.runtime !== activeRuntime ||
+              context.closing ||
+              context.storageInvalidated ||
+              context.options.appId !== scope.appId ||
+              context.options.dbName !== scope.dbName ||
+              context.options.storageOwner !== scope.storageOwner ||
+              context.options.authSessionKey !== scope.authSessionKey
+            )
+              throw new Error("Durable transaction admitted owner was replaced");
+            pump.assertOpen();
+            assertWorkerSessionClaims(context, claims);
+          };
+          assertCurrent();
+          await pump!.flush();
+          assertCurrent();
+          // This view is registered on the real durable Inner BEFORE begin;
+          // no foreground transaction or seal can be adopted here.
+          const runtime = activeRuntime.registerSchemaView(command.schema);
+          const handle = await host.begin(
+            peer,
+            {
+              runtime,
+              context: command.context,
+              readCapability: command.readCapability,
+              claims,
+              assertCurrent,
+            },
+            command.openTransactionId,
+          );
+          result(peer, message.id, undefined, { initializationResult: handle });
+        });
+        return;
+      }
+      let value: unknown;
+      switch (command.operation) {
+        case "wait":
+          value = await host.wait(
+            peer,
+            command.transactionId as TxId,
+            command.tier,
+            command.waitId,
+          );
+          break;
+        case "cancel-wait":
+          host.cancelWait(peer, command.waitId);
+          break;
+        case "seal":
+          value = await host.seal(peer, command.handle);
+          break;
+        case "publish":
+          value = await host.publish(peer, command.handle, command.waitIntents);
+          break;
+        case "commit":
+          value = await host.commit(peer, command.handle, command.waitIntents);
+          break;
+        case "cancel":
+          await host.cancel(peer, command.handle);
+          break;
+        default:
+          value = await host.run(peer, command.handle, async (runtime, id, _opening, signal) => {
+            const assertBatch = (encoded: string) => {
+              const options = JSON.parse(encoded) as { transaction_id?: unknown };
+              if (options?.transaction_id !== id)
+                throw new Error("Durable operation must name its original open transaction");
+            };
+            if (command.operation === "query") {
+              assertBatch(command.options);
+              runtime.assertInitializationOwnerContext(
+                command.session,
+                context.options.sessionClaims,
+              );
+              return runtime.query(
+                command.query,
+                command.session,
+                command.tier,
+                command.options,
+                signal,
+              );
+            }
+            if (command.operation === "accepted-query") {
+              runtime.assertInitializationOwnerContext(
+                command.session,
+                context.options.sessionClaims,
+              );
+              return runtime.queryAccepted(
+                command.query,
+                id,
+                command.session,
+                command.timeoutMs,
+                signal,
+              );
+            }
+            if (command.operation === "prepare-insert")
+              return runtime.recordInitializationInsertAbsence(id, command.table, command.rowId);
+            assertBatch(command.context);
+            runtime.assertInitializationOwnerContext(
+              command.context,
+              context.options.sessionClaims,
+            );
+            switch (command.operation) {
+              case "insert":
+                return runtime.insert(
+                  command.table,
+                  command.values,
+                  command.context,
+                  command.rowId,
+                );
+              case "upsert":
+                return runtime.upsert(
+                  command.table,
+                  command.rowId,
+                  command.values,
+                  command.context,
+                );
+              case "update":
+                return runtime.update(
+                  command.table,
+                  command.rowId,
+                  command.values,
+                  command.context,
+                );
+              case "restore":
+                return runtime.restore(
+                  command.table,
+                  command.rowId,
+                  command.values,
+                  command.context,
+                );
+              case "delete":
+                return runtime.delete(command.table, command.rowId, command.context);
+            }
+          });
+      }
+      result(peer, message.id, undefined, { initializationResult: value });
+      return;
+    }
+    if (message.type === "initialization-status") {
+      if (!peer.subscriber || !peer.pump) throw new Error("Browser tab is not admitted");
+      const statuses = activeRuntime.initializationTransactionStatusEncoded(
+        message.reservedTxIds as ReservedTxId[],
+      );
+      if (
+        peer.context.peers.get(peer.tabId) !== peer ||
+        peer.context.runtime !== activeRuntime ||
+        peer.context.storageInvalidated ||
+        peer.context.closing ||
+        !peer.subscriber
+      )
+        throw new Error("Initialization status admission ended");
+      post(peer.port, {
+        type: "result",
+        id: message.id,
+        initializationStatuses: statuses,
       });
       return;
     }
@@ -1849,8 +2035,15 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
     ) {
       return;
     }
-    if ("id" in message) result(peer, message.id, toError(error));
-    else failPeer(peer, toError(error));
+    if ("id" in message) {
+      // The new fixed owner route can reject with native structured errors.
+      // Preserve their actual code/message through the existing bounded codec.
+      const failure =
+        message.type === "initialization-owner" && error !== null && typeof error === "object"
+          ? error
+          : toError(error);
+      result(peer, message.id, failure);
+    } else failPeer(peer, toError(error));
   }
 }
 
@@ -1983,11 +2176,14 @@ function attachInspectorControl(authSessionKey: string, port: MessagePort): void
 function result(
   peer: TabPeer,
   id: number,
-  error?: Error,
+  error?: unknown,
   receipt?: {
     inspectorAttachmentPhysicalDbName?: string;
     peerAuthority?: { node: Uint8Array; epoch: bigint; features: number };
     workerRealmId?: string;
+    initializationResult?: unknown;
+    initializationStatuses?: string;
+    durableOwnerOpened?: boolean;
   },
 ): void {
   if (peer.context.peers.get(peer.tabId) !== peer) return;
@@ -2008,6 +2204,10 @@ function closeTab(context: RuntimeContext, tabId: string, closePort = true): voi
   const peer = context.peers.get(tabId);
   if (!peer) return;
   context.peers.delete(tabId);
+  void context.initializationTransactions.revokeOwner(peer).catch((error) => {
+    console.error("Durable transaction retirement failed", error);
+    handleStorageInvalidation(context);
+  });
   peer.transportWaitAbort.abort();
   for (const dispose of peer.pendingInspectorBootstraps) dispose();
   peer.pendingInspectorBootstraps.clear();
@@ -2100,6 +2300,7 @@ async function releaseIdleContext(context: RuntimeContext): Promise<void> {
       // Foreground leases belong to the physical owner, not to this schema pin.
       const physicalOwner = physicalDatabaseOwners.get(context.options.dbName);
       const treeRetirement = context.pageStore?.retireTreeOwnership();
+      context.initializationTransactions.discard();
       context.runtime?.discard();
       context.runtime = null;
       context.disposePageStoreInvalidation?.();
@@ -2216,6 +2417,7 @@ function handleStorageInvalidation(context: RuntimeContext): void {
   context.disposePageStoreInvalidation?.();
   context.disposePageStoreInvalidation = null;
   context.pageStore = null;
+  context.initializationTransactions.discard();
   context.runtime?.discard();
   context.runtime = null;
   context.disposeTelemetry?.();

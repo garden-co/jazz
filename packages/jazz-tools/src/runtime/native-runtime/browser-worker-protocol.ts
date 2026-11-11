@@ -1,3 +1,6 @@
+import type { InsertValues } from "../../drivers/types.js";
+import type { OpenTransactionId } from "../client.js";
+import type { TransactionReadCapability } from "../accepted-read.js";
 import type { ClientMigrations } from "../client-migrations.js";
 import type { WasmSchema, Value } from "../../drivers/types.js";
 import type { RuntimeSourcesConfig } from "../context.js";
@@ -494,7 +497,53 @@ export type InspectorStagedEdit = {
   updatedAt?: number;
 };
 
+export type BrowserInitializationWaitIntent = { waitId: string; tier: "local" | "global" };
+
+export type BrowserInitializationCommand =
+  | {
+      operation: "begin";
+      openTransactionId: OpenTransactionId;
+      schema: WasmSchema;
+      context?: string | null;
+      readCapability: TransactionReadCapability;
+    }
+  | {
+      operation: "query";
+      handle: string;
+      query: string;
+      session?: string | null;
+      tier?: string | null;
+      options: string;
+    }
+  | {
+      operation: "accepted-query";
+      handle: string;
+      query: string;
+      session?: string | null;
+      timeoutMs: number;
+    }
+  | {
+      operation: "insert" | "upsert" | "update" | "restore";
+      handle: string;
+      table: string;
+      rowId: string;
+      values: InsertValues;
+      context: string;
+    }
+  | { operation: "delete"; handle: string; table: string; rowId: string; context: string }
+  | { operation: "prepare-insert"; handle: string; table: string; rowId: string }
+  | {
+      operation: "publish" | "commit";
+      handle: string;
+      waitIntents?: BrowserInitializationWaitIntent[];
+    }
+  | { operation: "seal" | "cancel"; handle: string }
+  | { operation: "wait"; transactionId: string; waitId: string; tier: "local" | "global" }
+  | { operation: "cancel-wait"; waitId: string };
+
 export type BrowserFollowerPortRequest =
+  | { type: "initialization-owner"; id: number; command: BrowserInitializationCommand }
+  | { type: "initialization-status"; id: number; reservedTxIds: string[] }
   /** Connection liveness only; never acknowledges an operation's outcome. */
   | { type: "runtime-probe"; connectionId: string; nonce: number }
   | {
@@ -657,6 +706,9 @@ export type BrowserFollowerPortEvent =
       peerAuthority?: { node: Uint8Array; epoch: bigint; features: number };
       /** Present on init replies; identifies the worker owning the durable root. */
       workerRealmId?: string;
+      initializationResult?: unknown;
+      initializationStatuses?: string;
+      durableOwnerOpened?: boolean;
     }
   | { type: "auth-failure"; reason: string }
   | { type: "auth-restored" }

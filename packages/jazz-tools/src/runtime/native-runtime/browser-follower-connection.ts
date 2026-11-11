@@ -1,3 +1,8 @@
+import {
+  decodeInitializationStatuses,
+  type InitializationTransactionStatus,
+} from "../provisional-initialization.js";
+import type { BrowserInitializationCommand } from "./browser-worker-protocol.js";
 import type { AuthFailureReason } from "../auth-state.js";
 import type {
   BrowserFollowerConnection,
@@ -22,11 +27,14 @@ import { toError } from "../util.js";
 
 type PendingRequest = {
   type: BrowserFollowerPortRpcRequest["type"] | "open-inspector-control";
-  resolve: () => void;
+  resolve: (value?: unknown) => void;
+  receiveInitializationStatuses?: (encoded: string) => void;
   reject: (error: Error) => void;
 };
 
 type BrowserFollowerPortRpcRequest =
+  | { type: "initialization-owner"; command: BrowserInitializationCommand }
+  | { type: "initialization-status"; reservedTxIds: string[] }
   | {
       type: "init";
       sessionClaims: Record<string, unknown>;
@@ -131,6 +139,25 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       sessionClaims,
       ...(inspectorBinding ? { inspectorBinding } : {}),
     });
+    this.disposeStorageOwnerAdmission = runtime.setStorageOwnerAdmission(async () => {
+      await initialized;
+      if (this.closed || this.failed)
+        throw this.failed ?? new Error("Browser follower connection is closed");
+      if (!this.durableOwnerOpened || !this.peerAuthority || !this.workerRealmId)
+        throw new Error("Worker did not confirm its actual durable open and peer admission");
+    });
+    this.disposeInitializationOwner = runtime.setInitializationCommandOwner((command) =>
+      this.initializationCommand(command),
+    );
+    runtime.setInitializationStatusOwner(async (ids) => {
+      await this.ready();
+      let statuses: readonly InitializationTransactionStatus[] | undefined;
+      await this.request({ type: "initialization-status", reservedTxIds: [...ids] }, (encoded) => {
+        statuses = decodeInitializationStatuses(encoded, ids);
+      });
+      if (!statuses) throw new Error("Durable owner omitted initialization status");
+      return statuses;
+    });
     const connected = (async () => {
       await initialized;
       const transport = await runtime.connectUpstreamPeer(this.peerAuthority);
@@ -166,8 +193,16 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
           : undefined,
       );
       for (const frames of this.pendingFrames.splice(0)) this.pump.receive(frames);
+      await runtime.waitForStorageOwner();
+      this.ownerAdmissionPending = false;
+      if (!this.hasPendingWork()) this.clearWatchdog();
     })();
-    this.readyPromise = Promise.all([initialized, connected]).then(() => undefined);
+    const disposed = new Promise<never>((_, reject) => {
+      this.rejectReadiness = reject;
+    });
+    this.readyPromise = Promise.race([Promise.all([initialized, connected]), disposed]).then(() => {
+      this.rejectReadiness = undefined;
+    });
     void this.readyPromise.catch((error: unknown) => this.fail(toError(error)));
   }
 
@@ -214,7 +249,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     let rejectPending: (error: Error) => void = () => {};
     const promise = new Promise<void>((resolve, reject) => {
       rejectPending = reject;
-      this.pending.set(id, { type: "open-inspector-control", resolve, reject });
+      this.pending.set(id, { type: "open-inspector-control", resolve: () => resolve(), reject });
     });
     let controlClosed = false;
     const closeControl = () => {
@@ -305,13 +340,21 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     this.dispose(new Error("Browser follower connection is reconnecting"));
   }
 
-  private request(request: BrowserFollowerPortRpcRequest): Promise<void> {
+  private request<T = void>(
+    request: BrowserFollowerPortRpcRequest,
+    receiveInitializationStatuses?: (encoded: string) => void,
+  ): Promise<T> {
     if (this.failed) return Promise.reject(this.failed);
     if (this.closed) return Promise.reject(new Error("Browser follower connection is closed"));
     const id = this.nextRequestId++;
     const message = { ...request, id };
-    const promise = new Promise<void>((resolve, reject) => {
-      this.pending.set(id, { type: request.type, resolve, reject });
+    const promise = new Promise<T>((resolve, reject) => {
+      this.pending.set(id, {
+        type: request.type,
+        resolve: (value) => resolve(value as T),
+        reject,
+        receiveInitializationStatuses,
+      });
     });
     this.armWatchdog();
     try {
@@ -384,7 +427,12 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
   };
 
   private hasPendingWork(): boolean {
-    return this.pending.size > 0 || this.localSettlementsPending || this.resumeProbePending;
+    return (
+      this.ownerAdmissionPending ||
+      this.pending.size > 0 ||
+      this.localSettlementsPending ||
+      this.resumeProbePending
+    );
   }
 
   private readonly onVisibilityChange = (): void => {
@@ -478,8 +526,21 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       if (pending.type === "init") {
         this.peerAuthority = message.peerAuthority;
         this.workerRealmId = message.workerRealmId;
+        this.durableOwnerOpened = message.durableOwnerOpened === true;
       }
-      pending.resolve();
+      if (pending.receiveInitializationStatuses) {
+        try {
+          if (typeof message.initializationStatuses !== "string")
+            throw new Error("Missing initialization status response");
+          pending.receiveInitializationStatuses(message.initializationStatuses);
+        } catch (error) {
+          pending.reject(toError(error));
+          return;
+        }
+      }
+      pending.resolve(
+        pending.type === "initialization-owner" ? message.initializationResult : undefined,
+      );
     }
   };
 
@@ -512,6 +573,12 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
   private dispose(error: Error): void {
     if (this.closed) return;
     this.closed = true;
+    this.rejectReadiness?.(new Error("Browser follower connection is closed"));
+    this.rejectReadiness = undefined;
+    this.disposeStorageOwnerAdmission?.();
+    this.disposeStorageOwnerAdmission = null;
+    this.disposeInitializationOwner?.();
+    this.disposeInitializationOwner = null;
     this.clearWatchdog();
     globalThis.removeEventListener?.("pageshow", this.onResume);
     globalThis.document?.removeEventListener("visibilitychange", this.onVisibilityChange);
@@ -525,5 +592,21 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     this.port.close();
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
+  }
+
+  private disposeInitializationOwner: (() => void) | null = null;
+
+  private disposeStorageOwnerAdmission: (() => void) | null = null;
+
+  private durableOwnerOpened = false;
+
+  private rejectReadiness?: (error: Error) => void;
+
+  private ownerAdmissionPending = true;
+
+  /** Internal fixed-command route; opening occurs in the admitted worker. */
+  async initializationCommand(command: BrowserInitializationCommand): Promise<unknown> {
+    await this.ready();
+    return this.request<unknown>({ type: "initialization-owner", command });
   }
 }

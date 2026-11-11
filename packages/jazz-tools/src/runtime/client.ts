@@ -1,3 +1,16 @@
+type TransactionWaitGroup = {
+  openId?: OpenTransactionId;
+  txId?: TxId;
+  waiters?: Set<(txId: TxId) => void>;
+};
+import {
+  InitializationCapabilityError,
+  assertInitializationStatusBound,
+  type InitializationRuntime,
+  type InitializationSeal,
+  type InitializationTransactionStatus,
+  type ReservedTxId,
+} from "./provisional-initialization.js";
 import {
   validateAcceptedReadTimeout,
   isAcceptedReadCapability,
@@ -50,6 +63,7 @@ export type TransactionPreparationIO = Pick<
   | "upsertInternal"
   | "restoreInternal"
 > & {
+  recordInitializationInsertAbsence(table: string, rowId: string): Promise<void>;
   assertActive(): void;
   /** @internal Ordinary policy-checked query outside this transaction's overlay. */
   queryGlobal(
@@ -181,7 +195,7 @@ export type AuthUpdate =
 /**
  * Common interface for the runtime backing `JazzClient`.
  */
-export interface Runtime {
+export interface Runtime extends Partial<InitializationRuntime> {
   /**
    * Wait until every write committed so far reaches `tier`. `throughOutage`
    * keeps the wait pending through outages until a terminal failure.
@@ -198,6 +212,22 @@ export interface Runtime {
     sessionJson?: string | null,
     readCapability?: TransactionReadCapability,
   ): OpenTransactionId;
+
+  /** @internal Carry a caller's existing wait into a not-yet-published durable batch. */
+  registerTransactionWaitIntent?(
+    id: OpenTransactionId,
+    tier: DurabilityTier,
+    signal: AbortSignal,
+  ): () => void;
+
+  /** @internal Select a real durable batch before any callback operation. */
+  beginTransactionOnDurableOwner?(
+    kind: TransactionKind,
+    id: OpenTransactionId,
+    session: string | null | undefined,
+    readCapability: TransactionReadCapability,
+    beforeBegin?: TransactionAdmission,
+  ): Promise<void> | undefined;
   /** @internal Authority evidence in an opted-in existing serializable batch. */
   queryAccepted?(
     queryJson: string,
@@ -992,6 +1022,7 @@ export class WriteHandle<T = void, WaitResult = void> {
 
   constructor(txId: TxId | Promise<TxId>, client: JazzClient, value = undefined as T) {
     this.value = value;
+    this.originalTxId = txId;
     this.txId = Promise.resolve(txId);
     // Fire-and-forget callers may wait later, or never. Observe rejection now
     // without replacing txId: a later wait must still receive the original error.
@@ -1021,6 +1052,9 @@ export class WriteHandle<T = void, WaitResult = void> {
   protected client(): JazzClient {
     return this.#client;
   }
+
+  // Keep known IDs immediate; pending IDs must register waits before they settle.
+  protected readonly originalTxId: TxId | Promise<TxId>;
 }
 
 /**
@@ -1071,7 +1105,7 @@ export class SerializableWriteHandle extends WriteHandle<void> {
   override async wait(options: Partial<WriteWaitOptions> = {}): Promise<void> {
     const tier = options.tier === undefined ? undefined : resolveWriteWaitTier(options.tier);
     validateWriteWaitTimeout(options.timeoutMs);
-    await this.client().waitForSerializableTransaction(this.txId, options.timeoutMs, tier);
+    await this.client().waitForSerializableTransaction(this.originalTxId, options.timeoutMs, tier);
   }
 }
 
@@ -1090,7 +1124,7 @@ export class SerializableWriteResult<T> extends WriteResult<T> {
   override async wait(options: Partial<WriteWaitOptions> = {}): Promise<T> {
     const tier = options.tier === undefined ? undefined : resolveWriteWaitTier(options.tier);
     validateWriteWaitTimeout(options.timeoutMs);
-    await this.client().waitForSerializableTransaction(this.txId, options.timeoutMs, tier);
+    await this.client().waitForSerializableTransaction(this.originalTxId, options.timeoutMs, tier);
     return this.value;
   }
 
@@ -1147,7 +1181,15 @@ export function beginClientTransactionAfter(
 export class JazzClient {
   private readonly transactionPreparations = new Map<
     OpenTransactionId,
-    { pending?: Promise<void>; committing: boolean; unopened?: boolean }
+    {
+      pending?: Promise<void>;
+      committing: boolean;
+      unopened?: boolean;
+      durableOpening?: boolean;
+      implicitDurableOwner?: boolean;
+      seal?: InitializationSeal;
+      waitGroup?: TransactionWaitGroup;
+    }
   >();
   private runtime: Runtime;
   private scheduler: (task: () => void) => void;
@@ -1290,31 +1332,88 @@ export class JazzClient {
         readCapability && session === undefined
           ? undefined
           : this.writeContext(session, attribution);
-      const state: { pending?: Promise<void>; committing: boolean; unopened?: boolean } = {
+      const state: {
+        pending?: Promise<void>;
+        committing: boolean;
+        unopened?: boolean;
+        durableOpening?: boolean;
+        implicitDurableOwner?: boolean;
+      } = {
         committing: false,
         unopened: true,
       };
       this.transactionPreparations.set(id, state);
-      state.pending = Promise.resolve().then(async () => {
-        const assertCurrent = () => {
-          if (this.discarded) throw new Error("Client discarded before transaction admission");
-          if (this.shutdownPromise)
-            throw new Error("Client shut down before transaction admission");
-          if (this.transactionPreparations.get(id) !== state)
-            throw new Error("Transaction was rolled back before admission");
-        };
+      const assertCurrent = () => {
+        if (this.discarded) throw new Error("Client discarded before transaction admission");
+        if (this.shutdownPromise) throw new Error("Client shut down before transaction admission");
+        if (this.transactionPreparations.get(id) !== state)
+          throw new Error("Transaction was rolled back before admission");
+      };
+      const beforeBegin = async () => {
         assertCurrent();
         await prerequisite();
         assertCurrent();
-        if (readCapability) this.runtime.beginTransaction(kind, id, context, readCapability);
-        else this.runtime.beginTransaction(kind, id, context);
-        state.unopened = false;
-      });
+      };
+      // Select and freeze the actual route synchronously, before immediate
+      // typed writes capture their contexts. No native BEGIN happens until
+      // the unchanged opening prerequisite has completed.
+      const durable = readCapability
+        ? this.runtime.beginTransactionOnDurableOwner?.(
+            kind,
+            id,
+            context,
+            readCapability,
+            beforeBegin,
+          )
+        : undefined;
+      if (durable) {
+        state.durableOpening = true;
+        state.implicitDurableOwner =
+          readCapability === "client-accepted-evidence" && session === undefined;
+        state.pending = durable.then(() => {
+          assertCurrent();
+          state.unopened = false;
+        });
+      } else {
+        state.pending = Promise.resolve()
+          .then(beforeBegin)
+          .then(() => {
+            assertCurrent();
+            if (readCapability) this.runtime.beginTransaction(kind, id, context, readCapability);
+            else this.runtime.beginTransaction(kind, id, context);
+            state.unopened = false;
+          });
+      }
       state.pending.catch(() => {});
       return id;
     }
     const context =
       readCapability && session === undefined ? undefined : this.writeContext(session, attribution);
+    const durable = readCapability
+      ? this.runtime.beginTransactionOnDurableOwner?.(kind, id, context, readCapability)
+      : undefined;
+    if (durable) {
+      const state = {
+        committing: false,
+        unopened: true,
+        durableOpening: true,
+        implicitDurableOwner:
+          readCapability === "client-accepted-evidence" && session === undefined,
+        pending: undefined as Promise<void> | undefined,
+      };
+      this.transactionPreparations.set(id, state);
+      state.pending = durable.then(() => {
+        if (
+          this.transactionPreparations.get(id) !== state ||
+          this.discarded ||
+          this.shutdownPromise
+        )
+          throw new Error("Durable transaction admission was retired");
+        state.unopened = false;
+      });
+      state.pending.catch(() => {});
+      return id;
+    }
     const opened = readCapability
       ? this.runtime.beginTransaction(kind, id, context, readCapability)
       : this.runtime.beginTransaction(kind, id, context);
@@ -1374,6 +1473,14 @@ export class JazzClient {
       };
       try {
         await prepare({
+          recordInitializationInsertAbsence: async (table, rowId) => {
+            assertActive();
+            const operation = this.runtime.recordInitializationInsertAbsence;
+            if (!operation)
+              throw new InitializationCapabilityError("recordInitializationInsertAbsence");
+            await operation.call(this.runtime, id, table, rowId);
+            assertActive();
+          },
           assertActive,
           queryInternal: (query, options, session) => {
             assertActive();
@@ -1504,9 +1611,18 @@ export class JazzClient {
     const state = this.transactionPreparations.get(id);
     if (state?.committing) throw new Error("Transaction is already committing");
     const runtime = this.runtime;
-    const submitted = state?.pending
-      ? state.pending.then(() => runtime.commitTransaction(id))
-      : runtime.commitTransaction(id);
+    const submit = () => {
+      const committed = runtime.commitTransaction(id);
+      const group = state?.waitGroup;
+      if (typeof committed === "string" && group) {
+        group.txId = committed;
+        // Claim before returning to the preparation promise: runtime progress
+        // may already be queued ahead of its TxId resolution continuations.
+        for (const start of group.waiters ?? []) start(committed);
+      }
+      return committed;
+    };
+    const submitted = state?.pending ? state.pending.then(submit) : submit();
     if (typeof submitted === "string") {
       this.transactionPreparations.delete(id);
       return new WriteHandle(submitted, this);
@@ -1522,13 +1638,16 @@ export class JazzClient {
         throw error;
       },
     );
+    this.bindTransactionWait(id, txId);
     return new WriteHandle(txId, this);
   }
 
   rollbackTransaction(id: OpenTransactionId): Promise<boolean> {
-    const unopened = this.transactionPreparations.get(id)?.unopened;
+    const state = this.transactionPreparations.get(id);
+    if (state?.seal) return this.cancelInitializationTransaction(state.seal).then(() => true);
+    const unopened = state?.unopened;
     this.transactionPreparations.delete(id);
-    if (unopened) return Promise.resolve(true);
+    if (unopened && !state?.durableOpening) return Promise.resolve(true);
     return this.runtime.rollbackTransaction(id);
   }
 
@@ -1640,9 +1759,16 @@ export class JazzClient {
     }: { updatedAt?: number; branch?: BranchView | BranchSelector } = {},
   ): string | undefined {
     // An explicit attribution without a session writes as no session, not the client's.
+    const implicitOwner =
+      explicitSession === undefined &&
+      attribution === undefined &&
+      openTransactionId !== undefined &&
+      this.transactionPreparations.get(openTransactionId)?.implicitDurableOwner === true;
     const session =
       explicitSession ||
-      (attribution === undefined ? (this.resolvedSession ?? undefined) : undefined);
+      (attribution === undefined && !implicitOwner
+        ? (this.resolvedSession ?? undefined)
+        : undefined);
     const branch = selected && ("head" in selected ? selected : { head: selected });
     if (
       !session &&
@@ -2001,7 +2127,14 @@ export class JazzClient {
     session?: Session,
   ): Promise<Row[]> {
     const normalizedOptions = this.normalizeQueryExecutionOptions(options);
-    const effectiveSession = session ?? this.resolvedSession;
+    // An implicit own-client opening already captured the real authenticated
+    // worker owner. Do not turn its default into a page-realm explicit token.
+    // Caller-supplied sessions still cross the boundary and must be checked.
+    const implicitOwner =
+      normalizedOptions.openTransactionId !== undefined &&
+      this.transactionPreparations.get(normalizedOptions.openTransactionId)
+        ?.implicitDurableOwner === true;
+    const effectiveSession = session ?? (implicitOwner ? null : this.resolvedSession);
     const sessionJson = effectiveSession
       ? JSON.stringify(serializeRuntimeSession(effectiveSession))
       : undefined;
@@ -2456,19 +2589,63 @@ export class JazzClient {
         timeoutMs,
       );
     }
+    let releaseWaiter: (() => void) | undefined;
+    let releaseDurableIntent: (() => void) | undefined;
     try {
-      // Register before awaiting host readiness. Readiness still gates completion,
-      // including runtimes that do not themselves need to defer transport progress.
-      const completion = this.runtime.waitForTransaction(txId, tier, {
-        ...(ready ? { ready } : {}),
-        signal: control.signal,
-      });
+      const complete = (id: TxId | Promise<TxId>): Promise<void> => {
+        // Register before awaiting readiness or a deferred commit: this claims
+        // the runtime outcome while the original wait's one timeout stays live.
+        const completion = this.runtime.waitForTransaction(id, tier, {
+          ...(ready ? { ready } : {}),
+          signal: control.signal,
+        });
+        completion.catch(() => undefined);
+        return Promise.all([ready, completion]).then(async () => {
+          if (tier === "global") await this.initializationCompletions.get(await id);
+        });
+      };
+      const group = typeof txId === "string" ? undefined : this.transactionWaitGroups.get(txId);
+      if (group?.openId)
+        releaseDurableIntent = this.runtime.registerTransactionWaitIntent?.(
+          group.openId,
+          tier,
+          control.signal,
+        );
+      const completion = group
+        ? new Promise<void>((resolve, reject) => {
+            let started = false;
+            const start = (committed: TxId) => {
+              if (started || control.signal.aborted) return;
+              started = true;
+              group.txId = committed;
+              releaseWaiter?.();
+              try {
+                complete(committed).then(resolve, reject);
+              } catch (error) {
+                reject(error);
+              }
+            };
+            releaseWaiter = () => group.waiters?.delete(start);
+            if (group.txId) start(group.txId);
+            else {
+              (group.waiters ??= new Set()).add(start);
+              void Promise.resolve(txId).then(start, (error) => {
+                if (started) return;
+                started = true;
+                releaseWaiter?.();
+                reject(error);
+              });
+            }
+          })
+        : complete(txId);
       completion.catch(() => undefined);
-      await Promise.race([Promise.all([ready, completion]), ended]);
+      await Promise.race([completion, ended]);
     } catch (error) {
       if (control.signal.aborted && error === control.signal.reason) throw error;
       throw this.normalizeTransactionWaitError(error);
     } finally {
+      releaseWaiter?.();
+      releaseDurableIntent?.();
       clearTimeout(timer);
       if (!control.signal.aborted) control.abort(new Error("write wait ended"));
     }
@@ -2507,11 +2684,12 @@ export class JazzClient {
     // Revoke scopes before close can synchronously re-enter application code.
     this.preparationClosed = true;
     this.shutdownPromise = (async () => {
-      // Close runtime if it supports explicit shutdown.
-      if (this.runtime.close) {
-        await this.runtime.close();
-      } else {
-        this.runtime.disconnect({ rejectWaiters: false });
+      try {
+        // Close runtime if it supports explicit shutdown.
+        if (this.runtime.close) await this.runtime.close();
+        else this.runtime.disconnect({ rejectWaiters: false });
+      } finally {
+        this.initializationCompletions.clear();
       }
     })();
 
@@ -2521,6 +2699,7 @@ export class JazzClient {
   /** @internal Abandon runtime work after external storage invalidation/reset. */
   discard(): void {
     this.discarded = true;
+    this.initializationCompletions.clear();
     this.runtime.discard?.();
   }
 
@@ -2530,5 +2709,118 @@ export class JazzClient {
     }
 
     await this.runtime.clearClientStorage();
+  }
+
+  private readonly initializationSeals = new WeakMap<InitializationSeal, OpenTransactionId>();
+
+  private readonly initializationCompletions = new Map<TxId, Promise<void>>();
+
+  private readonly transactionWaitGroups = new WeakMap<Promise<TxId>, TransactionWaitGroup>();
+
+  /** @internal Drain this transaction's existing preparation before freezing it. */
+  async sealInitializationTransaction(id: OpenTransactionId): Promise<InitializationSeal> {
+    const operation = this.runtime.sealInitializationTransaction;
+    if (
+      !operation ||
+      !this.runtime.publishInitializationTransaction ||
+      !this.runtime.cancelInitializationTransaction
+    )
+      throw new InitializationCapabilityError("seal/publish/cancelInitializationTransaction");
+    const state = this.transactionPreparations.get(id);
+    if (!state || state.committing) throw new Error("Transaction is closed or committing");
+    state.committing = true;
+    try {
+      await state.pending;
+      if (this.transactionPreparations.get(id) !== state)
+        throw new Error("Transaction was rolled back before initialization seal");
+      const seal = await operation.call(this.runtime, id);
+      if (this.transactionPreparations.get(id) !== state) {
+        await this.runtime.cancelInitializationTransaction(seal);
+        throw new Error("Transaction was rolled back during initialization seal");
+      }
+      this.initializationSeals.set(seal, id);
+      state.seal = seal;
+      return seal;
+    } catch (error) {
+      await this.rollbackTransaction(id).catch(() => {});
+      throw error;
+    }
+  }
+
+  /** @internal Publication alone turns a reserved identity into an ordinary TxId. */
+  async publishInitializationTransaction(seal: InitializationSeal): Promise<TxId> {
+    const operation = this.runtime.publishInitializationTransaction;
+    if (!operation) throw new InitializationCapabilityError("publishInitializationTransaction");
+    const id = this.initializationSeals.get(seal);
+    if (!id) throw new Error("Initialization seal is foreign or already consumed");
+    this.initializationSeals.delete(seal);
+    this.transactionPreparations.delete(id);
+    return operation.call(this.runtime, seal);
+  }
+
+  /** @internal Terminal abandonment never reuses a reservation. */
+  async cancelInitializationTransaction(seal: InitializationSeal): Promise<void> {
+    const operation = this.runtime.cancelInitializationTransaction;
+    if (!operation) throw new InitializationCapabilityError("cancelInitializationTransaction");
+    const id = this.initializationSeals.get(seal);
+    if (!id) throw new Error("Initialization seal is foreign or already consumed");
+    this.initializationSeals.delete(seal);
+    this.transactionPreparations.delete(id);
+    await operation.call(this.runtime, seal);
+  }
+
+  /** @internal Read only the admitted durable owner's exact records. */
+  async initializationTransactionStatus(
+    ids: readonly ReservedTxId[],
+  ): Promise<readonly InitializationTransactionStatus[]> {
+    assertInitializationStatusBound(ids);
+    const operation = this.runtime.initializationTransactionStatus;
+    if (!operation) throw new InitializationCapabilityError("initializationTransactionStatus");
+    return operation.call(this.runtime, ids);
+  }
+
+  /** @internal Preserve ordinary insert semantics while recording exact absence. */
+  recordInitializationInsertAbsence(
+    id: OpenTransactionId,
+    table: string,
+    rowId: string,
+  ): Promise<void> {
+    return this.prepareTransaction(id, (io) => io.recordInitializationInsertAbsence(table, rowId));
+  }
+
+  /** @internal Carry application wait intent through deferred commit handles and retries. */
+  bindTransactionWait(id: OpenTransactionId, txId: Promise<TxId>): void {
+    const state = this.transactionPreparations.get(id);
+    if (!state) return;
+    const inherited = this.transactionWaitGroups.get(txId);
+    if (inherited && state.waitGroup && inherited !== state.waitGroup)
+      throw new Error("Cannot combine unrelated transaction wait owners");
+    const group = inherited ?? state.waitGroup ?? {};
+    group.openId = id;
+    state.waitGroup = group;
+    this.transactionWaitGroups.set(txId, group);
+  }
+
+  /** @internal */
+  transactionPreparation(openTransactionId: OpenTransactionId): Promise<void> | undefined {
+    return this.transactionPreparations.get(openTransactionId)?.pending;
+  }
+
+  /** @internal Preserve global crypto/promotion completion without raising the local durability floor. */
+  setInitializationCompletion(txId: TxId, completion: Promise<void>): void {
+    if (this.discarded || this.shutdownPromise)
+      throw new Error("Initialization completion owner is closed");
+    if (this.initializationCompletions.has(txId))
+      throw new Error("Initialization completion already registered");
+    this.initializationCompletions.set(txId, completion);
+    void completion.then(
+      () => {
+        if (this.initializationCompletions.get(txId) === completion)
+          this.initializationCompletions.delete(txId);
+      },
+      () => {
+        /* Retain the observed rejection for later global waits. */
+      },
+    );
   }
 }
