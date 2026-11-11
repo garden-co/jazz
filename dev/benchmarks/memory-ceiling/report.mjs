@@ -26,6 +26,12 @@ export function renderSummary(summary, steps) {
     `jazz-tools ${summary.jazzTools}; budgets: server ${fmt(summary.budgets.server)}, client ${fmt(summary.budgets.client)} of growth; growth writes: ${summary.writes}.`,
     "",
   );
+  if (summary.error) {
+    lines.push(
+      `**Run failed** at ${summary.error.at.toLocaleString("en-US")} ${summary.unit}, before any budget was crossed: ${summary.error.error.split("\n")[0]}`,
+      "",
+    );
+  }
   if (summary.firstToCross) {
     const c = summary.ceilings[summary.firstToCross];
     lines.push(
@@ -38,7 +44,7 @@ export function renderSummary(summary, steps) {
           `- Also crossed: ${sideNames[side]} at ${other.overAt.toLocaleString("en-US")} ${summary.unit}.`,
         );
     }
-  } else {
+  } else if (!summary.error) {
     lines.push(`**No budget crossed** (${summary.reached}).`, "");
   }
   const per = summary.bytesPerUnit;

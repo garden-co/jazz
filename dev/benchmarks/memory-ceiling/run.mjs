@@ -102,7 +102,10 @@ const budgets = {
 };
 const growth = Number(args.growth);
 const maxScale = Number(args["max-scale"]);
-const deadline = Date.now() + Number(args["max-minutes"]) * 60_000;
+// --max-minutes is the whole run's budget. Each scenario gets an even share
+// of what is left when it starts, so one that never crosses (and grows for
+// its whole share) cannot starve the next.
+const runDeadline = Date.now() + Number(args["max-minutes"]) * 60_000;
 const bisectSteps = Number(args.bisect);
 const crowdSize = Number(args.crowd);
 const minFreeDisk = parseBytes(args["min-free-disk"]);
@@ -134,8 +137,15 @@ function dirBytes(path) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function runScenario(name) {
+async function runScenario(name, scenariosLeft) {
   const scenario = adapter.scenarios[name];
+  const deadline = Date.now() + Math.max(0, runDeadline - Date.now()) / scenariosLeft;
+  // A worker request may take at most what is left of this scenario's share
+  // (and at least a minute), and fails at once if the server exits.
+  const bounded = (server) => ({
+    timeoutMs: Math.max(60_000, deadline - Date.now()),
+    abortOn: server.exited,
+  });
   const out = join(outRoot, name);
   rmSync(out, { recursive: true, force: true });
   mkdirSync(out, { recursive: true });
@@ -157,8 +167,20 @@ async function runScenario(name) {
     writes: args.writes,
   });
 
-  const launch = async (dataDir) =>
-    await startServer({ bin: serverBin, appId, dataDir, outDir: out, adminSecret, backendSecret });
+  // Every server this scenario starts, so a failure can stop them all.
+  const servers = new Set();
+  const launch = async (dataDir) => {
+    const server = await startServer({
+      bin: serverBin,
+      appId,
+      dataDir,
+      outDir: out,
+      adminSecret,
+      backendSecret,
+    });
+    servers.add(server);
+    return server;
+  };
 
   /** Grow from `from` to `to` units on a running server, watching the budget. */
   async function ingest(server, from, to, label) {
@@ -180,7 +202,10 @@ async function runScenario(name) {
       for (let i = 1; i <= chunkCount; i++) {
         const end = i === chunkCount ? to : from + Math.round(((to - from) * i) / chunkCount);
         if (end <= at) continue;
-        const r = await writer.call({ op: "seed", from: at, to: end, window: Number(args.window) });
+        const r = await writer.call(
+          { op: "seed", from: at, to: end, window: Number(args.window) },
+          bounded(server),
+        );
         rows += r.rows;
         at = end;
         chunks.push({ units: end, serverPeak: serverSampler.peak, serverRss: server.memory().rss });
@@ -194,12 +219,10 @@ async function runScenario(name) {
     if (!error && !server.exit && Number(args.probe) > 0) {
       const probeSampler = sampleMemory(server.pid);
       try {
-        probe = await writer.call({
-          op: "probe",
-          scale: at,
-          count: Number(args.probe),
-          serverPid: server.pid,
-        });
+        probe = await writer.call(
+          { op: "probe", scale: at, count: Number(args.probe), serverPid: server.pid },
+          bounded(server),
+        );
       } catch (e) {
         probe = { error: String(e.message ?? e) };
       }
@@ -239,17 +262,19 @@ async function runScenario(name) {
     await sleep(1000);
     result.serverIdle = server.memory().rss;
     const serverSampler = sampleMemory(server.pid);
-    const client = await startWorker({
-      name: "client",
-      outDir: out,
-      init: workerInit(server.url),
-      packagesDir,
-    });
-    result.clientBaseline = client.memory().rss;
-    const clientSampler = sampleMemory(client.pid);
+    let client;
+    let clientSampler;
     let crowd;
     try {
-      const reads = await client.call({ op: "read", kind: "client", scale });
+      client = await startWorker({
+        name: "client",
+        outDir: out,
+        init: workerInit(server.url),
+        packagesDir,
+      });
+      result.clientBaseline = client.memory().rss;
+      clientSampler = sampleMemory(client.pid);
+      const reads = await client.call({ op: "read", kind: "client", scale }, bounded(server));
       result.clientMs = reads.ms;
       result.reads = reads.results[0];
       result.clientPeak = clientSampler.stop();
@@ -262,17 +287,21 @@ async function runScenario(name) {
           init: workerInit(server.url),
           packagesDir,
         });
-        const r = await crowd.call({ op: "read", kind: "crowd", size: crowdSize, scale });
+        const r = await crowd.call(
+          { op: "read", kind: "crowd", size: crowdSize, scale },
+          bounded(server),
+        );
         result.crowd = { users: r.results.length, ms: r.ms };
       }
     } catch (e) {
       result.error = String(e.message ?? e);
-      result.clientPeak ??= clientSampler.stop();
+      result.clientPeak ??= clientSampler?.stop();
     }
     result.serverPeak = serverSampler.stop();
     result.serverHwm = server.memory().hwm;
     result.serverExit = server.exit;
-    result.clientGrowth = (result.clientPeak ?? 0) - result.clientBaseline;
+    result.clientGrowth =
+      result.clientBaseline == null ? 0 : (result.clientPeak ?? 0) - result.clientBaseline;
     if (!server.exit) {
       const profile = await server.heapProfile();
       if (profile) {
@@ -280,7 +309,7 @@ async function runScenario(name) {
         result.heap = summarizeHeap(profile);
       }
     }
-    await client.stop();
+    await client?.stop();
     await crowd?.stop();
     // What the server keeps once its users have gone: retained, not peak.
     if (!server.exit) {
@@ -295,7 +324,7 @@ async function runScenario(name) {
       // again. Memory still held after each departure is per-session state
       // the server never frees; reconnect storms after a restart grow it.
       const cycles = [];
-      for (let i = 0; i < Number(args.churn) && !server.exit; i++) {
+      for (let i = 0; i < Number(args.churn) && !server.exit && !result.error; i++) {
         const again = await startWorker({
           name: "churn",
           outDir: out,
@@ -303,7 +332,10 @@ async function runScenario(name) {
           packagesDir,
         });
         try {
-          await again.call({ op: "read", kind: "client", scale });
+          await again.call({ op: "read", kind: "client", scale }, bounded(server));
+        } catch (e) {
+          result.error = String(e.message ?? e);
+          break;
         } finally {
           await again.stop();
         }
@@ -328,149 +360,182 @@ async function runScenario(name) {
     return { server, result };
   }
 
+  // Which sides went over their budget. The harness measures memory and
+  // enforces no limit, so nothing here is ever OOM-killed: a server that
+  // exits has crashed, which `stepError` reports as an error, not a ceiling.
   const verdict = (ingestStep, cold) => ({
-    serverImport:
-      Math.max(0, ...ingestStep.chunks.map((c) => c.serverPeak)) > budgets.server ||
-      (Boolean(ingestStep.serverExit) && !ingestStep.probe),
-    serverEdit:
-      (ingestStep.probe?.serverPeak ?? 0) > budgets.server ||
-      (Boolean(ingestStep.serverExit) && Boolean(ingestStep.probe)),
-    serverCold:
-      Boolean(cold) &&
-      (Math.max(cold.serverPeak, cold.serverHwm) > budgets.server || Boolean(cold.serverExit)),
+    serverImport: Math.max(0, ...ingestStep.chunks.map((c) => c.serverPeak)) > budgets.server,
+    serverEdit: (ingestStep.probe?.serverPeak ?? 0) > budgets.server,
+    serverCold: Boolean(cold) && Math.max(cold.serverPeak, cold.serverHwm) > budgets.server,
     client: Boolean(cold) && cold.clientGrowth > budgets.client,
   });
+  /** Why a step measured nothing, or null. */
+  const stepError = (ingestStep, cold) =>
+    (ingestStep.serverExit && `server exited (${JSON.stringify(ingestStep.serverExit)})`) ||
+    (cold?.serverExit && `server exited (${JSON.stringify(cold.serverExit)})`) ||
+    ingestStep.error ||
+    ingestStep.probe?.error ||
+    cold?.error ||
+    null;
 
   const dataDir = join(out, "data");
   const okDir = join(out, "data-ok");
   log(`server budget ${fmt(budgets.server)}, client budget ${fmt(budgets.client)}`);
-  let server = await launch(dataDir);
-  ({ bundle } = await deploy({
-    appId,
-    serverUrl: server.url,
-    adminSecret,
-    schema: adapter.app,
-    permissions: adapter.permissions,
-  }));
 
   const steps = [];
-  let scale = 0;
-  let next = Number(args.start ?? scenario.start);
   let lastOk = { scale: 0 };
   let over = null;
-  while (next <= maxScale) {
-    if (Date.now() > deadline) {
-      log("time limit reached");
-      break;
-    }
-    if (freeDisk(out) < minFreeDisk) {
-      log("disk limit reached");
-      break;
-    }
-    const label = `step-${String(steps.length + 1).padStart(2, "0")}`;
-    const ingestStep = await ingest(server, scale, next, label);
-    log(
-      `${label} ingest ${scale}→${ingestStep.to} ${scenario.unit}: ${ingestStep.rows} rows in ${(ingestStep.ms / 1000).toFixed(1)} s, server peak ${fmt(ingestStep.serverPeak)}` +
-        (ingestStep.probe?.msPerTransaction
-          ? `; user edit ${ingestStep.probe.msPerTransaction} ms (server CPU ${ingestStep.probe.serverCpuMsPerTransaction} ms)`
-          : "") +
-        (ingestStep.error ? ` ERROR ${ingestStep.error}` : ""),
-    );
-    let cold = null;
-    if (!server.exit) {
-      await server.stop();
-      const c = await coldLoad(dataDir, ingestStep.to, label);
-      server = c.server;
-      cold = c.result;
-      log(
-        `${label} cold @${ingestStep.to}: ready ${cold.readyMs} ms, server idle ${fmt(cold.serverIdle)}, one user ${fmt(cold.serverPeakClientOnly ?? 0)}, with crowd ${fmt(Math.max(cold.serverPeak, cold.serverHwm))}, after disconnect ${fmt(cold.serverAfterDisconnect ?? 0)}; client +${fmt(cold.clientGrowth)} (abs ${fmt(cold.clientPeak ?? 0)}, reads ${cold.clientMs} ms)` +
-          (cold.churn
-            ? `; each extra session keeps ${fmt(cold.churn.rssPerSession)} RSS, ${fmt(cold.churn.heapPerSession ?? 0)} heap`
-            : "") +
-          (cold.error ? ` ERROR ${cold.error}` : ""),
-      );
-    }
-    const step = {
-      label,
-      scale: ingestStep.to,
-      counts: scenario.describe(ingestStep.to),
-      diskBytes: existsSync(dataDir) ? dirBytes(dataDir) : null,
-      ingest: ingestStep,
-      cold,
-    };
-    step.over = verdict(ingestStep, cold);
-    steps.push(step);
-    writeFileSync(join(out, "steps.json"), JSON.stringify(steps, null, 2));
-    if (Object.values(step.over).some(Boolean) || ingestStep.error) {
-      over = step;
-      break;
-    }
-    // Keep the last data under budget, to bisect from.
-    await server.stop();
-    rmSync(okDir, { recursive: true, force: true });
-    cpSync(dataDir, okDir, { recursive: true });
-    server = await launch(dataDir);
-    lastOk = step;
-    scale = ingestStep.to;
-    next = Math.max(scale + 1, Math.ceil(scale * growth));
-  }
-  await server.stop();
-
-  // Bisect each side that crossed between the last step under budget and
-  // the first over it, by growing a copy of the last good data.
+  // Why the run could not measure what it set out to (a rejected write, a
+  // failed read, a worker or harness failure): reported as an error, never
+  // as "no budget crossed".
+  let failure = null;
   const ceilings = {};
-  if (over) {
-    // Ingest: the chunk at which the server first crossed is the answer
-    // (within a tenth of the step), no re-run needed.
-    if (over.over.serverImport) {
-      const firstOver = over.ingest.chunks.find((c) => c.serverPeak > budgets.server);
-      const before = over.ingest.chunks.filter((c) => c.units < (firstOver?.units ?? Infinity));
-      ceilings.serverImport = {
-        units: before.at(-1)?.units ?? lastOk.scale,
-        overAt: firstOver?.units ?? over.scale,
-      };
-    }
-    for (const side of ["serverEdit", "serverCold", "client"]) {
-      if (!over.over[side]) continue;
-      let lo = lastOk.scale;
-      let hi = over.scale;
-      const probes = [];
-      for (let i = 0; i < bisectSteps && hi - lo > 1 && lo > 0; i++) {
-        if (Date.now() > deadline) break;
-        const mid = Math.round((lo + hi) / 2);
-        const probeDir = join(out, "data-probe");
-        rmSync(probeDir, { recursive: true, force: true });
-        cpSync(okDir, probeDir, { recursive: true });
-        const s = await launch(probeDir);
-        const ingestStep = await ingest(s, lo, mid, `bisect-${side}-${i + 1}`);
-        await s.stop();
-        const { server: s2, result: cold } = await coldLoad(
-          probeDir,
-          mid,
-          `bisect-${side}-${i + 1}`,
-        );
-        await s2.stop();
-        const v = verdict(ingestStep, cold);
-        probes.push({
-          scale: mid,
-          counts: scenario.describe(mid),
-          ingest: ingestStep,
-          cold,
-          over: v,
-        });
-        log(
-          `bisect ${side} @${mid}: import peak ${fmt(ingestStep.serverPeak)}, edits peak ${fmt(ingestStep.probe?.serverPeak ?? 0)}, cold peak ${fmt(Math.max(cold.serverPeak, cold.serverHwm))}, client +${fmt(cold.clientGrowth)} → ${v[side] ? "over" : "under"}`,
-        );
-        if (v[side]) hi = mid;
-        else {
-          lo = mid;
-          rmSync(okDir, { recursive: true, force: true });
-          cpSync(probeDir, okDir, { recursive: true });
-        }
-        rmSync(probeDir, { recursive: true, force: true });
+  try {
+    let server = await launch(dataDir);
+    ({ bundle } = await deploy({
+      appId,
+      serverUrl: server.url,
+      adminSecret,
+      schema: adapter.app,
+      permissions: adapter.permissions,
+    }));
+
+    let scale = 0;
+    let next = Number(args.start ?? scenario.start);
+    while (next <= maxScale) {
+      if (Date.now() > deadline) {
+        log("time limit reached");
+        break;
       }
-      ceilings[side] = { units: lo, overAt: hi, probes };
+      if (freeDisk(out) < minFreeDisk) {
+        log("disk limit reached");
+        break;
+      }
+      const label = `step-${String(steps.length + 1).padStart(2, "0")}`;
+      const ingestStep = await ingest(server, scale, next, label);
+      log(
+        `${label} ingest ${scale}→${ingestStep.to} ${scenario.unit}: ${ingestStep.rows} rows in ${(ingestStep.ms / 1000).toFixed(1)} s, server peak ${fmt(ingestStep.serverPeak)}` +
+          (ingestStep.probe?.msPerTransaction
+            ? `; user edit ${ingestStep.probe.msPerTransaction} ms (server CPU ${ingestStep.probe.serverCpuMsPerTransaction} ms)`
+            : "") +
+          (ingestStep.error ? ` ERROR ${ingestStep.error}` : "") +
+          (ingestStep.probe?.error ? ` EDIT ERROR ${ingestStep.probe.error}` : ""),
+      );
+      let cold = null;
+      if (!server.exit) {
+        await server.stop();
+        const c = await coldLoad(dataDir, ingestStep.to, label);
+        server = c.server;
+        cold = c.result;
+        log(
+          `${label} cold @${ingestStep.to}: ready ${cold.readyMs} ms, server idle ${fmt(cold.serverIdle)}, one user ${fmt(cold.serverPeakClientOnly ?? 0)}, with crowd ${fmt(Math.max(cold.serverPeak, cold.serverHwm))}, after disconnect ${fmt(cold.serverAfterDisconnect ?? 0)}; client +${fmt(cold.clientGrowth)} (abs ${fmt(cold.clientPeak ?? 0)}, reads ${cold.clientMs} ms)` +
+            (cold.churn
+              ? `; each extra session keeps ${fmt(cold.churn.rssPerSession)} RSS, ${fmt(cold.churn.heapPerSession ?? 0)} heap`
+              : "") +
+            (cold.error ? ` ERROR ${cold.error}` : ""),
+        );
+      }
+      const step = {
+        label,
+        scale: ingestStep.to,
+        counts: scenario.describe(ingestStep.to),
+        diskBytes: existsSync(dataDir) ? dirBytes(dataDir) : null,
+        ingest: ingestStep,
+        cold,
+      };
+      step.over = verdict(ingestStep, cold);
+      steps.push(step);
+      writeFileSync(join(out, "steps.json"), JSON.stringify(steps, null, 2));
+      if (Object.values(step.over).some(Boolean)) {
+        over = step;
+        break;
+      }
+      // Not over any budget, yet not measured: say so and stop.
+      const error = stepError(ingestStep, cold);
+      if (error) {
+        failure = { at: step.scale, error };
+        break;
+      }
+      // Keep the last data under budget, to bisect from.
+      await server.stop();
+      rmSync(okDir, { recursive: true, force: true });
+      cpSync(dataDir, okDir, { recursive: true });
+      server = await launch(dataDir);
+      lastOk = step;
+      scale = ingestStep.to;
+      next = Math.max(scale + 1, Math.ceil(scale * growth));
     }
+    await server.stop();
+
+    // Bisect each side that crossed between the last step under budget and
+    // the first over it. Every side starts from its own copy of the last good
+    // data, which advances only with that side's under-budget probes, so the
+    // data at hand always matches `lo`.
+    if (over) {
+      // Ingest: the chunk at which the server first crossed is the answer
+      // (within a tenth of the step), no re-run needed.
+      if (over.over.serverImport) {
+        const firstOver = over.ingest.chunks.find((c) => c.serverPeak > budgets.server);
+        const before = over.ingest.chunks.filter((c) => c.units < (firstOver?.units ?? Infinity));
+        ceilings.serverImport = {
+          units: before.at(-1)?.units ?? lastOk.scale,
+          overAt: firstOver?.units ?? over.scale,
+        };
+      }
+      for (const side of ["serverEdit", "serverCold", "client"]) {
+        if (!over.over[side]) continue;
+        let lo = lastOk.scale;
+        let hi = over.scale;
+        const probes = [];
+        const sideOkDir = join(out, `data-ok-${side}`);
+        rmSync(sideOkDir, { recursive: true, force: true });
+        if (lo > 0) cpSync(okDir, sideOkDir, { recursive: true });
+        for (let i = 0; i < bisectSteps && hi - lo > 1 && lo > 0; i++) {
+          if (Date.now() > deadline) break;
+          const mid = Math.round((lo + hi) / 2);
+          const probeDir = join(out, "data-probe");
+          rmSync(probeDir, { recursive: true, force: true });
+          cpSync(sideOkDir, probeDir, { recursive: true });
+          const label = `bisect-${side}-${i + 1}`;
+          const s = await launch(probeDir);
+          const ingestStep = await ingest(s, lo, mid, label);
+          await s.stop();
+          const { server: s2, result: cold } = await coldLoad(probeDir, mid, label);
+          await s2.stop();
+          const v = verdict(ingestStep, cold);
+          const probeError = stepError(ingestStep, cold);
+          probes.push({
+            scale: mid,
+            counts: scenario.describe(mid),
+            ingest: ingestStep,
+            cold,
+            over: v,
+            error: probeError ?? null,
+          });
+          log(
+            `bisect ${side} @${mid}: import peak ${fmt(ingestStep.serverPeak)}, edits peak ${fmt(ingestStep.probe?.serverPeak ?? 0)}, cold peak ${fmt(Math.max(cold.serverPeak, cold.serverHwm))}, client +${fmt(cold.clientGrowth)} → ${v[side] ? "over" : probeError ? `ERROR ${probeError}` : "under"}`,
+          );
+          if (v[side]) hi = mid;
+          else if (probeError) {
+            // Neither over nor measured: stop narrowing this side.
+            rmSync(probeDir, { recursive: true, force: true });
+            break;
+          } else {
+            lo = mid;
+            rmSync(sideOkDir, { recursive: true, force: true });
+            cpSync(probeDir, sideOkDir, { recursive: true });
+          }
+          rmSync(probeDir, { recursive: true, force: true });
+        }
+        rmSync(sideOkDir, { recursive: true, force: true });
+        ceilings[side] = { units: lo, overAt: hi, probes };
+      }
+    }
+  } catch (e) {
+    failure = { at: steps.at(-1)?.scale ?? 0, error: `harness: ${e.stack ?? e}` };
+    log(`ERROR ${failure.error}`);
+  } finally {
+    for (const server of servers) await server.stop().catch(() => {});
   }
 
   // Growth per unit: least squares over the steps (scale, memory).
@@ -509,7 +574,11 @@ async function runScenario(name) {
     serverBin,
     writes: args.writes,
     budgets,
-    reached: over ? null : `no budget crossed up to ${steps.at(-1)?.scale ?? 0} ${scenario.unit}`,
+    error: failure,
+    reached:
+      over || failure
+        ? null
+        : `no budget crossed up to ${steps.at(-1)?.scale ?? 0} ${scenario.unit}`,
     firstToCross: sides[0]?.[0] ?? null,
     ceilings: Object.fromEntries(
       Object.entries(ceilings).map(([side, c]) => [
@@ -546,11 +615,15 @@ async function runScenario(name) {
     for (const dir of [dataDir, okDir]) rmSync(dir, { recursive: true, force: true });
   }
   log(
-    `summary: ${JSON.stringify({ firstToCross: summary.firstToCross, ceilings: Object.fromEntries(Object.entries(summary.ceilings).map(([k, v]) => [k, v.units])), reached: summary.reached })}`,
+    `summary: ${JSON.stringify({ firstToCross: summary.firstToCross, ceilings: Object.fromEntries(Object.entries(summary.ceilings).map(([k, v]) => [k, v.units])), reached: summary.reached, error: summary.error?.error ?? null })}`,
   );
   return summary;
 }
 
 const summaries = [];
-for (const name of scenarioNames) summaries.push(await runScenario(name));
+for (const [i, name] of scenarioNames.entries()) {
+  summaries.push(await runScenario(name, scenarioNames.length - i));
+}
+// A run that could not measure a scenario fails, after writing what it has.
+if (summaries.some((summary) => summary.error)) process.exitCode = 1;
 writeFileSync(join(outRoot, "summary.json"), JSON.stringify(summaries, null, 2));

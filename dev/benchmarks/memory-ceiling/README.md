@@ -75,12 +75,22 @@ For each scenario the adapter declares:
 6. Stops at the first step where any side crosses its budget, then finds the
    ceiling: the import crossing to a tenth of the step from the samples it
    took while writing, and the edit, cold and client crossings by bisecting
-   (`--bisect`, 3 rounds) on a copy of the last data under budget.
+   (`--bisect`, 3 rounds) on a copy of the last data under budget. Each side
+   bisects from its own copy, so its data always matches its lower bound.
+
+`--max-minutes` (120) bounds the whole run: each scenario gets an even share
+of the time left when it starts. A worker request may take at most what is
+left of its scenario's share, and fails as soon as the server exits. The
+budgets are measured, not enforced, so a server that exits has crashed: that
+is an error, never a ceiling. A run
+that cannot measure a scenario (a rejected edit, a failed read, a server
+that exits, a harness error) reports **Run failed** with the error and exits non-zero, after
+writing the summary of the steps it has.
 
 Heap profiles (`GET /debug/pprof/heap`) are saved after every import, cold
 load and disconnect, and summarized by allocation site (the nearest frame
-that is not allocator plumbing). They only see Rust allocations: RocksDB's
-memtables and block cache are in RSS but not in the profile.
+that is not allocator plumbing). They only see Rust allocations: SQLite's
+page cache, allocated by SQLite itself, is in RSS but not in the profile.
 
 Output, under `--out/<scenario>/`: `summary.md` (the table the workflow posts),
 `summary.json`, `steps.json` (every measurement), `*.pb.gz` (open with

@@ -1,8 +1,8 @@
 // Processes the memory-ceiling harness owns: the shipped `jazz-tools server`
-// binary, and forked Jazz client workers. Every process it starts gets a
-// pidfile, and the harness only ever signals the pids it wrote.
+// binary, and forked Jazz client workers. The harness only ever signals the
+// child processes it started itself.
 import { fork, spawn } from "node:child_process";
-import { createWriteStream, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createWriteStream, readFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { join } from "node:path";
 
@@ -91,13 +91,10 @@ export async function startServer({
   });
   child.stdout.pipe(log);
   child.stderr.pipe(log);
-  const pidfile = join(outDir, "server.pid");
-  writeFileSync(pidfile, String(child.pid));
   let exit = null;
   const exited = new Promise((resolve) =>
     child.once("exit", (code, signal) => {
       exit = { code, signal };
-      rmSync(pidfile, { force: true });
       resolve(exit);
     }),
   );
@@ -105,13 +102,16 @@ export async function startServer({
   const started = Date.now();
   for (;;) {
     if (exit) throw new Error(`server exited during startup: ${JSON.stringify(exit)}`);
+    if (Date.now() - started > 120_000) {
+      child.kill("SIGKILL");
+      throw new Error("server did not become healthy");
+    }
     try {
       const res = await fetch(`${url}/health`);
       if (res.ok) break;
     } catch {
       // not listening yet
     }
-    if (Date.now() - started > 120_000) throw new Error("server did not become healthy");
     await sleep(50);
   }
   return {
@@ -156,8 +156,6 @@ export async function startWorker({ name, outDir, init, packagesDir }) {
   });
   child.stdout.pipe(log);
   child.stderr.pipe(log);
-  const pidfile = join(outDir, `${name}.pid`);
-  writeFileSync(pidfile, String(child.pid));
   let nextId = 1;
   const pending = new Map();
   let exit = null;
@@ -172,18 +170,46 @@ export async function startWorker({ name, outDir, init, packagesDir }) {
     });
     child.once("exit", (code, signal) => {
       exit = { code, signal };
-      rmSync(pidfile, { force: true });
       const error = new Error(`${name} exited (${code ?? signal})`);
       reject(error);
       for (const waiter of pending.values()) waiter.reject(error);
       pending.clear();
     });
   });
-  const call = (message) =>
+  /**
+   * Send a request and wait for its reply. With `timeoutMs`, or when
+   * `abortOn` (say, the server's `exited`) settles first, the call fails and
+   * the worker is killed, so a crashed server or a stuck request never holds
+   * the run until the job's own timeout.
+   */
+  const call = (message, { timeoutMs, abortOn } = {}) =>
     new Promise((resolve, reject) => {
       if (exit) return reject(new Error(`${name} already exited`));
       const id = nextId++;
-      pending.set(id, { resolve, reject });
+      let timer;
+      const settle = (fn) => (value) => {
+        clearTimeout(timer);
+        pending.delete(id);
+        fn(value);
+      };
+      const fail = (error) => {
+        if (!pending.has(id)) return;
+        settle(reject)(error);
+        if (!exit) child.kill("SIGKILL");
+      };
+      pending.set(id, { resolve: settle(resolve), reject: settle(reject) });
+      if (timeoutMs != null) {
+        timer = setTimeout(
+          () =>
+            fail(
+              new Error(`${name}: ${message.op} timed out after ${Math.round(timeoutMs / 1000)} s`),
+            ),
+          timeoutMs,
+        );
+      }
+      abortOn?.then((why) =>
+        fail(new Error(`${name}: ${message.op} stopped: server exited (${JSON.stringify(why)})`)),
+      );
       child.send({ ...message, id });
     });
   await ready;
