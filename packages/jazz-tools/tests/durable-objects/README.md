@@ -43,20 +43,21 @@ packaging uses none of them. The production workspace lives in
 
 ## Known limits
 
-The scope check currently fails because it expects an empty staged transaction
-to succeed, but managed storage now rejects transaction begin until persistent
-overlays are implemented. The crash test also stops at `beginTransaction()`
-because backend transactions execute on the authority, whose managed storage
-does not yet support persistent overlays.
-Both tests are temporarily skipped in Vitest; their assertions remain unchanged.
-Do not interpret a subset passing as a full conformance pass.
+Open transactions (thin-client, backend and Rust callback transactions) run
+on managed storage without holding a SQL scope between engine calls: each
+stage or read replays the batch in one `transactionSync` scope and rolls it
+back, and commit applies it in one scope. Cost is a replay per stage or read,
+so it grows with batch size. Chunked large values are read through the DO's
+own SQL connection with a bounded cache, so they survive restarts. The
+`scopes` and `crash` tests run again.
 
-Transaction overlays, durable chunk storage and hibernation remain deferred;
+An incremental transaction overlay (no per-operation replay), chunk storage
+in R2 and hibernation remain deferred;
 see the [existing plan](../../../../crates/jazz-wasm/durable-object/PLAN.md).
 DO integers are limited to ±(2^53−1); REAL values retain IEEE-754 behavior.
 Thin requests may span frames, within 8 MiB per session and 16 MiB aggregate
 DO ingress reservations. Incomplete requests expire after 90 seconds without a
-part; over-budget input is refused. Backend transactions remain unsupported on DO storage; native stores support them. Worker applications
+part; over-budget input is refused. Worker applications
 use `jazz-tools/backend` with `nodejs_compat`, request-owned clients and
 WebSockets; their HTTP-stream fallback and text-anchor helpers are unsupported.
 Keep deployed behavior and performance claims separate from local results.

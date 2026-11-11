@@ -830,8 +830,22 @@ impl Storage {
 pub(crate) enum FileReader {
     #[cfg(feature = "sqlite")]
     Native(rusqlite::Connection),
-    Managed(Arc<dyn Backend>),
+    Managed(SharedBackend),
 }
+
+/// A managed backend shared with the chunk cache, which the store's commit
+/// and rollback hooks (`Send`) hold. Native backends are `Send + Sync`
+/// ([`BackendThreading`]). A wasm32 host without threads has one thread, so
+/// nothing can send or share it elsewhere; with threads this does not
+/// compile rather than assert it.
+pub(crate) struct SharedBackend(Arc<dyn Backend>);
+// SAFETY: wasm32 without the `atomics` target feature runs one thread.
+#[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
+unsafe impl Send for SharedBackend {}
+// SAFETY: as above.
+#[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
+unsafe impl Sync for SharedBackend {}
+
 impl FileReader {
     pub(crate) fn open(path: &Path, flags: OpenFlags, vfs: Option<&str>) -> Result<Self> {
         #[cfg(feature = "sqlite")]
@@ -852,7 +866,7 @@ impl FileReader {
         match self {
             #[cfg(feature = "sqlite")]
             Self::Native(conn) => Ok(Statement::Native(conn.prepare_cached(sql)?)),
-            Self::Managed(backend) => Ok(Statement::Managed {
+            Self::Managed(SharedBackend(backend)) => Ok(Statement::Managed {
                 backend: &**backend,
                 sql: sql.to_owned(),
                 bindings: Vec::new(),
@@ -866,7 +880,7 @@ impl Storage {
     /// stores have none (a file opens its own; memory has only the cache).
     pub(crate) fn managed_reader(&self) -> Option<FileReader> {
         self.managed()
-            .map(|owner| FileReader::Managed(owner.backend.clone()))
+            .map(|owner| FileReader::Managed(SharedBackend(owner.backend.clone())))
     }
 }
 

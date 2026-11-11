@@ -1551,7 +1551,7 @@ impl Db {
         // SQLite's own rollbacks (after a full disk, say) count too.
         let rollback_key = crate::values::rollback_key(&conn);
         conn.rollback_hook(Some(move || {
-            rolled_back.unpin();
+            rolled_back.rolled_back();
             crate::values::note_rollback(rollback_key);
         }))
         .map_err(storage)?;

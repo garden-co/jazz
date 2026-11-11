@@ -982,6 +982,19 @@ impl Chunks {
         state.evict();
     }
 
+    /// The open transaction rolled back: the epochs it wrote are gone, and
+    /// their ids may be assigned again, so drop them rather than keep a
+    /// stale epoch under a reused id. Its nodes are content-addressed:
+    /// unreferenced but still correct bytes, so they are only unpinned.
+    pub(crate) fn rolled_back(&self) {
+        self.state
+            .lock()
+            .expect("chunk cache")
+            .epochs
+            .retain(|_, epoch| !epoch.pinned);
+        self.unpin();
+    }
+
     /// Whether the cache is the store's only readable copy of its nodes.
     pub(crate) fn in_memory(&self) -> bool {
         self.state.lock().expect("chunk cache").budget.is_none()
