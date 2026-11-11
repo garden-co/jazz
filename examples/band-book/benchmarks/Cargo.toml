@@ -7,6 +7,9 @@ publish = false
 [dependencies]
 jazz = { workspace = true, features = ["testing", "transport-compression-zstd"] }
 jazz-benchmark-guard = { path = "../../../crates/benchmark-guard" }
+jazz-testkit = { path = "../../../crates/jazz-testkit", default-features = false, features = [
+  "scenarios",
+] }
 serde_json = "1.0.145"
 tempfile = "3.27.0"
 uuid = "1.18.1"
@@ -23,6 +26,12 @@ harness = false
 # (dev/benchmarks/codspeed-artifact.mjs).
 [[bench]]
 name = "nightly"
+harness = false
+
+# One band's workspace opens against another band's requests on one server:
+# measured by the nightly CodSpeed run only.
+[[bench]]
+name = "contention"
 harness = false
 
 [[bin]]

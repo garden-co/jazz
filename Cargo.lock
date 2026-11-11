@@ -2020,6 +2020,7 @@ dependencies = [
  "codspeed-divan-compat",
  "jazz",
  "jazz-benchmark-guard",
+ "jazz-testkit",
  "serde_json",
  "tempfile",
  "uuid",
@@ -2042,8 +2043,10 @@ dependencies = [
  "codspeed-divan-compat",
  "jazz",
  "jazz-benchmark-guard",
+ "jazz-testkit",
  "sha2",
  "tempfile",
+ "uuid",
 ]
 
 [[package]]
