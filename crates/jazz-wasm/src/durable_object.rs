@@ -722,27 +722,31 @@ impl WasmDb {
 #[cfg(feature = "durable-object-tests")]
 pub fn check_durable_object_scopes(db: &jazz::db::Db) -> Result<(), JsValue> {
     db.check_sql_scopes_for_test().map_err(crate::to_js_error)?;
-    // Rust callbacks use staged transactions too: entering the callback does
-    // not require an open SQL scope. A read still needs the deferred overlay.
+    // Rust callbacks use staged transactions too. Managed storage holds no
+    // SQL scope between engine calls: each read replays the batch in one
+    // `transactionSync` scope and rolls it back.
     let (value, _) =
         crate::block_on(db.transaction(async |_| Ok(42))).map_err(crate::to_js_error)?;
     assert_eq!(value, 42);
     let query = db
         .prepare_query(&jazz::query::Query::from("tasks"))
         .map_err(crate::to_js_error)?;
-    let error = crate::block_on(db.transaction(async |_| db.read(&query))).unwrap_err();
-    assert_eq!(error.code, jazz::db::ErrorCode::Query);
-    assert!(error.message.contains("SQL savepoint `overlay`"));
-    // A failed callback must abandon its batch and leave ordinary reads usable.
+    let outside = db.read(&query).map_err(crate::to_js_error)?.len();
+    let (inside, _) =
+        crate::block_on(db.transaction(async |_| db.read(&query))).map_err(crate::to_js_error)?;
+    assert_eq!(inside.len(), outside);
+    // An error abandons the callback's batch and leaves ordinary reads usable.
+    let error = crate::block_on(db.transaction(async |_| -> Result<(), jazz::db::Error> {
+        Err(jazz::db::Error::new(jazz::db::ErrorCode::Query, "abandon"))
+    }))
+    .unwrap_err();
+    assert_eq!(error.message, "abandon");
     db.read(&query).map_err(crate::to_js_error)?;
+    // An open handle reads through its overlay between separate engine calls.
     let id = jazz::tools::OpenTransactionId::new();
     crate::block_on(db.begin_mergeable(id)).map_err(crate::to_js_error)?;
-    let query = db
-        .prepare_query(&jazz::query::Query::from("tasks"))
-        .map_err(crate::to_js_error)?;
-    let error = crate::block_on(db.tx_ref(id).all_prepared(&query)).unwrap_err();
-    assert_eq!(error.code, jazz::db::ErrorCode::Query);
-    assert!(error.message.contains("SQL savepoint `overlay`"));
+    let staged = crate::block_on(db.tx_ref(id).all_prepared(&query)).map_err(crate::to_js_error)?;
+    assert_eq!(staged.len(), outside);
     db.abandon_transaction_handle(id)
         .map_err(crate::to_js_error)?;
     Ok(())

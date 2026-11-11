@@ -15,7 +15,9 @@ futures-util = "0.3.31"
 futures-channel = "0.3.31"
 jazz = { path = "../jazz", default-features = false }
 jazz-server = { path = "../jazz-server", default-features = false, optional = true }
-jazz-db = { path = "../jazz/layers/db", optional = true, default-features = false, features = ["testing"] }
+jazz-db = { path = "../jazz/layers/db", optional = true, default-features = false, features = [
+  "testing",
+] }
 jazz-text = { path = "../jazz-text", features = ["serde"] }
 js-sys = "0.3.82"
 postcard = { version = "1.1.3", features = ["alloc"] }
@@ -46,7 +48,14 @@ wasm-bindgen-test = "0.3"
 [features]
 default = ["browser", "console_error_panic_hook", "transport-compression-ruzstd"]
 # Browser stores select SQLite; Durable Objects inject their managed backend.
-browser = ["jazz/sqlite", "dep:sqlite-wasm-rs", "dep:indexed_db_futures", "dep:rsqlite-vfs", "dep:thiserror", "dep:tokio"]
+browser = [
+  "jazz/sqlite",
+  "dep:sqlite-wasm-rs",
+  "dep:indexed_db_futures",
+  "dep:rsqlite-vfs",
+  "dep:thiserror",
+  "dep:tokio",
+]
 durable-object = []
 # Shared authority hosting without native threads, sockets or SQLite.
 server = ["dep:jazz-server", "dep:tokio"]

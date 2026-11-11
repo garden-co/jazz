@@ -17,6 +17,10 @@ sql-trace = []
 # statement length, expression depth, ...), to find SQL that would fail
 # there. See `durable_object_limits.rs`.
 durable-object-limits = ["rusqlite/limits"]
+# Open `Db::open`'s in-memory stores through managed storage (see
+# `storage::managed_emulation`), so the suite takes the code paths a Durable
+# Object host takes: callback scopes only, no SQL transaction control.
+managed-storage-emulation = ["testing"]
 
 [dependencies]
 jazz-text.workspace = true

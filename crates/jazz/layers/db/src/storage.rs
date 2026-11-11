@@ -651,12 +651,201 @@ pub fn backend_error(code: i32, message: String) -> Error {
     Error::SqliteFailure(rusqlite::ffi::Error::new(code), Some(message))
 }
 
-/// The native file cache's read-only connection. Managed stores do not open
-/// another connection; their chunk-access adaptation is a separate capability.
-pub(crate) struct FileReader {
-    #[cfg(feature = "sqlite")]
-    conn: rusqlite::Connection,
+/// Managed storage over a native connection, for tests: the engine sees the
+/// same owner a Durable Object host gives it ([`Storage::from_backend`]),
+/// so it takes the managed paths (callback scopes only, no open savepoint
+/// between calls), while SQLite itself stays native. Like `ctx.storage.sql`,
+/// it refuses transaction control in SQL text: scopes come only from
+/// [`Backend::transaction`], nested as `transactionSync` nests.
+#[cfg(all(feature = "sqlite", any(test, feature = "testing")))]
+pub mod managed_emulation {
+    use super::{Backend, Cursor, Error, Result, Value};
+    use std::sync::Mutex;
+
+    /// Clones share one database, as a Durable Object's successive
+    /// instances share its storage: open a new [`super::Storage`] over a
+    /// clone to "restart" it.
+    #[derive(Clone)]
+    pub struct EmulatedObjectSql {
+        conn: std::sync::Arc<Mutex<rusqlite::Connection>>,
+        depth: std::sync::Arc<Mutex<usize>>,
+    }
+
+    struct Materialized {
+        columns: Vec<String>,
+        rows: std::vec::IntoIter<Vec<Value>>,
+        current: Vec<Value>,
+    }
+    impl Cursor for Materialized {
+        fn next(&mut self) -> Result<Option<&[Value]>> {
+            Ok(match self.rows.next() {
+                Some(row) => {
+                    self.current = row;
+                    Some(&self.current)
+                }
+                None => None,
+            })
+        }
+        fn columns(&self) -> &[String] {
+            &self.columns
+        }
+    }
+
+    fn refuse_transaction_control(sql: &str) -> Result<()> {
+        let first = sql
+            .trim_start()
+            .split(|c: char| c.is_whitespace() || c == ';')
+            .next()
+            .unwrap_or("")
+            .to_ascii_uppercase();
+        if matches!(
+            first.as_str(),
+            "BEGIN" | "COMMIT" | "END" | "ROLLBACK" | "SAVEPOINT" | "RELEASE"
+        ) {
+            return Err(super::backend_error(
+                1,
+                format!("transaction control in SQL is not allowed on managed storage: {sql}"),
+            ));
+        }
+        Ok(())
+    }
+
+    impl EmulatedObjectSql {
+        pub fn open_in_memory() -> Result<Self> {
+            let conn = rusqlite::Connection::open_in_memory()?;
+            #[cfg(feature = "durable-object-limits")]
+            crate::durable_object_limits::apply(&conn);
+            Ok(Self {
+                conn: std::sync::Arc::new(Mutex::new(conn)),
+                depth: std::sync::Arc::default(),
+            })
+        }
+    }
+
+    impl Backend for EmulatedObjectSql {
+        // Rows are read out before returning, so the engine may issue more
+        // SQL while it walks them, as it may with a DO cursor.
+        fn query(&self, sql: &str, parameters: &[Value]) -> Result<Box<dyn Cursor + '_>> {
+            refuse_transaction_control(sql)?;
+            let conn = self.conn.lock().unwrap();
+            let mut statement = conn.prepare_cached(sql)?;
+            let columns: Vec<String> = statement
+                .column_names()
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+            let n = columns.len();
+            let mut rows = statement.query(rusqlite::params_from_iter(parameters.iter()))?;
+            let mut out = Vec::new();
+            while let Some(row) = rows.next()? {
+                let mut cells = Vec::with_capacity(n);
+                for i in 0..n {
+                    cells.push(Value::from(row.get_ref(i)?));
+                }
+                out.push(cells);
+            }
+            Ok(Box::new(Materialized {
+                columns,
+                rows: out.into_iter(),
+                current: Vec::new(),
+            }))
+        }
+        fn execute(&self, sql: &str, parameters: &[Value]) -> Result<usize> {
+            refuse_transaction_control(sql)?;
+            let conn = self.conn.lock().unwrap();
+            let mut statement = conn.prepare_cached(sql)?;
+            statement.execute(rusqlite::params_from_iter(parameters.iter()))
+        }
+        fn execute_script(&self, script: &str) -> Result<()> {
+            let mut start = 0;
+            for (end, _) in script.match_indices(';') {
+                let part = &script[start..=end];
+                let c = std::ffi::CString::new(part).map_err(|_| Error::InvalidQuery)?;
+                // SAFETY: SQLite only reads this NUL-terminated SQL string.
+                if unsafe { rusqlite::ffi::sqlite3_complete(c.as_ptr()) } != 0 {
+                    refuse_transaction_control(part)?;
+                    self.conn.lock().unwrap().execute_batch(part)?;
+                    start = end + 1;
+                }
+            }
+            if !script[start..].trim().is_empty() {
+                refuse_transaction_control(&script[start..])?;
+                self.conn.lock().unwrap().execute_batch(&script[start..])?;
+            }
+            Ok(())
+        }
+        fn transaction(&self, body: &mut dyn FnMut() -> bool) -> Result<()> {
+            let name = {
+                let mut depth = self.depth.lock().unwrap();
+                *depth += 1;
+                format!("do_scope_{depth}")
+            };
+            let begin = self
+                .conn
+                .lock()
+                .unwrap()
+                .execute_batch(&format!("SAVEPOINT {name}"));
+            if let Err(error) = begin {
+                *self.depth.lock().unwrap() -= 1;
+                return Err(error);
+            }
+            // Like `transactionSync`, a panic in the body rolls back too.
+            let keep = std::panic::catch_unwind(std::panic::AssertUnwindSafe(&mut *body));
+            let conn = self.conn.lock().unwrap();
+            let end = match keep {
+                Ok(true) => conn.execute_batch(&format!("RELEASE {name}")),
+                _ => conn.execute_batch(&format!("ROLLBACK TO {name}; RELEASE {name}")),
+            };
+            drop(conn);
+            *self.depth.lock().unwrap() -= 1;
+            match keep {
+                Err(panic) => std::panic::resume_unwind(panic),
+                Ok(_) => end,
+            }
+        }
+        fn last_insert_rowid(&self) -> Result<i64> {
+            Ok(self.conn.lock().unwrap().last_insert_rowid())
+        }
+        fn total_changes(&self) -> Result<u64> {
+            Ok(self.conn.lock().unwrap().total_changes())
+        }
+        fn max_parameters(&self) -> usize {
+            100
+        }
+    }
 }
+
+#[cfg(all(feature = "sqlite", any(test, feature = "testing")))]
+impl Storage {
+    /// An in-memory store behind [`managed_emulation::EmulatedObjectSql`].
+    pub fn managed_emulation_in_memory() -> Result<Self> {
+        managed_emulation::EmulatedObjectSql::open_in_memory().map(Self::from_backend)
+    }
+}
+
+/// Where the chunk cache reads nodes and epochs it does not hold: a native
+/// file's second, read-only connection, or a managed store's own backend.
+/// The managed reader sees the owner's open scope too; what that scope
+/// wrote is already cached pinned, so it reads only what the cache lacks.
+pub(crate) enum FileReader {
+    #[cfg(feature = "sqlite")]
+    Native(rusqlite::Connection),
+    Managed(SharedBackend),
+}
+
+/// A managed backend shared with the chunk cache, which the store's commit
+/// and rollback hooks (`Send`) hold. Native backends are `Send + Sync`
+/// ([`BackendThreading`]). A wasm32 host without threads has one thread, so
+/// nothing can send or share it elsewhere; with threads this does not
+/// compile rather than assert it.
+pub(crate) struct SharedBackend(Arc<dyn Backend>);
+// SAFETY: wasm32 without the `atomics` target feature runs one thread.
+#[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
+unsafe impl Send for SharedBackend {}
+// SAFETY: as above.
+#[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
+unsafe impl Sync for SharedBackend {}
+
 impl FileReader {
     pub(crate) fn open(path: &Path, flags: OpenFlags, vfs: Option<&str>) -> Result<Self> {
         #[cfg(feature = "sqlite")]
@@ -665,7 +854,7 @@ impl FileReader {
                 Some(vfs) => rusqlite::Connection::open_with_flags_and_vfs(path, flags, vfs)?,
                 None => rusqlite::Connection::open_with_flags(path, flags)?,
             };
-            Ok(Self { conn })
+            Ok(Self::Native(conn))
         }
         #[cfg(not(feature = "sqlite"))]
         {
@@ -674,15 +863,24 @@ impl FileReader {
         }
     }
     pub(crate) fn prepare_cached(&self, sql: &str) -> Result<Statement<'_>> {
-        #[cfg(feature = "sqlite")]
-        {
-            Ok(Statement::Native(self.conn.prepare_cached(sql)?))
+        match self {
+            #[cfg(feature = "sqlite")]
+            Self::Native(conn) => Ok(Statement::Native(conn.prepare_cached(sql)?)),
+            Self::Managed(SharedBackend(backend)) => Ok(Statement::Managed {
+                backend: &**backend,
+                sql: sql.to_owned(),
+                bindings: Vec::new(),
+            }),
         }
-        #[cfg(not(feature = "sqlite"))]
-        {
-            let _ = sql;
-            Err(Error::InvalidQuery)
-        }
+    }
+}
+
+impl Storage {
+    /// A managed store's chunk reader: its own backend, shared. Native
+    /// stores have none (a file opens its own; memory has only the cache).
+    pub(crate) fn managed_reader(&self) -> Option<FileReader> {
+        self.managed()
+            .map(|owner| FileReader::Managed(SharedBackend(owner.backend.clone())))
     }
 }
 

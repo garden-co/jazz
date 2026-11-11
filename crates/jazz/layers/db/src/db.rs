@@ -1381,7 +1381,10 @@ impl Db {
 
 impl Db {
     pub async fn open(config: DbConfig) -> Result<Self, Error> {
+        #[cfg(not(feature = "managed-storage-emulation"))]
         let conn = Storage::open_in_memory().map_err(storage)?;
+        #[cfg(feature = "managed-storage-emulation")]
+        let conn = Storage::managed_emulation_in_memory().map_err(storage)?;
         crate::format::admit(&conn)?;
         Self::open_on(config, conn, None)
     }
@@ -1525,8 +1528,12 @@ impl Db {
         names.check_types(&schema)?;
         // Variants are tagged before any DDL: an enum default is its tag.
         names.mint(&conn, &schema)?;
-        let chunks =
-            crate::large::Chunks::install(path, config.chunk_store.clone(), config.host_chunk_io)?;
+        let chunks = crate::large::Chunks::install_reading(
+            path,
+            conn.managed_reader(),
+            config.chunk_store.clone(),
+            config.host_chunk_io,
+        )?;
         // Statements are keyed per table and verb; the default 16 entries
         // thrash as soon as a schema has a few tables.
         conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
@@ -1544,7 +1551,7 @@ impl Db {
         // SQLite's own rollbacks (after a full disk, say) count too.
         let rollback_key = crate::values::rollback_key(&conn);
         conn.rollback_hook(Some(move || {
-            rolled_back.unpin();
+            rolled_back.rolled_back();
             crate::values::note_rollback(rollback_key);
         }))
         .map_err(storage)?;
@@ -8905,11 +8912,6 @@ impl Db {
 
     fn begin(&self, id: OpenTransactionId, kind: BatchKind) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
-        if !inner.conn.supports_open_scopes() {
-            return Err(unsupported(
-                "Persistent transaction overlays on managed SQL storage",
-            ));
-        }
         inner.require_mutation_admission()?;
         if inner.batches.contains_key(&id) {
             return Err(rejected(format!("transaction {id:?} is already open")));
@@ -9229,6 +9231,42 @@ impl Db {
         let own = inner.seq + 1;
         inner.derived.extend(edits.derived);
         inner.pending_nodes.extend(edits.pending_nodes);
+        if !inner.conn.supports_open_scopes() {
+            // Managed storage (a Durable Object's `transactionSync`) cannot
+            // keep a scope open between engine calls, so there is no cached
+            // overlay: replay the staged batch, apply `extra` and run
+            // `read` inside one scope, then undo all of it. The batch's ops
+            // stay the source of truth either way; this costs a replay per
+            // stage or read instead of one per batch.
+            // Nothing is cached, so `ops` is the whole batch.
+            let ops = ops.unwrap_or_default();
+            return inner.scope("overlay", |inner| {
+                let mark = inner.changed.borrow().len();
+                let result = inner
+                    .apply_all_checking(&ops, ops.len(), own)
+                    .and_then(|()| match extra {
+                        Some(op) => inner.counter_deltas(op).and_then(|()| {
+                            let schema = inner.schema.clone();
+                            inner.defer_checks();
+                            let applied = inner
+                                .apply_all_checking(&[(schema, op.clone())], 0, own)
+                                .and_then(|()| inner.finish_checks_after(own, staged_rows));
+                            if applied.is_err() {
+                                inner.abandon_checks();
+                            }
+                            applied
+                        }),
+                        None => Ok(()),
+                    });
+                inner.clear_derived();
+                let result = result.and_then(|()| {
+                    let own = inner.own_rank(own);
+                    read(inner, snapshot.map(|cut| Cut { own, ..cut }))
+                });
+                inner.changed.borrow_mut().truncate(mark);
+                Ok(ScopeOutcome::Rollback(result))
+            })?;
+        }
         if let Some(ops) = ops {
             inner.settle_overlay();
             begin_savepoint(&inner.conn, "overlay")?;
