@@ -1085,6 +1085,94 @@ pub enum WireKind {
         reads: Vec<WireRead>,
         own: Vec<u64>,
     },
+    /// `jazz.sqlite.serializable-origins.v2`: current-schema read proofs plus
+    /// frozen (local position, original node, original tx) own dependencies.
+    /// The retired v1 WireRead had a different layout and is not imported.
+    SerializableOriginsV2 {
+        #[serde(deserialize_with = "accepted_seq")]
+        snapshot: u64,
+        reads: Vec<WireRead>,
+        #[serde(deserialize_with = "serializable_origins")]
+        own: Vec<(u64, [u8; 16], u64)>,
+    },
+}
+
+pub(super) const MAX_SERIALIZABLE_ORIGINS: usize = 4096;
+
+fn check_original_dependency_shape(
+    own: &[(u64, [u8; 16], u64)],
+    sender: Option<([u8; 16], u64)>,
+) -> Result<(), Error> {
+    if own.len() > MAX_SERIALIZABLE_ORIGINS {
+        return Err(unsupported(
+            "serializable original dependency prefix exceeds 4096 commits",
+        ));
+    }
+    let mut positions = BTreeSet::new();
+    let mut origins = BTreeSet::new();
+    for &(position, node, tx) in own {
+        if position == 0
+            || tx == 0
+            || position >= i64::MAX as u64
+            || tx >= i64::MAX as u64
+            || sender == Some((node, tx))
+            || !positions.insert(position)
+            || !origins.insert((node, tx))
+        {
+            return Err(Error::new(
+                ErrorCode::Protocol,
+                "invalid or self-referencing original dependency prefix",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn serializable_origins<'de, D>(decoder: D) -> Result<Vec<(u64, [u8; 16], u64)>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct Origins;
+    impl<'de> serde::de::Visitor<'de> for Origins {
+        type Value = Vec<(u64, [u8; 16], u64)>;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("at most 4096 unique original dependency coordinates")
+        }
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            use serde::de::Error;
+            if seq
+                .size_hint()
+                .is_some_and(|n| n > MAX_SERIALIZABLE_ORIGINS)
+            {
+                return Err(A::Error::custom(
+                    "original dependency prefix exceeds 4096 commits",
+                ));
+            }
+            let mut out = Vec::new();
+            let mut positions = BTreeSet::new();
+            let mut ids = BTreeSet::new();
+            while let Some((position, node, tx)) = seq.next_element::<(u64, [u8; 16], u64)>()? {
+                if out.len() == MAX_SERIALIZABLE_ORIGINS
+                    || position == 0
+                    || tx == 0
+                    || position >= i64::MAX as u64
+                    || tx >= i64::MAX as u64
+                    || !positions.insert(position)
+                    || !ids.insert((node, tx))
+                {
+                    return Err(A::Error::custom(
+                        "invalid, duplicate or excessive original dependency prefix",
+                    ));
+                }
+                out.push((position, node, tx));
+            }
+            Ok(out)
+        }
+    }
+    decoder.deserialize_seq(Origins)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1517,12 +1605,17 @@ pub(crate) enum Kind {
         reads: Vec<WireRead>,
         own: Vec<u64>,
     },
+    SerializableOriginsV2 {
+        snapshot: u64,
+        reads: Vec<WireRead>,
+        own: Vec<(u64, [u8; 16], u64)>,
+    },
 }
 
 impl Kind {
     /// Whether the authority must see the commit even with no writes.
     pub(crate) fn validates_reads(&self) -> bool {
-        matches!(self, Kind::Serializable { reads, .. } if !reads.is_empty())
+        matches!(self, Kind::Serializable { reads, .. } | Kind::SerializableOriginsV2 { reads, .. } if !reads.is_empty())
     }
 }
 
@@ -1799,7 +1892,36 @@ pub struct RejectedTransaction {
 #[derive(Debug)]
 pub struct Upstream(u64);
 
+pub(super) struct InitializationUploadCheckpoint {
+    unsent: usize,
+    baselines: HashSet<RowKey>,
+}
+impl Inner {
+    pub(super) fn initialization_upload_checkpoint(
+        &self,
+    ) -> Option<InitializationUploadCheckpoint> {
+        let client = self.client.as_ref()?;
+        Some(InitializationUploadCheckpoint {
+            unsent: client.unsent.len(),
+            baselines: client.baselines.keys().cloned().collect(),
+        })
+    }
+    pub(super) fn rollback_initialization_upload(
+        &mut self,
+        position: u64,
+        checkpoint: &InitializationUploadCheckpoint,
+    ) {
+        let client = self.client.as_mut().expect("admitted replica");
+        client.pending.remove(position);
+        client.unsent.truncate(checkpoint.unsent);
+        client
+            .baselines
+            .retain(|key, _| checkpoint.baselines.contains(key));
+    }
+}
+
 pub(crate) struct Client {
+    pub(super) origin_aware: bool,
     transport: Option<Box<dyn Transport>>,
     /// A new link came up: the versions the last upstream held unsettled
     /// are dropped before anything it sends applies (see
@@ -5299,6 +5421,236 @@ impl Inner {
         Ok(roots)
     }
 
+    fn pending_integrity_digest(&self, tx: u64) -> Result<[u8; 32], Error> {
+        let mut hash = jazz_types::sha256::Hasher::new();
+        hash.update(b"jazz.sqlite.pending-original.v1");
+        let header: Vec<u8> = self
+            .conn
+            .query_row(
+                "SELECT header FROM _jazz_pending WHERE tx=?1",
+                [tx as i64],
+                |row| row.get(0),
+            )
+            .map_err(storage)?;
+        hash.update(&(header.len() as u64).to_le_bytes());
+        hash.update(&header);
+        let mut items = self
+            .conn
+            .prepare_cached(
+                "SELECT part,n,item FROM _jazz_pending_items WHERE tx=?1 ORDER BY part,n",
+            )
+            .map_err(storage)?;
+        let rows = items
+            .query_map([tx as i64], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                ))
+            })
+            .map_err(storage)?;
+        for row in rows {
+            let (part, n, item) = row.map_err(storage)?;
+            hash.update(b"item");
+            hash.update(&part.to_le_bytes());
+            hash.update(&n.to_le_bytes());
+            hash.update(&(item.len() as u64).to_le_bytes());
+            hash.update(&item);
+        }
+        let mut rows = self
+            .conn
+            .prepare_cached("SELECT n,tbl,id,key FROM _jazz_pending_rows WHERE tx=?1 ORDER BY n")
+            .map_err(storage)?;
+        let rows = rows
+            .query_map([tx as i64], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Vec<u8>>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                ))
+            })
+            .map_err(storage)?;
+        for row in rows {
+            let (n, table, id, key) = row.map_err(storage)?;
+            hash.update(b"row");
+            hash.update(&n.to_le_bytes());
+            for bytes in [table.as_bytes(), id.as_slice(), key.as_slice()] {
+                hash.update(&(bytes.len() as u64).to_le_bytes());
+                hash.update(bytes);
+            }
+        }
+        Ok(*hash.finalize().as_bytes())
+    }
+
+    pub(super) fn verify_initialization_pending(&self, tx: u64) -> Result<(), Error> {
+        if !self.initialization_enabled {
+            return Ok(());
+        }
+        let stored: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT digest FROM _jazz_initialization_pending_v1 WHERE tx=?1",
+                [tx as i64],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage)?;
+        if stored.is_none() {
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                "pending original proof is missing",
+            ));
+        }
+        let header: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT header FROM _jazz_pending WHERE tx=?1",
+                [tx as i64],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage)?;
+        if header.is_none() {
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                "pending original unit is missing",
+            ));
+        }
+        let actual = self.pending_integrity_digest(tx)?;
+        if stored.as_deref() != Some(actual.as_slice()) {
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                "pending original proof is missing or incomplete; retained local data must not be resent as an empty or reconstructed transaction",
+            ));
+        }
+        let message: SyncMessage = decode_stored(header.as_deref().expect("checked header"))?;
+        let SyncMessage::Commit { id, clock, .. } = message else {
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                "pending original header is not a commit",
+            ));
+        };
+        // Normal Rows can reconcile an original transaction before its Fate.
+        // Rebase then removes its optimistic ranks, while its exact original
+        // packet and digest must remain intact until the terminal decision.
+        let reconciled = matches!(self.settled(*id.node.as_bytes(), id.time.0)?, Some(Some(landing)) if landing.accepted());
+        for (table, row, key) in self.pending_rows(tx)? {
+            if !reconciled
+                && self
+                    .ranked_image(
+                        &table,
+                        row,
+                        &key,
+                        versioned(Pos::pending(clock), *id.node.as_bytes(), id.time.0),
+                    )?
+                    .is_none()
+            {
+                return Err(Error::new(
+                    ErrorCode::NotObserved,
+                    "pending original row version is missing",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Journal-known outstanding units remain outstanding even when recovery
+    /// cannot reconstruct their original packet. This index bounds discovery.
+    fn initialization_outstanding_positions(&self) -> Result<Vec<u64>, Error> {
+        if !self.initialization_enabled {
+            return Ok(Vec::new());
+        }
+        let mut query = self.conn.prepare_cached(
+            "SELECT position FROM _jazz_initialization_publications_v1 WHERE terminal=0 AND position IS NOT NULL ORDER BY position LIMIT 4097",
+        ).map_err(storage)?;
+        let positions = query
+            .query_map([], |row| row.get::<_, i64>(0))
+            .map_err(storage)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(storage)?;
+        if positions.len() > 4096 || positions.iter().any(|position| *position <= 0) {
+            return Err(rejected(
+                "initialization pending prefix exceeds 4096 publications",
+            ));
+        }
+        Ok(positions
+            .into_iter()
+            .map(|position| position as u64)
+            .collect())
+    }
+
+    /// A missing original packet is an explicit unavailable outcome, never
+    /// the successful no-op fallback used for unrelated unknown positions.
+    fn initialization_wait_pending(&self, tx: u64) -> Result<bool, Error> {
+        if !self.initialization_enabled {
+            return Ok(false);
+        }
+        let owner: Option<String> = self.conn.query_row(
+            "SELECT author FROM _jazz_initialization_publications_v1 WHERE position=?1 AND terminal=0",
+            [tx as i64], |row| row.get(0),
+        ).optional().map_err(storage)?;
+        let Some(owner) = owner else {
+            return Ok(false);
+        };
+        if owner != self.identity.author.canonical() {
+            return Err(rejected(
+                "pending initialization prefix belongs to another authenticated principal",
+            ));
+        }
+        self.verify_initialization_pending(tx)?;
+        Ok(true)
+    }
+
+    fn verify_initialization_prefix(&self) -> Result<(), Error> {
+        if !self.initialization_enabled {
+            return Ok(());
+        }
+        let mut query = self.conn.prepare_cached("SELECT position,node,tx,author FROM _jazz_initialization_publications_v1 WHERE terminal=0 AND position IS NOT NULL ORDER BY position LIMIT 4097").map_err(storage)?;
+        let positions = query
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(storage)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(storage)?;
+        if positions.len() > 4096 {
+            return Err(rejected(
+                "initialization pending prefix exceeds 4096 publications",
+            ));
+        }
+        for (position, node, tx, author) in positions {
+            if author != self.identity.author.canonical() {
+                return Err(rejected(
+                    "pending initialization prefix belongs to another authenticated principal",
+                ));
+            }
+            self.verify_initialization_pending(position as u64)?;
+            let bytes: Vec<u8> = self
+                .conn
+                .query_row(
+                    "SELECT header FROM _jazz_pending WHERE tx=?1",
+                    [position],
+                    |row| row.get(0),
+                )
+                .map_err(storage)?;
+            let message: SyncMessage = decode_stored(&bytes)?;
+            if !matches!(message,SyncMessage::Commit { id,.. } if id.node.as_bytes().as_slice()==node.as_slice() && id.time.0==tx as u64)
+            {
+                return Err(Error::new(
+                    ErrorCode::NotObserved,
+                    "pending original identity does not match its captured publication",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn persist_pending(&self, tx: u64, commit: &SyncMessage, rows: &[RowKey]) -> Result<(), Error> {
         let SyncMessage::Commit {
             id,
@@ -5324,6 +5676,18 @@ impl Inner {
                 },
                 reads.as_slice(),
             ),
+            WireKind::SerializableOriginsV2 {
+                snapshot,
+                reads,
+                own,
+            } => (
+                WireKind::SerializableOriginsV2 {
+                    snapshot: *snapshot,
+                    reads: Vec::new(),
+                    own: own.clone(),
+                },
+                reads.as_slice(),
+            ),
         };
         let header = SyncMessage::Commit {
             id: *id,
@@ -5332,9 +5696,14 @@ impl Inner {
             ops: Vec::new(),
             acting: acting.clone(),
         };
+        let header_bytes = encode(&header);
+        let mut expected = jazz_types::sha256::Hasher::new();
+        expected.update(b"jazz.sqlite.pending-original.v1");
+        expected.update(&(header_bytes.len() as u64).to_le_bytes());
+        expected.update(&header_bytes);
         self.exec(
             "INSERT INTO _jazz_pending (tx, header) VALUES (?1, ?2)",
-            rusqlite::params![tx as i64, encode(&header)],
+            rusqlite::params![tx as i64, header_bytes],
         )
         .map_err(storage)?;
         let items = (ops.iter().map(encode).map(|item| (PendingPart::Op, item)))
@@ -5346,6 +5715,11 @@ impl Inner {
                 last = Some(part as i64);
                 n = 0;
             }
+            expected.update(b"item");
+            expected.update(&(part as i64).to_le_bytes());
+            expected.update(&n.to_le_bytes());
+            expected.update(&(item.len() as u64).to_le_bytes());
+            expected.update(&item);
             self.exec(
                 "INSERT INTO _jazz_pending_items (tx, part, n, item) VALUES (?1, ?2, ?3, ?4)",
                 rusqlite::params![tx as i64, part as i64, n, item],
@@ -5354,11 +5728,36 @@ impl Inner {
             n += 1;
         }
         for (n, (table, row, key)) in rows.iter().enumerate() {
+            expected.update(b"row");
+            expected.update(&(n as i64).to_le_bytes());
+            for bytes in [
+                table.as_bytes(),
+                row.0.as_bytes().as_slice(),
+                key.as_slice(),
+            ] {
+                expected.update(&(bytes.len() as u64).to_le_bytes());
+                expected.update(bytes);
+            }
             self.exec(
                 "INSERT INTO _jazz_pending_rows (tx, n, tbl, id, key) VALUES (?1, ?2, ?3, ?4, ?5)",
                 rusqlite::params![tx as i64, n as i64, table, row.0.as_bytes().as_slice(), key],
             )
             .map_err(storage)?;
+        }
+        if self.initialization_enabled {
+            let digest = *expected.finalize().as_bytes();
+            if self.pending_integrity_digest(tx)? != digest {
+                return Err(Error::new(
+                    ErrorCode::Storage,
+                    "pending original unit did not persist completely",
+                ));
+            }
+            self.conn
+                .execute(
+                    "INSERT INTO _jazz_initialization_pending_v1(tx,digest) VALUES(?1,?2)",
+                    rusqlite::params![tx as i64, digest.as_slice()],
+                )
+                .map_err(storage)?;
         }
         Ok(())
     }
@@ -5563,7 +5962,19 @@ impl Inner {
 
     /// Forget settled commit `tx`: its items, rows and version go with it
     /// (`_jazz_pending_forget`).
-    fn forget_pending(&self, tx: u64) -> Result<(), Error> {
+    fn forget_pending(&self, tx: u64, global: bool) -> Result<(), Error> {
+        if self.initialization_enabled {
+            self.exec(
+                "UPDATE _jazz_initialization_publications_v1 SET terminal=?2 WHERE position=?1",
+                rusqlite::params![tx as i64, if global { 1i64 } else { 2i64 }],
+            )
+            .map_err(storage)?;
+            self.exec(
+                "DELETE FROM _jazz_initialization_pending_v1 WHERE tx=?1",
+                [tx as i64],
+            )
+            .map_err(storage)?;
+        }
         self.exec("DELETE FROM _jazz_pending WHERE tx = ?1", [tx as i64])
             .map_err(storage)?;
         Ok(())
@@ -5572,6 +5983,7 @@ impl Inner {
     /// Pending commit `tx` as `persist_pending` stored it: its header
     /// with its lists filled from `_jazz_pending_items`.
     fn pending_commit(&self, tx: u64, header: &[u8]) -> Result<SyncMessage, Error> {
+        self.verify_initialization_pending(tx)?;
         let mut commit: SyncMessage = decode_stored(header)?;
         let SyncMessage::Commit { kind, ops, .. } = &mut commit else {
             return Err(crate::format::unsupported(
@@ -5594,7 +6006,10 @@ impl Inner {
             match PendingPart::from_stored(part)? {
                 PendingPart::Op => ops.push(decode_stored(&item)?),
                 PendingPart::Read => match kind {
-                    WireKind::Serializable { reads, .. } => reads.push(decode_stored(&item)?),
+                    WireKind::Serializable { reads, .. }
+                    | WireKind::SerializableOriginsV2 { reads, .. } => {
+                        reads.push(decode_stored(&item)?)
+                    }
                     WireKind::Mergeable => {
                         return Err(crate::format::unsupported(
                             "a mergeable pending commit has reads",
@@ -5920,6 +6335,46 @@ impl Inner {
         Ok(())
     }
 
+    pub(super) fn initialization_terminal_state(
+        &self,
+        id: TxId,
+        position: u64,
+        terminal: i64,
+    ) -> Result<InitializationTransactionStatus, Error> {
+        let fate = self.applied_fate(*id.node.as_bytes(), id.time.0)?;
+        let settled = self.settled(*id.node.as_bytes(), id.time.0)?;
+        let (fate, global_position) = match (fate, settled) {
+            (Some(Ok(())), Some(Some(at))) if terminal == 1 => {
+                (InitializationFate::Accepted, Some(at.seq))
+            }
+            (Some(Err(error)), Some(None)) => {
+                let error = from_wire_error(error);
+                (
+                    InitializationFate::Rejected {
+                        code: error.code,
+                        reason: error.reason,
+                        message: error.message,
+                    },
+                    None,
+                )
+            }
+            _ => return Ok(InitializationTransactionStatus::Incomplete),
+        };
+        Ok(InitializationTransactionStatus::Complete(
+            InitializationWriteState {
+                transaction_id: id,
+                publication_position: position,
+                fate,
+                durability: if terminal == 1 {
+                    DurabilityTier::Global
+                } else {
+                    DurabilityTier::Local
+                },
+                global_position,
+            },
+        ))
+    }
+
     /// Where a commit landed: `Some(at)` once accepted (in the authority's
     /// order, or a relay's own commit carrying it), `None` once rejected.
     /// Kept by the authority for every upload and by a replica for its
@@ -5942,7 +6397,12 @@ impl Inner {
         // A relay keeps each session commit it carries under that
         // session's order (see `authorize_commit`).
         Ok(match self.own_order.get(&seq) {
-            Some(&(_, node, tx)) if node != *self.identity.node.as_bytes() => vec![(node, tx)],
+            Some(&(_, node, tx))
+                if node != *self.identity.node.as_bytes()
+                    || (self.initialization_enabled && tx != seq) =>
+            {
+                vec![(node, tx)]
+            }
             _ => Vec::new(),
         })
     }
@@ -5967,10 +6427,10 @@ impl Inner {
     /// Where each of `own` (this replica's commits unsettled at a
     /// serializable snapshot) has since landed.
     pub(crate) fn own_landings(&self, own: &[u64]) -> Result<HashMap<u64, Pos>, Error> {
-        let me = *self.identity.node.as_bytes();
         let mut landed = HashMap::new();
         for &tx in own {
-            if let Some(Some(seq)) = self.settled(me, tx)? {
+            let original = self.local_publication_origin(tx)?;
+            if let Some(Some(seq)) = self.settled(*original.node.as_bytes(), original.time.0)? {
                 landed.insert(tx, seq);
             }
         }
@@ -5983,10 +6443,13 @@ impl Inner {
     /// still pending at its local seq, or rejected (then it never happened).
     pub(crate) fn serializable_cut(&self, snapshot: Pos, own: &[u64]) -> Result<Cut, Error> {
         let mut cut = Cut::at(snapshot);
-        let me = *self.identity.node.as_bytes();
         for &tx in own {
-            match self.settled(me, tx)? {
-                Some(Some(at)) => cut.extra.push(versioned(at, me, tx)),
+            let original = self.local_publication_origin(tx)?;
+            match self.settled(*original.node.as_bytes(), original.time.0)? {
+                Some(Some(at)) => {
+                    cut.extra
+                        .push(versioned(at, *original.node.as_bytes(), original.time.0))
+                }
                 Some(None) => {}
                 None => cut.extra.push(self.own_rank(tx)),
             }
@@ -5999,6 +6462,9 @@ impl Inner {
     /// itself, settled at the authority seq it knows; its sessions' commits
     /// stay pending all the same).
     fn relays_upstream(&self) -> bool {
+        if self.initialization_enabled && self.client.is_some() {
+            return true;
+        }
         self.client.as_ref().is_some_and(|client| {
             let link = client.hint.get();
             !(link.reported && link.hint == RemoteLinkHint::NoServer)
@@ -6337,6 +6803,43 @@ impl Inner {
         })
     }
 
+    /// Preserve the captured own map through the relay. A row already naming
+    /// one of those actual origins must not be mistaken for a local position.
+    fn relayed_serializable_origins(
+        &self,
+        snapshot: u64,
+        reads: Vec<WireRead>,
+        own: Vec<(u64, [u8; 16], u64)>,
+    ) -> Result<Kind, Error> {
+        let actual: BTreeSet<_> = own.iter().map(|(_, node, tx)| (*node, *tx)).collect();
+        let me = *self.identity.node.as_bytes();
+        let pending = &self.client.as_ref().expect("relay is a client").pending;
+        let reads = reads
+            .into_iter()
+            .map(|read| {
+                let rows = read
+                    .rows
+                    .into_iter()
+                    .map(|(row, by, tx)| match by {
+                        Some(node) if node == me && !actual.contains(&(node, tx)) => {
+                            match pending.upload_id(tx) {
+                                Some(id) => (row, Some(*id.node.as_bytes()), id.time.0),
+                                None => (row, by, tx),
+                            }
+                        }
+                        _ => (row, by, tx),
+                    })
+                    .collect();
+                WireRead { rows, ..read }
+            })
+            .collect();
+        Ok(Kind::SerializableOriginsV2 {
+            snapshot,
+            reads,
+            own,
+        })
+    }
+
     /// How a serializable read names the version `at` it read of a row
     /// (see [`WireRead::rows`]): an accepted one by position, a pending one
     /// by the commit that wrote it, (node, tx), which the authority finds
@@ -6351,6 +6854,25 @@ impl Inner {
                 None => (None, pos.t() as u64),
             },
         }
+    }
+
+    /// Do not manufacture a qualified input from an unqualified legacy prefix.
+    pub(super) fn check_initialization_activation_prefix(&self) -> Result<(), Error> {
+        let Some(client) = &self.client else {
+            if self.authority {
+                return Ok(());
+            }
+            return Err(unsupported(
+                "initialization requires ordinary replica admission",
+            ));
+        };
+        if !client.pending.is_empty() || !client.own_accepted.is_empty() {
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                "enable initialization before pending writes, or first wait for genuine authority settlement and a current known cut",
+            ));
+        }
+        Ok(())
     }
 
     /// The own commits a replica's serializable transaction began over:
@@ -6402,14 +6924,23 @@ impl Inner {
                 Some(None) => continue,
                 None => {}
             }
-            if node == me
-                && let Some(client) = &self.client
-            {
-                if client.pending.iter().any(|p| p.tx == tx) {
-                    cut.extra.push(self.own_rank(tx));
+            if let Some(client) = &self.client {
+                // Journal snapshots name original transactions across node
+                // changes. Legacy relay snapshots retain owner-local positions.
+                if let Some(pending) = client.pending.iter().find(|pending| {
+                    if self.initialization_enabled {
+                        pending.id.node.as_bytes() == &node && pending.id.time.0 == tx
+                    } else {
+                        node == me && pending.tx == tx
+                    }
+                }) {
+                    cut.extra.push(self.own_rank(pending.tx));
                     continue;
                 }
-                if client.fates.get(&tx).is_some_and(Result::is_err) {
+                if !self.initialization_enabled
+                    && node == me
+                    && client.fates.get(&tx).is_some_and(Result::is_err)
+                {
                     continue;
                 }
             }
@@ -6456,6 +6987,7 @@ impl Inner {
             .map_err(storage)?;
         self.seq = self.seq.max(pending.unwrap_or(0) as u64);
         let mut client = Client::new(me);
+        client.origin_aware = self.initialization_enabled;
         client.stranded = self.meta("stranded")?.is_some();
         client.known = self.meta("known")?.unwrap_or(0);
         client.persisted_known = client.known;
@@ -6472,7 +7004,15 @@ impl Inner {
             .map_err(storage)?;
         drop(statement);
         for (tx, header) in pending {
-            let commit = self.pending_commit(tx, &header)?;
+            let commit = match self.pending_commit(tx, &header) {
+                Ok(commit) => commit,
+                Err(error)
+                    if self.initialization_enabled && error.code == ErrorCode::NotObserved =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             let rows = self.pending_rows(tx)?;
             let SyncMessage::Commit {
                 id,
@@ -6489,7 +7029,10 @@ impl Inner {
             // looked up there.
             self.own_order
                 .insert(tx, (clock, *id.node.as_bytes(), id.time.0));
-            let serializable = matches!(kind, WireKind::Serializable { .. });
+            let serializable = matches!(
+                kind,
+                WireKind::Serializable { .. } | WireKind::SerializableOriginsV2 { .. }
+            );
             let mut ops = ops
                 .iter()
                 .cloned()
@@ -6573,6 +7116,25 @@ impl Inner {
                 client.newest_foreign.insert(table.clone(), newest as u64);
             }
         }
+        if self.initialization_enabled {
+            // Reopen maps genuine original landings back to local ordering;
+            // it never stores a synthetic canonical (current-node,position).
+            let mut statement=self.conn.prepare_cached("SELECT t.t,p.position FROM _jazz_initialization_publications_v1 AS p JOIN _jazz_nodes AS n ON n.node=p.node JOIN _jazz_transactions AS t ON t.n=n.n AND t.tx=p.tx WHERE p.author=?1 AND p.position IS NOT NULL AND t.t>?2 AND t.t<?3").map_err(storage)?;
+            let own = statement
+                .query_map(
+                    rusqlite::params![
+                        self.identity.author.canonical(),
+                        client.known as i64,
+                        band_start(PENDING)
+                    ],
+                    |row| Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u64)),
+                )
+                .map_err(storage)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(storage)?;
+            client.own_accepted.extend(own);
+            return Ok(());
+        }
         let node = self.node_code(*self.identity.node.as_bytes())?;
         let mut statement = self
             .conn
@@ -6627,10 +7189,20 @@ impl Client {
     /// The local seq of commit `id` this store uploads: its own (its
     /// node's counter is its local seq), or a session's it carries.
     fn local_tx(&self, id: &TxId) -> Option<u64> {
+        if self.origin_aware {
+            return self
+                .pending
+                .iter()
+                .find(|pending| pending.id == *id)
+                .map(|pending| pending.tx);
+        }
         if *id.node.as_bytes() == self.node {
             return Some(id.time.0);
         }
-        self.pending.iter().find(|p| p.id == *id).map(|p| p.tx)
+        self.pending
+            .iter()
+            .find(|pending| pending.id == *id)
+            .map(|pending| pending.tx)
     }
 
     /// How far the live read `key` is settled: its own settle, or the
@@ -6675,6 +7247,7 @@ impl Client {
             live_reads: HashMap::new(),
             outbox: Vec::new(),
             pending: PendingQueue::default(),
+            origin_aware: false,
             unsent: Vec::new(),
             fates: HashMap::new(),
             local_fates: HashSet::new(),
@@ -6734,6 +7307,15 @@ fn stranded() -> Error {
          not supported yet: a store that will connect upstream becomes a replica \
          (`become_replica`, or a remote link hint) before it writes",
     )
+}
+
+/// Captured metadata for one stored upload, passed unchanged through its
+/// stored-schema view. This is not a wire or durable encoding.
+struct UploadContext<'a> {
+    relayed: Option<Relayed>,
+    provenance: Option<&'a [Option<SubmissionProvenance>]>,
+    identity: Option<WriteIdentity>,
+    reservation: Option<ReservedTxId>,
 }
 
 impl Db {
@@ -7051,26 +7633,75 @@ impl Db {
     /// by, and was never recorded for upload, so such a store keeps it and
     /// refuses every upstream (see [`stranded`]).
     pub fn become_replica(&self) {
+        self.become_replica_checked()
+            .expect("persist replica admission");
+    }
+
+    /// The same normal replica admission with a typed, atomic storage failure.
+    /// Initialization must not reserve an identity after a half-written role.
+    pub(super) fn become_replica_checked(&self) -> Result<(), Error> {
+        self.ensure_storage_owner_active()?;
         let mut inner = self.inner.borrow_mut();
-        // Even an already-restored replica is now published in this lifetime.
         inner.catalogue_owner_published.set(true);
         if inner.client.is_some() {
-            return;
+            return Ok(());
         }
-        let stranded = !inner.authority && inner.holds_rows().expect("read the store's tables");
-        inner.me = inner.own_code().expect("intern this replica's node");
+        let stranded = !inner.authority && inner.holds_rows()?;
         let node = *inner.identity.node.as_bytes();
         let mut client = Client::new(node);
+        client.origin_aware = inner.initialization_enabled;
         client.stranded = stranded;
+        begin_savepoint(&inner.conn, "jazz_replica_admission")?;
+        let admitted: Result<i64, Error> = (|| {
+            let code = inner.own_code()?;
+            if stranded {
+                inner.persist_meta("stranded", 1)?;
+            }
+            inner.persist_meta("client", 1)?;
+            Ok(code)
+        })();
+        end_savepoint(&inner.conn, "jazz_replica_admission", admitted.is_ok())?;
+        inner.me = admitted?;
         inner.client = Some(client);
-        if stranded {
-            inner
-                .persist_meta("stranded", 1)
-                .expect("persist stranded flag");
+        Ok(())
+    }
+
+    /// Preserve a real authenticated physical authority without conversion;
+    /// other owners need ordinary durable replica admission before writes.
+    /// Standalone or stranded replicas cannot be relabelled as qualified.
+    pub(super) fn admit_initialization_owner(&self) -> Result<(), Error> {
+        self.ensure_storage_owner_active()?;
+        {
+            let inner = self.inner.borrow();
+            inner.require_mutation_lifetime()?;
+            if inner.non_durable || inner.tx.is_some() {
+                return Err(unsupported("initialization outside its durable owner"));
+            }
+            if inner.authority {
+                if inner.client.is_some()
+                    || self.view.is_some()
+                    || !matches!(inner.identity.author, AuthorSubject::Authenticated(_))
+                {
+                    return Err(rejected(
+                        "authority initialization requires its actual authenticated physical owner, without a replica or SYSTEM role",
+                    ));
+                }
+                return Ok(());
+            }
+            if let Some(client) = &inner.client {
+                if client.stranded {
+                    return Err(stranded());
+                }
+                return Ok(());
+            }
+            if inner.seq != 0 || inner.holds_rows()? {
+                return Err(Error::new(
+                    ErrorCode::NotObserved,
+                    "initialization requires replica admission before standalone writes",
+                ));
+            }
         }
-        inner
-            .persist_meta("client", 1)
-            .expect("persist replica flag");
+        self.become_replica_checked()
     }
 
     pub fn set_remote_link_hint(&self, hint: RemoteLinkHint) {
@@ -7158,6 +7789,97 @@ impl Db {
         provenance: Option<&[Option<SubmissionProvenance>]>,
         identity: Option<WriteIdentity>,
     ) -> Result<(), Error> {
+        self.record_stored_upload_scoped(
+            ops,
+            seq,
+            kind,
+            UploadContext {
+                relayed,
+                provenance,
+                identity,
+                reservation: None,
+            },
+        )
+    }
+
+    pub(super) fn record_batch_upload(
+        &self,
+        ops: Vec<StagedOp>,
+        seq: u64,
+        kind: Kind,
+        batch: &Batch,
+        reservation: Option<ReservedTxId>,
+    ) -> Result<(), Error> {
+        {
+            let inner = self.inner();
+            if inner.authority && inner.client.is_none() {
+                if let Some(reservation) = reservation {
+                    let original = reservation.transaction_id();
+                    if self.view.is_some()
+                        || original.node != inner.identity.node
+                        || !matches!(inner.identity.author, AuthorSubject::Authenticated(_))
+                    {
+                        return Err(rejected("invalid physical authority publication owner"));
+                    }
+                    // Claim only this actual publishing owner's node. Existing
+                    // foreign ownership refuses; this is never a dependency
+                    // claim or the account-based takeover route.
+                    let recorded: Option<Option<i64>> = inner
+                        .conn
+                        .query_row(
+                            "SELECT author FROM _jazz_nodes WHERE node=?1",
+                            [original.node.as_bytes().as_slice()],
+                            |row| row.get(0),
+                        )
+                        .optional()
+                        .map_err(storage)?;
+                    if recorded.flatten().is_some()
+                        && !inner.writes_as(*original.node.as_bytes(), &inner.identity.author)?
+                    {
+                        return Err(rejected(
+                            "physical authority node belongs to another actual principal",
+                        ));
+                    }
+                    if !inner.claim_node(*original.node.as_bytes(), &inner.identity.author)? {
+                        return Err(rejected("physical authority node ownership refused"));
+                    }
+                    inner.record_local_publication(
+                        seq,
+                        original,
+                        Some(reservation),
+                        inner.identity.author,
+                    )?;
+                    inner.record_fate(*original.node.as_bytes(), original.time.0, &Ok(()))?;
+                    inner.record_settled(
+                        *original.node.as_bytes(),
+                        original.time.0,
+                        Some(Pos::at(seq)),
+                    )?;
+                    inner.conn.execute("UPDATE _jazz_initialization_publications_v1 SET terminal=1 WHERE position=?1",[seq as i64]).map_err(storage)?;
+                }
+                return Ok(());
+            }
+        }
+        self.record_stored_upload_scoped(
+            ops,
+            seq,
+            kind,
+            UploadContext {
+                relayed: None,
+                provenance: Some(&batch.observation_provenance),
+                identity: batch.identity,
+                reservation,
+            },
+        )
+    }
+
+    fn record_stored_upload_scoped(
+        &self,
+        ops: Vec<StagedOp>,
+        seq: u64,
+        kind: Kind,
+        context: UploadContext<'_>,
+    ) -> Result<(), Error> {
         let mut inner = self.inner.borrow_mut();
         if inner.client.is_none() {
             return Ok(());
@@ -7166,8 +7888,7 @@ impl Db {
         let view = inner.stored_view();
         let active = std::mem::replace(&mut inner.schema, view);
         drop(inner);
-        let recorded =
-            self.record_upload_under_stored_view(ops, seq, kind, relayed, provenance, identity);
+        let recorded = self.record_upload_under_stored_view(ops, seq, kind, context);
         self.inner.borrow_mut().schema = active;
         recorded
     }
@@ -7177,10 +7898,14 @@ impl Db {
         ops: Vec<StagedOp>,
         seq: u64,
         kind: Kind,
-        relayed: Option<Relayed>,
-        provenance: Option<&[Option<SubmissionProvenance>]>,
-        identity: Option<WriteIdentity>,
+        context: UploadContext<'_>,
     ) -> Result<(), Error> {
+        let UploadContext {
+            relayed,
+            provenance,
+            identity,
+            reservation,
+        } = context;
         let mut inner = self.inner.borrow_mut();
         if inner.tx.is_some() {
             inner.capture.extend(ops);
@@ -7188,8 +7913,19 @@ impl Db {
         }
         // A read-only serializable commit still goes up: the authority
         // validates its reads.
-        if (ops.is_empty() && !kind.validates_reads()) || seq != inner.seq {
+        if (ops.is_empty() && !kind.validates_reads() && reservation.is_none()) || seq != inner.seq
+        {
             return Ok(());
+        }
+        // This runs inside the caller's ordinary SQLite commit transaction,
+        // before mutating pending queues. Refusal rolls back the visible write
+        // as well: never append a unit that prevents the entire prefix draining.
+        if inner.initialization_enabled
+            && inner.initialization_outstanding_positions()?.len() >= 4096
+        {
+            return Err(rejected(
+                "initialization pending prefix exceeds 4096 publications",
+            ));
         }
         // The writer the authority stamps: an explicit identity, or the
         // system at this node (the authority stamps its own writes as its
@@ -7251,7 +7987,20 @@ impl Db {
             // far back it is.
             // A relay's unsettled version (on a tab) is its writer's commit.
             let on = match client.pending.newest(&row_key) {
-                Some(tx) => Some(BuiltOn::Own { back: seq - tx }),
+                Some(tx) => {
+                    let original = inner.local_publication_origin(tx)?;
+                    if reservation.is_none()
+                        && original.node == inner.identity.node
+                        && original.time.0 == tx
+                    {
+                        Some(BuiltOn::Own { back: seq - tx })
+                    } else {
+                        Some(BuiltOn::Commit {
+                            node: *original.node.as_bytes(),
+                            tx: original.time.0,
+                        })
+                    }
+                }
                 None => image.as_ref().and_then(|image| match image.written {
                     _ if image.at.accepted() => Some(BuiltOn::Seq(image.at.seq)),
                     Some((_, node, tx)) => Some(BuiltOn::Commit { node, tx }),
@@ -7286,7 +8035,9 @@ impl Db {
             ),
             None => (
                 bases,
-                tx_id(inner.client.as_ref().expect("client").node, seq),
+                reservation
+                    .map(ReservedTxId::transaction_id)
+                    .unwrap_or_else(|| tx_id(inner.client.as_ref().expect("client").node, seq)),
                 inner.commit_hlc(seq),
             ),
         };
@@ -7312,7 +8063,10 @@ impl Db {
         let client = inner.client.as_mut().expect("client");
         let added: Vec<RowKey> = baselines.iter().map(|(key, _)| key.clone()).collect();
         client.baselines.extend(baselines);
-        let serializable = matches!(kind, Kind::Serializable { .. });
+        let serializable = matches!(
+            kind,
+            Kind::Serializable { .. } | Kind::SerializableOriginsV2 { .. }
+        );
         match wire {
             Ok(wire) => {
                 let kind = match kind {
@@ -7322,6 +8076,15 @@ impl Db {
                         reads,
                         own,
                     } => WireKind::Serializable {
+                        snapshot,
+                        reads,
+                        own,
+                    },
+                    Kind::SerializableOriginsV2 {
+                        snapshot,
+                        reads,
+                        own,
+                    } => WireKind::SerializableOriginsV2 {
                         snapshot,
                         reads,
                         own,
@@ -7346,7 +8109,10 @@ impl Db {
                 });
                 let persisted = inner
                     .persist_pending(seq, &commit, &rows)
-                    .and_then(|()| inner.persist_observation_submission(seq, provenance));
+                    .and_then(|()| inner.persist_observation_submission(seq, provenance))
+                    .and_then(|()| {
+                        inner.record_local_publication(seq, id, reservation, inner.identity.author)
+                    });
                 if let Err(error) = persisted {
                     let client = inner.client.as_mut().expect("client");
                     client.unsent.pop();
@@ -7367,10 +8133,22 @@ impl Db {
                 });
                 drop(inner);
                 if reorder {
+                    if reservation.is_some() {
+                        return Err(rejected(
+                            "sealed publication cannot reorder an already pending local version",
+                        ));
+                    }
                     self.rebase()?;
                 }
             }
             Err(error) => {
+                for key in &added {
+                    client.baselines.remove(key);
+                }
+                if inner.initialization_enabled {
+                    return Err(error);
+                }
+                let client = inner.client.as_mut().expect("client");
                 client.fates.insert(seq, Err(error));
                 client.pending.push(Pending {
                     tx: seq,
@@ -7852,11 +8630,8 @@ impl Db {
                 .map(|p| p.tx)
                 .filter(|tx| captured.contains(tx))
                 .chain(client.own_accepted.iter().map(|&(_, tx)| tx))
-                .map(|tx| TxId {
-                    time: TxTime(tx),
-                    node,
-                })
-                .collect(),
+                .map(|tx| inner.local_publication_origin(tx))
+                .collect::<Result<Vec<_>, _>>()?,
         })
     }
 
@@ -7874,6 +8649,7 @@ impl Db {
     /// Wait for a local transaction's fate at `tier`.
     pub async fn wait_for_transaction(&self, tx: u64, tier: DurabilityTier) -> Result<u64, Error> {
         self.ensure_storage_owner_active()?;
+        self.inner.borrow().initialization_wait_pending(tx)?;
         if !self.waits_upstream(tier) {
             return Ok(tx);
         }
@@ -7883,6 +8659,10 @@ impl Db {
             }
             let inner = self.inner.borrow();
             let client = inner.client.as_ref().expect("client");
+            let journal_pending = match inner.initialization_wait_pending(tx) {
+                Ok(pending) => pending,
+                Err(error) => return Poll::Ready(Err(error)),
+            };
             match client.fates.get(&tx) {
                 // Ordered by a replica with no server: no authority makes
                 // it `Global`.
@@ -7900,7 +8680,9 @@ impl Db {
                 None if client.stranded && client.pending.iter().any(|p| p.tx == tx) => {
                     Poll::Ready(Err(stranded()))
                 }
-                None if client.pending.iter().any(|p| p.tx == tx) => Poll::Pending,
+                None if journal_pending || client.pending.iter().any(|p| p.tx == tx) => {
+                    Poll::Pending
+                }
                 // Not pending and no fate: a local no-op or pre-connection commit.
                 None => Poll::Ready(Ok(tx)),
             }
@@ -7913,13 +8695,26 @@ impl Db {
     /// rejected. Writes made after the call are not waited for.
     pub async fn wait_for_pending_writes(&self, tier: DurabilityTier) -> Result<(), Error> {
         self.ensure_storage_owner_active()?;
+        let outstanding = {
+            let inner = self.inner.borrow();
+            let positions = inner.initialization_outstanding_positions()?;
+            for &tx in &positions {
+                inner.initialization_wait_pending(tx)?;
+            }
+            positions
+        };
         if !self.waits_upstream(tier) {
             return Ok(());
         }
-        let pending: Vec<u64> = {
+        let pending: BTreeSet<u64> = {
             let inner = self.inner.borrow();
             let client = inner.client.as_ref().expect("client");
-            client.pending.iter().map(|p| p.tx).collect()
+            client
+                .pending
+                .iter()
+                .map(|p| p.tx)
+                .chain(outstanding)
+                .collect()
         };
         for tx in pending {
             self.wait_for_transaction(tx, tier).await?;
@@ -8509,6 +9304,14 @@ impl Db {
                         global,
                     } => {
                         let through = outcome.position();
+                        // This opted-in role never discards its original pending
+                        // proof on a relay's provisional local acceptance.
+                        if inner.initialization_enabled
+                            && !global
+                            && matches!(outcome, Outcome::Accepted { .. })
+                        {
+                            continue;
+                        }
                         let client = inner.client.as_mut().expect("client");
                         // Not a commit this store uploads: nothing to settle.
                         let Some(tx) = client.local_tx(&id) else {
@@ -8608,13 +9411,31 @@ impl Db {
                         // report, not this store's. One whose session is gone
                         // is reported as the commit the session made.
                         let relayed = client.relayed_fates.contains_key(&tx);
+                        if inner.initialization_enabled {
+                            inner.record_fate(
+                                *id.node.as_bytes(),
+                                id.time.0,
+                                &result.clone().map_err(|error| wire_error(&error)),
+                            )?;
+                        }
                         if let Err(error) = &result {
                             let origins = inner.relayed_origins(tx)?;
                             // The originating store keeps its own refused
                             // payload, for a host that reports refusals,
                             // until the host has (INV-TX-9). A relay keeps
                             // none of its sessions'.
-                            if inner.upstream_rejections.is_some() && !relayed && origins.is_empty()
+                            // Original-ID aliases need terminal correlation,
+                            // but an owned initialization is still this owner's
+                            // original rejected operation, not a relay session.
+                            // This preserves the existing rejected-op queue;
+                            // it does not alter AccessLost or row-cache retention.
+                            let owned_initialization = inner.initialization_enabled && inner.conn.query_row(
+                                "SELECT EXISTS(SELECT 1 FROM _jazz_initialization_publications_v1 WHERE position=?1 AND node=?2 AND tx=?3 AND author=?4 AND initialization=1)",
+                                rusqlite::params![tx as i64,id.node.as_bytes().as_slice(),id.time.0 as i64,inner.identity.author.canonical()],|row|row.get::<_,bool>(0),
+                            ).map_err(storage)?;
+                            if inner.upstream_rejections.is_some()
+                                && !relayed
+                                && (origins.is_empty() || owned_initialization)
                             {
                                 inner.retain_rejected(tx, error, serializable)?;
                             }
@@ -8650,7 +9471,18 @@ impl Db {
                         if let Some(hashes) = client.pushed.remove(&tx) {
                             crate::large::mark_pushed(&inner.conn, &hashes)?;
                         }
-                        inner.record_settled(node, tx, accepted.then_some(landed))?;
+                        if inner.initialization_enabled {
+                            // A local ordering coordinate is not another
+                            // canonical transaction. Keep the actual received
+                            // origin in history; the journal maps local waits.
+                            inner.record_settled(
+                                *id.node.as_bytes(),
+                                id.time.0,
+                                accepted.then_some(landed),
+                            )?;
+                        } else {
+                            inner.record_settled(node, tx, accepted.then_some(landed))?;
+                        }
                         // The sessions' commits it carried settle where it
                         // did: a resend of one gets the upstream's fate.
                         if accepted && global {
@@ -8658,7 +9490,7 @@ impl Db {
                                 inner.record_settled(origin, session_tx, Some(landed))?;
                             }
                         }
-                        inner.forget_pending(tx)?;
+                        inner.forget_pending(tx, global)?;
                         rebase = true;
                         // Sessions whose commits this upload carried learn
                         // their fate from the upstream's.
@@ -8777,6 +9609,13 @@ impl Db {
                 pulls: batch.to_vec(),
             });
         }
+        inner.verify_initialization_prefix().map_err(|error| {
+            if error.code == ErrorCode::NotObserved {
+                Error::new(ErrorCode::Storage, error.message)
+            } else {
+                error
+            }
+        })?;
         let client = inner.client.as_mut().expect("client");
         let mut commits = std::mem::take(&mut client.unsent);
         // Each commit's large-value nodes go ahead of it. A commit whose
@@ -8927,7 +9766,13 @@ impl Db {
             // receipt. If every coordinate has reached this commit or later,
             // replay would apply it twice. Keep the pending upload and its
             // waiters until the actual Fate arrives.
-            if let Some(Some(accepted)) = inner.settled(node, tx)?
+            let settled = if inner.initialization_enabled {
+                let original = inner.local_publication_origin(tx)?;
+                inner.settled(*original.node.as_bytes(), original.time.0)?
+            } else {
+                inner.settled(node, tx)?
+            };
+            if let Some(Some(accepted)) = settled
                 && !rows.is_empty()
                 && rows.iter().all(|row| {
                     baseline
@@ -12804,6 +13649,10 @@ impl Db {
             Ok(ops) => ops,
             Err(error) => return Err((error, Vec::new())),
         };
+        // This also covers direct public Rust transports which do not deserialize bytes.
+        if let WireKind::SerializableOriginsV2 { own, .. } = &kind {
+            check_original_dependency_shape(own, Some(id)).map_err(|error| (error, Vec::new()))?;
+        }
         let mentioned = |inner: &Inner| -> Vec<(String, RowUuid, Vec<u8>)> {
             let mut out = Vec::new();
             for op in &ops {
@@ -12826,7 +13675,10 @@ impl Db {
         // validates it; this store applies it optimistically meanwhile, as
         // any replica applies its own.
         let relay = self.is_client();
-        let forward = matches!(kind, WireKind::Serializable { .. }) && relay;
+        let forward = matches!(
+            kind,
+            WireKind::Serializable { .. } | WireKind::SerializableOriginsV2 { .. }
+        ) && relay;
         let upload = match std::mem::replace(&mut kind, WireKind::Mergeable) {
             WireKind::Serializable {
                 snapshot,
@@ -12837,17 +13689,34 @@ impl Db {
                 .borrow()
                 .relayed_serializable(snapshot, reads, own)
                 .map_err(|e| (e, Vec::new()))?,
+            WireKind::SerializableOriginsV2 {
+                snapshot,
+                reads,
+                own,
+            } if forward => self
+                .inner
+                .borrow()
+                .relayed_serializable_origins(snapshot, reads, own)
+                .map_err(|e| (e, Vec::new()))?,
             unchanged => {
                 kind = unchanged;
                 Kind::Mergeable
             }
         };
-        if let WireKind::Serializable {
-            snapshot,
-            reads,
-            own,
-        } = &kind
-        {
+        let validation = match &kind {
+            WireKind::Serializable {
+                snapshot,
+                reads,
+                own,
+            } => Some((*snapshot, reads.as_slice(), Some(own.as_slice()), None)),
+            WireKind::SerializableOriginsV2 {
+                snapshot,
+                reads,
+                own,
+            } => Some((*snapshot, reads.as_slice(), None, Some(own.as_slice()))),
+            WireKind::Mergeable => None,
+        };
+        if let Some((snapshot, reads, legacy_own, original_own)) = validation {
             // Reads are validated by the policies the session read by: its
             // bundle's when it is pinned to one, not the store's current ones.
             let policies = self.view_policies();
@@ -12856,18 +13725,30 @@ impl Db {
             // and where each settled here (earlier on this connection, so
             // before this one).
             let mut settled = BTreeMap::new();
-            for &tx in own {
-                if let Some(seq) = inner
-                    .settled(id.0, tx)
+            let mut settled_origins = BTreeMap::new();
+            if let Some(own) = legacy_own {
+                // Preserve the legacy route and its exact interpretation.
+                for &tx in own {
+                    if let Some(seq) = inner
+                        .settled(id.0, tx)
+                        .map_err(|e| (e, Vec::new()))?
+                        .flatten()
+                    {
+                        settled.insert(tx, seq);
+                    }
+                }
+            } else if let Some(own) = original_own {
+                for (position, origin, at) in inner
+                    .resolve_original_dependencies(id, identity.as_ref(), own)
                     .map_err(|e| (e, Vec::new()))?
-                    .flatten()
                 {
-                    settled.insert(tx, seq);
+                    settled.insert(position, at);
+                    settled_origins.insert(origin, at);
                 }
             }
             // The session's snapshot is the authority seq its server
             // served it at.
-            let base = Pos::at(*snapshot);
+            let base = Pos::at(snapshot);
             let in_snapshot = |at: Pos| at <= base || settled.values().any(|s| *s == at);
             for op in &ops {
                 if let Some(row) = op.row()
@@ -12919,7 +13800,13 @@ impl Db {
                         // never numbered matches nothing.
                         None => Some(Pos::from_t(i64::try_from(seq).unwrap_or(-1)))
                             .filter(|at| at.accepted() && seq <= MAX_SEQ),
-                        Some(node) if node == id.0 => settled.get(&seq).copied(),
+                        Some(node) if node == id.0 => {
+                            if legacy_own.is_some() {
+                                settled.get(&seq).copied()
+                            } else {
+                                settled_origins.get(&(node, seq)).copied()
+                            }
+                        }
                         Some(node) => inner
                             .settled(node, seq)
                             .map_err(|e| (e, Vec::new()))?
@@ -13031,7 +13918,10 @@ impl Db {
                 .iter()
                 .map(|op| (inner.schema.clone(), op.clone()))
                 .collect::<Vec<_>>();
-            let serializable = matches!(kind, WireKind::Serializable { .. });
+            let serializable = matches!(
+                kind,
+                WireKind::Serializable { .. } | WireKind::SerializableOriginsV2 { .. }
+            );
             let applied = inner.candidate_unit(&unit, seq, serializable, false, |inner| {
                 ops.iter()
                     .try_for_each(|op| inner.apply_as(op, who, seq).map(drop))

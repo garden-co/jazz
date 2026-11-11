@@ -34,6 +34,12 @@ mod candidates;
 #[path = "catalogue_cache.rs"]
 mod catalogue_cache;
 pub use catalogue_cache::{AuthenticatedCatalogueState, validate_catalogue_capture_replacement};
+#[path = "initialization.rs"]
+mod initialization;
+pub use initialization::{
+    InitializationFate, InitializationSeal, InitializationTransactionStatus,
+    InitializationWriteState, ReservedTxId,
+};
 #[path = "fanout.rs"]
 mod fanout;
 #[path = "read_policy_literals.rs"]
@@ -583,6 +589,9 @@ struct Inner {
     bundle_views: RefCell<HashMap<crate::catalogue::BundleId, (Rc<Schema>, Rc<Schema>)>>,
     /// Open transaction batches, by id.
     batches: HashMap<OpenTransactionId, Batch>,
+    retired_initializations: BTreeSet<OpenTransactionId>,
+    initialization_owner_retired: bool,
+    initialization_enabled: bool,
     identity: DbIdentity,
     /// The node SYSTEM provenance names ([`crate::options::DbConfig::system_node`]).
     system_node: crate::ids::NodeUuid,
@@ -1423,6 +1432,7 @@ impl Db {
         conn.execute_batch(candidates::TEMP_DDL).map_err(storage)?;
         names.admit(&conn, &schema)?;
         conn.execute_batch(sync::SYNC_DDL).map_err(storage)?;
+        let initialization_enabled = initialization::allocation_active(&conn)?;
         let catalogue_cache_required = conn
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM _jazz_meta WHERE k=?1)",
@@ -1510,6 +1520,9 @@ impl Db {
                 bundles: HashMap::new(),
                 bundle_views: RefCell::default(),
                 batches: HashMap::new(),
+                retired_initializations: BTreeSet::new(),
+                initialization_owner_retired: false,
+                initialization_enabled,
                 system_node: config.system_node.unwrap_or(config.identity.node),
                 identity: config.identity,
                 writer: None,
@@ -1569,6 +1582,12 @@ impl Db {
             }
             inner.seq = seq;
             inner.load_client()?;
+            if inner.initialization_enabled {
+                inner.seq = inner.seq.max(initialization::allocation_floor(
+                    &inner.conn,
+                    inner.identity.node,
+                )?);
+            }
             inner.load_shard()?;
         }
         Ok(db)
@@ -2167,6 +2186,9 @@ impl Db {
     }
 
     pub async fn close(&self) -> Result<(), Error> {
+        if self.view.is_none() {
+            self.inner().initialization_owner_retired = true;
+        }
         self.retire_local_observation_capabilities();
         self.tick().await
     }
@@ -7777,6 +7799,9 @@ enum BatchKind {
         /// On a client, its own commits still unsettled at begin: the
         /// snapshot includes them (reads see what this client wrote).
         own: Vec<u64>,
+        /// Frozen local-position/original-identity map for the opted-in owner;
+        /// never reconstructed from publication-time pending state.
+        own_origins: Option<Vec<(u64, [u8; 16], u64)>>,
     },
 }
 
@@ -8241,13 +8266,15 @@ impl Db {
     /// complete through, plus its own unsettled commits: never positions it
     /// numbered itself, which would hold every authority version.
     pub async fn begin_serializable(&self, id: OpenTransactionId) -> Result<(), Error> {
-        let (snapshot, own) = {
+        let (snapshot, own, own_origins) = {
             let inner = self.inner.borrow();
             let snapshot = match &inner.client {
                 Some(client) => Pos::at(client.known),
                 None => inner.frontier(),
             };
-            (snapshot, inner.unsettled_own())
+            let own = inner.unsettled_own();
+            let own_origins = inner.captured_initialization_origins(&own)?;
+            (snapshot, own, own_origins)
         };
         self.begin(
             id,
@@ -8256,6 +8283,7 @@ impl Db {
                 reads: Vec::new(),
                 pinned: !self.is_client(),
                 own,
+                own_origins,
             },
         )
     }
@@ -8347,6 +8375,9 @@ impl Db {
         // Opening owns a live handle, not permission to read or mutate an
         // unpublished requested schema. Each actual operation checks admission.
         inner.require_mutation_lifetime()?;
+        if inner.retired_initializations.contains(&id) {
+            return Err(rejected("initialization transaction handle was sealed"));
+        }
         if inner.batches.contains_key(&id) {
             return Err(rejected(format!("transaction {id:?} is already open")));
         }
@@ -8422,12 +8453,23 @@ impl Db {
         id: OpenTransactionId,
     ) -> Result<TxReceipt, Error> {
         let batch = self.take_batch(id)?;
+        self.commit_serializable_batch(&batch, id, None)
+    }
+
+    /// The same real checks for an owned batch, including a later sealed publication.
+    fn commit_serializable_batch(
+        &self,
+        batch: &Batch,
+        id: OpenTransactionId,
+        reservation: Option<ReservedTxId>,
+    ) -> Result<TxReceipt, Error> {
         batch.reads_state.borrow().check_commit()?;
-        self.check_accepted_batch(&batch)?;
+        self.check_accepted_batch(batch)?;
         let BatchKind::Serializable {
             snapshot,
             reads,
             own,
+            own_origins,
             ..
         } = &batch.kind
         else {
@@ -8542,14 +8584,25 @@ impl Db {
                 debug_assert!(snapshot.accepted(), "a snapshot is the authority's");
                 reads
             };
-            return self.commit_ops(
-                &batch,
-                sync::Kind::Serializable {
+            let kind = match own_origins {
+                Some(origins)
+                    if origins.iter().any(|(position, node, tx)| {
+                        *node != *self.inner.borrow().identity.node.as_bytes() || *tx != *position
+                    }) =>
+                {
+                    sync::Kind::SerializableOriginsV2 {
+                        snapshot: snapshot.seq,
+                        reads,
+                        own: origins.clone(),
+                    }
+                }
+                _ => sync::Kind::Serializable {
                     snapshot: snapshot.seq,
                     reads,
                     own: own.clone(),
                 },
-            );
+            };
+            return self.commit_ops_with_reservation(batch, kind, reservation);
         }
         {
             let policies = self.view_policies();
@@ -8584,15 +8637,33 @@ impl Db {
                 }
             }
         }
-        self.commit_ops(&batch, sync::Kind::Mergeable)
+        self.commit_ops_with_reservation(batch, sync::Kind::Mergeable, reservation)
     }
 
     fn commit_ops(&self, batch: &Batch, kind: sync::Kind) -> Result<TxReceipt, Error> {
-        crate::db::large_ops::renew_upload_leases(&self.inner(), &batch.uploads)?;
-        self.with_upload(|| self.commit_ops_now(batch, kind))
+        self.commit_ops_with_reservation(batch, kind, None)
     }
 
-    fn commit_ops_now(&self, batch: &Batch, kind: sync::Kind) -> Result<TxReceipt, Error> {
+    fn commit_ops_with_reservation(
+        &self,
+        batch: &Batch,
+        kind: sync::Kind,
+        reservation: Option<ReservedTxId>,
+    ) -> Result<TxReceipt, Error> {
+        crate::db::large_ops::renew_upload_leases(&self.inner(), &batch.uploads)?;
+        match reservation {
+            Some(reservation) => self.commit_initialization_ops(batch, kind, reservation),
+            None => self.with_upload(|| self.commit_ops_now(batch, kind, None)),
+        }
+    }
+
+    fn commit_ops_now(
+        &self,
+        batch: &Batch,
+        kind: sync::Kind,
+        reserved_publication: Option<(ReservedTxId, u64)>,
+    ) -> Result<TxReceipt, Error> {
+        let reservation = reserved_publication.map(|(reservation, _)| reservation);
         {
             let inner = self.inner();
             inner.require_mutation_lifetime()?;
@@ -8603,10 +8674,22 @@ impl Db {
             }
         }
         let ops = &batch.ops;
-        let (seq, prior, mark) = {
+        let (seq, prior, mark, previous_origin) = {
             let mut inner = self.inner();
-            let seq = inner.next_seq();
+            // The guard owns this exact chosen position, including authority
+            // clocks which can advance between two calls to next_seq().
+            let seq =
+                reserved_publication.map_or_else(|| inner.next_seq(), |(_, position)| position);
             begin_savepoint(&inner.conn, "commit_batch")?;
+            let previous_origin = inner.own_order.get(&seq).copied();
+            if let Some(reservation) = reservation {
+                inner.stamp_commit(seq);
+                let clock = inner.commit_hlc(seq);
+                let original = reservation.transaction_id();
+                inner
+                    .own_order
+                    .insert(seq, (clock, *original.node.as_bytes(), original.time.0));
+            }
             let mark = inner.changed.borrow().len();
             inner.defer_checks();
             // Session-bound batches recheck current permissions at commit.
@@ -8632,15 +8715,25 @@ impl Db {
             if let Err(error) = applied {
                 inner.abandon_checks();
                 inner.changed.borrow_mut().truncate(mark);
+                if reservation.is_some() {
+                    match previous_origin {
+                        Some(origin) => {
+                            inner.own_order.insert(seq, origin);
+                        }
+                        None => {
+                            inner.own_order.remove(&seq);
+                        }
+                    }
+                }
                 end_savepoint(&inner.conn, "commit_batch", false)?;
                 return Err(error);
             }
             end_savepoint(&inner.conn, "commit_batch", true)?;
             let prior = inner.seq;
-            if !ops.is_empty() || kind.validates_reads() {
+            if !ops.is_empty() || kind.validates_reads() || reservation.is_some() {
                 inner.seq = inner.seq.max(seq);
             }
-            (seq, prior, mark)
+            (seq, prior, mark, previous_origin)
         };
         // `commit_ops` holds the upload record and the commit in one SQLite
         // transaction and rolls both back on an error.
@@ -8650,23 +8743,26 @@ impl Db {
             .iter()
             .map(|(schema, op)| self.inner().stored_op(op.clone(), schema))
             .collect::<Result<Vec<_>, _>>()
-            .and_then(|ops| {
-                self.record_stored_upload_with_provenance(
-                    ops,
-                    seq,
-                    kind,
-                    None,
-                    Some(&batch.observation_provenance),
-                    batch.identity,
-                )
-            });
+            .and_then(|ops| self.record_batch_upload(ops, seq, kind, batch, reservation));
         if let Err(error) = recorded {
             let mut inner = self.inner();
             inner.seq = prior;
             inner.changed.borrow_mut().truncate(mark);
+            if reservation.is_some() {
+                match previous_origin {
+                    Some(origin) => {
+                        inner.own_order.insert(seq, origin);
+                    }
+                    None => {
+                        inner.own_order.remove(&seq);
+                    }
+                }
+            }
             return Err(error);
         }
-        self.notify();
+        if reservation.is_none() {
+            self.notify();
+        }
         Ok(TxReceipt(seq))
     }
 

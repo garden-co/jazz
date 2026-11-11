@@ -1793,6 +1793,68 @@ impl NapiDb {
             .map_err(host_error)?)
     }
 
+    /// Enable the actual owner's durable initialization journal before writes.
+    #[napi(js_name = "enableInitializationJournal")]
+    pub fn enable_initialization_journal(&self) -> js::Result<()> {
+        Ok(self
+            .binding()?
+            .enable_initialization_journal()
+            .map_err(host_error)?)
+    }
+
+    /// Ordinary same-batch coordinate eligibility, never authority evidence.
+    #[napi(js_name = "prepareInitializationInsert")]
+    pub fn prepare_initialization_insert(
+        &self,
+        id: String,
+        table: String,
+        row: Uint8Array,
+    ) -> js::Result<()> {
+        Ok(self
+            .binding()?
+            .prepare_initialization_insert(&id, &table, &row)
+            .map_err(host_error)?)
+    }
+
+    /// Named JSON with the owner-local token and exact reserved identity.
+    #[napi(js_name = "sealInitializationTransaction")]
+    pub fn seal_initialization_transaction(&self, id: String) -> js::Result<String> {
+        let seal = self
+            .binding()?
+            .seal_initialization_transaction(&id)
+            .map_err(host_error)?;
+        Ok(serde_json::to_string(&seal)
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?)
+    }
+
+    /// Consume once without publication or reserved identity recycling.
+    #[napi(js_name = "cancelInitializationTransaction")]
+    pub fn cancel_initialization_transaction(&self, token: String) -> js::Result<()> {
+        Ok(self
+            .binding()?
+            .cancel_initialization_transaction(&token)
+            .map_err(host_error)?)
+    }
+
+    /// Named exact owner status, distinct from complete history or acceptance.
+    #[napi(js_name = "initializationTransactionStatus")]
+    pub fn initialization_transaction_status(&self, ids: Vec<String>) -> js::Result<String> {
+        Ok(self
+            .binding()?
+            .initialization_transaction_status(&ids)
+            .map_err(host_error)?)
+    }
+
+    /// Publish through the exact frozen replica batch and original context.
+    #[napi(js_name = "publishInitializationTransaction")]
+    pub fn publish_initialization_transaction(&self, env: Env, token: String) -> js::Result<Write> {
+        let inner = self.open_inner()?;
+        Ok(inner.write(
+            &env,
+            inner.binding.publish_initialization_transaction(&token),
+        )?)
+    }
+
     /// Commit an owner-wide transaction by id and optional kind.
     #[napi(js_name = "commitTransaction")]
     pub fn commit_transaction(

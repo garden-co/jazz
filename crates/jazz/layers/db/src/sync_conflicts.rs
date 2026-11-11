@@ -440,6 +440,49 @@ impl Inner {
         Ok(built)
     }
 
+    /// Resolve an explicit own-prefix only under the existing actual-session
+    /// ownership rule. Referencing a node never claims/transfers it. Ordinary
+    /// foreign WireRead rows do not use this own-prefix admission.
+    pub(super) fn resolve_original_dependencies(
+        &self,
+        sender: ([u8; 16], u64),
+        identity: Option<&AuthorSubject>,
+        own: &[(u64, [u8; 16], u64)],
+    ) -> Result<Vec<(u64, ([u8; 16], u64), Pos)>, Error> {
+        if own.len() > super::MAX_SERIALIZABLE_ORIGINS {
+            return Err(unsupported(
+                "serializable original dependency prefix exceeds 4096 commits",
+            ));
+        }
+        let mut positions = BTreeSet::new();
+        let mut origins = BTreeSet::new();
+        let mut resolved = Vec::with_capacity(own.len());
+        for &(position, node, tx) in own {
+            if position == 0
+                || tx == 0
+                || position >= i64::MAX as u64
+                || tx >= i64::MAX as u64
+                || (node, tx) == sender
+                || !positions.insert(position)
+                || !origins.insert((node, tx))
+            {
+                return Err(unknown_base("an invalid original dependency prefix"));
+            }
+            if node != sender.0
+                && let Some(identity) = identity
+                && !self.writes_as(node, identity)?
+            {
+                return Err(predecessor_rejected());
+            }
+            let landed = predecessor(self.settled(node, tx)?)?;
+            if !landed.accepted() {
+                return Err(predecessor_rejected());
+            }
+            resolved.push((position, (node, tx), landed));
+        }
+        Ok(resolved)
+    }
+
     /// Where each based row of an upload this relay carries was built on,
     /// in its own history, for the echo inference alone (see `Echoable`):
     /// its sessions also build on its unsettled versions, named as its

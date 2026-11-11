@@ -171,6 +171,8 @@ mod sqlite_candidate_uuid_correlations;
 mod sqlite_candidates;
 #[path = "../sqlite_catalogue_cache.rs"]
 mod sqlite_catalogue_cache;
+#[path = "../sqlite_initialization.rs"]
+mod sqlite_initialization;
 #[path = "../sqlite_read_policy_literals.rs"]
 mod sqlite_read_policy_literals;
 #[path = "../sqlite_sync_ingress.rs"]

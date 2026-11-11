@@ -182,6 +182,7 @@ impl Db {
                     snapshot,
                     pinned,
                     own,
+                    own_origins,
                     reads,
                 } = &mut batch.kind
                 else {
@@ -190,6 +191,9 @@ impl Db {
                 *snapshot = Pos::at(reply.through);
                 *pinned = true;
                 own.clear();
+                if let Some(origins) = own_origins {
+                    origins.clear();
+                }
                 reads.push(ReadRecord {
                     prepared: prepared
                         .clone()
@@ -226,6 +230,7 @@ impl Db {
             pinned,
             own,
             reads,
+            ..
         } = &batch.kind
         else {
             unreachable!()
