@@ -5531,15 +5531,20 @@ impl Inner {
                 "pending original header is not a commit",
             ));
         };
+        // Normal Rows can reconcile an original transaction before its Fate.
+        // Rebase then removes its optimistic ranks, while its exact original
+        // packet and digest must remain intact until the terminal decision.
+        let reconciled = matches!(self.settled(*id.node.as_bytes(), id.time.0)?, Some(Some(_)));
         for (table, row, key) in self.pending_rows(tx)? {
-            if self
-                .ranked_image(
-                    &table,
-                    row,
-                    &key,
-                    versioned(Pos::pending(clock), *id.node.as_bytes(), id.time.0),
-                )?
-                .is_none()
+            if !reconciled
+                && self
+                    .ranked_image(
+                        &table,
+                        row,
+                        &key,
+                        versioned(Pos::pending(clock), *id.node.as_bytes(), id.time.0),
+                    )?
+                    .is_none()
             {
                 return Err(Error::new(
                     ErrorCode::NotObserved,
@@ -5548,6 +5553,53 @@ impl Inner {
             }
         }
         Ok(())
+    }
+
+    /// Journal-known outstanding units remain outstanding even when recovery
+    /// cannot reconstruct their original packet. This index bounds discovery.
+    fn initialization_outstanding_positions(&self) -> Result<Vec<u64>, Error> {
+        if !self.initialization_enabled {
+            return Ok(Vec::new());
+        }
+        let mut query = self.conn.prepare_cached(
+            "SELECT position FROM _jazz_initialization_publications_v1 WHERE terminal=0 AND position IS NOT NULL ORDER BY position LIMIT 4097",
+        ).map_err(storage)?;
+        let positions = query
+            .query_map([], |row| row.get::<_, i64>(0))
+            .map_err(storage)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(storage)?;
+        if positions.len() > 4096 || positions.iter().any(|position| *position <= 0) {
+            return Err(rejected(
+                "initialization pending prefix exceeds 4096 publications",
+            ));
+        }
+        Ok(positions
+            .into_iter()
+            .map(|position| position as u64)
+            .collect())
+    }
+
+    /// A missing original packet is an explicit unavailable outcome, never
+    /// the successful no-op fallback used for unrelated unknown positions.
+    fn initialization_wait_pending(&self, tx: u64) -> Result<bool, Error> {
+        if !self.initialization_enabled {
+            return Ok(false);
+        }
+        let owner: Option<String> = self.conn.query_row(
+            "SELECT author FROM _jazz_initialization_publications_v1 WHERE position=?1 AND terminal=0",
+            [tx as i64], |row| row.get(0),
+        ).optional().map_err(storage)?;
+        let Some(owner) = owner else {
+            return Ok(false);
+        };
+        if owner != self.identity.author.canonical() {
+            return Err(rejected(
+                "pending initialization prefix belongs to another authenticated principal",
+            ));
+        }
+        self.verify_initialization_pending(tx)?;
+        Ok(true)
     }
 
     fn verify_initialization_prefix(&self) -> Result<(), Error> {
@@ -6872,14 +6924,21 @@ impl Inner {
                 Some(None) => continue,
                 None => {}
             }
-            if node == me
-                && let Some(client) = &self.client
-            {
-                if client.pending.iter().any(|p| p.tx == tx) {
-                    cut.extra.push(self.own_rank(tx));
+            if let Some(client) = &self.client {
+                // A snapshot dot names the original transaction, not this
+                // owner's publication position or its current reopened node.
+                if let Some(pending) = client
+                    .pending
+                    .iter()
+                    .find(|pending| pending.id.node.as_bytes() == &node && pending.id.time.0 == tx)
+                {
+                    cut.extra.push(self.own_rank(pending.tx));
                     continue;
                 }
-                if client.fates.get(&tx).is_some_and(Result::is_err) {
+                if !self.initialization_enabled
+                    && node == me
+                    && client.fates.get(&tx).is_some_and(Result::is_err)
+                {
                     continue;
                 }
             }
@@ -7856,6 +7915,16 @@ impl Db {
         {
             return Ok(());
         }
+        // This runs inside the caller's ordinary SQLite commit transaction,
+        // before mutating pending queues. Refusal rolls back the visible write
+        // as well: never append a unit that prevents the entire prefix draining.
+        if inner.initialization_enabled
+            && inner.initialization_outstanding_positions()?.len() >= 4096
+        {
+            return Err(rejected(
+                "initialization pending prefix exceeds 4096 publications",
+            ));
+        }
         // The writer the authority stamps: an explicit identity, or the
         // system at this node (the authority stamps its own writes as its
         // node, so a trusted link names its own).
@@ -8578,6 +8647,7 @@ impl Db {
     /// Wait for a local transaction's fate at `tier`.
     pub async fn wait_for_transaction(&self, tx: u64, tier: DurabilityTier) -> Result<u64, Error> {
         self.ensure_storage_owner_active()?;
+        self.inner.borrow().initialization_wait_pending(tx)?;
         if !self.waits_upstream(tier) {
             return Ok(tx);
         }
@@ -8587,6 +8657,10 @@ impl Db {
             }
             let inner = self.inner.borrow();
             let client = inner.client.as_ref().expect("client");
+            let journal_pending = match inner.initialization_wait_pending(tx) {
+                Ok(pending) => pending,
+                Err(error) => return Poll::Ready(Err(error)),
+            };
             match client.fates.get(&tx) {
                 // Ordered by a replica with no server: no authority makes
                 // it `Global`.
@@ -8604,7 +8678,9 @@ impl Db {
                 None if client.stranded && client.pending.iter().any(|p| p.tx == tx) => {
                     Poll::Ready(Err(stranded()))
                 }
-                None if client.pending.iter().any(|p| p.tx == tx) => Poll::Pending,
+                None if journal_pending || client.pending.iter().any(|p| p.tx == tx) => {
+                    Poll::Pending
+                }
                 // Not pending and no fate: a local no-op or pre-connection commit.
                 None => Poll::Ready(Ok(tx)),
             }
@@ -8617,13 +8693,26 @@ impl Db {
     /// rejected. Writes made after the call are not waited for.
     pub async fn wait_for_pending_writes(&self, tier: DurabilityTier) -> Result<(), Error> {
         self.ensure_storage_owner_active()?;
+        let outstanding = {
+            let inner = self.inner.borrow();
+            let positions = inner.initialization_outstanding_positions()?;
+            for &tx in &positions {
+                inner.initialization_wait_pending(tx)?;
+            }
+            positions
+        };
         if !self.waits_upstream(tier) {
             return Ok(());
         }
-        let pending: Vec<u64> = {
+        let pending: BTreeSet<u64> = {
             let inner = self.inner.borrow();
             let client = inner.client.as_ref().expect("client");
-            client.pending.iter().map(|p| p.tx).collect()
+            client
+                .pending
+                .iter()
+                .map(|p| p.tx)
+                .chain(outstanding)
+                .collect()
         };
         for tx in pending {
             self.wait_for_transaction(tx, tier).await?;

@@ -636,6 +636,7 @@ fn incomplete_recovery_blocks_every_upload_prefix() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("alice.sqlite");
         let reserved;
+        let damaged_position;
         {
             let alice = open(1, "alice", Some(&path), false);
             let seal = alice
@@ -657,6 +658,7 @@ fn incomplete_recovery_blocks_every_upload_prefix() {
             let storage = rusqlite::Connection::open(&path).unwrap();
             // Public reservation ID is intentionally not the local pending key.
             let tx:i64 = storage.query_row("SELECT position FROM _jazz_initialization_publications_v1 WHERE node=?1 AND tx=?2",rusqlite::params![reserved.transaction_id().node.as_bytes().as_slice(),reserved.transaction_id().time.0 as i64],|row|row.get(0)).unwrap();
+            damaged_position = tx as u64;
             match damage {
                 "missing-unit" => {
                     storage
@@ -711,6 +713,20 @@ fn incomplete_recovery_blocks_every_upload_prefix() {
                 .unwrap(),
             vec![InitializationTransactionStatus::Incomplete],
             "{damage}"
+        );
+        assert_eq!(
+            block_on(alice.wait_for_transaction(damaged_position, DurabilityTier::Global))
+                .unwrap_err()
+                .code,
+            ErrorCode::NotObserved,
+            "{damage}: no individual false Global success"
+        );
+        assert_eq!(
+            block_on(alice.wait_for_pending_writes(DurabilityTier::Global))
+                .unwrap_err()
+                .code,
+            ErrorCode::NotObserved,
+            "{damage}: no whole-queue false Global success"
         );
         let bob = open(3, "bob", None, true);
         connect(&alice, &bob, "alice");
@@ -1777,4 +1793,245 @@ fn origin_global_history_records_only_the_actual_original_identity() {
             .unwrap();
         assert_eq!(pending, 0);
     }
+}
+
+/// Alice receives real accepted Rows but loses the later Fates. The intact
+/// original packet remains resendable after a new-node persistent reopen.
+/// Alice INSERT+UPDATE -> Bob -> Rows -> Alice; Fate held -> reopen -> resend.
+#[test]
+fn review_rows_before_fate_preserve_pending_original_on_reopen() {
+    use jazz::db::{SyncMessage, Transport, TransportError};
+    use std::{cell::RefCell, collections::VecDeque, rc::Rc};
+    struct HoldFates {
+        wire: Box<dyn Transport>,
+        held: Rc<RefCell<VecDeque<SyncMessage>>>,
+    }
+    impl Transport for HoldFates {
+        fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
+            self.wire.send(message)
+        }
+        fn try_recv(&mut self) -> Option<SyncMessage> {
+            while let Some(message) = self.wire.try_recv() {
+                if matches!(message, SyncMessage::Fate { .. }) {
+                    self.held.borrow_mut().push_back(message);
+                } else {
+                    return Some(message);
+                }
+            }
+            None
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("alice.sqlite");
+    let bob = open(3, "bob", None, true);
+    let reserved;
+    {
+        let alice = open(1, "alice", Some(&path), false);
+        let seal = alice
+            .seal_initialization_transaction(stage(&alice, 1))
+            .unwrap();
+        reserved = seal.reservation();
+        let published = alice.publish_initialization_transaction(seal).unwrap();
+        block_on(alice.update("notes", row(1), cells("later"), Default::default())).unwrap();
+        let (up, down) = duplex();
+        let held = Rc::new(RefCell::new(VecDeque::new()));
+        block_on(alice.connect_upstream(Box::new(HoldFates {
+            wire: up,
+            held: held.clone(),
+        })));
+        bob.accept_subscriber(down, author("alice")).unwrap();
+        for _ in 0..12 {
+            block_on(alice.tick()).expect("accepted Rows are not missing original proof");
+            block_on(bob.tick()).unwrap();
+        }
+        assert_eq!(held.borrow().len(), 2, "withheld actual terminal receipts");
+        assert_eq!(rows(&alice), vec![(row(1), "later".into())]);
+        assert!(
+            matches!(alice.initialization_transaction_status(&[reserved]).unwrap().as_slice(),
+            [InitializationTransactionStatus::Complete(state)] if state.fate == Fate::Pending)
+        );
+        let mut wait = pin!(alice.wait_for_transaction(published.0, DurabilityTier::Global));
+        assert!(
+            wait.as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+    }
+    let alice = open(2, "alice", Some(&path), false);
+    assert!(
+        matches!(alice.initialization_transaction_status(&[reserved]).unwrap().as_slice(),
+        [InitializationTransactionStatus::Complete(state)] if state.fate == Fate::Pending)
+    );
+    connect(&alice, &bob, "alice");
+    drive(
+        &[&alice, &bob],
+        alice.wait_for_pending_writes(DurabilityTier::Global),
+    )
+    .unwrap();
+    assert_eq!(rows(&alice), vec![(row(1), "later".into())]);
+    assert_eq!(rows(&bob), vec![(row(1), "later".into())]);
+    assert!(
+        matches!(alice.initialization_transaction_status(&[reserved]).unwrap().as_slice(),
+        [InitializationTransactionStatus::Complete(state)] if state.fate == Fate::Accepted)
+    );
+}
+
+/// Alice cannot infer authority success from a journal-known incomplete unit
+/// omitted during recovery. SQL tampering is necessary to model lost storage;
+/// status and both wait APIs are exercised through the public owner API.
+#[test]
+fn review_incomplete_recovery_never_reports_global_success() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("alice.sqlite");
+    let (reserved, position);
+    {
+        let alice = open(1, "alice", Some(&path), false);
+        let seal = alice
+            .seal_initialization_transaction(stage(&alice, 1))
+            .unwrap();
+        reserved = seal.reservation();
+        position = alice.publish_initialization_transaction(seal).unwrap().0;
+    }
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute("DELETE FROM _jazz_pending WHERE tx=?1", [position as i64])
+        .unwrap();
+    let alice = open(2, "alice", Some(&path), false);
+    assert_eq!(
+        alice
+            .initialization_transaction_status(&[reserved])
+            .unwrap(),
+        vec![InitializationTransactionStatus::Incomplete]
+    );
+    assert!(
+        block_on(alice.wait_for_transaction(position, DurabilityTier::Global)).is_err(),
+        "missing original packet cannot be a successful Global no-op"
+    );
+    assert!(
+        block_on(alice.wait_for_pending_writes(DurabilityTier::Global)).is_err(),
+        "whole-queue Global wait includes known incomplete publications"
+    );
+}
+
+fn review_pending_snapshot(reopen: bool) {
+    use jazz::protocol::{ReadViewSourceSpec, ReadViewSpec};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("alice.sqlite");
+    let alice = open(1, "alice", Some(&path), false);
+    let seal = alice
+        .seal_initialization_transaction(stage(&alice, 1))
+        .unwrap();
+    let original = seal.reservation().transaction_id();
+    let position = alice.publish_initialization_transaction(seal).unwrap().0;
+    assert_ne!(original.time.0, position);
+    let snapshot = block_on(alice.capture_snapshot()).unwrap();
+    assert_eq!(snapshot.dots, vec![original]);
+    let alice = if reopen {
+        drop(alice);
+        open(2, "alice", Some(&path), false)
+    } else {
+        alice
+    };
+    let query = alice.prepare_query(&Query::from("notes")).unwrap();
+    let found = block_on(alice.all(
+        &query,
+        ReadOpts {
+            read_view: ReadViewSpec {
+                source: ReadViewSourceSpec::Snapshot {
+                    snapshot: snapshot.clone(),
+                },
+                include_deleted: false,
+            },
+            ..Default::default()
+        },
+    ))
+    .expect("retained original dot resolves to its actual publication rank");
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].row_uuid(), row(1));
+    let mut unavailable = snapshot;
+    unavailable.dots[0].node = NodeUuid::from_bytes([99; 16]);
+    assert!(
+        block_on(alice.all(
+            &query,
+            ReadOpts {
+                read_view: ReadViewSpec {
+                    source: ReadViewSourceSpec::Snapshot {
+                        snapshot: unavailable
+                    },
+                    include_deleted: false
+                },
+                ..Default::default()
+            }
+        ))
+        .is_err(),
+        "unknown foreign origin remains unavailable"
+    );
+}
+/// Alice's public snapshot resolves the reserved original ID before Global.
+#[test]
+fn review_pending_snapshot_uses_original_identity() {
+    review_pending_snapshot(false);
+}
+/// The same retained snapshot remains readable after Alice changes local node.
+#[test]
+fn review_pending_snapshot_survives_new_node_reopen() {
+    review_pending_snapshot(true);
+}
+
+/// Alice fills the bounded offline prefix, refuses the excess append atomically,
+/// then drains through Bob and can append again without an unsendable queue.
+#[test]
+fn review_prefix_capacity_refuses_before_visible_commit_and_can_drain() {
+    let alice = open(1, "alice", None, false);
+    let seal = alice
+        .seal_initialization_transaction(stage(&alice, 1))
+        .unwrap();
+    alice.publish_initialization_transaction(seal).unwrap();
+    let id = |n: u128| RowUuid::from_bytes((n + 1000).to_be_bytes());
+    for n in 0..4095 {
+        block_on(alice.insert(
+            "notes",
+            cells("ordinary"),
+            jazz::db::InsertOptions {
+                row_id: Some(id(n)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    }
+    assert_eq!(rows(&alice).len(), 4096);
+    let error = block_on(alice.insert(
+        "notes",
+        cells("excess"),
+        jazz::db::InsertOptions {
+            row_id: Some(id(4095)),
+            ..Default::default()
+        },
+    ))
+    .expect_err("excess publication must refuse before its visible commit");
+    assert_eq!(error.code, ErrorCode::WriteRejected);
+    assert_eq!(rows(&alice).len(), 4096);
+    let bob = open(3, "bob", None, true);
+    connect(&alice, &bob, "alice");
+    drive(
+        &[&alice, &bob],
+        alice.wait_for_pending_writes(DurabilityTier::Global),
+    )
+    .unwrap();
+    assert_eq!(rows(&bob).len(), 4096);
+    let next = block_on(alice.insert(
+        "notes",
+        cells("after drain"),
+        jazz::db::InsertOptions {
+            row_id: Some(id(4095)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    drive(
+        &[&alice, &bob],
+        alice.wait_for_transaction(next.mergeable_tx_id(), DurabilityTier::Global),
+    )
+    .unwrap();
+    assert_eq!(rows(&bob).len(), 4097);
 }
