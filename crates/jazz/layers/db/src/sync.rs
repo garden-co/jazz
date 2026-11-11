@@ -14234,7 +14234,7 @@ impl Db {
             // Coverage and chunk waits may outlive a policy revision. Resolve
             // identity-read policies on every local evaluation attempt.
             let prepared = match identity {
-                Some(_) => std::borrow::Cow::Owned(self.execution_query(&prepared)),
+                Some(_) => self.execution_query(&prepared),
                 None => std::borrow::Cow::Borrowed(&prepared),
             };
             let inner = self.inner();

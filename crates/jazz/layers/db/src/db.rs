@@ -1977,20 +1977,23 @@ impl Db {
     }
 
     /// Keep prepared names while selecting policy from the executing handle.
-    fn execution_query(&self, prepared: &PreparedQuery) -> PreparedQuery {
+    fn execution_query<'a>(
+        &self,
+        prepared: &'a PreparedQuery,
+    ) -> std::borrow::Cow<'a, PreparedQuery> {
         let inner = self.inner();
         let names = prepared.schema.as_ref().unwrap_or(&inner.owner);
         let governing = inner.schema.policies_from.as_ref().unwrap_or(&inner.schema);
         let prior = names.policies_from.as_ref().unwrap_or(names);
         if Rc::ptr_eq(prior, governing) {
-            return prepared.clone();
+            return std::borrow::Cow::Borrowed(prepared);
         }
-        PreparedQuery {
+        std::borrow::Cow::Owned(PreparedQuery {
             schema: Some(Rc::new(
                 (**names).clone().with_policies_of(governing.clone()),
             )),
             ..prepared.clone()
-        }
+        })
     }
 
     pub fn table(&self, table: impl Into<String>) -> Query {
@@ -10039,27 +10042,30 @@ impl TxRef<'_> {
                 *pinned = true;
             }
         }
-        // Hydration may yield while owner policies change. Select execution
-        // policies now, rather than retaining the policies from before the wait.
-        let prepared = self.db.execution_query(prepared);
-        let prepared = &prepared;
         // Relations nest inside the overlay, so they see staged rows too.
         // Offloaded leaves are fetched as for any read.
-        let rows = self
+        let (rows, prepared) = self
             .db
             .fetching_with((), |()| {
-                self.db.in_overlay_prefix(self.id, prefix, |inner, cut| {
+                // Both remote hydration and offloaded chunks may yield while
+                // owner policies change. Resolve policy at each evaluation.
+                let prepared = match identity {
+                    Some(_) => self.db.execution_query(prepared),
+                    None => std::borrow::Cow::Borrowed(prepared),
+                };
+                let rows = self.db.in_overlay_prefix(self.id, prefix, |inner, cut| {
                     let read = ReadSpec {
                         include_deleted,
                         cut,
                         ..ReadSpec::default()
                     };
-                    let roots = inner.run(prepared, identity, &read)?;
-                    inner.nest_relations(prepared, identity, &read, roots)
-                })
+                    let roots = inner.run(&prepared, identity, &read)?;
+                    inner.nest_relations(&prepared, identity, &read, roots)
+                })?;
+                Ok((rows, prepared))
             })
             .await?;
-        self.db.record_read(self.id, prepared, include_deleted)?;
+        self.db.record_read(self.id, &prepared, include_deleted)?;
         Ok(rows)
     }
 
