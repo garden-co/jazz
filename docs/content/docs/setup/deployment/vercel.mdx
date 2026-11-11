@@ -75,6 +75,10 @@ On Vercel, sync uses a WebSocket (through `upgradeWebSocket` from `@vercel/funct
 `next dev`, which can't upgrade sockets, the browser
 switches to an HTTP stream on its own.
 
+Without `ws`, the backend logs once at startup "jazz: next() on Vercel needs the ws package: npm
+install ws. Without it, sync sockets can't open: clients sync over the HTTP stream instead." Clients
+still sync, but the HTTP stream needs a single instance or sticky routing, so install `ws`.
+
 <include>../../../partials/main-backend-use.mdx</include>
 
 ## Large values
