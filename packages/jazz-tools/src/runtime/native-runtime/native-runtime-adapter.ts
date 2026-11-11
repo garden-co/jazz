@@ -4917,6 +4917,11 @@ export class NativeRuntimeAdapter implements Runtime {
     { request: DurableOwnerRequest; remote: RemoteDurableTransaction }
   >();
 
+  private readonly deferredDurableWaitIntents = new Map<
+    OpenTransactionId,
+    Set<(remote: RemoteDurableTransaction) => void>
+  >();
+
   private readonly durableWaitIntents = new WeakMap<
     AbortSignal,
     { remote: RemoteDurableTransaction; waitId: string }
@@ -4969,25 +4974,46 @@ export class NativeRuntimeAdapter implements Runtime {
     signal: AbortSignal,
   ): () => void {
     const owner = this.ownerRuntime;
+    if (signal.aborted) return () => {};
     const remote = owner.durableTransactions.get(id);
-    if (!remote) return () => {};
+    if (!remote && (!owner.nonDurableClient || !owner.initializationCommandOwner)) return () => {};
     const waitId = crypto.randomUUID();
-    if (!remote.registerWait(waitId, tier, signal)) return () => {};
-    owner.durableWaitIntents.set(signal, { remote, waitId });
+    let attached: RemoteDurableTransaction | undefined;
+    const attach = (actual: RemoteDurableTransaction) => {
+      if (signal.aborted || !actual.registerWait(waitId, tier, signal)) return;
+      attached = actual;
+      owner.durableWaitIntents.set(signal, { remote: actual, waitId });
+    };
     const release = () => {
       signal.removeEventListener("abort", release);
-      if (owner.durableWaitIntents.get(signal)?.waitId !== waitId) return;
+      const pending = owner.deferredDurableWaitIntents.get(id);
+      pending?.delete(attach);
+      if (pending?.size === 0) owner.deferredDurableWaitIntents.delete(id);
+      if (!attached || owner.durableWaitIntents.get(signal)?.waitId !== waitId) return;
       owner.durableWaitIntents.delete(signal);
-      if (remote.waitWasSubmitted(waitId)) {
+      if (attached.waitWasSubmitted(waitId)) {
         const request = owner.initializationCommandOwner;
         if (request)
           void request({ operation: "cancel-wait", waitId }).catch((error) =>
             owner.reportLocalRelayError(toError(error)),
           );
       }
-      remote.forgetWait(waitId);
+      attached.forgetWait(waitId);
     };
     signal.addEventListener("abort", release, { once: true });
+    if (remote) attach(remote);
+    else {
+      let pending = owner.deferredDurableWaitIntents.get(id);
+      if (!pending) {
+        pending = new Set();
+        owner.deferredDurableWaitIntents.set(id, pending);
+      }
+      if (pending.size >= 64) {
+        signal.removeEventListener("abort", release);
+        throw new Error("Too many waits for one opening durable transaction");
+      }
+      pending.add(attach);
+    }
     return release;
   }
 
@@ -5023,6 +5049,9 @@ export class NativeRuntimeAdapter implements Runtime {
       assertCurrent,
     );
     owner.durableTransactions.set(id, remote);
+    const pendingWaits = owner.deferredDurableWaitIntents.get(id);
+    owner.deferredDurableWaitIntents.delete(id);
+    for (const attach of pendingWaits ?? []) attach(remote);
     return remote.ready;
   }
 
@@ -5186,7 +5215,11 @@ export class NativeRuntimeAdapter implements Runtime {
     this.initializationSeals.delete(seal);
     const write = this.db.publishInitializationTransaction!(owned.token);
     this.completedTxs.set(owned.id, { kind: "serializable", state: "committed" });
-    const txId = recordWrite(write, this.writes);
+    // Native Write.txId has the existing TransactionId encoding. Keep the
+    // reserved coordinate as the journal/status lookup alias for this exact
+    // native write; neither its original native identity nor fate is changed.
+    const txId = seal.reservedTxId as unknown as TxId;
+    this.writes.set(txId, write);
     onPublished?.(txId);
     this.pumpSubscriptions();
     this.scheduleServerPump();

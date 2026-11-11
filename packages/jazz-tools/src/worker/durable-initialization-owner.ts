@@ -38,7 +38,17 @@ type Slot = {
 export class DurableInitializationOwner {
   private readonly slots = new Map<string, Slot>();
   private closed = false;
-  private readonly published = new Map<TxId, { owner: object; runtime: NativeRuntimeAdapter }>();
+  private readonly published = new Map<
+    TxId,
+    {
+      owner: object;
+      runtime: NativeRuntimeAdapter;
+      cancelledWaitIds: Set<string>;
+      cancellationHistoryFull: boolean;
+    }
+  >();
+  // Belongs to the same live published-write registry, never pending capacity.
+  private readonly cancelledPublishedWaits = new Map<string, { owner: object; tx: TxId }>();
   private readonly waits = new Map<
     string,
     {
@@ -297,6 +307,11 @@ export class DurableInitializationOwner {
       (this.reservedWaits.has(waitId) && this.reservedWaits.get(waitId) !== owner)
     )
       throw new Error("Durable wait does not belong to this live peer");
+    const cancelled = this.cancelledPublishedWaits.get(waitId);
+    if (cancelled && (cancelled.owner !== owner || cancelled.tx !== tx))
+      throw new Error("Durable wait identity was reused for a different write");
+    if (cancelled || write.cancellationHistoryFull)
+      return Promise.reject(new Error("Durable write wait ended"));
     const existing = this.waits.get(waitId);
     if (existing && (existing.owner !== owner || existing.tx !== tx || existing.tier !== tier))
       throw new Error("Durable wait identity was reused for a different write");
@@ -314,8 +329,14 @@ export class DurableInitializationOwner {
       (waiting && waiting.owner !== owner)
     )
       throw new Error("Cannot cancel another peer's durability wait");
-    if (waiting) waiting.abort.abort(new Error("Durable write wait ended"));
-    else {
+    if (waiting) {
+      waiting.abort.abort(new Error("Durable write wait ended"));
+      this.waits.delete(waitId);
+      this.rememberCancelledWait(owner, waiting.tx, waitId);
+    } else if (this.cancelledPublishedWaits.has(waitId)) {
+      if (this.cancelledPublishedWaits.get(waitId)!.owner !== owner)
+        throw new Error("Cannot cancel another peer's durability wait");
+    } else {
       if (this.cancelledWaits.size >= 4096)
         throw new Error("Too many outstanding durable wait cancellations");
       const previous = this.cancelledWaits.get(waitId);
@@ -367,7 +388,12 @@ export class DurableInitializationOwner {
     tx: TxId,
     intents: BrowserInitializationWaitIntent[],
   ): void {
-    this.published.set(tx, { owner, runtime: slot.admission.runtime });
+    this.published.set(tx, {
+      owner,
+      runtime: slot.admission.runtime,
+      cancelledWaitIds: new Set(),
+      cancellationHistoryFull: false,
+    });
     for (const { waitId, tier } of intents)
       this.startWait(owner, slot.admission.runtime, tx, tier, waitId);
   }
@@ -391,6 +417,7 @@ export class DurableInitializationOwner {
       throw new Error("Durable wait cancellation owner differs");
     if (cancelled) {
       this.cancelledWaits.delete(waitId);
+      this.rememberCancelledWait(owner, tx, waitId);
       abort.abort(new Error("Durable write wait ended"));
     }
     // Native wait registration happens synchronously in the publication
@@ -403,8 +430,21 @@ export class DurableInitializationOwner {
     }
     void promise.catch(() => {});
     const waiting = { owner, tx, tier, abort, promise };
-    this.waits.set(waitId, waiting);
+    if (!abort.signal.aborted) this.waits.set(waitId, waiting);
     return waiting;
+  }
+
+  private rememberCancelledWait(owner: object, tx: TxId, waitId: string): void {
+    const write = this.published.get(tx);
+    if (!write || write.owner !== owner) throw new Error("Durable wait lost its publication owner");
+    // Bound retained cancellation identities per existing published write.
+    // Exhaustion refuses later waits on that write, never later publications.
+    if (write.cancelledWaitIds.size >= 4096) {
+      write.cancellationHistoryFull = true;
+      return;
+    }
+    write.cancelledWaitIds.add(waitId);
+    this.cancelledPublishedWaits.set(waitId, { owner, tx });
   }
 
   async cancel(owner: object, handle: string): Promise<void> {
@@ -437,7 +477,11 @@ export class DurableInitializationOwner {
   }
 
   async revokeOwner(owner: object): Promise<void> {
-    for (const [tx, write] of this.published) if (write.owner === owner) this.published.delete(tx);
+    for (const [tx, write] of this.published)
+      if (write.owner === owner) {
+        for (const id of write.cancelledWaitIds) this.cancelledPublishedWaits.delete(id);
+        this.published.delete(tx);
+      }
     for (const [id, waiting] of this.waits)
       if (waiting.owner === owner) {
         waiting.abort.abort(new Error("Durable wait peer retired"));
@@ -477,6 +521,7 @@ export class DurableInitializationOwner {
       waiting.abort.abort(new Error("Durable storage owner discarded"));
     this.waits.clear();
     this.published.clear();
+    this.cancelledPublishedWaits.clear();
     this.cancelledWaits.clear();
     this.reservedWaits.clear();
     for (const slot of this.slots.values()) {

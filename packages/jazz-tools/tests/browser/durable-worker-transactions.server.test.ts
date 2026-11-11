@@ -38,7 +38,24 @@ const brokerWorkerUrl = new URL(
   import.meta.url,
 ).href;
 
+async function workerRuntimeSources() {
+  const wasmUrl = new URL("jazz_wasm_bg.wasm", brokerWorkerUrl).href;
+  const hashes = await Promise.all(
+    [brokerWorkerUrl, wasmUrl].map(async (url) => {
+      const response = await fetch(url);
+      if (!response.ok) throw new Error(`Missing normal worker qualification asset: ${url}`);
+      const digest = await crypto.subtle.digest("SHA-256", await response.arrayBuffer());
+      return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join(
+        "",
+      );
+    }),
+  );
+  return { brokerWorkerUrl, wasmUrl, wasmVersion: hashes.join(":") };
+}
+
 async function setup(label: string) {
+  // Bind the actual normal producer outputs, including after a source correction.
+  const runtimeSources = await workerRuntimeSources();
   const core = await getJazzServerInfo(uniqueDbName(label));
   await deploy({ ...core, schema: app.wasmSchema, permissions });
   const server = await startJazzApp(core, { schema: app.wasmSchema, permissions });
@@ -56,7 +73,7 @@ async function setup(label: string) {
         serverUrl: control.url,
         account,
         driver: { type: "persistent", dbName },
-        runtimeSources: { brokerWorkerUrl, wasmVersion: "durable-sdk-a5366daa" },
+        runtimeSources,
       }),
     );
   const tab = await reopen();

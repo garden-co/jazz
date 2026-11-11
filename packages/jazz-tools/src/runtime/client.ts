@@ -1185,6 +1185,7 @@ export class JazzClient {
       committing: boolean;
       unopened?: boolean;
       durableOpening?: boolean;
+      implicitDurableOwner?: boolean;
       seal?: InitializationSeal;
       waitGroup?: TransactionWaitGroup;
     }
@@ -1335,6 +1336,7 @@ export class JazzClient {
         committing: boolean;
         unopened?: boolean;
         durableOpening?: boolean;
+        implicitDurableOwner?: boolean;
       } = {
         committing: false,
         unopened: true,
@@ -1356,6 +1358,8 @@ export class JazzClient {
           : undefined;
         if (durable) {
           state.durableOpening = true;
+          state.implicitDurableOwner =
+            readCapability === "client-accepted-evidence" && session === undefined;
           await durable;
           assertCurrent();
         } else if (readCapability) this.runtime.beginTransaction(kind, id, context, readCapability);
@@ -1375,6 +1379,8 @@ export class JazzClient {
         committing: false,
         unopened: true,
         durableOpening: true,
+        implicitDurableOwner:
+          readCapability === "client-accepted-evidence" && session === undefined,
         pending: undefined as Promise<void> | undefined,
       };
       this.transactionPreparations.set(id, state);
@@ -1735,9 +1741,16 @@ export class JazzClient {
     }: { updatedAt?: number; branch?: BranchView | BranchSelector } = {},
   ): string | undefined {
     // An explicit attribution without a session writes as no session, not the client's.
+    const implicitOwner =
+      explicitSession === undefined &&
+      attribution === undefined &&
+      openTransactionId !== undefined &&
+      this.transactionPreparations.get(openTransactionId)?.implicitDurableOwner === true;
     const session =
       explicitSession ||
-      (attribution === undefined ? (this.resolvedSession ?? undefined) : undefined);
+      (attribution === undefined && !implicitOwner
+        ? (this.resolvedSession ?? undefined)
+        : undefined);
     const branch = selected && ("head" in selected ? selected : { head: selected });
     if (
       !session &&
@@ -2096,7 +2109,14 @@ export class JazzClient {
     session?: Session,
   ): Promise<Row[]> {
     const normalizedOptions = this.normalizeQueryExecutionOptions(options);
-    const effectiveSession = session ?? this.resolvedSession;
+    // An implicit own-client opening already captured the real authenticated
+    // worker owner. Do not turn its default into a page-realm explicit token.
+    // Caller-supplied sessions still cross the boundary and must be checked.
+    const implicitOwner =
+      normalizedOptions.openTransactionId !== undefined &&
+      this.transactionPreparations.get(normalizedOptions.openTransactionId)
+        ?.implicitDurableOwner === true;
+    const effectiveSession = session ?? (implicitOwner ? null : this.resolvedSession);
     const sessionJson = effectiveSession
       ? JSON.stringify(serializeRuntimeSession(effectiveSession))
       : undefined;

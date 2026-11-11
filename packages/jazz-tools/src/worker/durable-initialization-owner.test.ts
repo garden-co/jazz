@@ -291,3 +291,27 @@ it("retains a cancellation which arrives while publication is queued", async () 
     /wait ended/,
   );
 });
+
+it.each(["before publication", "after publication"])(
+  "reuses cancelled prepublication wait capacity %s without a later wait RPC",
+  async (phase) => {
+    const f = fixture();
+    let count = 0;
+    f.runtime.commitTransaction.mockImplementation((_id, onPublished) => {
+      const tx = `actual-${++count}` as TxId;
+      onPublished?.(tx);
+      return tx;
+    });
+    for (let i = 0; i < 4097; i++) {
+      const handle = await f.open();
+      const waitId = crypto.randomUUID();
+      const publication = f.host.commit(f.peer, handle, [{ waitId, tier: "global" }]);
+      if (phase === "before publication") f.host.cancelWait(f.peer, waitId);
+      const tx = await publication;
+      if (phase === "after publication") f.host.cancelWait(f.peer, waitId);
+      // A timed-out page deliberately sends no later wait RPC. The next
+      // independent commit must still be able to register its genuine wait.
+      expect(tx).toBe(`actual-${i + 1}`);
+    }
+  },
+);

@@ -16,7 +16,7 @@ function deferred<T>() {
   });
   return { promise, resolve };
 }
-function fixture() {
+function fixture(withSession = false) {
   const raw = {
     setTickScheduler: vi.fn(),
     onMutationError: vi.fn(),
@@ -47,7 +47,20 @@ function fixture() {
     return undefined;
   });
   const detach = runtime.setInitializationCommandOwner(request);
-  const client = JazzClient.connectWithRuntime(runtime, { appId: "durable-route", schema });
+  const client = JazzClient.connectWithRuntime(runtime, {
+    appId: "durable-route",
+    schema,
+    ...(withSession
+      ? {
+          cookieSession: {
+            issuer: "https://issuer.example",
+            user_id: "alice",
+            authMode: "external" as const,
+            claims: { role: "reader" },
+          },
+        }
+      : {}),
+  });
   const begin = () =>
     client.openTransaction(
       "serializable",
@@ -146,4 +159,56 @@ it("requires the genuine worker-open admission provider for a non-durable foregr
   release();
   ready.resolve();
   await expect(admitted).rejects.toThrow(/retired/);
+});
+
+it("carries an immediate wait across a still-pending opening prerequisite", async () => {
+  const f = fixture();
+  const prerequisite = deferred<void>();
+  const id = f.client.openTransaction(
+    "serializable",
+    undefined,
+    undefined,
+    undefined,
+    () => prerequisite.promise,
+    "client-accepted-evidence",
+  );
+  const commit = f.client.commitTransaction(id);
+  const waiting = commit.wait({ tier: "global", timeoutMs: 5000 });
+  expect(f.commands).toEqual([]);
+  prerequisite.resolve();
+  await vi.waitFor(() => expect(f.commands[0]?.operation).toBe("begin"));
+  f.opened.resolve("actual-worker-handle");
+  await waiting;
+  const publication = f.commands.find((c) => c.operation === "commit");
+  const wait = f.commands.find((c) => c.operation === "wait");
+  if (publication?.operation !== "commit" || wait?.operation !== "wait")
+    throw new Error("missing actual publication and wait");
+  expect(publication.waitIntents).toEqual([{ waitId: wait.waitId, tier: "global" }]);
+});
+
+it("keeps implicit durable-owner defaults distinct from explicit operation sessions", async () => {
+  const f = fixture(true);
+  const id = f.begin();
+  f.opened.resolve("authenticated-worker-handle");
+  await f.client.prepareTransaction(id, async (io) => {
+    await io.queryInternal('{"table":"notes"}');
+    io.insertInternal("notes", text, { id: stableId });
+    await io.queryInternal('{"table":"notes"}', undefined, {
+      issuer: "https://issuer.example",
+      user_id: "mallory",
+      authMode: "external",
+      claims: { role: "writer" },
+    });
+  });
+  const queries = f.commands.filter((c) => c.operation === "query");
+  const mutation = f.commands.find((c) => c.operation === "insert");
+  expect(queries[0]?.session).toBeUndefined();
+  if (mutation?.operation !== "insert") throw new Error("missing same-batch mutation");
+  expect(JSON.parse(mutation.context).session).toBeUndefined();
+  expect(JSON.parse(mutation.context).transaction_id).toBe(id);
+  expect(JSON.parse(queries[1]!.session!)).toMatchObject({
+    user_id: "mallory",
+    claims: { role: "writer" },
+  });
+  await f.client.rollbackTransaction(id);
 });
