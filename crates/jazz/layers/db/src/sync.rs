@@ -5534,7 +5534,7 @@ impl Inner {
         // Normal Rows can reconcile an original transaction before its Fate.
         // Rebase then removes its optimistic ranks, while its exact original
         // packet and digest must remain intact until the terminal decision.
-        let reconciled = matches!(self.settled(*id.node.as_bytes(), id.time.0)?, Some(Some(_)));
+        let reconciled = matches!(self.settled(*id.node.as_bytes(), id.time.0)?, Some(Some(landing)) if landing.accepted());
         for (table, row, key) in self.pending_rows(tx)? {
             if !reconciled
                 && self
@@ -6925,13 +6925,15 @@ impl Inner {
                 None => {}
             }
             if let Some(client) = &self.client {
-                // A snapshot dot names the original transaction, not this
-                // owner's publication position or its current reopened node.
-                if let Some(pending) = client
-                    .pending
-                    .iter()
-                    .find(|pending| pending.id.node.as_bytes() == &node && pending.id.time.0 == tx)
-                {
+                // Journal snapshots name original transactions across node
+                // changes. Legacy relay snapshots retain owner-local positions.
+                if let Some(pending) = client.pending.iter().find(|pending| {
+                    if self.initialization_enabled {
+                        pending.id.node.as_bytes() == &node && pending.id.time.0 == tx
+                    } else {
+                        node == me && pending.tx == tx
+                    }
+                }) {
                     cut.extra.push(self.own_rank(pending.tx));
                     continue;
                 }

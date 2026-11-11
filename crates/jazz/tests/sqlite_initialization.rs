@@ -2035,3 +2035,148 @@ fn review_prefix_capacity_refuses_before_visible_commit_and_can_drain() {
     .unwrap();
     assert_eq!(rows(&bob).len(), 4097);
 }
+
+fn review_relay_database(node: u8, path: Option<&Path>, journal: bool) -> Db {
+    let schema = common::compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("text", ColumnType::Text)
+                    .policies(common::allow_all_policies()),
+            )
+            .build(),
+    );
+    let config = DbConfig::new(
+        schema,
+        jazz::db::DbIdentity {
+            node: NodeUuid::from_bytes([node; 16]),
+            author: author("alice"),
+        },
+    );
+    let db = match path {
+        Some(path) => block_on(Db::open_at(config, path, Default::default())),
+        None => block_on(Db::open(config)),
+    }
+    .unwrap();
+    db.set_remote_link_hint(jazz::db::RemoteLinkHint::Failed);
+    if journal {
+        db.enable_initialization_journal().unwrap();
+    }
+    db
+}
+
+/// An ordinary relay without journal opt-in keeps its existing relay-local
+/// snapshot coordinates while preserving the child's actual pending writer.
+/// Alice child -> offline Alice relay -> capture -> same public snapshot read.
+#[test]
+fn review_relay_nonjournal_snapshot_keeps_local_publication_coordinates() {
+    use jazz::protocol::{ReadViewSourceSpec, ReadViewSpec};
+    let relay = review_relay_database(2, None, false);
+    let child = review_relay_database(1, None, false);
+    connect(&child, &relay, "alice");
+    block_on(child.insert(
+        "notes",
+        cells("child original"),
+        jazz::db::InsertOptions {
+            row_id: Some(row(1)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    for _ in 0..8 {
+        block_on(child.tick()).unwrap();
+        block_on(relay.tick()).unwrap();
+    }
+    assert_eq!(rows(&relay), vec![(row(1), "child original".into())]);
+    let snapshot = block_on(relay.capture_snapshot()).unwrap();
+    assert_eq!(snapshot.dots.len(), 1);
+    assert_eq!(snapshot.dots[0].node, NodeUuid::from_bytes([2; 16]));
+    let query = relay.prepare_query(&Query::from("notes")).unwrap();
+    let read = block_on(relay.all(
+        &query,
+        ReadOpts {
+            read_view: ReadViewSpec {
+                source: ReadViewSourceSpec::Snapshot { snapshot },
+                include_deleted: false,
+            },
+            ..Default::default()
+        },
+    ))
+    .expect("ordinary nonjournal relay snapshot keeps local publication coordinates");
+    assert_eq!(read.len(), 1);
+    assert_eq!(read[0].row_uuid(), row(1));
+}
+
+/// A relay's provisional child landing is not authority acceptance and cannot
+/// excuse missing optimistic data on reopen. SQL deletion models storage loss
+/// that cannot be produced by a public API; resending uses only public links.
+#[test]
+fn review_relay_provisional_landing_does_not_waive_missing_original_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("relay.sqlite");
+    {
+        let relay = review_relay_database(2, Some(&path), true);
+        let child = review_relay_database(1, None, false);
+        connect(&child, &relay, "alice");
+        let written = block_on(child.insert(
+            "notes",
+            cells("child original"),
+            jazz::db::InsertOptions {
+                row_id: Some(row(1)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+        for _ in 0..8 {
+            block_on(child.tick()).unwrap();
+            block_on(relay.tick()).unwrap();
+        }
+        block_on(child.wait_for_transaction(written.mergeable_tx_id(), DurabilityTier::Local))
+            .unwrap();
+        assert_eq!(rows(&relay), vec![(row(1), "child original".into())]);
+        let mut pending = pin!(relay.wait_for_pending_writes(DurabilityTier::Global));
+        assert!(
+            pending
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+    }
+    {
+        let storage = rusqlite::Connection::open(&path).unwrap();
+        let table: String = storage
+            .query_row(
+                "SELECT tbl FROM _jazz_pending_rows ORDER BY tx,n LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let table = table.replace('"', "\"\"");
+        assert_eq!(
+            storage
+                .execute(
+                    &format!("DELETE FROM \"{table}\" WHERE id=?1"),
+                    [row(1).as_bytes().as_slice()]
+                )
+                .unwrap(),
+            1
+        );
+    }
+    let relay = review_relay_database(3, Some(&path), true);
+    let bob = open(4, "bob", None, true);
+    connect(&relay, &bob, "alice");
+    assert_eq!(
+        block_on(relay.tick())
+            .expect_err("provisional relay landing must not waive missing optimistic row")
+            .code,
+        ErrorCode::Storage
+    );
+    assert_eq!(
+        block_on(relay.wait_for_pending_writes(DurabilityTier::Global))
+            .unwrap_err()
+            .code,
+        ErrorCode::NotObserved
+    );
+    block_on(bob.tick()).unwrap();
+    assert!(rows(&bob).is_empty(), "no damaged relay prefix uploaded");
+}
