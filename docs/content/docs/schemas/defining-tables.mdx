@@ -64,6 +64,15 @@ column on its own does not create one.
 Use an optional UUID (`s.uuid().optional()`) if a post might not have an author, or an array of
 UUIDs (`s.array(s.uuid())`) if it can have several; `s.rel` points at the column either way.
 
+A declared relation does not guarantee the target row exists or is readable: a peer may not
+have synced it, it may have been deleted, or permissions may hide it. See
+[Missing references](/docs/reading/includes-and-relations#missing-references).
+
+App construction validates the complete schema, including relations outside a typed slice.
+Targets and local columns must exist, forward columns must have supported UUID shapes, and
+reverse declarations must resolve to a forward relation pointing back to their table.
+Relation names must not collide with stored column names.
+
 ### Arrays or reverse relations?
 
 - **One-to-many: point each child row at its parent** with a UUID column, and give the parent an
@@ -78,14 +87,6 @@ UUIDs (`s.array(s.uuid())`) if it can have several; `s.rel` points at the column
 - **Many-to-many links that people edit concurrently, or that carry data of their own** (a role,
   when someone joined): use a join table with an `s.rel` to each side, like the members table in
   [Group permissions](/docs/recipes/access-control/group-permissions).
-A declared relation does not guarantee the target row exists or is readable: a peer may not
-have synced it, it may have been deleted, or permissions may hide it. See
-[Missing references](/docs/reading/includes-and-relations#missing-references).
-
-App construction validates the complete schema, including relations outside a typed slice.
-Targets and local columns must exist, forward columns must have supported UUID shapes, and
-reverse declarations must resolve to a forward relation pointing back to their table.
-Relation names must not collide with stored column names.
 
 ## Latest-only tables
 
