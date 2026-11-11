@@ -2035,8 +2035,15 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
     ) {
       return;
     }
-    if ("id" in message) result(peer, message.id, toError(error));
-    else failPeer(peer, toError(error));
+    if ("id" in message) {
+      // The new fixed owner route can reject with native structured errors.
+      // Preserve their actual code/message through the existing bounded codec.
+      const failure =
+        message.type === "initialization-owner" && error !== null && typeof error === "object"
+          ? error
+          : toError(error);
+      result(peer, message.id, failure);
+    } else failPeer(peer, toError(error));
   }
 }
 
@@ -2169,7 +2176,7 @@ function attachInspectorControl(authSessionKey: string, port: MessagePort): void
 function result(
   peer: TabPeer,
   id: number,
-  error?: Error,
+  error?: unknown,
   receipt?: {
     inspectorAttachmentPhysicalDbName?: string;
     peerAuthority?: { node: Uint8Array; epoch: bigint; features: number };

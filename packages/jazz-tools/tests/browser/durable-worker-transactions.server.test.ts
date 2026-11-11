@@ -247,6 +247,15 @@ it("persists a Local pending publication across an offline owner reopen and late
     expect(await direct.all(app.notes.where({ id }), { tier: ReadTier.Remote })).toEqual([
       { id, body: "offline original" },
     ]);
+    // waitForSync explicitly excludes writes recovered by the shared worker.
+    // Wait boundedly on this exact journal identity for actual accepted fate.
+    await expect
+      .poll(
+        async () =>
+          (await native(restored).initializationTransactionStatus([seal.reservedTxId]))[0],
+        { timeout: 15_000 },
+      )
+      .toMatchObject({ kind: "complete", fate: { kind: "accepted" }, durability: "global" });
     const after = await native(restored).initializationTransactionStatus([seal.reservedTxId]);
     expect(after).toEqual([
       {
@@ -274,7 +283,7 @@ it("preserves the typed transaction's real snapshot/read-set conflict across the
     .wait({ tier: "global" });
   tx.update(app.notes, row.id, { body: "must be rejected" });
   await expect(tx.commit().wait({ tier: "global", timeoutMs: 15_000 })).rejects.toThrow(
-    /(?:transaction|serialization|exclusive)_conflict/,
+    /(?:transaction|serialization|exclusive)[_: ]?conflict/i,
   );
   expect(await direct.all(app.notes.where({ id: row.id }), { tier: ReadTier.Remote })).toEqual([
     { id: row.id, body: "real concurrent writer" },
