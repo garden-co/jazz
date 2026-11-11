@@ -10,7 +10,7 @@ import {
 } from "./client-session.js";
 import { getDbInternalSession, setTrustedReservedSession } from "./db-internal-session.js";
 function author(issuer: string, subject: string) {
-  return { account: null, identity: { issuer, subject } };
+  return { user: null, identity: { issuer, subject } };
 }
 
 function withTrustedSession(config: DbConfig, session: Session): DbConfig {
@@ -217,7 +217,7 @@ describe("Db auth state", () => {
       claims: { role: "reader" },
     });
     expect(db.getAuthState().session).toMatchObject({
-      user: author("https://issuer.example", "alice"),
+      ...author("https://issuer.example", "alice"),
       claims: expect.objectContaining({ role: "reader" }),
     });
   });
@@ -269,7 +269,7 @@ describe("Db auth state", () => {
 
     expect(db.getAuthState()).toMatchObject({
       authMode: "local-first",
-      session: { user: author(LOCAL_FIRST_JWT_ISSUER, "alice") },
+      session: { ...author(LOCAL_FIRST_JWT_ISSUER, "alice") },
     });
     expect(runtimeClient.updateTrustedAuthToken).toHaveBeenCalledWith(
       refreshedToken,
@@ -436,7 +436,7 @@ describe("Db auth state", () => {
     expect(db.getAuthState()).toMatchObject({
       authMode: "external",
       session: {
-        user: author("https://issuer.example", "alice"),
+        ...author("https://issuer.example", "alice"),
         claims: expect.objectContaining({ role: "reader" }),
       },
     });
@@ -444,7 +444,7 @@ describe("Db auth state", () => {
 
   it("reports backend-scoped auth state for session-backed dbs", () => {
     const session = {
-      user: author("https://issuer.example", "alice"),
+      ...author("https://issuer.example", "alice"),
       claims: { role: "writer" },
       authMode: "external" as const,
     };
@@ -498,7 +498,7 @@ describe("Db auth state", () => {
       {
         authMode: "external",
         session: {
-          user: author("https://issuer.example", "bob"),
+          ...author("https://issuer.example", "bob"),
           claims: { role: "writer" },
           authMode: "external",
         },
@@ -511,13 +511,13 @@ describe("Db auth state", () => {
     expect(sharedDb.getAuthState()).toMatchObject({
       authMode: "external",
       session: {
-        user: author("https://issuer.example", "alice"),
+        ...author("https://issuer.example", "alice"),
       },
     });
     expect(scopedDb.getAuthState()).toMatchObject({
       authMode: "external",
       session: {
-        user: author("https://issuer.example", "bob"),
+        ...author("https://issuer.example", "bob"),
       },
     });
   });
@@ -528,7 +528,7 @@ describe("Db auth state", () => {
     expect(db.getAuthState()).toMatchObject({
       authMode: "external",
       session: {
-        user: author("https://issuer.example", "alice"),
+        ...author("https://issuer.example", "alice"),
         claims: expect.objectContaining({ role: "reader" }),
       },
     });
@@ -554,7 +554,7 @@ describe("Db auth state", () => {
     expect(db.getAuthState()).toMatchObject({
       authMode: "external",
       session: {
-        user: author("https://issuer.example", "alice"),
+        ...author("https://issuer.example", "alice"),
         claims: expect.objectContaining({ role: "writer" }),
       },
     });
@@ -585,7 +585,7 @@ describe("Db auth state", () => {
     expect(states[0]).toMatchObject({
       authMode: "external",
       session: {
-        user: author("https://issuer.example", "alice"),
+        ...author("https://issuer.example", "alice"),
       },
     });
     expect(states[0]?.error).toBeUndefined();
@@ -603,7 +603,7 @@ describe("Db auth state", () => {
     expect(db.getAuthState()).toMatchObject({
       authMode: "external",
       session: {
-        user: author("https://issuer.example", "alice"),
+        ...author("https://issuer.example", "alice"),
       },
     });
     expect(db.getAuthState().error).toBeUndefined();
@@ -648,7 +648,7 @@ describe("Db auth state", () => {
     expect(db.getAuthState()).toMatchObject({
       authMode: "external",
       session: {
-        user: author("https://issuer.example", "alice"),
+        ...author("https://issuer.example", "alice"),
         claims: expect.objectContaining({ role: "writer" }),
       },
     });
@@ -683,7 +683,7 @@ describe("Db auth state", () => {
     const stop = db.onAuthChanged((state) => {
       observedStates.push({
         authMode: state.authMode,
-        subject: state.session?.user.identity.subject,
+        subject: state.session?.identity.subject,
         version: state.session?.claims.version,
       });
     });

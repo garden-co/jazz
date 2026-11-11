@@ -19,17 +19,20 @@ pub use account_session::{
 };
 mod node_lease;
 mod relay;
+mod text_anchors;
 pub use relay::*;
+pub use text_anchors::jazz_native_relay_text_anchors;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::c_void;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use jazz::binding_host;
 use jazz::db::{DbIdentity, RemoteLinkHint};
 use jazz::ids::NodeUuid;
+use jazz::link::{LinkEvent, LinkPhase, LinkStatus};
 use jazz::records::Value;
 use jazz::schema::JazzSchema;
 use jazz::tools::AppId;
@@ -42,9 +45,11 @@ use node_lease::{ForegroundNodeLease, ForegroundNodeLeasePool};
 /// `jazz-rn` constant.) Breaking command/response changes bump the value:
 /// 1 was the first public ABI; 2 added `CodedOperationError` answers to
 /// existing commands, so a JS bundle and native build from different ABIs
-/// refuse to open rather than misread a failure. Append-only commands use
-/// optional native capabilities while existing command layouts remain stable.
-pub const NATIVE_RELAY_ABI_V1: u16 = 2;
+/// refuse to open rather than misread a failure; 3 added its `reason_name`;
+/// 4 ends each subscription delta with its updated rows' splices.
+/// Append-only commands use optional native capabilities while existing
+/// command layouts remain stable.
+pub const NATIVE_RELAY_ABI_V1: u16 = 4;
 
 const FOREGROUND_WAKE_IMMEDIATE: u8 = 0;
 const FOREGROUND_WAKE_CANCELLED: u8 = 3;
@@ -160,7 +165,14 @@ struct PendingPrivateSession {
 struct PrivateRelaySocketSession {
     server_url: String,
     app_id: String,
+    /// What the socket presents: a local-first account's own token, or, for
+    /// a user signed in through the app's backend, the app's own bearer.
     bearer: String,
+    /// Set for a user signed in through the app's backend: the session the
+    /// socket states, which the backend checks against who `bearer` is. The
+    /// bearer then rides the upgrade's `Authorization` header to the app's
+    /// backend, never the prelude a core reads.
+    backend_session: Option<serde_json::Value>,
 }
 
 /// JSON-shaped form accepted only by the platform-owned admission C entry
@@ -496,6 +508,59 @@ pub enum ForegroundDbCommandRequest {
     },
     /// Capture the foreground's local frontier through its ordinary owner queue.
     CaptureSnapshot,
+    /// Everything a host reports after a tick, in one call: drained mutation
+    /// errors and the upstream's current refusal of the scope's credential
+    /// (#4296).
+    DrainTickEvents,
+    /// The slow-query report due now, naming `app` (append-only: an older
+    /// native build answers it with an error and the host stops asking).
+    TakeSlowQueryReport {
+        app: Option<String>,
+    },
+    /// Report query runs of at least `ms` milliseconds; 0 turns the
+    /// slow-query log off (append-only, as above).
+    SetSlowQueryThresholdMs {
+        ms: u64,
+    },
+    /// How many of the foreground's commits still wait for the server's
+    /// verdict (append-only: an older native build answers it with an error
+    /// and the host reports none).
+    PendingUploadCount,
+    /// The foreground's uploads: pending, since when, and what the server
+    /// refused since it opened (append-only: an older native build answers
+    /// it with an error and the host falls back to `PendingUploadCount`).
+    UploadStatus,
+}
+
+/// One refusal of a scope's credential by its upstream. Every refusal gets a
+/// new `sequence`, increasing across workers, so a host reports a renewed
+/// credential refused again even when the reason is the same (#4296).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct NativeAuthRejection {
+    pub sequence: u64,
+    pub reason: String,
+}
+
+/// A failure of a scope's upstream connection other than a refused
+/// credential: a refused connection (TLS, a proxy refusing the upgrade, a
+/// rejected session) or a lost link the worker gave up on. It is connection
+/// state, not a failed tick: local work keeps running, as on the web and Node
+/// transports (#4337). `retrying` is whether the worker is still trying to
+/// connect. A new `sequence` is issued whenever the reason or `retrying`
+/// changes, so a link failing the same way on every retry reports once.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct NativeUpstreamFailure {
+    pub sequence: u64,
+    pub reason: String,
+    pub retrying: bool,
+}
+
+/// Source of [`NativeAuthRejection::sequence`] and
+/// [`NativeUpstreamFailure::sequence`]; zero is never issued.
+static UPSTREAM_EVENTS: AtomicU64 = AtomicU64::new(0);
+
+fn next_upstream_event() -> u64 {
+    UPSTREAM_EVENTS.fetch_add(1, Ordering::Relaxed) + 1
 }
 
 /// Append-only V1 advice grammar: Insert=0, Read=1, Update=2, Delete=3.
@@ -606,6 +671,11 @@ pub enum ForegroundDbCommandResponse {
         configured: bool,
         explicitly_offline: bool,
         connected: bool,
+        /// The upstream refused the scope's credential, with its reason. Set
+        /// until a connection with a refreshed credential succeeds. Ticks
+        /// keep running meanwhile; the host learns of each refusal from
+        /// `TickEvents` and renews the credential (#4248, #4296).
+        auth_rejected: Option<String>,
     },
     NativeSessionMetadata {
         node: [u8; 16],
@@ -637,9 +707,34 @@ pub enum ForegroundDbCommandResponse {
     /// An `OperationError` caused by a core `jazz::db::Error`, carrying its
     /// stable `ErrorCode::as_str` code beside the unchanged reason text.
     /// Introduced by ABI 2: every other failure still uses `OperationError`.
+    /// `reason_name` (ABI 3) is the error's `Reason::as_str`, when it has one.
     CodedOperationError {
         code: String,
+        reason_name: Option<String>,
         reason: String,
+    },
+    /// Answer to [`ForegroundDbCommandRequest::DrainTickEvents`].
+    TickEvents {
+        events_json: String,
+        auth_rejection: Option<NativeAuthRejection>,
+        upstream_failure: Option<NativeUpstreamFailure>,
+    },
+    /// Answer to [`ForegroundDbCommandRequest::TakeSlowQueryReport`]: a
+    /// JSON array of report lines (empty between reports).
+    SlowQueryReport {
+        lines_json: String,
+    },
+    /// Answer to [`ForegroundDbCommandRequest::SetSlowQueryThresholdMs`].
+    SlowQueryThresholdSet,
+    /// Answer to [`ForegroundDbCommandRequest::PendingUploadCount`].
+    PendingUploadCount {
+        count: u64,
+    },
+    /// Answer to [`ForegroundDbCommandRequest::UploadStatus`]: the core's
+    /// upload status as JSON (`{ pending, oldestPendingAt, rejected,
+    /// lastRejection }`).
+    UploadStatus {
+        status_json: String,
     },
 }
 
@@ -750,32 +845,89 @@ struct OpenedRelay {
 struct PrivateScopeSocketWorker {
     admitted_scope: AdmissionCapability,
     _worker: NativeRelaySocketWorker,
-    connected: Arc<AtomicBool>,
-    /// The upstream rejected this session before it connected, or the
-    /// worker gave up after a failure. It is observable to foreground ticks
-    /// until a new authenticated connection succeeds, so an upstream failure
-    /// never silently becomes an indefinite query timeout.
-    ///
-    /// Losing an already-authenticated link is not latched here while the
-    /// worker retries it: that is connection state (a failed remote link),
-    /// and must not poison a valid foreground (#3630). A reconnect that the
-    /// upstream then rejects latches as usual.
-    terminal_error: Arc<Mutex<Option<String>>>,
-    /// The worker's socket loop has exited and will never reconnect on its
-    /// own. An explicit reconnect replaces such a worker.
-    stopped: Arc<AtomicBool>,
+    /// The worker's link as its [`jazz::link::UpstreamLink`] last reported it.
+    link: Arc<Mutex<WorkerLink>>,
 }
 
 impl PrivateScopeSocketWorker {
-    /// The worker gave up after a terminal failure: it is no longer an
-    /// upstream and nothing but a replacement can clear its failure.
+    fn link(&self) -> MutexGuard<'_, WorkerLink> {
+        self.link
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn connected(&self) -> bool {
+        self.link().phase() == Some(&LinkPhase::Live)
+    }
+
+    /// The worker stopped trying on its own: it waits for a credential or
+    /// has stopped. Only a replacement can connect again.
     fn terminally_stopped(&self) -> bool {
-        self.stopped.load(Ordering::Acquire)
-            && self
-                .terminal_error
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .is_some()
+        matches!(
+            self.link().phase(),
+            Some(LinkPhase::Stopped | LinkPhase::AwaitingCredential(_))
+        )
+    }
+}
+
+/// A worker's link as the host reports it: the machine's status plus the
+/// sequenced refusal and failure that `TickEvents` carries.
+#[derive(Default)]
+struct WorkerLink {
+    status: Option<LinkStatus>,
+    /// The upstream refused this worker's credential. Auth state, not a
+    /// failed session: local ticks keep running while the host renews the
+    /// credential, as on the web and Node transports (#4296).
+    auth_rejected: Option<NativeAuthRejection>,
+    /// The upstream refused a connection for another reason, an outage was
+    /// published, or the worker stopped. Connection state, never a failed
+    /// tick (#4337).
+    failure: Option<NativeUpstreamFailure>,
+}
+
+impl WorkerLink {
+    fn phase(&self) -> Option<&LinkPhase> {
+        self.status.as_ref().map(|status| &status.phase)
+    }
+
+    fn hint(&self) -> RemoteLinkHint {
+        self.phase()
+            .map_or(RemoteLinkHint::Attempting, LinkPhase::remote_link_hint)
+    }
+
+    fn on_event(&mut self, event: LinkEvent) {
+        match event {
+            LinkEvent::AuthFailed { message, .. } => {
+                self.auth_rejected = Some(NativeAuthRejection {
+                    sequence: next_upstream_event(),
+                    reason: message,
+                });
+            }
+            LinkEvent::AuthRestored => {}
+            LinkEvent::Status(status) => {
+                let reason = status.reason.clone().unwrap_or_default();
+                let failure = match status.phase {
+                    LinkPhase::Live => {
+                        self.auth_rejected = None;
+                        None
+                    }
+                    LinkPhase::Stopped => Some(false),
+                    LinkPhase::Backoff | LinkPhase::Connecting if status.outage_published => {
+                        Some(true)
+                    }
+                    _ => None,
+                };
+                self.failure = failure.map(|retrying| match self.failure.take() {
+                    Some(same) if same.reason == reason && same.retrying == retrying => same,
+                    _ => NativeUpstreamFailure {
+                        sequence: next_upstream_event(),
+                        reason,
+                        retrying,
+                    },
+                });
+                self.status = Some(status);
+            }
+        }
     }
 }
 
@@ -785,9 +937,6 @@ struct OpenedForeground {
     client: u64,
     /// Last native-socket reachability reported to this foreground's `Db`.
     remote_link_hint: Option<RemoteLinkHint>,
-    /// This foreground was reported `Live` since it opened or last went
-    /// explicitly offline; a disconnected worker is then backing off.
-    link_was_live: bool,
     runtime_token: u64,
     wake: Option<Arc<ForegroundWakeState>>,
     lease: ForegroundNodeLease,
@@ -926,7 +1075,7 @@ impl NativeRelayHost {
             let mut bytes = [0_u8; 16];
             getrandom::fill(&mut bytes)
                 .map_err(|error| relay_status(RelayError::Entropy(error.to_string())))?;
-            match pool.acquire_fresh(NodeUuid::from_bytes(bytes)) {
+            match pool.acquire_fresh(NodeUuid::random_from(bytes)) {
                 Ok(lease) => return Ok(lease),
                 // CSPRNG collision against a live, reusable, or retired node
                 // is vanishingly unlikely, but never turn one into a lease
@@ -1024,15 +1173,8 @@ impl NativeRelayHost {
         session: PrivateRelaySocketSession,
         connector: Arc<dyn NativeTransportConnector>,
     ) -> Result<PrivateScopeSocketWorker, JazzNativeRelayStatus> {
-        let terminal_error = Arc::new(Mutex::new(None));
-        let terminal_for_event = Arc::clone(&terminal_error);
-        let connected = Arc::new(AtomicBool::new(false));
-        let connected_for_event = Arc::clone(&connected);
-        let stopped = Arc::new(AtomicBool::new(false));
-        let stopped_for_event = Arc::clone(&stopped);
-        // A failure of an established link, held until the worker either
-        // retries it (connection state) or stops on it (terminal).
-        let link_failure = Mutex::new(None::<String>);
+        let link = Arc::new(Mutex::new(WorkerLink::default()));
+        let link_for_event = Arc::clone(&link);
         let worker = NativeRelaySocketWorker::prepare_with_connector(
             relay,
             NativeRelaySocketConfig {
@@ -1040,45 +1182,25 @@ impl NativeRelayHost {
                 app_id: AppId::from_string(&session.app_id)
                     .unwrap_or_else(|_| AppId::from_name(&session.app_id)),
                 peer_identity,
-                auth: AuthConfig {
-                    jwt_token: Some(session.bearer),
-                    ..AuthConfig::default()
+                auth: match &session.backend_session {
+                    Some(stated) => AuthConfig {
+                        backend_session: Some(stated.clone()),
+                        ..AuthConfig::default()
+                    },
+                    None => AuthConfig {
+                        jwt_token: Some(session.bearer.clone()),
+                        ..AuthConfig::default()
+                    },
                 },
-                reconnect_delay: std::time::Duration::from_secs(1),
+                authorization: session
+                    .backend_session
+                    .is_some()
+                    .then(|| format!("Bearer {}", session.bearer)),
                 on_event: Arc::new(move |event| {
-                    let set_terminal = |error| {
-                        *terminal_for_event
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner()) = error;
-                    };
-                    let mut link_failure = link_failure
+                    link_for_event
                         .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    match event {
-                        NativeRelaySocketEvent::Connected => {
-                            connected_for_event.store(true, Ordering::Release);
-                            *link_failure = None;
-                            set_terminal(None);
-                        }
-                        NativeRelaySocketEvent::TerminalError(error) => {
-                            if connected_for_event.swap(false, Ordering::AcqRel) {
-                                *link_failure = Some(error);
-                            } else {
-                                set_terminal(Some(error));
-                            }
-                        }
-                        NativeRelaySocketEvent::Reconnecting => {
-                            connected_for_event.store(false, Ordering::Release);
-                            *link_failure = None;
-                        }
-                        NativeRelaySocketEvent::Stopped => {
-                            connected_for_event.store(false, Ordering::Release);
-                            if let Some(error) = link_failure.take() {
-                                set_terminal(Some(error));
-                            }
-                            stopped_for_event.store(true, Ordering::Release);
-                        }
-                    }
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .on_event(event);
                 }),
             },
             connector,
@@ -1087,9 +1209,7 @@ impl NativeRelayHost {
         Ok(PrivateScopeSocketWorker {
             admitted_scope,
             _worker: worker,
-            connected,
-            terminal_error,
-            stopped,
+            link,
         })
     }
 
@@ -1129,11 +1249,12 @@ impl NativeRelayHost {
                     .identity
                     .author;
                 let was_offline = self.explicitly_offline_scopes.remove(&scope);
-                // A worker that gave up after a terminal failure is no longer
-                // an upstream. Explicit reconnect replaces it (dropping it
-                // only joins an already-exited thread) so its latched failure
-                // cannot outlive the caller's request to try again. A worker
-                // that is still connected or retrying is left untouched.
+                // A worker that stopped after a terminal failure, or that is
+                // parked waiting for a new credential, is no longer an
+                // upstream. Explicit reconnect replaces it so its latched
+                // failure cannot outlive the caller's request to try again.
+                // A worker that is still connected or retrying is left
+                // untouched.
                 if self
                     .private_scope_workers
                     .get(&scope)
@@ -1158,18 +1279,29 @@ impl NativeRelayHost {
             connected: self
                 .private_scope_workers
                 .get(&scope)
-                .is_some_and(|worker| worker.connected.load(Ordering::Acquire)),
+                .is_some_and(PrivateScopeSocketWorker::connected),
+            auth_rejected: self
+                .private_scope_auth_rejection(&scope)
+                .map(|rejection| rejection.reason),
         })
     }
 
+    fn private_scope_auth_rejection(&self, scope: &RelayScope) -> Option<NativeAuthRejection> {
+        self.private_scope_workers
+            .get(scope)
+            .and_then(|worker| worker.link().auth_rejected.clone())
+    }
+
+    #[cfg(test)]
     fn private_scope_terminal_error(&self, scope: &RelayScope) -> Option<String> {
-        self.private_scope_workers.get(scope).and_then(|worker| {
-            worker
-                .terminal_error
-                .lock()
-                .ok()
-                .and_then(|error| error.clone())
-        })
+        self.private_scope_upstream_failure(scope)
+            .map(|failure| failure.reason)
+    }
+
+    fn private_scope_upstream_failure(&self, scope: &RelayScope) -> Option<NativeUpstreamFailure> {
+        self.private_scope_workers
+            .get(scope)
+            .and_then(|worker| worker.link().failure.clone())
     }
 
     fn execute(
@@ -1458,7 +1590,6 @@ impl NativeRelayHost {
                 relay: relay_handle,
                 client: client_handle,
                 remote_link_hint: None,
-                link_was_live: false,
                 runtime_token,
                 wake: None,
                 lease,
@@ -1490,34 +1621,15 @@ impl NativeRelayHost {
         }
         let scope = opened.scope.clone();
         let previous = opened.remote_link_hint;
-        let explicitly_offline = self.explicitly_offline_scopes.contains(&scope);
-        if explicitly_offline
-            && opened.link_was_live
-            && let Some(opened) = self.foregrounds.get_mut(&foreground)
-        {
-            // Going back online after an explicit offline period is a fresh
-            // attempt.
-            opened.link_was_live = false;
-        }
-        let Some(opened) = self.foregrounds.get(&foreground) else {
-            return;
-        };
-        // A worker that is not connected after this foreground saw it live
-        // is backing off between retries: nothing waits on that, as on the
-        // TS and native-facade hosts. Only a first connection, or one after
-        // an explicit offline period, is an attempt.
-        let hint = if explicitly_offline {
+        // The worker's machine decides, as on every other host: a link that
+        // is backing off or waiting for a credential is Failed, and nothing
+        // waits on it.
+        let hint = if self.explicitly_offline_scopes.contains(&scope) {
             RemoteLinkHint::Failed
         } else {
-            match self.private_scope_workers.get(&scope) {
-                Some(worker) if worker.connected.load(Ordering::Acquire) => RemoteLinkHint::Live,
-                Some(_) if self.private_scope_terminal_error(&scope).is_some() => {
-                    RemoteLinkHint::Failed
-                }
-                Some(_) if opened.link_was_live => RemoteLinkHint::Failed,
-                Some(_) => RemoteLinkHint::Attempting,
-                None => RemoteLinkHint::Failed,
-            }
+            self.private_scope_workers
+                .get(&scope)
+                .map_or(RemoteLinkHint::Failed, |worker| worker.link().hint())
         };
         if previous == Some(hint) {
             return;
@@ -1543,7 +1655,6 @@ impl NativeRelayHost {
             .is_some_and(|opened| opened.relay.set_remote_link_hint(hint).is_ok());
         if reported && let Some(opened) = self.foregrounds.get_mut(&foreground) {
             opened.remote_link_hint = Some(hint);
-            opened.link_was_live |= hint == RemoteLinkHint::Live;
         }
     }
 
@@ -1552,14 +1663,11 @@ impl NativeRelayHost {
             .foregrounds
             .get(&foreground)
             .ok_or(JazzNativeRelayStatus::InvalidHandle)?;
-        let (relay, scope) = (opened.relay, opened.scope.clone());
-        // A rejected session or a stopped upstream fails the tick. A lost
-        // established link that the worker is retrying is not latched: it is
-        // reported through the remote-link hint and `NativeConnectionStatus`
-        // while local work continues.
-        if self.private_scope_terminal_error(&scope).is_some() {
-            return Err(JazzNativeRelayStatus::LifecycleFailure);
-        }
+        let relay = opened.relay;
+        // Upstream failures, a refused credential included, are connection
+        // state: the remote-link hint and `TickEvents` report them while
+        // local work continues, as on the web and Node transports (#4296,
+        // #4337). Only a failure of the foreground itself fails the tick.
         self.relays
             .get(&relay)
             .ok_or(JazzNativeRelayStatus::InvalidHandle)?;
@@ -1866,7 +1974,7 @@ impl NativeRelayHost {
         RelayScope::from(scope.clone())
             .validate()
             .map_err(relay_status)?;
-        let digest = blake3::hash(
+        let digest = jazz::sha256::hash(
             format!(
                 "{}\0{}\0{}",
                 scope.app_namespace, scope.storage_namespace, canonical_subject
@@ -1887,13 +1995,14 @@ impl NativeRelayHost {
                 scope,
                 sqlite_path,
                 identity: DbIdentity {
-                    node: NodeUuid::from_bytes(node),
+                    node: NodeUuid::random_from(node),
                     author,
                 },
                 socket: Some(PrivateRelaySocketSession {
                     server_url: request.server_url,
                     app_id: request.app_id,
                     bearer: request.jwt,
+                    backend_session: None,
                 }),
             },
         );
@@ -2119,7 +2228,7 @@ fn fresh_client_identity(author: jazz::ids::AuthorSubject) -> Result<DbIdentity,
     let mut node = [0_u8; 16];
     getrandom::fill(&mut node).map_err(|error| RelayError::Entropy(error.to_string()))?;
     Ok(DbIdentity {
-        node: jazz::ids::NodeUuid::from_bytes(node),
+        node: jazz::ids::NodeUuid::random_from(node),
         author,
     })
 }
@@ -2152,7 +2261,7 @@ pub extern "C" fn jazz_native_relay_abi_version() -> u16 {
 }
 
 /// Optional foreground capture support in the linked native artifact.
-/// Existing ABI 2 builds remain compatible without advertising this feature.
+/// A feature query outside the command layout, so it does not change the ABI.
 #[unsafe(no_mangle)]
 pub extern "C" fn jazz_native_relay_supports_snapshot_capture() -> bool {
     true
@@ -2820,6 +2929,26 @@ impl NativeRelayHost {
             Request::Close => Response::Closed {
                 closed: self.close_foreground(foreground)?,
             },
+            Request::DrainTickEvents => {
+                let scope = self
+                    .foregrounds
+                    .get(&foreground)
+                    .ok_or(JazzNativeRelayStatus::InvalidHandle)?
+                    .scope
+                    .clone();
+                let Response::MutationErrors { events_json } = self
+                    .foreground_client(foreground)?
+                    .execute(Request::DrainMutationErrors)
+                    .map_err(foreground_engine_status)?
+                else {
+                    return Err(JazzNativeRelayStatus::LifecycleFailure);
+                };
+                Response::TickEvents {
+                    events_json,
+                    auth_rejection: self.private_scope_auth_rejection(&scope),
+                    upstream_failure: self.private_scope_upstream_failure(&scope),
+                }
+            }
             command => self
                 .foreground_client(foreground)?
                 .execute(command)
@@ -2938,4 +3067,14 @@ mod tests {
 
     mod host;
     mod snapshot_capture_codec;
+    mod socket_worker;
+
+    /// The C header's ABI define, which the C and C++ probes compare the
+    /// artifact against, is the ABI this crate speaks.
+    #[test]
+    fn c_header_names_the_relay_abi() {
+        let header = include_str!("../include/jazz_native_relay.h");
+        let define = format!("#define JAZZ_NATIVE_RELAY_ABI_VERSION {NATIVE_RELAY_ABI_V1}\n");
+        assert!(header.contains(&define), "header must contain {define:?}");
+    }
 }

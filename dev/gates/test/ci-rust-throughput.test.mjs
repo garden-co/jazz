@@ -8,7 +8,6 @@ import { pathToFileURL } from "node:url";
 import { parse } from "yaml";
 import { cleanDist } from "../../../packages/jazz-tools/scripts/clean-dist.mjs";
 import { missingJazzToolsTestSurface } from "../verify-jazz-tools-exports.mjs";
-import { TARGETS as jazzToolsTargets } from "../../../packages/jazz-tools/scripts/targets.mjs";
 
 const root = path.resolve(import.meta.dirname, "../../..");
 const workflow = fs.readFileSync(path.join(root, ".github/workflows/ci.yml"), "utf8");
@@ -1461,47 +1460,38 @@ test("CodSpeed measures BandChat and WorldTour through the native wall-time matr
   assert.match(codspeedWorkflow, /node dev\/benchmarks\/codspeed-artifact\.mjs groups/);
 });
 
-test("jazz-tools advertises exactly the CLI artifacts its build matrix produces", () => {
-  const producedCliArtifacts = [...packageBuild.matchAll(/^\s+output: (jazz-tools-\S+)$/gm)].map(
-    (match) => match[1],
+test("the jazz-tools npm package ships no native CLI binary", () => {
+  // The server CLI was removed from npm: jazz-tools is TypeScript only, and
+  // the core ships as the jazz-napi addon (serveCore) that vercel()
+  // Sandboxes run. Jazz Cloud's Linux server binary is a CI artifact under
+  // its old names, attached to the GitHub release, never staged into npm.
+  assert.doesNotMatch(packageBuild, /bin\/native/);
+  assert.doesNotMatch(packageBuild, /jazz-tools-darwin-/);
+  for (const arch of ["x64", "arm64"])
+    assert.match(packageBuild, new RegExp(`output: jazz-tools-linux-${arch}\\n`));
+  const publish = fs.readFileSync(
+    path.join(root, ".github/workflows/publish-jazz-tools-alpha.yml"),
+    "utf8",
   );
-
-  assert.deepEqual(Object.values(jazzToolsTargets).sort(), producedCliArtifacts.sort());
-  assert.equal(jazzToolsTargets["win32-x64"], undefined);
-  assert.match(packageBuild, /default: .*"platform":"win32-x64-msvc"/);
+  assert.match(
+    publish,
+    /gh release upload "\$\{TAG\}" dist\/jazz-tools-linux-x64 dist\/jazz-tools-linux-arm64 dist\/SHA256SUMS/,
+  );
+  const launcher = fs.readFileSync(
+    path.join(root, "packages/jazz-tools/bin/jazz-tools.js"),
+    "utf8",
+  );
+  assert.doesNotMatch(launcher, /bin.*native|spawnSync\(binaryPath/);
 });
 
-test("the jazz-tools launcher reports Windows as unsupported instead of a missing artifact", () => {
-  const launcherPath = path.join(root, "packages/jazz-tools/bin/jazz-tools.js");
-  const probe = spawnSync(
-    process.execPath,
-    [
-      "--input-type=module",
-      "--eval",
-      `
-        Object.defineProperty(process, "platform", { value: "win32" });
-        Object.defineProperty(process, "arch", { value: "x64" });
-        process.argv = ["node", "jazz-tools", "server"];
-        await import(${JSON.stringify(launcherPath)});
-      `,
-    ],
-    { encoding: "utf8" },
-  );
-
-  assert.equal(probe.status, 1);
-  assert.match(probe.stderr, /jazz-tools CLI is not supported on win32\/x64\./);
-  assert.doesNotMatch(probe.stderr, /Bundled binary missing/);
-});
-
-test("Windows NAPI release builds provision libclang for RocksDB bindgen", () => {
-  const windowsNapiSetup =
-    /name: Install libclang for Windows bindgen[\s\S]*if: matrix\.platform == 'win32-x64-msvc'[\s\S]*choco install llvm --version=21\.1\.8 --yes --no-progress --limit-output[\s\S]*Test-Path \(Join-Path \$libclangPath "libclang\.dll"\)[\s\S]*LIBCLANG_PATH=\$libclangPath[\s\S]*\$env:GITHUB_PATH/;
-  assert.match(packageBuild, windowsNapiSetup);
-  assert.throws(
-    () =>
-      assert.match(packageBuild.replace('"LIBCLANG_PATH=$libclangPath" | ', ""), windowsNapiSetup),
-    /LIBCLANG_PATH/,
-  );
+test("native release builds need no libclang because no Rust dependency uses bindgen", () => {
+  // RocksDB's sys crates pulled in bindgen, which needed libclang on every
+  // build host. If bindgen returns, provision libclang where it is needed
+  // (Windows MSVC runners, the Bullseye NAPI image, Vercel) before updating this.
+  const lockfile = fs.readFileSync(path.join(root, "Cargo.lock"), "utf8");
+  for (const crate of ["bindgen", "clang-sys", "rust-librocksdb-sys"])
+    assert.doesNotMatch(lockfile, new RegExp(`^name = "${crate}"$`, "m"), crate);
+  assert.doesNotMatch(packageBuild, /libclang|LIBCLANG_PATH/);
 });
 
 test("pkg.pr.new previews omit Windows while release package builds retain it", () => {
@@ -1545,7 +1535,7 @@ test("TypeScript CI overlaps independent Node and browser suites after one artif
   assert.match(runner, /public export surface is incomplete/);
   assert.match(runner, /producer receipt is checked before either suite starts/);
   assert.match(runner, /correctness-artifact-producer\.mjs/);
-  assert.match(runner, /--concurrency=2/);
+  assert.match(runner, /--concurrency=3/);
   assert.match(
     runner,
     /browser_tests_command=.*pnpm --parallel --filter jazz-tools --filter inspector --filter band-chat-nextjs-betterauth --filter record-player-next-betterauth --filter auth-workos-chat test:browser/,

@@ -7,15 +7,10 @@ import { PersistedWriteRejectedError } from "jazz-tools";
  *   left this process. Two requests racing on the same server session (a
  *   double click, two tabs, React strict mode's double effect) end here.
  * - `serialization_conflict`: the authority found the conflict.
- * - `cascade_rejected`: an earlier transaction this one built on lost.
- *   It can also follow a rejection that never clears, which is why the
- *   retries below are bounded.
+ *
+ * A busy row can keep losing, which is why the retries below are bounded.
  */
-const retryableConflicts = new Set([
-  "transaction_conflict",
-  "serialization_conflict",
-  "cascade_rejected",
-]);
+const retryableConflicts = new Set(["transaction_conflict", "serialization_conflict"]);
 
 /** Whether a serializable transaction lost to a concurrent one and can run again. */
 export function isSerializationConflict(error: unknown): boolean {

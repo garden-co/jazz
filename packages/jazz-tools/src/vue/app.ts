@@ -1,4 +1,5 @@
 import {
+  camelize,
   defineComponent,
   h,
   inject,
@@ -8,26 +9,34 @@ import {
   provide,
   shallowReadonly,
   shallowRef,
-  watch,
   type InjectionKey,
   type PropType,
   type ShallowRef,
 } from "vue";
-import { createJazzAppOwner, type JazzAppSnapshot, type JazzAuth } from "../session/app.js";
-import { createJazzSession, type JazzSessionConfig } from "../session/create-jazz-session.js";
+import { createJazzAppOwner, type JazzAppSnapshot } from "../session/app.js";
+import { createJazzClient, type JazzClientConfig } from "../session/create-jazz-session.js";
 import type { JazzSessionActions } from "../session/state.js";
 import type { AccountDbConfig } from "../accounts/context.js";
 import type { JazzClient } from "./create-jazz-client.js";
 import { JazzClientProvider, LegacyJazzProvider } from "./provider.js";
+import {
+  refuseAutoAttachDevTools,
+  type NoAutoAttachDevTools,
+} from "../runtime/removed-provider-props.js";
 
-export type JazzProviderProps = Partial<JazzSessionConfig> & {
-  config?: AccountDbConfig;
-  auth?: JazzAuth;
-  autoAttachDevTools?: boolean;
-};
+export type JazzProviderProps = Partial<JazzClientConfig> &
+  NoAutoAttachDevTools & {
+    config?: AccountDbConfig;
+  };
 export type UseJazzAuth = {
   readonly snapshot: Readonly<ShallowRef<JazzAppSnapshot<JazzClient>>>;
   readonly sessionActions: JazzSessionActions;
+  /**
+   * Your auth changed: call this after your own sign-in, sign-out or account
+   * switch. Jazz asks your backend who is signed in now and follows its
+   * answer. Failures are represented in the snapshot.
+   */
+  reauthenticate(): Promise<void>;
   logout(): Promise<void>;
   retry(): Promise<void>;
 };
@@ -44,38 +53,39 @@ export const JazzProvider = defineComponent({
   inheritAttrs: false,
   props: {
     config: Object as PropType<AccountDbConfig>,
-    appId: String,
-    serverUrl: String,
-    auth: Object as PropType<JazzAuth>,
-    initial: [String, Object] as PropType<JazzSessionConfig["initial"]>,
-    autoAttachDevTools: { type: Boolean, default: true },
+    scope: String,
+    serverUrl: { type: String as PropType<string | null>, default: undefined },
+    initial: [String, Object] as PropType<JazzClientConfig["initial"]>,
+    // Declared so `clear-on-sign-out` (bare or bound) reaches the session as
+    // a boolean; left out, each keeps the session's own default.
+    clearOnSignOut: { type: Boolean, default: undefined },
+    linkGuestOnSignUp: { type: Boolean, default: undefined },
   },
   setup(props, { slots, attrs }) {
+    refuseAutoAttachDevTools("JazzProvider", attrs);
     if (props.config)
-      return () =>
-        h(
-          LegacyJazzProvider,
-          {
-            ...attrs,
-            config: props.config!,
-            autoAttachDevTools: props.autoAttachDevTools,
-          },
-          slots,
-        );
-    if (!props.appId) throw new Error("JazzProvider requires appId or config");
+      return () => h(LegacyJazzProvider, { ...attrs, config: props.config! }, slots);
+    // Vue passes undeclared attributes as written: `driver` stays `driver`,
+    // but a kebab-case `log-level` must still reach the client as `logLevel`.
+    const options: Record<string, unknown> = {};
+    for (const [name, value] of Object.entries(attrs)) options[camelize(name)] = value;
     const config = {
-      ...attrs,
-      appId: props.appId,
+      ...options,
+      scope: props.scope,
       serverUrl: props.serverUrl,
-      initial: props.initial ?? (props.auth ? undefined : "local-first"),
-      auth: props.auth,
-    } as JazzSessionConfig & { auth?: JazzAuth };
-    const app = createJazzAppOwner(config, createJazzSession, { start: false });
+      initial: props.initial,
+      ...(props.clearOnSignOut === undefined ? {} : { clearOnSignOut: props.clearOnSignOut }),
+      ...(props.linkGuestOnSignUp === undefined
+        ? {}
+        : { linkGuestOnSignUp: props.linkGuestOnSignUp }),
+    } as JazzClientConfig;
+    const app = createJazzAppOwner(config, createJazzClient, { start: false });
     const snapshot = shallowRef(app.getSnapshot());
     const lease = app.attachConsumer();
     const auth: UseJazzAuth = {
       snapshot: shallowReadonly(snapshot),
       sessionActions: app.sessionActions,
+      reauthenticate: () => app.reauthenticate().catch(() => {}),
       logout: () => app.logout().catch(() => {}),
       retry: () => app.retry().catch(() => {}),
     };
@@ -86,10 +96,6 @@ export const JazzProvider = defineComponent({
       // Vue flushes old descendants' unmount hooks before acknowledging.
       void nextTick(() => lease.acknowledge(observed));
     });
-    watch(
-      () => props.auth,
-      (value) => app.updateAuth(value),
-    );
     onMounted(() => {
       void app.start().catch(() => {});
     });
@@ -105,10 +111,7 @@ export const JazzProvider = defineComponent({
       if (state.status === "ready" && state.client)
         return h(
           JazzClientProvider,
-          {
-            client: state.client,
-            autoAttachDevTools: props.autoAttachDevTools,
-          },
+          { client: state.client },
           { default: slots.default, fallback: loading },
         );
       if (state.status === "signed-out") return slots.signedOut?.() ?? null;

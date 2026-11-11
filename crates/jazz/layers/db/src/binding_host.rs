@@ -326,7 +326,7 @@ fn restore_options_as<O: HostObject>(
     })
 }
 
-/// `{ read_view? | readView?, tier?, include_deleted?, first_load_remote_wait_ms? }`.
+/// `{ read_view? | readView?, tier?, include_deleted?, first_load_remote_wait_ms?, splices? }`.
 pub fn read_opts<O: HostObject>(options: &O) -> HostResult<ReadOpts> {
     let mut opts = ReadOpts::default();
     for name in ["read_view", "readView"] {
@@ -357,6 +357,10 @@ pub fn read_opts<O: HostObject>(options: &O) -> HostResult<ReadOpts> {
         if opts.tier == ReadTier::LocalFirst {
             opts.first_load = FirstLoad::WaitForRemote { timeout_ms };
         }
+    }
+    if let Some(splices) = options.get("splices")? {
+        opts.splices = O::decode::<Vec<String>>(splices)
+            .map_err(|_| HostError::Argument("splices must be an array of column names".into()))?;
     }
     Ok(opts)
 }
@@ -408,6 +412,13 @@ pub struct OpenConfig {
     /// The public `initialSyncFlushEvery` option. Each applied batch commits
     /// on its own, so there is nothing to tune and any value is accepted.
     pub initial_sync_flush_every: Option<u32>,
+    /// The app's schema versions and migrations as JSON (a deployment's
+    /// `schemas` and `migrations`), which the binding lowers into
+    /// [`DbConfig::with_migrations`] (SPEC 10.7).
+    pub migrations: Option<Vec<u8>>,
+    /// The node SYSTEM provenance names when it is not `identity.node`: a
+    /// backend that draws a fresh node per open keeps one stable subject.
+    pub system_node: Option<NodeUuid>,
 }
 
 /// The identity in an [`OpenConfig`].
@@ -530,7 +541,8 @@ pub fn open_identity(config: &mut OpenConfig, how: OpenAs<'_>) -> HostResult<(Db
 
 /// The [`DbConfig`] for `schema` under `config` and `identity`.
 pub fn db_config(schema: JazzSchema, config: &OpenConfig, identity: DbIdentity) -> DbConfig {
-    let db_config = DbConfig::new(schema, identity);
+    let mut db_config = DbConfig::new(schema, identity);
+    db_config.system_node = config.system_node;
     match config.row_id_seed {
         Some(seed) => db_config.with_id_source(SeededRowIdSource::new(seed)),
         None => db_config,
@@ -617,7 +629,9 @@ impl<F: Future> Future for Parked<F> {
 pub type HostFuture<T> = Pin<Box<dyn Future<Output = HostResult<T>>>>;
 
 /// See [`Hooks::rejected`].
-pub type RejectedHook = Box<dyn Fn(&TransactionId, &Error, bool, Option<Rc<Cell<bool>>>)>;
+/// Told of a refused upload no wait claimed; returns whether the refusal
+/// reached the application (a listener was there to take it).
+pub type RejectedHook = Box<dyn Fn(&TransactionId, &Error, bool, Option<Rc<Cell<bool>>>) -> bool>;
 
 /// Hooks a host gives the database it binds.
 #[derive(Default)]
@@ -669,7 +683,10 @@ impl Hooks {
 
     /// Tell [`Hooks::rejected`] of each refused upload no wait claimed.
     /// A relayed session's refused commit is reported under its own id.
-    fn report(&self, node: NodeUuid, rejections: Vec<crate::db::UpstreamRejection>) {
+    /// Returns the seqs of `node`'s own refusals that reached the
+    /// application, through a wait or the hook.
+    fn report(&self, node: NodeUuid, rejections: Vec<crate::db::UpstreamRejection>) -> Vec<u64> {
+        let mut delivered = Vec::new();
         for rejection in rejections {
             let (seq, error) = (rejection.seq, &rejection.error);
             let writer = NodeUuid::from_bytes(rejection.writer);
@@ -677,15 +694,47 @@ impl Hooks {
                 .then(|| self.claims.borrow_mut().remove(&seq))
                 .flatten()
                 .and_then(|claim| claim.upgrade());
-            if claim.as_ref().is_some_and(|claim| claim.get()) {
-                continue;
-            }
-            if let Some(rejected) = self.rejected.borrow().as_ref() {
+            let reached = if claim.as_ref().is_some_and(|claim| claim.get()) {
+                true
+            } else if let Some(rejected) = self.rejected.borrow().as_ref() {
                 let tx_id = TransactionId::from_committed_tx(TxId::new(TxTime(seq), writer));
-                rejected(&tx_id, error, rejection.serializable, claim);
+                rejected(&tx_id, error, rejection.serializable, claim)
+            } else {
+                false
+            };
+            if reached && writer == node {
+                delivered.push(seq);
             }
         }
+        delivered
     }
+}
+
+/// Whether a wait for `write` at `tier` claims reporting the write's
+/// rejection as it starts: when the wait will report the rejection itself.
+/// It does for a write already refused here, and at `global`, which waits
+/// for the authority's verdict. One at `none` or `local` resolves once the
+/// write is committed here, so a refusal that arrives later (after an
+/// offline write reconnects) still goes to the mutation-error listener.
+fn wait_claims_rejection(write: &Write, tier: &str) -> bool {
+    write.rejected.is_some()
+        || matches!(
+            crate::binding_args::durability_tier(tier),
+            Ok(DurabilityTier::Global)
+        )
+}
+
+/// A wait's `fate` that claims the write's rejection when it reports one
+/// itself: a non-durable replica's `local` wait, still open when the
+/// refusal arrives (one a relay answers), fails with it, so the listener is not told a second time.
+fn claiming(fate: HostFuture<()>, claimed: Rc<Cell<bool>>) -> HostFuture<()> {
+    Box::pin(async move {
+        let result = fate.await;
+        if result.is_err() {
+            claimed.set(true);
+        }
+        result
+    })
 }
 
 /// The public `kind` of a transaction in a mutation-error event.
@@ -721,6 +770,7 @@ struct WriteResultPayload {
 /// A committed write as a binding returns it.
 #[derive(Clone, Debug)]
 pub struct Write {
+    node: NodeUuid,
     /// postcard `{ row_id, tx_id }`.
     pub payload: Vec<u8>,
     /// The written row (zero for a transaction commit).
@@ -757,6 +807,8 @@ pub struct Binding {
     /// Local-first accounts a backend admitted (see
     /// [`Binding::admit_local_first_session`]), by canonical author.
     admitted: Rc<RefCell<BTreeMap<String, SelfSignedProof>>>,
+    /// Whether the next tick reports the retry store's refusals again.
+    requeue: Rc<Cell<bool>>,
 }
 
 /// A Jazz self-signed proof of a local-first account.
@@ -784,6 +836,7 @@ impl Binding {
             refused: Rc::default(),
             bound: Rc::default(),
             admitted: Rc::default(),
+            requeue: Rc::new(Cell::new(true)),
         }
     }
 
@@ -848,7 +901,18 @@ impl Binding {
 
     /// A typed schema view backed by the same runtime.
     pub fn register_schema(&self, schema: &[u8]) -> HostResult<Self> {
+        self.register_schema_shipping(schema, crate::db::Migrations::default())
+    }
+
+    /// A typed schema view of an app that ships `migrations` (see
+    /// [`crate::db::Db::add_migrations`]), backed by the same runtime.
+    pub fn register_schema_shipping(
+        &self,
+        schema: &[u8],
+        migrations: crate::db::Migrations,
+    ) -> HostResult<Self> {
         let schema = decode_schema(schema)?;
+        self.db.add_migrations(migrations);
         let view = block_on(self.db.register_schema_view(schema))?;
         Ok(Self {
             db: Rc::new(view),
@@ -910,6 +974,7 @@ impl Binding {
     fn receipt(&self, row_id: RowUuid, seq: u64) -> HostResult<Write> {
         let tx_id = TxId::new(TxTime(seq), self.node);
         Ok(Write {
+            node: self.node,
             payload: postcard::to_allocvec(&WriteResultPayload { row_id, tx_id })
                 .map_err(|error| HostError::Argument(error.to_string()))?,
             row_id,
@@ -1452,14 +1517,33 @@ impl Binding {
     }
 
     /// Resolve once `write` reached `tier`; fail at once with its
-    /// rejection, if it was rejected.
-    pub fn wait_for_write(&self, write: &Write, tier: &str) -> HostResult<HostFuture<()>> {
-        if let Some(error) = &write.rejected {
+    /// rejection, if it was rejected. A wait given the write's `claim`
+    /// claims reporting its rejection whenever it reports it itself (see
+    /// [`wait_claims_rejection`] and [`claiming`]), so the mutation-error
+    /// listener is not told too; an observing wait passes `None`.
+    pub fn wait_for_write(
+        &self,
+        write: &Write,
+        tier: &str,
+        claim: Option<Rc<Cell<bool>>>,
+    ) -> HostResult<HostFuture<()>> {
+        if self.node != write.node {
+            return Err("write belongs to a different database node".into());
+        }
+        let fate: HostFuture<()> = if let Some(error) = &write.rejected {
             binding_args::durability_tier(tier)?;
             let error = error.clone();
-            return Ok(Box::pin(async move { Err(HostError::Engine(error)) }));
+            Box::pin(async move { Err(HostError::Engine(error)) })
+        } else {
+            self.wait_for(write.seq, tier)?
+        };
+        let Some(claim) = claim else {
+            return Ok(fate);
+        };
+        if wait_claims_rejection(write, tier) {
+            claim.set(true);
         }
-        self.wait_for(write.seq, tier)
+        Ok(claiming(fate, claim))
     }
 
     /// Resolve once every local write so far reached the server. Local
@@ -1472,13 +1556,65 @@ impl Binding {
         }))
     }
 
+    /// How many local commits still wait for the server's verdict.
+    pub fn pending_upload_count(&self) -> usize {
+        self.db.pending_upload_count()
+    }
+
+    /// See [`crate::db::Db::upload_status`].
+    pub fn upload_status(&self) -> crate::db::UploadStatus {
+        self.db.upload_status()
+    }
+
     /// Apply received frames and send what is due; waits wake.
     pub async fn tick(&self) -> HostResult<()> {
         let result = self.db.tick().await;
-        self.hooks
-            .report(self.node, self.db.take_upstream_rejections());
+        // Refusals kept from before (a reopened store's, or ones no
+        // listener took) go out again first.
+        let requeued = if self.requeue.replace(false) {
+            self.db.requeue_rejected_transactions()
+        } else {
+            Ok(())
+        };
+        let rejections = self.db.take_upstream_rejections();
+        let delivered = self.hooks.report(self.node, rejections);
+        // Delivered: the retry store lets go of their payloads. One no
+        // listener took stays, for the next listener or the next open.
+        let discarded = delivered
+            .into_iter()
+            .try_for_each(|seq| self.db.discard_rejected_transaction(seq));
         self.hooks.progress.wake_all();
-        Ok(result?)
+        result?;
+        requeued?;
+        Ok(discarded?)
+    }
+
+    /// Report the refusals the retry store still holds again on the next
+    /// tick: the host now has a listener for them.
+    pub fn redeliver_rejections(&self) {
+        self.requeue.set(true);
+        self.hooks.schedule_tick();
+    }
+
+    /// The slow-query report due now: one line per slow query shape,
+    /// naming `app`: the first at once, then at most every 10 seconds. The host
+    /// writes the lines where it reports problems (`console.warn`).
+    pub fn take_slow_query_report(&self, app: Option<&str>) -> Vec<String> {
+        self.db.take_slow_query_report(app)
+    }
+
+    /// Report query runs of at least `ms` milliseconds; 0 turns the log
+    /// off.
+    pub fn set_slow_query_threshold_ms(&self, ms: f64) -> HostResult<()> {
+        if !ms.is_finite() || ms < 0.0 {
+            return Err(HostError::Argument(format!(
+                "slow query threshold must be a non-negative number of milliseconds, not {ms}"
+            )));
+        }
+        self.db.set_slow_query_threshold(
+            (ms > 0.0).then(|| std::time::Duration::from_secs_f64(ms / 1000.0)),
+        );
+        Ok(())
     }
 
     /// Make this store the optimistic, non-durable foreground of a durable
@@ -1541,6 +1677,7 @@ impl Binding {
         updated_at_ms: Option<f64>,
         head: Option<BranchSelector>,
         base: Option<BranchViewBase>,
+        transaction: Option<&str>,
     ) -> HostResult<StreamingMutation> {
         let identity = match (author, attribution) {
             (Some(_), Some(_)) => {
@@ -1574,12 +1711,18 @@ impl Binding {
                 "backend-attributed streaming mutations do not support branch writes".into(),
             );
         }
+        let transaction = transaction.map(open_transaction).transpose()?;
+        let identity = match transaction {
+            Some(id) => self.staged_identity(id, identity)?,
+            None => identity,
+        };
         let upload = self
             .db
             .begin_streaming_value_upload(&table, &cells, &column)?;
         Ok(StreamingMutation {
             state: Some(Box::new(StreamingState {
                 binding: self.clone(),
+                transaction,
                 upload,
                 mutation,
                 table,
@@ -1615,21 +1758,23 @@ impl Binding {
     }
 
     /// Serve a subscriber (another replica) as `identity` with `claims`.
-    pub fn accept_subscriber(&self, identity: AuthorSubject, claims: Cells) -> Link {
-        self.db.set_identity_claims(identity, claims);
+    /// A store configured as a user refuses any other identity (see
+    /// [`Db::accept_subscriber`]).
+    pub fn accept_subscriber(&self, identity: AuthorSubject, claims: Cells) -> HostResult<Link> {
         let queues = WireQueues::default();
         let transport = Box::new(WireTransportAdapter::current(QueueTransport {
             queues: queues.clone(),
         }));
-        let subscriber = self.db.accept_subscriber(transport, identity);
-        Link {
+        let subscriber = self.db.accept_subscriber(transport, identity)?;
+        self.db.set_identity_claims(identity, claims);
+        Ok(Link {
             binding: self.clone(),
             queues,
             kind: LinkKind::Subscriber {
                 id: Some(subscriber),
                 identity,
             },
-        }
+        })
     }
 
     /// Close the database (a schema view leaves its owner open).
@@ -1737,7 +1882,7 @@ pub fn event_chunk(event: SubscriptionEvent) -> HostResult<EventChunk> {
             tier: format!("{tier:?}"),
         },
         SubscriptionEvent::Closed => EventChunk::Closed,
-        SubscriptionEvent::Rejected { reason } => EventChunk::Rejected { detail: reason },
+        SubscriptionEvent::Rejected { reason, .. } => EventChunk::Rejected { detail: reason },
     })
 }
 
@@ -1755,6 +1900,8 @@ struct StreamingState {
     updated_at_ms: Option<u64>,
     head: Option<BranchSelector>,
     base: Option<BranchViewBase>,
+    /// The open transaction the finished value is staged in.
+    transaction: Option<OpenTransactionId>,
 }
 
 /// A large value uploaded in chunks, then published as one row mutation.
@@ -1794,6 +1941,15 @@ impl StreamingMutation {
         if self.failed {
             return Err(closed());
         }
+        if self
+            .state
+            .as_ref()
+            .is_some_and(|state| state.transaction.is_some())
+        {
+            return Err(HostError::Argument(
+                "a streaming mutation begun in a transaction finishes in it".into(),
+            ));
+        }
         let state = *self.state.take().ok_or_else(closed)?;
         let write = block_on(state.binding.db.finish_streaming_value_upload(
             state.upload,
@@ -1808,6 +1964,42 @@ impl StreamingMutation {
             state.base,
         ));
         state.binding.write(write)
+    }
+
+    /// Whether the mutation began in a transaction, and so finishes with
+    /// [`Self::finish_in_transaction`].
+    pub fn in_transaction(&self) -> bool {
+        self.state
+            .as_ref()
+            .is_some_and(|state| state.transaction.is_some())
+    }
+
+    /// Stage the uploaded value's row mutation in the transaction the
+    /// mutation began in. Like any staged write, a refusal decided by the
+    /// row's stored state is reported by the commit.
+    pub fn finish_in_transaction(&mut self) -> HostResult<()> {
+        if self.failed {
+            return Err(closed());
+        }
+        let Some(id) = self.state.as_ref().and_then(|state| state.transaction) else {
+            return Err(HostError::Argument(
+                "a streaming mutation begun outside a transaction finishes with finish".into(),
+            ));
+        };
+        let state = *self.state.take().ok_or_else(closed)?;
+        let staged = block_on(state.binding.db.tx_ref(id).finish_streaming_value_upload(
+            state.upload,
+            state.mutation,
+            &state.table,
+            state.row,
+            state.cells,
+            &state.column,
+            state.identity,
+            state.updated_at_ms,
+            state.head,
+            state.base,
+        ));
+        state.binding.staged(id, staged)
     }
 
     /// Drop the upload; `false` when already closed.
@@ -1907,6 +2099,17 @@ impl Link {
         self.binding.db.set_identity_claims(identity, claims);
         self.binding.hooks.progress.wake_all();
         Ok(())
+    }
+
+    /// Why the database dropped this upstream link on its own (see
+    /// [`Db::upstream_refusal`]): the host stops the link instead of keeping
+    /// a socket nothing syncs over, and reports why, as `code` and message.
+    /// `None` for a link that stands, a closed one, or a subscriber link.
+    pub fn upstream_refusal(&self) -> Option<Error> {
+        match &self.kind {
+            LinkKind::Upstream(Some(upstream)) => self.binding.db.upstream_refusal(upstream),
+            _ => None,
+        }
     }
 
     /// Detach the link; `false` when already closed.

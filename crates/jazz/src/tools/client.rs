@@ -34,6 +34,10 @@ use crate::db::{
     UpdateOptions, UpsertOptions, Upstream, WireTransportAdapter, WriteIdentity,
 };
 use crate::ids::{AuthorSubject, NodeUuid, RowUuid};
+use crate::link::{
+    AttemptId, AuthFailureReason, LinkAction, LinkEvent, LinkFailure, LinkInput, LinkPolicy,
+    LinkStatus, TimerToken, UpstreamLink,
+};
 use crate::model::public_api::types::{
     OrderedAdded, OrderedRemoved, OrderedUpdated, QueryResultField,
 };
@@ -47,8 +51,8 @@ use crate::query::Query;
 use crate::records::Value as CoreValue;
 use crate::schema::history;
 use crate::tools::native_transport_connector::{
-    NativeTransportConnector, NativeTransportError, NativeTransportLink, NativeTransportRequest,
-    NativeTransportTerminalFuture,
+    NativeTransportConnector, NativeTransportError, NativeTransportFuture, NativeTransportLink,
+    NativeTransportRequest, NativeTransportTerminal, NativeTransportTerminalFuture,
 };
 use crate::tools::sync::{DurabilityTier, ReadTier};
 use crate::tools::websocket_prelude_auth::AuthConfig;
@@ -61,8 +65,18 @@ use crate::tx::{DurabilityTier as CoreDurabilityTier, TxId};
 /// The driver ticks at least this often while it runs, so read deadlines
 /// (`FirstLoad::WaitForRemote`) expire without other work.
 const FALLBACK_TICK: Duration = Duration::from_millis(50);
-const RECONNECT_BASE_DELAY: Duration = Duration::from_millis(50);
-const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(2);
+/// After a recoverable tick failure the driver retries after this delay,
+/// doubling per consecutive failure up to [`TICK_RETRY_MAX_DELAY`].
+const TICK_RETRY_BASE_DELAY: Duration = Duration::from_millis(10);
+const TICK_RETRY_MAX_DELAY: Duration = Duration::from_secs(2);
+/// Consecutive recoverable tick failures the driver rides out; one more
+/// stops it as if the failure were fatal (INV-API-23). With the backoff
+/// above that is about 2.5 s of failures in a row, after which the client
+/// stays stopped: every call reports the error, and recovering means
+/// opening a new client. `Db::tick` does not surface backpressure (the
+/// transport absorbs it), so in practice the retries cover protocol and
+/// transaction-conflict failures.
+const TICK_RECOVERY_ATTEMPTS: u32 = 8;
 /// The local store under `AppContext::data_dir`.
 const STORE_FILE: &str = "jazz.sqlite";
 /// The node id a persistent store's writes are uploaded under. It must
@@ -91,6 +105,8 @@ impl Clone for JazzClient {
 
 struct Shared {
     db: Db,
+    /// The app, named in slow-query reports.
+    app: String,
     identity: DbIdentity,
     schema: Schema,
     /// Asks the driver for a tick.
@@ -100,6 +116,8 @@ struct Shared {
     /// True while a test holds the upstream detached; the keeper neither
     /// keeps nor re-opens a link until it turns false.
     upstream_paused: watch::Sender<bool>,
+    /// The credential the next connection attempt presents.
+    credentials: watch::Sender<AuthConfig>,
     /// No server is configured, so nothing can confirm a write past Local.
     serverless: bool,
     /// The upstream link is a trusted backend or admin link, which may
@@ -123,8 +141,62 @@ struct State {
     /// upstream starts it with its first subscription; until then its
     /// calls tick inline, so it needs no `LocalSet`.
     driven: bool,
-    /// Failed upstream connect attempts so far, and the last one's error.
-    connect_failures: (u64, Option<String>),
+    /// The last upstream connect attempt the keeper started. Attempt ids
+    /// rise, so a waiter judges only attempts started after it looked.
+    connect_started: u64,
+    /// The last upstream connect attempt that failed, and its error.
+    connect_failed: Option<(u64, String)>,
+    /// The upstream link's last published status; `None` without a server.
+    link_status: Option<LinkStatus>,
+    /// Consecutive recoverable tick failures.
+    tick_failures: u32,
+    /// The failure that stopped the tick driver. Every later call reports
+    /// it instead of waiting on sync that can no longer happen.
+    stopped: Option<CoreError>,
+}
+
+/// How the tick driver treats a failed [`Db::tick`] (INV-API-23).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TickFailure {
+    /// A passing condition (a full queue, a protocol hiccup the engine
+    /// repairs by detaching the link): retry with bounded backoff.
+    Recoverable,
+    /// The store or schema is unusable: stop and report it.
+    Fatal,
+}
+
+fn classify_tick_driver_error(error: &CoreError) -> TickFailure {
+    use crate::db::ErrorCode::*;
+    match error.code {
+        // A refused upstream detaches only its link; the store is fine.
+        Backpressure | Protocol | TransactionConflict | NotObserved | AuthorityChanged => {
+            TickFailure::Recoverable
+        }
+        Storage
+        | UnsupportedStorageCodecs
+        | Schema
+        | Query
+        | WriteRejected
+        | HistoricalReadRequiresServer => TickFailure::Fatal,
+    }
+}
+
+/// The driver's delay before retrying after `failures` consecutive
+/// recoverable failures.
+fn tick_retry_delay(failures: u32) -> Duration {
+    TICK_RETRY_BASE_DELAY
+        .saturating_mul(1 << failures.saturating_sub(1).min(16))
+        .min(TICK_RETRY_MAX_DELAY)
+}
+
+/// The error a caller gets once the tick driver stopped on `error`.
+fn stopped_driver_error(error: &CoreError) -> JazzError {
+    let message = format!("the client's sync driver stopped: {error}");
+    match error.code {
+        crate::db::ErrorCode::Storage => JazzError::Storage(message),
+        crate::db::ErrorCode::UnsupportedStorageCodecs => JazzError::UnsupportedStorage(message),
+        _ => JazzError::Sync(message),
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -152,9 +224,38 @@ impl Shared {
         self.state.borrow_mut()
     }
 
+    /// Drop the engine subscriptions whose public streams were dropped.
+    /// Dropping one queues its unsubscription on the connection, so doing it
+    /// as the public stream drops orders the unsubscription ahead of
+    /// anything the caller asks next on the same connection.
+    fn drop_cancelled(&self) {
+        let cancelled: Vec<Forwarder> = {
+            // A stream dropped while the state is borrowed is dropped by
+            // the next tick instead.
+            let Ok(mut state) = self.state.try_borrow_mut() else {
+                return;
+            };
+            let mut cancelled = Vec::new();
+            for mut forwarder in std::mem::take(&mut state.forwarders) {
+                if forwarder.cancelled() {
+                    cancelled.push(forwarder);
+                } else {
+                    state.forwarders.push(forwarder);
+                }
+            }
+            cancelled
+        };
+        // Outside the state borrow: dropping each runs engine cleanup.
+        drop(cancelled);
+    }
+
     fn ensure_open(&self) -> Result<()> {
-        if self.state.borrow().closed {
+        let state = self.state.borrow();
+        if state.closed {
             return Err(JazzError::Connection("client is shut down".to_owned()));
+        }
+        if let Some(error) = &state.stopped {
+            return Err(stopped_driver_error(error));
         }
         Ok(())
     }
@@ -173,7 +274,10 @@ impl Shared {
             }
             if !self.state.borrow().driven {
                 self.tick().await;
-                tokio::task::yield_now().await;
+                match self.state.borrow().tick_failures {
+                    0 => tokio::task::yield_now().await,
+                    failures => tokio::time::sleep(tick_retry_delay(failures)).await,
+                }
                 continue;
             }
             self.tick_soon();
@@ -204,22 +308,49 @@ impl Shared {
         .await
     }
 
+    /// Tick the engine once. A recoverable failure is retried by the next
+    /// tick; a fatal one, or one recoverable failure too many, stops the
+    /// driver and is reported to every caller from then on.
     async fn tick(&self) {
-        if let Err(error) = self.db.tick().await {
-            tracing::warn!(%error, "jazz client tick failed");
+        if self.state.borrow().stopped.is_some() {
+            return;
+        }
+        // Before the tick flushes the connection: a stream dropped since the
+        // last one unsubscribes in this flush, not the next.
+        self.drop_cancelled();
+        let result = self.db.tick().await;
+        {
+            let mut state = self.state();
+            match result {
+                Ok(()) => state.tick_failures = 0,
+                Err(error) => match classify_tick_driver_error(&error) {
+                    TickFailure::Recoverable if state.tick_failures < TICK_RECOVERY_ATTEMPTS => {
+                        state.tick_failures += 1;
+                        tracing::warn!(
+                            %error,
+                            failures = state.tick_failures,
+                            "jazz client tick failed; retrying"
+                        );
+                    }
+                    failure => {
+                        tracing::error!(%error, ?failure, "jazz client sync driver stopped");
+                        state.stopped = Some(error);
+                    }
+                },
+            }
+        }
+        for line in self.db.take_slow_query_report(Some(&self.app)) {
+            tracing::warn!(app = %self.app, "{line}");
         }
         self.forward();
+        // Waiters re-poll and see a stopped driver as an error.
         self.progress.send_modify(|generation| *generation += 1);
     }
 
     fn forward(&self) {
         let mut state = self.state();
         state.forwarders.retain_mut(|forwarder| {
-            if !matches!(
-                forwarder.cancellation.try_recv(),
-                Err(oneshot::error::TryRecvError::Empty)
-            ) || forwarder.sender.is_closed()
-            {
+            if forwarder.cancelled() {
                 return false;
             }
             while let Some(event) = forwarder.stream.try_next_event() {
@@ -250,11 +381,13 @@ impl Shared {
                             },
                         },
                     },
-                    SubscriptionEvent::Rejected { reason } => SubscriptionStreamItem::Rejected {
-                        reason: SubscriptionRejectReason::UnsupportedShapeCapability {
-                            detail: reason,
-                        },
-                    },
+                    SubscriptionEvent::Rejected { reason, .. } => {
+                        SubscriptionStreamItem::Rejected {
+                            reason: SubscriptionRejectReason::UnsupportedShapeCapability {
+                                detail: reason,
+                            },
+                        }
+                    }
                     SubscriptionEvent::Closed => return false,
                 };
                 if forwarder.sender.send(item).is_err() {
@@ -267,6 +400,14 @@ impl Shared {
 }
 
 impl Forwarder {
+    /// Its public stream was dropped.
+    fn cancelled(&mut self) -> bool {
+        !matches!(
+            self.cancellation.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ) || self.sender.is_closed()
+    }
+
     fn delta(
         &mut self,
         schema: &Schema,
@@ -337,6 +478,7 @@ impl Forwarder {
                 old_index: row.previous_index.unwrap_or(row.index),
                 new_index: row.index,
                 row: changed.then_some(public),
+                splices: row.splices.clone(),
             });
         }
         for row in &added_rows {
@@ -369,6 +511,17 @@ async fn drive(shared: Weak<Shared>, work: Arc<Notify>) {
                 return;
             }
             shared.tick().await;
+            let state = shared.state.borrow();
+            if state.stopped.is_some() {
+                return;
+            }
+            if state.tick_failures > 0 {
+                let delay = tick_retry_delay(state.tick_failures);
+                drop(state);
+                drop(shared);
+                tokio::time::sleep(delay).await;
+                continue;
+            }
         }
         tokio::select! {
             _ = work.notified() => {}
@@ -377,74 +530,203 @@ async fn drive(shared: Weak<Shared>, work: Arc<Notify>) {
     }
 }
 
-/// Keeps one upstream link: waits for the attached link to stop, detaches
-/// it, and reconnects with backoff.
+/// Drives the shared upstream link machine ([`UpstreamLink`]): this task owns
+/// the socket and the timer, the machine decides when to connect, back off,
+/// wait for a new credential or stop.
+///
+/// `paused` and `credentials` are subscribed before the first attempt, so a
+/// change made before this task first runs is still seen.
 async fn keep_upstream(
     shared: Weak<Shared>,
     connector: Arc<dyn NativeTransportConnector>,
-    request: NativeTransportRequest,
-    mut attached: Option<NativeTransportTerminalFuture>,
+    mut request: NativeTransportRequest,
+    mut keeper: LinkKeeper,
+    mut paused: watch::Receiver<bool>,
+    mut credentials: watch::Receiver<AuthConfig>,
 ) {
-    let mut delay = RECONNECT_BASE_DELAY;
-    let mut paused = match shared.upgrade() {
-        Some(shared) => shared.upstream_paused.subscribe(),
-        None => return,
-    };
+    let mut connecting: Option<(AttemptId, NativeTransportFuture)> = None;
+    let mut timer: Option<(TimerToken, std::pin::Pin<Box<tokio::time::Sleep>>)> = None;
     loop {
-        let terminal = match attached.take() {
-            Some(terminal) => terminal,
-            None => {
-                if paused.wait_for(|paused| !*paused).await.is_err() {
-                    return;
-                }
-                {
-                    let Some(shared) = shared.upgrade() else {
-                        return;
-                    };
-                    if shared.state.borrow().closed {
-                        return;
+        for action in std::mem::take(&mut keeper.actions) {
+            match action {
+                LinkAction::Connect { attempt, .. } => {
+                    if let Some(shared) = shared.upgrade() {
+                        shared.state().connect_started = attempt.0;
                     }
-                    shared.db.set_remote_link_hint(RemoteLinkHint::Attempting);
+                    connecting = Some((attempt, connector.connect(request.clone())));
                 }
-                match connector.connect(request.clone()).await {
+                LinkAction::Close(attempt) => {
+                    if connecting
+                        .as_ref()
+                        .is_some_and(|(open, _)| *open == attempt)
+                    {
+                        connecting = None;
+                    }
+                    if keeper
+                        .live
+                        .as_ref()
+                        .is_some_and(|(open, _)| *open == attempt)
+                    {
+                        keeper.live = None;
+                        if let Some(shared) = shared.upgrade() {
+                            detach(&shared);
+                        }
+                    }
+                }
+                LinkAction::ArmTimer { token, after_ms } => {
+                    timer = Some((
+                        token,
+                        Box::pin(tokio::time::sleep(Duration::from_millis(after_ms))),
+                    ));
+                }
+                LinkAction::CancelTimer(_) => timer = None,
+            }
+        }
+        {
+            let Some(shared) = shared.upgrade() else {
+                return;
+            };
+            if shared.state.borrow().closed {
+                return;
+            }
+            keeper.publish(&shared);
+        }
+        let input = tokio::select! {
+            result = async { connecting.as_mut().expect("guarded").1.as_mut().await },
+                if connecting.is_some() =>
+            {
+                let (attempt, _) = connecting.take().expect("guarded");
+                match result {
                     Ok(link) => {
                         let Some(shared) = shared.upgrade() else {
                             return;
                         };
                         attach(&shared, link.transport).await;
-                        delay = RECONNECT_BASE_DELAY;
-                        link.terminal
+                        keeper.live = Some((attempt, link.terminal));
+                        LinkInput::Admitted(attempt)
                     }
                     Err(error) => {
                         tracing::debug!(%error, "jazz client upstream connect failed");
                         if let Some(shared) = shared.upgrade() {
-                            shared.db.set_remote_link_hint(RemoteLinkHint::Failed);
-                            let mut state = shared.state();
-                            let failures = state.connect_failures.0 + 1;
-                            state.connect_failures = (failures, Some(error.to_string()));
-                            drop(state);
-                            shared.tick_soon();
+                            shared.state().connect_failed = Some((attempt.0, error.to_string()));
                         }
-                        tokio::time::sleep(delay).await;
-                        delay = (delay * 2).min(RECONNECT_MAX_DELAY);
-                        continue;
+                        LinkInput::Ended(attempt, link_failure(error))
                     }
                 }
             }
-        };
-        tokio::select! {
-            stopped = terminal => {
+            stopped = async { keeper.live.as_mut().expect("guarded").1.as_mut().await },
+                if keeper.live.is_some() =>
+            {
                 tracing::debug!(?stopped, "jazz client upstream stopped");
+                let (attempt, _) = keeper.live.take().expect("guarded");
+                if let Some(shared) = shared.upgrade() {
+                    detach(&shared);
+                }
+                LinkInput::Ended(attempt, terminal_failure(stopped))
             }
-            // A test detached the link; dropping its terminal closes it.
-            _ = paused.wait_for(|paused| *paused) => {}
-        }
-        let Some(shared) = shared.upgrade() else {
-            return;
+            () = async { timer.as_mut().expect("guarded").1.as_mut().await },
+                if timer.is_some() =>
+            {
+                let (token, _) = timer.take().expect("guarded");
+                LinkInput::TimerFired(token)
+            }
+            changed = paused.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+                LinkInput::SetOffline(*paused.borrow_and_update())
+            }
+            changed = credentials.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+                request.auth = credentials.borrow_and_update().clone();
+                LinkInput::CredentialUpdated
+            }
         };
-        detach(&shared);
-        shared.db.set_remote_link_hint(RemoteLinkHint::Failed);
-        shared.tick_soon();
+        keeper.handle(input);
+    }
+}
+
+/// The client's [`UpstreamLink`] with the clock it is driven by, the actions
+/// it still owes, and the established link it admitted.
+struct LinkKeeper {
+    link: UpstreamLink,
+    started: tokio::time::Instant,
+    actions: Vec<LinkAction>,
+    live: Option<(AttemptId, NativeTransportTerminalFuture)>,
+}
+
+impl LinkKeeper {
+    fn new() -> Self {
+        let seed = Uuid::new_v4().as_u64_pair().0;
+        let mut keeper = Self {
+            link: UpstreamLink::new(LinkPolicy::default(), seed),
+            started: tokio::time::Instant::now(),
+            actions: Vec::new(),
+            live: None,
+        };
+        keeper.handle(LinkInput::ServerConfigured(true));
+        keeper
+    }
+
+    fn handle(&mut self, input: LinkInput) {
+        let now = self.started.elapsed().as_millis() as u64;
+        let actions = self.link.handle(now, input);
+        self.actions.extend(actions);
+    }
+
+    /// The connect the machine asked for, taken to be carried out inline.
+    fn take_connect(&mut self) -> Option<AttemptId> {
+        let at = self
+            .actions
+            .iter()
+            .position(|action| matches!(action, LinkAction::Connect { .. }))?;
+        match self.actions.remove(at) {
+            LinkAction::Connect { attempt, .. } => Some(attempt),
+            _ => unreachable!(),
+        }
+    }
+
+    /// Hand the machine's view to the read gate and the status accessor.
+    fn publish(&mut self, shared: &Shared) {
+        shared.db.set_remote_link_hint(self.link.remote_link_hint());
+        for event in self.link.drain_events() {
+            if let LinkEvent::Status(status) = event {
+                shared.state().link_status = Some(status);
+            }
+        }
+    }
+}
+
+/// A failed connection attempt, as the shared link classifies it. A
+/// connector's `Terminal` (TLS, a proxy refusing the upgrade) can clear on
+/// its own, so it is a refusal the link retries.
+fn link_failure(error: NativeTransportError) -> LinkFailure {
+    match error {
+        NativeTransportError::AuthRejected(message) => LinkFailure::AuthRejected {
+            reason: AuthFailureReason::from_message(&message),
+            message,
+        },
+        NativeTransportError::Terminal(message) => LinkFailure::Refused(message),
+        NativeTransportError::Retryable(message) => LinkFailure::Network(message),
+    }
+}
+
+/// How an established link ended. Losing an admitted link is an outage,
+/// whatever the transport calls it, unless the server refused the credential.
+fn terminal_failure(stopped: NativeTransportTerminal) -> LinkFailure {
+    match stopped {
+        NativeTransportTerminal::Failed(error @ NativeTransportError::AuthRejected(_)) => {
+            link_failure(error)
+        }
+        NativeTransportTerminal::Failed(
+            NativeTransportError::Terminal(message) | NativeTransportError::Retryable(message),
+        )
+        | NativeTransportTerminal::PeerClosed(message) => LinkFailure::Network(message),
+        NativeTransportTerminal::OwnerDropped => {
+            LinkFailure::Network("upstream connection dropped".to_owned())
+        }
     }
 }
 
@@ -453,7 +735,6 @@ async fn attach(shared: &Shared, transport: Box<dyn crate::wire::WireTransport +
         .db
         .connect_upstream(Box::new(WireTransportAdapter::current(transport)))
         .await;
-    shared.db.set_remote_link_hint(RemoteLinkHint::Live);
     shared.state().upstream = Some(upstream);
     shared.tick_soon();
 }
@@ -497,11 +778,21 @@ impl JazzClient {
                 ));
             }
         };
+        // A core governs a stated session only by the bundle it is pinned
+        // to, and refuses one without: say so here, not as a refusal later.
+        if has_server && context.backend_session.is_some() && context.bundle.is_none() {
+            return Err(JazzError::Connection(
+                "a backend_session needs `bundle`: the published permissions bundle \
+                 (as deploying the app returns it) its user is checked by"
+                    .to_owned(),
+            ));
+        }
         let default_session = default_session_from_context(&context);
         let core_schema = crate::schema::JazzSchema::new(&context.schema)
             .map_err(|error| JazzError::Schema(error.to_string()))?;
         let identity = core_identity(&context, client_id(&context)?, default_session.as_ref())?;
-        let config = DbConfig::new(core_schema, identity);
+        let mut config = DbConfig::new(core_schema, identity);
+        config.migrations = context.migrations.clone();
         let db = match context.storage {
             ClientStorage::Memory => Db::open(config).await,
             ClientStorage::Persistent => {
@@ -526,13 +817,30 @@ impl JazzClient {
         let (progress, _) = watch::channel(0);
         let shared = Rc::new(Shared {
             db,
+            app: context.app_id.to_string(),
             identity,
             schema: context.schema.clone(),
             work: work.clone(),
             progress,
             upstream_paused: watch::channel(false).0,
+            credentials: watch::channel(AuthConfig {
+                // With the backend secret, a client's own proof is the
+                // backend relaying that client (a local-first guest).
+                jwt_token: if context.backend_session.is_some() {
+                    None
+                } else {
+                    context.jwt_token.clone()
+                },
+                backend_secret: context.backend_secret.clone(),
+                admin_secret: context.admin_secret.clone(),
+                backend_session: stated_session(&context)?,
+            })
+            .0,
             serverless: connector.is_none(),
-            trusted: context.backend_secret.is_some() || context.admin_secret.is_some(),
+            trusted: context.admin_secret.is_some()
+                || (context.backend_secret.is_some()
+                    && context.backend_session.is_none()
+                    && context.jwt_token.is_none()),
             state: RefCell::new(State::default()),
         });
 
@@ -543,45 +851,48 @@ impl JazzClient {
         }
         if let Some(connector) = connector {
             let wake = work.clone();
+            let paused = shared.upstream_paused.subscribe();
+            let mut credentials = shared.credentials.subscribe();
             let request = NativeTransportRequest {
                 requested_link: NativeTransportLink::OrdinarySession,
                 server_url: context.server_url.clone(),
                 app_id: context.app_id,
                 peer_identity: identity.author,
-                auth: AuthConfig {
-                    jwt_token: if context.backend_secret.is_some() {
-                        None
-                    } else {
-                        context.jwt_token.clone()
-                    },
-                    backend_secret: context.backend_secret.clone(),
-                    admin_secret: context.admin_secret.clone(),
-                    backend_session: None,
-                },
+                auth: credentials.borrow_and_update().clone(),
+                authorization: None,
+                bundle: context.bundle.clone(),
                 wake: Arc::new(move || wake.notify_one()),
             };
-            shared.db.set_remote_link_hint(RemoteLinkHint::Attempting);
             // The first attempt decides whether the server admits this
             // client at all; an unreachable server only means offline.
-            let attached = match connector.connect(request.clone()).await {
+            let mut keeper = LinkKeeper::new();
+            keeper.publish(&shared);
+            let attempt = keeper.take_connect().expect("a configured link connects");
+            match connector.connect(request.clone()).await {
                 Ok(link) => {
                     attach(&shared, link.transport).await;
-                    Some(link.terminal)
+                    keeper.live = Some((attempt, link.terminal));
+                    keeper.handle(LinkInput::Admitted(attempt));
                 }
-                Err(NativeTransportError::Terminal(error)) => {
+                Err(
+                    NativeTransportError::Terminal(error)
+                    | NativeTransportError::AuthRejected(error),
+                ) => {
                     return Err(JazzError::Connection(error));
                 }
-                Err(NativeTransportError::Retryable(error)) => {
+                Err(error @ NativeTransportError::Retryable(_)) => {
                     tracing::debug!(%error, "jazz client starts offline");
-                    shared.db.set_remote_link_hint(RemoteLinkHint::Failed);
-                    None
+                    keeper.handle(LinkInput::Ended(attempt, link_failure(error)));
                 }
-            };
+            }
+            keeper.publish(&shared);
             let keeper = tokio::task::spawn_local(keep_upstream(
                 Rc::downgrade(&shared),
                 connector,
                 request,
-                attached,
+                keeper,
+                paused,
+                credentials,
             ));
             shared.state().tasks.push(keeper);
             shared.ensure_driven();
@@ -846,7 +1157,17 @@ impl JazzClient {
         });
         self.shared.ensure_driven();
         self.shared.tick_soon();
-        Ok(SubscriptionStream::new(receiver, cancel))
+        let shared = Rc::downgrade(&self.shared);
+        Ok(SubscriptionStream::new(
+            receiver,
+            cancel,
+            Box::new(move || {
+                if let Some(shared) = shared.upgrade() {
+                    shared.drop_cancelled();
+                    shared.tick_soon();
+                }
+            }),
+        ))
     }
 
     fn open_core_subscription(
@@ -897,7 +1218,7 @@ impl JazzClient {
                     added.sort_by_key(|row| row.index);
                     added.into_iter().map(|row| row.row).collect()
                 }
-                SubscriptionEvent::Rejected { reason } => return Err(JazzError::Query(reason)),
+                SubscriptionEvent::Rejected { reason, .. } => return Err(JazzError::Query(reason)),
                 SubscriptionEvent::Closed => {
                     return Err(JazzError::Query("the read closed before answering".into()));
                 }
@@ -1355,6 +1676,34 @@ impl JazzClient {
         Ok(self.shared.schema.clone())
     }
 
+    /// Present a new bearer token upstream. A live link reconnects with it;
+    /// a link whose token the server refused connects again with it.
+    pub fn update_auth_token(&self, jwt_token: String) -> Result<()> {
+        self.shared.ensure_open()?;
+        if self.shared.serverless || self.shared.trusted {
+            return Err(JazzError::Connection(
+                "only a client with a bearer-authenticated server can update its token".to_owned(),
+            ));
+        }
+        self.shared
+            .credentials
+            .send_modify(|auth| auth.jwt_token = Some(jwt_token));
+        Ok(())
+    }
+
+    /// The upstream link's status, including why it is not live and whether
+    /// it waits for a new token. `None` for a client without a server.
+    pub fn upstream_status(&self) -> Option<LinkStatus> {
+        self.shared.state.borrow().link_status.clone()
+    }
+
+    /// Log query shapes whose runs take at least `threshold` as `tracing`
+    /// warnings, one line per shape, at most every 10 s (`None` turns the log
+    /// off). Defaults to [`crate::slow::DEFAULT_SLOW_QUERY_THRESHOLD`].
+    pub fn set_slow_query_threshold(&self, threshold: Option<Duration>) {
+        self.shared.db.set_slow_query_threshold(threshold);
+    }
+
     /// Check if connected to server.
     pub fn is_connected(&self) -> bool {
         self.shared.state.borrow().upstream.is_some()
@@ -1418,9 +1767,20 @@ impl JazzClient {
             .expect("connect local JazzClient")
     }
 
+    /// Make the engine's next ticks fail with `codes`, in order.
+    pub fn fail_next_ticks_for_test(&self, codes: impl IntoIterator<Item = crate::db::ErrorCode>) {
+        self.shared.db.fail_next_ticks_for_test(codes);
+        self.shared.tick_soon();
+    }
+
     /// The engine's sync state, for test failure messages.
     pub(crate) fn sync_debug_for_test(&self) -> String {
         self.shared.db.sync_debug()
+    }
+
+    /// Engine subscriptions this client still holds for public streams.
+    pub(crate) fn live_subscriptions_for_test(&self) -> usize {
+        self.shared.state().forwarders.len()
     }
 
     pub(crate) fn disconnect_upstream_for_test(&self) -> bool {
@@ -1446,12 +1806,19 @@ impl JazzClient {
     /// Let the keeper open a fresh link for the preserved client state and
     /// wait until it is attached.
     pub(crate) async fn reconnect_upstream_for_test(&self) -> Result<bool> {
-        let (failed, attached) = {
+        // An attempt the keeper started before this call (a retry during an
+        // outage) may still fail after it: only attempts started from here
+        // on answer it.
+        let (started, attached) = {
             let state = self.shared.state.borrow();
-            (state.connect_failures.0, state.upstream.is_some())
+            (state.connect_started, state.upstream.is_some())
         };
         // Neither detached nor reconnecting: nothing to reattach.
-        if !self.shared.upstream_paused.send_replace(false) && attached {
+        let resumed = self
+            .shared
+            .upstream_paused
+            .send_if_modified(|paused| std::mem::replace(paused, false));
+        if !resumed && attached {
             return Ok(false);
         }
         // The first attempt either attaches or fails; the keeper retries
@@ -1462,10 +1829,10 @@ impl JazzClient {
                 if state.upstream.is_some() {
                     return Some(Ok(true));
                 }
-                match &state.connect_failures {
-                    (n, error) if *n > failed => Some(Err(JazzError::Connection(
-                        error.clone().unwrap_or_default(),
-                    ))),
+                match &state.connect_failed {
+                    Some((attempt, error)) if *attempt > started => {
+                        Some(Err(JazzError::Connection(error.clone())))
+                    }
                     _ => None,
                 }
             })
@@ -1546,8 +1913,9 @@ fn client_id(context: &AppContext) -> Result<Uuid> {
     if let Some(id) = context.client_id {
         return Ok(id.0);
     }
+    // Minted nodes are random version-4 UUIDs (INV-DATA-5).
     if context.storage == ClientStorage::Memory {
-        return Ok(Uuid::now_v7());
+        return Ok(Uuid::new_v4());
     }
     if context.data_dir.join(PRE_SQLITE_STORE).exists() {
         return Err(JazzError::UnsupportedStorage(format!(
@@ -1562,7 +1930,7 @@ fn client_id(context: &AppContext) -> Result<Uuid> {
             JazzError::Storage(format!("invalid client id in {}: {error}", path.display()))
         }),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let id = Uuid::now_v7();
+            let id = Uuid::new_v4();
             std::fs::write(&path, id.to_string())?;
             Ok(id)
         }
@@ -1613,8 +1981,26 @@ fn session_from_unverified_jwt(token: &str) -> Option<Session> {
     })
 }
 
+/// The session a backend client states for its user, as the core reads it.
+fn stated_session(context: &AppContext) -> Result<Option<serde_json::Value>> {
+    let Some(session) = context.backend_session.as_ref() else {
+        return Ok(None);
+    };
+    if context.backend_secret.is_none() || context.admin_secret.is_some() {
+        return Err(JazzError::Connection(
+            "a backend_session is stated with the backend secret alone".to_owned(),
+        ));
+    }
+    serde_json::to_value(session)
+        .map(Some)
+        .map_err(|error| JazzError::Connection(error.to_string()))
+}
+
 fn default_session_from_context(context: &AppContext) -> Option<Session> {
-    if context.backend_secret.is_some() || context.admin_secret.is_some() {
+    if let Some(session) = context.backend_session.as_ref() {
+        return Some(session.clone());
+    }
+    if context.admin_secret.is_some() {
         return None;
     }
     context
@@ -2054,5 +2440,113 @@ fn provenance(row: &CurrentRow) -> crate::model::metadata::RowProvenance {
         updated_by: author("$updatedBy").unwrap_or_else(|| created_by.clone()),
         created_by,
         created_at,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::native_transport_connector::ConnectedNativeTransport;
+    use crate::tools::public_schema::{ColumnType, SchemaBuilder, TableSchema};
+    use crate::wire::{TransportError, WireTransport};
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+    use tokio::sync::oneshot;
+
+    struct NoopTransport;
+
+    impl WireTransport for NoopTransport {
+        fn send_frame(&mut self, _frame: Vec<u8>) -> std::result::Result<(), TransportError> {
+            Ok(())
+        }
+        fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+            None
+        }
+    }
+
+    type Outcome = std::result::Result<(), String>;
+
+    /// Each attempt takes the next scripted outcome; an attempt past the
+    /// script attaches a link that never speaks.
+    struct ScriptedConnector {
+        attempts: Mutex<VecDeque<oneshot::Receiver<Outcome>>>,
+        started: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl NativeTransportConnector for ScriptedConnector {
+        fn connect(&self, _request: NativeTransportRequest) -> NativeTransportFuture {
+            self.started
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let outcome = self.attempts.lock().unwrap().pop_front();
+            Box::pin(async move {
+                let outcome = match outcome {
+                    Some(outcome) => outcome.await.unwrap_or(Ok(())),
+                    None => Ok(()),
+                };
+                match outcome {
+                    Ok(()) => Ok(ConnectedNativeTransport {
+                        transport: Box::new(NoopTransport),
+                        protocol_version: crate::wire::WIRE_PROTOCOL_VERSION,
+                        features: 0,
+                        terminal: Box::pin(std::future::pending()),
+                    }),
+                    Err(error) => Err(NativeTransportError::Retryable(error)),
+                }
+            })
+        }
+    }
+
+    /// A retry the keeper started before the reconnect call fails after it:
+    /// the call waits for an attempt of its own instead of reporting that
+    /// stale failure (`replica_settlement::connect_failure_keeps_authority_
+    /// subscription_held_until_upstream_returns` raced on it).
+    #[tokio::test]
+    async fn reconnect_ignores_a_failure_from_an_attempt_started_before_it() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (first_tx, first) = oneshot::channel();
+                let (retry_tx, retry) = oneshot::channel();
+                first_tx.send(Err("server down".to_owned())).unwrap();
+                let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let connector = Arc::new(ScriptedConnector {
+                    attempts: Mutex::new(VecDeque::from([first, retry])),
+                    started: started.clone(),
+                });
+                let schema = SchemaBuilder::new()
+                    .table(TableSchema::builder("notes").column("title", ColumnType::Text))
+                    .build();
+                let mut context = AppContext::test(schema);
+                context.server_url = "http://upstream.invalid".to_owned();
+                context.admin_secret = Some("admin-secret".to_owned());
+                let client = JazzClient::connect_with_native_transport(context, connector)
+                    .await
+                    .expect("an unreachable server starts the client offline");
+
+                // The keeper's own retry is in flight when the call starts.
+                tokio::time::timeout(Duration::from_secs(30), async {
+                    while started.load(std::sync::atomic::Ordering::SeqCst) < 2 {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                })
+                .await
+                .expect("the keeper retries");
+                let reconnect = {
+                    let client = client.clone();
+                    tokio::task::spawn_local(
+                        async move { client.reconnect_upstream_for_test().await },
+                    )
+                };
+                tokio::task::yield_now().await;
+                retry_tx.send(Err("stale outage".to_owned())).unwrap();
+
+                let attached = tokio::time::timeout(Duration::from_secs(30), reconnect)
+                    .await
+                    .expect("a later attempt answers the call")
+                    .expect("reconnect task")
+                    .expect("the stale failure is not this call's");
+                assert!(attached);
+                assert!(started.load(std::sync::atomic::Ordering::SeqCst) >= 3);
+            })
+            .await;
     }
 }

@@ -133,6 +133,7 @@ export function proveForegroundWriteAbi(
   factory: NativeForegroundRuntimeFactory,
   capability: Uint8Array,
   codec: ForegroundByteCodec,
+  markFailure: (code: DeviceDiagnosticCode) => void = () => {},
 ): void {
   const foreground = factory.openAttached(capability);
   const execute = (command: NativeForegroundCommand): NativeForegroundResponse =>
@@ -144,6 +145,7 @@ export function proveForegroundWriteAbi(
     return response.transaction;
   };
   const rowId = Uint8Array.from({ length: 16 }, () => 0x71);
+  markFailure("foreground-write-insert-failed");
   const mergeable = requireTransaction("mergeable");
   const inserted = execute({
     type: "insert",
@@ -154,6 +156,7 @@ export function proveForegroundWriteAbi(
   });
   if (inserted.type !== "inserted" || !sameBytes(inserted.rowId, rowId))
     throw new Error("foreground Insert did not return its supplied row id");
+  markFailure("foreground-write-mutation-failed");
   for (const command of [
     { type: "update" as const, patch: fixtureCells("updated") },
     { type: "upsert" as const, cells: fixtureCells("upserted") },
@@ -168,6 +171,7 @@ export function proveForegroundWriteAbi(
     if (response.type !== "mutationStaged")
       throw new Error(`foreground ${command.type} was not staged`);
   }
+  markFailure("foreground-write-commit-failed");
   const committed = execute({
     type: "commitTransaction",
     transaction: mergeable,
@@ -178,13 +182,23 @@ export function proveForegroundWriteAbi(
     committed.txId.every((byte) => byte === 0)
   )
     throw new Error("foreground Commit did not return a non-zero public txId");
+  markFailure("foreground-write-retire-failed");
+  // A committed handle is retired: committing it again is refused, and a
+  // rollback is the relay's idempotent no-op, reporting nothing rolled back.
+  const recommitted = execute({
+    type: "commitTransaction",
+    transaction: mergeable,
+  });
+  if (recommitted.type !== "operationError")
+    throw new Error("foreground committed a terminal transaction handle twice");
   const retired = execute({
     type: "rollbackTransaction",
     transaction: mergeable,
   });
-  if (retired.type !== "operationError")
-    throw new Error("foreground accepted a terminal transaction handle");
+  if (retired.type !== "transactionRolledBack" || retired.rolledBack)
+    throw new Error("foreground rolled back a terminal transaction handle");
 
+  markFailure("foreground-write-rollback-failed");
   const exclusive = requireTransaction("serializable");
   const rollbackRowId = Uint8Array.from({ length: 16 }, () => 0x72);
   const rollbackInsert = execute({
@@ -203,6 +217,7 @@ export function proveForegroundWriteAbi(
   if (rolledBack.type !== "transactionRolledBack" || !rolledBack.rolledBack)
     throw new Error("exclusive foreground transaction did not roll back");
 
+  markFailure("foreground-write-alias-failed");
   // Handles are local to their foreground alias. A sibling cannot commit an
   // otherwise well-formed handle from this terminal transaction.
   const sibling = factory.openAttached(capability);

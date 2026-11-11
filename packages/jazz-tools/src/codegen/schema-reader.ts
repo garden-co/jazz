@@ -121,6 +121,12 @@ function columnMergeStrategyToWasm(
       return "Counter";
     case "g-set":
       return "GSet";
+    case "text":
+      return "Text";
+    case "markdown":
+      return "Markdown";
+    case "html":
+      return "Html";
   }
 }
 
@@ -207,6 +213,14 @@ export function schemaToWasm(schema: Schema): WasmSchema {
       ) {
         throw new Error("g-set merge strategy is only supported on non-nullable ARRAY columns.");
       }
+      if (
+        (col.mergeStrategy === "text" ||
+          col.mergeStrategy === "markdown" ||
+          col.mergeStrategy === "html") &&
+        col.sqlType !== "TEXT"
+      ) {
+        throw new Error(`${col.mergeStrategy} merge strategy is only supported on TEXT columns.`);
+      }
       const descriptor: ColumnDescriptor = {
         name: col.name,
         column_type: columnType,
@@ -232,6 +246,7 @@ export function schemaToWasm(schema: Schema): WasmSchema {
         ? { composite_indexes: table.compositeIndexes.map((columns) => [...columns]) }
         : {}),
       ...(table.branchBy ? { branchBy: [...table.branchBy] } : {}),
+      ...(table.history ? { history: table.history } : {}),
       policies: table.policies ? clonePolicies(table.policies) : undefined,
     };
   }

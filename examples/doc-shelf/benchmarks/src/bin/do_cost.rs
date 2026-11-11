@@ -99,10 +99,12 @@ fn main() {
     let device = block_on(Db::open(config(0x81))).expect("open device");
     let _upstream =
         block_on(device.connect_upstream(Box::new(WireTransportAdapter::current(client))));
-    let _subscriber = server.accept_subscriber(
-        Box::new(WireTransportAdapter::current(authority)),
-        AuthorSubject::SYSTEM,
-    );
+    let _subscriber = server
+        .accept_subscriber(
+            Box::new(WireTransportAdapter::current(authority)),
+            AuthorSubject::SYSTEM,
+        )
+        .unwrap();
     let round = || {
         block_on(device.tick()).expect("device tick");
         block_on(server.tick()).expect("authority tick");

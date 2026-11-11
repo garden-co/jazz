@@ -160,12 +160,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "arrayref"
-version = "0.3.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76a2e8124351fda1ef8aaaa3bbd7ebbcb486bbcd4225aca0aa0d84bb2db8fecb"
-
-[[package]]
 name = "arrayvec"
 version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -332,11 +326,10 @@ checksum = "843867be96c8daad0d758b57df9392b6d8d271134fce549de6ce169ff98a92af"
 
 [[package]]
 name = "blake3"
-version = "1.8.4"
+version = "1.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4d2d5991425dfd0785aed03aedcf0b321d61975c9b5b3689c774a2610ae0b51e"
+checksum = "6d9e454fc11f76977dc803893aff6304ed33d6a26efae8696573bea74baa27ae"
 dependencies = [
- "arrayref",
  "arrayvec",
  "cc",
  "cfg-if",
@@ -1894,7 +1887,6 @@ name = "jazz"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
- "blake3",
  "bytes",
  "codspeed-divan-compat",
  "criterion",
@@ -1940,6 +1932,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-alpha59-alpha60-dump"
+version = "0.0.0"
+dependencies = [
+ "blake3",
+ "ciborium",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+]
+
+[[package]]
 name = "jazz-benchmark-guard"
 version = "0.1.0"
 dependencies = [
@@ -1956,6 +1959,7 @@ dependencies = [
  "flate2",
  "futures-util",
  "jazz",
+ "jazz-alpha59-alpha60-dump",
  "jazz-native-transport",
  "jazz-otel",
  "jazz-server",
@@ -1994,11 +1998,11 @@ dependencies = [
 name = "jazz-db"
 version = "0.1.0"
 dependencies = [
- "blake3",
  "bytes",
  "futures",
  "jazz-model",
  "jazz-protocol",
+ "jazz-text",
  "jazz-types",
  "postcard",
  "rusqlite",
@@ -2088,6 +2092,7 @@ dependencies = [
  "codspeed-divan-compat",
  "jazz",
  "jazz-benchmark-guard",
+ "jazz-native-relay",
  "tempfile",
  "zstd",
 ]
@@ -2148,9 +2153,9 @@ name = "jazz-model"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
- "blake3",
  "hex",
  "internment",
+ "jazz-text",
  "jazz-types",
  "jsonschema",
  "postcard",
@@ -2171,6 +2176,7 @@ dependencies = [
  "jazz-native-relay",
  "jazz-otel",
  "jazz-server",
+ "jazz-text",
  "libsodium-sys-stable",
  "mimalloc-safe",
  "napi",
@@ -2180,6 +2186,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -2187,16 +2194,15 @@ name = "jazz-native-relay"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
- "blake3",
  "futures",
  "getrandom 0.3.4",
  "jazz",
  "jazz-native-transport",
  "jazz-server",
  "jazz-testkit",
+ "jazz-text",
  "libc",
  "postcard",
- "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
@@ -2255,7 +2261,6 @@ dependencies = [
 name = "jazz-protocol"
 version = "0.1.0"
 dependencies = [
- "blake3",
  "hex",
  "jazz-compression",
  "jazz-model",
@@ -2281,9 +2286,12 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
+ "bytes",
+ "flate2",
  "futures",
  "futures-util",
  "hex",
+ "hmac",
  "http",
  "jazz",
  "jazz-otel",
@@ -2341,11 +2349,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-text"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "jazz-types"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
- "blake3",
  "bytes",
  "ed25519-dalek",
  "futures",
@@ -2374,23 +2389,26 @@ dependencies = [
  "futures-util",
  "getrandom 0.2.17",
  "getrandom 0.3.4",
+ "indexed_db_futures",
  "jazz",
+ "jazz-text",
  "jazz-wasm-tracing",
  "js-sys",
  "postcard",
+ "rsqlite-vfs",
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
  "sha2",
  "sqlite-wasm-rs",
- "sqlite-wasm-vfs",
  "talc",
+ "thiserror",
+ "tokio",
  "tracing",
  "uuid",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-bindgen-test",
- "web-sys",
  "web-time",
 ]
 
@@ -4361,22 +4379,6 @@ dependencies = [
  "js-sys",
  "rsqlite-vfs",
  "wasm-bindgen",
-]
-
-[[package]]
-name = "sqlite-wasm-vfs"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f7a5c9ac229421d577bb5a9bb59048838509958b218dd4e0b3c1214a87c361e"
-dependencies = [
- "indexed_db_futures",
- "js-sys",
- "rsqlite-vfs",
- "thiserror",
- "tokio",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
 ]
 
 [[package]]

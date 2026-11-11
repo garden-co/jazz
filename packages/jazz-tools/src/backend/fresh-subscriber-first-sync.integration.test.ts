@@ -4,12 +4,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
-import { deploy, startLocalJazzServer } from "../testing/index.js";
-import { createJazzSession } from "./index.js";
+import { startTestJazz } from "../testing/index.js";
+import { createJazzClient } from "./index.js";
 
-const app = s.defineApp({
-  docs: s.table({ label: s.string(), body: s.string() }, {}),
-});
+const app = s.defineApp(
+  {
+    docs: s.table({ label: s.string(), body: s.string() }, {}),
+  },
+  { migrations: "none" },
+);
 const permissions = s.definePermissions(app, ({ policy }) => {
   policy.docs.allowRead.always();
   policy.docs.allowInsert.always();
@@ -30,10 +33,10 @@ describe("fresh subscriber first sync", () => {
     };
     const rowCount = 100;
     const body = "x".repeat(60_000);
-    const server = await startLocalJazzServer({ ...settings, schema: app, permissions });
-    const sessions: Awaited<ReturnType<typeof createJazzSession>>[] = [];
+    const server = await startTestJazz({ app, permissions, coreOptions: settings });
+    const sessions: Awaited<ReturnType<typeof createJazzClient>>[] = [];
     const open = async (name: string) => {
-      const session = await createJazzSession({
+      const session = await createJazzClient({
         appId: settings.appId,
         app,
         permissions,
@@ -48,7 +51,6 @@ describe("fresh subscriber first sync", () => {
     };
     let unsubscribe: (() => void) | undefined;
     try {
-      await deploy({ ...settings, schema: app, permissions, serverUrl: server.url });
       const writer = await open("writer");
       for (let start = 0; start < rowCount; start += 20) {
         await Promise.all(

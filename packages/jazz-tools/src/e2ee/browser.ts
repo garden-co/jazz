@@ -1,3 +1,11 @@
+/**
+ * @packageDocumentation
+ * Experimental: low-level crypto building blocks for end-to-end encryption.
+ * Not audited, not yet an end-to-end encrypted app, and the API may change in
+ * any release.
+ *
+ * @experimental
+ */
 import { resolveCrypto } from "./crypto.js";
 import { createSodiumLargeValueCipher } from "./large-value.js";
 import { createSodiumDeviceSigner } from "./signer.js";
@@ -9,6 +17,7 @@ import {
 import type { SodiumKeyPrimitives } from "./sodium.js";
 import type { CellCipher, CryptoAdapters, DeviceSigner, JazzCrypto, KeyEnvelope } from "./types.js";
 
+/** @experimental */
 export async function createBrowserCrypto(overrides: JazzCrypto = {}): Promise<CryptoAdapters> {
   return resolveCrypto(overrides, {
     cellCipher: createBrowserCellCipher,
@@ -19,10 +28,12 @@ export async function createBrowserCrypto(overrides: JazzCrypto = {}): Promise<C
   });
 }
 
+/** @experimental */
 export async function createBrowserEqualityIndex() {
   return createSodiumEqualityIndex(await browserSodium());
 }
 
+/** @experimental */
 export async function createBrowserLargeValueCipher() {
   // Keep this platform-specific WASM module unloaded when a caller overrides the adapter.
   const { default: sodium } = await import("./sodium-browser.js");
@@ -88,15 +99,21 @@ export async function createBrowserLargeValueCipher() {
   });
 }
 
-/** Initialise the official libsodium.js implementation before preparing writes. */
+/**
+ * Initialise the official libsodium.js implementation before preparing writes.
+ *
+ * @experimental
+ */
 export async function createBrowserCellCipher(): Promise<CellCipher> {
   return createSodiumCellCipher(await browserSodium());
 }
 
+/** @experimental */
 export async function createBrowserKeyEnvelope(): Promise<KeyEnvelope> {
   return createSodiumKeyEnvelope(await browserSodium());
 }
 
+/** @experimental */
 export async function createBrowserDeviceSigner(): Promise<DeviceSigner> {
   // Keep this platform-specific WASM module unloaded when a caller overrides the adapter.
   const { default: sodium } = await import("./sodium-browser.js");

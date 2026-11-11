@@ -56,7 +56,7 @@ use common::{
 
 const USERS: usize = 4;
 const ROOMS: usize = 3;
-const ME: [&str; 3] = ["user", "identity", "subject"];
+const ME: [&str; 2] = ["identity", "subject"];
 
 fn user(n: usize) -> AuthorSubject {
     AuthorSubject::for_test_bytes([0x40 + n as u8; 16])
@@ -279,7 +279,10 @@ impl World {
             .unwrap();
             let (client_side, server_side) = duplex();
             let _upstream = block_on(client.connect_upstream(client_side));
-            world.server.accept_subscriber(server_side, user(u));
+            world
+                .server
+                .accept_subscriber(server_side, user(u))
+                .unwrap();
             world.clients.push(client);
         }
         for u in 0..USERS {

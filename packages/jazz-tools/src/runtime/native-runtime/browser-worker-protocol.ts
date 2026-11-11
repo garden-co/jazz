@@ -1,7 +1,9 @@
+import type { ClientMigrations } from "../client-migrations.js";
 import type { WasmSchema, Value } from "../../drivers/types.js";
 import type { RuntimeSourcesConfig } from "../context.js";
 import type { MutationErrorEvent } from "../client.js";
 import type { RemoteLinkState } from "../remote-link-state.js";
+import type { LinkStatus } from "../sync-status.js";
 import type { NativeSelfSignedClientProof } from "./native-codec.js";
 import {
   UNSUPPORTED_STORAGE_CODECS_ERROR_CODE,
@@ -34,6 +36,15 @@ export interface BrowserRelayError {
   unknown?: string[];
   cause?: unknown;
 }
+
+/**
+ * Why a worker refuses a tab whose configuration differs from the open
+ * store's only in who is signed in to its account: a guest who signed up in
+ * that tab (and kept the account) while another tab is still the guest. The
+ * tab tries again on its own until that tab follows the sign-up or closes.
+ */
+export const BROWSER_STORE_HELD_BY_ANOTHER_SIGN_IN =
+  "this account's store is open under another sign-in in another tab";
 
 /** The relay error envelope is deliberately small enough for a MessagePort. */
 export const BROWSER_RELAY_ERROR_MAX_CAUSE_DEPTH = 32;
@@ -360,7 +371,11 @@ export interface BrowserWorkerInitOptions {
   author: Uint8Array;
   selfSignedClientProof?: NativeSelfSignedClientProof;
   initialSyncFlushEvery: number;
+  /** The app's versions and migrations: see {@link ClientMigrations}. */
+  migrations?: ClientMigrations;
   appId: string;
+  /** Slow-query log threshold for the worker's store; 0 turns the log off. */
+  slowQueryThresholdMs?: number;
   /** Non-secret logical owner pinned to an explicitly selected physical IDB root. */
   storageOwner: string;
   authSessionKey: string;
@@ -491,6 +506,13 @@ export type InspectorStagedEdit = {
 export type BrowserFollowerPortRequest =
   /** Connection liveness only; never acknowledges an operation's outcome. */
   | { type: "runtime-probe"; connectionId: string; nonce: number }
+  /**
+   * A Web Lock the tab now holds for as long as its page lives. The worker
+   * waits on it and detaches the tab once the browser grants it: the page
+   * went away (closed, crashed, discarded) without saying so. Sent only once
+   * the tab holds it, so the worker's request always queues behind the tab.
+   */
+  | { type: "liveness-lock"; name: string }
   | {
       type: "inspect-commit";
       id: number;
@@ -637,11 +659,11 @@ export type BrowserFollowerPortEvent =
    */
   | { type: "transport-state"; explicitlyDisconnected: boolean }
   /**
-   * Live reachability of the worker's upstream server. Tabs use it only to
+   * Live reachability of the worker's upstream server. Tabs use `state` to
    * decide whether a local-first read's first load may wait for a remote
-   * answer; older tabs ignore it.
+   * answer, and report `link` as their sync status; older tabs ignore it.
    */
-  | { type: "remote-link"; state: RemoteLinkState }
+  | { type: "remote-link"; state: RemoteLinkState; link?: LinkStatus }
   | {
       type: "result";
       id: number;
@@ -656,11 +678,27 @@ export type BrowserFollowerPortEvent =
   | { type: "auth-restored" }
   | { type: "mutation-error"; event: MutationErrorEvent }
   /**
-   * A terminal failure of the worker-owned upstream server transport. This is
-   * deliberately not a mutation rejection: the follower records it only to
-   * reject its active remote waits and subscriptions.
+   * The worker could not write its store to IndexedDB (storage full, most
+   * often): `message` says why, or `null` once a write succeeds again.
+   * Meanwhile it keeps the tab's writes in memory and acknowledges none, so
+   * the tab rejects their `local` waits.
    */
-  | { type: "transport-error"; error: BrowserRelayError }
+  | { type: "storage-failure"; message: string | null }
+  /**
+   * A failure of the worker-owned upstream server transport. This is
+   * deliberately not a mutation rejection: the follower records it only to
+   * reject its active remote waits and subscriptions, or, while the worker
+   * keeps reconnecting, its remote reads.
+   */
+  | {
+      type: "transport-error";
+      error: BrowserRelayError;
+      /**
+       * The worker keeps reconnecting through the error, so writes' Global
+       * waits and remote subscriptions wait for it (#3923).
+       */
+      retrying?: boolean;
+    }
   | { type: "storage-reset"; resetId: number }
   | { type: "storage-invalidated" }
   | { type: "relay-trace"; entries: BrowserRelayTrace[] }

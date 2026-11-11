@@ -21,7 +21,8 @@ export type NativeCoreErrorCode =
   | "backpressure"
   | "not_observed"
   | "historical_read_requires_server"
-  | "unsupported_storage_codecs";
+  | "unsupported_storage_codecs"
+  | "authority_changed";
 
 /** Read the string `code` of a thrown value, or `undefined` when it has none. */
 export function nativeErrorCode(error: unknown): string | undefined {
@@ -41,6 +42,7 @@ const NATIVE_CORE_ERROR_CODES: ReadonlySet<string> = new Set<NativeCoreErrorCode
   "not_observed",
   "historical_read_requires_server",
   "unsupported_storage_codecs",
+  "authority_changed",
 ]);
 
 /** The core `ErrorCode` a thrown value carries, or `undefined` for any other value. */
@@ -49,4 +51,67 @@ export function nativeCoreErrorCode(error: unknown): NativeCoreErrorCode | undef
   return code !== undefined && NATIVE_CORE_ERROR_CODES.has(code)
     ? (code as NativeCoreErrorCode)
     : undefined;
+}
+
+/**
+ * The stable reason a core Jazz error carries across the native boundary,
+ * finer than its code: the Rust `Reason::as_str` name, set as `error.reason`
+ * by WASM, by NAPI promise rejections and by React Native. A NAPI synchronous
+ * throw carries only its code, since napi-rs creates it from a code and a
+ * message alone; that includes a pollable NAPI read or `waitForPendingWrites`
+ * whose `poll()` throws.
+ */
+export type NativeCoreErrorReason =
+  | "authorization_denied"
+  | "client_clock_too_far_ahead"
+  | "serialization_conflict"
+  | "row_already_deleted"
+  | "row_already_exists"
+  | "row_not_deleted"
+  | "missing_required"
+  | "branch_move"
+  | "missing_chunks"
+  | "predecessor_rejected"
+  | "schema_version_not_deployed"
+  | "identity_mismatch";
+
+/** Every reason this build knows; a test checks it against the engine's `Reason::ALL`. */
+export const NATIVE_CORE_ERROR_REASONS: ReadonlySet<string> = new Set<NativeCoreErrorReason>([
+  "authorization_denied",
+  "client_clock_too_far_ahead",
+  "serialization_conflict",
+  "row_already_deleted",
+  "row_already_exists",
+  "row_not_deleted",
+  "missing_required",
+  "branch_move",
+  "missing_chunks",
+  "predecessor_rejected",
+  "schema_version_not_deployed",
+  "identity_mismatch",
+]);
+
+/** The core `Reason` a thrown value carries, or `undefined` when it has none this build knows. */
+export function nativeCoreErrorReason(error: unknown): NativeCoreErrorReason | undefined {
+  if (!error || typeof error !== "object") return undefined;
+  const reason = (error as { reason?: unknown }).reason;
+  return typeof reason === "string" && NATIVE_CORE_ERROR_REASONS.has(reason)
+    ? (reason as NativeCoreErrorReason)
+    : undefined;
+}
+
+/**
+ * The core's refusal of a session's update or upsert of a row it may not
+ * read or that does not exist, as a synchronous write throws it. A caller
+ * that decides the same refusal itself (no row came back from the read
+ * before an update) throws this, so the two read alike.
+ */
+export function unreadableTargetError(operation: "Update" | "Upsert", table: string): Error {
+  const verb = operation.toUpperCase();
+  return Object.assign(
+    new Error(
+      `${operation} failed: WriteError("authorization_denied: read policy denied ${verb} on table ${table}: the row does not exist or the session may not read it")`,
+    ),
+    { code: "permission_denied" },
+  );
 }

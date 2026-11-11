@@ -1,9 +1,8 @@
 <!-- #region read-write-svelte -->
 <script lang="ts">
-	import { getDb, QuerySubscription } from 'jazz-tools/svelte';
+	import { QuerySubscription } from 'jazz-tools/svelte';
 	import { app } from '../schema.js';
 
-  const db = getDb();
   // #region reading-reactive-svelte
   const todos = new QuerySubscription(app.todos);
   // #endregion reading-reactive-svelte
@@ -25,27 +24,27 @@
     e.preventDefault();
     if (!title.trim()) return;
     // #region writing-insert-svelte
-    db.insert(app.todos, { title: title.trim(), done: false });
+    todos.db.insert(app.todos, { title: title.trim(), done: false });
     // #endregion writing-insert-svelte
     title = '';
   }
 
   // #region writing-mutations-svelte
   function toggleTodo(todo: { id: string; done: boolean }) {
-    db.update(app.todos, todo.id, { done: !todo.done });
+    todos.db.update(app.todos, todo.id, { done: !todo.done });
   }
 
   function removeTodo(id: string) {
-    db.delete(app.todos, id);
+    todos.db.delete(app.todos, id);
   }
   // #endregion writing-mutations-svelte
   // #endregion writing-use-db-svelte
 
   // #region writing-durability-svelte
   async function addImportantTodo(todoTitle: string) {
-    const { id } = await db.insert(app.todos, { title: todoTitle, done: false }).wait({ tier: 'global' });
-    await db.update(app.todos, id, { done: true }).wait({ tier: 'global' });
-    await db.delete(app.todos, id).wait({ tier: 'global' });
+    const { id } = await todos.db.insert(app.todos, { title: todoTitle, done: false }).wait({ tier: 'global' });
+    await todos.db.update(app.todos, id, { done: true }).wait({ tier: 'global' });
+    await todos.db.delete(app.todos, id).wait({ tier: 'global' });
   }
   // #endregion writing-durability-svelte
 </script>

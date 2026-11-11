@@ -7,9 +7,9 @@ import {
   setWriteWaitReadiness,
   ReadTier,
   resolveEffectiveQueryExecutionOptions,
+  DEFAULT_CLIENT_FIRST_LOAD_REMOTE_WAIT_MS,
   publicQueryExecutionOptions,
   type Runtime,
-  type TransactionalRuntime,
   type TxId,
   type MutationErrorEvent,
   type OpenTransactionId,
@@ -99,19 +99,19 @@ function makeFakeRuntime() {
     onMutationError: vi.fn<Runtime["onMutationError"]>((callback) => {
       mutationErrorCallback = callback;
     }),
-    beginTransaction: vi.fn<TransactionalRuntime["beginTransaction"]>((_kind, id) => {
+    beginTransaction: vi.fn<Runtime["beginTransaction"]>((_kind, id) => {
       nextTransactionNumber += 1;
       return id;
     }),
     connect: vi.fn<Runtime["connect"]>(),
     disconnect: vi.fn<Runtime["disconnect"]>(),
-    commitTransaction: vi.fn<TransactionalRuntime["commitTransaction"]>(
+    commitTransaction: vi.fn<Runtime["commitTransaction"]>(
       () => `committed-${nextTransactionNumber}` as TxId,
     ),
     waitForTransaction: vi.fn<Runtime["waitForTransaction"]>(async () => undefined),
-    rollbackTransaction: vi.fn<TransactionalRuntime["rollbackTransaction"]>(async () => false),
+    rollbackTransaction: vi.fn<Runtime["rollbackTransaction"]>(async () => false),
     close: vi.fn(),
-  } satisfies TransactionalRuntime;
+  } satisfies Runtime;
 
   return Object.assign(runtime, {
     emitMutationError(event: MutationErrorEvent) {
@@ -182,10 +182,12 @@ describe("JazzClient onAuthFailure wiring", () => {
     expect(onAuthFailure).toHaveBeenCalledWith("expired");
   });
 
-  it("does nothing when runtimeOptions.onAuthFailure is omitted", () => {
+  it("still observes refusals when runtimeOptions.onAuthFailure is omitted", () => {
+    // A refusal nothing renews ends the client's Global waits (#3923).
     const runtime = makeFakeRuntime();
     JazzClient.connectWithRuntime(runtime as any, makeContext(), {});
-    expect(runtime.onAuthFailure).not.toHaveBeenCalled();
+    expect(runtime.onAuthFailure).toHaveBeenCalledTimes(1);
+    expect(() => runtime.onAuthFailure.mock.calls[0][0]("token expired")).not.toThrow();
   });
 });
 
@@ -628,6 +630,46 @@ describe("default read tier", () => {
       vi.unstubAllGlobals();
     }
   });
+
+  it.each([
+    { window: {}, document: {}, navigator: undefined },
+    { window: undefined, document: undefined, navigator: { product: "ReactNative" } },
+  ])("waits briefly for the server on a client's default first load", (globals) => {
+    try {
+      for (const [name, value] of Object.entries(globals)) vi.stubGlobal(name, value);
+      const context = { serverUrl: "https://example.test" };
+      expect(resolveEffectiveQueryExecutionOptions(context)).toMatchObject({
+        tier: ReadTier.LocalFirst,
+        firstLoadRemoteWaitMs: DEFAULT_CLIENT_FIRST_LOAD_REMOTE_WAIT_MS,
+      });
+      expect(
+        resolveEffectiveQueryExecutionOptions(context, { firstLoadRemoteWaitMs: 250 }),
+      ).toMatchObject({ tier: ReadTier.LocalFirst, firstLoadRemoteWaitMs: 250 });
+      // An explicit zero, an explicit local-first tier, and a remote read opt out.
+      for (const options of [
+        { firstLoadRemoteWaitMs: 0 },
+        { tier: ReadTier.LocalFirst },
+        { tier: ReadTier.Remote },
+      ] as const) {
+        expect(resolveEffectiveQueryExecutionOptions(context, options)).not.toHaveProperty(
+          "firstLoadRemoteWaitMs",
+        );
+      }
+      // Without a server nothing could answer, so nothing waits.
+      expect(resolveEffectiveQueryExecutionOptions({})).not.toHaveProperty("firstLoadRemoteWaitMs");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("does not wait by default outside client platforms", () => {
+    expect(
+      resolveEffectiveQueryExecutionOptions(
+        { serverUrl: "https://example.test" },
+        { tier: ReadTier.LocalFirst },
+      ),
+    ).not.toHaveProperty("firstLoadRemoteWaitMs");
+  });
 });
 
 describe("public read tiers", () => {
@@ -962,7 +1004,10 @@ describe("JazzClient runtime transaction waits", () => {
       const handle = mapped ? original.mapValue((value) => value.toUpperCase()) : original;
       const completed = vi.fn();
       const waiting = handle.wait({ tier: "global" }).then(completed);
-      expect(runtime.waitForTransaction).toHaveBeenCalledWith(handle.txId, "global", { ready });
+      expect(runtime.waitForTransaction).toHaveBeenCalledWith(handle.txId, "global", {
+        ready,
+        signal: expect.any(AbortSignal),
+      });
       await Promise.resolve();
       await Promise.resolve();
       expect(completed).not.toHaveBeenCalled();
@@ -999,7 +1044,9 @@ describe("JazzClient runtime transaction waits", () => {
       client.waitForTransaction("transaction-runtime" as TxId, "global"),
     ).resolves.toBeUndefined();
 
-    expect(runtime.waitForTransaction).toHaveBeenCalledWith("transaction-runtime", "global");
+    expect(runtime.waitForTransaction).toHaveBeenCalledWith("transaction-runtime", "global", {
+      signal: expect.any(AbortSignal),
+    });
   });
 
   it("waits for connected serializable transactions at the global tier", async () => {
@@ -1009,7 +1056,9 @@ describe("JazzClient runtime transaction waits", () => {
 
     await expect(handle.wait()).resolves.toBeUndefined();
 
-    expect(runtime.waitForTransaction).toHaveBeenCalledWith("transaction-serializable", "global");
+    expect(runtime.waitForTransaction).toHaveBeenCalledWith("transaction-serializable", "global", {
+      signal: expect.any(AbortSignal),
+    });
   });
 
   it("waits for local-only serializable transactions at the local tier", async () => {
@@ -1022,7 +1071,9 @@ describe("JazzClient runtime transaction waits", () => {
 
     await expect(handle.wait()).resolves.toBeUndefined();
 
-    expect(runtime.waitForTransaction).toHaveBeenCalledWith("transaction-serializable", "local");
+    expect(runtime.waitForTransaction).toHaveBeenCalledWith("transaction-serializable", "local", {
+      signal: expect.any(AbortSignal),
+    });
   });
 
   it("surfaces runtime wait rejection as PersistedWriteRejectedError", async () => {

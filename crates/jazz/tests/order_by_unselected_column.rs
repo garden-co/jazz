@@ -240,18 +240,32 @@ fn subscription_orders_by_an_unselected_column() {
     }
 }
 
-/// A read with an include (array subquery) must not return the unselected
-/// order key either. Ordering such reads by an unselected column is tracked
-/// separately in #3503; this pins only that the key does not leak.
+/// A read with an include (array subquery) orders by the unselected key
+/// and does not return it (#3503), in both directions and through the
+/// bindings' read entry point.
 #[test]
-fn include_read_does_not_return_the_unselected_order_key() {
+fn include_read_orders_by_the_unselected_key_without_returning_it() {
     let db = seeded_db();
-    let query = by_rank(OrderDirection::Asc)
-        .array_subquery(ArraySubquery::new("notes", "notes", "task_id", "id").select(["body"]));
-    let prepared = db.prepare_query(&query).expect("prepare query");
-    let mut read = titles(block_on(db.all(&prepared, local())).expect("read"));
-    read.sort();
-    assert_eq!(read, ["a", "b", "c", "d"]);
+    for (direction, expected) in [
+        (OrderDirection::Asc, ["a", "b", "c", "d"]),
+        (OrderDirection::Desc, ["d", "c", "b", "a"]),
+    ] {
+        let query = by_rank(direction)
+            .array_subquery(ArraySubquery::new("notes", "notes", "task_id", "id").select(["body"]));
+        let prepared = db.prepare_query(&query).expect("prepare query");
+        let read = titles(block_on(db.all(&prepared, local())).expect("read"));
+        assert_eq!(read, expected, "{direction:?}");
+        let bytes = postcard::to_allocvec(&query).expect("encode query");
+        let rows = match block_on(db.all_serialized_query(&bytes, local(), None, None, None))
+            .expect("serialized read")
+        {
+            jazz::db::SerializedReadResult::Relation(snapshot) => {
+                snapshot.rows[..snapshot.root_count].to_vec()
+            }
+            jazz::db::SerializedReadResult::Rows(rows) => rows,
+        };
+        assert_eq!(titles(rows), expected, "{direction:?} through the bindings");
+    }
 }
 
 /// Alice reads one metric through prepared queries. Non-null scalar double

@@ -1,5 +1,6 @@
 import { schema as s } from "jazz-tools";
 import { schema as betterAuthSchema } from "./schema-better-auth/schema";
+import { migrations } from "./migrations";
 
 /**
  * BandBook is a Notion-style workspace: a tree of pages, each holding an
@@ -39,7 +40,7 @@ const schema = {
         workspaceId: s.uuid(),
         parentId: s.uuid().optional(),
         title: s.string(),
-        kind: s.enum("doc", "issues", "issue"),
+        kind: s.enum("doc", "issues", "issue", "song"),
       },
       {
         workspace: s.rel("workspaces", "workspaceId"),
@@ -48,6 +49,7 @@ const schema = {
         blocksViaPage: s.reverse("blocks", "page"),
         grantsViaPage: s.reverse("pageGrants", "page"),
         issuesViaPage: s.reverse("issues", "page"),
+        sheetsViaPage: s.reverse("songSheets", "page"),
       },
     )
     .indexOnly(["workspaceId", "parentId"]),
@@ -86,6 +88,55 @@ const schema = {
       },
     )
     .indexOnly(["pageId", "position"]),
+  // #region rich-text-schema
+  // A song sheet page is one rich-text document: lyrics, chords and notes as
+  // Markdown. The authority merges concurrent edits to it (SPEC 4 §4.3), so
+  // two people rewriting different lines, online or offline, keep both.
+  songSheets: s
+    .table(
+      {
+        workspaceId: s.uuid(),
+        pageId: s.uuid(),
+        body: s.string().merge("markdown"),
+      },
+      { workspace: s.rel("workspaces", "workspaceId"), page: s.rel("pages", "pageId") },
+    )
+    .indexOnly(["pageId"]),
+  // Comments sit over a song sheet's text without being part of it: each one
+  // stores the text it covers and the text around it (a jazz-tools text
+  // range), and every reader finds it again in the sheet's current body.
+  sheetComments: s
+    .table(
+      {
+        workspaceId: s.uuid(),
+        pageId: s.uuid(),
+        author: s.uuid(),
+        range: s.json(),
+        text: s.string(),
+        resolved: s.boolean(),
+      },
+      { workspace: s.rel("workspaces", "workspaceId"), page: s.rel("pages", "pageId") },
+    )
+    .indexOnly(["pageId"]),
+  // Who has a song sheet open and where their cursor is: one row per open
+  // editor, overwritten a few times a second and refreshed while it stays
+  // open. Readers ignore rows whose `seenAt` is old. Latest-only: a cursor's
+  // past positions are worth nothing, so nodes keep no history of them.
+  sheetPresence: s
+    .table(
+      {
+        workspaceId: s.uuid(),
+        pageId: s.uuid(),
+        account: s.uuid(),
+        cursor: s.json(),
+        selection: s.json().optional(),
+        seenAt: s.float(),
+      },
+      { workspace: s.rel("workspaces", "workspaceId"), page: s.rel("pages", "pageId") },
+    )
+    .history("latest")
+    .indexOnly(["pageId"]),
+  // #endregion rich-text-schema
   // Attachment bytes are a large value written with `insertStreaming`. List
   // queries select the metadata columns only, so a page never downloads a
   // file it does not render.
@@ -140,13 +191,16 @@ const schema = {
 };
 
 type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema);
+export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
 export type Workspace = s.RowOf<typeof app.workspaces>;
 export type Member = s.RowOf<typeof app.members>;
 export type Page = s.RowOf<typeof app.pages>;
 export type PageGrant = s.RowOf<typeof app.pageGrants>;
 export type Block = s.RowOf<typeof app.blocks>;
 export type Attachment = s.RowOf<typeof app.attachments>;
+export type SongSheet = s.RowOf<typeof app.songSheets>;
+export type SheetComment = s.RowOf<typeof app.sheetComments>;
+export type SheetPresence = s.RowOf<typeof app.sheetPresence>;
 export type Issue = s.RowOf<typeof app.issues>;
 export type Invite = s.RowOf<typeof app.invites>;
 export type WorkspaceRole = Member["role"];

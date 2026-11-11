@@ -9,7 +9,7 @@ case "$platform" in
 esac
 root="$(pwd)"
 baseline="$(sha256sum dev/artifacts/linux-napi/Dockerfile | cut -d ' ' -f1)"
-image="jazz-napi-al2023:${baseline}-${docker_arch}"
+image="jazz-napi-bullseye:${baseline}-${docker_arch}"
 docker build --platform "linux/$docker_arch" --tag "$image" dev/artifacts/linux-napi
 # This directory is deliberately distinct from every host Cargo cache. Its key
 # changes with the whole producer image recipe, including both base digests.
@@ -27,7 +27,7 @@ docker run --rm --platform "linux/$docker_arch" \
   --env CARGO_TARGET_DIR="$cache/target" \
   --env JAZZ_NAPI_PNPM_STORE="$cache/pnpm-store" \
   --env JAZZ_TEST_ARTIFACT_LOCK_PATH="$cache/artifact.lock" \
-  --env JAZZ_NAPI_BUILD_BASELINE="al2023-gcc11-$baseline" \
+  --env JAZZ_NAPI_BUILD_BASELINE="bullseye-gcc10-$baseline" \
   --env JAZZ_NAPI_BUILD_IMAGE="$(docker image inspect --format '{{.Id}}' "$image")" \
   "$image" bash -c 'set -euo pipefail
     git config --global --add safe.directory "$PWD"

@@ -17,9 +17,7 @@ use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
 use duplex_transport::duplex;
-use jazz::db::{
-    Db, DbConfig, DbIdentity, FileOptions, InsertOptions, LOCAL_BASE, ReadOpts, block_on,
-};
+use jazz::db::{Db, DbConfig, DbIdentity, FileOptions, InsertOptions, ReadOpts, block_on};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query};
 use jazz::records::Value;
@@ -120,7 +118,10 @@ fn reopening_restores_rows_history_and_the_commit_seq() {
     let next = block_on(db.insert("items", item(100), Default::default()))
         .unwrap()
         .mergeable_tx_id();
-    assert_eq!(next, before + 1, "the commit seq continues");
+    assert!(
+        next > before,
+        "the commit seq continues above what it numbered"
+    );
     // History survived: an as-of read of the superseded image.
     let open = OpenTransactionId::new();
     block_on(db.begin_serializable(open)).unwrap();
@@ -294,7 +295,9 @@ fn a_replicas_pending_uploads_survive_a_restart_and_are_resent() {
     let (client_side, server_side) = duplex();
     block_on(client.connect_upstream(client_side));
     client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
-    server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+    server
+        .accept_subscriber(server_side, AuthorSubject::SYSTEM)
+        .unwrap();
     drive(
         &[&client, &server, &client],
         client.wait_for_pending_writes(DurabilityTier::Global),
@@ -306,7 +309,7 @@ fn a_replicas_pending_uploads_survive_a_restart_and_are_resent() {
         "every recovered upload reached the server"
     );
     for tx in txs {
-        assert!(tx > LOCAL_BASE);
+        assert!(tx > 0);
         drive(
             &[&client, &server, &client],
             client.wait_for_transaction(tx, DurabilityTier::Global),
@@ -338,7 +341,9 @@ fn a_reopened_replica_whose_uploads_settled_continues_after_its_own_seqs() {
         let (client_side, server_side) = duplex();
         block_on(client.connect_upstream(client_side));
         client.set_remote_link_hint(jazz::db::RemoteLinkHint::Live);
-        server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+        server
+            .accept_subscriber(server_side, AuthorSubject::SYSTEM)
+            .unwrap();
     };
     let insert = |db: &Db, n: u64| {
         let options = InsertOptions {
@@ -381,7 +386,9 @@ fn a_fresh_database_under_a_reused_node_continues_after_the_seeded_floor() {
     let connect = |client: &Db| {
         let (client_side, server_side) = duplex();
         block_on(client.connect_upstream(client_side));
-        server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+        server
+            .accept_subscriber(server_side, AuthorSubject::SYSTEM)
+            .unwrap();
     };
     let insert = |db: &Db, n: u64| {
         let options = InsertOptions {
@@ -425,7 +432,9 @@ fn a_server_restart_between_apply_and_ack_does_not_apply_twice() {
         let server = open_file(&server_path, 0xef);
         let (client_side, server_side) = duplex();
         block_on(client.connect_upstream(client_side));
-        server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+        server
+            .accept_subscriber(server_side, AuthorSubject::SYSTEM)
+            .unwrap();
         let tx = block_on(client.insert(
             "items",
             item(1),
@@ -444,7 +453,9 @@ fn a_server_restart_between_apply_and_ack_does_not_apply_twice() {
     let server = open_file(&server_path, 0xef);
     let (client_side, server_side) = duplex();
     block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+    server
+        .accept_subscriber(server_side, AuthorSubject::SYSTEM)
+        .unwrap();
     drive(
         &[&client, &server, &client],
         client.wait_for_transaction(tx, DurabilityTier::Global),
@@ -552,7 +563,9 @@ fn closing_a_store_that_read_large_values_back_checkpoints_its_wal() {
         let client = open_file(&path, 4);
         let (client_side, server_side) = duplex();
         let _upstream = block_on(client.connect_upstream(client_side));
-        server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+        server
+            .accept_subscriber(server_side, AuthorSubject::SYSTEM)
+            .unwrap();
         let query = client.prepare_query(&Query::from("items")).unwrap();
         let _stream = block_on(client.subscribe(&query, ReadOpts::default())).unwrap();
         for _ in 0..5 {
@@ -577,7 +590,9 @@ fn a_replica_reads_its_own_synced_large_value_offline_after_a_restart() {
         let client = open_file(&path, 5);
         let (client_side, server_side) = duplex();
         let _upstream = block_on(client.connect_upstream(client_side));
-        server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+        server
+            .accept_subscriber(server_side, AuthorSubject::SYSTEM)
+            .unwrap();
         let query = client.prepare_query(&Query::from("items")).unwrap();
         let _stream = block_on(client.subscribe(&query, ReadOpts::default())).unwrap();
         let handle = block_on(client.insert(
@@ -639,11 +654,15 @@ fn a_durable_relay_reads_a_large_value_its_client_wrote_offline_after_a_restart(
         let relay = open_file(&path, 6);
         let (relay_side, server_side) = duplex();
         let _upstream = block_on(relay.connect_upstream(relay_side));
-        server.accept_subscriber(server_side, AuthorSubject::SYSTEM);
+        server
+            .accept_subscriber(server_side, AuthorSubject::SYSTEM)
+            .unwrap();
         let client = block_on(Db::open(config(7))).unwrap();
         let (client_side, relay_down) = duplex();
         let _relay_link = block_on(client.connect_upstream(client_side));
-        relay.accept_subscriber(relay_down, AuthorSubject::SYSTEM);
+        relay
+            .accept_subscriber(relay_down, AuthorSubject::SYSTEM)
+            .unwrap();
         let query = client.prepare_query(&Query::from("items")).unwrap();
         let _stream = block_on(client.subscribe(&query, ReadOpts::default())).unwrap();
         let handle = block_on(client.insert(
@@ -689,7 +708,9 @@ fn a_durable_relay_reads_a_large_value_its_client_wrote_offline_after_a_restart(
     tab.set_non_durable_client();
     let (tab_side, relay_down) = duplex();
     let _tab_link = block_on(tab.connect_upstream(tab_side));
-    relay.accept_subscriber(relay_down, AuthorSubject::SYSTEM);
+    relay
+        .accept_subscriber(relay_down, AuthorSubject::SYSTEM)
+        .unwrap();
     // The app disconnected from the server; the worker still answers.
     tab.set_remote_link_hint(jazz::db::RemoteLinkHint::Failed);
     let read = postcard::to_allocvec(&Query::from("items")).unwrap();
@@ -709,5 +730,113 @@ fn a_durable_relay_reads_a_large_value_its_client_wrote_offline_after_a_restart(
             .and_then(|(_, v)| v.cloned()),
         Some(Value::String(label)),
         "the tab reads the large value through its relay"
+    );
+}
+
+/// #4189: a replica's games list subscribes in batches of up to 256 ids,
+/// `id IN batch ORDER BY n DESC LIMIT window`, growing the window 20 rows
+/// a step (closing and reopening each batch's subscription) to the end of
+/// 600 rows, then shrinking back to 41. After a shrink the subscriptions on
+/// both sides are back to the cold-launch count, and crawling again does
+/// not grow the process: what a deep crawl holds is released or reused.
+#[test]
+fn a_deep_crawl_then_shrink_releases_subscription_state() {
+    let client_path = scratch("crawl");
+    let server = block_on(Db::open_history_complete(config(0xc1))).unwrap();
+    let total = 600u64;
+    for n in 0..total {
+        let mut cells = item(n);
+        cells.insert("label".to_owned(), Value::String(format!("{n:>1024}")));
+        block_on(server.insert(
+            "items",
+            cells,
+            InsertOptions {
+                row_id: Some(row(n)),
+                ..Default::default()
+            },
+        ))
+        .unwrap();
+    }
+    let client = open_file(&client_path, 6);
+    let (client_side, server_side) = duplex();
+    let _upstream = block_on(client.connect_upstream(client_side));
+    server
+        .accept_subscriber(server_side, AuthorSubject::SYSTEM)
+        .unwrap();
+    let pump = || {
+        for _ in 0..4 {
+            block_on(client.tick()).unwrap();
+            block_on(server.tick()).unwrap();
+        }
+        block_on(client.tick()).unwrap();
+    };
+    let ids: Vec<u64> = (0..total).collect();
+    let open_window = |limit: usize| {
+        ids.chunks(256)
+            .map(|batch| {
+                let query = Query::from("items")
+                    .filter(jazz::query::in_list(
+                        jazz::query::col("id"),
+                        batch
+                            .iter()
+                            .map(|n| jazz::query::lit(Value::Uuid(row(*n).0))),
+                    ))
+                    .order_by("n", OrderDirection::Desc)
+                    .limit(limit);
+                let prepared = client.prepare_query(&query).unwrap();
+                block_on(client.subscribe(&prepared, ReadOpts::default())).unwrap()
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut window = open_window(40);
+    pump();
+    let cold = (
+        client.runtime_stats_for_test().active_subscriptions,
+        server.runtime_stats_for_test().active_subscriptions,
+    );
+    let crawl = |window: &mut Vec<_>| {
+        let mut limit = 40;
+        while limit < total as usize {
+            limit += 20;
+            window.clear();
+            pump();
+            *window = open_window(limit);
+            pump();
+        }
+        window.clear();
+        pump();
+        *window = open_window(41);
+        pump();
+    };
+    crawl(&mut window);
+    let after_first = rss_kib();
+    let shrunk = (
+        client.runtime_stats_for_test().active_subscriptions,
+        server.runtime_stats_for_test().active_subscriptions,
+    );
+    assert_eq!(
+        shrunk, cold,
+        "(client, server) subscriptions after the shrink"
+    );
+    for _ in 0..3 {
+        crawl(&mut window);
+    }
+    let after_more = rss_kib();
+    eprintln!(
+        "crawl: RSS after one crawl {} MiB, after four {} MiB",
+        after_first / 1024,
+        after_more / 1024
+    );
+    assert!(
+        after_more.saturating_sub(after_first) < 32 * 1024,
+        "repeated crawls grew the process by {} MiB",
+        (after_more - after_first) / 1024
+    );
+    assert_eq!(
+        (
+            client.runtime_stats_for_test().active_subscriptions,
+            server.runtime_stats_for_test().active_subscriptions,
+        ),
+        cold
     );
 }

@@ -266,9 +266,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
 
       const isRetryableSerializationConflict = (error: unknown) =>
         error instanceof PersistedWriteRejectedError &&
-        (error.code === "cascade_rejected" ||
-          error.code === "serialization_conflict" ||
-          error.code === "transaction_conflict");
+        (error.code === "serialization_conflict" || error.code === "transaction_conflict");
 
       /** Re-runs `attempt` until it is not rejected by a concurrent serializable transaction. */
       const retryOnSerializationConflict = async <T>(attempt: () => Promise<T>): Promise<T> => {

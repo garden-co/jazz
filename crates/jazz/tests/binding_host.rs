@@ -331,7 +331,9 @@ fn two_bindings_sync_over_frames_the_host_carries() {
     let server = authority();
     let client = open(0xa1);
     let upstream = client.connect_upstream();
-    let subscriber = server.accept_subscriber(client.author(), Default::default());
+    let subscriber = server
+        .accept_subscriber(client.author(), Default::default())
+        .unwrap();
     let links = [(&upstream, &subscriber)];
 
     let write = client.insert("notes", &title("hello"), &none()).unwrap();
@@ -405,7 +407,9 @@ fn a_write_made_before_the_upstream_connects_uploads_once_it_does() {
     let client = open(0xa1);
     let write = client.insert("notes", &title("offline"), &none()).unwrap();
     let upstream = client.connect_upstream();
-    let subscriber = server.accept_subscriber(client.author(), Default::default());
+    let subscriber = server
+        .accept_subscriber(client.author(), Default::default())
+        .unwrap();
     let links = [(&upstream, &subscriber)];
     drive(&links, client.wait_for(write.seq, "global").unwrap()).unwrap();
     assert_eq!(titles(&server), ["offline"]);
@@ -421,6 +425,7 @@ fn a_streamed_value_publishes_as_one_write() {
             &row,
             &empty_cells(),
             "title".to_owned(),
+            None,
             None,
             None,
             None,
@@ -579,13 +584,14 @@ fn a_backend_writes_as_a_local_first_account_only_once_admitted() {
 }
 
 #[test]
-fn a_first_result_larger_than_one_wire_frame_splits_into_rows_messages() {
+fn a_message_larger_than_one_wire_frame_travels_in_parts() {
     use jazz::db::{FrameJoiner, Image, SyncCell, SyncMessage, encode_frames};
     let image = |n: u8| Image {
+        written: None,
         table: "todos".into(),
         id: [n; 16],
         key: Vec::new(),
-        seq: 1,
+        at: jazz::db::Pos::at(1),
         deleted: false,
         content: true,
         cells: vec![("title".into(), SyncCell::Text(vec![b'x'; 300 * 1024]))],
@@ -593,39 +599,36 @@ fn a_first_result_larger_than_one_wire_frame_splits_into_rows_messages() {
     let images: Vec<Image> = (0..20).map(image).collect();
     let frames = encode_frames(SyncMessage::Rows {
         images: images.clone(),
+        tx_ids: Vec::new(),
     })
     .unwrap();
     assert!(frames.len() > 1);
     let limit = jazz::protocol_limits::MAX_WIRE_FRAME_BYTES;
-    // Every frame but the last carries leading parts; the last is the
-    // `Rows` that completes them, and only it yields the whole message.
+    // Every frame is a part of the one encoding, marked as leading or
+    // last; only the last yields the whole message.
     let last = frames.len() - 1;
     let mut joiner = FrameJoiner::default();
     for (i, frame) in frames.iter().enumerate() {
         assert!(frame.len() < limit);
-        let decoded = postcard::from_bytes::<SyncMessage>(frame).unwrap();
-        match (i == last, decoded) {
-            (false, SyncMessage::RowsPart { .. }) | (true, SyncMessage::Rows { .. }) => {}
-            (_, other) => panic!("frame {i} of {}: {other:?}", frames.len()),
-        }
+        assert_eq!(frame[0], if i == last { 0xFE } else { 0xFF });
         match joiner.push(frame).unwrap() {
             None => assert!(i < last),
-            Some(SyncMessage::Rows { images: joined }) => {
+            Some(SyncMessage::Rows { images: joined, .. }) => {
                 assert_eq!(i, last);
-                assert_eq!(
-                    joined.iter().map(|i| i.id).collect::<Vec<_>>(),
-                    images.iter().map(|i| i.id).collect::<Vec<_>>()
-                );
+                assert_eq!(joined, images);
             }
             Some(other) => panic!("expected rows, got {other:?}"),
         }
     }
-    // A message that fits stays one frame.
-    let one = encode_frames(SyncMessage::Rows {
+    // A message that fits stays one frame: its plain encoding.
+    let small = SyncMessage::Rows {
         images: vec![image(1)],
-    })
-    .unwrap();
-    assert_eq!(one.len(), 1);
+        tx_ids: Vec::new(),
+    };
+    assert_eq!(
+        encode_frames(small.clone()).unwrap(),
+        [postcard::to_allocvec(&small).unwrap()]
+    );
 }
 
 /// A browser tab over its worker: the worker is a replica whose own
@@ -634,12 +637,39 @@ fn tab_over(worker: &Binding, tab: Binding) -> (Binding, Link, Link) {
     tab.set_non_durable_client();
     tab.set_remote_link_hint("live").unwrap();
     let up = tab.connect_upstream();
-    let down = worker.accept_subscriber(worker.author(), Default::default());
+    let down = worker
+        .accept_subscriber(worker.author(), Default::default())
+        .unwrap();
     (tab, up, down)
 }
 
 #[test]
-fn a_frame_is_one_message_and_a_rows_message_ends_its_parts() {
+fn a_worker_refuses_a_tab_of_another_identity() {
+    // A worker relays its tabs' writes as its own identity: serving
+    // another user's tab would attribute that user's writes to it.
+    let worker = open(0xb1);
+    let other = open(0xb2);
+    match worker.accept_subscriber(other.author(), Default::default()) {
+        Err(HostError::Engine(error)) => {
+            assert_eq!(error.code, ErrorCode::Protocol);
+            assert_eq!(error.reason, Some(jazz::db::Reason::IdentityMismatch));
+        }
+        Err(other) => panic!("expected an identity mismatch, got {other:?}"),
+        Ok(_) => panic!("the worker served a tab of another identity"),
+    }
+    assert_eq!(worker.db.open_subscribers(), 0);
+    // Its own identity's tabs are served, and the authority serves anyone.
+    let (_tab, _up, _down) = tab_over(&worker, open(0xb3));
+    assert_eq!(worker.db.open_subscribers(), 1);
+    assert!(
+        authority()
+            .accept_subscriber(other.author(), Default::default())
+            .is_ok()
+    );
+}
+
+#[test]
+fn a_frame_is_one_message_and_a_split_message_ends_with_its_last_part() {
     use jazz::db::{FrameJoiner, SyncMessage, decode_message, encode_frames};
     let [frame] =
         <[Vec<u8>; 1]>::try_from(encode_frames(SyncMessage::Unsubscribe { id: 7 }).unwrap())
@@ -653,11 +683,24 @@ fn a_frame_is_one_message_and_a_rows_message_ends_its_parts() {
     assert!(postcard::from_bytes::<SyncMessage>(&trailing).is_ok());
     assert!(decode_message(&trailing).is_err());
     assert!(FrameJoiner::default().push(&trailing).is_err());
-    // Parts followed by anything but their `Rows` are the peer's error.
-    let part = postcard::to_allocvec(&SyncMessage::RowsPart { images: Vec::new() }).unwrap();
+    // A message split in two joins from its parts.
+    let (head, tail) = frame.split_at(1);
     let mut joiner = FrameJoiner::default();
-    assert!(joiner.push(&part).unwrap().is_none());
+    assert!(joiner.push(&[&[0xFF], head].concat()).unwrap().is_none());
+    assert!(matches!(
+        joiner.push(&[&[0xFE], tail].concat()),
+        Ok(Some(SyncMessage::Unsubscribe { id: 7 }))
+    ));
+    // Parts followed by a whole message, or a last part with nothing
+    // before it, are the peer's error.
+    let mut joiner = FrameJoiner::default();
+    assert!(joiner.push(&[&[0xFF], head].concat()).unwrap().is_none());
     assert!(joiner.push(&frame).is_err());
+    assert!(
+        FrameJoiner::default()
+            .push(&[&[0xFE], tail].concat())
+            .is_err()
+    );
 }
 
 /// A frame no sync message decodes from.
@@ -741,7 +784,9 @@ fn a_tab_reads_and_writes_through_its_worker_to_the_server() {
     let worker = open(0xc0);
     worker.set_remote_link_hint("live").unwrap();
     let up = worker.connect_upstream();
-    let down = server.accept_subscriber(worker.author(), Default::default());
+    let down = server
+        .accept_subscriber(worker.author(), Default::default())
+        .unwrap();
     let (tab, tab_up, tab_down) = tab_over(&worker, open(0xc1));
     let links = [(&up, &down), (&tab_up, &tab_down)];
 
@@ -834,7 +879,9 @@ fn a_tab_reads_a_large_value_its_worker_relays_from_the_server() {
     let worker = open(0xd2);
     worker.set_remote_link_hint("live").unwrap();
     let up = worker.connect_upstream();
-    let down = server.accept_subscriber(worker.author(), Default::default());
+    let down = server
+        .accept_subscriber(worker.author(), Default::default())
+        .unwrap();
     let (tab, tab_up, tab_down) = tab_over(&worker, open(0xd3));
     let links = [(&up, &down), (&tab_up, &tab_down)];
     let query = postcard::to_allocvec(&Query::from("notes")).unwrap();
@@ -856,7 +903,9 @@ fn a_tab_subscription_opens_with_a_large_value_its_worker_relays_from_the_server
     let worker = open(0xd4);
     worker.set_remote_link_hint("live").unwrap();
     let up = worker.connect_upstream();
-    let down = server.accept_subscriber(worker.author(), Default::default());
+    let down = server
+        .accept_subscriber(worker.author(), Default::default())
+        .unwrap();
     let (tab, tab_up, tab_down) = tab_over(&worker, open(0xd5));
     let links = [(&up, &down), (&tab_up, &tab_down)];
     let query = postcard::to_allocvec(&Query::from("notes").select(["title"])).unwrap();
@@ -887,7 +936,9 @@ fn a_tab_sees_another_workers_tab_write_live() {
         let worker = open(node);
         worker.set_remote_link_hint("live").unwrap();
         let up = worker.connect_upstream();
-        let down = server.accept_subscriber(worker.author(), Default::default());
+        let down = server
+            .accept_subscriber(worker.author(), Default::default())
+            .unwrap();
         let (tab, tab_up, tab_down) = tab_over(&worker, open(node + 1));
         (worker, tab, up, down, tab_up, tab_down)
     };
@@ -924,7 +975,9 @@ fn a_tabs_large_value_reaches_the_server_through_its_worker() {
     let worker = open(0xe0);
     worker.set_remote_link_hint("live").unwrap();
     let up = worker.connect_upstream();
-    let down = server.accept_subscriber(worker.author(), Default::default());
+    let down = server
+        .accept_subscriber(worker.author(), Default::default())
+        .unwrap();
     let (tab, tab_up, tab_down) = tab_over(&worker, open(0xe1));
     let links = [(&up, &down), (&tab_up, &tab_down)];
 
@@ -972,7 +1025,9 @@ fn a_tab_whose_write_the_server_refuses_reverts_to_the_servers_row() {
     let worker = open(0xf0);
     worker.set_remote_link_hint("live").unwrap();
     let up = worker.connect_upstream();
-    let down = server.accept_subscriber(worker.author(), Default::default());
+    let down = server
+        .accept_subscriber(worker.author(), Default::default())
+        .unwrap();
     let (tab, tab_up, tab_down) = tab_over(&worker, open(0xf1));
     let links = [(&up, &down), (&tab_up, &tab_down)];
 
@@ -1033,10 +1088,13 @@ fn a_refusal_for_a_closed_tabs_write_names_the_tabs_transaction() {
     let seen = std::rc::Rc::clone(&refused);
     *worker.hooks.rejected.borrow_mut() = Some(Box::new(move |tx_id, _, _, _| {
         seen.borrow_mut().push(tx_id.clone());
+        true
     }));
     worker.set_remote_link_hint("live").unwrap();
     let mut up = worker.connect_upstream();
-    let down = server.accept_subscriber(worker.author(), Default::default());
+    let down = server
+        .accept_subscriber(worker.author(), Default::default())
+        .unwrap();
     let (tab, tab_up, mut tab_down) = tab_over(&worker, open(0xe1));
     let links = [(&up, &down), (&tab_up, &tab_down)];
     let write = tab.insert("notes", &title("kept"), &none()).unwrap();
@@ -1054,10 +1112,96 @@ fn a_refusal_for_a_closed_tabs_write_names_the_tabs_transaction() {
 
     // The worker uploads it once it is back, and the server refuses it.
     let up = worker.connect_upstream();
-    let down = server.accept_subscriber(worker.author(), Default::default());
+    let down = server
+        .accept_subscriber(worker.author(), Default::default())
+        .unwrap();
     pump(&[(&up, &down)]);
     assert_eq!(titles(&worker), ["kept"]);
     assert_eq!(*refused.borrow(), [update.tx_id]);
+    // Neither the relay nor the authority keeps the tab's refused payload
+    // (INV-TX-9): only the store that made a write retries it.
+    assert!(worker.db.rejected_transactions().unwrap().is_empty());
+    assert!(server.db.rejected_transactions().unwrap().is_empty());
+}
+
+/// A refusal no listener took stays in the retry store (INV-TX-9): the
+/// store's payload is let go only once the refusal reached the
+/// application, here when a listener arrives and asks for it again.
+#[test]
+fn a_refusal_nobody_heard_is_kept_until_a_listener_takes_it() {
+    // Notes may be inserted and read, never changed.
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("title", ColumnType::Text)
+                    .policies(
+                        jazz::tools::TablePolicies::new()
+                            .with_select(jazz::tools::PolicyExpr::True)
+                            .with_insert(jazz::tools::PolicyExpr::True),
+                    ),
+            )
+            .build(),
+    );
+    let server = {
+        let identity = DbIdentity {
+            node: NodeUuid::from_bytes([0xed; 16]),
+            author: AuthorSubject::SYSTEM,
+        };
+        let db = block_on(Db::open_history_complete(DbConfig::new(
+            schema.clone(),
+            identity,
+        )))
+        .unwrap();
+        Binding::new(db, identity, true)
+    };
+    let identity = identity(0xe2);
+    let client = Binding::new(
+        block_on(Db::open(DbConfig::new(schema, identity))).unwrap(),
+        identity,
+        false,
+    );
+    let listening = std::rc::Rc::new(std::cell::Cell::new(false));
+    let heard = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let (on, seen) = (std::rc::Rc::clone(&listening), std::rc::Rc::clone(&heard));
+    *client.hooks.rejected.borrow_mut() = Some(Box::new(move |tx_id, _, _, _| {
+        if on.get() {
+            seen.borrow_mut().push(tx_id.clone());
+        }
+        on.get()
+    }));
+    client.set_remote_link_hint("live").unwrap();
+    let up = client.connect_upstream();
+    let down = server
+        .accept_subscriber(client.author(), Default::default())
+        .unwrap();
+    let links = [(&up, &down)];
+    let write = client.insert("notes", &title("kept"), &none()).unwrap();
+    drive(&links, client.wait_for(write.seq, "global").unwrap()).unwrap();
+    let row = *write.row_id.0.as_bytes();
+
+    let update = client
+        .update("notes", &row, &title("changed"), &none())
+        .unwrap();
+    pump(&links);
+    assert!(heard.borrow().is_empty());
+    assert_eq!(
+        client
+            .db
+            .rejected_transactions()
+            .unwrap()
+            .iter()
+            .map(|r| r.seq)
+            .collect::<Vec<_>>(),
+        [update.seq],
+        "nobody heard it: the payload stays"
+    );
+
+    listening.set(true);
+    client.redeliver_rejections();
+    pump(&links);
+    assert_eq!(*heard.borrow(), [update.tx_id]);
+    assert!(client.db.rejected_transactions().unwrap().is_empty());
 }
 
 #[test]
@@ -1067,7 +1211,9 @@ fn a_tab_subscribed_while_its_worker_is_offline_hears_the_server_once_it_is_back
     let worker = open(0xac);
     let up = worker.connect_upstream();
     worker.set_remote_link_hint("failed").unwrap();
-    let down = server.accept_subscriber(worker.author(), Default::default());
+    let down = server
+        .accept_subscriber(worker.author(), Default::default())
+        .unwrap();
     let (tab, tab_up, tab_down) = tab_over(&worker, open(0xad));
     let tab_links = [(&tab_up, &tab_down)];
 
@@ -1094,8 +1240,11 @@ fn a_tab_subscribed_while_its_worker_is_offline_hears_the_server_once_it_is_back
 }
 
 #[test]
-fn tabs_changing_one_row_at_once_settle_on_their_workers_winner() {
-    // A worker with no server: it settles its tabs' commits itself.
+fn tabs_changing_one_row_at_once_converge_on_the_later_write_without_a_server() {
+    // A worker with no server settles nothing: each tab's commit stays
+    // pending, and pending versions order last-writer-wins by their
+    // commits' clocks (the writer's node breaking a tie), so the worker
+    // and both tabs show the same write until a server orders them.
     let worker = open(0xc0);
     worker.set_remote_link_hint("none").unwrap();
     let (a, a_up, a_down) = tab_over(&worker, open(0xc1));
@@ -1112,12 +1261,13 @@ fn tabs_changing_one_row_at_once_settle_on_their_workers_winner() {
     }
     let row = *write.row_id.0.as_bytes();
 
+    // b writes after a (or in the same millisecond, from the larger node).
     a.update("notes", &row, &title("from a"), &none()).unwrap();
     b.update("notes", &row, &title("from b"), &none()).unwrap();
     pump(&links);
-    let winner = titles(&worker);
-    assert_eq!(titles(&a), winner);
-    assert_eq!(titles(&b), winner);
+    assert_eq!(titles(&worker), ["from b"]);
+    assert_eq!(titles(&a), ["from b"]);
+    assert_eq!(titles(&b), ["from b"]);
 }
 
 #[test]
@@ -1126,7 +1276,9 @@ fn a_tabs_local_reads_are_its_workers_store() {
     let worker = open(0xa8);
     worker.set_remote_link_hint("live").unwrap();
     let up = worker.connect_upstream();
-    let down = server.accept_subscriber(worker.author(), Default::default());
+    let down = server
+        .accept_subscriber(worker.author(), Default::default())
+        .unwrap();
     let (tab, tab_up, tab_down) = tab_over(&worker, open(0xa9));
     let links = [(&up, &down), (&tab_up, &tab_down)];
     let query = postcard::to_allocvec(&Query::from("notes")).unwrap();
@@ -1236,7 +1388,7 @@ fn a_tabs_remote_reads_and_global_waits_stay_pending_when_its_worker_has_no_serv
     let mut stream = tab.subscribe(&query, &remote, None, None).unwrap();
     still_pending(&links, pin!(tab.next_event(&mut stream)));
     let write = tab.insert("notes", &title("tab's"), &none()).unwrap();
-    let mut global = tab.wait_for_write(&write, "global").unwrap();
+    let mut global = tab.wait_for_write(&write, "global", None).unwrap();
     still_pending(&links, global.as_mut());
 
     let local = tab
@@ -1258,7 +1410,9 @@ fn a_remote_read_waits_for_the_server_while_offline() {
     // A tab, its worker's link down.
     let worker = open(0xb2);
     let up = worker.connect_upstream();
-    let down = server.accept_subscriber(worker.author(), Default::default());
+    let down = server
+        .accept_subscriber(worker.author(), Default::default())
+        .unwrap();
     worker.set_remote_link_hint("failed").unwrap();
     let (tab, tab_up, tab_down) = tab_over(&worker, open(0xb3));
     let tab_links = [(&tab_up, &tab_down)];
@@ -1278,7 +1432,9 @@ fn a_remote_read_waits_for_the_server_while_offline() {
     // A client of its own, its link down.
     let client = open(0xb4);
     let up = client.connect_upstream();
-    let down = server.accept_subscriber(client.author(), Default::default());
+    let down = server
+        .accept_subscriber(client.author(), Default::default())
+        .unwrap();
     client.set_remote_link_hint("failed").unwrap();
     let mut read = client.all(query, &remote, None, None, None).unwrap();
     still_pending(&[], read.as_mut());
@@ -1296,7 +1452,9 @@ fn a_tabs_first_load_wait_reaches_its_worker() {
     worker.set_remote_link_hint("live").unwrap();
     // Connected, but the server never answers: its frames are never carried.
     let _up = worker.connect_upstream();
-    let _down = server.accept_subscriber(worker.author(), Default::default());
+    let _down = server
+        .accept_subscriber(worker.author(), Default::default())
+        .unwrap();
     worker.insert("notes", &title("worker's"), &none()).unwrap();
     let (tab, tab_up, tab_down) = tab_over(&worker, open(0xb6));
     let links = [(&tab_up, &tab_down)];
@@ -1352,7 +1510,9 @@ fn a_remote_subscription_never_lists_pending_local_versions() {
         .as_bytes();
     let client = open(0xb7);
     let up = client.connect_upstream();
-    let down = server.accept_subscriber(client.author(), Default::default());
+    let down = server
+        .accept_subscriber(client.author(), Default::default())
+        .unwrap();
     let links = [(&up, &down)];
     let query = postcard::to_allocvec(&Query::from("notes")).unwrap();
     let mut remote = client
@@ -1398,4 +1558,109 @@ fn a_remote_subscription_never_lists_pending_local_versions() {
         .unwrap();
     assert_eq!(rows_in(&drive(&links, read).unwrap()), 2);
     assert_eq!(titles(&server), ["changed", "pending"]);
+}
+
+/// A tab's `local` wait still open when its worker refuses the write
+/// fails with the refusal and claims it, so a listener the binding tells
+/// later (on its next task, unless claimed by then) hears it once, from
+/// the wait. The tab builds a second update on its first while the worker
+/// already knows the server refused the first: the worker refuses the
+/// second before storing it. The first, whose local wait resolved, stays
+/// unclaimed for the listener.
+#[test]
+fn a_tabs_local_wait_the_worker_refuses_claims_the_refusal() {
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+    // Notes may be inserted and read, never changed.
+    let schema = compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("title", ColumnType::Text)
+                    .policies(
+                        jazz::tools::TablePolicies::new()
+                            .with_select(jazz::tools::PolicyExpr::True)
+                            .with_insert(jazz::tools::PolicyExpr::True),
+                    ),
+            )
+            .build(),
+    );
+    let open = |node: u8| {
+        let identity = identity(node);
+        let db = block_on(Db::open(DbConfig::new(schema.clone(), identity))).unwrap();
+        Binding::new(db, identity, false)
+    };
+    let server = {
+        let identity = DbIdentity {
+            node: NodeUuid::from_bytes([0xed; 16]),
+            author: AuthorSubject::SYSTEM,
+        };
+        let db = block_on(Db::open_history_complete(DbConfig::new(
+            schema.clone(),
+            identity,
+        )))
+        .unwrap();
+        Binding::new(db, identity, true)
+    };
+    let worker = open(0xe0);
+    worker.set_remote_link_hint("live").unwrap();
+    let up = worker.connect_upstream();
+    let down = server
+        .accept_subscriber(worker.author(), Default::default())
+        .unwrap();
+    let (tab, tab_up, tab_down) = tab_over(&worker, open(0xe1));
+    let told = Rc::new(RefCell::new(Vec::new()));
+    let heard = Rc::clone(&told);
+    *tab.hooks.rejected.borrow_mut() = Some(Box::new(move |tx_id, _, _, claim| {
+        heard
+            .borrow_mut()
+            .push((tx_id.clone(), claim.map(|claim| claim.get())));
+        true
+    }));
+    let server_link = [(&up, &down)];
+    let tab_link = [(&tab_up, &tab_down)];
+    let links = [(&up, &down), (&tab_up, &tab_down)];
+
+    let write = tab.insert("notes", &title("kept"), &none()).unwrap();
+    drive(&links, tab.wait_for(write.seq, "global").unwrap()).unwrap();
+    let row = *write.row_id.0.as_bytes();
+
+    // The first update reaches the worker: its local wait resolves.
+    let first = tab.update("notes", &row, &title("first"), &none()).unwrap();
+    let first_claim = Rc::new(Cell::new(false));
+    tab.hooks.track(&first, &first_claim);
+    let wait = tab
+        .wait_for_write(&first, "local", Some(Rc::clone(&first_claim)))
+        .unwrap();
+    drive(&tab_link, wait).unwrap();
+    // The second is built on it, its local wait open.
+    let second = tab
+        .update("notes", &row, &title("second"), &none())
+        .unwrap();
+    let second_claim = Rc::new(Cell::new(false));
+    tab.hooks.track(&second, &second_claim);
+    let mut wait = tab
+        .wait_for_write(&second, "local", Some(Rc::clone(&second_claim)))
+        .unwrap();
+    // The server refuses the first; only the worker hears it.
+    pump(&server_link);
+    // The worker refuses the second, and tells the tab of both.
+    let error = drive(&tab_link, wait.as_mut()).unwrap_err();
+    pump(&links);
+
+    assert!(
+        format!("{error:?}").contains("built on a write"),
+        "{error:?}"
+    );
+    assert!(
+        second_claim.get(),
+        "the wait that failed with the refusal claims it"
+    );
+    assert!(
+        !first_claim.get(),
+        "the refusal of the write whose wait resolved is the listener's"
+    );
+    let told = told.borrow();
+    assert!(told.iter().any(|(id, _)| *id == first.tx_id), "{told:?}");
+    assert_eq!(titles(&tab), ["kept"]);
 }

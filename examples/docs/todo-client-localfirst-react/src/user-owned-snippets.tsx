@@ -13,15 +13,15 @@ const schema = {
 };
 
 type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema);
+export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
 // #endregion owned-schema
 
 // #region owned-permissions
 s.definePermissions(app, ({ policy, session }) => {
-  policy.todos.allowRead.where({ "$createdBy.account": session.user.account });
+  policy.todos.allowRead.where({ $createdBy: session.user });
   policy.todos.allowInsert.always();
-  policy.todos.allowUpdate.where({ "$createdBy.account": session.user.account });
-  policy.todos.allowDelete.where({ "$createdBy.account": session.user.account });
+  policy.todos.allowUpdate.where({ $createdBy: session.user });
+  policy.todos.allowDelete.where({ $createdBy: session.user });
 });
 // #endregion owned-permissions
 
@@ -67,14 +67,16 @@ const schemaExplicit = {
 };
 
 type ExplicitAppSchema = s.Schema<typeof schemaExplicit>;
-export const explicitApp: s.App<ExplicitAppSchema> = s.defineApp(schemaExplicit);
+export const explicitApp: s.App<ExplicitAppSchema> = s.defineApp(schemaExplicit, {
+  migrations: "none",
+});
 // #endregion owned-schema-explicit
 
 // #region owned-permissions-explicit
 s.definePermissions(explicitApp, ({ policy, session }) => {
-  policy.todos.allowRead.where({ owner_id: session.user.account });
+  policy.todos.allowRead.where({ owner_id: session.user });
   policy.todos.allowInsert.always();
-  policy.todos.allowUpdate.whereOld({ owner_id: session.user.account });
-  policy.todos.allowDelete.where({ owner_id: session.user.account });
+  policy.todos.allowUpdate.whereOld({ owner_id: session.user });
+  policy.todos.allowDelete.where({ owner_id: session.user });
 });
 // #endregion owned-permissions-explicit

@@ -1,8 +1,4 @@
-export {
-  createJazzClient,
-  type JazzClient,
-  type JazzClientConfig,
-} from "../web/create-jazz-client.js";
+export type { JazzClient } from "../web/create-jazz-client.js";
 export { BrowserAuthSecretStore } from "../runtime/auth-secret-store.js";
 export type {
   AuthSecretStore,
@@ -20,7 +16,7 @@ export * from "../accounts/exports.js";
 
 export { accountRegistryUrl } from "../accounts/context.js";
 
-export { createJazzSession, type JazzSessionConfig } from "../session/create-jazz-session.js";
+export { createJazzClient, type JazzClientConfig } from "../session/create-jazz-session.js";
 export type {
   JazzSession,
   JazzSessionActions,
@@ -28,12 +24,5 @@ export type {
   JazzSessionOperation,
 } from "../session/state.js";
 
-export * from "../session/auth-provider-exports.js";
 export { createJazzApp, type JazzAppConfig } from "../session/create-jazz-app.js";
-export {
-  betterAuth,
-  jwtAuth,
-  type JazzAuth,
-  type JazzApp,
-  type JazzAppSnapshot,
-} from "../session/app.js";
+export type { JazzApp, JazzAppSnapshot, JazzUser } from "../session/app.js";

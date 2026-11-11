@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { createDb, schema } from "../index.js";
 import { getDbInternalSession } from "../runtime/db-internal-session.js";
-import type { AuthFailureReason } from "../runtime/auth-state.js";
+import { mapAuthReason, type AuthFailureReason } from "../runtime/auth-state.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
+import { createAccountManager } from "./create-account-manager.js";
 
 function failAuth(db: object, reason: AuthFailureReason): void {
   (db as { markUnauthenticated(reason: AuthFailureReason): void }).markUnauthenticated(reason);
@@ -11,7 +12,10 @@ function failAuth(db: object, reason: AuthFailureReason): void {
 describe("account context authority", () => {
   it("opens locally without activating its registry transport and rejects another app or authority", async () => {
     const { serverUrl: _serverUrl, ...config } = await localAccountConfig("local-only-account");
-    const app = schema.defineApp({ notes: schema.table({ text: schema.string() }, {}) });
+    const app = schema.defineApp(
+      { notes: schema.table({ text: schema.string() }, {}) },
+      { migrations: "none" },
+    );
     const db = await createDb(config);
     try {
       const { value: row } = await db.insert(app.notes, { text: "offline" });
@@ -84,7 +88,7 @@ describe("account context authority", () => {
       }
       expect(db.getAuthState()).toMatchObject({
         authMode: "local-first",
-        session: { user: { identity: config.account.identity } },
+        session: { identity: config.account.identity },
       });
     } finally {
       await db.shutdown();
@@ -96,7 +100,7 @@ describe("account context authority", () => {
     const db = await createDb(config);
     try {
       await db.refreshAccountAuth(config.account);
-      const refresh = vi.spyOn(db, "refreshAccountAuth");
+      const refresh = vi.spyOn(db, "refreshOwnAccountAuth");
       failAuth(db, "expired");
       expect(db.getAuthState().error).toBe("expired");
       await vi.waitFor(() => expect(db.getAuthState().error).toBeUndefined());
@@ -112,7 +116,7 @@ describe("account context authority", () => {
     const logged = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       const refresh = vi
-        .spyOn(db, "refreshAccountAuth")
+        .spyOn(db, "refreshOwnAccountAuth")
         .mockRejectedValueOnce(new Error("registry unavailable"));
       failAuth(db, "expired");
       await vi.waitFor(() => expect(db.getAuthState().error).toBeUndefined(), { timeout: 5_000 });
@@ -127,11 +131,122 @@ describe("account context authority", () => {
     }
   });
 
+  it("renews again when a renewal hands back an already-expired token", async () => {
+    const config = await localAccountConfig("local-first-expired-renewal-token");
+    const db = await createDb(config);
+    try {
+      const payload = Buffer.from(
+        JSON.stringify({ exp: Math.floor(Date.now() / 1000) - 60 }),
+      ).toString("base64url");
+      const refresh = vi
+        .spyOn(db, "refreshOwnAccountAuth")
+        .mockResolvedValueOnce(`x.${payload}.x` as never);
+      failAuth(db, "expired");
+      // The expired token is renewed again rather than scheduled.
+      await vi.waitFor(() => expect(refresh).toHaveBeenCalledTimes(2), { timeout: 5_000 });
+      await vi.waitFor(() => expect(db.getAuthState().error).toBeUndefined());
+    } finally {
+      await db.shutdown();
+    }
+  });
+
+  it("renews again when the scheduled renewal hands back an already-expired token", async () => {
+    const config = await localAccountConfig("local-first-expired-scheduled-renewal");
+    const db = await createDb(config);
+    try {
+      const token = (exp: number) =>
+        `x.${Buffer.from(JSON.stringify({ exp })).toString("base64url")}.x` as never;
+      const now = Math.floor(Date.now() / 1000);
+      const refresh = vi
+        .spyOn(db, "refreshOwnAccountAuth")
+        .mockResolvedValueOnce(token(now + 2))
+        .mockResolvedValueOnce(token(now - 60));
+      // A refusal the server does not call "expired", as after a signing key
+      // rotation, renews too.
+      failAuth(db, "invalid");
+      await vi.waitFor(() => expect(refresh).toHaveBeenCalledOnce());
+      // The short-lived token's scheduled renewal starts a fresh streak and
+      // gets an already-expired token back: that renews again too.
+      await vi.waitFor(() => expect(refresh).toHaveBeenCalledTimes(3), { timeout: 6_000 });
+      await vi.waitFor(() => expect(db.getAuthState().error).toBeUndefined());
+    } finally {
+      await db.shutdown();
+    }
+  });
+
+  it("leaves a refused backend sign-in to the backend, with no token to renew", async () => {
+    // A browser page, signed in by the app's backend from its cookie.
+    vi.stubGlobal("document", {});
+    const appId = "backend-signed-in-no-renewal";
+    let stored: string | null = null;
+    const accounts = await createAccountManager({
+      appId,
+      serverUrl: "http://127.0.0.1:1",
+      store: {
+        async read() {
+          return stored;
+        },
+        async update(transform) {
+          stored = transform(stored);
+        },
+      },
+      fetch: async () =>
+        Response.json({
+          account: "6f1c1b6e-2d1a-4c8e-9a43-5b0f2f6f3a10",
+          identity: { issuer: "jazz:backend", subject: "alice" },
+          claims: {},
+        }),
+    });
+    const account = await accounts.loginWithBackend();
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const db = await createDb({ appId, account, driver: { type: "memory" } });
+    try {
+      const refresh = vi.spyOn(db, "refreshOwnAccountAuth");
+      failAuth(db, "expired");
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
+      // Renewing would only fail, and log it every few seconds.
+      expect(refresh).not.toHaveBeenCalled();
+      expect(logged).not.toHaveBeenCalledWith("Account auth refresh failed", expect.anything());
+    } finally {
+      logged.mockRestore();
+      vi.unstubAllGlobals();
+      await db.shutdown();
+    }
+  });
+
+  it("does not renew a revoked account identity", async () => {
+    const config = await localAccountConfig("local-first-revoked-no-renewal");
+    const db = await createDb(config);
+    try {
+      const refresh = vi.spyOn(db, "refreshOwnAccountAuth");
+      // The server's words for a reassigned or revoked principal.
+      failAuth(db, mapAuthReason("account identity revoked"));
+      expect(db.getAuthState().error).toBe("revoked");
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      expect(refresh).not.toHaveBeenCalled();
+    } finally {
+      await db.shutdown();
+    }
+  });
+
+  it("does not renew a disabled account", async () => {
+    const config = await localAccountConfig("local-first-disabled-no-renewal");
+    const db = await createDb(config);
+    try {
+      const refresh = vi.spyOn(db, "refreshOwnAccountAuth");
+      failAuth(db, "disabled");
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      expect(refresh).not.toHaveBeenCalled();
+    } finally {
+      await db.shutdown();
+    }
+  });
+
   it("spaces out account renewals a server keeps rejecting as expired", async () => {
     const config = await localAccountConfig("local-first-renewal-backoff");
     const db = await createDb(config);
     try {
-      const refresh = vi.spyOn(db, "refreshAccountAuth");
+      const refresh = vi.spyOn(db, "refreshOwnAccountAuth");
       failAuth(db, "expired");
       await vi.waitFor(() => expect(db.getAuthState().error).toBeUndefined());
       expect(refresh).toHaveBeenCalledOnce();

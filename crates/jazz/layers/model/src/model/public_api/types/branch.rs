@@ -7,7 +7,7 @@ use super::*;
 // ============================================================================
 
 /// Content-addressed hash of a schema's structural elements.
-/// Uses BLAKE3 over deterministic table ordering while preserving each table's
+/// Uses SHA-256 over deterministic table ordering while preserving each table's
 /// declared column order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SchemaHash(pub [u8; 32]);
@@ -54,7 +54,7 @@ impl SchemaHash {
 
     /// Compute hash for a complete schema (HashMap<TableName, TableSchema>).
     pub fn compute(schema: &Schema) -> Self {
-        let mut hasher = blake3::Hasher::new();
+        let mut hasher = jazz_types::sha256::Hasher::new();
 
         // Sort tables by name for deterministic ordering
         let mut table_names: Vec<_> = schema.keys().collect();
@@ -97,6 +97,12 @@ impl SchemaHash {
                 );
                 hasher.update(&[0]);
             }
+
+            // Full history is not hashed, so existing schemas keep their
+            // hashes; TypeScript's `structuralSchemaHash` mirrors this.
+            if table_schema.history == super::schema::HistoryRetention::Latest {
+                hasher.update(b"history\0latest\0");
+            }
         }
 
         Self(*hasher.finalize().as_bytes())
@@ -129,14 +135,14 @@ impl<'de> Deserialize<'de> for SchemaHash {
 }
 
 /// Hash a RowDescriptor into a hasher, preserving declared column order.
-pub fn hash_row_descriptor(hasher: &mut blake3::Hasher, descriptor: &RowDescriptor) {
+pub fn hash_row_descriptor(hasher: &mut jazz_types::sha256::Hasher, descriptor: &RowDescriptor) {
     for col in &descriptor.columns {
         hash_column_descriptor(hasher, col);
     }
 }
 
 /// Hash a single ColumnDescriptor.
-fn hash_column_descriptor(hasher: &mut blake3::Hasher, col: &ColumnDescriptor) {
+fn hash_column_descriptor(hasher: &mut jazz_types::sha256::Hasher, col: &ColumnDescriptor) {
     // Name
     hash_cstr(hasher, col.name.as_str());
 
@@ -170,6 +176,15 @@ fn hash_column_descriptor(hasher: &mut blake3::Hasher, col: &ColumnDescriptor) {
             ColumnMergeStrategy::GSet => {
                 hasher.update(&[2]);
             }
+            ColumnMergeStrategy::Text => {
+                hasher.update(&[3]);
+            }
+            ColumnMergeStrategy::Markdown => {
+                hasher.update(&[4]);
+            }
+            ColumnMergeStrategy::Html => {
+                hasher.update(&[5]);
+            }
         }
     } else {
         hasher.update(&[0]);
@@ -178,7 +193,7 @@ fn hash_column_descriptor(hasher: &mut blake3::Hasher, col: &ColumnDescriptor) {
     hasher.update(&[0]); // delimiter
 }
 
-fn hash_value(hasher: &mut blake3::Hasher, value: &Value) {
+fn hash_value(hasher: &mut jazz_types::sha256::Hasher, value: &Value) {
     match value {
         Value::Integer(v) => {
             hasher.update(&[1]);
@@ -245,12 +260,12 @@ fn hash_value(hasher: &mut blake3::Hasher, value: &Value) {
 }
 
 /// Hash a string followed by a NUL delimiter.
-fn hash_cstr(hasher: &mut blake3::Hasher, value: &str) {
+fn hash_cstr(hasher: &mut jazz_types::sha256::Hasher, value: &str) {
     hasher.update(value.as_bytes());
     hasher.update(&[0]);
 }
 
-fn hash_enum_payload_cases(hasher: &mut blake3::Hasher, cases: &[EnumCaseDescriptor]) {
+fn hash_enum_payload_cases(hasher: &mut jazz_types::sha256::Hasher, cases: &[EnumCaseDescriptor]) {
     hasher.update(&(cases.len() as u64).to_le_bytes());
     for case in cases {
         hash_cstr(hasher, &case.name);
@@ -264,7 +279,7 @@ fn hash_enum_payload_cases(hasher: &mut blake3::Hasher, cases: &[EnumCaseDescrip
 }
 
 /// Hash a ColumnType recursively (for Array and Row types).
-fn hash_column_type(hasher: &mut blake3::Hasher, col_type: &ColumnType) {
+fn hash_column_type(hasher: &mut jazz_types::sha256::Hasher, col_type: &ColumnType) {
     match col_type {
         ColumnType::Integer => {
             hasher.update(&[1]);

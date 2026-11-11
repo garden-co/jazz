@@ -100,8 +100,9 @@
 </template>
 
 <script setup lang="ts">
+import { asLines } from "../lib/text.js";
 import { reactive, ref } from "vue";
-import { useAll, useDb } from "jazz-tools/vue";
+import { useAll } from "jazz-tools/vue";
 import { app, type StopStatus } from "../../schema.js";
 import { fromDateInput, statusLabels } from "../lib/format.js";
 import { reportWriteError } from "../lib/write-errors.js";
@@ -110,9 +111,8 @@ import Button from "./ui/Button.vue";
 const props = defineProps<{ lat: number; lng: number; bandId: string; userId: string }>();
 const emit = defineEmits<{ created: [stopId: string]; cancel: [] }>();
 
-const db = useDb();
 // Only this band's venues: another band's venue could be moved or deleted by that band.
-const { data: venues } = useAll(() =>
+const { data: venues, db } = useAll(() =>
   app.venues.where({ bandId: props.bandId }).orderBy("name", "asc"),
 );
 
@@ -138,7 +138,7 @@ function submit() {
 async function addStop() {
   const date = fromDateInput(show.date);
   date.setHours(20);
-  const body = show.notes.trim();
+  const body = asLines(show.notes);
 
   const written = await db.transaction((tx) => {
     const venueId =
@@ -155,7 +155,7 @@ async function addStop() {
       venueId,
       date,
       status: show.status,
-      publicDescription: show.description,
+      publicDescription: asLines(show.description),
     });
     if (body) tx.insert(app.stopNotes, { stopId: stop.id, bandId: props.bandId, body });
     return stop;

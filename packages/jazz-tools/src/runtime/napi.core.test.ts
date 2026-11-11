@@ -35,6 +35,13 @@ import {
 import { SubscriptionManager } from "./subscription-manager.js";
 import type { WasmRow } from "../drivers/types.js";
 import {
+  mergePermissionsIntoWasmSchema,
+  type CompiledPermissionsMap,
+} from "../schema-permissions.js";
+import { computeSchemaHash } from "../schema-hash.js";
+import { deployArtifacts } from "../dev/catalogue.js";
+import { fetchMigrationGraph } from "../dev/migration-graph.js";
+import {
   createOpenTransactionId,
   type TxId,
   type OpenTransactionId,
@@ -48,6 +55,27 @@ const TEST_EXTERNAL_ISSUER = "https://issuer.example";
 
 function testExternalAccountId(userId: string): string {
   return testAccountId(JSON.stringify([TEST_EXTERNAL_ISSUER, userId]));
+}
+
+/**
+ * Publish `schema` with `permissions` as a bundle, as createJazz does on
+ * boot, and answer its id: a user session the backend states is pinned to it.
+ */
+async function publishBundle(
+  server: LocalJazzServerHandle,
+  schema: WasmSchema,
+  permissions: CompiledPermissionsMap,
+): Promise<string> {
+  const structural = mergePermissionsIntoWasmSchema(schema, {});
+  const targetSchemaHash = await computeSchemaHash(structural);
+  const target = { appId: server.appId, serverUrl: server.url, adminSecret: server.adminSecret! };
+  const deployed = await deployArtifacts(target, await fetchMigrationGraph(target), {
+    targetSchemaHash,
+    schemas: [{ hash: targetSchemaHash, schema: structural }],
+    migrations: [],
+    permissions,
+  });
+  return deployed.bundle;
 }
 
 function testExternalSession(userId: string, claims: Record<string, unknown> = {}) {
@@ -486,9 +514,12 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       account: testAccountId(authorSeed),
       identity: { issuer: "urn:jazz:test", subject: authorSeed },
     };
-    const provenanceApp = s.defineApp({
-      todos: s.table({ title: s.string(), done: s.boolean() }, {}),
-    });
+    const provenanceApp = s.defineApp(
+      {
+        todos: s.table({ title: s.string(), done: s.boolean() }, {}),
+      },
+      { migrations: "none" },
+    );
     const runtime = new NativeRuntimeAdapter(
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
       TEST_SCHEMA,
@@ -650,6 +681,10 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       schema: OWNED_TODOS_SCHEMA,
       permissions: { todos: OWNED_TODOS_SCHEMA.todos.policies! },
     });
+    // Published as createJazz publishes it; the link is pinned to it.
+    const bundle = await publishBundle(server, OWNED_TODOS_SCHEMA as WasmSchema, {
+      todos: OWNED_TODOS_SCHEMA.todos.policies!,
+    });
 
     const nativeDb = NapiDb.openMemory(
       encodeSchema(OWNED_TODOS_SCHEMA),
@@ -670,7 +705,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     runtimes.push(runtime);
     runtime.connect(
       webSocketUrl(server.url, appId),
-      JSON.stringify({ backend_secret: server.backendSecret }),
+      JSON.stringify({ backend_secret: server.backendSecret, bundle }),
     );
 
     const aliceSession = JSON.stringify({
@@ -1859,8 +1894,9 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       inMemory: true,
       backendSecret: "core-napi-permission-advice-backend",
       adminSecret: "core-napi-permission-advice-admin",
-      schema: OWNED_TODOS_SCHEMA,
-      permissions: { todos: OWNED_TODOS_SCHEMA.todos.policies! },
+    });
+    const bundle = await publishBundle(server, OWNED_TODOS_SCHEMA as WasmSchema, {
+      todos: OWNED_TODOS_SCHEMA.todos.policies!,
     });
 
     const openRuntime = (userId: string, sourceId: number) => {
@@ -1878,6 +1914,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         JSON.stringify({
           backend_secret: server!.backendSecret,
           backend_session: testExternalSession(userId, { sub: userId }),
+          bundle,
         }),
       );
       return runtime;
@@ -1961,6 +1998,10 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       schema: OWNED_TODOS_SCHEMA,
       permissions: { todos: OWNED_TODOS_SCHEMA.todos.policies! },
     });
+    // Published as createJazz publishes it; the link is pinned to it.
+    const bundle = await publishBundle(server, OWNED_TODOS_SCHEMA as WasmSchema, {
+      todos: OWNED_TODOS_SCHEMA.todos.policies!,
+    });
 
     const runtime = new NativeRuntimeAdapter(
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
@@ -1973,7 +2014,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     runtimes.push(runtime);
     runtime.connect(
       webSocketUrl(server.url, appId),
-      JSON.stringify({ backend_secret: server.backendSecret }),
+      JSON.stringify({ backend_secret: server.backendSecret, bundle }),
     );
 
     const aliceSession = testExternalSessionJson(ALICE_ID);
@@ -2027,6 +2068,60 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     await expect(bobDenied).rejects.toThrow("authorization_denied");
   }, 15_000);
 
+  it("rejects a session write stamped too far ahead of the authority's clock with its own code", async () => {
+    globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
+
+    const { NapiDb } = await loadNapiModule();
+    const appId = "00000000-0000-0000-0000-00000000d00a";
+    server = await startLocalJazzServer({
+      appId,
+      inMemory: true,
+      backendSecret: "core-napi-clock-skew-backend",
+      adminSecret: "core-napi-clock-skew-admin",
+      schema: OWNED_TODOS_SCHEMA,
+      permissions: { todos: OWNED_TODOS_SCHEMA.todos.policies! },
+    });
+    // Published as createJazz publishes it; the link is pinned to it.
+    const bundle = await publishBundle(server, OWNED_TODOS_SCHEMA as WasmSchema, {
+      todos: OWNED_TODOS_SCHEMA.todos.policies!,
+    });
+
+    const runtime = new NativeRuntimeAdapter(
+      { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
+      OWNED_TODOS_SCHEMA,
+      deterministicBytes("jazz-napi-native-runtime-clock-skew:node"),
+      testAuthorBytes("jazz-napi-native-runtime-clock-skew:author"),
+      13,
+      true,
+    );
+    runtimes.push(runtime);
+    runtime.connect(
+      webSocketUrl(server.url, appId),
+      JSON.stringify({ backend_secret: server.backendSecret, bundle }),
+    );
+
+    // An hour ahead: far beyond the authority's skew tolerance.
+    const future = runtime.insert(
+      "todos",
+      {
+        title: { type: "Text", value: "from the future" },
+        done: { type: "Boolean", value: false },
+        owner_id: { type: "Text", value: ALICE_ID },
+      },
+      JSON.stringify({
+        session: testExternalSession(ALICE_ID),
+        updated_at: Date.now() + 3_600_000,
+      }),
+    );
+    const refused = runtime.waitForTransaction(await committedTxId(future), "global");
+    await expect(refused).rejects.toMatchObject({
+      kind: "rejected",
+      code: "client_clock_too_far_ahead",
+      reason: "Client clock is too far ahead",
+    });
+    await expect(refused).rejects.toThrow("client_clock_too_far_ahead");
+  }, 15_000);
+
   it("keeps persistent client-local session writes optimistic until the authority rejects them", async () => {
     globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
 
@@ -2040,6 +2135,10 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       adminSecret: "core-napi-persistent-owned-delete-admin",
       schema: OWNED_TODOS_SCHEMA,
       permissions: { todos: OWNED_TODOS_SCHEMA.todos.policies! },
+    });
+    // Published as createJazz publishes it; the link is pinned to it.
+    const bundle = await publishBundle(server, OWNED_TODOS_SCHEMA as WasmSchema, {
+      todos: OWNED_TODOS_SCHEMA.todos.policies!,
     });
 
     try {
@@ -2059,7 +2158,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       runtimes.push(runtime);
       runtime.connect(
         webSocketUrl(server.url, appId),
-        JSON.stringify({ backend_secret: server.backendSecret }),
+        JSON.stringify({ backend_secret: server.backendSecret, bundle }),
       );
 
       const aliceSession = JSON.stringify({ issuer: "https://issuer.example", user_id: ALICE_ID });
@@ -2350,11 +2449,14 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       inMemory: true,
       adminSecret: "core-napi-branch-policy-admin",
       backendSecret: "core-napi-branch-policy-backend",
-      schema: CHAT_POLICY_SCHEMA,
-      permissions: Object.fromEntries(
+    });
+    const bundle = await publishBundle(
+      server,
+      CHAT_POLICY_SCHEMA as WasmSchema,
+      Object.fromEntries(
         Object.entries(CHAT_POLICY_SCHEMA).map(([name, table]) => [name, table.policies ?? {}]),
       ),
-    });
+    );
 
     const openRuntime = (userId: string, sourceId: number) => {
       const runtime = new NativeRuntimeAdapter(
@@ -2371,6 +2473,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         JSON.stringify({
           backend_secret: "core-napi-branch-policy-backend",
           backend_session: testExternalSession(userId),
+          bundle,
         }),
       );
       return runtime;

@@ -1,29 +1,24 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::runtime::{NodeRole, StorageConfig};
+use crate::runtime::{AppStore, NodeRole, StorageConfig};
 use axum::Router;
 use jazz::schema::JazzSchema;
 use tracing::info;
 
 use crate::middleware::AuthConfig;
-use crate::middleware::auth::{
-    JWKS_CACHE_TTL, JWKS_MAX_STALE, JwksCache, JwtVerifier, StaticJwtVerifier,
-};
 use crate::profiling::{self, HeapProfileDump};
 use crate::server::routes;
-use crate::server::{
-    CatalogueKvStorage, CatalogueMemoryStorage, DynCatalogueStorage, ServerState, StoredCatalogue,
-};
+use crate::server::{ServerState, StoredCatalogue};
 use jazz::tools::AppId;
 #[allow(deprecated)]
 use jazz::tools::public_schema::Schema;
 #[cfg(test)]
 use jazz::tx::DurabilityTier;
 
-const CATALOGUE_FILE: &str = "catalogue.sqlite";
-const ACCOUNTS_FILE: &str = "accounts.sqlite";
+/// The one file an app's state lives in: rows, catalogue, account registry.
+const STORE_FILE: &str = "jazz.sqlite";
 /// Stores from before SQLite. A data directory that holds one and no SQLite
 /// store must be migrated first; the server never starts empty beside it.
 const PRE_SQLITE_STORES: [&str; 3] = [
@@ -63,16 +58,43 @@ enum ServerSchemaMode {
 
 /// Storage backend selection for [`ServerBuilder::with_storage`].
 ///
-/// `Persistent` keeps the runtime store, the catalogue and the account
-/// registry as SQLite files in one data directory.
+/// `Persistent` keeps the runtime's rows, the catalogue and the account
+/// registry in one SQLite file, `jazz.sqlite`, in the data directory.
 #[derive(Debug, Clone)]
 pub enum StorageBackend {
     InMemory,
     Persistent { path: PathBuf },
 }
 
+/// Where a persistent store keeps the bytes of large values once they
+/// settle (see [`jazz::chunk_store`]). The rows and the chunk metadata
+/// always stay in `jazz.sqlite`.
+#[derive(Debug, Clone)]
+pub enum BlobStore {
+    /// In `jazz.sqlite` itself. Simplest, but the file grows with every
+    /// large value.
+    Sqlite,
+    /// As files under `dir`; `None` is `blobs/` in the data directory.
+    Files { dir: Option<PathBuf> },
+    /// As objects in an S3-compatible bucket ([`crate::s3`]). The bucket
+    /// and prefix belong to this data directory alone: a store deletes the
+    /// values it reclaims.
+    S3(crate::s3::S3Options),
+    /// As private blobs in a Vercel Blob store ([`crate::vercel_blob`]),
+    /// under a prefix that belongs to this data directory alone.
+    VercelBlob(crate::vercel_blob::VercelBlobOptions),
+}
+
+/// Records which [`BlobStore`] a data directory was started with.
+const BLOB_STORE_MARKER: &str = "blob-store";
+/// A data directory's own id, which its blob directory is claimed for.
+const STORE_ID_FILE: &str = "store-id";
+/// In a blob directory: the id of the data directory that owns it.
+const BLOB_OWNER_FILE: &str = "owner";
+
 pub struct ServerBuilder {
     app_id: AppId,
+    blobs: BlobStore,
     auth_config: AuthConfig,
     schema_mode: ServerSchemaMode,
     storage_backend: StorageBackend,
@@ -91,6 +113,7 @@ impl ServerBuilder {
                 ..Default::default()
             },
             schema_mode: ServerSchemaMode::Dynamic,
+            blobs: BlobStore::Sqlite,
             storage_backend: StorageBackend::Persistent {
                 path: PathBuf::from("./data"),
             },
@@ -127,6 +150,15 @@ impl ServerBuilder {
         self
     }
 
+    /// Where a persistent store keeps settled large-value bytes. Defaults to
+    /// [`BlobStore::Sqlite`]. A data directory keeps the blob store it was
+    /// started with, except that one whose blobs are in SQLite may move
+    /// them out (they move on later ticks).
+    pub fn with_blob_store(mut self, blobs: BlobStore) -> Self {
+        self.blobs = blobs;
+        self
+    }
+
     /// Serve the executable's heap profile at `/debug/pprof/heap` to admins.
     ///
     /// Without one, the route answers `501 Not Implemented`.
@@ -147,34 +179,64 @@ impl ServerBuilder {
     }
 
     pub async fn build(self) -> Result<BuiltServer, String> {
-        let auth_config = self.auth_config.clone();
+        let mut auth_config = self.auth_config.clone();
         validate_server_config(&auth_config)?;
+        // A trusted workload replaces shared secrets: the server holds random
+        // ones only internally, and a verified token stands in for them.
+        // Otherwise the admin secret doubles as a backend credential, so a
+        // backend needs only that one secret; backend access through it gets
+        // the backend secret, or an internal one when none is configured.
+        use crate::middleware::workload::{BackendCredential, InternalSecrets, WorkloadVerifier};
+        let (backend_credential, workload_secrets) = match (
+            auth_config.trusted_workload.clone(),
+            auth_config.admin_secret.clone(),
+        ) {
+            (Some(workload), _) => {
+                let secrets = InternalSecrets::generate();
+                auth_config.admin_secret = Some(secrets.admin.clone());
+                auth_config.backend_secret = Some(secrets.backend.clone());
+                (
+                    Some(Arc::new(BackendCredential::Workload(Box::new(
+                        WorkloadVerifier::new(workload),
+                    )))),
+                    Some(secrets),
+                )
+            }
+            (None, Some(admin)) => {
+                let backend = auth_config
+                    .backend_secret
+                    .get_or_insert_with(|| InternalSecrets::generate().backend)
+                    .clone();
+                (
+                    Some(Arc::new(BackendCredential::AdminSecret(admin.clone()))),
+                    Some(InternalSecrets { admin, backend }),
+                )
+            }
+            (None, None) => (None, None),
+        };
         if self.max_websocket_connections == 0 {
             return Err("max websocket connections must be at least 1".to_owned());
         }
         if let StorageBackend::Persistent { path } = &self.storage_backend {
             refuse_pre_sqlite_data_dir(path)?;
         }
-        let jwt_verifier = build_jwt_verifier(&auth_config).await?;
         log_auth_config(&auth_config);
 
-        let (catalogue_store, latest_catalogue_schema) = self.build_catalogue_store()?;
-        let core_server_shell_storage_config = self.build_core_server_shell_storage_config();
-        let core_server_shell = self.build_core_server_shell(
-            latest_catalogue_schema,
-            core_server_shell_storage_config.clone(),
-        )?;
-        let core_server_shell_storage_config = core_server_shell_storage_config.ok();
+        // One store per app: the catalogue and the account registry are host
+        // tables in the file the runtime's rows live in, all on its thread.
+        let (storage_config, blob_store_record) = self.build_core_server_shell_storage_config()?;
+        let store = AppStore::open(&storage_config)?;
+        // Only a store that opened is recorded as having moved its blobs.
+        if let Some(record) = blob_store_record {
+            record.write()?;
+        }
+        store.set_app(self.app_id.to_string());
+        let (catalogue_store, latest_catalogue_schema) = self.build_catalogue_store(&store)?;
+        let core_server_shell = self.build_core_server_shell(latest_catalogue_schema, &store)?;
 
-        let accounts = {
-            let durable = match &self.storage_backend {
-                StorageBackend::InMemory => None,
-                StorageBackend::Persistent { path } => Some(path.join(ACCOUNTS_FILE)),
-            };
-            Some(crate::server::accounts::AccountRegistryOwner::open(
-                durable,
-            )?)
-        };
+        let accounts = Some(crate::server::accounts::AccountRegistryOwner::open(
+            store.sql()?,
+        )?);
 
         let state = Arc::new(ServerState {
             accounts,
@@ -182,25 +244,19 @@ impl ServerBuilder {
             catalogue: crate::server::ServerCatalogue,
             app_id: self.app_id,
             auth_config,
-            jwt_verifier,
+            backend_credential,
+            workload_secrets,
             core_server_shell: std::sync::RwLock::new(core_server_shell),
             websocket_admissions: Arc::new(
                 crate::server::routes::WebSocketAdmissionState::default(),
             ),
             max_websocket_connections: self.max_websocket_connections,
-            core_server_shell_storage_config,
+            store: Some(store),
             runtime_catalogue_publication: tokio::sync::Mutex::new(()),
             #[cfg(test)]
-            runtime_catalogue_before_publication_hook: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            runtime_catalogue_after_permissions_read_hook: std::sync::Mutex::new(None),
+            panic_during_shutdown_for_test: Default::default(),
             shutdown: crate::server::ShutdownController::new(self.shutdown_timeout),
         });
-
-        // Restore the durable administrative selection before serving snapshots.
-        super::runtime_catalogue::publish_runtime_catalogue(&state, &[], &[])
-            .await
-            .map_err(|error| format!("restore active schema before serving: {error}"))?;
 
         let app = routes::create_router(state.clone()).merge(profiling::admin_router(
             self.heap_profiler,
@@ -211,8 +267,11 @@ impl ServerBuilder {
 
     /// Build the direct admin catalogue store used by HTTP catalogue routes.
     ///
-    fn build_catalogue_store(&self) -> Result<(StoredCatalogue, Option<Schema>), String> {
-        let storage = self.build_catalogue_storage()?;
+    fn build_catalogue_store(
+        &self,
+        store: &AppStore,
+    ) -> Result<(StoredCatalogue, Option<Schema>), String> {
+        let storage = store.catalogue()?;
         let initial_schema = match &self.schema_mode {
             ServerSchemaMode::Fixed(schema) => Some(schema.clone()),
             ServerSchemaMode::Dynamic => None,
@@ -224,7 +283,6 @@ impl ServerBuilder {
             let local_durability_tiers =
                 std::collections::HashSet::from([self.local_durability_tier()]);
             StoredCatalogue::with_test_observability(
-                self.app_id,
                 initial_schema,
                 storage,
                 schema_branches,
@@ -233,7 +291,7 @@ impl ServerBuilder {
             .map_err(|error| format!("failed to read durable catalogue: {error}"))?
         };
         #[cfg(not(test))]
-        let store = StoredCatalogue::new(self.app_id, initial_schema, storage)
+        let store = StoredCatalogue::new(initial_schema, storage)
             .map_err(|error| format!("failed to read durable catalogue: {error}"))?;
 
         let latest_catalogue_schema = store
@@ -245,18 +303,11 @@ impl ServerBuilder {
     fn build_core_server_shell(
         &self,
         latest_catalogue_schema: Option<Schema>,
-        storage_config: Result<StorageConfig, String>,
+        store: &AppStore,
     ) -> Result<Option<crate::server::ServerRuntimeHandle>, String> {
         let role = NodeRole::Core;
         if let Some(schema) = &self.core_server_shell_schema {
-            let storage_config = storage_config?;
-            return Ok(Some(
-                crate::server::ServerRuntimeHandle::start_with_storage_config(
-                    schema.clone(),
-                    storage_config,
-                    role,
-                )?,
-            ));
+            return Ok(Some(store.start_runtime(schema.clone(), role, false)?));
         }
 
         let (schema, dynamic) = match &self.schema_mode {
@@ -266,48 +317,70 @@ impl ServerBuilder {
         let Some(schema) = schema else {
             return Ok(None);
         };
-        let storage_config = storage_config?;
         let schema = jazz::schema::JazzSchema::new(&schema)
             .map_err(|error| format!("failed to build server shell schema: {error}"))?;
         // The newest published schema may never have reached the shell store
         // (published without a lens, or its lens bridge failed). A dynamic
-        // server then reopens with the store's own current schema; startup
-        // re-applies the durable permissions head right after.
-        let start = if dynamic {
-            crate::server::ServerRuntimeHandle::start_with_catalogue_schema
-        } else {
-            crate::server::ServerRuntimeHandle::start_with_storage_config
-        };
-        Ok(Some(start(schema, storage_config, role)?))
+        // server then reopens with the store's own current schema.
+        Ok(Some(store.start_runtime(schema, role, dynamic)?))
     }
 
-    fn build_core_server_shell_storage_config(&self) -> Result<StorageConfig, String> {
+    /// The storage to open, and the blob-store record to write once it has
+    /// opened (if it changes).
+    fn build_core_server_shell_storage_config(
+        &self,
+    ) -> Result<(StorageConfig, Option<BlobStoreRecord>), String> {
         match &self.storage_backend {
-            StorageBackend::InMemory => Ok(StorageConfig::InMemory),
+            StorageBackend::InMemory => Ok((StorageConfig::InMemory, None)),
             StorageBackend::Persistent { path } => {
                 std::fs::create_dir_all(path)
                     .map_err(|e| format!("failed to create data dir '{}': {e}", path.display()))?;
-                Ok(StorageConfig::data_dir(path))
+                let blobs = match &self.blobs {
+                    // A bucket's default prefix is this store's own.
+                    BlobStore::S3(options) if options.prefix.is_empty() => {
+                        let mut options = options.clone();
+                        options.prefix = format!("jazz/{}/", store_id(path)?);
+                        BlobStore::S3(options)
+                    }
+                    BlobStore::VercelBlob(options) if options.prefix.is_empty() => {
+                        let mut options = options.clone();
+                        options.prefix = format!("jazz/{}/", store_id(path)?);
+                        BlobStore::VercelBlob(options)
+                    }
+                    blobs => blobs.clone(),
+                };
+                let plan = plan_blob_store(path, &blobs)?;
+                let config = match (&plan.blob_dir, &blobs) {
+                    (Some(dir), _) => {
+                        claim_blob_dir(path, dir)?;
+                        StorageConfig::data_dir(path).with_blob_dir(dir.clone())
+                    }
+                    (None, BlobStore::S3(options)) => {
+                        warn_on_distant_bucket(options);
+                        let store = crate::s3::S3ChunkStore::new(options.clone(), store_id(path)?)?;
+                        StorageConfig::data_dir(path).with_blobs(crate::runtime::Blobs::Network(
+                            crate::runtime::NetworkChunkStore {
+                                store: Arc::new(store),
+                                name: options.describe(),
+                            },
+                        ))
+                    }
+                    (None, BlobStore::VercelBlob(options)) => {
+                        let store = crate::vercel_blob::VercelBlobChunkStore::new(
+                            options.clone(),
+                            store_id(path)?,
+                        )?;
+                        StorageConfig::data_dir(path).with_blobs(crate::runtime::Blobs::Network(
+                            crate::runtime::NetworkChunkStore {
+                                store: Arc::new(store),
+                                name: options.describe(),
+                            },
+                        ))
+                    }
+                    (None, _) => StorageConfig::data_dir(path),
+                };
+                Ok((config, plan.record))
             }
-        }
-    }
-
-    fn build_catalogue_storage(&self) -> Result<DynCatalogueStorage, String> {
-        match &self.storage_backend {
-            StorageBackend::Persistent { path } => {
-                std::fs::create_dir_all(path)
-                    .map_err(|e| format!("failed to create data dir '{}': {e}", path.display()))?;
-
-                let db_path = path.join(CATALOGUE_FILE);
-                let storage = CatalogueKvStorage::open(db_path.clone()).map_err(|error| {
-                    format!(
-                        "failed to open catalogue storage '{}': {error}",
-                        db_path.display()
-                    )
-                })?;
-                Ok(Box::new(storage))
-            }
-            StorageBackend::InMemory => Ok(Box::new(CatalogueMemoryStorage::new())),
         }
     }
 
@@ -317,10 +390,311 @@ impl ServerBuilder {
     }
 }
 
+/// Where a data directory's large values go, and the record of that choice
+/// still to be written.
+struct BlobStorePlan {
+    /// `None` keeps them in SQLite.
+    blob_dir: Option<PathBuf>,
+    record: Option<BlobStoreRecord>,
+}
+
+/// A data directory's blob-store record, written once its store has opened.
+struct BlobStoreRecord {
+    marker: PathBuf,
+    contents: String,
+}
+
+impl BlobStoreRecord {
+    fn write(&self) -> Result<(), String> {
+        write_durably(&self.marker, self.contents.as_bytes())
+    }
+}
+
+/// Refuse to start `data_dir` with a blob store other than the one it was
+/// started with. A directory with no record keeps its blobs in SQLite (every
+/// store did before blob stores), and may move them out.
+///
+/// The record names the blob directory relative to the data directory when
+/// it is inside it (so the two move together) and absolute otherwise, so a
+/// relative `dir` means the same directory whatever the working directory.
+fn plan_blob_store(data_dir: &Path, blobs: &BlobStore) -> Result<BlobStorePlan, String> {
+    let marker = data_dir.join(BLOB_STORE_MARKER);
+    let recorded = match std::fs::read_to_string(&marker) {
+        Ok(recorded) => recorded.trim_end_matches('\n').to_owned(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => "sqlite".to_owned(),
+        Err(error) => return Err(format!("read {}: {error}", marker.display())),
+    };
+    let data_dir = absolute(data_dir)?;
+    let (wanted, blob_dir) = match blobs {
+        BlobStore::Sqlite => ("sqlite".to_owned(), None),
+        BlobStore::Files { dir } => {
+            let dir = match dir {
+                Some(dir) => absolute(dir)?,
+                None => data_dir.join("blobs"),
+            };
+            let named = if dir == data_dir.join("blobs") {
+                "files".to_owned()
+            } else if let Ok(inside) = dir.strip_prefix(&data_dir) {
+                format!("files {}", inside.display())
+            } else {
+                format!("files {}", dir.display())
+            };
+            (named, Some(dir))
+        }
+        BlobStore::S3(options) => (options.describe(), None),
+        BlobStore::VercelBlob(options) => (options.describe(), None),
+    };
+    if recorded == wanted {
+        return Ok(BlobStorePlan {
+            blob_dir,
+            record: None,
+        });
+    }
+    if recorded != "sqlite" {
+        return Err(format!(
+            "data dir '{}' keeps its large values in {recorded:?}; moving them to {wanted:?} is not supported yet",
+            data_dir.display(),
+        ));
+    }
+    Ok(BlobStorePlan {
+        blob_dir,
+        record: Some(BlobStoreRecord {
+            marker,
+            contents: format!("{wanted}\n"),
+        }),
+    })
+}
+
+/// Vercel functions and Sandboxes run in AWS regions: a bucket in another
+/// region pays transfer both ways and adds latency to every cold read.
+fn warn_on_distant_bucket(options: &crate::s3::S3Options) {
+    if options.endpoint.is_some() {
+        return;
+    }
+    let Some(vercel) = std::env::var("VERCEL_REGION").ok() else {
+        return;
+    };
+    if let Some(aws) = aws_region_of_vercel(&vercel)
+        && aws != options.region
+    {
+        tracing::warn!(
+            bucket = %options.bucket,
+            bucket_region = %options.region,
+            vercel_region = %vercel,
+            "the large-value bucket is in {}, but this deployment runs in {vercel} ({aws}): \
+             put the bucket in {aws} to avoid cross-region transfer",
+            options.region,
+        );
+    }
+}
+
+/// The AWS region a Vercel region runs in.
+pub fn aws_region_of_vercel(vercel: &str) -> Option<&'static str> {
+    Some(match vercel {
+        "iad1" => "us-east-1",
+        "cle1" => "us-east-2",
+        "sfo1" => "us-west-1",
+        "pdx1" => "us-west-2",
+        "yul1" => "ca-central-1",
+        "gru1" => "sa-east-1",
+        "dub1" => "eu-west-1",
+        "lhr1" => "eu-west-2",
+        "cdg1" => "eu-west-3",
+        "fra1" => "eu-central-1",
+        "arn1" => "eu-north-1",
+        "cpt1" => "af-south-1",
+        "dxb1" => "me-central-1",
+        "bom1" => "ap-south-1",
+        "sin1" => "ap-southeast-1",
+        "syd1" => "ap-southeast-2",
+        "hkg1" => "ap-east-1",
+        "hnd1" => "ap-northeast-1",
+        "icn1" => "ap-northeast-2",
+        "kix1" => "ap-northeast-3",
+        _ => return None,
+    })
+}
+
+/// Claim `blob_dir` for `data_dir`, or refuse it if another data directory
+/// owns it: a store deletes the values it reclaims, so two stores sharing a
+/// directory would delete each other's values. The claim is exclusive: the
+/// owner file is created only if none exists, so of two data dirs claiming
+/// one blob dir at once, one wins and the other reads its id.
+fn claim_blob_dir(data_dir: &Path, blob_dir: &Path) -> Result<(), String> {
+    let id = store_id(data_dir)?;
+    std::fs::create_dir_all(blob_dir)
+        .map_err(|e| format!("failed to create blob dir '{}': {e}", blob_dir.display()))?;
+    let owner_file = blob_dir.join(BLOB_OWNER_FILE);
+    if !owner_file.exists() {
+        create_exclusively(&owner_file, format!("{id}\n").as_bytes())?;
+    }
+    let owner = read_owner(&owner_file)?;
+    if owner != id {
+        return Err(format!(
+            "blob dir '{}' belongs to another data dir; give each data dir its own blob dir",
+            blob_dir.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Create `path` holding `contents`, unless it already exists (which is
+/// not an error: the caller reads who won). A synced temporary file is
+/// hard-linked into place, so the file appears whole. Where the file system
+/// has no hard links (FAT, SMB, some FUSE and NFS mounts), it is created
+/// with `O_EXCL` and then written, and readers wait out the moment it is
+/// empty.
+fn create_exclusively(path: &Path, contents: &[u8]) -> Result<(), String> {
+    use std::io::{ErrorKind, Write};
+    let parent = path.parent().unwrap_or(Path::new("."));
+    let claim = temporary_beside(path);
+    write_synced(&claim, contents)?;
+    let linked = std::fs::hard_link(&claim, path);
+    let _ = std::fs::remove_file(&claim);
+    match linked {
+        Ok(()) => return sync_dir(parent),
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => return Ok(()),
+        // No hard links here; any real failure surfaces from the create below.
+        Err(_) => {}
+    }
+    let mut file = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => return Ok(()),
+        Err(error) => return Err(format!("claim {}: {error}", path.display())),
+    };
+    file.write_all(contents)
+        .and_then(|()| file.sync_all())
+        .map_err(|e| format!("write {}: {e}", path.display()))?;
+    sync_dir(parent)
+}
+
+/// The id in an owner file, waiting briefly while one created without hard
+/// links is still empty.
+fn read_owner(owner_file: &Path) -> Result<String, String> {
+    for _ in 0..50 {
+        let owner = std::fs::read_to_string(owner_file)
+            .map_err(|e| format!("read {}: {e}", owner_file.display()))?;
+        if owner.ends_with('\n') {
+            return Ok(owner.trim().to_owned());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    Err(format!(
+        "{} is incomplete; if no other data dir uses this blob dir, delete it and start again",
+        owner_file.display()
+    ))
+}
+
+/// The data directory's id, made on first use.
+fn store_id(data_dir: &Path) -> Result<String, String> {
+    let file = data_dir.join(STORE_ID_FILE);
+    match std::fs::read_to_string(&file) {
+        Ok(id) => return Ok(id.trim().to_owned()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("read {}: {error}", file.display())),
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    write_durably(&file, format!("{id}\n").as_bytes())?;
+    Ok(id)
+}
+
+/// `path` as one name per directory, read the way the file system reads it:
+/// each part that exists is canonicalized as it is reached (so a symlink,
+/// and a `..` after it, resolve as they would on disk), and parts that do
+/// not exist yet are appended, with `.` and `..` resolved as written.
+fn absolute(path: &Path) -> Result<PathBuf, String> {
+    let path =
+        std::path::absolute(path).map_err(|e| format!("resolve '{}': {e}", path.display()))?;
+    let mut resolved = PathBuf::new();
+    for part in path.components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                resolved.pop();
+            }
+            std::path::Component::Normal(name) => {
+                resolved.push(name);
+                match std::fs::canonicalize(&resolved) {
+                    Ok(on_disk) => resolved = without_verbatim_prefix(on_disk),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(format!("resolve '{}': {error}", resolved.display()));
+                    }
+                }
+            }
+            // The drive or share, and the root: kept as written.
+            other => resolved.push(other),
+        }
+    }
+    Ok(resolved)
+}
+
+/// Windows' canonical paths are verbatim (`\\?\C:\x`, `\\?\UNC\host\share\x`);
+/// the plain spelling (`C:\x`, `\\host\share\x`) names the same file and is
+/// the one people write, so it is the one recorded.
+fn without_verbatim_prefix(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let text = path.to_string_lossy();
+        if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{rest}"));
+        }
+        if let Some(rest) = text.strip_prefix(r"\\?\") {
+            if rest.as_bytes().get(1) == Some(&b':') {
+                return PathBuf::from(rest);
+            }
+        }
+    }
+    path
+}
+
+/// Write `path` so that a crash leaves either the old file or the whole
+/// new one: a synced temporary file renamed into place, then the directory
+/// synced.
+fn write_durably(path: &Path, contents: &[u8]) -> Result<(), String> {
+    let temporary = temporary_beside(path);
+    let written = write_synced(&temporary, contents).and_then(|()| {
+        std::fs::rename(&temporary, path)
+            .map_err(|e| format!("rename {}: {e}", temporary.display()))
+    });
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    written?;
+    sync_dir(path.parent().unwrap_or(Path::new(".")))
+}
+
+/// A temporary name next to `path`, unique to this write.
+fn temporary_beside(path: &Path) -> PathBuf {
+    path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4().simple()))
+}
+
+fn write_synced(path: &Path, contents: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    let mut file =
+        std::fs::File::create(path).map_err(|e| format!("create {}: {e}", path.display()))?;
+    let written = file
+        .write_all(contents)
+        .and_then(|()| file.sync_all())
+        .map_err(|e| format!("write {}: {e}", path.display()));
+    if written.is_err() {
+        let _ = std::fs::remove_file(path);
+    }
+    written
+}
+
+fn sync_dir(dir: &Path) -> Result<(), String> {
+    std::fs::File::open(dir)
+        .and_then(|dir| dir.sync_all())
+        .map_err(|e| format!("sync {}: {e}", dir.display()))
+}
+
 fn refuse_pre_sqlite_data_dir(path: &std::path::Path) -> Result<(), String> {
-    let started = [CATALOGUE_FILE, ACCOUNTS_FILE, "jazz.sqlite"]
-        .iter()
-        .any(|file| path.join(file).exists());
+    let started = path.join(STORE_FILE).exists();
     match PRE_SQLITE_STORES.iter().find(|dir| path.join(dir).exists()) {
         Some(old) if !started => Err(format!(
             "data dir '{}' holds a store from before SQLite ({old}); migrate it before starting this server",
@@ -335,113 +709,24 @@ fn test_schema_branches(schema: Option<&Schema>) -> Vec<String> {
     schema.map(|_| "main".to_string()).into_iter().collect()
 }
 
-async fn build_jwt_verifier(auth_config: &AuthConfig) -> Result<Option<Arc<JwtVerifier>>, String> {
-    match (
-        auth_config.jwks_url.as_ref(),
-        auth_config.jwt_public_key.as_ref(),
-    ) {
-        (Some(_), Some(_)) => Err(
-            "configure either --jwks-url / JAZZ_JWKS_URL or --jwt-public-key / JAZZ_JWT_PUBLIC_KEY, not both"
-                .to_string(),
-        ),
-        (None, None) => Ok(None),
-        (None, Some(public_key)) => {
-            let verifier = StaticJwtVerifier::from_public_key(public_key)?;
-            Ok(Some(Arc::new(JwtVerifier::Static(verifier))))
-        }
-        (Some(jwks_url), None) => {
-            let jwks_ttl = std::env::var("JAZZ_JWKS_CACHE_TTL_SECS")
-                .ok()
-                .and_then(|value| value.parse::<u64>().ok())
-                .map(Duration::from_secs)
-                .unwrap_or(JWKS_CACHE_TTL);
-            let jwks_max_stale = std::env::var("JAZZ_JWKS_MAX_STALE_SECS")
-                .ok()
-                .and_then(|value| value.parse::<u64>().ok())
-                .map(Duration::from_secs)
-                .unwrap_or(JWKS_MAX_STALE);
-
-            let http_client = reqwest::Client::builder()
-                .connect_timeout(Duration::from_secs(5))
-                .timeout(Duration::from_secs(10))
-                .build()
-                .map_err(|e| format!("failed to build JWKS HTTP client: {e}"))?;
-
-            let verifier = Arc::new(JwtVerifier::Jwks(JwksCache::new(
-                jwks_url.clone(),
-                http_client,
-                jwks_ttl,
-                jwks_max_stale,
-            )));
-
-            // Warm the cache in the background. The JWKS endpoint may not be
-            // available yet (e.g. Jazz server starts during Next.js config resolution,
-            // before the app is listening). First auth request will block on fetch
-            // if the background warm hasn't completed.
-            {
-                let verifier = Arc::clone(&verifier);
-                tokio::spawn(async move {
-                    if let JwtVerifier::Jwks(cache) = verifier.as_ref()
-                        && let Err(e) = cache.load(false).await
-                    {
-                        tracing::warn!(
-                            "Background JWKS warm failed (will retry on first auth request): {e}"
-                        );
-                    }
-                });
-            }
-
-            Ok(Some(verifier))
-        }
-    }
-}
-
 fn validate_server_config(auth_config: &AuthConfig) -> Result<(), String> {
-    let has_jwt_key = auth_config.jwks_url.is_some() || auth_config.jwt_public_key.is_some();
-    if auth_config
-        .jwt_issuer
-        .as_deref()
-        .is_some_and(|value| value.trim().is_empty())
-    {
-        return Err("external JWT issuer cannot be empty".to_owned());
-    }
-    if auth_config
-        .jwt_audience
-        .as_deref()
-        .is_some_and(|value| value.trim().is_empty())
-    {
-        return Err("external JWT audience cannot be empty".to_owned());
-    }
-
-    match (
-        auth_config.jwt_issuer.as_ref(),
-        auth_config.jwt_audience.as_ref(),
-    ) {
-        (Some(_), Some(_)) if !has_jwt_key => {
+    if let Some(workload) = &auth_config.trusted_workload {
+        if auth_config.admin_secret.is_some() || auth_config.backend_secret.is_some() {
             return Err(
-                "external JWT issuer/audience require --jwks-url / JAZZ_JWKS_URL or --jwt-public-key / JAZZ_JWT_PUBLIC_KEY"
+                "a trusted workload replaces the admin and backend secrets; configure one or the other"
                     .to_owned(),
             );
         }
-        (Some(_), None) => {
-            return Err(
-                "external JWT verification requires --jwt-audience / JAZZ_JWT_AUDIENCE".to_owned(),
-            );
+        for (name, value) in [
+            ("issuer", &workload.issuer),
+            ("audience", &workload.audience),
+            ("subject", &workload.subject),
+        ] {
+            if value.trim().is_empty() {
+                return Err(format!("trusted workload {name} cannot be empty"));
+            }
         }
-        (None, Some(_)) => {
-            return Err(
-                "external JWT verification requires --jwt-issuer / JAZZ_JWT_ISSUER".to_owned(),
-            );
-        }
-        (None, None) if has_jwt_key && !auth_config.allow_local_first_auth => {
-            return Err(
-                "external JWT verification requires --jwt-issuer / JAZZ_JWT_ISSUER and --jwt-audience / JAZZ_JWT_AUDIENCE"
-                    .to_owned(),
-            );
-        }
-        _ => {}
     }
-
     if auth_config
         .admin_secret
         .as_deref()
@@ -462,14 +747,8 @@ fn validate_server_config(auth_config: &AuthConfig) -> Result<(), String> {
 
 fn log_auth_config(auth_config: &AuthConfig) {
     info!(
-        "Auth configured: local_first={}, jwks={}, static_jwt_key={}, jwt_issuer={}, jwt_audience={}, cookie={}, trust_forwarded_host={}, backend={}, admin={}",
+        "Auth configured: local_first={}, backend={}, admin={}",
         auth_config.allow_local_first_auth,
-        auth_config.jwks_url.is_some(),
-        auth_config.jwt_public_key.is_some(),
-        auth_config.jwt_issuer.is_some(),
-        auth_config.jwt_audience.is_some(),
-        auth_config.auth_cookie_name.is_some(),
-        auth_config.trust_forwarded_host,
         auth_config.backend_secret.is_some(),
         auth_config.admin_secret.is_some()
     );
@@ -479,11 +758,7 @@ fn log_auth_config(auth_config: &AuthConfig) {
 mod tests {
     use super::*;
     use crate::server::catalogue::CatalogueStore;
-    use crate::server::catalogue_entry::CatalogueEntry;
     use jazz::tools::AppId;
-    use jazz::tools::metadata::{MetadataKey, ObjectType};
-    use jazz::tools::public_schema::SchemaHash;
-    use jazz::tools::schema_lens::LensTransform;
 
     fn dynamic_bootstrap_schema() -> jazz::tools::public_schema::Schema {
         jazz::tools::public_schema::SchemaBuilder::new()
@@ -492,54 +767,6 @@ mod tests {
                     .column("body", jazz::tools::public_schema::ColumnType::Text),
             )
             .build()
-    }
-
-    fn write_raw_catalogue_entry(catalogue_path: &std::path::Path, entry: &CatalogueEntry) {
-        let storage = open_raw_catalogue_storage(catalogue_path);
-        jazz::db::block_on(storage.set(
-            "default".to_owned(),
-            crate::server::catalogue_storage::CatalogueKvStorage::entry_key(entry.object_id),
-            entry.encode_storage_row().expect("encode catalogue entry"),
-        ))
-        .expect("write raw catalogue entry");
-    }
-
-    /// The catalogue file as raw keys and values, for writing entries the
-    /// catalogue itself never would.
-    struct RawCatalogue(crate::kv::SqliteKv);
-
-    impl RawCatalogue {
-        async fn set(&self, _space: String, key: Vec<u8>, value: Vec<u8>) -> Result<(), String> {
-            self.0.write_many(&[(key, value)])
-        }
-
-        async fn delete(&self, _space: String, key: Vec<u8>) -> Result<(), String> {
-            self.0.delete(&key)
-        }
-    }
-
-    fn open_raw_catalogue_storage(catalogue_path: &std::path::Path) -> RawCatalogue {
-        RawCatalogue(crate::kv::SqliteKv::open(catalogue_path).expect("open raw catalogue storage"))
-    }
-
-    #[test]
-    fn local_first_server_may_start_with_unbound_jwks_but_external_only_may_not() {
-        let local_first = AuthConfig {
-            jwks_url: Some("http://127.0.0.1:9/jwks".to_owned()),
-            allow_local_first_auth: true,
-            ..Default::default()
-        };
-        validate_server_config(&local_first)
-            .expect("local-first admission does not require external JWT bindings");
-
-        let external_only = AuthConfig {
-            allow_local_first_auth: false,
-            ..local_first
-        };
-        let error = validate_server_config(&external_only)
-            .expect_err("an external-only verifier must be explicitly bound");
-        assert!(error.contains("--jwt-issuer"), "{error}");
-        assert!(error.contains("--jwt-audience"), "{error}");
     }
 
     #[tokio::test]
@@ -589,6 +816,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn builder_refuses_shared_secrets_next_to_a_trusted_workload() {
+        let workload = crate::middleware::workload::TrustedWorkload {
+            issuer: "https://oidc.example".to_owned(),
+            audience: "aud".to_owned(),
+            subject: "sub".to_owned(),
+        };
+        let config = AuthConfig {
+            trusted_workload: Some(workload.clone()),
+            backend_secret: Some("shared".to_owned()),
+            ..AuthConfig::default()
+        };
+        assert!(
+            validate_server_config(&config)
+                .unwrap_err()
+                .contains("trusted workload")
+        );
+        let blank = AuthConfig {
+            trusted_workload: Some(crate::middleware::workload::TrustedWorkload {
+                subject: " ".to_owned(),
+                ..workload
+            }),
+            ..AuthConfig::default()
+        };
+        assert!(
+            validate_server_config(&blank)
+                .unwrap_err()
+                .contains("subject")
+        );
+    }
+
+    #[tokio::test]
     async fn builder_accepts_nonblank_admin_and_backend_secrets() {
         let admin_secret = " configured-admin ";
         let backend_secret = " configured-backend ";
@@ -634,370 +892,346 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persistent_builder_fails_when_catalogue_scan_is_corrupt() {
+    async fn a_data_dir_keeps_its_blob_store_except_moving_out_of_sqlite() {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
-        let catalogue_path = data_dir.path().join(CATALOGUE_FILE);
-        {
-            let storage = open_raw_catalogue_storage(&catalogue_path);
-            jazz::db::block_on(storage.set(
-                "default".to_owned(),
-                b"cat:not-a-uuid".to_vec(),
-                vec![0],
-            ))
-            .expect("write malformed catalogue entry");
-        }
+        let start = |blobs: BlobStore| {
+            ServerBuilder::new(AppId::from_name("blob-store-pin"))
+                .with_storage(StorageBackend::Persistent {
+                    path: data_dir.path().to_path_buf(),
+                })
+                .with_blob_store(blobs)
+                .build()
+        };
+        let files = || BlobStore::Files { dir: None };
 
-        let result = ServerBuilder::new(AppId::from_name("corrupt-durable-catalogue"))
-            .with_schema(dynamic_bootstrap_schema())
-            .with_storage(StorageBackend::Persistent {
-                path: data_dir.path().to_path_buf(),
-            })
-            .build()
-            .await;
-
-        let error = result.err().expect(
-            "server startup must fail rather than treating a corrupt durable catalogue as empty",
-        );
-        assert!(
-            error.contains(
-                "failed to read durable catalogue: Storage error: IO error: catalogue key uses an unsupported namespace"
-            ),
-            "startup error retains the catalogue-read context and storage corruption: {error}"
-        );
-
-        let storage = open_raw_catalogue_storage(&catalogue_path);
-        jazz::db::block_on(storage.delete("default".to_owned(), b"cat:not-a-uuid".to_vec()))
-            .expect("remove corrupt catalogue entry");
-        drop(storage);
-        ServerBuilder::new(AppId::from_name("corrupt-durable-catalogue"))
-            .with_schema(dynamic_bootstrap_schema())
-            .with_storage(StorageBackend::Persistent {
-                path: data_dir.path().to_path_buf(),
-            })
-            .build()
+        // A store from before blob stores keeps its blobs in SQLite, and may
+        // move them out.
+        start(BlobStore::Sqlite)
             .await
-            .expect("builder retries after repaired catalogue");
+            .expect("sqlite")
+            .shutdown()
+            .await;
+        assert!(!data_dir.path().join(BLOB_STORE_MARKER).exists());
+        start(files())
+            .await
+            .expect("sqlite to files")
+            .shutdown()
+            .await;
+        assert_eq!(
+            std::fs::read_to_string(data_dir.path().join(BLOB_STORE_MARKER)).unwrap(),
+            "files\n"
+        );
+        start(files()).await.expect("files again").shutdown().await;
+
+        for other in [
+            BlobStore::Sqlite,
+            BlobStore::Files {
+                dir: Some(data_dir.path().join("elsewhere")),
+            },
+        ] {
+            let error = start(other.clone())
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("{other:?} after files starts"));
+            assert!(error.contains("not supported yet"), "{error}");
+        }
     }
 
+    /// Without a prefix, each data dir gets its own (`jazz/<store id>/`,
+    /// naming no app), so two stores sharing a bucket (preview and
+    /// production) never share keys.
     #[tokio::test]
-    async fn persistent_builder_fails_when_known_catalogue_payload_is_corrupt() {
-        for (object_type, decode_context) in [
-            (ObjectType::CatalogueSchema, "decode schema payload"),
-            (ObjectType::CatalogueLens, "decode lens payload"),
-            (
-                ObjectType::CataloguePermissionsBundle,
-                "decode permissions bundle payload",
-            ),
-            (
-                ObjectType::CataloguePermissionsHead,
-                "decode permissions head payload",
-            ),
-        ] {
+    async fn a_bucket_without_a_prefix_gets_one_per_data_dir() {
+        let app = AppId::from_name("blob-store-prefix");
+        let blobs = BlobStore::S3(crate::s3::S3Options {
+            bucket: "jazz".to_owned(),
+            region: "auto".to_owned(),
+            endpoint: Some("http://127.0.0.1:9".to_owned()),
+            prefix: String::new(),
+            path_style: true,
+            credentials: crate::s3::S3Credentials::Static(crate::s3::Keys {
+                access_key_id: "k".to_owned(),
+                secret_access_key: "s".to_owned(),
+                session_token: None,
+            }),
+            sts_endpoint: None,
+            environment: None,
+        });
+        let mut recorded = Vec::new();
+        for _ in 0..2 {
             let data_dir = tempfile::TempDir::new().expect("temp data dir");
-            let catalogue_path = data_dir.path().join(CATALOGUE_FILE);
-            let app_id = AppId::from_name(&format!("corrupt-{}", object_type.as_str()));
-            let object_id = jazz::tools::ObjectId::new();
-            let mut metadata = std::collections::HashMap::from([
-                (MetadataKey::Type.to_string(), object_type.to_string()),
-                (MetadataKey::AppId.to_string(), app_id.uuid().to_string()),
-            ]);
-            if object_type == ObjectType::CatalogueLens {
-                let schema_hash = SchemaHash::compute(&dynamic_bootstrap_schema());
-                metadata.insert(MetadataKey::SourceHash.to_string(), schema_hash.to_string());
-                metadata.insert(MetadataKey::TargetHash.to_string(), schema_hash.to_string());
-            }
-            let entry = CatalogueEntry {
-                object_id,
-                metadata,
-                content: vec![0],
-            };
-            write_raw_catalogue_entry(&catalogue_path, &entry);
-
-            let result = ServerBuilder::new(app_id)
+            ServerBuilder::new(app)
                 .with_storage(StorageBackend::Persistent {
                     path: data_dir.path().to_path_buf(),
                 })
-                .build()
-                .await;
-            let error = result
-                .err()
-                .expect("corrupt known catalogue payload must fail startup");
-            assert!(
-                error.contains("failed to read durable catalogue: Decode error"),
-                "startup error retains the durable-catalogue context: {error}"
-            );
-            assert!(
-                error.contains(object_type.as_str()) && error.contains(decode_context),
-                "startup error identifies the corrupt known entry type and decoder: {error}"
-            );
-            assert!(
-                error.contains(&object_id.to_string()),
-                "startup error identifies the corrupt durable object: {error}"
-            );
-
-            let storage = open_raw_catalogue_storage(&catalogue_path);
-            jazz::db::block_on(storage.delete(
-                "default".to_owned(),
-                crate::server::catalogue_storage::CatalogueKvStorage::entry_key(object_id),
-            ))
-            .expect("remove corrupt catalogue entry");
-            drop(storage);
-            ServerBuilder::new(app_id)
-                .with_storage(StorageBackend::Persistent {
-                    path: data_dir.path().to_path_buf(),
-                })
+                .with_blob_store(blobs.clone())
                 .build()
                 .await
-                .expect("builder retries after repaired catalogue");
+                .expect("start")
+                .shutdown()
+                .await;
+            let id = std::fs::read_to_string(data_dir.path().join(STORE_ID_FILE)).unwrap();
+            let marker = std::fs::read_to_string(data_dir.path().join(BLOB_STORE_MARKER)).unwrap();
+            assert_eq!(
+                marker,
+                format!("s3 http://127.0.0.1:9 jazz/jazz/{}/\n", id.trim())
+            );
+            recorded.push(marker);
+        }
+        assert_ne!(recorded[0], recorded[1]);
+    }
+
+    /// A Blob store's default prefix is the data dir's own too.
+    #[tokio::test]
+    async fn a_vercel_blob_store_without_a_prefix_gets_one_per_data_dir() {
+        let app = AppId::from_name("vercel-blob-prefix");
+        let blobs = BlobStore::VercelBlob(crate::vercel_blob::VercelBlobOptions {
+            store_id: "abc".to_owned(),
+            prefix: String::new(),
+            credentials: crate::vercel_blob::VercelBlobCredentials::ReadWriteToken("t".to_owned()),
+            api_url: "http://127.0.0.1:9".to_owned(),
+            blob_url: Some("http://127.0.0.1:9".to_owned()),
+            environment: None,
+        });
+        let data_dir = tempfile::TempDir::new().expect("temp data dir");
+        ServerBuilder::new(app)
+            .with_storage(StorageBackend::Persistent {
+                path: data_dir.path().to_path_buf(),
+            })
+            .with_blob_store(blobs)
+            .build()
+            .await
+            .expect("start")
+            .shutdown()
+            .await;
+        let id = std::fs::read_to_string(data_dir.path().join(STORE_ID_FILE)).unwrap();
+        let marker = std::fs::read_to_string(data_dir.path().join(BLOB_STORE_MARKER)).unwrap();
+        assert_eq!(marker, format!("vercel-blob abc/jazz/{}/\n", id.trim()));
+    }
+
+    #[tokio::test]
+    async fn a_data_dir_may_move_its_blobs_from_sqlite_to_a_bucket_and_keeps_it() {
+        let data_dir = tempfile::TempDir::new().expect("temp data dir");
+        let bucket = |prefix: &str| {
+            BlobStore::S3(crate::s3::S3Options {
+                bucket: "jazz".to_owned(),
+                region: "auto".to_owned(),
+                endpoint: Some("http://127.0.0.1:9".to_owned()),
+                prefix: prefix.to_owned(),
+                path_style: true,
+                credentials: crate::s3::S3Credentials::Static(crate::s3::Keys {
+                    access_key_id: "k".to_owned(),
+                    secret_access_key: "s".to_owned(),
+                    session_token: None,
+                }),
+                sts_endpoint: None,
+                environment: None,
+            })
+        };
+        let start = |blobs: BlobStore| {
+            ServerBuilder::new(AppId::from_name("blob-store-s3"))
+                .with_storage(StorageBackend::Persistent {
+                    path: data_dir.path().to_path_buf(),
+                })
+                .with_blob_store(blobs)
+                .build()
+        };
+        start(BlobStore::Sqlite)
+            .await
+            .expect("sqlite")
+            .shutdown()
+            .await;
+        start(bucket("a/"))
+            .await
+            .expect("sqlite to s3")
+            .shutdown()
+            .await;
+        assert_eq!(
+            std::fs::read_to_string(data_dir.path().join(BLOB_STORE_MARKER)).unwrap(),
+            "s3 http://127.0.0.1:9 jazz/a/\n"
+        );
+        start(bucket("a/"))
+            .await
+            .expect("the same bucket")
+            .shutdown()
+            .await;
+        for other in [
+            bucket("b/"),
+            BlobStore::Files { dir: None },
+            BlobStore::Sqlite,
+        ] {
+            let error = start(other.clone())
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("{other:?} after s3 starts"));
+            assert!(error.contains("not supported yet"), "{error}");
         }
     }
 
     #[tokio::test]
-    async fn persistent_builder_rejects_nested_catalogue_codec_corruption_before_recovery() {
+    async fn a_blob_dir_is_named_the_same_however_it_is_spelled() {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
-        let catalogue_path = data_dir.path().join(CATALOGUE_FILE);
-        let app_id = AppId::from_name("corrupt-nested-catalogue-codec");
-        let schema = jazz::tools::public_schema::SchemaBuilder::new()
-            .table(
-                jazz::tools::public_schema::TableSchema::builder("documents").column(
-                    "payload",
-                    jazz::tools::public_schema::ColumnType::Json {
-                        schema: Some(serde_json::json!({"type": "object"})),
-                    },
-                ),
-            )
-            .build();
-        let schema_hash = SchemaHash::compute(&schema);
-        let object_id = schema_hash.to_object_id();
-        let mut content = crate::server::catalogue_payload_codec::encode_schema(&schema);
-        let nested_version = content
-            .windows(3)
-            .position(|window| window == [12, 1, 1])
-            .expect("nested JSON codec marker");
-        content[nested_version + 2] = 2;
-        write_raw_catalogue_entry(
-            &catalogue_path,
-            &CatalogueEntry {
-                object_id,
-                metadata: std::collections::HashMap::from([
-                    (
-                        MetadataKey::Type.to_string(),
-                        ObjectType::CatalogueSchema.to_string(),
-                    ),
-                    (MetadataKey::AppId.to_string(), app_id.uuid().to_string()),
-                    (MetadataKey::SchemaHash.to_string(), schema_hash.to_string()),
-                    (MetadataKey::PublishedAt.to_string(), "1".to_owned()),
-                ]),
-                content,
-            },
+        let start = |dir: PathBuf| {
+            ServerBuilder::new(AppId::from_name("blob-dir-spelling"))
+                .with_storage(StorageBackend::Persistent {
+                    path: data_dir.path().to_path_buf(),
+                })
+                .with_blob_store(BlobStore::Files { dir: Some(dir) })
+                .build()
+        };
+        // The default, spelled out with a trailing separator, is the default.
+        let spelled_out = PathBuf::from(format!("{}/blobs/", data_dir.path().display()));
+        start(spelled_out)
+            .await
+            .expect("default spelled out")
+            .shutdown()
+            .await;
+        assert_eq!(
+            std::fs::read_to_string(data_dir.path().join(BLOB_STORE_MARKER)).unwrap(),
+            "files\n"
         );
+        start(data_dir.path().join("x/../blobs"))
+            .await
+            .expect("default through ..")
+            .shutdown()
+            .await;
+    }
 
-        let error = ServerBuilder::new(app_id)
-            .with_storage(StorageBackend::Persistent {
-                path: data_dir.path().to_path_buf(),
+    #[cfg(unix)]
+    #[test]
+    fn a_blob_dir_through_a_symlink_is_the_directory_it_points_to() {
+        let root = tempfile::TempDir::new().expect("temp root");
+        let data_dir = root.path().join("data");
+        std::fs::create_dir_all(data_dir.join("deep")).unwrap();
+        std::os::unix::fs::symlink(data_dir.join("deep"), root.path().join("link")).unwrap();
+        // `link/..` is `data`, not `root`, on disk.
+        let through_link = root.path().join("link/../blobs");
+        let plan = plan_blob_store(
+            &data_dir,
+            &BlobStore::Files {
+                dir: Some(through_link),
+            },
+        )
+        .expect("plan");
+        assert_eq!(plan.record.expect("a record").contents, "files\n");
+    }
+
+    #[test]
+    fn two_data_dirs_claiming_one_blob_dir_at_once_leave_one_owner() {
+        let blobs = tempfile::TempDir::new().expect("temp blob dir");
+        let dirs: Vec<_> = (0..8).map(|_| tempfile::TempDir::new().unwrap()).collect();
+        let start = std::sync::Arc::new(std::sync::Barrier::new(dirs.len()));
+        let claims: Vec<_> = dirs
+            .iter()
+            .map(|dir| {
+                let (data, blob) = (dir.path().to_path_buf(), blobs.path().to_path_buf());
+                let start = start.clone();
+                std::thread::spawn(move || {
+                    let id = store_id(&data).unwrap();
+                    start.wait();
+                    (id, claim_blob_dir(&data, &blob).is_ok())
+                })
             })
+            .collect();
+        let winners: Vec<String> = claims
+            .into_iter()
+            .map(|claim| claim.join().unwrap())
+            .filter_map(|(id, won)| won.then_some(id))
+            .collect();
+        assert_eq!(winners.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(blobs.path().join(BLOB_OWNER_FILE)).unwrap(),
+            format!("{}\n", winners[0])
+        );
+    }
+
+    #[test]
+    fn a_blob_dir_inside_the_data_dir_is_recorded_relative_to_it() {
+        let data_dir = tempfile::TempDir::new().expect("temp data dir");
+        let outside = tempfile::TempDir::new().expect("temp blob dir");
+        let plan = |dir: PathBuf| {
+            plan_blob_store(data_dir.path(), &BlobStore::Files { dir: Some(dir) })
+                .expect("plan")
+                .record
+                .expect("a record to write")
+                .contents
+        };
+        assert_eq!(plan(data_dir.path().join("large")), "files large\n");
+        assert_eq!(
+            plan(outside.path().to_path_buf()),
+            format!("files {}\n", absolute(outside.path()).unwrap().display())
+        );
+    }
+
+    #[tokio::test]
+    async fn two_data_dirs_cannot_share_a_blob_dir() {
+        let first = tempfile::TempDir::new().expect("temp data dir");
+        let second = tempfile::TempDir::new().expect("temp data dir");
+        let blobs = tempfile::TempDir::new().expect("temp blob dir");
+        let start = |data_dir: &tempfile::TempDir| {
+            ServerBuilder::new(AppId::from_name("shared-blob-dir"))
+                .with_storage(StorageBackend::Persistent {
+                    path: data_dir.path().to_path_buf(),
+                })
+                .with_blob_store(BlobStore::Files {
+                    dir: Some(blobs.path().to_path_buf()),
+                })
+                .build()
+        };
+        start(&first).await.expect("first").shutdown().await;
+        let error = start(&second).await.err().expect("second refused");
+        assert!(error.contains("belongs to another data dir"), "{error}");
+        assert!(
+            !second.path().join(BLOB_STORE_MARKER).exists(),
+            "a refused start records nothing"
+        );
+        start(&first).await.expect("first again").shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn persistent_builder_fails_when_a_catalogue_definition_is_corrupt() {
+        let data_dir = tempfile::TempDir::new().expect("temp data dir");
+        let builder = || {
+            ServerBuilder::new(AppId::from_name("corrupt-durable-catalogue")).with_storage(
+                StorageBackend::Persistent {
+                    path: data_dir.path().to_path_buf(),
+                },
+            )
+        };
+        let server = builder().build().await.expect("first start");
+        server
+            .state
+            .catalogue_store
+            .publish_schema(dynamic_bootstrap_schema())
+            .expect("publish schema");
+        server.shutdown().await;
+        let file = data_dir.path().join(STORE_FILE);
+        let def = |update: &str| {
+            rusqlite::Connection::open(&file)
+                .unwrap()
+                .execute(update, [])
+                .unwrap();
+        };
+        def("UPDATE _jazz_schemas SET def = replace(def, 'notes', 'notez')");
+
+        let error = builder()
             .build()
             .await
             .err()
-            .expect("nested corruption must reject before catalogue recovery becomes resident");
+            .expect("startup fails rather than serving a corrupt catalogue");
         assert!(
-            error.contains("decode schema payload")
-                && error.contains(&object_id.to_string())
-                && error.contains("unsupported version"),
-            "startup error retains the nested-codec failure context: {error}"
+            error.contains("failed to read durable catalogue")
+                && error.contains("does not hash to its key"),
+            "{error}"
         );
 
-        let storage = open_raw_catalogue_storage(&catalogue_path);
-        jazz::db::block_on(storage.delete(
-            "default".to_owned(),
-            crate::server::catalogue_storage::CatalogueKvStorage::entry_key(object_id),
-        ))
-        .expect("remove corrupt nested catalogue entry");
-        drop(storage);
-        ServerBuilder::new(app_id)
-            .with_storage(StorageBackend::Persistent {
-                path: data_dir.path().to_path_buf(),
-            })
+        def("UPDATE _jazz_schemas SET def = replace(def, 'notez', 'notes')");
+        builder()
             .build()
             .await
-            .expect("repair permits a fresh atomic catalogue recovery");
-    }
-
-    #[tokio::test]
-    async fn persistent_builder_fails_when_known_catalogue_payload_has_trailing_garbage() {
-        let schema = dynamic_bootstrap_schema();
-        let schema_hash = SchemaHash::compute(&schema);
-        let permissions = std::collections::HashMap::new();
-        for (object_type, decode_context, mut content) in [
-            (
-                ObjectType::CatalogueSchema,
-                "decode schema payload",
-                crate::server::catalogue_payload_codec::encode_schema(&schema),
-            ),
-            (
-                ObjectType::CatalogueLens,
-                "decode lens payload",
-                crate::server::catalogue_payload_codec::encode_lens_transform(&LensTransform::new()),
-            ),
-            (
-                ObjectType::CataloguePermissionsBundle,
-                "decode permissions bundle payload",
-                crate::server::catalogue_payload_codec::encode_permissions_bundle(
-                    schema_hash,
-                    1,
-                    None,
-                    &permissions,
-                ),
-            ),
-            (
-                ObjectType::CataloguePermissionsHead,
-                "decode permissions head payload",
-                crate::server::catalogue_payload_codec::encode_permissions_head(
-                    schema_hash,
-                    1,
-                    None,
-                    jazz::tools::ObjectId::new(),
-                ),
-            ),
-        ] {
-            let data_dir = tempfile::TempDir::new().expect("temp data dir");
-            let catalogue_path = data_dir.path().join(CATALOGUE_FILE);
-            let app_id = AppId::from_name(&format!("trailing-{}", object_type.as_str()));
-            let object_id = jazz::tools::ObjectId::new();
-            let mut metadata = std::collections::HashMap::from([
-                (MetadataKey::Type.to_string(), object_type.to_string()),
-                (MetadataKey::AppId.to_string(), app_id.uuid().to_string()),
-            ]);
-            if object_type == ObjectType::CatalogueLens {
-                metadata.insert(MetadataKey::SourceHash.to_string(), schema_hash.to_string());
-                metadata.insert(MetadataKey::TargetHash.to_string(), schema_hash.to_string());
-            }
-            content.push(0xff);
-            write_raw_catalogue_entry(
-                &catalogue_path,
-                &CatalogueEntry {
-                    object_id,
-                    metadata,
-                    content,
-                },
-            );
-
-            let result = ServerBuilder::new(app_id)
-                .with_storage(StorageBackend::Persistent {
-                    path: data_dir.path().to_path_buf(),
-                })
-                .build()
-                .await;
-            let error = result
-                .err()
-                .expect("known catalogue payload with trailing garbage must fail startup");
-            assert!(
-                error.contains("failed to read durable catalogue: Decode error"),
-                "startup error retains durable-catalogue context: {error}"
-            );
-            assert!(
-                error.contains(object_type.as_str())
-                    && error.contains(decode_context)
-                    && error.contains("trailing data after decoded payload"),
-                "startup error identifies the known decoder and trailing payload data: {error}"
-            );
-            assert!(
-                error.contains(&object_id.to_string()),
-                "startup error identifies the corrupt durable object: {error}"
-            );
-
-            let storage = open_raw_catalogue_storage(&catalogue_path);
-            jazz::db::block_on(storage.delete(
-                "default".to_owned(),
-                crate::server::catalogue_storage::CatalogueKvStorage::entry_key(object_id),
-            ))
-            .expect("remove corrupt catalogue entry");
-            drop(storage);
-            ServerBuilder::new(app_id)
-                .with_storage(StorageBackend::Persistent {
-                    path: data_dir.path().to_path_buf(),
-                })
-                .build()
-                .await
-                .expect("builder retries after repaired catalogue");
-        }
-    }
-
-    #[tokio::test]
-    async fn persistent_builder_fails_when_catalogue_schema_publish_time_is_missing_or_invalid() {
-        let schema = dynamic_bootstrap_schema();
-        let schema_hash = SchemaHash::compute(&schema);
-        for published_at in [None, Some("not-a-timestamp")] {
-            let data_dir = tempfile::TempDir::new().expect("temp data dir");
-            let catalogue_path = data_dir.path().join(CATALOGUE_FILE);
-            let app_id = AppId::from_name("corrupt-schema-publish-time");
-            let object_id = schema_hash.to_object_id();
-            let mut metadata = std::collections::HashMap::from([
-                (
-                    MetadataKey::Type.to_string(),
-                    ObjectType::CatalogueSchema.to_string(),
-                ),
-                (MetadataKey::AppId.to_string(), app_id.uuid().to_string()),
-                (MetadataKey::SchemaHash.to_string(), schema_hash.to_string()),
-            ]);
-            if let Some(published_at) = published_at {
-                metadata.insert(
-                    MetadataKey::PublishedAt.to_string(),
-                    published_at.to_owned(),
-                );
-            }
-            write_raw_catalogue_entry(
-                &catalogue_path,
-                &CatalogueEntry {
-                    object_id,
-                    metadata,
-                    content: crate::server::catalogue_payload_codec::encode_schema(&schema),
-                },
-            );
-
-            let error = ServerBuilder::new(app_id)
-                .with_storage(StorageBackend::Persistent {
-                    path: data_dir.path().to_path_buf(),
-                })
-                .build()
-                .await
-                .err()
-                .expect("missing or malformed schema publication time must fail startup");
-            assert!(
-                error.contains("failed to read durable catalogue: Decode error")
-                    && error.contains(ObjectType::CatalogueSchema.as_str())
-                    && error.contains("published_at metadata")
-                    && error.contains(&object_id.to_string()),
-                "startup error identifies the corrupt schema metadata: {error}"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn persistent_builder_ignores_unknown_forward_compatible_catalogue_entries() {
-        let data_dir = tempfile::TempDir::new().expect("temp data dir");
-        let catalogue_path = data_dir.path().join(CATALOGUE_FILE);
-        let app_id = AppId::from_name("unknown-durable-catalogue-entry");
-        let entry = CatalogueEntry {
-            object_id: jazz::tools::ObjectId::new(),
-            metadata: std::collections::HashMap::from([
-                (
-                    MetadataKey::Type.to_string(),
-                    "future_catalogue_kind".to_owned(),
-                ),
-                (MetadataKey::AppId.to_string(), app_id.uuid().to_string()),
-            ]),
-            content: vec![0],
-        };
-        write_raw_catalogue_entry(&catalogue_path, &entry);
-
-        ServerBuilder::new(app_id)
-            .with_storage(StorageBackend::Persistent {
-                path: data_dir.path().to_path_buf(),
-            })
-            .build()
-            .await
-            .expect("unknown forward-compatible catalogue entry does not block startup");
+            .expect("builder starts after the definition is repaired")
+            .shutdown()
+            .await;
     }
 
     #[tokio::test]
@@ -1029,11 +1263,6 @@ mod tests {
                 .catalogue_store
                 .persist_schema()
                 .expect("publish fixed schema catalogue");
-            built
-                .state
-                .catalogue_store
-                .flush()
-                .expect("flush fixed schema catalogue");
         }
 
         let rebuilt = ServerBuilder::new(app_id)
@@ -1060,95 +1289,6 @@ mod tests {
         );
     }
 
-    /// Alice activates a descendant schema and permissions, then restarts.
-    /// Startup must retain the selection and revision before serving snapshots.
-    #[tokio::test]
-    async fn authority_reopens_active_descendant_before_serving_snapshots() {
-        use jazz::tools::schema_lens::{Lens, LensOp};
-        use jazz::tools::{
-            ColumnType, PolicyExpr, SchemaBuilder, TableName, TablePolicies, TableSchema,
-        };
-
-        let dir = tempfile::tempdir().unwrap();
-        let app_id = AppId::from_name("authority-active-descendant");
-        let base = dynamic_bootstrap_schema();
-        let target = SchemaBuilder::new()
-            .table(TableSchema::builder("notes").column("content", ColumnType::Text))
-            .build();
-        let target_runtime = jazz::schema::JazzSchema::new(&target).unwrap();
-        let lens = Lens::new(
-            SchemaHash::compute(&base),
-            SchemaHash::compute(&target),
-            LensTransform::with_ops(vec![LensOp::RenameColumn {
-                table: "notes".into(),
-                old_name: "body".into(),
-                new_name: "content".into(),
-            }]),
-        );
-        let builder = || {
-            ServerBuilder::new(app_id).with_storage(StorageBackend::Persistent {
-                path: dir.path().to_path_buf(),
-            })
-        };
-        let core = builder().with_schema(base).build().await.unwrap();
-        core.state
-            .catalogue
-            .publish_schema(&core.state.catalogue_store, target.clone())
-            .unwrap();
-        core.state
-            .catalogue
-            .publish_lens(&core.state.catalogue_store, &lens)
-            .unwrap();
-        super::super::runtime_catalogue::publish_runtime_catalogue(
-            &core.state,
-            &[target.clone()],
-            &[lens],
-        )
-        .await
-        .unwrap();
-        let permissions = std::collections::HashMap::from([(
-            TableName::new("notes"),
-            TablePolicies::new().with_select(PolicyExpr::True),
-        )]);
-        let selection = super::super::runtime_catalogue::publish_permissions_and_runtime(
-            &core.state,
-            SchemaHash::compute(&target),
-            permissions.clone(),
-            None,
-        )
-        .await
-        .ok()
-        .expect("activate descendant");
-        core.shutdown().await;
-        drop(core);
-
-        // No HTTP publication or test-side activation after reopen.
-        let reopened = builder().build().await.unwrap();
-        let snapshot = reopened
-            .state
-            .runtime()
-            .unwrap()
-            .trusted_catalogue_snapshot_for_test()
-            .await
-            .unwrap();
-        assert_eq!(
-            snapshot.current_write_schema.schema,
-            target_runtime.version_id()
-        );
-        assert_eq!(snapshot.current_write_schema.revision, selection.version);
-        assert!(selection.version > 0);
-        let selected = snapshot
-            .schemas
-            .iter()
-            .find(|schema| schema.id == target_runtime.version_id())
-            .unwrap();
-        assert_eq!(
-            selected.schema.public_schema()[&TableName::new("notes")].policies,
-            permissions[&TableName::new("notes")]
-        );
-        reopened.shutdown().await;
-    }
-
     #[tokio::test]
     async fn persistent_adapter_starts_core_server_shell_with_catalogue_storage_after_restart() {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
@@ -1171,8 +1311,13 @@ mod tests {
                 .expect("build persistent server with server shell");
 
             assert!(built.state.runtime().is_some());
-            assert!(data_dir.path().join(CATALOGUE_FILE).exists());
-            assert!(data_dir.path().join("jazz.sqlite").exists());
+            assert!(data_dir.path().join(STORE_FILE).exists());
+            let files: Vec<String> = std::fs::read_dir(data_dir.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .filter(|name| !name.ends_with("-wal") && !name.ends_with("-shm"))
+                .collect();
+            assert_eq!(files, vec![STORE_FILE.to_owned()], "one file per app");
             assert_eq!(
                 built.shutdown().await,
                 crate::server::ShutdownPhase::StorageClosed,
@@ -1228,6 +1373,93 @@ mod tests {
             crate::server::ShutdownPhase::StorageClosed
         );
         drop(retained_state);
+    }
+
+    #[tokio::test]
+    async fn a_data_dir_from_another_layout_is_refused_and_left_unchanged() {
+        let app_id = AppId::from_name("refused-data-dir");
+        for old in PRE_SQLITE_STORES.iter() {
+            let data_dir = tempfile::TempDir::new().expect("temp data dir");
+            let old_path = data_dir.path().join(old);
+            if old.ends_with(".rocksdb") {
+                std::fs::create_dir(&old_path).unwrap();
+            } else {
+                std::fs::write(&old_path, b"state this build does not read").unwrap();
+            }
+            let Err(error) = ServerBuilder::new(app_id)
+                .with_storage(StorageBackend::Persistent {
+                    path: data_dir.path().to_path_buf(),
+                })
+                .build()
+                .await
+            else {
+                panic!("a data dir holding {old} must be refused");
+            };
+            assert!(error.contains(old), "{error}");
+            assert!(
+                !data_dir.path().join(STORE_FILE).exists(),
+                "a refused data dir gets no store beside {old}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_dynamic_server_keeps_catalogue_accounts_and_rows_in_one_file() {
+        let data_dir = tempfile::TempDir::new().expect("temp data dir");
+        let built = ServerBuilder::new(AppId::from_name("one-file-per-app"))
+            .with_storage(StorageBackend::Persistent {
+                path: data_dir.path().to_path_buf(),
+            })
+            .build()
+            .await
+            .expect("build dynamic persistent server");
+        assert!(built.state.runtime().is_none(), "no schema published yet");
+        let alice = jazz::account_registry::Principal {
+            issuer: "https://issuer.example".into(),
+            subject: "alice".into(),
+        };
+        let accounts = built.state.accounts.as_ref().unwrap();
+        // The account registry is written before the runtime opens on the
+        // store...
+        let first = accounts.login_or_register(alice.clone()).await.unwrap();
+        built
+            .state
+            .start_core_server_shell(
+                jazz::schema::JazzSchema::new(&dynamic_bootstrap_schema()).unwrap(),
+            )
+            .expect("start the runtime on the store");
+        // ...and read through it afterwards.
+        assert_eq!(accounts.login(alice.clone()).await.unwrap(), first);
+        assert_eq!(
+            built.shutdown().await,
+            crate::server::ShutdownPhase::StorageClosed
+        );
+        let files: Vec<String> = std::fs::read_dir(data_dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .filter(|name| !name.ends_with("-wal") && !name.ends_with("-shm"))
+            .collect();
+        assert_eq!(files, vec![STORE_FILE.to_owned()]);
+
+        let reopened = ServerBuilder::new(AppId::from_name("one-file-per-app"))
+            .with_storage(StorageBackend::Persistent {
+                path: data_dir.path().to_path_buf(),
+            })
+            .build()
+            .await
+            .expect("reopen");
+        assert_eq!(
+            reopened
+                .state
+                .accounts
+                .as_ref()
+                .unwrap()
+                .login(alice)
+                .await
+                .unwrap(),
+            first
+        );
+        reopened.shutdown().await;
     }
 
     #[tokio::test]

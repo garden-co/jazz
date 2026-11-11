@@ -22,7 +22,7 @@ import { getLocalFirstAuthController } from "../runtime/local-first-auth-control
  *
  *   let config = $derived(
  *     !auth.isLoading && auth.secret
- *       ? { appId: '<your-app-id>', secret: auth.secret }
+ *       ? { secret: auth.secret }
  *       : null,
  *   );
  * </script>

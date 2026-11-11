@@ -10,6 +10,20 @@ declare module "jazz-wasm" {
   export function drainTraceEntries(): unknown[];
   export function subscribeTraceEntries(callback: () => void): () => void;
   export function generateId(): string;
+  export function captureTextAnchor(
+    text: string,
+    version: number | undefined,
+    position: number,
+    side: unknown,
+  ): unknown;
+  export function resolveTextAnchor(anchor: unknown, text: string, version?: number): unknown;
+  export function captureTextRange(
+    text: string,
+    version: number | undefined,
+    start: number,
+    end: number,
+  ): unknown;
+  export function resolveTextRange(range: unknown, text: string, version?: number): unknown;
   export function currentTimestamp(): bigint;
   export function deriveUserId(seedB64: string): string;
   export function mintLocalFirstToken(
@@ -33,6 +47,11 @@ declare module "jazz-wasm" {
   export class PendingNativeRead {
     poll(): Uint8Array | null;
     cancel(): void;
+  }
+  /** The core's upstream link machine, stepped with JSON documents. */
+  export class UpstreamLink {
+    constructor(seed: number);
+    handle(nowMs: number, input: string): string;
   }
   export class WasmPermissionAdviceRequest {
     readonly promise: Promise<"allowed" | "denied" | "unknown">;
@@ -64,6 +83,8 @@ declare module "jazz-wasm" {
     auxiliaryOutboundReady(): Promise<void>;
     tick(): Promise<number>;
     updateAuthenticatedClaims(claims: Record<string, unknown>): Promise<void>;
+    /** Why the core dropped this upstream link on its own, or `null`. */
+    upstreamRefusal(): (Error & { code: string }) | null;
     close(): boolean;
   }
 
@@ -103,8 +124,8 @@ declare module "jazz-wasm" {
     ): WasmDb;
     /**
      * Host-only relay open; `database` is the physical database name admitted by broker
-     * ownership admission. `pageStore` may carry `{ backend?: "indexeddb" | "opfs", path?: string }`
-     * to pick the SQLite VFS (IndexedDB, with the file named after `database`, by default).
+     * ownership admission. `pageStore` may carry `{ backend?: "indexeddb", path?: string }`
+     * to name the IndexedDB-backed SQLite file (named after `database` by default).
      */
     static openBrowser(
       pageStore: unknown,
@@ -144,7 +165,7 @@ declare module "jazz-wasm" {
     /** Resolves once every commit so far is in the browser store's backing storage. */
     flush(): Promise<void>;
 
-    registerSchema(schema: Uint8Array): WasmDb;
+    registerSchema(schema: Uint8Array, migrations?: Uint8Array): WasmDb;
     captureSnapshot(): Uint8Array | PendingNativeRead;
     beginTransaction(
       openTransactionId: string,
@@ -240,14 +261,18 @@ declare module "jazz-wasm" {
       callback: (urgency: "immediate" | "deferred" | `after:${number}`) => void,
     ): void;
     onMutationError(callback: (event: any) => void): void;
+    onStorageFailure(callback: (message: string | null) => void): void;
     tick(): Promise<void>;
     setNonDurableClient(): void;
+    /** This store's uploads; see `UploadStatus` in runtime/sync-status.ts. */
+    uploadStatus(): import("../runtime/sync-status.js").UploadStatus;
     /** @internal Foreground node-lease handoff only. */
     foregroundTxTimeHighWater(): Promise<bigint>;
     /** @internal Foreground node-lease bootstrap only. */
     seedForegroundTxTimeHighWater(highWater: bigint): void;
     /** Exact wire features compiled into this WASM artifact. */
     wireFeatures(): number;
+    createUpstreamLink(seed: number): UpstreamLink;
     close(): Promise<boolean>;
     setSessionClaims(claims: Record<string, unknown> | null): void | Promise<void>;
     connectUpstream(): Promise<WasmTransport>;

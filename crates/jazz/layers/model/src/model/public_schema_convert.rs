@@ -16,8 +16,8 @@ use jazz_types::records::{
 
 use crate::model::public_api::policy::{CmpOp, PolicyValue};
 use crate::model::public_schema::{
-    ColumnDescriptor, ColumnMergeStrategy, ColumnType, Operation, PolicyExpr, Schema, TableName,
-    TableSchema, Value,
+    ColumnDescriptor, ColumnMergeStrategy, ColumnType, HistoryRetention, Operation, PolicyExpr,
+    Schema, TableName, TableSchema, Value,
 };
 use crate::query::{
     RecursionBound, RelationColumnRef, RelationExpr, RelationJoinKind, RelationPredicate,
@@ -33,6 +33,24 @@ const PUBLIC_USER_SESSION_PATHS: &[&str] = &["user"];
 const DIRECT_AUTH_MODE_CLAIM: &str = "authMode";
 const PUBLIC_AUTH_MODE_SESSION_PATHS: &[&str] = &["authMode", "auth_mode"];
 const RESERVED_AGGREGATE_OUTPUT_PREFIX: &str = "__jazz_aggregate_";
+
+/// The columns every stored row table keeps beside the app's: its row key,
+/// branch, position (`_clock`: accepted or pending), a pending version's writer
+/// (`_writer`), state bits (deleted, no content), and what the authority keeps
+/// of an accepted upload (SPEC 4 §4.6), and `_partition`, the partition a sharded
+/// deployment stores each row under (SPEC 15). An app column cannot take
+/// their names.
+pub const RESERVED_ROW_COLUMNS: [&str; 9] = [
+    "id",
+    "rid",
+    "_branch",
+    "_clock",
+    "_writer",
+    "_state",
+    "_base",
+    "_touched",
+    "_partition",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Error produced while compiling a developer-authored schema for the runtime.
@@ -145,7 +163,7 @@ fn validate_converted_schema(tables: &[CoreTableSchema]) -> Result<(), SchemaCon
             policy.validate_runtime(&schema).map_err(|error| {
                 err(
                     format!("$.{}.policies.select.using", table.name),
-                    format!("converted read policy is invalid: {error:?}"),
+                    format!("read policy is invalid: {error}"),
                 )
             })?;
         }
@@ -153,7 +171,7 @@ fn validate_converted_schema(tables: &[CoreTableSchema]) -> Result<(), SchemaCon
             policy.validate_runtime(&schema).map_err(|error| {
                 err(
                     format!("$.{}.policies.{label}", table.name),
-                    format!("converted write policy is invalid: {error:?}"),
+                    format!("write policy is invalid: {error}"),
                 )
             })?;
         }
@@ -537,6 +555,12 @@ fn convert_table(
                 "column name \"id\" is reserved for the automatically generated UUID row ID",
             ));
         }
+        if column.name.as_str() != "id" && RESERVED_ROW_COLUMNS.contains(&column.name.as_str()) {
+            return Err(err(
+                format!("$.{}.columns.{}", name.as_str(), column.name.as_str()),
+                "column name is reserved for the store's own row columns",
+            ));
+        }
         if column
             .name
             .as_str()
@@ -645,6 +669,10 @@ fn convert_table(
         }
     }
     converted.merge_strategies = merge_strategies;
+    converted.history = table.history;
+    if table.history == HistoryRetention::Latest {
+        validate_latest_only(name, table)?;
+    }
     converted.read_policy = convert_optional_policy(
         schema,
         table,
@@ -704,10 +732,20 @@ fn convert_column(
         // deliberately distinct from text.
         converted.large_value_kind = crate::schema::LargeValueSemanticKind::Json;
     }
+    converted.enum_variants = enum_variants(&column.column_type);
     if let Some(default) = &column.default {
         converted.default = Some(convert_column_default(table, column, default)?);
     }
     Ok(converted)
+}
+
+/// The variants of an enum column, or of an array of enum values.
+fn enum_variants(column_type: &ColumnType) -> Option<Vec<String>> {
+    match column_type {
+        ColumnType::Enum { variants } => Some(variants.clone()),
+        ColumnType::Array { element } => enum_variants(element),
+        _ => None,
+    }
 }
 
 fn convert_column_default(
@@ -974,6 +1012,34 @@ fn validate_payload_enum_field(
     Ok(())
 }
 
+/// A latest-only table keeps no superseded versions (SPEC 4 §4.9), so a
+/// feature that reads them is refused when the schema compiles.
+fn validate_latest_only(
+    name: &TableName,
+    table: &TableSchema,
+) -> Result<(), SchemaConversionError> {
+    if !table.branch_by.is_empty() {
+        return Err(err(
+            format!("$.{}.branchBy", name.as_str()),
+            "branchBy is not supported on latest-only tables yet: branch views read frozen bases \
+             from history",
+        ));
+    }
+    if let Some(column) = table.columns.columns.iter().find(|column| {
+        column
+            .merge_strategy
+            .is_some_and(ColumnMergeStrategy::is_text)
+    }) {
+        return Err(column_err(
+            name,
+            column.name.as_str(),
+            "text merging is not supported on latest-only tables yet: Core merges a write with \
+             the version its writer saw, which a latest-only table does not keep",
+        ));
+    }
+    Ok(())
+}
+
 fn convert_merge_strategy(
     table: &TableName,
     column: &ColumnDescriptor,
@@ -986,6 +1052,9 @@ fn convert_merge_strategy(
     match strategy {
         ColumnMergeStrategy::Counter => Ok(MergeStrategy::Counter),
         ColumnMergeStrategy::GSet => Ok(MergeStrategy::GSet),
+        ColumnMergeStrategy::Text => Ok(MergeStrategy::Text),
+        ColumnMergeStrategy::Markdown => Ok(MergeStrategy::Markdown),
+        ColumnMergeStrategy::Html => Ok(MergeStrategy::Html),
     }
 }
 
@@ -1575,6 +1644,10 @@ struct LoweredRel {
     table: Option<String>,
     filters: Vec<LoweredRelPredicate>,
     joins: Vec<JoinVia>,
+    /// Correlations sourced from `OuterRow` filters, keyed by their path into
+    /// `joins`. `JoinVia::correlated_filters` also carries local compound ON
+    /// equalities, so this provenance must stay separate during rewrites.
+    outer_correlations: BTreeMap<Vec<usize>, Vec<JoinCorrelation>>,
     reachable: Vec<crate::query::ReachableVia>,
     pending_reachable: Option<PendingReachable>,
 }
@@ -1613,10 +1686,10 @@ fn validate_exists_rel_join_conditions(
         RelationExpr::Join {
             left, right, on, ..
         } => {
-            if on.len() > 1 {
+            if on.is_empty() {
                 return Err(err(
                     policy_path(table, path),
-                    "core schema ExistsRel joins support exactly one column equality",
+                    "core schema ExistsRel joins require at least one column equality",
                 ));
             }
             validate_exists_rel_join_conditions(table, path, left)?;
@@ -1710,10 +1783,6 @@ fn rel_has_outer_references(rel: &RelationExpr) -> bool {
     }
 }
 
-fn join_has_outer_correlations(join: &JoinVia) -> bool {
-    !join.correlated_filters.is_empty() || join.nested_joins.iter().any(join_has_outer_correlations)
-}
-
 fn uncorrelated_exists_join(
     table: String,
     filters: Vec<Predicate>,
@@ -1748,10 +1817,19 @@ fn root_exists_rel_at_correlation(
         .iter()
         .any(|filter| matches!(filter.value, Some(LoweredRelValue::OuterRow(_))))
     {
-        let Some(index) = lowered.joins.iter().position(join_has_outer_correlations) else {
+        let Some(index) = (0..lowered.joins.len()).find(|index| {
+            lowered
+                .outer_correlations
+                .keys()
+                .any(|route| route.first() == Some(index))
+        }) else {
             break;
         };
         let mut next = lowered.joins.remove(index);
+        let direct_outer = lowered
+            .outer_correlations
+            .remove(&vec![index])
+            .unwrap_or_default();
         let source_column = next.source_column.take().ok_or_else(|| {
             err(
                 policy_path(table, path),
@@ -1764,6 +1842,27 @@ fn root_exists_rel_at_correlation(
                 "core schema ExistsRel correlation requires a row-producing relation",
             )
         })?;
+        let reverse_index = next.nested_joins.len();
+        let mut forward_correlations = next.correlated_filters;
+        for correlation in &direct_outer {
+            let Some(position) = forward_correlations
+                .iter()
+                .position(|candidate| candidate == correlation)
+            else {
+                return Err(err(
+                    policy_path(table, path),
+                    "core schema ExistsRel lost an outer correlation during root orientation",
+                ));
+            };
+            forward_correlations.remove(position);
+        }
+        let reverse_correlations = forward_correlations
+            .into_iter()
+            .map(|correlation| JoinCorrelation {
+                join_column: correlation.source_column,
+                source_column: correlation.join_column,
+            })
+            .collect();
         let reverse = JoinVia {
             table: previous_table,
             target: if source_column == "id" {
@@ -1772,21 +1871,36 @@ fn root_exists_rel_at_correlation(
                 JoinTarget::Column
             },
             on_column: source_column,
-            source_column: Some(next.on_column),
+            source_column: Some(next.on_column.clone()),
             source_lookup: None,
-            correlated_filters: Vec::new(),
+            correlated_filters: reverse_correlations,
             filters: std::mem::take(&mut lowered.filters)
                 .into_iter()
                 .map(|filter| filter.predicate)
                 .collect(),
             nested_joins: std::mem::take(&mut lowered.joins),
         };
+        let old_outer_correlations = std::mem::take(&mut lowered.outer_correlations);
+        for (route, correlations) in old_outer_correlations {
+            if route.first() == Some(&index) {
+                if route.len() > 1 {
+                    lowered
+                        .outer_correlations
+                        .insert(route[1..].to_vec(), correlations);
+                }
+            } else {
+                lowered.outer_correlations.insert(
+                    rebase_sibling_route(&route, index, reverse_index),
+                    correlations,
+                );
+            }
+        }
         lowered.filters = next
             .filters
             .into_iter()
             .map(LoweredRelPredicate::bare)
             .chain(
-                next.correlated_filters
+                direct_outer
                     .into_iter()
                     .map(|correlation| LoweredRelPredicate {
                         predicate: Predicate::All(Vec::new()),
@@ -1803,6 +1917,22 @@ fn root_exists_rel_at_correlation(
     Ok(())
 }
 
+/// Moves a route through a sibling of the join removed at `removed_index`
+/// under the reversed edge at `reverse_index`. Siblings after the removed join
+/// shift down one position in the reversed edge's `nested_joins`.
+fn rebase_sibling_route(route: &[usize], removed_index: usize, reverse_index: usize) -> Vec<usize> {
+    let mut rebased = vec![reverse_index];
+    if let Some((&first, rest)) = route.split_first() {
+        rebased.push(if first > removed_index {
+            first - 1
+        } else {
+            first
+        });
+        rebased.extend_from_slice(rest);
+    }
+    rebased
+}
+
 fn append_exists_rel_policy_clause(
     schema: &Schema,
     table: &TableName,
@@ -1810,6 +1940,10 @@ fn append_exists_rel_policy_clause(
     mut query: Query,
     rel: &RelationExpr,
 ) -> Result<Query, SchemaConversionError> {
+    let mut rel = rel.clone();
+    normalize_author_relation(&mut rel)
+        .map_err(|message| err(policy_path(table, path), message))?;
+    let rel = &rel;
     let mut lowered = lower_exists_rel(schema, table, path, rel)?;
     root_exists_rel_at_correlation(table, path, &mut lowered)?;
     let correlation_index = lowered
@@ -1829,7 +1963,7 @@ fn append_exists_rel_policy_clause(
         if rel_has_outer_references(rel)
             || !lowered.reachable.is_empty()
             || lowered.pending_reachable.is_some()
-            || lowered.joins.iter().any(join_has_outer_correlations)
+            || !lowered.outer_correlations.is_empty()
         {
             return Err(err(
                 policy_path(table, path),
@@ -1953,12 +2087,23 @@ fn append_exists_rel_policy_clause(
         // Lift outer correlations on a nested join through its equality edge,
         // so `member.workspace = outer.workspace` constrains the root block's
         // workspace without publishing any proof carrier.
-        for nested in &mut lowered.joins {
-            if nested.nested_joins.iter().any(join_has_outer_correlations) {
+        for (index, nested) in lowered.joins.iter_mut().enumerate() {
+            if lowered
+                .outer_correlations
+                .keys()
+                .any(|route| route.first() == Some(&index) && route.len() > 1)
+            {
                 return Err(err(
                     policy_path(table, path),
                     "core schema ExistsRel does not yet support outer correlations beyond one nested join",
                 ));
+            }
+            let outer = lowered
+                .outer_correlations
+                .remove(&vec![index])
+                .unwrap_or_default();
+            if outer.is_empty() {
+                continue;
             }
             let source_column = nested.source_column.clone().ok_or_else(|| {
                 err(
@@ -1966,7 +2111,7 @@ fn append_exists_rel_policy_clause(
                     "core schema ExistsRel nested join is missing its source column",
                 )
             })?;
-            for correlation in std::mem::take(&mut nested.correlated_filters) {
+            for correlation in &outer {
                 if correlation.join_column != nested.on_column {
                     return Err(err(
                         policy_path(table, path),
@@ -1975,9 +2120,28 @@ fn append_exists_rel_policy_clause(
                 }
                 correlated_filters.push(JoinCorrelation {
                     join_column: source_column.clone(),
-                    source_column: correlation.source_column,
+                    source_column: correlation.source_column.clone(),
                 });
             }
+            for correlation in &outer {
+                let Some(position) = nested
+                    .correlated_filters
+                    .iter()
+                    .position(|candidate| candidate == correlation)
+                else {
+                    return Err(err(
+                        policy_path(table, path),
+                        "core schema ExistsRel lost an outer correlation during lowering",
+                    ));
+                };
+                nested.correlated_filters.remove(position);
+            }
+        }
+        if !lowered.outer_correlations.is_empty() {
+            return Err(err(
+                policy_path(table, path),
+                "core schema ExistsRel has an unresolved outer correlation after lowering",
+            ));
         }
         query.joins.push(JoinVia {
             table: lowered_table.clone(),
@@ -1994,6 +2158,13 @@ fn append_exists_rel_policy_clause(
             nested_joins: lowered.joins,
         });
         return Ok(query);
+    }
+
+    if !lowered.outer_correlations.is_empty() {
+        return Err(err(
+            policy_path(table, path),
+            "core schema ExistsRel has an unresolved outer correlation after lowering",
+        ));
     }
 
     let filters = lowered
@@ -2082,10 +2253,16 @@ fn append_scoped_rel_predicate(
                 for filter in filters {
                     match (filter.column, filter.value) {
                         (Some(join_column), Some(LoweredRelValue::OuterRow(source_column))) => {
-                            join.correlated_filters.push(JoinCorrelation {
+                            let correlation = JoinCorrelation {
                                 join_column,
                                 source_column,
-                            });
+                            };
+                            join.correlated_filters.push(correlation.clone());
+                            lowered
+                                .outer_correlations
+                                .entry(route.clone())
+                                .or_default()
+                                .push(correlation);
                         }
                         _ => join.filters.push(filter.predicate),
                     }
@@ -2135,6 +2312,7 @@ fn lower_exists_rel(
             table: Some(table.as_str().to_owned()),
             filters: Vec::new(),
             joins: Vec::new(),
+            outer_correlations: BTreeMap::new(),
             reachable: Vec::new(),
             pending_reachable: None,
         }),
@@ -2189,23 +2367,38 @@ fn lower_exists_rel(
                     "Gather on the right side of a join is not supported in policies yet",
                 ));
             }
-            // Only one equality becomes the join key; a second would be dropped.
-            let [on] = on.as_slice() else {
+            let Some(primary_on) = on.first() else {
                 return Err(err(
                     policy_path(table, path),
-                    "core schema ExistsRel joins require exactly one column equality",
+                    "core schema ExistsRel joins require at least one column equality",
                 ));
             };
-            let source_route = resolve_rel_column_route(table, path, &left, &on.left)?;
-            let target_route = resolve_rel_column_route(table, path, &right, &on.right)?;
-            if !target_route.is_empty() {
-                return Err(err(
-                    policy_path(table, path),
-                    "core schema ExistsRel join target must be the right relation's root source",
-                ));
+            let source_route = resolve_rel_column_route(table, path, &left, &primary_on.left)?;
+            for condition in on {
+                let condition_source_route =
+                    resolve_rel_column_route(table, path, &left, &condition.left)?;
+                if condition_source_route != source_route {
+                    return Err(err(
+                        policy_path(table, path),
+                        "core schema ExistsRel join equalities must use one left-side source",
+                    ));
+                }
+                let target_route = resolve_rel_column_route(table, path, &right, &condition.right)?;
+                if !target_route.is_empty() {
+                    return Err(err(
+                        policy_path(table, path),
+                        "core schema ExistsRel join target must be the right relation's root source",
+                    ));
+                }
             }
             if let Some(pending) = left.pending_reachable.take() {
-                if on.left.column != "id" {
+                if on.len() > 1 {
+                    return Err(err(
+                        policy_path(table, path),
+                        "compound joins from Gather are not supported in policies yet",
+                    ));
+                }
+                if primary_on.left.column != "id" {
                     return Err(err(
                         policy_path(table, path),
                         "core schema ExistsRel reachable joins must join from reachable id",
@@ -2240,8 +2433,8 @@ fn lower_exists_rel(
                 let mut reachable = crate::query::ReachableVia {
                     access_table: right_table,
                     access_row_column: "__pending_outer_row".to_owned(),
-                    access_team_column: on.right.column.clone(),
-                    access_team_target: if on.right.column == "id" {
+                    access_team_column: primary_on.right.column.clone(),
+                    access_team_target: if primary_on.right.column == "id" {
                         JoinTarget::RowId
                     } else {
                         JoinTarget::Column
@@ -2269,6 +2462,7 @@ fn lower_exists_rel(
                     table: left.table,
                     filters: Vec::new(),
                     joins: left.joins,
+                    outer_correlations: left.outer_correlations,
                     reachable: {
                         let mut reachables = left.reachable;
                         reachables.extend(right.reachable);
@@ -2279,16 +2473,26 @@ fn lower_exists_rel(
                 });
             }
 
-            let mut correlated_filters = Vec::new();
+            let mut correlated_filters = on
+                .iter()
+                .skip(1)
+                .map(|condition| JoinCorrelation {
+                    join_column: condition.right.column.clone(),
+                    source_column: condition.left.column.clone(),
+                })
+                .collect::<Vec<_>>();
+            let mut direct_outer_correlations = Vec::new();
             let filters = right
                 .filters
                 .into_iter()
                 .filter_map(|filter| match (filter.column, filter.value) {
                     (Some(join_column), Some(LoweredRelValue::OuterRow(source_column))) => {
-                        correlated_filters.push(JoinCorrelation {
+                        let correlation = JoinCorrelation {
                             join_column,
                             source_column,
-                        });
+                        };
+                        correlated_filters.push(correlation.clone());
+                        direct_outer_correlations.push(correlation);
                         None
                     }
                     _ => Some(filter.predicate),
@@ -2300,27 +2504,49 @@ fn lower_exists_rel(
                     "core schema ExistsRel joins require a row-producing right relation",
                 )
             })?;
+            let mut join_route = source_route;
+            let join_index = {
+                let mut joins = &mut left.joins;
+                for index in &join_route {
+                    joins = &mut joins[*index].nested_joins;
+                }
+                joins.len()
+            };
+            join_route.push(join_index);
+            let mut right_outer_correlations = right
+                .outer_correlations
+                .into_iter()
+                .map(|(route, correlations)| {
+                    let mut full_route = join_route.clone();
+                    full_route.extend(route);
+                    (full_route, correlations)
+                })
+                .collect::<Vec<_>>();
+            if !direct_outer_correlations.is_empty() {
+                right_outer_correlations.push((join_route.clone(), direct_outer_correlations));
+            }
             let join = JoinVia {
                 table: right_table,
-                on_column: on.right.column.clone(),
-                target: if on.right.column == "id" {
+                on_column: primary_on.right.column.clone(),
+                target: if primary_on.right.column == "id" {
                     JoinTarget::RowId
                 } else {
                     JoinTarget::Column
                 },
-                source_column: Some(on.left.column.clone()),
+                source_column: Some(primary_on.left.column.clone()),
                 source_lookup: None,
                 correlated_filters,
                 filters,
                 nested_joins: right.joins,
             };
-            let mut joins = &mut left.joins;
-            for index in &source_route {
-                joins = &mut joins[*index].nested_joins;
+            {
+                let mut joins = &mut left.joins;
+                for index in &join_route[..join_route.len() - 1] {
+                    joins = &mut joins[*index].nested_joins;
+                }
+                joins.push(join);
             }
-            let mut join_route = source_route;
-            join_route.push(joins.len());
-            joins.push(join);
+            left.outer_correlations.extend(right_outer_correlations);
             for (scope, route) in right.scope_paths {
                 let route = route.map(|route| {
                     let mut full_route = join_route.clone();
@@ -2407,6 +2633,7 @@ fn lower_gather_rel(
         table: output_table,
         filters: Vec::new(),
         joins: Vec::new(),
+        outer_correlations: BTreeMap::new(),
         reachable: Vec::new(),
         pending_reachable: Some(PendingReachable {
             from,
@@ -2864,7 +3091,8 @@ fn convert_policy_predicate(
             expr,
         )?))),
         PolicyExpr::Cmp { column, op, value } => {
-            let left = Operand::Column(column.clone());
+            let column = author_session_column(table, path, column, op, value)?;
+            let left = Operand::Column(column.into_owned());
             if matches!(value, PolicyValue::Literal(Value::Null)) {
                 // Match `session_where`: equality against the public NULL
                 // literal is the ergonomic spelling of a null test.
@@ -2986,11 +3214,153 @@ fn convert_policy_operand(
     }
 }
 
+/// The column an author record compared with a session value is
+/// compared by: `$createdBy` with `session.user` by its account (every
+/// identity linked to the account matches), `$createdBy.identity` with
+/// `session.identity` as itself. Any other pairing is refused, naming the
+/// forms that compare.
+fn author_session_column<'a>(
+    table: &TableName,
+    path: &str,
+    column: &'a str,
+    op: &CmpOp,
+    value: &PolicyValue,
+) -> Result<std::borrow::Cow<'a, str>, SchemaConversionError> {
+    use std::borrow::Cow;
+    let PolicyValue::SessionRef(session) = value else {
+        return Ok(Cow::Borrowed(column));
+    };
+    let ordered = matches!(op, CmpOp::Eq | CmpOp::Ne);
+    match author_column_for_session(column, ordered, session, &format!("{op:?}")) {
+        Ok(Some(column)) => Ok(Cow::Owned(column)),
+        Ok(None) => Ok(Cow::Borrowed(column)),
+        Err(message) => Err(err(policy_path(table, path), message)),
+    }
+}
+
+/// The shared rule for an author record (`$createdBy`, `$updatedBy`,
+/// `$deletedBy`, or one's `.identity`) compared with a session path:
+/// `Ok(Some(column))` names the column it compares by instead, `Ok(None)`
+/// keeps it, and `Err` names the forms that compare. `eq_or_ne` is whether
+/// the comparison is Eq or Ne; `op` names it otherwise.
+pub fn author_column_for_session(
+    column: &str,
+    eq_or_ne: bool,
+    session: &[String],
+    op: &str,
+) -> Result<Option<String>, String> {
+    let whole = match column {
+        "$createdBy" | "$updatedBy" | "$deletedBy" => true,
+        "$createdBy.identity" | "$updatedBy.identity" | "$deletedBy.identity" => false,
+        _ => return Ok(None),
+    };
+    if !eq_or_ne {
+        return Err(format!(
+            "an author record `{column}` only compares with Eq or Ne, not {op}"
+        ));
+    }
+    let session: Vec<&str> = session.iter().map(String::as_str).collect();
+    match (whole, session.as_slice()) {
+        (true, ["user"]) => Ok(Some(format!("{column}.account"))),
+        (false, ["identity"]) | (_, ["claims", ..]) => Ok(None),
+        _ => {
+            let record = column.trim_end_matches(".identity");
+            Err(format!(
+                "comparing `{column}` with `session.{}`: compare `{record}` with \
+                 `session.user` (the account) or `{record}.identity` with \
+                 `session.identity` (the exact login)",
+                session.join(".")
+            ))
+        }
+    }
+}
+
+/// Rewrite every author record compared with a session path inside a
+/// relation by [`author_column_for_session`], as plain policy comparisons
+/// are, so `{ $createdBy: session.user }` reads the same inside a relation.
+pub fn normalize_author_relation(rel: &mut RelationExpr) -> Result<(), String> {
+    match rel {
+        RelationExpr::TableScan { .. } => Ok(()),
+        RelationExpr::Filter { input, predicate } => {
+            normalize_author_relation(input)?;
+            normalize_author_relation_predicate(predicate)
+        }
+        RelationExpr::Union { inputs } => inputs
+            .iter_mut()
+            .try_for_each(|arm| normalize_author_relation(&mut arm.input)),
+        RelationExpr::Join { left, right, .. } => {
+            normalize_author_relation(left)?;
+            normalize_author_relation(right)
+        }
+        RelationExpr::Gather { seed, step, .. } => {
+            normalize_author_relation(seed)?;
+            normalize_author_relation(step)
+        }
+        RelationExpr::Project { input, .. }
+        | RelationExpr::Distinct { input, .. }
+        | RelationExpr::OrderBy { input, .. }
+        | RelationExpr::Offset { input, .. }
+        | RelationExpr::Limit { input, .. } => normalize_author_relation(input),
+    }
+}
+
+/// [`normalize_author_relation`] for one predicate.
+pub fn normalize_author_relation_predicate(
+    predicate: &mut RelationPredicate,
+) -> Result<(), String> {
+    match predicate {
+        RelationPredicate::Cmp {
+            left,
+            op,
+            right: RelationValueRef::SessionRef(session),
+        } => {
+            let eq_or_ne = matches!(
+                op,
+                crate::query::RelationCmpOp::Eq | crate::query::RelationCmpOp::Ne
+            );
+            if let Some(column) =
+                author_column_for_session(&left.column, eq_or_ne, session, &format!("{op:?}"))?
+            {
+                left.column = column;
+            }
+            Ok(())
+        }
+        RelationPredicate::And(children) | RelationPredicate::Or(children) => children
+            .iter_mut()
+            .try_for_each(normalize_author_relation_predicate),
+        RelationPredicate::Not(child) => normalize_author_relation_predicate(child),
+        _ => Ok(()),
+    }
+}
+
+/// The replacement for a session path `session.user` no longer has:
+/// `session.user` is the account itself and `session.identity` the exact
+/// login.
+pub(crate) fn removed_session_path(path: &[String]) -> Option<&'static str> {
+    let parts: Vec<&str> = path.iter().map(String::as_str).collect();
+    Some(match parts.as_slice() {
+        ["user", "account"] => "session.user, which is the account",
+        ["user", "identity"] => "session.identity, the exact login",
+        ["user", "identity", "issuer"] => "session.identity.issuer",
+        ["user", "identity", "subject"] => "session.identity.subject",
+        _ => return None,
+    })
+}
+
 fn convert_session_path_operand(
     table: &TableName,
     path: &str,
     path_segments: &[String],
 ) -> Result<Operand, SchemaConversionError> {
+    if let Some(replacement) = removed_session_path(path_segments) {
+        return Err(err(
+            policy_path(table, path),
+            format!(
+                "session.{} was removed: use {replacement}",
+                path_segments.join(".")
+            ),
+        ));
+    }
     if let Some(name) = crate::query::author_claim_path_key(path_segments) {
         return Ok(Operand::Claim(name));
     }
@@ -3010,7 +3380,7 @@ fn convert_session_path_operand(
     Err(err(
         policy_path(table, path),
         format!(
-            "core schema policies only support session.user, session.authMode, and provider claims through session.claims; got session.{}",
+            "core schema policies only support session.user, session.identity, session.authMode, and provider claims through session.claims; got session.{}",
             path_segments.join(".")
         ),
     ))
@@ -3070,6 +3440,15 @@ mod tests {
     use crate::query::RelationProjectColumn;
     use crate::query::provider_claim_operand_key;
     use crate::query::{InheritsOperation, JoinTarget, Operand, Predicate};
+
+    #[test]
+    fn rebasing_sibling_routes_accounts_for_the_removed_join() {
+        // Joins [a, b, c] with b (index 1) re-rooted: the reversed edge holds [a, c].
+        assert_eq!(rebase_sibling_route(&[0], 1, 4), vec![4, 0]);
+        assert_eq!(rebase_sibling_route(&[2], 1, 4), vec![4, 1]);
+        assert_eq!(rebase_sibling_route(&[2, 3], 1, 4), vec![4, 1, 3]);
+    }
+
     #[test]
     fn rejects_user_columns_in_the_compiler_aggregate_namespace() {
         let schema = SchemaBuilder::new()
@@ -3282,6 +3661,70 @@ mod tests {
                 .map(|table| table.branch_by.len())
                 .sum::<usize>(),
             2
+        );
+    }
+
+    #[test]
+    fn latest_only_tables_compile_with_their_retention_as_a_compatible_version() {
+        let table = |latest: bool| {
+            let table = TableSchemaBuilder::new("presence")
+                .column("cursor", ColumnType::Json { schema: None })
+                .column_with_default("moves", ColumnType::Integer, Value::Integer(0));
+            let table = if latest { table.latest_only() } else { table };
+            SchemaBuilder::new().table(table).build()
+        };
+        let full = convert_public_schema(&table(false)).expect("full history compiles");
+        let latest = convert_public_schema(&table(true)).expect("latest-only compiles");
+
+        assert_eq!(full.tables()[0].history, HistoryRetention::Full);
+        assert_eq!(latest.tables()[0].history, HistoryRetention::Latest);
+        assert_ne!(
+            full.version_id(),
+            latest.version_id(),
+            "a store admits a retention change as a version of its own"
+        );
+        assert_eq!(
+            full.compatibility_id(),
+            latest.compatibility_id(),
+            "retention changes what nodes keep, not how rows are stored"
+        );
+    }
+
+    #[test]
+    fn latest_only_tables_refuse_branches_and_text_merges() {
+        let branched = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("presence")
+                    .column("workspace_id", ColumnType::Uuid)
+                    .branch_by("workspace_id")
+                    .latest_only(),
+            )
+            .build();
+        assert_eq!(
+            convert_public_schema(&branched)
+                .expect_err("a latest-only table cannot branch")
+                .to_string(),
+            "$.presence.branchBy: branchBy is not supported on latest-only tables yet: branch \
+             views read frozen bases from history"
+        );
+
+        let merged = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("presence")
+                    .column("note", ColumnType::Text)
+                    .latest_only(),
+            )
+            .build();
+        let mut merged = merged;
+        let table = merged.get_mut(&TableName::new("presence")).unwrap();
+        table.columns.columns[0].merge_strategy = Some(ColumnMergeStrategy::Markdown);
+        assert_eq!(
+            convert_public_schema(&merged)
+                .expect_err("a latest-only table cannot text-merge")
+                .to_string(),
+            "$.presence.note: text merging is not supported on latest-only tables yet: Core \
+             merges a write with the version its writer saw, which a latest-only table does not \
+             keep"
         );
     }
 
@@ -4567,7 +5010,6 @@ mod tests {
                                         column: "user_id".to_owned(),
                                         op: CmpOp::Eq,
                                         value: PolicyValue::SessionRef(vec![
-                                            "user".to_owned(),
                                             "identity".to_owned(),
                                             "subject".to_owned(),
                                         ]),

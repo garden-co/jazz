@@ -126,6 +126,22 @@ describe("binding codec golden contract", () => {
     expect(delta.updatedPreviousIndices).toEqual([4]);
     expect(delta.updatedIndices).toEqual([1]);
     expect(delta.removedIndices).toEqual([3]);
+    expect(delta.updatedSplices).toEqual([
+      [
+        {
+          column: "title",
+          splices: [
+            {
+              at: 1,
+              delete: 2,
+              insert: new TextEncoder().encode("xy"),
+              atUtf16: 1,
+              deleteUtf16: 2,
+            },
+          ],
+        },
+      ],
+    ]);
   });
 
   it("keeps the terminal JSON codec contract stable", () => {

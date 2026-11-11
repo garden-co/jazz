@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "node src/lib/dev-secrets.mjs && next dev",
     "prebuild": "node src/lib/check-config.mjs",
-    "build": "node ../../../../packages/jazz-tools/dist/cli.js validate && next build",
+    "build": "jazz-tools validate && next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
     "test:permissions": "vitest run tests/permissions.test.ts tests/single-transaction.test.ts",
@@ -15,7 +15,8 @@
     "test:browser": "node ../../../../dev/gates/run-correctness-consumer.mjs -- pnpm exec vitest run --config vitest.config.browser.ts",
     "test:browser:focused": "node scripts/test-browser-focused.mjs",
     "test:selection": "node --test tests/test-selection.test.mjs",
-    "test": "pnpm test:config && pnpm test:composer && pnpm test:permissions && pnpm test:selection"
+    "test": "pnpm test:config && pnpm test:composer && pnpm test:permissions && pnpm test:selection",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@astryxdesign/core": "0.6.3",
@@ -28,6 +29,7 @@
     "react-dom": "19.2.4"
   },
   "devDependencies": {
+    "@playwright/test": "^1.58.2",
     "@types/node": "catalog:default",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",

@@ -9,6 +9,7 @@ import { bytesToHex, formatUuidAt } from "./hex.js";
 import type {
   RuntimeSubscriptionDelta,
   RuntimeTerminalOperation,
+  RuntimeValueSplice,
   Value,
   WasmRow,
 } from "../drivers/types.js";
@@ -22,15 +23,34 @@ export const RowChangeKind = {
 export type RowChangeKind = typeof RowChangeKind;
 export type RowChangeKindValue = (typeof RowChangeKind)[keyof typeof RowChangeKind];
 
+/**
+ * Per column, the sequential splices that turn a row's previous value into its
+ * new one: UTF-16 units and a string for TEXT, bytes for BYTEA.
+ */
+export type ValueSplices = Readonly<Record<string, readonly RuntimeValueSplice[]>>;
+
 export type RowDelta<T> =
   | { kind: RowChangeKind["Added"]; id: string; index: number; item: T }
   | { kind: RowChangeKind["Removed"]; id: string; index: number }
-  | { kind: RowChangeKind["Updated"]; id: string; index: number; item?: T };
+  | {
+      kind: RowChangeKind["Updated"];
+      id: string;
+      index: number;
+      item?: T;
+      /** Opted-in columns' splices, when they could be computed. */
+      splices?: ValueSplices;
+    };
 
 type DecodedRowDelta =
   | { kind: RowChangeKind["Added"]; id: string; index: number; row: WasmRow }
   | { kind: RowChangeKind["Removed"]; id: string; index: number }
-  | { kind: RowChangeKind["Updated"]; id: string; index: number; row?: WasmRow | null };
+  | {
+      kind: RowChangeKind["Updated"];
+      id: string;
+      index: number;
+      row?: WasmRow | null;
+      splices?: ValueSplices;
+    };
 
 export type SubscriptionDelta<T> =
   | {
@@ -496,6 +516,7 @@ export class SubscriptionManager<T extends { id: string }> {
           id: updatedKeys[index]!.id,
           index: change.index,
           row: change.row,
+          ...(change.splices ? { splices: change.splices } : {}),
         })),
         ...delta.added.map((change, index) => ({
           kind: RowChangeKind.Added,
@@ -786,6 +807,7 @@ export class SubscriptionManager<T extends { id: string }> {
               id: change.id,
               index: change.index,
               item: updatedItem ? withResultIdentity(updatedItem, change.id) : undefined,
+              ...(change.splices ? { splices: change.splices } : {}),
             };
           }
         }

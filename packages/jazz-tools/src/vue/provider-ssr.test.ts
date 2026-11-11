@@ -5,11 +5,11 @@ import type { AccountDbConfig } from "../accounts/context.js";
 import { makeFakeAccount } from "../react-core/test-utils.js";
 
 const mocks = vi.hoisted(() => ({
-  createJazzClient: vi.fn(),
+  openJazzClient: vi.fn(),
 }));
 
 vi.mock("./create-jazz-client.js", () => ({
-  createJazzClient: mocks.createJazzClient,
+  openJazzClient: mocks.openJazzClient,
 }));
 
 import { JazzProvider } from "./provider.js";
@@ -35,6 +35,6 @@ describe("JazzProvider SSR", () => {
     });
 
     await expect(renderToString(app)).resolves.toContain('<p id="loading">loading</p>');
-    expect(mocks.createJazzClient).not.toHaveBeenCalled();
+    expect(mocks.openJazzClient).not.toHaveBeenCalled();
   });
 });

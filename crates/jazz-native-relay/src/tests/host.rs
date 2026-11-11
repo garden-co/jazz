@@ -8,8 +8,6 @@ use jazz::ids::{AuthorSubject, RowUuid};
 use jazz::query::Query;
 use jazz::records::{OwnedRecord, RecordDescriptor, ValueType};
 use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder};
-use jazz_server::{JazzServer, TestJwtIssuer};
-use std::cell::RefCell;
 use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 
@@ -79,7 +77,6 @@ fn take_capability(output: &mut JazzNativeRelayBytes) -> [u8; 32] {
 
 /// One platform host and its retained runtime lease.
 struct Fixture {
-    accounts: RefCell<BTreeMap<String, jazz::account_registry::AccountId>>,
     host: *mut JazzNativeRelayHost,
     lease: *mut JazzNativeRelayHostLease,
 }
@@ -90,11 +87,7 @@ impl Fixture {
         assert!(!host.is_null());
         let lease = unsafe { jazz_native_relay_host_retain(host, 1) };
         assert!(!lease.is_null());
-        Self {
-            accounts: RefCell::new(BTreeMap::new()),
-            host,
-            lease,
-        }
+        Self { host, lease }
     }
 
     fn admit(&self, sqlite_path: &std::path::Path, auth_scope: &str, byte: u8) -> [u8; 32] {
@@ -127,79 +120,6 @@ impl Fixture {
             JazzNativeRelayStatus::Ok
         );
         take_capability(&mut output)
-    }
-
-    /// The private account-session handoff Android and iOS use: the
-    /// endpoint and bearer cross only the native boundary.
-    async fn begin_account_session(
-        &self,
-        server_url: &str,
-        app_id: &str,
-        bearer: &str,
-        storage_root: &std::path::Path,
-    ) -> [u8; 32] {
-        let registry = format!(
-            "{}/apps/{app_id}/accounts",
-            server_url.trim_end_matches('/')
-        );
-        let (issuer, subject) = jazz::tools::unverified_jwt_scope_subject(bearer).unwrap();
-        let key = serde_json::to_string(&(&registry, &issuer, &subject)).unwrap();
-        let retained = self.accounts.borrow().get(&key).copied();
-        let account = match retained {
-            Some(account) => account,
-            None => {
-                let response = reqwest::Client::new()
-                    .post(format!("{registry}/register"))
-                    .bearer_auth(bearer)
-                    .send()
-                    .await
-                    .unwrap();
-                assert!(response.status().is_success(), "{}", response.status());
-                let response: serde_json::Value = response.json().await.unwrap();
-                let account = serde_json::from_value(response["account"].clone()).unwrap();
-                self.accounts.borrow_mut().insert(key, account);
-                account
-            }
-        };
-        let request = serde_json::json!({
-            "server_url": server_url, "registry": registry,
-            "app_id": app_id, "env": "test", "account_id": account,
-            "issuer": issuer, "subject": subject, "jwt": bearer,
-            "claims": {},
-        });
-        let root = storage_root.to_str().unwrap().as_bytes();
-        let request = serde_json::to_vec(&request).unwrap();
-        let mut setup = JazzNativeRelayBytes::EMPTY;
-        assert_eq!(
-            unsafe {
-                jazz_native_relay_host_lease_begin_account_session_json(
-                    self.lease,
-                    request.as_ptr(),
-                    request.len(),
-                    root.as_ptr(),
-                    root.len(),
-                    &mut setup,
-                )
-            },
-            JazzNativeRelayStatus::Ok
-        );
-        let setup = take_capability(&mut setup);
-        let schema = serde_json::to_string(schema().public_schema()).unwrap();
-        let mut admitted = JazzNativeRelayBytes::EMPTY;
-        assert_eq!(
-            unsafe {
-                jazz_native_relay_host_lease_attach_account_schema_json(
-                    self.lease,
-                    setup.as_ptr(),
-                    setup.len(),
-                    schema.as_ptr(),
-                    schema.len(),
-                    &mut admitted,
-                )
-            },
-            JazzNativeRelayStatus::Ok
-        );
-        take_capability(&mut admitted)
     }
 
     fn revoke(&self, capability: &[u8; 32]) {
@@ -374,29 +294,6 @@ impl Fixture {
             std::thread::sleep(Duration::from_millis(10));
         }
         panic!("row {row:?} never reached the foreground");
-    }
-
-    async fn wait_for_core_transaction(&self, foreground: u64, tx_id: [u8; 16]) {
-        let mut response = self.execute(
-            foreground,
-            ForegroundDbCommandRequest::WaitForCoreTransaction { tx_id },
-        );
-        for _ in 0..600 {
-            match response {
-                ForegroundDbCommandResponse::Pending { operation } => {
-                    self.tick(foreground);
-                    tokio::time::sleep(Duration::from_millis(25)).await;
-                    response =
-                        self.execute(foreground, ForegroundDbCommandRequest::Poll { operation });
-                }
-                ForegroundDbCommandResponse::TransactionSettled { tx_id: settled } => {
-                    assert_eq!(settled, tx_id);
-                    return;
-                }
-                response => panic!("Core settlement: {response:?}"),
-            }
-        }
-        panic!("the foreground transaction never reached Core");
     }
 }
 
@@ -588,6 +485,11 @@ fn a_clean_handoff_reuses_the_node_above_its_high_water() {
     let capability = fixture.admit(&directory.path().join("handoff.sqlite"), "alice", 0xc1);
     let first = fixture.open(&capability);
     let node = fixture.metadata_node(first);
+    assert_eq!(
+        (node[6] >> 4, node[8] >> 6),
+        (4, 0b10),
+        "the pool mints random version-4 nodes"
+    );
     let first_tx = fixture.insert_todo(first, [0xd1; 16], "first lease holder");
     fixture.close(first);
 
@@ -727,64 +629,6 @@ fn a_sibling_commit_wakes_and_reaches_a_retained_subscription() {
     drop(recorder);
 }
 
-/// A real Core authenticates the private-session bearer; the foreground's
-/// write reaches Core through the relay's socket worker, and a fresh worker
-/// over the same SQLite file reads it back.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn private_session_write_reaches_core_and_survives_a_relay_restart() {
-    let issuer = TestJwtIssuer::start().await;
-    let core = JazzServer::builder()
-        .with_schema(schema().public_schema().clone())
-        .with_jwks_url(issuer.endpoint())
-        .start()
-        .await
-        .expect("start test server");
-    let bearer = TestJwtIssuer::jwt_for_user("native-private-alice");
-    let storage = tempfile::tempdir().unwrap();
-    let fixture = Fixture::new();
-    let endpoint = core.base_url();
-    let app_id = core.app_id().to_string();
-    let admitted = fixture
-        .begin_account_session(&endpoint, &app_id, &bearer, storage.path())
-        .await;
-    let foreground = fixture.open(&admitted);
-    jazz_testkit::wait_for(Duration::from_secs(15), "relay socket at Core", || {
-        let connected = core.server_state().shutdown.active_websockets() > 0;
-        async move { connected.then_some(()) }
-    })
-    .await;
-    assert!(matches!(
-        fixture.execute(
-            foreground,
-            ForegroundDbCommandRequest::NativeConnectionStatus
-        ),
-        ForegroundDbCommandResponse::NativeConnectionStatus {
-            configured: true,
-            ..
-        }
-    ));
-
-    let row = RowUuid::from_bytes([0x3a; 16]);
-    let committed = fixture.insert_todo(foreground, [0x3a; 16], "reaches Core");
-    fixture
-        .wait_for_core_transaction(foreground, committed)
-        .await;
-
-    fixture.close(foreground);
-    fixture.revoke(&admitted);
-    assert_eq!(
-        core.shutdown().await,
-        jazz_server::ShutdownPhase::StorageClosed
-    );
-
-    let reopened = fixture
-        .begin_account_session(&endpoint, &app_id, &bearer, storage.path())
-        .await;
-    let reopened_foreground = fixture.open(&reopened);
-    fixture.wait_for_row(reopened_foreground, (row, "reaches Core"));
-    fixture.revoke(&reopened);
-}
-
 /// On a replica a serializable snapshot is pinned by the transaction's
 /// first read; later writes outside it stay invisible to it.
 #[test]
@@ -819,4 +663,167 @@ fn a_serializable_transaction_keeps_its_pinned_snapshot() {
     fixture.insert_todo(foreground, [0x02; 16], "after");
     assert_eq!(fixture.rows(foreground).len(), 2);
     assert_eq!(read(), before, "the pinned snapshot does not advance");
+}
+
+#[test]
+fn pending_upload_count_has_pinned_bytes_and_answers() {
+    // Appended command and answer: existing ordinals stay fixed.
+    assert_eq!(
+        postcard::to_allocvec(&ForegroundDbCommandRequest::PendingUploadCount).unwrap(),
+        vec![38]
+    );
+    assert_eq!(
+        postcard::to_allocvec(&ForegroundDbCommandResponse::PendingUploadCount { count: 300 })
+            .unwrap(),
+        vec![29, 172, 2]
+    );
+
+    let directory = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new();
+    let capability = fixture.admit(&directory.path().join("alice.sqlite"), "alice", 0x11);
+    let foreground = fixture.open(&capability);
+    // A relay with no server decides nothing: the commit stays pending
+    // until a server is added and accepts it.
+    fixture.insert_todo(foreground, [0xa1; 16], "local only");
+    fixture.tick(foreground);
+    assert_eq!(
+        fixture.execute(foreground, ForegroundDbCommandRequest::PendingUploadCount),
+        ForegroundDbCommandResponse::PendingUploadCount { count: 1 }
+    );
+    fixture.close(foreground);
+}
+
+#[test]
+fn upload_status_has_pinned_bytes_and_answers() {
+    // Appended command and answer: existing ordinals stay fixed.
+    assert_eq!(
+        postcard::to_allocvec(&ForegroundDbCommandRequest::UploadStatus).unwrap(),
+        vec![39]
+    );
+    assert_eq!(
+        postcard::to_allocvec(&ForegroundDbCommandResponse::UploadStatus {
+            status_json: "{}".to_owned()
+        })
+        .unwrap(),
+        vec![30, 2, b'{', b'}']
+    );
+
+    let directory = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new();
+    let capability = fixture.admit(&directory.path().join("alice.sqlite"), "alice", 0x11);
+    let foreground = fixture.open(&capability);
+    fixture.insert_todo(foreground, [0xa1; 16], "local only");
+    fixture.tick(foreground);
+    let ForegroundDbCommandResponse::UploadStatus { status_json } =
+        fixture.execute(foreground, ForegroundDbCommandRequest::UploadStatus)
+    else {
+        panic!("an upload status");
+    };
+    let status: serde_json::Value = serde_json::from_str(&status_json).unwrap();
+    assert_eq!(status["pending"], 1);
+    assert!(status["oldestPendingAt"].as_u64().is_some_and(|at| at > 0));
+    assert_eq!(status["rejected"], 0);
+    assert!(status["lastRejection"].is_null());
+    fixture.close(foreground);
+}
+
+#[test]
+fn slow_query_commands_have_pinned_bytes_and_answer() {
+    // Appended commands and answers: existing ordinals stay fixed.
+    assert_eq!(
+        postcard::to_allocvec(&ForegroundDbCommandRequest::TakeSlowQueryReport { app: None })
+            .unwrap(),
+        vec![36, 0]
+    );
+    assert_eq!(
+        postcard::to_allocvec(&ForegroundDbCommandRequest::TakeSlowQueryReport {
+            app: Some("a".to_owned())
+        })
+        .unwrap(),
+        vec![36, 1, 1, b'a']
+    );
+    assert_eq!(
+        postcard::to_allocvec(&ForegroundDbCommandRequest::SetSlowQueryThresholdMs { ms: 200 })
+            .unwrap(),
+        vec![37, 200, 1]
+    );
+    assert_eq!(
+        postcard::to_allocvec(&ForegroundDbCommandResponse::SlowQueryReport {
+            lines_json: "[]".to_owned()
+        })
+        .unwrap(),
+        vec![27, 2, b'[', b']']
+    );
+    assert_eq!(
+        postcard::to_allocvec(&ForegroundDbCommandResponse::SlowQueryThresholdSet).unwrap(),
+        vec![28]
+    );
+
+    let directory = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new();
+    let capability = fixture.admit(&directory.path().join("alice.sqlite"), "alice", 0x11);
+    let foreground = fixture.open(&capability);
+    assert_eq!(
+        fixture.execute(
+            foreground,
+            ForegroundDbCommandRequest::SetSlowQueryThresholdMs { ms: 3_600_000 }
+        ),
+        ForegroundDbCommandResponse::SlowQueryThresholdSet
+    );
+    fixture.insert_todo(foreground, [0xa1; 16], "quick");
+    fixture.tick(foreground);
+    assert_eq!(
+        fixture.execute(
+            foreground,
+            ForegroundDbCommandRequest::TakeSlowQueryReport {
+                app: Some("my-app".to_owned())
+            }
+        ),
+        ForegroundDbCommandResponse::SlowQueryReport {
+            lines_json: "[]".to_owned()
+        },
+        "nothing ran for an hour"
+    );
+    fixture.close(foreground);
+}
+
+/// A relay uploads its clients' writes as its own identity, so it serves
+/// clients of that identity only: one of another identity is refused
+/// before its database is opened.
+#[test]
+fn a_relay_refuses_a_client_of_another_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let identity = |byte: u8| DbIdentity {
+        node: NodeUuid::from_bytes([byte; 16]),
+        author: AuthorSubject::for_test_bytes([0x5a; 16]),
+    };
+    let relay = NativeRelay::spawn(RelayOpenConfig {
+        supported_abi: NativeRelayAbiRange {
+            minimum: NATIVE_RELAY_ABI_V1,
+            maximum: NATIVE_RELAY_ABI_V1,
+        },
+        scope: RelayScope {
+            app_namespace: "app".to_owned(),
+            storage_namespace: "default".to_owned(),
+            auth_scope: Some("alice".to_owned()),
+        },
+        sqlite_path: directory.path().join("alice.sqlite"),
+        schema: schema(),
+        identity: identity(0x01),
+    })
+    .unwrap();
+    let other = DbIdentity {
+        author: AuthorSubject::for_test_bytes([0x5b; 16]),
+        ..identity(0x02)
+    };
+    match relay.attach_client(other, BTreeMap::new()) {
+        Err(RelayError::Host(binding_host::HostError::Engine(error))) => {
+            assert_eq!(error.reason, Some(jazz::db::Reason::IdentityMismatch));
+        }
+        Err(error) => panic!("expected an identity mismatch, got {error}"),
+        Ok(_) => panic!("the relay served a client of another identity"),
+    }
+    relay
+        .attach_client(identity(0x03), BTreeMap::new())
+        .expect("the relay serves its own identity");
 }

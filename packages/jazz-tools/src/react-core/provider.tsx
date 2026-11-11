@@ -7,6 +7,7 @@ import React, {
   type ReactNode,
 } from "react";
 import type { AuthState } from "../runtime/auth-state.js";
+import type { SyncStatus } from "../runtime/sync-status.js";
 import { createClientConfigKey } from "../runtime/client-config-key.js";
 import {
   acquireClient as registryAcquireClient,
@@ -19,6 +20,8 @@ import { trackPromise } from "../subscriptions-orchestrator.js";
 type CoreJazzDb = {
   getAuthState(): AuthState;
   onAuthChanged(listener: (state: AuthState) => void): () => void;
+  getSyncStatus(): SyncStatus;
+  onSyncStatusChange(listener: (status: SyncStatus) => void): () => void;
 };
 
 export type CoreJazzClient = {
@@ -27,7 +30,7 @@ export type CoreJazzClient = {
   shutdown(options?: import("../runtime/db.js").ShutdownOptions): Promise<void>;
 };
 
-export type CreateJazzClient<TClient extends CoreJazzClient = CoreJazzClient> = (
+export type OpenJazzClient<TClient extends CoreJazzClient = CoreJazzClient> = (
   config: DbConfig,
 ) => Promise<TClient>;
 
@@ -41,7 +44,7 @@ export type JazzProviderProps = {
   /** Rendered during SSR and until client acquisition completes after browser commit. */
   fallback?: ReactNode;
   children: ReactNode;
-  createJazzClient: CreateJazzClient;
+  openJazzClient: OpenJazzClient;
 };
 
 type JazzContextValue = {
@@ -58,10 +61,10 @@ const JazzContext = createContext<JazzContextValue | null>(null);
 function acquireClient<TClient extends CoreJazzClient>(
   configKey: string,
   config: DbConfig,
-  createJazzClient: CreateJazzClient<TClient>,
+  openJazzClient: OpenJazzClient<TClient>,
   holder: object,
 ): Promise<TClient> {
-  return registryAcquireClient<TClient>(configKey, () => createJazzClient(config), holder);
+  return registryAcquireClient<TClient>(configKey, () => openJazzClient(config), holder);
 }
 
 function releaseClient(configKey: string, holder: object): Promise<void> {
@@ -119,15 +122,15 @@ export function JazzClientProvider({ client: clientPromise, children }: JazzClie
  * If you need to create a Jazz client outside of the React component lifecycle,
  * use {@link JazzClientProvider}.
  */
-export function JazzProvider({ config, fallback, children, createJazzClient }: JazzProviderProps) {
+export function JazzProvider({ config, fallback, children, openJazzClient }: JazzProviderProps) {
   // Stable per-provider identity, used as the registry holder across effect
   // cleanup and re-acquisition (including React Strict Mode's effect replay).
   const holder = useRef({}).current;
 
-  // Keep the framework-level lease distinct from createJazzClient's own shared
+  // Keep the framework-level lease distinct from openJazzClient's own shared
   // client lease. Both use the generic registry; sharing an unqualified key
   // makes provider teardown recursively release itself instead of the runtime.
-  const configKey = createClientConfigKey("react", config, [createJazzClient]);
+  const configKey = createClientConfigKey("react", config, [openJazzClient]);
 
   const [clientLease, setClientLease] = useState<{
     configKey: string;
@@ -149,7 +152,7 @@ export function JazzProvider({ config, fallback, children, createJazzClient }: J
     const ready = previous.configKey === configKey ? Promise.resolve() : previous.release;
     const acquisition = ready.then(() => {
       if (cancelled) return;
-      const promise = acquireClient<CoreJazzClient>(configKey, config, createJazzClient, holder);
+      const promise = acquireClient<CoreJazzClient>(configKey, config, openJazzClient, holder);
       acquired = true;
       setClientLease({ configKey, promise });
     });
@@ -165,7 +168,7 @@ export function JazzProvider({ config, fallback, children, createJazzClient }: J
         }),
       };
     };
-  }, [configKey, createJazzClient, holder]);
+  }, [configKey, openJazzClient, holder]);
 
   // Effects do not run during SSR. Rendering the same fallback before the first
   // browser commit keeps hydration stable while deferring all registry work to

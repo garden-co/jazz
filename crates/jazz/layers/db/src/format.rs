@@ -33,7 +33,8 @@ pub const STORAGE_FORMAT: i64 = 1;
 
 const STAMP_TABLE: &str = "_jazz_format";
 
-fn unsupported(detail: impl std::fmt::Display) -> Error {
+/// A store this build cannot read, with what gave it away.
+pub(crate) fn unsupported(detail: impl std::fmt::Display) -> Error {
     Error::new(
         ErrorCode::UnsupportedStorageCodecs,
         format!(

@@ -46,6 +46,14 @@ pub const FEATURE_AUTHORIZATION_SCOPE_VIEWS: WireFeatures = 1 << 7;
 /// link.  This is a transport-admission capability only: a peer's advertised
 /// role and semantic frames never create the capability.
 pub const FEATURE_SCOPE_ISOLATED_CLIENT_RELAY: WireFeatures = 1 << 9;
+/// The peer is a thin client, or serves thin clients: it exchanges
+/// [`WireFrame::ThinRequest`] and [`WireFrame::ThinResponse`] (SPEC 8.14).
+pub const FEATURE_THIN_RESULTS: WireFeatures = 1 << 10;
+/// The peer keeps an idle link audible: a server sends
+/// [`WireFrame::Heartbeat`] on its keepalive cadence to a client that
+/// advertised this, so a client whose platform hides WebSocket pings (a
+/// browser) can tell a link that went silently dead from a quiet one.
+pub const FEATURE_HEARTBEAT: WireFeatures = 1 << 11;
 
 /// Bitset of optional protocol features advertised by one peer.
 pub type WireFeatures = u64;
@@ -61,6 +69,20 @@ pub enum WireFrame {
     Channel(WireChannelEnvelope),
     /// Receiver-consumption byte grant. Postcard-v1 enum tag 3 within wire v6.
     ChannelCredit(WireChannelCredit),
+    /// A thin client's request. Postcard-v1 enum tag 4 within wire v6; only
+    /// after both peers negotiated [`FEATURE_THIN_RESULTS`].
+    ThinRequest(crate::thin::ThinRequest),
+    /// The server's answer to a thin request. Postcard-v1 enum tag 5 within
+    /// wire v6; only after both peers negotiated [`FEATURE_THIN_RESULTS`].
+    ThinResponse(crate::thin::ThinResponse),
+    /// A piece of a thin request or response too large for one frame.
+    /// Postcard-v1 enum tag 6 within wire v6; only after both peers
+    /// negotiated [`FEATURE_THIN_RESULTS`].
+    ThinPart(crate::thin::ThinPart),
+    /// Proof of life on an otherwise quiet link, server to client. Carries
+    /// nothing and needs no answer. Postcard-v1 enum tag 7 within wire v6;
+    /// only after both peers negotiated [`FEATURE_HEARTBEAT`].
+    Heartbeat,
 }
 
 /// Which independently bounded transport resource this grant releases.
@@ -245,9 +267,9 @@ pub struct WireSession {
 
 impl std::fmt::Debug for WireSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let fingerprint = blake3::hash(self.session_id.as_bytes()).to_hex();
+        let fingerprint = jazz_types::sha256::hash(self.session_id.as_bytes()).to_hex();
         let identity_fingerprint = self.identity.map(|identity| {
-            blake3::hash(identity.canonical().as_bytes()).to_hex()[..12].to_owned()
+            jazz_types::sha256::hash(identity.canonical().as_bytes()).to_hex()[..12].to_owned()
         });
         f.debug_struct("WireSession")
             .field("session_id_len", &self.session_id.len())
@@ -483,6 +505,15 @@ pub fn is_channel_credit_frame(bytes: &[u8]) -> bool {
     bytes.first() == Some(&3)
 }
 
+/// Decode a thin frame joined from [`crate::thin::ThinPart`]s, which may be
+/// over a wire frame but not over [`crate::thin::MAX_THIN_MESSAGE_BYTES`].
+pub fn decode_postcard_frame(bytes: &[u8]) -> Result<WireFrame, postcard::Error> {
+    if bytes.len() > crate::thin::MAX_THIN_MESSAGE_BYTES {
+        return Err(postcard::Error::DeserializeUnexpectedEnd);
+    }
+    decode_postcard_exact(bytes)
+}
+
 /// Decode a wire frame serialized by [`encode_frame`].
 pub fn decode_frame(bytes: &[u8]) -> Result<WireFrame, postcard::Error> {
     if validate_wire_frame_len(bytes.len()).is_err() {
@@ -543,6 +574,16 @@ pub fn validate_frames_for_artifact_corpus(
             WireFrame::Error(_) => {}
             WireFrame::ChannelCredit(_) => {
                 return Err("credit frames require a persistent admitted endpoint".to_owned());
+            }
+            WireFrame::ThinRequest(_) | WireFrame::ThinResponse(_) | WireFrame::ThinPart(_) => {
+                if negotiated_features & FEATURE_THIN_RESULTS == 0 {
+                    return Err("thin frames require the thin results feature".to_owned());
+                }
+            }
+            WireFrame::Heartbeat => {
+                if negotiated_features & FEATURE_HEARTBEAT == 0 {
+                    return Err("heartbeat frames require the heartbeat feature".to_owned());
+                }
             }
         }
     }
@@ -842,6 +883,38 @@ pub enum TransportError {
     Failed(String),
 }
 
+impl std::fmt::Display for TransportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Backpressure => f.write_str("backpressure"),
+            Self::Failed(why) => f.write_str(why),
+        }
+    }
+}
+
+/// The wire version 2.0.0-alpha.58 and alpha.59 spoke. Its `WireFrame` put
+/// `Message` at enum tag 1 and `Error` at tag 2; the `WireError` body (code,
+/// retry, message) and its baseline codes are unchanged since.
+pub const ALPHA_59_WIRE_PROTOCOL_VERSION: u16 = 3;
+
+/// `WireFrame::Error`'s enum tag in [`ALPHA_59_WIRE_PROTOCOL_VERSION`].
+const ALPHA_59_ERROR_FRAME_TAG: u32 = 2;
+
+/// Encode `error` as a `WireFrame::Error` a peer whose `Hello` advertised
+/// `peer_max_version` as its highest wire version decodes: in the
+/// [`ALPHA_59_WIRE_PROTOCOL_VERSION`] layout for a released alpha.59 peer, in
+/// this version's otherwise. Only a version refusal needs this; nothing else
+/// is ever sent to a peer on another version.
+pub fn encode_error_frame_for_peer(
+    error: &WireError,
+    peer_max_version: u16,
+) -> Result<Vec<u8>, postcard::Error> {
+    if peer_max_version == ALPHA_59_WIRE_PROTOCOL_VERSION {
+        return to_allocvec(&(ALPHA_59_ERROR_FRAME_TAG, error));
+    }
+    encode_frame(&WireFrame::Error(error.clone()))
+}
+
 fn check_wire_protocol_range(min: u16, max: u16) -> Result<(), WireError> {
     if min == WIRE_PROTOCOL_VERSION && max == WIRE_PROTOCOL_VERSION {
         return Ok(());
@@ -859,8 +932,9 @@ fn check_wire_protocol_range(min: u16, max: u16) -> Result<(), WireError> {
 /// The cross-version prefix of a `Hello` frame: the `WireFrame::Hello` tag and
 /// the advertised `min_protocol_version..=max_protocol_version` range.
 ///
-/// This prefix, and the complete `WireFrame::Error` layout with its baseline
-/// codes, are the only bytes every wire version shares. Everything after the
+/// This prefix is the only part every wire version shares; the `WireError`
+/// body and its baseline codes are shared too, but `WireFrame::Error`'s tag is
+/// not (see [`encode_error_frame_for_peer`]). Everything after the
 /// range is scoped to the advertised version, so a receiver reads the range
 /// before it decodes the rest (SPEC 8 §8.1.1, "Forward compatibility of tagged
 /// unions"). Returns `None` when the bytes do not start with that prefix.
@@ -1011,8 +1085,8 @@ mod tests {
         assert!(decode_postcard_exact::<PredicateRead>(&padded).is_err());
     }
 
-    const PREDICATE_READ_WITHOUT_RESULT_HEX: &str = "017410444444444444444444444444444444440174000000000000000000000000000010555555555555555555555555555555550000";
-    const PREDICATE_READ_WITH_RESULT_HEX: &str = "0174104444444444444444444444444444444401740000000000000000000000000000105555555555555555555555555555555500010301abcd";
+    const PREDICATE_READ_WITHOUT_RESULT_HEX: &str = "01741044444444444444444444444444444444017400000000000000000000000000000010555555555555555555555555555555550000";
+    const PREDICATE_READ_WITH_RESULT_HEX: &str = "017410444444444444444444444444444444440174000000000000000000000000000000105555555555555555555555555555555500010301abcd";
 
     /// Wire layout is tested internally because enum tags are not a query API.
     #[test]
@@ -2529,5 +2603,22 @@ mod tests {
                 .code,
             WireErrorCode::UnsupportedFeature
         );
+    }
+
+    /// An alpha.59 peer's decoder (packages/jazz-tools `decodeWireError` at
+    /// 2.0.0-alpha.59) reads tag 2, then code, retry and message. A current
+    /// peer gets this version's frame.
+    #[test]
+    fn version_refusal_is_encoded_in_the_peers_error_layout() {
+        let error = WireError::new(
+            WireErrorCode::UnsupportedProtocolVersion,
+            WireRetry::Never,
+            "upgrade",
+        );
+        let alpha_59 = encode_error_frame_for_peer(&error, ALPHA_59_WIRE_PROTOCOL_VERSION).unwrap();
+        assert_eq!(alpha_59, [&[2u8, 0, 0, 7][..], b"upgrade"].concat());
+
+        let current = encode_error_frame_for_peer(&error, WIRE_PROTOCOL_VERSION).unwrap();
+        assert_eq!(decode_frame(&current).unwrap(), WireFrame::Error(error));
     }
 }

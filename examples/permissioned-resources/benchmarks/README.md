@@ -10,11 +10,16 @@ access through a recursive group policy. Core and Client are file-backed SQLite
 databases, and the client starts empty. Core authorizes the benchmark reader's
 identity.
 
-Revision 2 (`first_sync_local_relay_27518_rocksdb`) put a device-local
-persistence relay between Core and Client, and revision 1
-(`first_sync_27518_rocksdb`) a server edge, so `first_sync_direct_27518_file`
-is its own baseline, not a like-for-like comparison. Their metadata remains for
-historical runs.
+`first_sync_local_relay_27518_file` runs the same workload through the
+device-local native relay: Core serves a fresh file-backed relay over the same
+wire, and the client is the relay's in-memory foreground, subscribed on the
+relay's owner thread as on a device. The harness ticks Core and carries frames;
+the relay drives itself.
+
+Revision 2 (`first_sync_local_relay_27518_rocksdb`) put a RocksDB persistence
+relay between Core and a RocksDB client, and revision 1
+(`first_sync_27518_rocksdb`) a server edge, so neither is a like-for-like
+comparison with revision 3. Their metadata remains for historical runs.
 
 Core seeding is outside the wall-time measurement. Client opening, connection,
 query preparation, subscription and settling until every expected row is present
@@ -24,12 +29,13 @@ transport performs one wire encode, zstd roundtrip and decode per frame.
 ```sh
 cargo test -p jazz-example-permissioned-resources-benchmark --lib
 cargo bench -p jazz-example-permissioned-resources-benchmark --bench walltime --features jazz-benchmark-guard/mimalloc
-JAZZ_CUSTOMER_IDENTITY=member JAZZ_CUSTOMER_SCALE=1.0 cargo run --release -p jazz-example-permissioned-resources-benchmark --bin permissioned-resources-profile
+JAZZ_CUSTOMER_IDENTITY=member JAZZ_CUSTOMER_TOPOLOGY=relay JAZZ_CUSTOMER_SCALE=1.0 cargo run --release -p jazz-example-permissioned-resources-benchmark --bin permissioned-resources-profile
 ```
 
 The profile driver prints one receipt per run: rows, wall, connect, subscribe
 and settle times, ticks and compressed bytes sent to the client. Identities are
-`member`, `spy` (no grants) and `admin` (sees everything).
+`member`, `spy` (no grants) and `admin` (sees everything); topologies are
+`direct` and `relay`.
 
 `reference/` contains the earlier SQLite/Postgres comparison drivers and
 research receipts for revisions 1 and 2.

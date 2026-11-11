@@ -93,8 +93,8 @@ describe("RecoveryPhrase integration — identity continuity", () => {
     });
 
     try {
-      const idA = dbA.getAuthState().session?.user ?? null;
-      const idB = dbB.getAuthState().session?.user ?? null;
+      const idA = dbA.getAuthState().session?.identity ?? null;
+      const idB = dbB.getAuthState().session?.identity ?? null;
       expect(idA).not.toBeNull();
       expect(idB).toStrictEqual(idA);
     } finally {

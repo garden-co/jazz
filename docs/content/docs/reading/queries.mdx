@@ -1,6 +1,6 @@
 ---
 title: Queries
-description: One-shot queries, subscriptions, framework hooks, Suspense integration, and read durability options.
+description: "Learn how to run one-shot queries and subscriptions, use the framework hooks and Suspense, and choose read durability."
 reviewedAt: "b29b48d1a"
 ---
 
@@ -10,7 +10,7 @@ import DurabilityTiersTable from "../../partials/durability-tiers-table.mdx";
 
 A one-shot query runs once against the database without subscribing to changes.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-oneshot-ts
@@ -19,11 +19,6 @@ A one-shot query runs once against the database without subscribing to changes.
   <Tab value="Effect">
     <include cwd lang="ts">
       ../examples/docs/todo-effect/src/docs-snippets.ts#reading-oneshot-effect
-    </include>
-  </Tab>
-  <Tab value="Rust">
-    <include cwd lang="rs">
-      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-oneshot-rust
     </include>
   </Tab>
 </Tabs>
@@ -39,7 +34,7 @@ first matching row, or `null` if no row matches or you aren't allowed to read it
 
 Subscribe to a query to receive updates whenever the underlying data changes.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-subscriptions-ts
@@ -50,39 +45,30 @@ Subscribe to a query to receive updates whenever the underlying data changes.
       ../examples/docs/todo-effect/src/docs-snippets.ts#reading-subscriptions-effect
     </include>
   </Tab>
-  <Tab value="Rust">
-    <include cwd lang="rs">
-      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-subscriptions-rust
-    </include>
-  </Tab>
 </Tabs>
 
 ## Composing queries
 
 Queries are immutable and chainable. Each method returns a new query, so you can store a base and reuse it for different views without side effects.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Rust"]} persist updateAnchor>
-  <Tab value="TypeScript">
-    <include cwd lang="ts">
-      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-composing-queries-ts
-    </include>
-  </Tab>
-  <Tab value="Rust">
-    <include cwd lang="rs">
-      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-composing-queries-rust
-    </include>
-  </Tab>
-</Tabs>
+<include cwd lang="ts">
+  ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-composing-queries-ts
+</include>
 
 See [Filters & Sorting](/docs/reading/filters-and-sorting) for the full list of `where` operators, `orderBy`, `limit`, and `offset`.
 
 ## Read durability
 
-Queries and subscriptions return results as soon as they are available locally by default. Local reads are effectively instant, and remote updates stream in as they arrive, which is normally a good default. When you need a stronger guarantee for the first result, pass a `tier` option to fetch data from a different tier before returning.
+In browsers and React Native, queries and subscriptions read local-first by default: their first result waits briefly (up to 5 seconds) for the server while the client is online, and shows local data at once when it is offline. After that, local writes show instantly and remote updates stream in as they arrive. When you need a stronger guarantee for the first result, pass a `tier` option to fetch data from a different tier before returning.
+
+In Node (a backend client, a script or a test) with a `serverUrl`, a read that names no tier is
+`"remote"`: it waits for the server, and rejects while the server is unreachable. Catch that
+rejection, since an uncaught one ends a Node process, or pass `tier: "local-first"` to read local
+data.
 
 <DurabilityTiersTable />
 
-For background on how data flows between tiers, see [How Sync Works](/docs/concepts/how-sync-works#infrastructure-tiers).
+For background on how data flows between tiers, see [How Sync Works](/docs/recipes/local-first/how-sync-works#infrastructure-tiers).
 
 ### Choosing a tier
 
@@ -98,7 +84,7 @@ behavior and how subscriptions change between offline and online operation.
 These are the only read tiers. Write waits use the separate durability tiers `"local"` and
 `"global"`.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-durability-tier-ts
@@ -107,11 +93,6 @@ These are the only read tiers. Write waits use the separate durability tiers `"l
   <Tab value="Effect">
     <include cwd lang="ts">
       ../examples/docs/todo-effect/src/docs-snippets.ts#reading-durability-tier-effect
-    </include>
-  </Tab>
-  <Tab value="Rust">
-    <include cwd lang="rs">
-      ../examples/docs/todo-server-rs/src/docs_snippets.rs#reading-durability-tier-rust
     </include>
   </Tab>
 </Tabs>
@@ -142,9 +123,6 @@ const rows = useAll(app.todos, {
 });
 ```
 
-In Rust, use `client.query_local_first(query, Duration::from_millis(500))` and
-`client.subscribe_local_first(query, Duration::from_millis(500))`.
-
 - Only the initial load waits: a one-shot read, or a subscription's first callback. While the
   client looks online (its connection is live, or its connection attempt started less than 5 s
   ago), Jazz waits up to `firstLoadRemoteWaitMs` for the server's answer and shows that result, together
@@ -157,8 +135,9 @@ In Rust, use `client.query_local_first(query, Duration::from_millis(500))` and
   remote changes show when they arrive.
 - Queries with an `offset` read the server's page while waiting, because a partly synced cache
   would apply the offset to the wrong rows. On timeout they show the cached page.
-- The default, `0`, is plain `"local-first"`. The option applies to local-first reads (including
-  the browser default); TypeScript rejects it on a `"remote"` read, which
+- With an explicit `tier: "local-first"` the default is `0`, plain `"local-first"`. A browser or
+  React Native read that names no tier defaults to `5000` when a server is configured; pass
+  `firstLoadRemoteWaitMs: 0` to show local data at once. TypeScript rejects the option on a `"remote"` read, which
   always waits for the server (plain JavaScript callers have it ignored).
 
 <Callout type="warn" title="Removed read tiers">
@@ -181,51 +160,7 @@ See [Durability Tiers](/docs/reference/durability-tiers) for the full reference,
 
 ## Magic columns
 
-You can select and filter on Jazz's magic columns just like other columns. They are omitted from
-`select("*")`, so opt in explicitly when you want them.
-
-### Edit metadata columns
-
-- `$createdBy`&hairsp;—&hairsp;the Jazz principal that created the row
-- `$createdAt`&hairsp;—&hairsp;when the row was first created
-- `$updatedBy`&hairsp;—&hairsp;the Jazz principal that last updated the row
-- `$updatedAt`&hairsp;—&hairsp;when the row was last updated
-
-These are useful for showing authorship, when a row last changed, or building "my created items"
-views without storing duplicate ownership fields.
-
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
-  <Tab value="TypeScript">
-    <include cwd lang="ts">
-      ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#reading-edit-metadata-magic-columns-ts
-    </include>
-  </Tab>
-  <Tab value="Effect">
-    <include cwd lang="ts">
-      ../examples/docs/todo-effect/src/docs-snippets.ts#reading-edit-metadata-magic-columns-effect
-    </include>
-  </Tab>
-</Tabs>
-
-See [Permissions](/docs/auth/permissions) for policy examples using `$createdBy` and the other
-magic columns.
-
-### Deletion metadata columns
-
-After `.includeDeleted()`, you can select, filter, and sort by `$deletedAt` and `$deletedBy`.
-They return the winning deletion's authored timestamp as a `Date` and author as a `RowAuthor`, or `null` for live and restored rows.
-
-```ts
-const deletedTasks = await db.all(
-  app.tasks
-    .includeDeleted()
-    .where({ $deletedAt: { isNull: false } })
-    .select("title", "$deletedAt", "$deletedBy"),
-);
-```
-
-For [history rows](/docs/reading/history#deleted-rows), every version shares
-the logical row's current deletion timestamp and author.
+See [Edit Metadata](/docs/reading/metadata) for `$createdBy`, `$createdAt` and the other magic columns.
 
 ## Framework hooks
 
@@ -321,8 +256,8 @@ In practice this means:
 
 - Adding, removing, or reordering rows updates the array structure only — untouched row objects keep their identity, so `{#each items as item (item.id)}` and `<TransitionGroup>` keyed renders are stable.
 - Editing a single field on one row writes only that field — sibling rows do not re-render, and per-row components that read other fields stay quiet.
-- Vue's `useAll` returns `{ data, isLoading, error }`, where `data` is a deep `Ref` (not a `shallowRef`), so per-field reactivity composes with the rest of your component tree without manual unwrapping.
-- React and Solid return `{ data, isLoading, error }`; React returns a fresh `data` array each tick, while Solid's store keeps fine-grained dependency tracking for fields that changed.
+- Vue's `useAll` returns `{ data, isLoading, error, db }`, where `data` is a deep `Ref` (not a `shallowRef`), so per-field reactivity composes with the rest of your component tree without manual unwrapping.
+- React and Solid return `{ data, isLoading, error, db }`; React returns a fresh `data` array each tick, while Solid's store keeps fine-grained dependency tracking for fields that changed.
 
 React's granularity benefit comes from React's diffing, not from in-place reconciliation.
 
@@ -355,13 +290,13 @@ Pass `undefined` instead of a query to skip evaluation. This is useful when buil
 
 ### React Suspense and Transitions
 
-`useAllSuspense` is a React-specific variant that suspends instead of returning a loading state, keeping the previous result visible while the next one loads.
+`useAllSuspense` is a React-specific variant that suspends instead of returning a loading state, keeping the previous result visible while the next one loads. It returns `{ data, db }`.
 
 <include cwd lang="tsx" meta='title="App.tsx"'>
   ../examples/docs/todo-client-localfirst-react/src/ConcurrentTodoList.tsx#reading-concurrent-rendering-react
 </include>
 
-`useOneSuspense` does the same for a single row. It returns the row, or `null` if no row matches
+`useOneSuspense` does the same for a single row. Its `data` is the row, or `null` if no row matches
 or you aren't allowed to read it.
 
 <include cwd lang="tsx">

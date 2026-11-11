@@ -1,0 +1,151 @@
+name: Release candidate
+
+# Publishes a GitHub prerelease, v2.0.0-alpha.N-rc.M, carrying exactly the
+# native assets the release v2.0.0-alpha.N will carry, so Jazz Cloud and
+# self-hosters can try a candidate before it ships:
+#   - the server binaries Jazz Cloud's images run, jazz-tools-linux-{x64,arm64},
+#     with SHA256SUMS ("Publish jazz-tools alpha" attaches the same files);
+#   - the alpha.59 exporter and importer, with their .sha256 files (from the
+#     "alpha59-alpha60 exporter" workflow, which this calls).
+# It publishes nothing to npm, moves no dist-tag, and is never Latest. The
+# Actions token creates the tag on the exact commit built, when the
+# prerelease is published; an existing tag or release refuses the run.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Candidate version, e.g. 2.0.0-alpha.60-rc.1 (tag v<version>)."
+        required: true
+        type: string
+      ref:
+        description: "Branch, tag or commit to build."
+        required: true
+        type: string
+        default: main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-candidate-${{ inputs.version }}
+  cancel-in-progress: false
+
+env:
+  GH_REPO: ${{ github.repository }}
+  VERSION: ${{ inputs.version }}
+
+jobs:
+  draft:
+    name: Draft v${{ inputs.version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ inputs.ref }}
+
+      - id: resolve
+        name: Validate inputs and resolve the commit
+        run: |
+          set -euo pipefail
+          if ! [[ "${VERSION}" =~ ^2\.0\.0-alpha\.[0-9]+-rc\.[0-9]+$ ]]; then
+            echo "::error::version must look like 2.0.0-alpha.N-rc.M, got '${VERSION}'"
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/v${VERSION}" >/dev/null; then
+            echo "::error::tag v${VERSION} already exists; pick the next rc number."
+            exit 1
+          fi
+          if gh release view "v${VERSION}" >/dev/null 2>&1; then
+            echo "::error::a release v${VERSION} already exists; pick the next rc number."
+            exit 1
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Create the draft prerelease
+        env:
+          SHA: ${{ steps.resolve.outputs.sha }}
+        run: |
+          set -euo pipefail
+          printf 'Release candidate for %s, built from %s. Not published to npm.\n' \
+            "${VERSION%-rc.*}" "${SHA}" > "${RUNNER_TEMP}/notes.md"
+          gh release create "v${VERSION}" --draft --prerelease --latest=false \
+            --target "${SHA}" --title "Jazz ${VERSION}" --notes-file "${RUNNER_TEMP}/notes.md"
+
+  build:
+    name: Build Jazz packages
+    needs: draft
+    uses: ./.github/workflows/build-jazz-packages.yml
+    secrets: inherit
+    with:
+      ref: ${{ needs.draft.outputs.sha }}
+
+  attach-server-binaries:
+    name: Attach server binaries
+    needs: [draft, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: jazz-tools-linux-*
+          merge-multiple: true
+          path: dist
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          test -s jazz-tools-linux-x64
+          test -s jazz-tools-linux-arm64
+          sha256sum jazz-tools-linux-x64 jazz-tools-linux-arm64 > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload
+        run: |
+          set -euo pipefail
+          test "$(gh release view "v${VERSION}" --json isDraft --jq .isDraft)" = true
+          gh release upload "v${VERSION}" dist/jazz-tools-linux-x64 dist/jazz-tools-linux-arm64 dist/SHA256SUMS
+
+  exporter:
+    name: alpha59-alpha60 exporter
+    needs: draft
+    permissions:
+      contents: write
+    uses: ./.github/workflows/alpha59-alpha60-exporter.yml
+    secrets: inherit
+    with:
+      version: ${{ inputs.version }}
+      ref: ${{ needs.draft.outputs.sha }}
+
+  publish:
+    name: Publish the prerelease
+    needs: [draft, attach-server-binaries, exporter]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check the assets and publish
+        run: |
+          set -euo pipefail
+          assets=$(gh release view "v${VERSION}" --json assets --jq '.assets[].name')
+          for asset in jazz-tools-linux-x64 jazz-tools-linux-arm64 SHA256SUMS \
+            jazz-alpha59-alpha60-export-linux-x64 jazz-alpha59-alpha60-import-linux-x64 \
+            jazz-alpha59-alpha60-export.sha256 jazz-alpha59-alpha60-import.sha256; do
+            grep -qx "${asset}" <<<"${assets}" || { echo "::error::missing ${asset}"; exit 1; }
+          done
+          gh release edit "v${VERSION}" --draft=false --prerelease --latest=false
+          gh release view "v${VERSION}" --json url,tagName,targetCommitish

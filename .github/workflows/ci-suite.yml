@@ -35,7 +35,7 @@ jobs:
     runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 15
     container:
-      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:dcb4ec5e4f5507b258805617d58ee6976f7dcee2e9afe1b05ae3d41cc185ef35
+      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:457972f436c36e4d00c31d89fe13506e43afff95fe933e831c0efb4b6f492dba
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -85,7 +85,7 @@ jobs:
     runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 15
     container:
-      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:dcb4ec5e4f5507b258805617d58ee6976f7dcee2e9afe1b05ae3d41cc185ef35
+      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:457972f436c36e4d00c31d89fe13506e43afff95fe933e831c0efb4b6f492dba
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -142,7 +142,7 @@ jobs:
     runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 30
     container:
-      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:dcb4ec5e4f5507b258805617d58ee6976f7dcee2e9afe1b05ae3d41cc185ef35
+      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:457972f436c36e4d00c31d89fe13506e43afff95fe933e831c0efb4b6f492dba
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -222,7 +222,7 @@ jobs:
     # (root cause TBD; see dev/CI_NOTES.md). Release builds load fine.
 
     container:
-      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:dcb4ec5e4f5507b258805617d58ee6976f7dcee2e9afe1b05ae3d41cc185ef35
+      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:457972f436c36e4d00c31d89fe13506e43afff95fe933e831c0efb4b6f492dba
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -266,6 +266,16 @@ jobs:
         with:
           sccache-s3: ${{ inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') }}
 
+      # Restore compiler state only; tsc still checks current source and native
+      # declarations. Compatible prior revisions are invalidated by TypeScript.
+      - name: Restore TypeScript test compiler state
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: packages/jazz-tools/node_modules/.cache/tsc
+          key: test-ts-tsc-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pnpm-lock.yaml', 'packages/jazz-tools/tsconfig*.json', '.github/workflows/ci-suite.yml') }}-${{ github.sha }}
+          restore-keys: |
+            test-ts-tsc-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pnpm-lock.yaml', 'packages/jazz-tools/tsconfig*.json', '.github/workflows/ci-suite.yml') }}-
+
       # Builds provenance-checked test artifacts, then runs the parallel Node /
       # browser suites. The local CI-equivalent gate calls this exact partition.
       # The integration-branch workspace target-class check that used to run
@@ -295,7 +305,7 @@ jobs:
     runs-on: blacksmith-16vcpu-ubuntu-2404
     timeout-minutes: 20
     container:
-      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:dcb4ec5e4f5507b258805617d58ee6976f7dcee2e9afe1b05ae3d41cc185ef35
+      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:457972f436c36e4d00c31d89fe13506e43afff95fe933e831c0efb4b6f492dba
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}

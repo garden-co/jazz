@@ -1,4 +1,6 @@
 use super::*;
+use crate::server::permissions_validation::validate_permissions_relations;
+use jazz::catalogue::{CatalogueLens, CataloguePut};
 use jazz::tools::deployment::{DeploymentCatalogue, PreparedDeployment};
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -6,6 +8,9 @@ use jazz::tools::deployment::{DeploymentCatalogue, PreparedDeployment};
 pub(crate) struct DeploymentResponse {
     pub changed: bool,
     pub published: PublishedArtifacts,
+    /// The published permissions bundle (see [`jazz::catalogue`]): what
+    /// the backend pins its sessions to.
+    pub bundle: String,
 }
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub(crate) struct PublishedArtifacts {
@@ -21,8 +26,8 @@ pub(crate) struct PublishedMigration {
 
 pub(crate) struct StagedDeployment {
     expected: CatalogueIndex,
-    next: CatalogueIndex,
-    entries: Vec<CatalogueEntry>,
+    /// The rows the deployment adds, applied with its admission.
+    pub put: CataloguePut,
     pub response: DeploymentResponse,
 }
 
@@ -32,22 +37,23 @@ impl StoredCatalogue {
         Ok(DeploymentCatalogue {
             schemas: index.schemas.values().cloned().collect(),
             migrations: index.lenses.values().cloned().collect(),
-            active_schema_hash: index.active_schema.map(|active| active.schema_hash),
+            admitted_schema_hashes: index.admitted.clone(),
         })
     }
 
+    /// Stage `prepared` as a published bundle: its schemas, lenses and
+    /// permissions, activating nothing.
     pub(crate) fn stage_deployment(
         &self,
         prepared: &PreparedDeployment,
-        version: u64,
     ) -> Result<StagedDeployment, CatalogueError> {
         let expected = self
             .index
             .lock()
             .map_err(|_| CatalogueError::LockError)?
             .clone();
-        let mut next = expected.clone();
-        let mut entries = Vec::new();
+        let now = unix_timestamp_millis();
+        let mut put = CataloguePut::default();
         let mut published = PublishedArtifacts::default();
         for schema in prepared.schemas() {
             let hash = SchemaHash::compute(schema);
@@ -58,24 +64,13 @@ impl StoredCatalogue {
                 }
                 structural == *schema
             });
-            // A configured initial schema may be known only in memory. Its
-            // publication timestamp is present only after a schema record exists.
+            // A configured initial schema, or one the store admitted, is
+            // published only once a deployment publishes it.
             if unchanged && expected.schema_published_at.contains_key(&hash) {
                 continue;
             }
-            let (_, entry) = schema_entry(
-                self.app_id,
-                schema.clone(),
-                expected
-                    .schema_published_at
-                    .get(&hash)
-                    .copied()
-                    .unwrap_or_else(unix_timestamp_millis),
-            );
             published.schemas.push(hash.to_string());
-            next.apply_entry(&entry)?;
-            next.schemas.insert(hash, schema.clone());
-            entries.push(entry);
+            put.schemas.push((schema.clone(), now));
         }
         for lens in prepared.migrations() {
             // Preparation already rejects conflicting definitions for this pair.
@@ -89,9 +84,12 @@ impl StoredCatalogue {
                 from_hash: lens.source_hash.to_string(),
                 to_hash: lens.target_hash.to_string(),
             });
-            let entry = lens_entry(self.app_id, lens);
-            next.apply_entry(&entry)?;
-            entries.push(entry);
+            put.lenses.push(CatalogueLens {
+                source: lens.source_hash,
+                target: lens.target_hash,
+                published_at: now,
+                forward: lens.forward.clone(),
+            });
         }
         let source = prepared.active_schema().public_schema();
         let schema_hash = SchemaHash::compute(source);
@@ -100,101 +98,44 @@ impl StoredCatalogue {
             .filter(|(_, table)| table.policies != TablePolicies::default())
             .map(|(name, table)| (*name, table.policies.clone()))
             .collect::<HashMap<_, _>>();
-        validate_permissions_relations(&permissions)
+        validate_permissions_relations(&permissions).map_err(CatalogueError::WriteError)?;
+        let permissions: jazz::catalogue::Permissions = permissions.into_iter().collect();
+        let bundle = jazz::catalogue::bundle_id(&schema_hash, &permissions)
             .map_err(|error| CatalogueError::WriteError(error.to_string()))?;
-        let current = expected.active_schema();
-        let same_active = current.as_ref().is_some_and(|active| {
-            active.summary.schema_hash == schema_hash
-                && active
-                    .permissions
-                    .iter()
-                    .filter(|(_, policy)| **policy != TablePolicies::default())
-                    .map(|(name, policy)| (*name, policy.clone()))
-                    .collect::<HashMap<_, _>>()
-                    == permissions
-        });
-        let changed =
-            !same_active || !published.schemas.is_empty() || !published.migrations.is_empty();
-        if changed {
-            if expected
-                .active_schema
-                .is_some_and(|active| active.version >= version)
-            {
-                return Err(CatalogueError::WriteError(
-                    "deployment revision must advance".into(),
-                ));
-            }
-            let parent = expected.active_schema.map(|active| active.bundle_object_id);
-            let bundle = permissions_bundle_object_id(
-                self.app_id,
-                schema_hash,
-                version,
-                parent,
-                &permissions,
-            );
-            for entry in [
-                CatalogueEntry {
-                    object_id: bundle,
-                    metadata: catalogue_metadata(
-                        self.app_id,
-                        ObjectType::CataloguePermissionsBundle,
-                    ),
-                    content: encode_permissions_bundle(schema_hash, version, parent, &permissions),
-                },
-                CatalogueEntry {
-                    object_id: permissions_head_object_id(self.app_id),
-                    metadata: catalogue_metadata(self.app_id, ObjectType::CataloguePermissionsHead),
-                    content: encode_permissions_head(schema_hash, version, parent, bundle),
-                },
-            ] {
-                next.apply_entry(&entry)?;
-                entries.push(entry);
-            }
+        let new = !expected.bundles.iter().any(|known| known.id == bundle);
+        if new {
+            put.bundles.push((schema_hash, permissions, now));
         }
-        // Fail before writing if any metadata or payload cannot be encoded.
-        for entry in &entries {
-            entry
-                .encode_storage_row()
-                .map_err(CatalogueError::WriteError)?;
-        }
+        let changed = new || !published.schemas.is_empty() || !published.migrations.is_empty();
         published.schemas.sort();
         published
             .migrations
             .sort_by(|a, b| (&a.from_hash, &a.to_hash).cmp(&(&b.from_hash, &b.to_hash)));
         Ok(StagedDeployment {
             expected,
-            next,
-            entries,
-            response: DeploymentResponse { changed, published },
+            put,
+            response: DeploymentResponse {
+                changed,
+                published,
+                bundle: bundle.to_hex(),
+            },
         })
     }
 
-    pub(crate) fn commit_deployment(
-        &self,
-        staged: StagedDeployment,
-    ) -> Result<DeploymentResponse, CatalogueError> {
-        let mut storage = self.storage.lock().map_err(|_| CatalogueError::LockError)?;
-        let mut index = self.index.lock().map_err(|_| CatalogueError::LockError)?;
-        if *index != staged.expected {
+    /// Fail if the catalogue changed since `staged` was prepared.
+    pub(crate) fn check_unchanged(&self, staged: &StagedDeployment) -> Result<(), CatalogueError> {
+        if *self.index.lock().map_err(|_| CatalogueError::LockError)? != staged.expected {
             return Err(CatalogueError::WriteError(
                 "catalogue changed while preparing deployment; fetch the graph and retry".into(),
             ));
         }
-        if !staged.response.changed {
-            return Ok(staged.response);
-        }
-        storage.upsert_catalogue_entries(&staged.entries)?;
-        storage.flush()?;
-        storage.flush_wal()?;
-        *index = staged.next;
-        Ok(staged.response)
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::catalogue_storage::CatalogueMemoryStorage;
     use jazz::tools::{
         deployment::{DeploymentRequest, prepare_deployment},
         public_schema::{ColumnType, PolicyExpr, SchemaBuilder, TableSchema, Value},
@@ -204,7 +145,7 @@ mod tests {
     // Internal: public reads cannot distinguish an unnecessary rewrite from
     // leaving the same durable record untouched. Inspect the actual write batch.
     #[test]
-    fn deployment_writes_only_new_artifacts_and_active_permissions() {
+    fn deployment_writes_only_new_artifacts_and_bundles() {
         let table = TableSchema::builder("notes").column("title", ColumnType::Text);
         let base = SchemaBuilder::new().table(table.clone()).build();
         let next = SchemaBuilder::new()
@@ -213,12 +154,21 @@ mod tests {
         let base_hash = SchemaHash::compute(&base);
         let next_hash = SchemaHash::compute(&next);
         let store = StoredCatalogue::new(
-            AppId::from_name("deployment-write-delta"),
             Some(base.clone()),
-            Box::new(CatalogueMemoryStorage::new()),
+            crate::runtime::AppStore::memory()
+                .unwrap()
+                .catalogue()
+                .unwrap(),
         )
         .unwrap();
-        let stage = |target_schema_hash, schemas, migrations, permissions, revision| {
+        // The runtime applies a deployment's rows with its admission; here
+        // they are written alone.
+        let commit = |staged: StagedDeployment| {
+            store.check_unchanged(&staged).unwrap();
+            let storage = store.storage.lock().unwrap();
+            store.write(&storage, staged.put).unwrap();
+        };
+        let stage = |target_schema_hash, schemas, migrations, permissions| {
             let prepared = prepare_deployment(
                 &store.deployment_catalogue().unwrap(),
                 DeploymentRequest {
@@ -226,22 +176,23 @@ mod tests {
                     schemas,
                     migrations,
                     permissions,
+                    allow_dropping_history: false,
                 },
             )
             .unwrap();
-            store.stage_deployment(&prepared, revision).unwrap()
+            store.stage_deployment(&prepared).unwrap()
         };
-        let initial = stage(base_hash, vec![], vec![], HashMap::new(), 1);
+        let initial = stage(base_hash, vec![], vec![], HashMap::new());
         assert_eq!(
-            initial.entries.len(),
-            3,
-            "persist the in-memory initial schema, bundle and selection"
+            (initial.put.schemas.len(), initial.put.bundles.len()),
+            (1, 1),
+            "persist the in-memory initial schema and its bundle"
         );
         assert_eq!(
             initial.response.published.schemas,
             vec![base_hash.to_string()]
         );
-        store.commit_deployment(initial).unwrap();
+        commit(initial);
 
         let lens = Lens::new(
             base_hash,
@@ -259,19 +210,22 @@ mod tests {
             schemas.clone(),
             vec![lens.clone()],
             HashMap::new(),
-            2,
         );
         assert_eq!(
-            migrated.entries.len(),
-            4,
-            "only the new schema, lens, bundle and selection"
+            (
+                migrated.put.schemas.len(),
+                migrated.put.lenses.len(),
+                migrated.put.bundles.len()
+            ),
+            (1, 1, 1),
+            "only the new schema, lens and bundle"
         );
         assert_eq!(
             migrated.response.published.schemas,
             vec![next_hash.to_string()]
         );
         assert_eq!(migrated.response.published.migrations.len(), 1);
-        store.commit_deployment(migrated).unwrap();
+        commit(migrated);
 
         let permissions = HashMap::from([(
             "notes".into(),
@@ -282,20 +236,23 @@ mod tests {
             schemas.clone(),
             vec![lens.clone()],
             permissions.clone(),
-            3,
         );
         assert_eq!(
-            policies.entries.len(),
-            2,
-            "permission-only deployment writes the bundle and selection"
+            (
+                policies.put.schemas.len(),
+                policies.put.lenses.len(),
+                policies.put.bundles.len()
+            ),
+            (0, 0, 1),
+            "a permission-only deployment writes only its bundle"
         );
         assert!(policies.response.published.schemas.is_empty());
         assert!(policies.response.published.migrations.is_empty());
-        store.commit_deployment(policies).unwrap();
+        commit(policies);
 
-        let unchanged = stage(next_hash, schemas, vec![lens], permissions, 4);
+        let unchanged = stage(next_hash, schemas, vec![lens], permissions);
         assert!(!unchanged.response.changed);
-        assert!(unchanged.entries.is_empty());
-        store.commit_deployment(unchanged).unwrap();
+        assert!(unchanged.put.is_empty());
+        commit(unchanged);
     }
 }

@@ -64,7 +64,7 @@ export async function recoverPendingIndexedDbWrites(
     await call(page, "seed");
     phase = "online initial read";
     assert.deepEqual(await call<RecoveryRows>(page, "read"), { marker: 0, versions: [] });
-    await stopJazzServerByUrl(config.serverUrl);
+    await stopJazzServerByUrl(config.backendUrl ?? config.serverUrl);
     serverStopped = true;
     phase = "offline pending write";
     await call(page, "writePending");
@@ -106,7 +106,7 @@ export async function recoverPendingIndexedDbWrites(
       } else {
         await rm(profile, { recursive: true, force: true });
       }
-      if (!serverStopped) await stopJazzServerByUrl(config.serverUrl);
+      if (!serverStopped) await stopJazzServerByUrl(config.backendUrl ?? config.serverUrl);
     }
   }
 }
