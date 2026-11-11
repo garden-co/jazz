@@ -10,9 +10,11 @@ name: Example memory ceiling
 # demand, never per merge.
 #
 # It measures shipped builds: the npm release (default: the `alpha` dist-tag)
-# installed as published, the `jazz-tools server` binary from that package
-# and its jazz-napi runtime. Nothing is compiled here. A dispatch can name an
-# exact version, or pkg.pr.new package URLs to measure a PR preview.
+# installed as published, the `jazz-tools server` binary from that version's
+# GitHub release (an asset since alpha.60, no longer in the npm package) and
+# its jazz-napi runtime. Nothing is compiled here. A dispatch can name an
+# exact version. pkg.pr.new previews have no release binary, so they are not
+# supported yet.
 
 on:
   schedule:
@@ -20,10 +22,10 @@ on:
   workflow_dispatch:
     inputs:
       jazz-tools:
-        description: "npm version, dist-tag or pkg.pr.new URL of jazz-tools"
+        description: "npm version or dist-tag of jazz-tools (its GitHub release provides the server)"
         default: alpha
       jazz-napi:
-        description: "npm version, dist-tag or pkg.pr.new URL of jazz-napi (blank: same as jazz-tools when that is a version or tag)"
+        description: "npm version or dist-tag of jazz-napi (blank: same as jazz-tools)"
         default: ""
       adapters:
         description: "Space-separated adapter paths"
@@ -63,22 +65,29 @@ jobs:
         with:
           node-version-file: .nvmrc
       - name: Install the release under test
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          case "$JAZZ_TOOLS_SPEC$JAZZ_NAPI_SPEC" in
+            *http*) echo "::error::pkg.pr.new previews are not supported yet: they have no release server binary." && exit 1 ;;
+          esac
           napi="${JAZZ_NAPI_SPEC:-$JAZZ_TOOLS_SPEC}"
-          case "$JAZZ_TOOLS_SPEC" in http*) tools="$JAZZ_TOOLS_SPEC" ;; *) tools="jazz-tools@$JAZZ_TOOLS_SPEC" ;; esac
-          case "$napi" in http*) ;; *) napi="jazz-napi@$napi" ;; esac
           mkdir -p "$RUNNER_TEMP/jazz-release"
           cd "$RUNNER_TEMP/jazz-release"
           echo '{"private":true}' > package.json
-          npm install --no-audit --no-fund "$tools" "$napi"
-          chmod +x node_modules/jazz-tools/bin/native/jazz-tools-linux-x64
-          node -p '"jazz-tools " + require("jazz-tools/package.json").version + ", jazz-napi " + require("jazz-napi/package.json").version'
+          npm install --no-audit --no-fund "jazz-tools@$JAZZ_TOOLS_SPEC" "jazz-napi@$napi"
+          version=$(node -p 'require("jazz-tools/package.json").version')
+          gh release download "v$version" -R "$GITHUB_REPOSITORY" -p jazz-tools-linux-x64 -p SHA256SUMS
+          grep ' jazz-tools-linux-x64$' SHA256SUMS | sha256sum -c -
+          chmod +x jazz-tools-linux-x64
+          echo "jazz-tools $version, jazz-napi $(node -p 'require("jazz-napi/package.json").version')"
       - name: Find each app's ceiling
         run: |
           for adapter in $ADAPTERS; do
             node dev/benchmarks/memory-ceiling/run.mjs \
               --app "$adapter" \
               --packages "$RUNNER_TEMP/jazz-release/node_modules" \
+              --server-bin "$RUNNER_TEMP/jazz-release/jazz-tools-linux-x64" \
               --max-minutes 75 \
               --out "$RUNNER_TEMP/memory-ceiling/$(basename "$(dirname "$(dirname "$adapter")")")"
           done

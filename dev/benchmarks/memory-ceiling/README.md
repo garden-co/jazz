@@ -6,15 +6,19 @@ releases, …)", not "N rows". Speed benchmarks say how fast a query is; this
 says when a tenant's server is OOM-killed.
 
 ```sh
-# Measure the shipped release: install it once, outside the workspace.
+# Measure the shipped release: install it once, outside the workspace, and
+# fetch its server binary, a GitHub release asset since alpha.60.
 mkdir -p /tmp/jazz-release && cd /tmp/jazz-release && echo '{"private":true}' > package.json
 npm install jazz-tools@alpha jazz-napi@alpha
-chmod +x node_modules/jazz-tools/bin/native/jazz-tools-linux-x64
+version=$(node -p 'require("jazz-tools/package.json").version')
+gh release download "v$version" -R garden-co/jazz -p jazz-tools-linux-x64 -p SHA256SUMS
+grep jazz-tools-linux-x64 SHA256SUMS | sha256sum -c - && chmod +x jazz-tools-linux-x64
 cd -
 
 node dev/benchmarks/memory-ceiling/run.mjs \
   --app examples/big-label/benchmarks/memory-ceiling.ts \
   --packages /tmp/jazz-release/node_modules \
+  --server-bin /tmp/jazz-release/jazz-tools-linux-x64 \
   --out /tmp/memory-ceiling
 ```
 
@@ -22,11 +26,12 @@ Nothing is compiled: the server is the release's `jazz-tools server` binary
 and the clients use its jazz-napi runtime. `--packages` points the app's
 `jazz-tools` imports at that release, so the app's own `schema.ts` and
 `permissions.ts` load unchanged under Node's type stripping (Node 22.18+).
-Leave it out to use the workspace packages after `pnpm build:core`; pass
-`--server-bin` for another server binary.
+Leave it out to use the workspace packages after `pnpm build:core`, with
+`--server-bin` pointing at a server built from the workspace
+(`cargo build --release -p jazz-cli --bin jazz-tools`).
 
 `.github/workflows/memory-ceiling.yml` runs it nightly against the `alpha`
-dist-tag and on demand against any version or pkg.pr.new build. It is not a
+dist-tag and on demand against any published version. It is not a
 CodSpeed workload: the answer is a count of app units from a search that runs
 for up to an hour, not a timed function.
 

@@ -81,14 +81,21 @@ register(new URL("./resolve-hook.mjs", import.meta.url));
 const adapterPath = resolve(args.app);
 const adapter = (await import(pathToFileURL(adapterPath).href)).default;
 const scenarioNames = args.scenario ? args.scenario.split(",") : Object.keys(adapter.scenarios);
-const serverBin = resolve(
-  args["server-bin"] ??
-    join(
-      packagesDir ?? join(dirname(adapterPath), "node_modules"),
-      `jazz-tools/bin/native/jazz-tools-${process.platform}-${process.arch}`,
-    ),
+// Since alpha.60 the server binary is not in the npm package: it is the
+// `jazz-tools-<platform>-<arch>` asset of the GitHub release. Older releases
+// shipped it under jazz-tools/bin/native, which is still found by default.
+const bundledServerBin = join(
+  packagesDir ?? join(dirname(adapterPath), "node_modules"),
+  `jazz-tools/bin/native/jazz-tools-${process.platform}-${process.arch}`,
 );
-if (!existsSync(serverBin)) throw new Error(`server binary not found: ${serverBin}`);
+const serverBin = resolve(args["server-bin"] ?? bundledServerBin);
+if (!existsSync(serverBin)) {
+  throw new Error(
+    `server binary not found: ${serverBin}\n` +
+      `Pass --server-bin: since alpha.60 it is the jazz-tools-${process.platform}-${process.arch} ` +
+      "asset of the GitHub release (see README.md).",
+  );
+}
 const budgets = {
   server: parseBytes(args["server-budget"]),
   client: parseBytes(args["client-budget"]),
@@ -137,12 +144,16 @@ async function runScenario(name) {
     console.log(stamped);
     writeFileSync(join(out, "progress.log"), stamped + "\n", { flag: "a" });
   };
+  // The published permissions bundle, which workers pin their backend link
+  // to: since alpha.60 an unpinned link cannot act for an app user.
+  let bundle;
   const workerInit = (serverUrl) => ({
     adapterPath,
     scenarioName: name,
     appId,
     serverUrl,
     backendSecret,
+    bundle,
     writes: args.writes,
   });
 
@@ -334,13 +345,13 @@ async function runScenario(name) {
   const okDir = join(out, "data-ok");
   log(`server budget ${fmt(budgets.server)}, client budget ${fmt(budgets.client)}`);
   let server = await launch(dataDir);
-  await deploy({
+  ({ bundle } = await deploy({
     appId,
     serverUrl: server.url,
     adminSecret,
     schema: adapter.app,
     permissions: adapter.permissions,
-  });
+  }));
 
   const steps = [];
   let scale = 0;

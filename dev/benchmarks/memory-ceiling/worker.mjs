@@ -16,7 +16,15 @@ const sessions = new Map();
 
 const send = (message) => process.send?.(message);
 
-async function init({ adapterPath, scenarioName, appId, serverUrl, backendSecret, writes }) {
+async function init({
+  adapterPath,
+  scenarioName,
+  appId,
+  serverUrl,
+  backendSecret,
+  bundle,
+  writes,
+}) {
   writeAs = writes ?? "import";
   adapter = (await import(pathToFileURL(adapterPath).href)).default;
   scenario = adapter.scenarios[scenarioName];
@@ -35,6 +43,9 @@ async function init({ adapterPath, scenarioName, appId, serverUrl, backendSecret
     driver: { type: "memory" },
     serverUrl,
     backendSecret,
+    // Pinned to the deployed bundle, as createJazz pins its own link, so
+    // forSession can act for app users under that bundle's permissions.
+    bundle,
     env: "dev",
   });
 }
