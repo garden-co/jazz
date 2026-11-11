@@ -10,8 +10,10 @@
 //! newest pages (a remote read) and checking off one page (a write
 //! acknowledged by the server). Each runs once with the server otherwise
 //! idle, and once while the big band's member reopens the workspace back to
-//! back on two devices. Each open is a remote read, so the server checks and
-//! sends every page each time.
+//! back on two devices. Each open is a remote read of a query the server has
+//! not seen before (its limit, always above the page count, changes per
+//! open), so the server cannot resume from an earlier open's checkpoint: it
+//! checks and sends every page each time.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -129,10 +131,10 @@ impl ContentionFixture {
             self.browsers
                 .iter()
                 .map(|browser| {
-                    browser.repeat(move |client, _| {
+                    browser.repeat(move |client, n| {
                         Box::pin(async move {
                             let rows = client
-                                .query(workspace_sidebar(), ReadTier::Remote)
+                                .query(workspace_sidebar(pages, n), ReadTier::Remote)
                                 .await
                                 .expect("open the workspace");
                             assert_eq!(rows.len(), pages, "the sidebar lists every page");
@@ -161,10 +163,16 @@ fn own_pages() -> Query {
         .limit(LIST)
 }
 
-fn workspace_sidebar() -> Query {
+/// The sidebar, as the app runs it (every page, no bound), with a limit above
+/// the page count that differs per `open`. The limit changes no result, but
+/// makes each open a new query: a repeated one-shot remote read resumes from
+/// its checkpoint and skips the rows it already sent, which is not what a
+/// fresh tab opening the workspace costs.
+fn workspace_sidebar(pages: usize, open: u64) -> Query {
     Query::from("pages")
         .filter(eq(col("workspace_id"), lit(workspace_row(BIG_BAND).0)))
         .order_by("updated_at", OrderDirection::Asc)
+        .limit(pages + 1 + open as usize)
 }
 
 fn member_of_workspace() -> PolicyExpr {

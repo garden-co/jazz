@@ -131,7 +131,9 @@ impl ClientThread {
         }
     }
 
-    /// Run `request` on the client's thread and wait for its result.
+    /// Run `request` on the client's thread and wait for its result. The
+    /// thread runs one job at a time: while a [`Self::repeat`] on the same
+    /// client is running, this blocks until that [`Background`] is stopped.
     pub fn run<T: Send + 'static>(
         &self,
         request: impl FnOnce(JazzClient) -> ClientFuture<T> + Send + 'static,
@@ -162,13 +164,18 @@ impl ClientThread {
             Box::pin(async move {
                 request(client.clone(), 0).await;
                 let _ = warm.send(());
+                // At least one timed request, even when stop() comes right
+                // after start, so every Background returns samples.
                 let mut durations = Vec::new();
                 let mut n = 1;
-                while !running.load(Ordering::Acquire) {
+                loop {
                     let started = Instant::now();
                     request(client.clone(), n).await;
                     durations.push(started.elapsed());
                     n += 1;
+                    if running.load(Ordering::Acquire) {
+                        break;
+                    }
                 }
                 let _ = done.send(durations);
             })

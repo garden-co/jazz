@@ -103,7 +103,10 @@ pages (`band_book_open_my_pages_*`) or checks one off
 runs idle and `during_workspace_open`, while a member of band A reopens its
 5,000-page workspace on two devices back to back. Opening a workspace loads
 the app's sidebar: every page, oldest first, with no page bound, under the
-own-pages OR workspace-member policy. All clients are ordinary JWT users over
+own-pages OR workspace-member policy. Each open is a query the server has not
+seen (its limit, always above the page count, changes per open), as a fresh tab
+would be: a repeated one-shot remote read resumes from its checkpoint and skips
+the rows it already sent, which made later opens about half as costly. All clients are ordinary JWT users over
 WebSockets, each on its own thread. The fixture is in
 [src/contention.rs](src/contention.rs); the server and client threads come from
 `jazz_testkit::contention`.
