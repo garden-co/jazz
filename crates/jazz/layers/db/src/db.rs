@@ -1954,8 +1954,43 @@ impl Db {
     /// The shared state, set up to run under this handle's schema.
     fn inner(&self) -> std::cell::RefMut<'_, Inner> {
         let mut inner = self.inner.borrow_mut();
-        inner.schema = self.view.clone().unwrap_or_else(|| inner.owner.clone());
+        inner.schema = self.execution_schema(&inner);
         inner
+    }
+
+    /// Retained current-governed views keep their names, but not an old owner
+    /// policy. Exact registered views and published bundle pins stay fixed.
+    fn execution_schema(&self, inner: &Inner) -> Rc<Schema> {
+        let Some(view) = &self.view else {
+            return inner.owner.clone();
+        };
+        match &view.policies_from {
+            Some(policies) if policies.bundle.is_none() => {
+                if Rc::ptr_eq(policies, &inner.owner) {
+                    view.clone()
+                } else {
+                    Rc::new((**view).clone().with_policies_of(inner.owner.clone()))
+                }
+            }
+            _ => view.clone(),
+        }
+    }
+
+    /// Keep prepared names while selecting policy from the executing handle.
+    fn execution_query(&self, prepared: &PreparedQuery) -> PreparedQuery {
+        let inner = self.inner();
+        let names = prepared.schema.as_ref().unwrap_or(&inner.owner);
+        let governing = inner.schema.policies_from.as_ref().unwrap_or(&inner.schema);
+        let prior = names.policies_from.as_ref().unwrap_or(names);
+        if Rc::ptr_eq(prior, governing) {
+            return prepared.clone();
+        }
+        PreparedQuery {
+            schema: Some(Rc::new(
+                (**names).clone().with_policies_of(governing.clone()),
+            )),
+            ..prepared.clone()
+        }
     }
 
     pub fn table(&self, table: impl Into<String>) -> Query {
@@ -2807,8 +2842,9 @@ impl Db {
         opts: ReadOpts,
         identity: AuthorSubject,
     ) -> Result<Vec<CurrentRow>, Error> {
+        let prepared = self.execution_query(prepared);
         let inner = self.inner();
-        inner.run(prepared, Some(identity), &ReadSpec::of(&opts, &inner)?)
+        inner.run(&prepared, Some(identity), &ReadSpec::of(&opts, &inner)?)
     }
 
     pub async fn all_result_tree(
@@ -9374,7 +9410,7 @@ impl Db {
         read: impl FnOnce(&mut Inner, Option<Cut>) -> Result<R, Error>,
     ) -> Result<R, Error> {
         let mut inner = self.inner.staging();
-        inner.schema = self.view.clone().unwrap_or_else(|| inner.owner.clone());
+        inner.schema = self.execution_schema(&inner);
         let batch = inner
             .batches
             .get(&id)
@@ -9566,7 +9602,7 @@ impl Db {
         self.in_overlay(id, Some(&mut op), |_, _| Ok(()))
             .map_err(|error| self.serializable_write_conflict(id, &op, error))?;
         let mut inner = self.inner.staging();
-        let schema = self.view.clone().unwrap_or_else(|| inner.owner.clone());
+        let schema = self.execution_schema(&inner);
         let stored = match op.row() {
             Some(row) => Some((schema.table(op.table())?.stored.clone(), row)),
             None => None,
@@ -9631,7 +9667,7 @@ impl Db {
         let marks = {
             let mut inner = self.inner.staging();
             inner.require_mutation_admission()?;
-            inner.schema = self.view.clone().unwrap_or_else(|| inner.owner.clone());
+            inner.schema = self.execution_schema(&inner);
             edits.derived.extend(chunked.derived);
             edits.pending_nodes.extend(chunked.pending_nodes);
             let batch = inner
@@ -10003,6 +10039,10 @@ impl TxRef<'_> {
                 *pinned = true;
             }
         }
+        // Hydration may yield while owner policies change. Select execution
+        // policies now, rather than retaining the policies from before the wait.
+        let prepared = self.db.execution_query(prepared);
+        let prepared = &prepared;
         // Relations nest inside the overlay, so they see staged rows too.
         // Offloaded leaves are fetched as for any read.
         let rows = self
