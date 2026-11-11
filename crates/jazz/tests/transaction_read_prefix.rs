@@ -339,3 +339,65 @@ fn concurrent_first_reads_do_not_lose_rows_from_the_pinned_snapshot() {
         "successful read lost a row present at the transaction snapshot"
     );
 }
+
+/// Alice drops an admitted ordinary read. Its wake callback can immediately
+/// commit the remaining staging: cancellation must neither poison the batch nor
+/// invoke callbacks while holding the store or read-state borrow. Bob accepts it.
+#[test]
+fn cancelling_an_admitted_read_wakes_outside_borrows_and_allows_commit() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::sync::Arc;
+    use std::task::Wake;
+    thread_local! {
+        static ON_WAKE: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
+    }
+    struct CommitOnWake;
+    impl Wake for CommitOnWake {
+        fn wake(self: Arc<Self>) {
+            ON_WAKE.with(|callback| {
+                if let Some(callback) = callback.borrow().as_ref() {
+                    callback();
+                }
+            });
+        }
+    }
+    let (alice, bob) = fixture();
+    let alice = Rc::new(alice);
+    let id = begin(&alice);
+    let tx = alice.tx_ref(id);
+    block_on(tx.insert("notes", cells("staged"), Default::default())).unwrap();
+    let query = alice.prepare_query(&Query::from("notes")).unwrap();
+    let mut read = Box::pin(tx.all_prepared_at(&query, false, None, ReadTier::Remote));
+    let waker = Waker::from(Arc::new(CommitOnWake));
+    assert!(
+        read.as_mut()
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending()
+    );
+    let committed = Rc::new(RefCell::new(None));
+    ON_WAKE.with(|callback| {
+        let alice = alice.clone();
+        let committed = committed.clone();
+        *callback.borrow_mut() = Some(Box::new(move || {
+            *committed.borrow_mut() = Some(block_on(alice.commit_serializable_handle(id)).unwrap());
+        }));
+    });
+    drop(read);
+    ON_WAKE.with(|callback| *callback.borrow_mut() = None);
+    let receipt = committed
+        .borrow_mut()
+        .take()
+        .expect("cancellation did not wake the read task");
+    drive(
+        &[&alice, &bob],
+        alice.wait_for_transaction(receipt.0, DurabilityTier::Global),
+    )
+    .unwrap();
+    let rows = block_on(bob.all(
+        &bob.prepare_query(&Query::from("notes")).unwrap(),
+        ReadOpts::default(),
+    ))
+    .unwrap();
+    assert_eq!(bodies(rows), ["staged"]);
+}
