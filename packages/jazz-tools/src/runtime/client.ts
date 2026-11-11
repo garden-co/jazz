@@ -1378,6 +1378,7 @@ export class JazzClient {
         state.pending = Promise.resolve()
           .then(beforeBegin)
           .then(() => {
+            assertCurrent();
             if (readCapability) this.runtime.beginTransaction(kind, id, context, readCapability);
             else this.runtime.beginTransaction(kind, id, context);
             state.unopened = false;

@@ -259,3 +259,26 @@ it("cancels a frozen route without opening a batch or waiting for its prerequisi
   expect(f.raw.beginTransaction).not.toHaveBeenCalled();
   expect(f.raw.rollbackTransaction).not.toHaveBeenCalled();
 });
+
+it("refuses fallback BEGIN after cancellation in the final prerequisite microtask gap", async () => {
+  const f = fixture();
+  const gate = deferred<void>();
+  let cancellation: Promise<boolean> | undefined;
+  const id = f.client.openTransaction("serializable", undefined, undefined, undefined, async () => {
+    await gate.promise;
+    queueMicrotask(() =>
+      queueMicrotask(() => {
+        cancellation = f.client.rollbackTransaction(id);
+      }),
+    );
+  });
+  const pending = f.client.transactionPreparation(id);
+  if (!pending) throw new Error("missing ordinary fallback prerequisite");
+  gate.resolve();
+  const result = await pending.catch((error) => error);
+  if (!cancellation) throw new Error("cancellation did not run at the controlled boundary");
+  expect(await cancellation).toBe(true);
+  expect(f.raw.beginTransaction).not.toHaveBeenCalled();
+  expect(result).toBeInstanceOf(Error);
+  expect(f.raw.rollbackTransaction).not.toHaveBeenCalled();
+});
