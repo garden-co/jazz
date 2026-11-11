@@ -1,6 +1,6 @@
 ---
 title: Advanced Internals
-description: "How Jazz works under the hood: raw tables, row histories, sync, the query pipeline, and the browser architecture."
+description: "Look under the hood at raw tables, row histories, sync, the query pipeline and the browser architecture."
 reviewedAt: "b29b48d1a"
 ---
 
@@ -233,7 +233,7 @@ while Bob fixes a typo elsewhere in the same field, one of the two edits is lost
 instead. Core merges them against the version each writer started from, so changes to different
 parts of the text all survive. See
 [mergeable text columns](/docs/schemas/column-types#mergeable-text-columns) and
-[how text merges work](/docs/concepts/how-sync-works#text-merges).
+[how text merges work](/docs/recipes/local-first/how-sync-works#text-merges).
 
 ### Cold start
 

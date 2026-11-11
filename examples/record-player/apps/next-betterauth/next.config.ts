@@ -1,22 +1,13 @@
-import { withJazz } from "jazz-tools/dev/next";
+import { readConfig } from "./src/lib/config.mjs";
 
-const appOrigin = process.env.NEXT_PUBLIC_APP_ORIGIN ?? "http://127.0.0.1:3000";
+// Fails closed: a production build needs its own app id and secrets.
+readConfig();
 
-export default withJazz(
-  {
-    reactStrictMode: true,
-    serverExternalPackages: ["jazz-napi", "jazz-tools/backend"],
-  },
-  {
-    // Without BACKEND_SECRET in the environment, the development server
-    // generates one and exposes it to the auth backend as BACKEND_SECRET.
-    // A JWKS URL alone is not enough: the server rejects external tokens
-    // unless the issuer and audience match what Better Auth emits
-    // (src/lib/auth.ts), and account login fails as `invalid account credential`.
-    server: {
-      jwksUrl: `${appOrigin}/api/auth/jwks`,
-      jwtIssuer: appOrigin,
-      jwtAudience: appOrigin,
-    },
-  },
-);
+// Jazz runs inside this app (src/lib/jazz.server.ts): no separate sync server.
+export default {
+  reactStrictMode: true,
+  // The local origin is 127.0.0.1, which Next's dev server blocks by default.
+  allowedDevOrigins: ["127.0.0.1"],
+  // jazz-napi is a native addon: Node loads it at runtime, the bundler leaves it alone.
+  serverExternalPackages: ["jazz-napi", "jazz-tools/backend"],
+};

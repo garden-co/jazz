@@ -40,14 +40,21 @@ export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * An HTTP proxy for one device. While `online` is false it drops every open
  * connection and refuses new ones, the way turning Wi-Fi off would.
  */
-async function startDeviceNetwork({ keepPorts = [] } = {}) {
+async function startDeviceNetwork({ keepPorts = [], syncPaths = ["/jazz/"] } = {}) {
   // Dev tooling (a bundler's hot-reload socket) isn't part of the app; a
   // walkthrough may keep it connected so the page doesn't reload itself.
-  const kept = (port) => keepPorts.includes(Number(port));
+  // Jazz now runs inside the app's own server, so a kept port also carries
+  // sync: requests and sockets under `syncPaths` are cut like any other.
+  const isSync = (path) => syncPaths.some((prefix) => path.startsWith(prefix));
   const sockets = new Map();
-  const track = (socket, port) => {
-    if (sockets.has(socket)) return;
-    sockets.set(socket, Number(port));
+  const kept = (port, socket) => keepPorts.includes(Number(port)) && !sockets.get(socket)?.sync;
+  const track = (socket, port, sync = false) => {
+    const known = sockets.get(socket);
+    if (known) {
+      known.sync ||= sync;
+      return;
+    }
+    sockets.set(socket, { port: Number(port), sync });
     socket.on("close", () => sockets.delete(socket));
     socket.on("error", () => {});
   };
@@ -61,8 +68,11 @@ async function startDeviceNetwork({ keepPorts = [] } = {}) {
       return;
     }
     const port = target.port || 80;
-    if (!online && !kept(port)) return req.socket.destroy();
-    track(req.socket, port);
+    const sync = isSync(target.pathname);
+    if (process.env.WALK_TRACE && sync)
+      console.log(`proxy ${req.method} ${target.pathname} online=${online}`);
+    track(req.socket, port, sync);
+    if (!online && !kept(port, req.socket)) return req.socket.destroy();
     const upstream = http.request(
       {
         host: target.hostname,
@@ -70,13 +80,17 @@ async function startDeviceNetwork({ keepPorts = [] } = {}) {
         path: target.pathname + target.search,
         method: req.method,
         headers: req.headers,
+        // Each device gets its own upstream sockets. Node's shared keep-alive
+        // pool would hand one device's socket to another, so cutting one
+        // device's Wi-Fi could end the other's sync stream.
+        agent: false,
       },
       (response) => {
         res.writeHead(response.statusCode ?? 502, response.headers);
         response.pipe(res);
       },
     );
-    upstream.on("socket", (socket) => track(socket, port));
+    upstream.on("socket", (socket) => track(socket, port, sync));
     upstream.on("error", () => res.destroy());
     req.pipe(upstream);
   });
@@ -84,13 +98,25 @@ async function startDeviceNetwork({ keepPorts = [] } = {}) {
   server.on("connect", (req, client, head) => {
     const [host, port] = req.url.split(":");
     if (process.env.WALK_TRACE) console.log(`proxy CONNECT ${req.url} online=${online}`);
-    if (!online && !kept(port)) return client.destroy();
+    if (!online && !keepPorts.includes(Number(port))) return client.destroy();
     track(client, port);
     const upstream = net.connect(Number(port) || 80, host, () => {
       client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
       if (head?.length) upstream.write(head);
-      upstream.pipe(client);
-      client.pipe(upstream);
+      // A plain ws:// tunnel opens with its upgrade request, which names the
+      // path: a sync socket on a kept port is still cut when Wi-Fi goes off.
+      client.once("data", (chunk) => {
+        const path = /^[A-Z]+ (\S+) HTTP\//.exec(chunk.toString("latin1", 0, 2048))?.[1];
+        if (path && isSync(path)) {
+          track(client, port, true);
+          track(upstream, port, true);
+          if (process.env.WALK_TRACE) console.log(`proxy tunnel ${path} online=${online}`);
+          if (!online) return close();
+        }
+        upstream.write(chunk);
+        upstream.pipe(client);
+        client.pipe(upstream);
+      });
     });
     track(upstream, port);
     const close = () => {
@@ -109,8 +135,8 @@ async function startDeviceNetwork({ keepPorts = [] } = {}) {
     setOnline(next) {
       online = next;
       if (!next)
-        for (const [socket, port] of sockets)
-          if (port === undefined || !kept(port)) socket.destroy();
+        for (const [socket, { port }] of sockets)
+          if (Number.isNaN(port) || !kept(port, socket)) socket.destroy();
     },
     close() {
       for (const socket of sockets.keys()) socket.destroy();

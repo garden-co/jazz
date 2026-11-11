@@ -7,8 +7,7 @@ import { JazzSessionProvider, useJazzSession } from "./session.js";
 import { useJazzClient } from "./provider.js";
 import { attachSubscriptionStore, getSubscriptionStore } from "../subscription-store-internal.js";
 import type { JazzClient } from "../web/create-jazz-client.js";
-vi.mock("../web/create-jazz-client.js", () => ({ createJazzClient: vi.fn() }));
-vi.mock("../dev-tools/auto-attach.js", () => ({ startInspectorOnce: vi.fn() }));
+vi.mock("../web/create-jazz-client.js", () => ({ openJazzClient: vi.fn() }));
 const account = Object.freeze({
   id: "local",
   identity: { issuer: "test", subject: "local" },
@@ -18,10 +17,7 @@ async function fixture() {
   const accounts = new AccountManager(
     {
       createLocalFirst: () => account,
-      registerJWT: async () => account,
-      loginJWT: async () => account,
-      loginOrRegisterJWT: async () => account,
-      linkJWT: async () => account,
+      loginWithBackend: async () => account,
     },
     account,
   );
@@ -67,7 +63,7 @@ describe("Solid session provider", () => {
     const node = document.createElement("div");
     const dispose = render(
       () => (
-        <JazzSessionProvider session={session} fallback={<Fallback />} autoAttachDevTools={false}>
+        <JazzSessionProvider session={session} fallback={<Fallback />}>
           <Child />
         </JazzSessionProvider>
       ),
@@ -90,7 +86,7 @@ describe("Solid session provider", () => {
     const { session, client } = await fixture();
     const dispose = render(
       () => (
-        <JazzSessionProvider session={session} autoAttachDevTools={false}>
+        <JazzSessionProvider session={session}>
           <p>active</p>
         </JazzSessionProvider>
       ),
@@ -103,5 +99,30 @@ describe("Solid session provider", () => {
     await logout;
     expect(session.getSnapshot().status).toBe("signed-out");
     await session.close();
+  });
+  it("refuses the removed autoAttachDevTools prop and accepts it left undefined", async () => {
+    const { session } = await fixture();
+    const node = document.createElement("div");
+    const removed = { autoAttachDevTools: false } as Record<string, unknown>;
+    expect(() =>
+      render(
+        () => (
+          <JazzSessionProvider session={session} {...removed}>
+            <p>ready</p>
+          </JazzSessionProvider>
+        ),
+        node,
+      ),
+    ).toThrow(/JazzSessionProvider takes no autoAttachDevTools.*mountInspector/);
+    const unset = { autoAttachDevTools: undefined } as Record<string, unknown>;
+    const dispose = render(
+      () => (
+        <JazzSessionProvider session={session} {...unset}>
+          <p>ready</p>
+        </JazzSessionProvider>
+      ),
+      node,
+    );
+    dispose();
   });
 });

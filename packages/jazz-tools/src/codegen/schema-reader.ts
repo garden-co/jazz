@@ -217,11 +217,9 @@ export function schemaToWasm(schema: Schema): WasmSchema {
         (col.mergeStrategy === "text" ||
           col.mergeStrategy === "markdown" ||
           col.mergeStrategy === "html") &&
-        (col.nullable || col.sqlType !== "TEXT")
+        col.sqlType !== "TEXT"
       ) {
-        throw new Error(
-          `${col.mergeStrategy} merge strategy is only supported on non-nullable TEXT columns.`,
-        );
+        throw new Error(`${col.mergeStrategy} merge strategy is only supported on TEXT columns.`);
       }
       const descriptor: ColumnDescriptor = {
         name: col.name,
@@ -248,6 +246,7 @@ export function schemaToWasm(schema: Schema): WasmSchema {
         ? { composite_indexes: table.compositeIndexes.map((columns) => [...columns]) }
         : {}),
       ...(table.branchBy ? { branchBy: [...table.branchBy] } : {}),
+      ...(table.history ? { history: table.history } : {}),
       policies: table.policies ? clonePolicies(table.policies) : undefined,
     };
   }

@@ -11,7 +11,10 @@ const mocks = vi.hoisted(() => {
     subscribe,
   }));
 
+  const db = { marker: "db" };
+
   return {
+    db,
     unsubscribe,
     subscribe,
     makeQueryKey,
@@ -30,6 +33,7 @@ const mocks = vi.hoisted(() => {
 
 vi.mock("./provider.js", () => ({
   useJazzClient: () => ({
+    db: mocks.db,
     manager: {
       makeQueryKey: mocks.makeQueryKey,
       getCacheEntry: mocks.getCacheEntry,
@@ -176,6 +180,7 @@ describe("solid/useAll", () => {
       expect(result.data).toEqual([alice]);
       expect(result.isLoading).toBe(false);
       expect(result.error).toBeNull();
+      expect(result.db).toBe(mocks.db);
     } finally {
       dispose?.();
     }

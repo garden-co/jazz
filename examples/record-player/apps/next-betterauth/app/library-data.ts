@@ -12,7 +12,7 @@ export function useStore(): JazzRecordPlayerStore {
 
 /** The signed-in user's Jazz account ID: the value other people invite. */
 export function useAccountId(): string | undefined {
-  return useSession()?.user.account ?? undefined;
+  return useSession()?.user ?? undefined;
 }
 
 /**

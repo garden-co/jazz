@@ -29,6 +29,30 @@ pub struct DbConfig {
     /// Where settled large-value leaf bytes live. `None` keeps them in the
     /// SQLite file ([`crate::chunk_store`]).
     pub chunk_store: Option<std::sync::Arc<dyn crate::chunk_store::ChunkStore>>,
+    /// The host runs chunk-store I/O ([`crate::db::Db::take_chunk_io`])
+    /// and the tick never awaits it.
+    pub host_chunk_io: bool,
+    /// The wall clock (Unix ms) the store draws commit positions from, as
+    /// hybrid-clock timestamps ([`crate::db::shard`]), so the positions of
+    /// every store compare by time. `None` reads the system clock
+    /// ([`crate::db::shard::wall_clock_ms`]).
+    pub clock: Option<Box<dyn Fn() -> u64>>,
+    /// The app's earlier schema versions and the lenses between them, as
+    /// it ships them. A store that has not admitted `schema` admits the
+    /// versions on a lens path to it first, so it stores each column where
+    /// the authority does without asking (SPEC 10.7).
+    pub migrations: Migrations,
+    /// The node SYSTEM provenance names, when it is not this replica's own:
+    /// a backend that draws a fresh node per open keeps one stable subject.
+    pub system_node: Option<NodeUuid>,
+}
+
+/// Schema versions and the lenses between them (see
+/// [`DbConfig::with_migrations`]).
+#[derive(Clone, Debug, Default)]
+pub struct Migrations {
+    pub schemas: Vec<JazzSchema>,
+    pub lenses: Vec<crate::protocol::MigrationLens>,
 }
 
 impl DbConfig {
@@ -39,7 +63,17 @@ impl DbConfig {
             identity,
             id_source: None,
             chunk_store: None,
+            host_chunk_io: false,
+            clock: None,
+            migrations: Migrations::default(),
+            system_node: None,
         }
+    }
+
+    /// Stamp SYSTEM provenance as `node` instead of this replica's node.
+    pub fn with_system_node(mut self, node: NodeUuid) -> Self {
+        self.system_node = Some(node);
+        self
     }
 
     /// Override the row id source, typically with [`SeededRowIdSource`] in tests.
@@ -55,6 +89,35 @@ impl DbConfig {
         store: std::sync::Arc<dyn crate::chunk_store::ChunkStore>,
     ) -> Self {
         self.chunk_store = Some(store);
+        self
+    }
+
+    /// Have the host run the chunk store's I/O: [`crate::db::Db::tick`]
+    /// then never awaits it, and the host takes each batch with
+    /// [`crate::db::Db::take_chunk_io`], runs it where it likes (a network
+    /// store on its own runtime) and hands the outcome back with
+    /// [`crate::db::Db::finish_chunk_io`]. For hosts whose tick is
+    /// synchronous, so a slow bucket never stalls sync.
+    pub fn with_host_chunk_io(mut self) -> Self {
+        self.host_chunk_io = true;
+        self
+    }
+
+    /// Draw commit positions from `clock` (Unix ms) instead of the system
+    /// clock: a simulation's virtual time, or a skewed clock in a test.
+    pub fn with_clock(mut self, clock: impl Fn() -> u64 + 'static) -> Self {
+        self.clock = Some(Box::new(clock));
+        self
+    }
+
+    /// Ship the app's earlier `schemas` and the `lenses` between them (see
+    /// [`DbConfig::migrations`]).
+    pub fn with_migrations(
+        mut self,
+        schemas: Vec<JazzSchema>,
+        lenses: Vec<crate::protocol::MigrationLens>,
+    ) -> Self {
+        self.migrations = Migrations { schemas, lenses };
         self
     }
 }
@@ -431,17 +494,21 @@ pub enum Reason {
     /// A read needs large-value chunks this replica requested from
     /// upstream but has not received yet (code `NotObserved`).
     MissingChunks,
-    /// The server holds commits from an untrusted session until it has a
-    /// published permissions head to check them by (code `WriteRejected`).
-    PermissionsHeadMissing,
     /// The write was built on an unsettled write the authority rejected,
     /// so it is rejected too (code `WriteRejected`, SPEC 4 §4.6).
     PredecessorRejected,
+    /// The write was made through a schema version the server has not
+    /// deployed: the app was released ahead of its schema (code
+    /// `WriteRejected`, SPEC 8.9).
+    SchemaVersionNotDeployed,
+    /// A store configured as one user was asked to serve a session of
+    /// another identity (code `Protocol`): relays serve one identity.
+    IdentityMismatch,
 }
 
 impl Reason {
     /// Every reason, in declaration order.
-    pub const ALL: [Reason; 11] = [
+    pub const ALL: [Reason; 12] = [
         Reason::AuthorizationDenied,
         Reason::ClientClockTooFarAhead,
         Reason::SerializationConflict,
@@ -451,8 +518,9 @@ impl Reason {
         Reason::MissingRequired,
         Reason::BranchMove,
         Reason::MissingChunks,
-        Reason::PermissionsHeadMissing,
         Reason::PredecessorRejected,
+        Reason::SchemaVersionNotDeployed,
+        Reason::IdentityMismatch,
     ];
 
     /// The stable, snake_case name of this reason.
@@ -472,8 +540,9 @@ impl Reason {
             Reason::MissingRequired => "missing_required",
             Reason::BranchMove => "branch_move",
             Reason::MissingChunks => "missing_chunks",
-            Reason::PermissionsHeadMissing => "permissions_head_missing",
             Reason::PredecessorRejected => "predecessor_rejected",
+            Reason::SchemaVersionNotDeployed => "schema_version_not_deployed",
+            Reason::IdentityMismatch => "identity_mismatch",
         }
     }
 
@@ -522,6 +591,15 @@ pub enum ErrorCode {
     /// An existing local store was written with a storage format this build
     /// does not read.
     UnsupportedStorageCodecs,
+    /// The upstream serves another authority history than the one this
+    /// store mirrors (its namespace differs): the server's store was
+    /// recreated (a deleted data directory, a restarted in-memory server, a
+    /// new environment behind the same URL), or it is another app's. This
+    /// store's rows, watermarks and unsynced writes belong to the old
+    /// history, so the link stops: nothing syncs with that server until the
+    /// local store is reset (`deleteClientStorage()` in jazz-tools) or the
+    /// old server is back.
+    AuthorityChanged,
 }
 
 impl ErrorCode {
@@ -543,6 +621,7 @@ impl ErrorCode {
             ErrorCode::NotObserved => "not_observed",
             ErrorCode::HistoricalReadRequiresServer => "historical_read_requires_server",
             ErrorCode::UnsupportedStorageCodecs => "unsupported_storage_codecs",
+            ErrorCode::AuthorityChanged => "authority_changed",
         }
     }
 }

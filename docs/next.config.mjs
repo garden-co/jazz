@@ -78,7 +78,162 @@ const config = {
   async redirects() {
     // The examples & benchmarks page subsumes the old perf timeline. Old
     // ?benchmark=… links land on the page; the query is ignored.
-    return [{ source: "/perf-timeline", destination: "/examples", permanent: false }];
+    // Pages moved by the server-first docs restructure keep their old URLs
+    // working. Temporary until the new structure settles.
+    return [
+      { source: "/perf-timeline", destination: "/examples", permanent: false },
+      // Older create-jazz builds fetch the agent brief from its old URL.
+      { source: "/agent-brief.md", destination: "/quickstart.md", permanent: false },
+      {
+        source: "/docs/tooling/agent-skills",
+        destination: "/docs/setup/run-locally",
+        permanent: false,
+      },
+      {
+        source: "/docs/recipes/auth/better-auth-adapter",
+        destination: "/docs/setup/auth/better-auth#store-better-auths-tables-in-jazz",
+        permanent: false,
+      },
+      {
+        source: "/docs/setup/deployment",
+        destination: "/docs/setup/deployment/own-server",
+        permanent: false,
+      },
+      {
+        source: "/docs/recipes/local-first",
+        destination: "/docs/setup/web-client/local-first-client",
+        permanent: false,
+      },
+      {
+        source: "/docs/setup/backend",
+        destination: "/docs/setup/deployment/own-server",
+        permanent: false,
+      },
+      {
+        source: "/docs/setup/backend/install",
+        destination: "/docs/setup/deployment/own-server",
+        permanent: false,
+      },
+      {
+        source: "/docs/setup/backend/trusted",
+        destination: "/docs/setup/deployment/own-server#trusted-backend-use",
+        permanent: false,
+      },
+      {
+        source: "/docs/setup/backend/user-scoped",
+        destination: "/docs/setup/deployment/own-server#user-scoped-use",
+        permanent: false,
+      },
+      {
+        source: "/docs/setup/backend/backend-clients",
+        destination: "/docs/setup/backend-client",
+        permanent: false,
+      },
+      {
+        source: "/docs/setup/web-client/local-first-install",
+        destination: "/docs/setup/web-client/local-first-client",
+        permanent: false,
+      },
+      {
+        source: "/docs/setup/web-client/local-first-setup",
+        destination: "/docs/setup/web-client/local-first-client",
+        permanent: false,
+      },
+      {
+        source: "/docs/setup/web-client/local-first-auth",
+        destination: "/docs/setup/auth/local-first",
+        permanent: false,
+      },
+      {
+        source: "/docs/setup/auth/authentication",
+        destination: "/docs/setup/auth/custom",
+        permanent: false,
+      },
+      {
+        source: "/docs/recipes/auth/auth-provider-integration",
+        destination: "/docs/setup/auth/custom",
+        permanent: false,
+      },
+      { source: "/docs/faq", destination: "/docs/how-jazz-works#faq", permanent: false },
+      {
+        source: "/docs/auth/authentication",
+        destination: "/docs/setup/auth/custom",
+        permanent: false,
+      },
+      {
+        source: "/docs/auth/lifecycle",
+        destination: "/docs/setup/auth/backend#lifecycle",
+        permanent: false,
+      },
+      {
+        source: "/docs/auth/local-first-auth",
+        destination: "/docs/setup/auth/local-first",
+        permanent: false,
+      },
+      { source: "/docs/auth/permissions", destination: "/docs/schemas/policies", permanent: false },
+      {
+        source: "/docs/auth/sessions",
+        destination: "/docs/setup/auth/backend#the-session",
+        permanent: false,
+      },
+      {
+        source: "/docs/setup/auth/sessions",
+        destination: "/docs/setup/auth/backend#the-session",
+        permanent: false,
+      },
+      {
+        source: "/docs/setup/auth/lifecycle",
+        destination: "/docs/setup/auth/backend#lifecycle",
+        permanent: false,
+      },
+      {
+        source: "/docs/concepts/branches",
+        destination: "/docs/recipes/drafts-and-branches",
+        permanent: false,
+      },
+      {
+        source: "/docs/concepts/how-sync-works",
+        destination: "/docs/recipes/local-first/how-sync-works",
+        permanent: false,
+      },
+      {
+        source: "/docs/concepts/local-first-data-model",
+        destination: "/docs/recipes/local-first/local-first-data-model",
+        permanent: false,
+      },
+      {
+        source: "/docs/getting-started/client-setup",
+        destination: "/docs/setup/web-client/local-first-client",
+        permanent: false,
+      },
+      {
+        source: "/docs/getting-started/server-setup",
+        destination: "/docs/setup/deployment/own-server",
+        permanent: false,
+      },
+      {
+        source: "/docs/install/client",
+        destination: "/docs/setup/web-client/local-first-client",
+        permanent: false,
+      },
+      {
+        source: "/docs/install/typescript-server",
+        destination: "/docs/setup/deployment/own-server",
+        permanent: false,
+      },
+      { source: "/docs/quickstart", destination: "/docs/setup/run-locally", permanent: false },
+      { source: "/docs/recipes/testing", destination: "/docs/tooling/testing", permanent: false },
+      {
+        source: "/docs/reference/agent-skills",
+        destination: "/docs/setup/run-locally",
+        permanent: false,
+      },
+      {
+        source: "/docs/reference/inspector",
+        destination: "/docs/tooling/inspector",
+        permanent: false,
+      },
+    ];
   },
   async rewrites() {
     return [

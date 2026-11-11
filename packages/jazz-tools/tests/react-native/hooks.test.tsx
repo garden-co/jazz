@@ -15,9 +15,12 @@ import {
 import type { QueryBuilder, QueryOptions } from "../../src/runtime/db.js";
 import { withNativeRelayFixture } from "./fixture.js";
 
-const app = schema.defineApp({
-  notes: schema.table({ title: schema.string(), done: schema.boolean() }, {}),
-});
+const app = schema.defineApp(
+  {
+    notes: schema.table({ title: schema.string(), done: schema.boolean() }, {}),
+  },
+  { migrations: "none" },
+);
 type Note = { id: string; title: string; done: boolean };
 
 function Probe({
@@ -54,7 +57,9 @@ function Probe({
               ? "disabled"
               : (one.data?.title ?? "empty")}
       </output>
-      <output data-testid="session">{JSON.stringify(session?.user)}</output>
+      <output data-testid="session">
+        {JSON.stringify({ user: session?.user, identity: session?.identity })}
+      </output>
     </>
   );
 }
@@ -146,7 +151,7 @@ it("preserves equivalent provider config and isolates a replacement native ident
       expect(mounted.getByTestId("one").textContent).toBe("second scope");
       expect(mounted.getByTestId("session").textContent).toBe(
         JSON.stringify({
-          account: secondConfig.account.id,
+          user: secondConfig.account.id,
           identity: secondConfig.account.identity,
         }),
       );

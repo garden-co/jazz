@@ -18,7 +18,7 @@ fn public_policies() -> TablePolicies {
 }
 
 fn schema_with_policy(protected: bool) -> Schema {
-    let owner = eq("$createdBy.account", session("user.account"));
+    let owner = eq("$createdBy.account", session("user"));
     SchemaBuilder::new()
         .table(
             TableSchemaBuilder::new("todos")
@@ -67,7 +67,7 @@ mod tests {
     use super::*;
     use jazz::binding_codec::decode_named_cells;
     use jazz::tools::{AppContext, ClientStorage, Value};
-    use jazz_server::{JazzServer, TestJwtIssuer};
+    use jazz_server::{JazzServer, TEST_JWT_ISSUER};
     use jazz_testkit::{connect, enroll_test_context, wait_for_query};
     use std::time::Duration;
 
@@ -115,11 +115,9 @@ mod tests {
         tokio::task::LocalSet::new()
             .run_until(async {
                 for protected in [true, false] {
-                    let issuer = TestJwtIssuer::start().await;
                     let schema = schema_with_policy(protected);
                     let server = JazzServer::builder()
                         .with_schema(schema.clone())
-                        .with_jwks_url(issuer.endpoint())
                         .start()
                         .await
                         .expect("start test server");
@@ -135,11 +133,16 @@ mod tests {
                             data_dir: dir.path().to_owned(),
                             storage: ClientStorage::Memory,
                             account_id: None,
-                            jwt_token: Some(TestJwtIssuer::jwt_for_user(&format!(
-                                "rn-device-private-{scope}"
-                            ))),
-                            backend_secret: None,
+                            jwt_token: None,
+                            // The app's backend acts for the device's user.
+                            backend_secret: Some(server.backend_secret().to_owned()),
+                            backend_session: Some(jazz::tools::Session::new(
+                                TEST_JWT_ISSUER,
+                                format!("rn-device-private-{scope}"),
+                            )),
+                            bundle: server.latest_bundle(),
                             admin_secret: None,
+                            migrations: Default::default(),
                         };
                         enroll_test_context(&mut context).await.unwrap();
                         let client = connect(context).await.unwrap();

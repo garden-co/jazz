@@ -12,8 +12,8 @@ import { compile, compileModule } from "svelte/compiler";
 const packageDir =
   process.env.JAZZ_CLASSIC_CONSUMER_DIR ?? fileURLToPath(new URL("..", import.meta.url));
 
-// Match the enrolled-account fixture used by runtime tests. Only the external
-// registration response is substituted; provider configs receive opaque handles.
+// Match the enrolled-account fixture used by runtime tests. Only the backend
+// sign-in response is substituted; provider configs receive opaque handles.
 const accountFixture = `
   import { createAccountManagerWithRuntime } from ${JSON.stringify(
     pathToFileURL(join(packageDir, "dist/accounts/enrollment.js")).href,
@@ -29,8 +29,7 @@ const accountFixture = `
         account: crypto.randomUUID(), identity: { issuer, subject },
       }), { status: 200 }),
     });
-    const token = "header." + btoa(JSON.stringify({ iss: issuer, sub: subject })) + ".signature";
-    return { appId, serverUrl, account: await manager.registerJWT(token) };
+    return { appId, serverUrl, account: await manager.loginWithBackend() };
   }
 `;
 
@@ -99,7 +98,7 @@ async function runFrameworkConsumer(source, { browser = false, controlledFactory
               { filter: /[\\/]dist[\\/](svelte|vue)[\\/]create-jazz-client\.js$/ },
               () => ({
                 contents:
-                  "export const createJazzClient = (...args) => globalThis.__classicClientFactory(...args);",
+                  "export const openJazzClient = (...args) => globalThis.__classicClientFactory(...args);",
                 loader: "js",
               }),
             );
@@ -195,6 +194,8 @@ for (const [entrypoint, provider] of [
         const unavailable = () => { throw new Error("Unexpected native host call"); };
         export const CryptoDigestAlgorithm = { SHA256: "SHA-256" };
         export const TurboModuleRegistry = { get: unavailable, getEnforcing: unavailable };
+        export const AppState = { addEventListener: () => ({ remove() {} }) };
+        export const Platform = { OS: "ios" };
         export {
           unavailable as View, unavailable as Text, unavailable as Pressable,
           unavailable as getRandomBytes, unavailable as digestStringAsync,
@@ -239,8 +240,11 @@ for (const [entrypoint, provider] of [
         const current = createElement(binding.JazzProvider, {
           config: await accountConfig("classic-coexistence"),
           fallback: createElement("p", {}, "loading"),
-          autoAttachDevTools: false,
-          ...(${JSON.stringify(entrypoint)} === "react-core" ? { createJazzClient: binding.createJazzClient } : {}),
+          // react-core leaves opening a client to its framework binding; a
+          // client that never opens keeps the provider on its fallback.
+          ...(${JSON.stringify(entrypoint)} === "react-core"
+            ? { openJazzClient: () => new Promise(() => {}) }
+            : {}),
         }, "ready");
         assert.equal(renderToString(current), "<p>loading</p>");
       }
@@ -465,7 +469,7 @@ test("Solid's supported provider still renders through its Node export", async (
     const config = await accountConfig("solid-coexistence");
     const html = renderToString(() => createComponent(JazzProvider, {
       config,
-      fallback: "loading", children: "ready", autoAttachDevTools: false,
+      fallback: "loading", children: "ready",
     }));
     assert.ok(html.includes("loading"));
   `);
@@ -483,7 +487,7 @@ test("Solid's supported provider still mounts through its browser export", async
     const config = { ...await accountConfig("solid-coexistence"), driver: { type: "memory" } };
     const dispose = render(() => createComponent(JazzProvider, {
       config,
-      fallback: "loading", children: "ready", autoAttachDevTools: false,
+      fallback: "loading", children: "ready",
     }), target);
     assert.equal(target.textContent, "loading");
     dispose();
@@ -512,7 +516,7 @@ test("Vue refuses replacement when Classic attrs arrive during prior-client shut
         async shutdown() { startedShutdown(); await stopped; resource.closed = true; },
       };
     };
-    const props = reactive({ config: await accountConfig("first"), autoAttachDevTools: false });
+    const props = reactive({ config: await accountConfig("first") });
     const failures = [];
     const app = createApp({ render: () => h(JazzProvider, props, {
       default: () => h("p", "ready"), fallback: () => h("p", "loading"),
@@ -571,7 +575,7 @@ for (const framework of ["svelte", "vue"]) {
       if (${JSON.stringify(framework)} === "svelte") {
         // Non-reactive caller props force the post-await admission check, rather
         // than letting an effect rerun cancel creation on our behalf.
-        props = { config, autoAttachDevTools: false,
+        props = { config,
           children: createRawSnippet(() => ({ render: () => "<p>ready</p>" })),
           fallback: createRawSnippet(() => ({ render: () => "<p>loading</p>" })),
         };
@@ -580,7 +584,7 @@ for (const framework of ["svelte", "vue"]) {
         flushSync();
         dispose = () => unmount(instance);
       } else {
-        props = reactive({ config, autoAttachDevTools: false });
+        props = reactive({ config });
         const app = createApp({ render: () => h(JazzProvider, props, {
           default: () => h("p", "ready"), fallback: () => h("p", "loading"),
         }) });

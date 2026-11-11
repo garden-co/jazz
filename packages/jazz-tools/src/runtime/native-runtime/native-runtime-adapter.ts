@@ -1,8 +1,13 @@
+import type { ClientMigrations } from "../client-migrations.js";
+import { streamingChunks } from "../streaming-source.js";
 import { isHistoryTable, resolveQueryTable } from "../history-relation.js";
 import { AuxiliaryReceiveDeadline } from "./auxiliary-receive-deadline.js";
 import { Utf8Decoder } from "../utf8.js";
 import { parseSnapshotRef, UnsupportedSnapshotError, type SnapshotRef } from "../snapshot-ref.js";
-import { formatUuidAt } from "../hex.js";
+import { isAuthorityChangedError, upstreamRefusalError } from "../authority-changed-error.js";
+import { formatUuid, formatUuidAt } from "../hex.js";
+
+export { formatUuid };
 import { runtimeConnectionIncarnation, runtimeRandomBytes } from "../runtime-entropy.js";
 import { stripColumnQualifier } from "../query-column-name.js";
 import { writeRow } from "../write-row.js";
@@ -13,9 +18,14 @@ import {
   DerivedStatePublisher,
   LOCAL_ONLY,
   linkStatusFromUpstream,
+  linkFailureOf,
+  NO_UPLOADS,
   offlineLink,
   sameLinkStatus,
+  sameUploadStatus,
+  type LinkFailure,
   type LinkStatus,
+  type UploadStatus,
 } from "../sync-status.js";
 import type {
   ColumnDescriptor,
@@ -85,6 +95,7 @@ import {
   type QueryPredicate,
   type QueryPredicateOp,
   type ValueType,
+  clientMigrationsBytes,
 } from "./native-codec.js";
 import { exactSignedI64 } from "./exact-integer.js";
 import { encodeSchema } from "./schema-codec.js";
@@ -99,9 +110,11 @@ import {
   WebSocketCarrier,
   WIRE_PROTOCOL_VERSION,
   isReconnectLaterWireError,
+  isSocketDropWireError,
   normalizeBackendWebSocketAuth,
   peerIdentityForWebSocketAuth,
   policyClaimsForAdmittedWebSocket,
+  type WebSocketConstructor,
   type WebSocketNegotiation,
   type WireError,
   wireAuthFailureReason,
@@ -254,7 +267,8 @@ type NativeDb = {
   /** A fresh upstream link machine for this runtime's server WebSocket. */
   createUpstreamLink?(seed: number): NativeUpstreamLink;
   /** How many local commits still wait for the server's verdict. */
-  pendingUploadCount?(): number;
+  /** This store's uploads; see {@link UploadStatus}. */
+  uploadStatus?(): UploadStatus;
   nativeConnectionStatus?(): {
     configured: boolean;
     explicitlyOffline: boolean;
@@ -262,7 +276,7 @@ type NativeDb = {
     /** The upstream refused the scope's credential, with its reason. */
     authRejected?: string | null;
   };
-  registerSchema(schema: Uint8Array): NativeDb;
+  registerSchema(schema: Uint8Array, migrations?: Uint8Array): NativeDb;
   beginTransaction(
     openTransactionId: string,
     kind: TransactionKind,
@@ -347,6 +361,7 @@ type NativeDb = {
     updatedAtMs?: number,
     head?: unknown,
     base?: unknown,
+    transaction?: OpenTransactionId,
   ): NativeStreamingMutation;
   requestInsertPermissionAdvice?(
     table: string,
@@ -379,6 +394,11 @@ type NativeDb = {
       | ((error: Error | null, urgency: string) => void),
   ): void;
   onMutationError(callback: (event: MutationErrorEvent) => void): void;
+  /**
+   * A durable browser store's writes to its backing storage started failing
+   * (`message`) or work again (`null`); only the browser WASM host has one.
+   */
+  onStorageFailure?(callback: (message: string | null) => void): void;
   /** A native host's upstream refused the credential; ticks keep running. */
   onAuthRejected?(callback: (reason: string) => void): void;
   /**
@@ -445,6 +465,8 @@ type NativeDb = {
 type NativeStreamingMutation = {
   push(chunk: Uint8Array): void | Promise<void>;
   finish(): Write | Promise<Write>;
+  /** Stage the row mutation in the transaction the mutation began in. */
+  finishInTransaction?(): void | Promise<void>;
   abort(): boolean | Promise<boolean>;
 };
 
@@ -489,6 +511,12 @@ export type Transport = {
   takeAuxiliaryTrace?(): unknown[];
   setAuxiliaryTraceEnabled?(enabled: boolean): void;
   tick(): number | Promise<number>;
+  /**
+   * Why the core dropped this upstream link on its own (an `Error`-like
+   * value with the core `code`, e.g. `authority_changed`), or `null` while
+   * the link stands. Older bindings lack it.
+   */
+  upstreamRefusal?(): unknown;
   updateAuthenticatedClaims?(claims: Record<string, unknown>): void | Promise<void>;
   free?(): void;
 };
@@ -573,7 +601,7 @@ type UpstreamLinkStatus = {
   /** Only a new server or `connect()` revives the link: a stop, or a refused credential no renewal fixes. */
   terminal: boolean;
 };
-type RuntimeSyncStatus = { link: LinkStatus; pendingUploads: number };
+type RuntimeSyncStatus = { link: LinkStatus; uploads: UploadStatus };
 type UpstreamLinkStep = {
   actions: Array<
     | { type: "connect"; attempt: number }
@@ -600,10 +628,7 @@ function upstreamLinkFailure(error: WireError, negotiated: boolean): UpstreamLin
   }
   // The network or the server dropped the socket. A local-first client must
   // survive an outage of any length, including one it was opened in.
-  if (
-    error.retry === "later" &&
-    (error.code === "websocket_closed" || error.code === "websocket_error")
-  ) {
+  if (isSocketDropWireError(error)) {
     return { kind: "network", message };
   }
   // Anything else (a protocol error, an incompatible server) cannot succeed
@@ -673,7 +698,7 @@ type SubscriptionState = {
   cancelled: boolean;
 };
 
-type SubscriptionOutputColumns = {
+export type SubscriptionOutputColumns = {
   rootTable: string;
   rootColumns: readonly ColumnDescriptor[];
 };
@@ -876,11 +901,19 @@ export class NativeRuntimeAdapter implements Runtime {
   private peerUpstreamAttached = false;
   private nonDurableClient = false;
   private serverCarrier: WebSocketCarrier | null = null;
+  private readonly webSocket: WebSocketConstructor | undefined;
   private serverCarrierPromise: Promise<WebSocketCarrier> | null = null;
   private serverConnectionAttempt: ServerConnectionAttempt | null = null;
   private serverReplacementRetirement: Promise<void> | null = null;
   private serverTransportError: Error | null = null;
   private serverTransportErrorWaiters: ServerTransportErrorWaiter[] = [];
+  /**
+   * Why the durable worker cannot write its store now (storage full, most
+   * often), as relayed to this non-durable client. While set, its writes'
+   * `local` waits reject: the worker holds them only in memory.
+   */
+  private localStorageFailure: Error | null = null;
+  private readonly localStorageFailureWaiters = new Set<(error: Error) => void>();
   private serverTransportWorkEpoch = 0;
   private serverTransportWorkWaiters: ServerTransportWorkWaiter[] = [];
   private serverEndpointUrl: string | null = null;
@@ -899,6 +932,12 @@ export class NativeRuntimeAdapter implements Runtime {
   } | null = null;
   /** The error that ended the attempt the machine is deciding about. */
   private linkFailure: Error | null = null;
+  /**
+   * Why the core dropped the last admitted link on its own (see
+   * `Transport.upstreamRefusal`): the link is stopped with it until the next
+   * attempt, which an explicit reconnect starts.
+   */
+  private upstreamRefusal: Error | null = null;
   private linkCloseReason = "server transport replaced";
   /** The client keeps reconnecting through the current `serverTransportError`. */
   private serverTransportErrorRetrying = false;
@@ -914,8 +953,11 @@ export class NativeRuntimeAdapter implements Runtime {
   );
   private readonly syncStatusPublisher = new DerivedStatePublisher<RuntimeSyncStatus>(
     () => this.readSyncStatus(),
-    (a, b) => a.pendingUploads === b.pendingUploads && sameLinkStatus(a.link, b.link),
+    (a, b) => sameUploadStatus(a.uploads, b.uploads) && sameLinkStatus(a.link, b.link),
   );
+  /** The latest link failure, and the failing state it was recorded for. */
+  private lastFailure: LinkFailure | null = null;
+  private failingAs: string | null = null;
   private readonly pendingInboundServerFrames: Uint8Array[] = [];
   private serverInboundRouting: Promise<void> = Promise.resolve();
   private serverInboundProcessed = false;
@@ -982,9 +1024,16 @@ export class NativeRuntimeAdapter implements Runtime {
     });
   }
 
-  registerSchemaView(schema: WasmSchema): NativeRuntimeAdapter {
+  /** The migrations this runtime's app ships (see {@link ClientMigrations}). */
+  readonly migrations: ClientMigrations | undefined;
+
+  /** A view of `schema`, whose app ships `migrations` (see {@link ClientMigrations}). */
+  registerSchemaView(schema: WasmSchema, migrations?: ClientMigrations): NativeRuntimeAdapter {
     return new NativeRuntimeAdapter(null, schema, this.node, this.peerIdentity, 1, true, {
-      db: this.db.registerSchema(encodeSchema(schema)),
+      db: this.db.registerSchema(
+        encodeSchema(schema),
+        migrations ? clientMigrationsBytes(migrations) : undefined,
+      ),
       // Registered schema views are façades over this same native open. The
       // capability is private to the owner and must survive view creation so
       // backend reads keep selecting the backend ABI rather than identity ABI.
@@ -1009,9 +1058,15 @@ export class NativeRuntimeAdapter implements Runtime {
       scopeIsolatedRelay?: boolean;
       readAuthorizationHost?: ReadAuthorizationHost;
       backendMode?: boolean;
+      /** The node a backend's SYSTEM provenance names, when not `node`. */
+      systemNode?: Uint8Array;
       owner?: NativeRuntimeAdapter;
       /** Where slow queries are reported (`console.warn`): see {@link SlowQueryLogOptions}. */
       slowQueryLog?: SlowQueryLogOptions;
+      /** How this runtime opens its server socket, when not the platform's own WebSocket. */
+      webSocket?: WebSocketConstructor;
+      /** The app's versions and migrations: see {@link ClientMigrations}. */
+      migrations?: ClientMigrations;
     },
   ) {
     this.ownerRuntime = opts?.owner?.ownerRuntime ?? this;
@@ -1029,6 +1084,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.trustedBackend = (opts?.owner?.trustedBackend ?? opts?.backendMode) === true;
     this.selfSignedClientProof = opts?.selfSignedClientProof;
     this.scopeIsolatedRelay = opts?.scopeIsolatedRelay === true;
+    this.webSocket = opts?.webSocket;
     this.configBytes = openConfig(
       node,
       author,
@@ -1036,8 +1092,11 @@ export class NativeRuntimeAdapter implements Runtime {
       historyComplete,
       opts?.initialSyncFlushEvery,
       opts?.selfSignedClientProof,
+      opts?.migrations,
+      opts?.systemNode,
     );
     this.peerIdentity = author;
+    this.migrations = opts?.owner?.migrations ?? opts?.migrations;
     this.schemaHash = serializeRuntimeSchema(schema);
     if (opts?.db) {
       this.db = opts.db;
@@ -1308,8 +1367,18 @@ export class NativeRuntimeAdapter implements Runtime {
     return await this.db.evictExpiredStagedLargeValues();
   }
 
-  async acceptPeer(claims: Record<string, unknown> = {}, localEpoch?: bigint): Promise<Transport> {
-    if (this !== this.ownerRuntime) return this.ownerRuntime.acceptPeer(claims, localEpoch);
+  /**
+   * Serve a peer (a tab) whose replica is `identity`. A store configured as
+   * a user serves only its own identity: it uploads what its peers write as
+   * itself, so a peer of another identity is refused (`identity_mismatch`).
+   */
+  async acceptPeer(
+    claims: Record<string, unknown> = {},
+    localEpoch?: bigint,
+    identity: Uint8Array = this.peerIdentity,
+  ): Promise<Transport> {
+    if (this !== this.ownerRuntime)
+      return this.ownerRuntime.acceptPeer(claims, localEpoch, identity);
     if (this.closed) throw new Error("Native runtime is closed");
     return this.runWhenCoreIdle(async () => {
       if (this.closed) throw new Error("Native runtime is closed");
@@ -1326,6 +1395,8 @@ export class NativeRuntimeAdapter implements Runtime {
         const proof = this.selfSignedClientProof;
         let subscriber: Transport;
         if (proof) {
+          // The proof is this store's own: it vouches for no other identity.
+          if (!sameBytes(identity, this.peerIdentity)) throw identityMismatchError();
           if (!this.db.acceptSubscriberWithSelfSignedProof) {
             throw new Error(
               "Native runtime does not support self-signed subscriber admission; rebuild the matching Jazz WASM artifact",
@@ -1342,7 +1413,7 @@ export class NativeRuntimeAdapter implements Runtime {
           if (!this.db.acceptSubscriber) {
             throw new Error("Native runtime does not expose subscriber links");
           }
-          subscriber = await this.db.acceptSubscriber(this.peerIdentity, claims, localEpoch);
+          subscriber = await this.db.acceptSubscriber(identity, claims, localEpoch);
         }
         if (this.closed) {
           // We still own the slot. Awaiting gated retirement here would wait
@@ -1448,6 +1519,7 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private linkChanged(): void {
+    if (this === this.ownerRuntime) this.noteLinkFailure();
     this.remoteLink.changed();
     this.linkStatusPublisher.changed();
     this.syncStatusPublisher.changed();
@@ -1470,14 +1542,34 @@ export class NativeRuntimeAdapter implements Runtime {
       }
       return CONNECTING;
     }
+    if (this.linkStatus?.phase === "stopped" && isAuthorityChangedError(this.upstreamRefusal)) {
+      return offlineLink("authority-changed", false);
+    }
     return linkStatusFromUpstream(this.linkStatus);
   }
 
-  /** How many local commits still wait for the server's verdict. */
-  pendingUploadCount(): number {
-    if (this !== this.ownerRuntime) return this.ownerRuntime.pendingUploadCount();
-    if (this.closed) return 0;
-    return this.db?.pendingUploadCount?.() ?? 0;
+  /** This client's uploads: pending, since when, and the server's refusals. */
+  uploadStatus(): UploadStatus {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.uploadStatus();
+    if (this.closed) return NO_UPLOADS;
+    return this.db?.uploadStatus?.() ?? NO_UPLOADS;
+  }
+
+  /** The latest time the link failed, and how; it stays after the link recovers. */
+  lastLinkFailure(): LinkFailure | null {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.lastLinkFailure();
+    this.noteLinkFailure();
+    return this.lastFailure;
+  }
+
+  /** Record a failure the first time the link is seen failing that way. */
+  private noteLinkFailure(): void {
+    const link = this.upstreamLinkStatus();
+    const failing = link.state === "offline" ? link.reason : null;
+    if (failing === this.failingAs) return;
+    this.failingAs = failing;
+    const failure = linkFailureOf(link, (this.linkFailure ?? this.serverTransportError)?.message);
+    if (failure) this.lastFailure = failure;
   }
 
   /** Observe changes of {@link upstreamLinkStatus} alone. */
@@ -1490,7 +1582,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.startNativeLinkPoll();
   }
 
-  /** Observe changes of {@link upstreamLinkStatus} and {@link pendingUploadCount}. */
+  /** Observe changes of {@link upstreamLinkStatus} and {@link uploadStatus}. */
   onSyncStatusChange(listener: () => void, signal: AbortSignal): void {
     if (this !== this.ownerRuntime) {
       this.ownerRuntime.onSyncStatusChange(listener, signal);
@@ -1501,7 +1593,7 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private readSyncStatus(): RuntimeSyncStatus {
-    return { link: this.upstreamLinkStatus(), pendingUploads: this.pendingUploadCount() };
+    return { link: this.upstreamLinkStatus(), uploads: this.uploadStatus() };
   }
 
   private readRemoteLinkState(): RemoteLinkState {
@@ -1731,9 +1823,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const operation =
       mutation === "insert" ? "Insert" : mutation === "update" ? "Update" : "Upsert";
     this.assertMutationAdmission(operation);
-    if (this.currentTx(writeContext, operation)) {
-      throw new Error("Streaming mutations are not supported inside a transaction");
-    }
+    const tx = this.currentTx(writeContext, operation);
     const writeSession = sessionFromWriteContext(writeContext);
     this.applySessionClaims(writeSession);
     const writeIdentity = this.trustedWriteIdentity(writeSession);
@@ -1741,6 +1831,10 @@ export class NativeRuntimeAdapter implements Runtime {
     const branchView = branchViewFromWriteContext(writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     rejectAttributedBranchWrite(attribution, branchView);
+    if (tx) {
+      this.assertTransactionAttribution(tx, attribution);
+      this.assertTransactionWriteIdentity(tx, attribution ? undefined : writeIdentity);
+    }
     if (!begin) throw new Error("Native runtime does not expose streaming mutations");
 
     const definition = this.table(table);
@@ -1768,7 +1862,12 @@ export class NativeRuntimeAdapter implements Runtime {
       updatedAtMs ?? undefined,
       branchView?.head,
       branchView?.base,
+      tx?.id,
     );
+    if (tx && !upload.finishInTransaction) {
+      await upload.abort();
+      throw new Error("This native runtime does not support streaming inside a transaction yet");
+    }
     const owner = this.ownerRuntime;
     let releaseAdmission!: () => void;
     const admission = new Promise<void>((resolve) => {
@@ -1815,7 +1914,13 @@ export class NativeRuntimeAdapter implements Runtime {
       await previousFinalization;
       let receipt: MutationResult;
       try {
-        receipt = this.finishMutation(await upload.finish());
+        if (tx) {
+          await upload.finishInTransaction!();
+          tx.hasStagedMutations = true;
+          receipt = { kind: "staged", openTransactionId: tx.id };
+        } else {
+          receipt = this.finishMutation(await upload.finish());
+        }
       } finally {
         releaseFinalization();
       }
@@ -1938,7 +2043,9 @@ export class NativeRuntimeAdapter implements Runtime {
     // Branch views have no partial-value coordinate space yet (#2087). Do not
     // silently read or stage through the root instead.
     if (branchView) {
-      throw new Error("Typed large-value updates are not supported in branch views.");
+      throw new Error(
+        "Partial-value updates (applyDiffs, editedFrom) are not yet supported in branch views.",
+      );
     }
     if (tx) {
       // The transaction was opened with its identity, and the core stages the
@@ -1976,7 +2083,9 @@ export class NativeRuntimeAdapter implements Runtime {
     // Outside a transaction the binding writes as the adapter's own identity.
     // Do not silently substitute it for a session or attributed write.
     if (largeValueWriteHasIncompatibleIdentity(writeContext, this.peerIdentity)) {
-      throw new Error("Typed large-value updates do not yet support an attributed identity.");
+      throw new Error(
+        "Partial-value updates (applyDiffs, editedFrom) do not yet support a session or attributed identity outside a transaction.",
+      );
     }
     const updateLargeValues = this.db.updateLargeValues;
     if (!updateLargeValues) {
@@ -2341,10 +2450,12 @@ export class NativeRuntimeAdapter implements Runtime {
       this.throwServerTransportErrorForTier(tier, true);
       const transportError = this.waitForServerTransportError(tier, true);
       const transportWork = this.waitForServerTransportWork(tier, observedServerWorkEpoch);
+      const storageFailure = this.waitForLocalStorageFailure(tier);
       let stopAbortWake: (() => void) | undefined;
       try {
         const wakes: Array<Promise<"settled" | "work"> | Promise<never>> = [settled];
         if (transportError) wakes.push(transportError.promise);
+        if (storageFailure) wakes.push(storageFailure.promise);
         if (transportWork) wakes.push(transportWork.promise.then(() => "work" as const));
         if (signal) {
           wakes.push(
@@ -2369,6 +2480,7 @@ export class NativeRuntimeAdapter implements Runtime {
         stopAbortWake?.();
         transportError?.cancel();
         transportWork?.cancel();
+        storageFailure?.cancel();
       }
     }
   }
@@ -2765,6 +2877,7 @@ export class NativeRuntimeAdapter implements Runtime {
     // A published outage stays visible to Global readers until a retry
     // actually reconnects; each failed attempt must not hide it again.
     if (!this.linkStatus?.outagePublished) this.forgetServerTransportError();
+    this.upstreamRefusal = null;
     this.linkChanged();
     let resolveTerminal!: (error: Error) => void;
     const terminal = new Promise<Error>((resolve) => {
@@ -2782,6 +2895,7 @@ export class NativeRuntimeAdapter implements Runtime {
       this.endLinkAttempt(attempt, new Error(error.message), failure);
     };
     const carrier = new WebSocketCarrier({
+      WebSocket: this.webSocket,
       endpointUrl: url,
       peerIdentity: transportIdentity,
       features,
@@ -2811,7 +2925,8 @@ export class NativeRuntimeAdapter implements Runtime {
         if (
           isReconnectLaterWireError(error) ||
           error.code === "websocket_closed" ||
-          error.code === "websocket_error"
+          error.code === "websocket_error" ||
+          error.code === "websocket_silent"
         ) {
           return;
         }
@@ -3006,6 +3121,15 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   /**
+   * A durable browser store's host reports `message` when writing the store
+   * to its backing storage starts failing, and `null` once it works again.
+   */
+  onStorageFailure(callback: (message: string | null) => void): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.onStorageFailure(callback);
+    this.db.onStorageFailure?.(callback);
+  }
+
+  /**
    * Observe the first upstream transport failure, and whether the client
    * keeps reconnecting through it. This has no fate semantics: it only wakes
    * remote waits and subscriptions that are active in this runtime.
@@ -3046,6 +3170,39 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!this.serverTransportError) return;
     this.forgetServerTransportError();
     this.linkChanged();
+  }
+
+  /**
+   * The durable worker this client writes through reports that writing its
+   * store failed (`message`), or works again (`null`). Meanwhile the worker
+   * keeps the writes in memory and acknowledges none of them, so every
+   * `local` wait rejects with code `storage` instead of waiting.
+   */
+  reportLocalStorageFailure(message: string | null): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.reportLocalStorageFailure(message);
+    if (message === null) {
+      this.localStorageFailure = null;
+      return;
+    }
+    const error = Object.assign(new Error(message), { code: "storage" });
+    this.localStorageFailure = error;
+    for (const reject of this.localStorageFailureWaiters) reject(error);
+    this.localStorageFailureWaiters.clear();
+  }
+
+  private waitForLocalStorageFailure(
+    tier: string,
+  ): { promise: Promise<never>; cancel: () => void } | null {
+    if (tier !== "local" || !this.nonDurableClient) return null;
+    if (this.localStorageFailure) {
+      return { promise: Promise.reject(this.localStorageFailure), cancel: () => {} };
+    }
+    let reject!: (error: Error) => void;
+    const promise = new Promise<never>((_, rejectWith) => {
+      reject = rejectWith;
+    });
+    this.localStorageFailureWaiters.add(reject);
+    return { promise, cancel: () => this.localStorageFailureWaiters.delete(reject) };
   }
 
   reportRemoteMutationError(event: MutationErrorEvent): void {
@@ -4040,6 +4197,7 @@ export class NativeRuntimeAdapter implements Runtime {
         ) {
           return;
         }
+        if (this.stopRefusedUpstream(transport)) return;
         const frames = normalizeTransportFrames(transport.recvWireFrames());
         if (frames.length > 0) {
           this.sendServerFrames(frames, carrier, generation);
@@ -4057,6 +4215,22 @@ export class NativeRuntimeAdapter implements Runtime {
         this.scheduleServerPump();
       }
     }
+  }
+
+  /**
+   * Stop the link when the core dropped `transport` on its own: nothing
+   * syncs over it, and a retry would be refused the same way (a server whose
+   * authority changed). Waits for the server fail with the refusal, and the
+   * link stays stopped until an explicit reconnect.
+   */
+  private stopRefusedUpstream(transport: Transport): boolean {
+    const refusal = upstreamRefusalError(transport.upstreamRefusal?.());
+    if (!refusal) return false;
+    const attempt = this.serverConnectionAttempt;
+    if (!attempt || attempt.transport !== transport) return false;
+    this.upstreamRefusal = refusal;
+    this.endLinkAttempt(attempt, refusal, { kind: "fatal", message: refusal.message });
+    return true;
   }
 
   private async routePendingInboundServerFrames(): Promise<boolean> {
@@ -4484,7 +4658,7 @@ function recordWrite(write: Write, writes: Map<string, Write>): TxId {
   return id as TxId;
 }
 
-function txIdFromContext(writeContext?: string | null): OpenTransactionId | undefined {
+export function txIdFromContext(writeContext?: string | null): OpenTransactionId | undefined {
   if (!writeContext) return undefined;
   try {
     const parsed = JSON.parse(writeContext) as { transaction_id?: unknown };
@@ -4496,9 +4670,11 @@ function txIdFromContext(writeContext?: string | null): OpenTransactionId | unde
   }
 }
 
-type EncodedBranchView = { head: unknown; base?: unknown };
+export type EncodedBranchView = { head: unknown; base?: unknown };
 
-function branchViewFromWriteContext(writeContext?: string | null): EncodedBranchView | undefined {
+export function branchViewFromWriteContext(
+  writeContext?: string | null,
+): EncodedBranchView | undefined {
   if (!writeContext) return undefined;
   try {
     const parsed = JSON.parse(writeContext) as { branch_view?: unknown };
@@ -4676,7 +4852,7 @@ function updatedAtMsFromWriteContext(writeContext?: string | null): number | und
   return parsed.updated_at;
 }
 
-function effectiveUpdatedAtMs(writeContext?: string | null): number | null {
+export function effectiveUpdatedAtMs(writeContext?: string | null): number | null {
   return updatedAtMsFromWriteContext(writeContext) ?? Date.now();
 }
 
@@ -4731,7 +4907,9 @@ function pendingTxFromOptions(
   return openTransactionId ? pendingTxs.get(openTransactionId) : undefined;
 }
 
-function openTransactionIdFromOptions(optionsJson?: string | null): OpenTransactionId | undefined {
+export function openTransactionIdFromOptions(
+  optionsJson?: string | null,
+): OpenTransactionId | undefined {
   if (!optionsJson) return undefined;
   try {
     const parsed = JSON.parse(optionsJson) as { transaction_id?: unknown };
@@ -4743,7 +4921,7 @@ function openTransactionIdFromOptions(optionsJson?: string | null): OpenTransact
   }
 }
 
-function readOptions(
+export function readOptions(
   tier?: string | null,
   includeDeleted = false,
   optionsJson?: string | null,
@@ -4781,7 +4959,10 @@ function readFirstLoadWaitsForRemote(optionsJson?: string | null): boolean {
   }
 }
 
-function assertSupportedReadOptions(tier?: string | null, optionsJson?: string | null): void {
+export function assertSupportedReadOptions(
+  tier?: string | null,
+  optionsJson?: string | null,
+): void {
   if (tier != null && !["local-first", "remote", "local-only"].includes(tier)) {
     throw new Error(`Native runtime received unsupported read tier '${tier}'`);
   }
@@ -4876,7 +5057,7 @@ function closeSubscriptionSource(source: SubscriptionSource): void {
   source.close();
 }
 
-function queryIncludesDeleted(queryJson: string): boolean {
+export function queryIncludesDeleted(queryJson: string): boolean {
   try {
     return (JSON.parse(queryJson) as { include_deleted?: unknown }).include_deleted === true;
   } catch {
@@ -4884,7 +5065,7 @@ function queryIncludesDeleted(queryJson: string): boolean {
   }
 }
 
-function queryHasArraySubqueries(queryJson: string): boolean {
+export function queryHasArraySubqueries(queryJson: string): boolean {
   try {
     const value = (JSON.parse(queryJson) as { array_subqueries?: unknown }).array_subqueries;
     return Array.isArray(value) && value.length > 0;
@@ -4897,7 +5078,7 @@ function nativeQueryInput(queryJson: string, schema: WasmSchema): NativeQueryInp
   return encodeQueryJson(queryJson, schema);
 }
 
-function assertNoUnsupportedPermissionIntrospection(queryJson: string): void {
+export function assertNoUnsupportedPermissionIntrospection(queryJson: string): void {
   if (!queryContainsPermissionIntrospection(queryJson)) return;
   throw new Error(
     "Native runtime does not support permission-introspection query columns or predicates " +
@@ -5040,7 +5221,7 @@ function unqualifiedColumn(column: string): string {
   return stripColumnQualifier(column);
 }
 
-function subscriptionOutputColumns(
+export function subscriptionOutputColumns(
   queryJson: string,
   schema: WasmSchema,
 ): SubscriptionOutputColumns {
@@ -5211,7 +5392,7 @@ function outputColumnsForTable(
   return columns;
 }
 
-function addNestedOuterColumns(queryJson: string): string {
+export function addNestedOuterColumns(queryJson: string): string {
   const parsed = JSON.parse(queryJson) as { array_subqueries?: unknown };
   addNestedOuterColumnsToSubqueries(parsed.array_subqueries);
   return JSON.stringify(parsed);
@@ -5331,7 +5512,15 @@ function writeOrNormalizeRejection<T>(
     if (isCoreWriteRejection(error)) {
       const message = errorMessage(error);
       const reason = extractWriteRejectedReason(message) ?? message;
-      throw new Error(`${operation} failed: WriteError("${reason}")`);
+      // A synchronous NAPI throw carries no reason, but a denial's message
+      // leads with it. Either way the caller gets the code a rejected wait
+      // would carry, so one check handles a denial wherever it is decided.
+      const coreReason =
+        nativeCoreErrorReason(error) ??
+        (reason.startsWith("authorization_denied:") ? "authorization_denied" : undefined);
+      throw Object.assign(new Error(`${operation} failed: WriteError("${reason}")`), {
+        code: rejectionCode(coreReason),
+      });
     }
     throw error;
   }
@@ -5366,6 +5555,14 @@ function errorMessage(error: unknown): string {
   return String(error);
 }
 
+/** The refusal the engine gives a peer of another identity, with its reason. */
+function identityMismatchError(): Error {
+  return Object.assign(
+    new Error("a store configured as one user serves only its own identity's peers"),
+    { code: "protocol", reason: "identity_mismatch" satisfies NativeCoreErrorReason },
+  );
+}
+
 function contextualError(context: string, error: unknown): Error {
   const cause = error instanceof Error ? error : new Error(errorMessage(error));
   return new Error(`${context}: ${cause.message}`, { cause });
@@ -5385,8 +5582,10 @@ const REJECTION_CODES_BY_REASON: Readonly<Record<NativeCoreErrorReason, string>>
   missing_required: "write_rejected",
   branch_move: "write_rejected",
   missing_chunks: "write_rejected",
-  permissions_head_missing: "write_rejected",
   predecessor_rejected: "write_rejected",
+  schema_version_not_deployed: "write_rejected",
+  // A refused subscriber, never a write's fate.
+  identity_mismatch: "write_rejected",
 };
 
 /** A rejected wait's code, from the core reason every binding carries on it. */
@@ -5426,7 +5625,7 @@ function extractWriteRejectedReason(message: string): string | null {
   return match ? match[1]! : null;
 }
 
-function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
+export function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
   const parsed = JSON.parse(queryJson) as {
     array_subqueries?: unknown;
     conditions?: unknown;
@@ -6360,7 +6559,7 @@ export function encodeCellsForRow(
   return encodeCells(columns, (column) => row[column.name], true);
 }
 
-function encodeCellsForStreamingRow(
+export function encodeCellsForStreamingRow(
   definition: { columns: ColumnDescriptor[]; policies?: TablePolicies },
   row: InsertValues,
   streamedColumn: string,
@@ -6377,7 +6576,7 @@ function encodeCellsForStreamingRow(
   return encodeCells(columns, (column) => row[column.name], true);
 }
 
-function encodeCellsForStreamingPatch(
+export function encodeCellsForStreamingPatch(
   definition: { columns: ColumnDescriptor[]; policies?: TablePolicies },
   row: InsertValues,
   streamedColumn: string,
@@ -6386,29 +6585,6 @@ function encodeCellsForStreamingPatch(
     (column) => column.name !== streamedColumn && Object.hasOwn(row, column.name),
   );
   return encodeCells(columns, (column) => row[column.name], false);
-}
-
-async function* streamingChunks(source: StreamingValueSource): AsyncGenerator<Uint8Array | string> {
-  const readable = source as ReadableStream<Uint8Array | string>;
-  if (typeof readable.getReader !== "function") {
-    yield* source as AsyncIterable<Uint8Array | string>;
-    return;
-  }
-  const reader = readable.getReader();
-  let completed = false;
-  try {
-    while (true) {
-      const result = await reader.read();
-      if (result.done) {
-        completed = true;
-        return;
-      }
-      yield result.value;
-    }
-  } finally {
-    if (!completed) await reader.cancel().catch(() => undefined);
-    reader.releaseLock();
-  }
 }
 
 export function encodeCellsForPatch(
@@ -6480,11 +6656,11 @@ function encodeCellValue(
   return encodeNativeColumnValue(column, resolved);
 }
 
-function readRowBatches(payload: Uint8Array): NativeRowBatch[] {
+export function readRowBatches(payload: Uint8Array): NativeRowBatch[] {
   return new PostcardReader(payload).readVec(readNativeRowBatch);
 }
 
-function readRelationSnapshot(payload: Uint8Array): NativeRelationSubscriptionSnapshot {
+export function readRelationSnapshot(payload: Uint8Array): NativeRelationSubscriptionSnapshot {
   return readNativeRelationSubscriptionSnapshot(new PostcardReader(payload));
 }
 
@@ -6569,7 +6745,7 @@ function nativeRowFieldPlans(
   return plans;
 }
 
-function rowsFromRelationSnapshot(
+export function rowsFromRelationSnapshot(
   snapshot: NativeRelationSubscriptionSnapshot,
   schema: WasmSchema,
   projectedColumns?: readonly ColumnDescriptor[],
@@ -7063,8 +7239,10 @@ function normalizeSubscriptionRejectionReason(
   if (record.type === "ShapeRegistrationPendingCatalogueAdmission") {
     return { type: "ShapeRegistrationPendingCatalogueAdmission" };
   }
-  if (record.type === "ServerFailure" && typeof record.code === "string") {
-    return { type: "ServerFailure", code: record.code };
+  // NAPI names the server's reason `code`, WASM `detail`.
+  const failure = record.code ?? record.detail;
+  if (record.type === "ServerFailure" && typeof failure === "string") {
+    return { type: "ServerFailure", code: failure };
   }
   if (record.type === "InvalidAuthoritySourceClosure" && typeof record.transition === "string") {
     return {
@@ -7222,10 +7400,6 @@ export function parseUuid(value: string): Uint8Array {
     bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
   }
   return bytes;
-}
-
-export function formatUuid(bytes: Uint8Array): string {
-  return formatUuidAt(bytes, 0);
 }
 
 function readU32Le(bytes: Uint8Array, offset: number): number {

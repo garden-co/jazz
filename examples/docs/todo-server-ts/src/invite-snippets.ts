@@ -1,5 +1,5 @@
 import { schema as s } from "jazz-tools";
-import type { JazzClient } from "jazz-tools/backend";
+import type { Jazz } from "jazz-tools/backend";
 
 // #region invite-schema
 const schema = {
@@ -30,12 +30,12 @@ const schema = {
 // #endregion invite-schema
 
 type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema);
+export const app: s.App<AppSchema> = s.defineApp(schema, { migrations: "none" });
 
 // #region invite-permissions
 s.definePermissions(app, ({ policy, allOf, anyOf, session }) => {
   policy.chats.allowRead.where((chat) =>
-    policy.chatMembers.exists.where({ chatId: chat.id, user_id: session.user.account }),
+    policy.chatMembers.exists.where({ chatId: chat.id, user_id: session.user }),
   );
   policy.chats.allowInsert.always();
 
@@ -43,8 +43,8 @@ s.definePermissions(app, ({ policy, allOf, anyOf, session }) => {
   // member of their chats.
   policy.chatMembers.allowRead.where((member) =>
     anyOf([
-      { user_id: session.user.account },
-      policy.chats.exists.where({ id: member.chatId, "$createdBy.account": session.user.account }),
+      { user_id: session.user },
+      policy.chats.exists.where({ id: member.chatId, $createdBy: session.user }),
     ]),
   );
 
@@ -53,42 +53,41 @@ s.definePermissions(app, ({ policy, allOf, anyOf, session }) => {
   // privileges.
   policy.chatMembers.allowInsert.where((member) =>
     allOf([
-      { user_id: session.user.account },
-      policy.chats.exists.where({ id: member.chatId, "$createdBy.account": session.user.account }),
+      { user_id: session.user },
+      policy.chats.exists.where({ id: member.chatId, $createdBy: session.user }),
     ]),
   );
 
   // Users can leave; chat creators can remove any member.
   policy.chatMembers.allowDelete.where((member) =>
     anyOf([
-      { user_id: session.user.account },
-      policy.chats.exists.where({ id: member.chatId, "$createdBy.account": session.user.account }),
+      { user_id: session.user },
+      policy.chats.exists.where({ id: member.chatId, $createdBy: session.user }),
     ]),
   );
 
   // Invite codes are bearer capabilities. They never sync back down to a client.
   policy.chatInvites.allowRead.never();
   policy.chatInvites.allowInsert.where((invite) =>
-    policy.chats.exists.where({ id: invite.chatId, "$createdBy.account": session.user.account }),
+    policy.chats.exists.where({ id: invite.chatId, $createdBy: session.user }),
   );
   policy.chatInvites.allowDelete.where((invite) =>
-    policy.chats.exists.where({ id: invite.chatId, "$createdBy.account": session.user.account }),
+    policy.chats.exists.where({ id: invite.chatId, $createdBy: session.user }),
   );
 });
 // #endregion invite-permissions
 
-declare const client: JazzClient;
+declare const jazz: Jazz;
 
 // #region invite-redeem-route
 export async function POST(req: Request): Promise<Response> {
-  const requester = await client.forRequest(req);
-  const user = requester.getAuthState().session?.user.account;
+  const user = await jazz.accountFor(req);
   if (!user) return new Response("Account required", { status: 401 });
 
   const { chatId, code } = (await req.json()) as { chatId: string; code: string };
 
   // Preserve the verified caller as author while using backend permissions.
-  const backendDb = await client.withAttributionForRequest(req);
+  const backendDb = await jazz.withAttribution(req);
   const result = await backendDb.serializableTransaction(async (tx) => {
     // Checking membership first keeps re-opening a successfully redeemed link idempotent,
     // even after a single-use invite has been consumed.

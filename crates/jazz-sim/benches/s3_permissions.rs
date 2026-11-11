@@ -118,7 +118,7 @@ fn schema() -> JazzSchema {
         &[],
         TEAMS,
         "userTeamOf",
-        &["user", "identity", "subject"],
+        &["identity", "subject"],
         "id",
     );
     let table = TableSchemaBuilder::new;
@@ -316,7 +316,7 @@ fn forbidden_images(sim: &Sim, model: &Model, persona: &Persona, from: usize) ->
     let mut shipped = 0;
     let mut forbidden = 0;
     for message in sim.downstream_log(&persona.name).into_iter().skip(from) {
-        if let jazz::db::SyncMessage::Rows { images } = message {
+        if let jazz::db::SyncMessage::Rows { images, .. } = message {
             for image in images.iter().filter(|image| !image.deleted) {
                 shipped += 1;
                 if !model.readable(persona.u, &image.table, RowUuid::from_bytes(image.id)) {
@@ -528,7 +528,14 @@ fn run(config: &Config, emit: bool) {
             if personas[0].resources.ids().contains(resource) {
                 break;
             }
-            assert!(sim.step(), "the grant must reach the persona");
+            // The last tick can deliver it with nothing left in flight.
+            if !sim.step() {
+                personas[0].resources.poll();
+                assert!(
+                    personas[0].resources.ids().contains(resource),
+                    "the grant must reach the persona"
+                );
+            }
         }
         grant_latency.record(sim.now_ms() - at);
     }

@@ -14,15 +14,20 @@ if (!project || !stateDir) throw new Error("usage: mixed-version-client.mjs <pro
 mkdirSync(stateDir, { recursive: true, mode: 0o700 });
 const require = createRequire(join(project, "package.json"));
 const { schema: s } = await import(pathToFileURL(require.resolve("jazz-tools")));
-const { createJazzSession } = await import(pathToFileURL(require.resolve("jazz-tools/backend")));
+const backendModule = await import(pathToFileURL(require.resolve("jazz-tools/backend")));
+// Releases before alpha.60 call it createJazzSession.
+const createJazzClient = backendModule.createJazzClient ?? backendModule.createJazzSession;
 const version = JSON.parse(
   readFileSync(join(project, "node_modules", "jazz-tools", "package.json"), "utf8"),
 ).version;
 
 // Keep in sync with FIXTURE_SCHEMA in mixed-version.mjs (deployed via the CLI).
-const app = s.defineApp({
-  docs: s.table({ label: s.string(), body: s.string(), author: s.string() }, {}),
-});
+const app = s.defineApp(
+  {
+    docs: s.table({ label: s.string(), body: s.string(), author: s.string() }, {}),
+  },
+  { migrations: "none" },
+);
 const permissions = s.definePermissions(app, ({ policy }) => {
   for (const op of ["allowRead", "allowInsert", "allowUpdate", "allowDelete"])
     policy.docs[op].always();
@@ -71,7 +76,7 @@ async function waitFor(check, label, ms) {
 
 const ops = {
   async open({ name, appId, serverUrl }) {
-    session = await createJazzSession({
+    session = await createJazzClient({
       appId,
       serverUrl,
       app,

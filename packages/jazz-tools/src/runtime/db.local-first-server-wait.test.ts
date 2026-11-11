@@ -4,26 +4,23 @@ import { definePermissions } from "../permissions/index.js";
 import { ReadTier } from "./client.js";
 import { createDb } from "./default-create-db.js";
 import { localAccountConfig } from "./testing/account-fixtures.js";
-import { deploy, startLocalJazzServer } from "../testing/index.js";
+import { startTestJazz } from "../testing/index.js";
 import { createTransportControl } from "./testing/transport-control.js";
 
-const app = s.defineApp({ entries: s.table({ title: s.string() }, {}) });
+const app = s.defineApp({ entries: s.table({ title: s.string() }, {}) }, { migrations: "none" });
 const permissions = definePermissions(app, ({ policy }) => {
   policy.entries.allowRead.always();
   policy.entries.allowInsert.always();
 });
 
 it("opens a client with local rows on the server's answer when it arrives in time", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  const server = await startTestJazz({
+    app: app,
+    permissions: permissions,
+    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+  });
   const dbs: Awaited<ReturnType<typeof createDb>>[] = [];
   try {
-    await deploy({
-      serverUrl: server.url,
-      appId: server.appId,
-      adminSecret: server.adminSecret,
-      schema: app,
-      permissions,
-    });
     const writer = await createDb(await localAccountConfig(server.appId, server.url));
     dbs.push(writer);
     const written = writer.insert(app.entries, { title: "Already on the server" });
@@ -57,17 +54,14 @@ it("opens a client with local rows on the server's answer when it arrives in tim
 }, 60_000);
 
 it("does not wait for a server that is unreachable", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  const server = await startTestJazz({
+    app: app,
+    permissions: permissions,
+    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+  });
   let db: Awaited<ReturnType<typeof createDb>> | undefined;
   let serverStopped = false;
   try {
-    await deploy({
-      serverUrl: server.url,
-      appId: server.appId,
-      adminSecret: server.adminSecret,
-      schema: app,
-      permissions,
-    });
     const account = await localAccountConfig(server.appId, server.url);
     await server.stop();
     serverStopped = true;
@@ -99,16 +93,13 @@ it("does not wait for a server that is unreachable", async () => {
 }, 60_000);
 
 it("gives an empty client the server's rows as its first delivery", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  const server = await startTestJazz({
+    app: app,
+    permissions: permissions,
+    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+  });
   const dbs: Awaited<ReturnType<typeof createDb>>[] = [];
   try {
-    await deploy({
-      serverUrl: server.url,
-      appId: server.appId,
-      adminSecret: server.adminSecret,
-      schema: app,
-      permissions,
-    });
     const writer = await createDb(await localAccountConfig(server.appId, server.url));
     dbs.push(writer);
     const written = writer.insert(app.entries, { title: "Already on the server" });
@@ -141,17 +132,14 @@ it("gives an empty client the server's rows as its first delivery", async () => 
 }, 60_000);
 
 it("shows local rows at the deadline when a live server has not answered", async () => {
-  const server = await startLocalJazzServer({ allowLocalFirstAuth: true, inMemory: true });
+  const server = await startTestJazz({
+    app: app,
+    permissions: permissions,
+    coreOptions: { allowLocalFirstAuth: true, inMemory: true },
+  });
   const transport = await createTransportControl(server.url);
   const dbs: Awaited<ReturnType<typeof createDb>>[] = [];
   try {
-    await deploy({
-      serverUrl: server.url,
-      appId: server.appId,
-      adminSecret: server.adminSecret,
-      schema: app,
-      permissions,
-    });
     const writer = await createDb(await localAccountConfig(server.appId, server.url));
     dbs.push(writer);
     await writer.insert(app.entries, { title: "Only on the server" }).wait({ tier: "global" });

@@ -6,6 +6,8 @@ import type { CryptoMechanism } from "./envelope.js";
  * Successfully consuming a prefix does not establish whole-stream success.
  * Early return requests upstream cleanup without awaiting it or propagating cleanup
  * failures. Use AbortSignal to interrupt a pending read; return() alone cannot.
+ *
+ * @experimental
  */
 export interface LargeValueCipher {
   readonly mechanism: CryptoMechanism;
@@ -23,7 +25,11 @@ export interface LargeValueCipher {
   ): AsyncIterable<Uint8Array>;
 }
 
-/** Independent adapter overrides; omitted adapters use available platform defaults. */
+/**
+ * Independent adapter overrides; omitted adapters use available platform defaults.
+ *
+ * @experimental
+ */
 export interface JazzCrypto {
   equalityIndex?: EqualityIndex;
   deviceSigner?: DeviceSigner;
@@ -32,7 +38,11 @@ export interface JazzCrypto {
   largeValueCipher?: LargeValueCipher;
 }
 
-/** Resolved platform defaults and independently supplied adapter overrides. */
+/**
+ * Resolved platform defaults and independently supplied adapter overrides.
+ *
+ * @experimental
+ */
 export interface CryptoAdapters {
   equalityIndex?: EqualityIndex;
   deviceSigner: DeviceSigner;
@@ -41,9 +51,14 @@ export interface CryptoAdapters {
   largeValueCipher?: LargeValueCipher;
 }
 
+/** @experimental */
 export type DeviceKeyPair = Readonly<{ publicKey: Uint8Array; privateKey: Uint8Array }>;
 
-/** Signs canonical lifecycle records; membership and acceptance belong to the caller. */
+/**
+ * Signs canonical lifecycle records; membership and acceptance belong to the caller.
+ *
+ * @experimental
+ */
 export interface DeviceSigner {
   readonly mechanism: CryptoMechanism;
   createKeyPair(): Promise<DeviceKeyPair>;
@@ -51,7 +66,11 @@ export interface DeviceSigner {
   verify(publicKey: Uint8Array, record: Uint8Array, signature: Uint8Array): Promise<boolean>;
 }
 
-/** Independently replaceable symmetric key wraps and device envelopes. */
+/**
+ * Independently replaceable symmetric key wraps and device envelopes.
+ *
+ * @experimental
+ */
 export interface KeyEnvelope {
   readonly mechanism: CryptoMechanism;
   createKeyPair(): Promise<DeviceKeyPair>;
@@ -61,14 +80,22 @@ export interface KeyEnvelope {
   open(device: DeviceKeyPair, context: Uint8Array, envelope: Uint8Array): Promise<Uint8Array>;
 }
 
-/** Replaceable cell encryption; context is the common layer's canonical bytes. */
+/**
+ * Replaceable cell encryption; context is the common layer's canonical bytes.
+ *
+ * @experimental
+ */
 export interface CellCipher {
   readonly mechanism: CryptoMechanism;
   encrypt(key: Uint8Array, context: Uint8Array, plaintext: Uint8Array): Promise<Uint8Array>;
   decrypt(key: Uint8Array, context: Uint8Array, envelope: Uint8Array): Promise<Uint8Array>;
 }
 
-/** Deterministic keyed tokens; the common layer owns scoping and candidate verification. */
+/**
+ * Deterministic keyed tokens; the common layer owns scoping and candidate verification.
+ *
+ * @experimental
+ */
 export interface EqualityIndex {
   readonly mechanism: CryptoMechanism;
   token(key: Uint8Array, context: Uint8Array, plaintext: Uint8Array): Promise<Uint8Array>;

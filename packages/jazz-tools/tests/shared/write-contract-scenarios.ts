@@ -6,9 +6,12 @@ import { schema, type Db } from "../../src/index.js";
  * through the public `Db` API with the same calls on every binding: React
  * Native (native relay), NAPI and WASM.
  */
-export const writeContractApp = schema.defineApp({
-  notes: schema.table({ text: schema.string(), seq: schema.int() }, {}),
-});
+export const writeContractApp = schema.defineApp(
+  {
+    notes: schema.table({ text: schema.string(), seq: schema.int() }, {}),
+  },
+  { migrations: "none" },
+);
 
 const notes = writeContractApp.notes;
 

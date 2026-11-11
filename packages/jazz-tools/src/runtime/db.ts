@@ -1,3 +1,5 @@
+import { clientScope } from "./client-scope.js";
+import { registerPageDb } from "./page-handle.js";
 import { isHistoryTable, resolveQueryTable } from "./history-relation.js";
 import type { ConnectionRequirement } from "./connection-manager/types.js";
 import type { DbAccessContext } from "./db-access-context.js";
@@ -27,12 +29,14 @@ import {
   SerializableWriteResult,
   WriteResult,
   JazzClient,
-  withTransactionAdmission,
+  beginClientTransactionAfter,
+  type TransactionAdmission,
   type MutationErrorEvent,
   WriteHandle,
   createOpenTransactionId,
   setWriteWaitReadiness,
   type TransactionKind,
+  type Runtime,
   type ReadTierOptions,
   type InternalQueryExecutionOptions,
   type QueryVisibility,
@@ -46,11 +50,13 @@ import {
   type OpenTransactionId,
   type TxId,
   type PermissionAdvice,
+  type StreamingMutationKind,
   type StreamingValueSource,
   validateWriteWaitTimeout,
   WriteWaitTimeoutError,
 } from "./client.js";
 import { sameSyncStatus, type SyncStatus } from "./sync-status.js";
+import type { TextAnchors } from "./text-anchors.js";
 import {
   type BrowserForegroundNodeLease,
   type RuntimeSource,
@@ -66,6 +72,7 @@ import {
   unwrapValue,
 } from "./row-transformer.js";
 import { getOwnerPreparation, runAfterPreparation, WritePreparation } from "./write-preparation.js";
+import { nativeCoreErrorCode, unreadableTargetError } from "./native-runtime/native-error-code.js";
 import { writeRow } from "./write-row.js";
 import {
   ComputedReadState,
@@ -96,7 +103,6 @@ import {
   parseJwtPayload,
   internalSessionFromVerifiedReservedJwtPayload,
   resolveClientInternalSessionSync,
-  isRetainedAccountSessionInput,
 } from "./client-session.js";
 import {
   createBrowserPhysicalDatabaseName,
@@ -128,6 +134,9 @@ import {
   type DbForConnection,
 } from "./connection-manager/index.js";
 import { toError } from "./util.js";
+import { isThinDb, upgradeDbToLocalFirst, type LocalFirstLoader } from "./local-first-upgrade.js";
+import { DbReplacedError, type DbReplacedReason } from "./db-replaced-error.js";
+import { RuntimeClosedError } from "./runtime-closed-error.js";
 
 type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
 type AnyRuntimeSource = RuntimeSource<any>;
@@ -141,8 +150,17 @@ export type DbConfig = {
   accountId?: string;
   /** @internal Handle-derived enrollment authority, independent of active transport. */
   accountRegistryAuthority?: string;
-  /** Application identifier (used for isolation) */
-  appId: string;
+  /**
+   * Application identifier. Backend and test code only: a browser client
+   * leaves it out, and its local data, secret and identity are scoped by the
+   * endpoint it syncs with (see `clientScope`).
+   */
+  appId?: string;
+  /**
+   * For apps that already have local-first users: the app id their secrets
+   * and accounts were created under, so they keep them. New apps leave it out.
+   */
+  scope?: string;
   /** Storage driver mode (defaults to persistent). */
   driver?: StorageDriver;
   /** Optional server URL for sync */
@@ -216,7 +234,7 @@ export function resolvePersistentDbBaseName(config: DbConfig): string {
   const explicitDbName = trimOptionalString(
     (driver.type === "persistent" ? driver.dbName : undefined) ?? config.dbName,
   );
-  return explicitDbName ?? config.appId;
+  return explicitDbName ?? clientScope(config);
 }
 
 /** @internal Derive the physical browser persistence namespace for this Db config. */
@@ -366,6 +384,62 @@ export type SubscriptionHandle = (() => void) & {
 
 const dbSubscriptionSources = new WeakMap<Db, DbSubscriptionSource>();
 
+/**
+ * What a Db hands to its successor after the local-first upgrade: everything
+ * an app or framework calls. Its shutdown, and the internals its own runtime
+ * needs to finish uploading, stay with it.
+ */
+const FORWARDED_TO_SUCCESSOR = [
+  "allFromInspectorAttachment",
+  "subscribeFromInspectorAttachment",
+  "currentRuntime",
+  "prefetchRuntimeQueries",
+  "refreshAccountAuth",
+  "updateAuthToken",
+  "updateCookieSession",
+  "getAuthState",
+  "getLocalFirstIdentityProof",
+  "onAuthChanged",
+  "onMutationError",
+  "textAnchors",
+  "getSyncStatus",
+  "waitForSync",
+  "getConfig",
+  "setDevMode",
+  "disconnect",
+  "reconnect",
+  "getActiveQuerySubscriptions",
+  "onActiveQuerySubscriptionsChange",
+  "getRuntimeSchema",
+  "openInspectorControlPort",
+  "insert",
+  "insertStreaming",
+  "updateStreaming",
+  "upsertStreaming",
+  "restore",
+  "upsert",
+  "update",
+  "delete",
+  "canInsert",
+  "canRead",
+  "canUpdate",
+  "canDelete",
+  "createTransaction",
+  "captureSnapshot",
+  "beginTransaction",
+  "beginSerializableTransaction",
+  "transaction",
+  "serializableTransaction",
+  "upgradeToLocalFirst",
+  "deleteClientStorage",
+  "logout",
+  "all",
+  "allInternal",
+  "one",
+  "subscribe",
+  "subscribeDelta",
+] as const;
+
 /** @internal Retrieve the incremental source associated with a public Db. */
 export function getDbSubscriptionSource(db: Db): DbSubscriptionSource {
   const source = dbSubscriptionSources.get(db);
@@ -392,8 +466,29 @@ export interface UpdateOptions extends TimestampOverrideOptions {
   base?: BranchBase;
 }
 
-type TypedUpdateOptionsWithDiffs<TReplacements extends object, TDiffs> = UpdateOptions & {
+/** `update` options, with `editedFrom` for the columns `TReplacements` writes. */
+export type UpdateEditOptions<TReplacements extends object> = UpdateOptions & {
+  /**
+   * For text-merge columns written whole by an editor: the value each was
+   * edited from, which the editor last showed or wrote. When the column
+   * holds a newer value (a merge that reached this store before the editor
+   * showed it), the write is merged over it instead of undoing it. A column
+   * left `undefined` here is written as usual.
+   */
+  editedFrom?: { readonly [TColumn in keyof TReplacements]?: string };
+};
+
+type TypedUpdateOptionsWithDiffs<
+  TReplacements extends object,
+  TDiffs,
+> = UpdateEditOptions<TReplacements> & {
   applyDiffs?: TDiffs & { [TColumn in keyof TReplacements]?: never };
+};
+
+/** The options an untyped `update` call is lowered from. */
+type LoweredUpdateOptions = UpdateOptions & {
+  applyDiffs?: object;
+  editedFrom?: { readonly [column: string]: string | undefined };
 };
 
 export interface DeleteOptions extends TimestampOverrideOptions {
@@ -720,6 +815,12 @@ type WireLargeValueUpdate =
       kind: "json_set";
       column: string;
       edits: Array<{ at: string; value: unknown }>;
+    }
+  | {
+      kind: "text_edit";
+      column: string;
+      text: string;
+      edited_from: string;
     };
 
 function isPartialLargeValueUpdate(value: unknown): value is Record<string, unknown> {
@@ -745,6 +846,58 @@ function requirePageRange(from: number, to: number, column: string): void {
   if (from > to) {
     throw new Error(`Large-value page for "${column}" must have from <= to.`);
   }
+}
+
+/**
+ * An `update` call's replacements and wire descriptors: its `applyDiffs`,
+ * and each `editedFrom` column's replacement as a text edit of that value.
+ */
+function lowerUpdate(
+  table: TableProxy<any, any, any, any, any>,
+  data: Record<string, unknown>,
+  options: LoweredUpdateOptions | undefined,
+): { replacements: Record<string, unknown>; descriptors: WireLargeValueUpdate[] } {
+  const descriptors = lowerApplyDiffs(table, data, options?.applyDiffs);
+  const editedFrom = options?.editedFrom;
+  if (editedFrom === undefined) {
+    rejectIncompleteDependencies(table, data, Object.keys(options?.applyDiffs ?? {}));
+    return { replacements: data, descriptors };
+  }
+  if (typeof editedFrom !== "object" || editedFrom === null || Array.isArray(editedFrom)) {
+    throw new Error("update option editedFrom must be an object keyed by column name.");
+  }
+  const replacements = { ...data };
+  const edited: string[] = [];
+  for (const [column, from] of Object.entries(editedFrom)) {
+    if (from === undefined) continue;
+    const transform = table._columnTransforms?.[column];
+    if (transform && !transform.computed) {
+      throw new Error(
+        `update option editedFrom is not supported yet on "${column}", which has a transform.`,
+      );
+    }
+    const text = replacements[column];
+    if (typeof text !== "string" || typeof from !== "string") {
+      throw new Error(
+        `update option editedFrom.${column} needs a string, and a string replacement for "${column}".`,
+      );
+    }
+    delete replacements[column];
+    edited.push(column);
+    descriptors.push({ kind: "text_edit", column, text, edited_from: from });
+  }
+  rejectIncompleteDependencies(table, replacements, [
+    ...Object.keys(options?.applyDiffs ?? {}),
+    ...edited,
+  ]);
+  return { replacements, descriptors };
+}
+
+/** `options` without `editedFrom`, which {@link lowerUpdate} turned into descriptors. */
+function withoutEditedFrom(options: LoweredUpdateOptions | undefined) {
+  if (options?.editedFrom === undefined) return options;
+  const { editedFrom: _, ...rest } = options;
+  return rest;
 }
 
 /** Validate an `update` call's `applyDiffs` option and lower it to wire descriptors. */
@@ -1349,6 +1502,42 @@ function transformInputColumns(
 
 const noWriteDependencies: readonly string[] = [];
 
+/**
+ * How long an update of a row this replica hasn't loaded waits for the
+ * server to send it, before it is refused as a row the session can't find.
+ */
+const LOAD_ROW_WAIT_MS = 10_000;
+
+/**
+ * Read one row by id from the server through the caller's session, so this
+ * replica holds it before a write stages against it. The read waits for the
+ * server at most {@link LOAD_ROW_WAIT_MS}: offline, it finds no row and the
+ * update fails instead of hanging, with the writes queued behind it.
+ */
+function loadRow(
+  client: JazzClient,
+  table: TableProxy<any, any>,
+  id: string,
+  session: Session | undefined,
+  branch: NonNullable<ReturnType<typeof normalizeViewOptions>>["branch"],
+): Promise<unknown[]> {
+  const built = JSON.stringify({
+    table: table._table,
+    conditions: [{ column: "id", op: "eq", value: id }],
+    limit: 1,
+  });
+  const read = client.queryInternal(
+    translateQuery(built, table._schema),
+    branch ? { tier: "remote", branch } : { tier: "remote" },
+    session,
+  );
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<unknown[]>((resolve) => {
+    timer = setTimeout(() => resolve([]), LOAD_ROW_WAIT_MS);
+  });
+  return Promise.race([read, timeout]).finally(() => clearTimeout(timer));
+}
+
 function missingWriteDependencies(
   table: TableProxy<any, any>,
   data: Record<string, unknown>,
@@ -1440,7 +1629,30 @@ function rejectIncompleteDependencies(
   }
 }
 
-function reserveRowId(): string {
+/**
+ * @internal The row an insert or restore of `data` as row `id` writes, as
+ * the table's schema alone decides it: for writes made before a client
+ * exists (`createJazz`'s `db` while its store opens).
+ */
+export function previewWrittenRow<T, Init>(
+  table: TableProxy<T, Init>,
+  operation: "Insert" | "Restore",
+  id: string,
+  data: Init,
+): T {
+  assertWritableTable(table);
+  const transformedData = table._columnTransforms
+    ? transformInputColumns(table, data, { id }, true)
+    : (data as Record<string, unknown>);
+  return immediateWriteRow(
+    table,
+    id,
+    toWriteRecordForOperation(operation, transformedData, table._schema, table._table),
+  );
+}
+
+/** @internal A fresh row id, as an insert without one would get. */
+export function reserveRowId(): string {
   const hex = createOpenTransactionId();
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
@@ -1643,6 +1855,22 @@ export async function runInTransaction<TResult, TKind extends TransactionKind>(
  * Groups a set of writes as either a mergeable or serializable transaction (see {@link TransactionKind}).
  */
 export class Transaction<TKind extends TransactionKind = TransactionKind> {
+  /** @internal Install the prerequisite before binding the owner. */
+  static createWithAdmission<TKind extends TransactionKind>(
+    kind: TKind,
+    resolveClient: (schema: WasmSchema) => JazzClient,
+    context: DbAccessContext | null,
+    ownerClient: JazzClient | undefined,
+    prerequisite: TransactionAdmission | undefined,
+  ): Transaction<TKind> {
+    const transaction = new Transaction(kind, resolveClient, context);
+    transaction.openingPrerequisite = prerequisite;
+    if (ownerClient) transaction.bindOwnerClient(ownerClient);
+    return transaction;
+  }
+
+  private openingPrerequisite?: TransactionAdmission;
+
   private readonly pendingReads = new Set<Promise<unknown>>();
   private committing = false;
 
@@ -1682,7 +1910,16 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     const owner = getOwnerPreparation(ownerClient);
     const openTransactionId = owner?.pending
       ? createOpenTransactionId()
-      : ownerClient.beginTransaction(this.kind, session, attribution);
+      : this.openingPrerequisite
+        ? beginClientTransactionAfter(
+            ownerClient,
+            this.kind,
+            session,
+            attribution,
+            undefined,
+            this.openingPrerequisite,
+          )
+        : ownerClient.beginTransaction(this.kind, session, attribution);
     const binding: DbTransactionHandleBinding = {
       ownerClient,
       openTransactionId,
@@ -1696,11 +1933,16 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
       preparation.run(() =>
         owner!.run(() => {
           if (preparation.cancelled) return;
-          const begin = () =>
-            ownerClient.beginTransaction(this.kind, session, attribution, openTransactionId);
-          const prerequisite = transactionAdmission.get(this);
-          if (prerequisite) withTransactionAdmission(ownerClient, prerequisite, begin);
-          else begin();
+          if (this.openingPrerequisite)
+            beginClientTransactionAfter(
+              ownerClient,
+              this.kind,
+              session,
+              attribution,
+              openTransactionId,
+              this.openingPrerequisite,
+            );
+          else ownerClient.beginTransaction(this.kind, session, attribution, openTransactionId);
           binding.begun = true;
         }),
       );
@@ -1752,6 +1994,114 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     const result = ownerClient.rollbackTransaction(openTransactionId);
     preparation.cancelled = true;
     return result;
+  }
+
+  /**
+   * Stream one Text, Json, or Bytea column into a new row, staged in this
+   * transaction. Resolves with the row id once the stream is consumed; the
+   * commit waits for it and fails if the stream did.
+   *
+   * The streamed value is held for the transaction for at most the store's
+   * staging max age (10 minutes by default) after the stream finishes. A
+   * transaction left open longer than that is refused at commit, with
+   * `streaming upload expired`, so its storage is never held indefinitely;
+   * start it again. The same applies to `updateStreaming` and
+   * `upsertStreaming`.
+   */
+  insertStreaming<T, Init, StreamingInit>(
+    table: TableProxy<T, Init, StreamingInit>,
+    data: StreamingInit,
+    options?: StreamingInsertOptions,
+  ): Promise<{ id: string }> {
+    return this.streamingMutation("insert", table, options?.id, data, options);
+  }
+
+  /** Stream one large column of an existing row, staged in this transaction. */
+  updateStreaming<T, Init, StreamingInit, StreamingUpdate>(
+    table: TableProxy<T, Init, StreamingInit, StreamingUpdate>,
+    id: string,
+    data: StreamingUpdate,
+    options?: UpdateOptions,
+  ): Promise<{ id: string }> {
+    return this.streamingMutation("update", table, id, data, options);
+  }
+
+  /** Stream one large column of a row, creating it if absent, staged in this transaction. */
+  upsertStreaming<T, Init, StreamingInit, StreamingUpdate>(
+    table: TableProxy<T, Init, StreamingInit, StreamingUpdate>,
+    id: string,
+    data: StreamingUpdate,
+    options?: UpdateOptions,
+  ): Promise<{ id: string }> {
+    return this.streamingMutation("upsert", table, id, data, options);
+  }
+
+  private streamingMutation(
+    mutation: StreamingMutationKind,
+    table: TableProxy<any, any, any, any>,
+    id: string | undefined,
+    data: unknown,
+    options?: StreamingInsertOptions | UpdateOptions,
+  ): Promise<{ id: string }> {
+    assertWritableTable(table);
+    this.bindTable(table);
+    const client = this.resolveClient(table._schema);
+    const operation =
+      mutation === "insert" ? "Insert" : mutation === "update" ? "Update" : "Upsert";
+    const { openTransactionId, session, attribution, preparation } = this.requireBinding(
+      `${mutation}Streaming`,
+    );
+    const { column, source, values: ordinaryData } = splitStreamingMutation(table, data);
+    rejectIncompleteDependencies(table, ordinaryData, [column]);
+    const rowId =
+      id ??
+      (missingWriteDependencies(table, ordinaryData).includes("id") ? reserveRowId() : undefined);
+    const stage = async () => {
+      const record =
+        mutation === "insert"
+          ? transformInputColumns(table, ordinaryData, rowId ? { id: rowId } : {}, true)
+          : await prepareInputColumns(
+              table,
+              ordinaryData,
+              operation,
+              rowId!,
+              client,
+              session,
+              undefined,
+              normalizeViewOptions(table._schema, table._table, options as UpdateOptions),
+            );
+      const values = toWriteRecordForOperation(operation, record, table._schema, table._table);
+      const branch =
+        mutation === "insert" ? deriveStreamingInsertBranch(table, ordinaryData) : undefined;
+      const normalized =
+        mutation === "insert"
+          ? normalizeSelectorOptions(table._schema, table._table, {
+              ...options,
+              ...(rowId ? { id: rowId } : {}),
+              ...(branch ? { branch } : {}),
+            })
+          : normalizeViewOptions(table._schema, table._table, options as UpdateOptions);
+      return client.streamingMutationInTransaction(
+        mutation,
+        table._table,
+        values,
+        column,
+        source,
+        openTransactionId,
+        normalized,
+        session,
+        attribution,
+        rowId,
+      );
+    };
+    return Promise.resolve(
+      preparation.run(() =>
+        runAfterPreparation(client, () => (preparation.cancelled ? undefined : stage())),
+      ),
+    ).then((staged) => {
+      if (!staged) throw new Error("Transaction was rolled back before the stream was staged");
+      return staged;
+    });
   }
 
   /**
@@ -1925,54 +2275,47 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     table: TableProxy<T, Init>,
     id: string,
     data: Partial<Init>,
-    options?: UpdateOptions,
+    options?: UpdateEditOptions<Partial<Init>>,
   ): void;
   update(
     table: TableProxy<any, any, any, any, any>,
     id: string,
     data: Record<string, unknown>,
-    options?: UpdateOptions & { applyDiffs?: object },
+    options?: LoweredUpdateOptions,
   ): void {
     assertWritableTable(table);
     this.bindTable(table);
-    const descriptors = lowerApplyDiffs(table, data, options?.applyDiffs);
-    rejectIncompleteDependencies(table, data, Object.keys(options?.applyDiffs ?? {}));
+    const { replacements, descriptors } = lowerUpdate(table, data, options);
+    options = withoutEditedFrom(options);
     const client = this.resolveClient(table._schema);
     const { openTransactionId, session, attribution } = this.requireBinding("update");
     const normalizedOptions = normalizeViewOptions(table._schema, table._table, options);
-    this.prepareMutation(
-      table,
-      id,
-      data as Record<string, unknown>,
-      "Update",
-      options,
-      (updates) => {
-        if (descriptors.length > 0) {
-          client.updateLargeValuesInternal(
-            table._table,
-            id,
-            updates,
-            descriptors,
-            normalizedOptions?.updatedAt,
-            session,
-            attribution,
-            openTransactionId,
-            normalizedOptions?.branch,
-          );
-          return;
-        }
-        client.updateInternal(
+    this.prepareMutation(table, id, replacements, "Update", options, (updates) => {
+      if (descriptors.length > 0) {
+        client.updateLargeValuesInternal(
           table._table,
           id,
           updates,
+          descriptors,
           normalizedOptions?.updatedAt,
           session,
           attribution,
           openTransactionId,
           normalizedOptions?.branch,
         );
-      },
-    );
+        return;
+      }
+      client.updateInternal(
+        table._table,
+        id,
+        updates,
+        normalizedOptions?.updatedAt,
+        session,
+        attribution,
+        openTransactionId,
+        normalizedOptions?.branch,
+      );
+    });
   }
 
   private prepareMutation(
@@ -2122,19 +2465,12 @@ export type TransactionScope<TKind extends TransactionKind = TransactionKind> = 
   Transaction<TKind>
 >;
 
-const transactionAdmission = new WeakMap<Db | Transaction, () => Promise<void>>();
-
 /** @internal The compiler opts in before staging any operations. */
 export function beginDbTransactionAfter(
   db: Db,
-  prepare: () => Promise<void>,
+  prepare: TransactionAdmission,
 ): Transaction<"serializable"> {
-  transactionAdmission.set(db, prepare);
-  try {
-    return db.beginSerializableTransaction();
-  } finally {
-    transactionAdmission.delete(db);
-  }
+  return db.createTransaction("serializable", prepare);
 }
 
 /**
@@ -2174,6 +2510,14 @@ export class Db {
   private readonly localFirstRenewals = new AuthRenewalBackoff();
   private localFirstRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private shutdownPromise: Promise<void> | null = null;
+  /** Set once the session that owned this Db moved on to another one. */
+  private replaced: DbReplacedError | null = null;
+  /** Ends each live subscription with a terminal error. */
+  private readonly liveSubscriptionEnders = new Set<(error: Error) => void>();
+  /** The Db this one hands its work to after the local-first upgrade. */
+  private successor: Db | null = null;
+  /** Queries and listeners that move to the successor with the upgrade. */
+  private readonly movable = new Set<{ move(next: Db): void }>();
   private readonly shutdownAbort = new AbortController();
   private syncStatusSnapshot: SyncStatus | null = null;
   private readonly activeQuerySubscriptionTraces = new Map<
@@ -2212,6 +2556,11 @@ export class Db {
     const inspectorAttachmentRequested =
       config.runtimeSources?.browserWorkerPort !== undefined &&
       config.runtimeSources.inspectorHostPhysicalDbName !== undefined;
+    // The Inspector's own Db reads the page's data; it is not one of the page's Dbs.
+    if (!inspectorAttachmentRequested) {
+      const unregister = registerPageDb(this, config.appId ?? null);
+      this.shutdownAbort.signal.addEventListener("abort", unregister, { once: true });
+    }
     dbSubscriptionSources.set(this, {
       // Cache identity is reserved before the async worker receipt arrives so
       // an Inspector entry can never share a host application's query cache.
@@ -2343,7 +2692,7 @@ export class Db {
       const ttlSeconds = 3600;
       const newToken = this.mintLocalFirstToken(
         this._localFirstSecret,
-        this.config.appId,
+        clientScope(this.config),
         ttlSeconds,
       );
       const trustedReservedSession = internalSessionFromVerifiedReservedJwtPayload(
@@ -2510,6 +2859,21 @@ export class Db {
     return this.connection.getCurrentClient();
   }
 
+  /** @internal The runtime behind this Db's client, once it exists. */
+  currentRuntime(): Runtime | null {
+    return this.getCurrentClient()?.getRuntime() ?? null;
+  }
+
+  /**
+   * @internal Read each runtime query at the remote tier, so that this Db's
+   * store holds what the server holds for it before anything subscribes.
+   */
+  async prefetchRuntimeQueries(schema: WasmSchema, queryJsons: readonly string[]): Promise<void> {
+    const client = this.getClient(schema);
+    await this.ensureReady("server");
+    await Promise.all(queryJsons.map((queryJson) => client.query(queryJson, { tier: "remote" })));
+  }
+
   protected async ensureReady(
     requirement: ConnectionRequirement,
     signal?: AbortSignal,
@@ -2520,9 +2884,12 @@ export class Db {
 
   private wrapWriteWait<THandle extends WriteHandle<unknown, unknown>>(handle: THandle): THandle {
     notifyLocalWrite(this);
-    return setWriteWaitReadiness(handle, (tier) =>
-      this.ensureReady(tier === "global" ? "server" : "runtime"),
-    );
+    return setWriteWaitReadiness(handle, async (tier) => {
+      // A write made before this Db handed over to a successor waits on its
+      // own runtime's last uploads, which the drain keeps going.
+      if (this.drain) return;
+      await this.ensureReady(tier === "global" ? "upload" : "runtime");
+    });
   }
 
   protected getAccessContext(): DbAccessContext | null {
@@ -2531,9 +2898,12 @@ export class Db {
     return null;
   }
 
-  private handleMutationError(event: MutationErrorEvent): void {
+  private handleMutationError(event: MutationErrorEvent, logged = false): void {
+    // A write this Db took before the upgrade, rejected while it uploads:
+    // the app's listeners are on the successor now.
+    if (this.successor) return this.successor.handleMutationError(event, logged);
     if (this.mutationErrorListeners.size === 0) {
-      console.error("Unhandled Jazz mutation error", event);
+      if (!logged) console.error("Unhandled Jazz mutation error", event);
       this.pendingMutationErrorEvents.push(event);
       return;
     }
@@ -2544,6 +2914,16 @@ export class Db {
 
   /** @internal Refresh only through the immutable handle that owns this context. */
   async refreshAccountAuth(account: AccountHandle): Promise<string> {
+    return this.refreshOwnAccountAuth(account);
+  }
+
+  /**
+   * @internal Renew this Db's own runtime's credential. Its account context
+   * calls this rather than {@link refreshAccountAuth}, which after the
+   * local-first upgrade renews the successor: the thin runtime still needs
+   * its own credential to finish uploading.
+   */
+  async refreshOwnAccountAuth(account: AccountHandle): Promise<string> {
     assertAccountConfig(this.config);
     const current = getDbInternalSession(this);
     if (
@@ -2595,14 +2975,51 @@ export class Db {
     }
 
     const ttl = options?.ttlSeconds ?? 60;
-    const audience = options?.audience ?? this.config.appId;
+    const audience = options?.audience ?? clientScope(this.config);
     return this.mintLocalFirstToken(this._localFirstSecret, audience, ttl);
   }
 
+  /** @internal This Db's own runtime's auth state changes, which never move to a successor. */
+  onOwnAuthChanged(listener: (state: AuthState) => void): () => void {
+    return this.authStateStore.onChange((state) => listener(state));
+  }
+
   onAuthChanged(listener: (state: AuthState) => void): () => void {
-    return this.authStateStore.onChange((state) => {
-      listener(state);
-    });
+    return this.registerMovable((db) =>
+      db.authStateStore.onChange((state) => {
+        listener(state);
+      }),
+    );
+  }
+
+  /**
+   * Register something on this Db that moves to its successor when the
+   * session upgrades it to the local-first client, so code holding the
+   * returned handle keeps hearing from whichever Db does the work.
+   */
+  private registerMovable(
+    register: (db: Db) => () => void,
+    // Register again on this Db rather than on its successor: for what this
+    // Db answers itself after the upgrade (its sync status covers the writes
+    // its own runtime is still uploading).
+    reregisterHere = false,
+  ): () => void {
+    let detach = register(this);
+    let closed = false;
+    const entry = {
+      move: (next: Db) => {
+        if (closed) return;
+        detach();
+        detach = reregisterHere ? register(this) : next.registerMovable(register);
+      },
+    };
+    this.movable.add(entry);
+    return () => {
+      if (closed) return;
+      closed = true;
+      this.movable.delete(entry);
+      detach();
+    };
   }
 
   /**
@@ -2612,20 +3029,33 @@ export class Db {
    * @returns an unsubscribe callback
    */
   onMutationError(listener: (event: MutationErrorEvent) => void): () => void {
-    this.mutationErrorListeners.add(listener);
-    while (this.pendingMutationErrorEvents.length > 0) {
-      listener(this.pendingMutationErrorEvents.shift()!);
-    }
-    return () => {
-      this.mutationErrorListeners.delete(listener);
-    };
+    if (this.replaced) throw this.replaced;
+    return this.registerMovable((db) => {
+      db.mutationErrorListeners.add(listener);
+      while (db.pendingMutationErrorEvents.length > 0) {
+        listener(db.pendingMutationErrorEvents.shift()!);
+      }
+      return () => {
+        db.mutationErrorListeners.delete(listener);
+      };
+    });
+  }
+
+  /**
+   * Stateless anchors and ranges into text values, such as cursors,
+   * selections and comments on a text column: captured from one value and
+   * found again in later ones by the text around them.
+   */
+  textAnchors(): TextAnchors {
+    return this.runtimeSource.textAnchors();
   }
 
   /**
    * Whether this Db's writes have reached the server: the upstream
    * connection, and how many committed transactions the server has not
    * accepted or rejected yet. The same object is returned until the status
-   * changes, so it can back `useSyncExternalStore` directly.
+   * changes, so it can back `useSyncExternalStore` directly. In a browser,
+   * agents and tests read the same through `window.__jazz.status()`.
    */
   getSyncStatus(): SyncStatus {
     const next = this.connection.syncStatus();
@@ -2642,6 +3072,26 @@ export class Db {
    * @returns an unsubscribe callback
    */
   onSyncStatusChange(listener: (status: SyncStatus) => void): () => void {
+    let last = this.getSyncStatus();
+    const deliver = (status: SyncStatus) => {
+      if (status === last || sameSyncStatus(status, last)) return;
+      last = status;
+      listener(status);
+    };
+    return this.registerMovable((db) => {
+      const stop = db.syncStatusChangeRegistration(deliver);
+      // Moved at the upgrade: the status now covers both runtimes.
+      if (db.successor) deliver(db.getSyncStatus());
+      return stop;
+    }, true);
+  }
+
+  /** How this Db reports sync status changes: its own, or combined with its successor's. */
+  private syncStatusChangeRegistration(listener: (status: SyncStatus) => void): () => void {
+    return this.onSyncStatusChangeHere(listener);
+  }
+
+  private onSyncStatusChangeHere(listener: (status: SyncStatus) => void): () => void {
     const subscription = new AbortController();
     const end = () => subscription.abort();
     this.shutdownAbort.signal.addEventListener("abort", end, { once: true });
@@ -2682,7 +3132,9 @@ export class Db {
     signal?.addEventListener("abort", forward, { once: true });
     // Shutdown ends the wait instead of leaving it parked on a closed runtime.
     const shutdown = () => control.abort(new Error("Db was shut down"));
-    this.shutdownAbort.signal.addEventListener("abort", shutdown, { once: true });
+    this.shutdownAbort.signal.addEventListener("abort", shutdown, {
+      once: true,
+    });
     const timer =
       timeoutMs === undefined
         ? undefined
@@ -2728,6 +3180,7 @@ export class Db {
       throw new Error("Cannot disconnect a Db that is shutting down.");
     }
 
+    this.offlineRequested = true;
     await this.connection.disconnect();
   }
 
@@ -2742,6 +3195,7 @@ export class Db {
       throw new Error("Cannot reconnect a Db that is shutting down.");
     }
 
+    this.offlineRequested = false;
     await this.connection.reconnect();
   }
 
@@ -2758,11 +3212,13 @@ export class Db {
    * @internal
    */
   onActiveQuerySubscriptionsChange(listener: ActiveQuerySubscriptionTraceListener): () => void {
-    this.activeQuerySubscriptionTraceListeners.add(listener);
-    listener(this.getActiveQuerySubscriptions());
-    return () => {
-      this.activeQuerySubscriptionTraceListeners.delete(listener);
-    };
+    return this.registerMovable((db) => {
+      db.activeQuerySubscriptionTraceListeners.add(listener);
+      listener(db.getActiveQuerySubscriptions());
+      return () => {
+        db.activeQuerySubscriptionTraceListeners.delete(listener);
+      };
+    });
   }
 
   /**
@@ -3086,8 +3542,34 @@ export class Db {
               context?.attribution,
             );
       };
-      if (missing.length === 0)
-        return submit(table._columnTransforms ? transformInputColumns(table, data, { id }) : data);
+      if (missing.length === 0) {
+        const record = table._columnTransforms ? transformInputColumns(table, data, { id }) : data;
+        if (operation !== "Update") return submit(record);
+        try {
+          return submit(record);
+        } catch (error) {
+          // An update stages against the row's current cells. When this
+          // replica has not loaded the row yet (a fresh process, another
+          // instance), read it through the caller's session and stage again;
+          // later writes wait behind this one, so their order holds.
+          if (nativeCoreErrorCode(error) !== "not_observed") throw error;
+          // The read's row count is not the answer: this replica may filter
+          // out a row it now holds, lacking the rows that grant the session
+          // access, and only the authority decides whether the session may
+          // write it. Stage again whatever came back.
+          return loadRow(client, table, id, context?.readSession, normalized?.branch).then(() => {
+            try {
+              return submit(record);
+            } catch (retryError) {
+              // Still not held: the server sent no row, so it does not exist
+              // or the session may not read it, and the two are refused alike,
+              // with the denial's code, as the authority answers.
+              if (nativeCoreErrorCode(retryError) !== "not_observed") throw retryError;
+              throw unreadableTargetError("Update", table._table);
+            }
+          });
+        }
+      }
       const transaction = client.beginTransaction(
         "mergeable",
         context?.writeSession,
@@ -3155,21 +3637,21 @@ export class Db {
     table: TableProxy<T, Init>,
     id: string,
     data: Partial<Init>,
-    options?: UpdateOptions,
+    options?: UpdateEditOptions<Partial<Init>>,
   ): WriteHandle;
   update(
     table: TableProxy<any, any, any, any, any>,
     id: string,
     data: Record<string, unknown>,
-    options?: UpdateOptions & { applyDiffs?: object },
+    options?: LoweredUpdateOptions,
   ): WriteHandle {
     assertWritableTable(table);
     const client = this.getClient(table._schema);
-    const descriptors = lowerApplyDiffs(table, data, options?.applyDiffs);
-    rejectIncompleteDependencies(table, data, Object.keys(options?.applyDiffs ?? {}));
+    const { replacements, descriptors } = lowerUpdate(table, data, options);
+    options = withoutEditedFrom(options);
     const context = this.getAccessContext();
     if (descriptors.length > 0) {
-      return this.prepareMutation(table, id, data, "Update", options, (updates) =>
+      return this.prepareMutation(table, id, replacements, "Update", options, (updates) =>
         client.updateLargeValues(
           table._table,
           id,
@@ -3246,7 +3728,11 @@ export class Db {
     return client.requestDeletePermissionAdvice(table._table, id, context?.writeSession);
   }
 
-  private createTransaction<TKind extends TransactionKind>(kind: TKind): Transaction<TKind> {
+  /** @internal Shared construction path; admission remains owned by the transaction. */
+  createTransaction<TKind extends TransactionKind>(
+    kind: TKind,
+    prerequisite?: TransactionAdmission,
+  ): Transaction<TKind> {
     this.assertOpen();
     notifyLocalWrite(this);
     const context = this.getAccessContext();
@@ -3256,22 +3742,12 @@ export class Db {
         "Cannot begin a serializable transaction before the JazzClient has been created. Run a query or mutation first.",
       );
     }
-    const prerequisite = transactionAdmission.get(this);
-    if (prerequisite && ownerClient) {
-      const transaction = withTransactionAdmission(
-        ownerClient,
-        prerequisite,
-        () => new Transaction(kind, (schema) => this.getClient(schema), context, ownerClient),
-      );
-      // Owner preparation can postpone opening beyond the synchronous admission scope.
-      transactionAdmission.set(transaction, prerequisite);
-      return transaction;
-    }
-    return new Transaction(
+    return Transaction.createWithAdmission(
       kind,
       (schema) => this.getClient(schema),
       context,
       ownerClient ?? undefined,
+      prerequisite,
     );
   }
 
@@ -3353,6 +3829,29 @@ export class Db {
   }
 
   /**
+   * Move this app from the thin client to the local-first one, loading it with
+   * `loader` (for example `() => import("jazz-tools/local-first")`). Under a
+   * Jazz provider the provider swaps in the local-first `Db` once it holds the
+   * app's live queries, and this resolves then. A local-first `Db` resolves at
+   * once. (A thin `Db` opened directly, outside a session, upgrades with
+   * `upgradeToLocalFirst(thin, open)` from `jazz-tools/thin`, which returns
+   * the new `Db` for the app to swap in itself.)
+   */
+  async upgradeToLocalFirst(loader: LocalFirstLoader): Promise<void> {
+    await upgradeDbToLocalFirst(this, loader);
+  }
+
+  /**
+   * Whether this `Db` reads and writes through a local store: true for a
+   * local-first `Db`, and for a thin one once its session has upgraded it
+   * (the same `Db` carries on), false for a thin one before. To wait for the
+   * upgrade, `await db.upgradeToLocalFirst(loader)`.
+   */
+  isLocalFirst(): boolean {
+    return !isThinDb(this);
+  }
+
+  /**
    * Delete browser IndexedDB storage for this Db's active namespace.
    */
   async deleteClientStorage(): Promise<void> {
@@ -3381,7 +3880,15 @@ export class Db {
    * @returns Array of typed objects matching the query
    */
   async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
-    return this.allInternal(query, lowerPublicDbQueryOptions(options));
+    try {
+      return await this.allInternal(query, lowerPublicDbQueryOptions(options));
+    } catch (error) {
+      // Begun before this Db handed over to a successor, and ended by that
+      // (its own runtime closing): the successor answers it. Any other
+      // error is the read's own answer.
+      if (this.successor && isRuntimeClosed(error)) return this.current().all(query, options);
+      throw error;
+    }
   }
 
   private async allInternal<T>(
@@ -3394,7 +3901,11 @@ export class Db {
     // A newly attached browser-worker follower learns the namespace-wide
     // connection state during its init handshake. The core read gate needs
     // that state before it decides whether the first load may wait.
-    const mayWaitForServer = (options?.firstLoadRemoteWaitMs ?? 0) > 0;
+    const mayWaitForServer =
+      resolveEffectiveQueryExecutionOptions(this.config, {
+        tier: options?.tier,
+        firstLoadRemoteWaitMs: options?.firstLoadRemoteWaitMs,
+      }).firstLoadRemoteWaitMs !== undefined;
     const initialOfflineState = mayWaitForServer
       ? this.connection.initialExplicitOfflineState()
       : null;
@@ -3507,8 +4018,51 @@ export class Db {
     options?: InternalDbQueryOptions,
     session?: Session,
   ): SubscriptionHandle {
+    if (this.replaced) throw this.replaced;
     const { onDelta, onError } =
       typeof callbacks === "function" ? { onDelta: callbacks, onError: undefined } : callbacks;
+    let ready: Promise<void> | undefined;
+    let first = true;
+    const stop = this.registerMovable((db) => {
+      // On the successor the query starts over: its opening result replaces
+      // what the subscriber has, rows the upgrade already read in included.
+      let opening = !first;
+      first = false;
+      const handle = db.subscribeDeltaHere(
+        query,
+        {
+          onDelta: (delta) => {
+            if (opening) {
+              opening = false;
+              onDelta({
+                delta: delta.delta,
+                all: delta.all ?? [],
+                reset: true,
+              });
+              return;
+            }
+            onDelta(delta);
+          },
+          ...(onError === undefined ? {} : { onError }),
+        },
+        options,
+        session,
+      );
+      ready ??= handle.ready;
+      return handle;
+    });
+    const handle = (() => stop()) as SubscriptionHandle;
+    if (ready) Object.defineProperty(handle, "ready", { value: ready });
+    return handle;
+  }
+
+  private subscribeDeltaHere<T extends { id: string }>(
+    query: QueryBuilder<T>,
+    callbacks: DbDeltaSubscriptionCallbacks<T>,
+    options?: InternalDbQueryOptions,
+    session?: Session,
+  ): SubscriptionHandle {
+    const { onDelta, onError } = callbacks;
     // Constructing a browser follower starts its init handshake. Do that before
     // asking whether this is a newly attaching peer.
     const client = this.getClient(query._schema);
@@ -3586,6 +4140,7 @@ export class Db {
         subscription.predecessor = null;
       }
       readyAbort.abort();
+      this.liveSubscriptionEnders.delete(endLive);
       this.unregisterActiveQuerySubscriptionTrace(traceId);
       manager.clear();
       notifyTerminalError(terminalError);
@@ -3741,6 +4296,7 @@ export class Db {
     const unsubscribe = () => {
       if (unsubscribed) return;
       unsubscribed = true;
+      this.liveSubscriptionEnders.delete(endLive);
       deliveryReady = false;
       bufferedDeltas.length = 0;
       readyAbort.abort();
@@ -3781,6 +4337,10 @@ export class Db {
     // and public Db.subscribe callers are not required to consume it.
     if (ready) void ready.catch(() => undefined);
     const initialSubscription = createSubscriptionGeneration();
+    const endLive = (error: Error) => {
+      if (activeSubscription !== null) terminalizeSubscription(activeSubscription, error);
+    };
+    this.liveSubscriptionEnders.add(endLive);
     // The native maintained stream owns both the opening snapshot and later
     // changes. Do not fabricate an empty opening or race it with a one-shot
     // cache read: that snapshot may be older than deltas already delivered.
@@ -3802,6 +4362,190 @@ export class Db {
     const handle = unsubscribe as SubscriptionHandle;
     if (ready) Object.defineProperty(handle, "ready", { value: ready });
     return handle;
+  }
+
+  /**
+   * @internal The session that owned this Db replaced it. Its live queries
+   * end with a {@link DbReplacedError} naming the fix, and its reads, writes
+   * and listeners throw it, so code that kept the handle fails loudly instead
+   * of going silent.
+   */
+  markReplaced(reason: DbReplacedReason): void {
+    this.successor?.markReplaced(reason);
+    if (this.replaced) return;
+    const error = new DbReplacedError(reason);
+    this.replaced = error;
+    for (const end of Array.from(this.liveSubscriptionEnders)) end(error);
+    this.liveSubscriptionEnders.clear();
+  }
+
+  /**
+   * @internal The session upgraded this Db to `next`, the local-first Db of
+   * the same account. This Db becomes a handle on `next`: its live queries
+   * and listeners move there (each query's first result there replaces what
+   * it had, so nothing goes back to loading), and its reads and writes go
+   * there from now on. Only its own runtime stays behind, for the session to
+   * shut down once its writes are uploaded.
+   */
+  adoptSuccessor(next: Db): void {
+    if (this.successor) throw new Error("This Db already has a successor");
+    const own = this.currentRuntime();
+    this.successor = next;
+    // A read still waiting for this runtime's server (the server is down)
+    // asks `next` instead: only the drain below waits for that server.
+    own?.endUnsentReads?.();
+    // Upload what this runtime still holds, then stop it. Until then its
+    // writes count in the sync status and in waitForSync.
+    let draining = true;
+    const drainListeners = new Set<() => void>();
+    const drained = this.shutdown({ waitForSync: true }).finally(() => {
+      draining = false;
+      for (const listener of Array.from(drainListeners)) listener();
+    });
+    void drained.catch(() => {});
+    this.drain = {
+      done: drained,
+      abort: () => {
+        if (draining) this.abortGracefulShutdown();
+      },
+    };
+    let combined: SyncStatus | null = null;
+    const syncStatus = (): SyncStatus => {
+      const ahead = next.getSyncStatus();
+      if (!draining) return ahead;
+      const own = Db.prototype.getSyncStatus.call(this);
+      const status: SyncStatus = {
+        link: ahead.link,
+        pendingUploads: ahead.pendingUploads + own.pendingUploads,
+        oldestPendingAt:
+          ahead.oldestPendingAt === null || own.oldestPendingAt === null
+            ? (ahead.oldestPendingAt ?? own.oldestPendingAt)
+            : Math.min(ahead.oldestPendingAt, own.oldestPendingAt),
+        rejected: ahead.rejected + own.rejected,
+        lastError:
+          own.lastError && (!ahead.lastError || own.lastError.at > ahead.lastError.at)
+            ? own.lastError
+            : ahead.lastError,
+        synced: ahead.synced && own.pendingUploads === 0,
+      };
+      if (combined && sameSyncStatus(status, combined)) return combined;
+      return (combined = status);
+    };
+    const overrides: Record<string, (...args: never[]) => unknown> = {
+      getSyncStatus: syncStatus,
+      syncStatusChangeRegistration: (listener: (status: SyncStatus) => void) => {
+        let published = syncStatus();
+        const publish = () => {
+          const status = syncStatus();
+          if (status === published) return;
+          published = status;
+          listener(status);
+        };
+        const stopAhead = next.onSyncStatusChange(publish);
+        const stopOwn = draining ? this.onSyncStatusChangeHere(publish) : () => {};
+        drainListeners.add(publish);
+        return () => {
+          stopAhead();
+          stopOwn();
+          drainListeners.delete(publish);
+        };
+      },
+      waitForSync: async (options: { timeoutMs?: number; signal?: AbortSignal } = {}) => {
+        await Promise.all([
+          next.waitForSync(options),
+          draining ? this.waitForOwnSync(options, drained) : undefined,
+        ]);
+      },
+      // The app's offline toggle covers both runtimes while the thin one
+      // still uploads.
+      disconnect: async () => {
+        await Promise.all([next.disconnect(), draining ? this.connection.disconnect() : undefined]);
+      },
+      reconnect: async () => {
+        await Promise.all([next.reconnect(), draining ? this.connection.reconnect() : undefined]);
+      },
+    };
+    for (const name of FORWARDED_TO_SUCCESSOR) {
+      Object.defineProperty(this, name, {
+        configurable: true,
+        value:
+          overrides[name] ??
+          ((...args: unknown[]) =>
+            (next as unknown as Record<string, (...a: unknown[]) => unknown>)[name]!(...args)),
+      });
+    }
+    Object.defineProperty(this, "syncStatusChangeRegistration", {
+      configurable: true,
+      value: overrides.syncStatusChangeRegistration,
+    });
+    // An app that took the thin Db offline keeps the local-first one offline.
+    // The last toggle the app asked for counts, even while it is in flight.
+    if (this.offlineRequested ?? this.connection.isExplicitlyOffline())
+      void next.disconnect().catch(() => {});
+    // Rejections this Db reported before anyone listened go to the listeners
+    // on the successor (already logged here as unhandled).
+    for (const event of this.pendingMutationErrorEvents.splice(0))
+      next.handleMutationError(event, true);
+    for (const entry of Array.from(this.movable)) entry.move(next);
+    this.movable.clear();
+  }
+
+  /**
+   * Wait for this Db's own runtime's writes, as {@link waitForSync} does
+   * (rejecting with the server's error for a rejected one), while it drains
+   * after the upgrade. The drain ending is the wait ending.
+   */
+  private async waitForOwnSync(
+    options: { timeoutMs?: number; signal?: AbortSignal },
+    drained: Promise<void>,
+  ): Promise<void> {
+    const { timeoutMs, signal } = options;
+    validateWriteWaitTimeout(timeoutMs);
+    signal?.throwIfAborted();
+    const control = new AbortController();
+    const forward = () => control.abort(signal!.reason);
+    signal?.addEventListener("abort", forward, { once: true });
+    const timer =
+      timeoutMs === undefined
+        ? undefined
+        : setTimeout(
+            () => control.abort(new WriteWaitTimeoutError("global", timeoutMs)),
+            timeoutMs,
+          );
+    try {
+      // The thin runtime's writes are answered (a rejection fails the wait),
+      // or its drain ends: then it has nothing left to wait for.
+      await Promise.race([this.connection.waitForSync(control.signal), drained]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      signal?.removeEventListener("abort", forward);
+    }
+  }
+
+  /** The app's last {@link disconnect} (true) or {@link reconnect} (false). */
+  private offlineRequested: boolean | undefined;
+
+  /** Set once this Db adopted a successor: its own runtime's last uploads. */
+  private drain: { done: Promise<void>; abort(): void } | null = null;
+
+  /**
+   * @internal Stop this Db's own runtime after the upgrade. With
+   * `waitForSync`, its writes upload first, the way a local-first client's
+   * do when it shuts down; without, they are dropped, as when a thin client
+   * closes.
+   */
+  async stopOwnRuntime(options: ShutdownOptions = {}): Promise<void> {
+    const drain = this.drain;
+    if (!drain) return this.shutdown(options);
+    if (!options.waitForSync) drain.abort();
+    await drain.done.catch(() => {});
+    // An aborted or failed drain leaves the runtime open: stop it now.
+    await Db.prototype.shutdown.call(this);
+  }
+
+  /** @internal The Db that does this one's work now: itself, or its successor. */
+  current(): Db {
+    return this.successor?.current() ?? this;
   }
 
   /**
@@ -3830,6 +4574,7 @@ export class Db {
   }
 
   protected assertOpen(): void {
+    if (this.replaced) throw this.replaced;
     if (this.shutdownPromise) {
       throw new Error("Cannot operate on a Db that is shutting down or closed.");
     }
@@ -4154,7 +4899,7 @@ async function openDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
 
     if (!config.jwtToken) {
       const jwtToken = runtimeSource.mintLocalFirstToken(
-        createRuntimeTokenOptions(secret, config.appId, 3600),
+        createRuntimeTokenOptions(secret, clientScope(config), 3600),
       );
       const trustedReservedSession = internalSessionFromVerifiedReservedJwtPayload(
         parseJwtPayload(jwtToken) ?? {},
@@ -4163,21 +4908,13 @@ async function openDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
       resolvedConfig = { ...configWithoutAuth, jwtToken };
       setTrustedReservedSession(resolvedConfig, trustedReservedSession);
     }
-  } else if (
-    !config.jwtToken &&
-    !config.cookieSession &&
-    !config.adminSecret &&
-    !isRetainedAccountSessionInput({
-      ...config,
-      trustedReservedSession: getTrustedReservedSession(config),
-    })
-  ) {
+  } else if (!config.jwtToken && !config.cookieSession && !config.adminSecret) {
     // Anonymous: mint an ephemeral keypair + anonymous JWT.
     // Admin-secret clients intentionally stay sessionless so local policy
     // evaluation does not preempt backend-authorized transport writes.
     const ephemeralSeed = generateEphemeralSeedBase64Url();
     const jwtToken = runtimeSource.mintAnonymousToken(
-      createRuntimeTokenOptions(ephemeralSeed, config.appId, 3600),
+      createRuntimeTokenOptions(ephemeralSeed, clientScope(config), 3600),
     );
     const trustedReservedSession = internalSessionFromVerifiedReservedJwtPayload(
       parseJwtPayload(jwtToken) ?? {},
@@ -4223,7 +4960,7 @@ async function openDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
 export function assertNoClientBackendSecret(config: object): void {
   if (Object.hasOwn(config, "backendSecret")) {
     throw new Error(
-      "DbConfig does not accept backendSecret. Use createJazzContext() from jazz-tools/backend on a trusted server instead.",
+      "DbConfig does not accept backendSecret. Run Jazz in your backend with createJazz() from jazz-tools/backend instead.",
     );
   }
 }
@@ -4247,4 +4984,11 @@ export function holdCredentialRenewal(db: object): () => void {
     released = true;
     credentialRenewers.set(db, (credentialRenewers.get(db) ?? 1) - 1);
   };
+}
+
+/** `error` says the runtime closed, also when a connection wrapped it as its cause. */
+function isRuntimeClosed(error: unknown): boolean {
+  for (let current = error; current instanceof Error; current = current.cause)
+    if (current instanceof RuntimeClosedError) return true;
+  return false;
 }

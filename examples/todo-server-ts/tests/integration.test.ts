@@ -1,20 +1,12 @@
 /**
  * Integration tests for the todo server.
  *
- * These tests start the server programmatically with Fjall-backed storage,
+ * These tests start the server programmatically with SQLite-backed storage,
  * exercise the full HTTP API, and clean up afterwards.
  */
 
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
-import { createAccountManager } from "jazz-tools";
-import {
-  deploy,
-  startLocalJazzServer,
-  startTestJwtIssuer,
-  type LocalJazzServerHandle,
-  type TestJwtIssuerHandle,
-} from "jazz-tools/testing";
-import permissions from "../permissions.js";
+import { startTestJwtIssuer, type TestJwtIssuerHandle } from "jazz-tools/testing";
 import { app } from "../schema.js";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
@@ -38,30 +30,31 @@ type Identity = {
 
 async function createIdentity(
   jwtIssuer: TestJwtIssuerHandle,
-  upstream: LocalJazzServerHandle,
+  baseUrl: string,
   userId: string,
 ): Promise<Identity> {
-  const token = jwtIssuer.jwtForUser(userId, {}, { issuer: EXTERNAL_ISSUER });
+  const token = await jwtIssuer.jwtForUser(userId, {}, { issuer: EXTERNAL_ISSUER });
   const payload = JSON.parse(Buffer.from(token.split(".")[1]!, "base64url").toString("utf8"));
   expect(payload).toMatchObject({ iss: EXTERNAL_ISSUER, sub: userId });
-  let stored: string | null = null;
-  const accounts = await createAccountManager({
-    appId: upstream.appId,
-    serverUrl: upstream.url,
-    env: `todo-server-integration-${crypto.randomUUID()}`,
-    store: {
-      async read() {
-        return stored;
-      },
-      async update(transform) {
-        stored = transform(stored);
-      },
-    },
+  // Signing in returns the account Jazz made for the identity.
+  const response = await fetch(`${baseUrl}/sign-in`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
   });
-  const account = await accounts.registerJWT(token);
-  return { token, userId, user: account.id };
+  expect(response.status).toBe(200);
+  const { account } = (await response.json()) as { account: string };
+  return { token, userId, user: account };
 }
 let primaryIdentity: Identity;
+
+/** Sign `identity` in on a server with its own store: Jazz has no account for them there yet. */
+async function signIn(baseUrl: string, identity = primaryIdentity): Promise<void> {
+  const response = await fetch(`${baseUrl}/sign-in`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${identity.token}` },
+  });
+  expect(response.status).toBe(200);
+}
 let jwtIssuer: TestJwtIssuerHandle;
 
 function authenticatedFetch(
@@ -93,23 +86,9 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
 describe("Todo Server Integration", () => {
   let server: RunningServer;
   let baseUrl: string;
-  let upstream: LocalJazzServerHandle;
 
   beforeAll(async () => {
     jwtIssuer = await startTestJwtIssuer();
-    upstream = await startLocalJazzServer({
-      jwksUrl: jwtIssuer.jwksUrl,
-      jwtIssuer: EXTERNAL_ISSUER,
-      jwtAudience: jwtIssuer.audience,
-    });
-    await deploy({
-      serverUrl: upstream.url,
-      appId: upstream.appId,
-      adminSecret: upstream.adminSecret,
-      schema: app,
-      permissions,
-    });
-    primaryIdentity = await createIdentity(jwtIssuer, upstream, "todo-rest-integration");
     // Create an isolated persistent server for the CRUD suite.
     const todoServer = await createServer(
       {
@@ -122,6 +101,7 @@ describe("Todo Server Integration", () => {
     // Start on random available port
     server = await startServer(todoServer, 0);
     baseUrl = server.baseUrl;
+    primaryIdentity = await createIdentity(jwtIssuer, baseUrl, "todo-rest-integration");
   });
 
   afterAll(async () => {
@@ -129,17 +109,10 @@ describe("Todo Server Integration", () => {
       await stopServer(server);
     }
     await jwtIssuer?.stop();
-    await upstream?.stop();
   });
 
   function jazzOptions() {
-    return {
-      jwksUrl: jwtIssuer.jwksUrl,
-      appId: upstream.appId,
-      serverUrl: upstream.url,
-      backendSecret: upstream.backendSecret,
-      adminSecret: upstream.adminSecret,
-    };
+    return { jwksUrl: jwtIssuer.jwksUrl, jwtIssuer: EXTERNAL_ISSUER };
   }
 
   describe("Health Check", () => {
@@ -259,8 +232,8 @@ describe("Todo Server Integration", () => {
 
   describe("Policy-Aware Requests", () => {
     it("filters rows by the authenticated session owner", async () => {
-      const alice = await createIdentity(jwtIssuer, upstream, "todo-rest-policy-alice");
-      const bob = await createIdentity(jwtIssuer, upstream, "todo-rest-policy-bob");
+      const alice = await createIdentity(jwtIssuer, baseUrl, "todo-rest-policy-alice");
+      const bob = await createIdentity(jwtIssuer, baseUrl, "todo-rest-policy-bob");
       const aliceTitle = `Alice private ${Date.now()}`;
       const bobTitle = `Bob private ${Date.now()}`;
 
@@ -321,7 +294,7 @@ describe("Todo Server Integration", () => {
 
   describe("Persistence / Cold Start", () => {
     it("survives a server restart", async () => {
-      // Use a shared data path so both server instances see the same Fjall file
+      // Use a shared data path so both server instances see the same database
       const dataDir = mkdtempSync(join(tmpdir(), "jazz-cold-start-"));
       const dbPath = join(dataDir, "jazz.db");
 
@@ -330,6 +303,7 @@ describe("Todo Server Integration", () => {
         await createServer({ type: "persistent", dataPath: dbPath }, jazzOptions()),
         0,
       );
+      await signIn(server1.baseUrl);
 
       const createRes1 = await authenticatedFetch(`${server1.baseUrl}/todos`, {
         method: "POST",
@@ -347,8 +321,6 @@ describe("Todo Server Integration", () => {
       expect(createRes2.status).toBe(201);
       const todo2: Todo = await createRes2.json();
 
-      // Flush to disk and shut down
-      server1.flush();
       await stopServer(server1);
 
       // --- Second boot: same data path, fresh server ---
@@ -380,8 +352,7 @@ describe("Todo Server Integration", () => {
       await stopServer(server2);
     });
 
-    // The 256 revision receipt intentionally authenticates every HTTP write
-    // through the remote account registry before proving cold-restart state.
+    // The 256 revisions each authenticate an HTTP write before the restart.
     // Keep its timeout scoped: ordinary routes retain the suite's 60s bound.
     it("returns the current value after dense update history and a restart", async () => {
       const dataDir = mkdtempSync(join(tmpdir(), "jazz-dense-history-"));
@@ -390,6 +361,7 @@ describe("Todo Server Integration", () => {
         await createServer({ type: "persistent", dataPath: dbPath }, jazzOptions()),
         0,
       );
+      await signIn(server1.baseUrl);
 
       let todoId: string | undefined;
       try {
@@ -409,7 +381,6 @@ describe("Todo Server Integration", () => {
           });
           expect(update.status).toBe(200);
         }
-        server1.flush();
       } finally {
         await stopServer(server1);
       }
@@ -447,11 +418,8 @@ describe("Todo Server Integration", () => {
       const sseBaseUrl = sseServer.baseUrl;
       let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
       try {
-        // The suite shares one deployed upstream, so use an identity that has
-        // no earlier todos rather than assuming a fresh local server implies a
-        // fresh remote account view.
-        const sseIdentity = await createIdentity(jwtIssuer, upstream, "todo-rest-sse-primary");
-        const otherIdentity = await createIdentity(jwtIssuer, upstream, "todo-rest-sse-other");
+        const sseIdentity = await createIdentity(jwtIssuer, sseBaseUrl, "todo-rest-sse-primary");
+        const otherIdentity = await createIdentity(jwtIssuer, sseBaseUrl, "todo-rest-sse-other");
         const foreignCreate = await authenticatedFetch(
           `${sseBaseUrl}/todos`,
           {
@@ -595,6 +563,7 @@ describe("Todo Server Integration", () => {
     it("gracefully closes active SSE connections during shutdown", async () => {
       const sseServer = await startServer(await createServer({ type: "memory" }, jazzOptions()), 0);
       const sseBaseUrl = sseServer.baseUrl;
+      await signIn(sseBaseUrl);
       let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
       let shutdown: Promise<void> | undefined;
       let succeeded = false;

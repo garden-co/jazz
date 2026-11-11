@@ -33,6 +33,7 @@ mod tools {
 pub mod binding_args;
 pub mod binding_codec;
 pub mod binding_host;
+pub mod catalogue;
 pub mod chunk_store;
 pub mod compile;
 pub mod db;
@@ -48,7 +49,6 @@ pub mod options;
 pub mod slow;
 #[cfg(feature = "sql-trace")]
 mod sql_trace;
-pub(crate) mod text_merge;
 pub mod values;
 
 #[cfg(feature = "testing")]

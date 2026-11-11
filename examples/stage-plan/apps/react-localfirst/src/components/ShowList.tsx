@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useAll, useDb } from "jazz-tools/react";
+import { useAll } from "jazz-tools/react";
 import { Badge } from "@astryxdesign/core/Badge";
 import { Button } from "@astryxdesign/core/Button";
 import { ClickableCard } from "@astryxdesign/core/ClickableCard";
@@ -18,11 +18,10 @@ import { Page } from "./Page.js";
 import { ShowDialog } from "./ShowDialog.js";
 
 export function ShowList() {
-  const db = useDb();
   const me = useMe();
   const [isCreating, setCreating] = useState(false);
   // Read permissions only return shows you crew on, so this is "my shows".
-  const { data: shows } = useAll(
+  const { data: shows, db } = useAll(
     app.shows.orderBy("date", "asc").include({ tasks: app.tasks.select("status") }),
   );
 

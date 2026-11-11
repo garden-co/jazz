@@ -5,9 +5,12 @@ import { createDb } from "../runtime/default-create-db.js";
 import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
 import { Jazz, JazzError } from "./index.js";
 
-const app = s.defineApp({
-  todos: s.table({ title: s.string(), done: s.boolean() }, {}),
-});
+const app = s.defineApp(
+  {
+    todos: s.table({ title: s.string(), done: s.boolean() }, {}),
+  },
+  { migrations: "none" },
+);
 
 class Oops extends Data.TaggedError("Oops")<{}> {}
 
@@ -307,7 +310,14 @@ describe("Jazz Effect service", { timeout: 30_000 }, () => {
     );
 
     expect([...result]).toEqual([
-      { link: { state: "local-only" }, pendingUploads: 0, synced: true },
+      {
+        link: { state: "local-only" },
+        pendingUploads: 0,
+        oldestPendingAt: null,
+        rejected: 0,
+        lastError: null,
+        synced: true,
+      },
     ]);
   });
 });

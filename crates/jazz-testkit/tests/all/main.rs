@@ -56,6 +56,8 @@ mod local_first_auth_integration;
 mod local_first_server_wait;
 #[path = "../merged_redelivery.rs"]
 mod merged_redelivery;
+#[path = "../migrated_table_after_restart.rs"]
+mod migrated_table_after_restart;
 #[path = "../mixed_generation_history.rs"]
 mod mixed_generation_history;
 #[path = "../native_account_admission.rs"]
@@ -88,6 +90,8 @@ mod schema_migration_policies;
 mod scope_revocation;
 #[path = "../server_subscriptions.rs"]
 mod server_subscriptions;
+#[path = "../split_messages.rs"]
+mod split_messages;
 #[path = "../subscription_initial_hydration.rs"]
 mod subscription_initial_hydration;
 #[path = "../subscription_lifecycle.rs"]

@@ -20,7 +20,7 @@ use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 
 use common::{compile_schema, read_and_allow_all_writes, session_eq};
 
-const ME: [&str; 3] = ["user", "identity", "subject"];
+const ME: [&str; 2] = ["identity", "subject"];
 
 fn schema() -> JazzSchema {
     compile_schema(
@@ -122,7 +122,7 @@ fn a_synced_aggregate_reads_only_the_rows_its_reader_may_read() {
     let client = open(1, user(1));
     let (client_side, server_side) = duplex();
     let _upstream = block_on(client.connect_upstream(client_side));
-    server.accept_subscriber(server_side, user(1));
+    server.accept_subscriber(server_side, user(1)).unwrap();
 
     let query = Query::from("metrics")
         .filter(eq(col("kind"), lit("cpu")))

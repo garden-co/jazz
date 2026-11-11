@@ -18,19 +18,22 @@ import {
   waitForQuery,
   withTimeout,
 } from "./support.js";
-import { getJazzServerInfo } from "./testing-server.js";
+import { getJazzServerInfo, startJazzApp } from "./testing-server.js";
 
-const app = s.defineApp({
-  values: s.table(
-    {
-      name: s.string(),
-      text: s.string().optional(),
-      bytes: s.bytes().optional(),
-      control: s.boolean(),
-    },
-    {},
-  ),
-});
+const app = s.defineApp(
+  {
+    values: s.table(
+      {
+        name: s.string(),
+        text: s.string().optional(),
+        bytes: s.bytes().optional(),
+        control: s.boolean(),
+      },
+      {},
+    ),
+  },
+  { migrations: "none" },
+);
 
 const permissions = s.definePermissions(app, ({ policy }) => [
   policy.values.allowRead.always(),
@@ -43,25 +46,28 @@ const permissions = s.definePermissions(app, ({ policy }) => [
 // automatic 64 KiB promotion boundary during one user transaction which also
 // authors a referenced project. It is distinct from the streaming receipts
 // below, which each create one row in their own transaction.
-const transactionApp = s.defineApp({
-  projects: s.table(
-    {
-      name: s.string(),
-    },
-    { documentsViaProject: s.reverse("documents", "project") },
-  ),
-  documents: s
-    .table(
+const transactionApp = s.defineApp(
+  {
+    projects: s.table(
       {
-        branch: s.string(),
-        title: s.string(),
-        projectId: s.uuid(),
-        body: s.string(),
+        name: s.string(),
       },
-      { project: s.rel("projects", "projectId") },
-    )
-    .branchBy("branch"),
-});
+      { documentsViaProject: s.reverse("documents", "project") },
+    ),
+    documents: s
+      .table(
+        {
+          branch: s.string(),
+          title: s.string(),
+          projectId: s.uuid(),
+          body: s.string(),
+        },
+        { project: s.rel("projects", "projectId") },
+      )
+      .branchBy("branch"),
+  },
+  { migrations: "none" },
+);
 
 const transactionPermissions = s.definePermissions(transactionApp, ({ policy }) => [
   policy.projects.allowRead.always(),
@@ -87,18 +93,19 @@ describe("browser persistent-worker large-value relay", () => {
   ///
   /// writer tab -> persistent SharedWorker -> server -> reader tab
   it("syncs streamed text and bytes without poisoning the relay", async () => {
-    const server = await withTimeout(
+    const core = await withTimeout(
       getJazzServerInfo(uniqueDbName("large-value-worker-relay")),
       10_000,
       "test server did not become available",
     );
     await deploy({
-      appId: server.appId,
-      serverUrl: server.serverUrl,
-      adminSecret: server.adminSecret,
+      appId: core.appId,
+      serverUrl: core.serverUrl,
+      adminSecret: core.adminSecret,
       schema: app.wasmSchema,
       permissions,
     });
+    const server = await startJazzApp(core, { schema: app.wasmSchema, permissions });
 
     const secret = generateAuthSecret();
     const writer = await withTimeout(
@@ -186,15 +193,19 @@ describe("browser persistent-worker large-value relay", () => {
    * tab transaction(project + large document) -> SharedWorker -> server
    */
   it("settles an ordinary multi-row transaction with an automatic large value", async () => {
-    const server = await withTimeout(
+    const core = await withTimeout(
       getJazzServerInfo(uniqueDbName("large-value-transaction-relay")),
       10_000,
       "test server did not become available",
     );
     await deploy({
-      appId: server.appId,
-      serverUrl: server.serverUrl,
-      adminSecret: server.adminSecret,
+      appId: core.appId,
+      serverUrl: core.serverUrl,
+      adminSecret: core.adminSecret,
+      schema: transactionApp.wasmSchema,
+      permissions: transactionPermissions,
+    });
+    const server = await startJazzApp(core, {
       schema: transactionApp.wasmSchema,
       permissions: transactionPermissions,
     });

@@ -1,4 +1,5 @@
 import { schema as s } from "jazz-tools";
+import { migrations } from "./migrations";
 
 /**
  * StagePlan: a crew preparing shows.
@@ -87,7 +88,9 @@ const schema = {
       title: s.string(),
       status: s.enum(...TASK_STATUSES),
       assigneeId: s.uuid().optional(),
-      notes: s.string().optional(),
+      // Concurrent edits to a task's notes merge instead of the last one
+      // winning.
+      notes: s.string().optional().merge("text"),
       /** Sort key inside a column. Lower values come first. */
       rank: s.float(),
     },
@@ -135,7 +138,7 @@ const schema = {
 };
 
 type AppSchema = s.Schema<typeof schema>;
-export const app: s.App<AppSchema> = s.defineApp(schema);
+export const app: s.App<AppSchema> = s.defineApp(schema, { migrations });
 
 export type Crew = s.RowOf<typeof app.crew>;
 export type Show = s.RowOf<typeof app.shows>;

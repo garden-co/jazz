@@ -19,7 +19,9 @@ pub use account_session::{
 };
 mod node_lease;
 mod relay;
+mod text_anchors;
 pub use relay::*;
+pub use text_anchors::jazz_native_relay_text_anchors;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::c_void;
@@ -163,7 +165,14 @@ struct PendingPrivateSession {
 struct PrivateRelaySocketSession {
     server_url: String,
     app_id: String,
+    /// What the socket presents: a local-first account's own token, or, for
+    /// a user signed in through the app's backend, the app's own bearer.
     bearer: String,
+    /// Set for a user signed in through the app's backend: the session the
+    /// socket states, which the backend checks against who `bearer` is. The
+    /// bearer then rides the upgrade's `Authorization` header to the app's
+    /// backend, never the prelude a core reads.
+    backend_session: Option<serde_json::Value>,
 }
 
 /// JSON-shaped form accepted only by the platform-owned admission C entry
@@ -517,6 +526,10 @@ pub enum ForegroundDbCommandRequest {
     /// verdict (append-only: an older native build answers it with an error
     /// and the host reports none).
     PendingUploadCount,
+    /// The foreground's uploads: pending, since when, and what the server
+    /// refused since it opened (append-only: an older native build answers
+    /// it with an error and the host falls back to `PendingUploadCount`).
+    UploadStatus,
 }
 
 /// One refusal of a scope's credential by its upstream. Every refusal gets a
@@ -716,6 +729,12 @@ pub enum ForegroundDbCommandResponse {
     /// Answer to [`ForegroundDbCommandRequest::PendingUploadCount`].
     PendingUploadCount {
         count: u64,
+    },
+    /// Answer to [`ForegroundDbCommandRequest::UploadStatus`]: the core's
+    /// upload status as JSON (`{ pending, oldestPendingAt, rejected,
+    /// lastRejection }`).
+    UploadStatus {
+        status_json: String,
     },
 }
 
@@ -1056,7 +1075,7 @@ impl NativeRelayHost {
             let mut bytes = [0_u8; 16];
             getrandom::fill(&mut bytes)
                 .map_err(|error| relay_status(RelayError::Entropy(error.to_string())))?;
-            match pool.acquire_fresh(NodeUuid::from_bytes(bytes)) {
+            match pool.acquire_fresh(NodeUuid::random_from(bytes)) {
                 Ok(lease) => return Ok(lease),
                 // CSPRNG collision against a live, reusable, or retired node
                 // is vanishingly unlikely, but never turn one into a lease
@@ -1163,10 +1182,20 @@ impl NativeRelayHost {
                 app_id: AppId::from_string(&session.app_id)
                     .unwrap_or_else(|_| AppId::from_name(&session.app_id)),
                 peer_identity,
-                auth: AuthConfig {
-                    jwt_token: Some(session.bearer),
-                    ..AuthConfig::default()
+                auth: match &session.backend_session {
+                    Some(stated) => AuthConfig {
+                        backend_session: Some(stated.clone()),
+                        ..AuthConfig::default()
+                    },
+                    None => AuthConfig {
+                        jwt_token: Some(session.bearer.clone()),
+                        ..AuthConfig::default()
+                    },
                 },
+                authorization: session
+                    .backend_session
+                    .is_some()
+                    .then(|| format!("Bearer {}", session.bearer)),
                 on_event: Arc::new(move |event| {
                     link_for_event
                         .lock()
@@ -1945,7 +1974,7 @@ impl NativeRelayHost {
         RelayScope::from(scope.clone())
             .validate()
             .map_err(relay_status)?;
-        let digest = blake3::hash(
+        let digest = jazz::sha256::hash(
             format!(
                 "{}\0{}\0{}",
                 scope.app_namespace, scope.storage_namespace, canonical_subject
@@ -1966,13 +1995,14 @@ impl NativeRelayHost {
                 scope,
                 sqlite_path,
                 identity: DbIdentity {
-                    node: NodeUuid::from_bytes(node),
+                    node: NodeUuid::random_from(node),
                     author,
                 },
                 socket: Some(PrivateRelaySocketSession {
                     server_url: request.server_url,
                     app_id: request.app_id,
                     bearer: request.jwt,
+                    backend_session: None,
                 }),
             },
         );
@@ -2198,7 +2228,7 @@ fn fresh_client_identity(author: jazz::ids::AuthorSubject) -> Result<DbIdentity,
     let mut node = [0_u8; 16];
     getrandom::fill(&mut node).map_err(|error| RelayError::Entropy(error.to_string()))?;
     Ok(DbIdentity {
-        node: jazz::ids::NodeUuid::from_bytes(node),
+        node: jazz::ids::NodeUuid::random_from(node),
         author,
     })
 }

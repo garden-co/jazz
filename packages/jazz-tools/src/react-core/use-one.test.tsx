@@ -30,6 +30,9 @@ function makeHarness() {
     getSyncStatus: () => ({
       link: { state: "local-only" as const },
       pendingUploads: 0,
+      oldestPendingAt: null,
+      rejected: 0,
+      lastError: null,
       synced: true,
     }),
     onSyncStatusChange: () => () => {},
@@ -72,6 +75,7 @@ describe("react-core/useOne", () => {
     );
 
     expect(container.textContent).toBe("loading");
+    expect(result.db).toBe(harness.client.db);
     expect(JSON.parse(harness.getSubscribedQuery()!._build()).limit).toBe(1);
 
     act(() => harness.emit([]));
@@ -80,6 +84,7 @@ describe("react-core/useOne", () => {
 
     act(() => harness.emit([{ id: "1", title: "first" }]));
     expect(result.data).toEqual({ id: "1", title: "first" });
+    expect(result.db).toBe(harness.client.db);
     expect(container.textContent).toBe("first");
 
     act(() => harness.emit([]));

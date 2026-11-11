@@ -5,7 +5,7 @@ const address = "bandchat.example.com";
 export default {
   id: "band-chat",
   summary:
-    "A guest asks to join a room and the creator admits them; the room and its history appear in his list, replies arrive live, and a message he sends with the Wi-Fi off arrives once it's back.",
+    "A guest asks to join a room and the creator admits them; the room, its history and an attached stage plot appear in his list, replies arrive live, and a message he sends with the Wi-Fi off arrives once it's back.",
   devices: {
     a: { name: "Olive's laptop", address },
     b: { name: "Gus's laptop", address, color: "#ea580c" },
@@ -46,6 +46,7 @@ export default {
     { do: "admit", on: "a" },
     // Gus's room list is a live query of the rooms he belongs to.
     { do: "waitForRoom", on: "b", args: ["Rehearsal", "Soundcheck moved to 7"] },
+    { do: "waitForAttachment", on: "b", args: ["stage-plot.png"] },
     {
       caption:
         "Admitted: the room appears in Gus's live room list, history and attachment included",
@@ -56,7 +57,6 @@ export default {
     { see: "I'll bring the spare snare", on: "a" },
     { poster: true },
     { wait: 1600 },
-
     { caption: "Gus's Wi-Fi drops…" },
     { wifi: "off", on: "b" },
     { caption: "…he keeps chatting: the message commits on his laptop" },

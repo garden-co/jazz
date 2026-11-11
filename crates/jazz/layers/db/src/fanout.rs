@@ -13,6 +13,7 @@
 
 use super::*;
 use crate::schema::history::{history_source_table, is_history_table};
+use std::borrow::Cow;
 
 pub(super) type Queue = Rc<RefCell<VecDeque<SubscriptionEvent>>>;
 
@@ -43,6 +44,9 @@ struct GroupKey {
     partial: String,
     /// The columns whose changes updated rows carry as splices.
     splices: Vec<String>,
+    /// The position the result reads as of: results of different upstream
+    /// reads settle apart.
+    position: String,
 }
 
 struct Member {
@@ -87,11 +91,30 @@ pub(super) struct Group {
     awaiting: bool,
     /// Whether the opening was published.
     opened: bool,
+    /// Under a branch view, per branched stored table, the branch keys it
+    /// reads (its head, and its live base): a change on any other key of
+    /// that table cannot move the result.
+    branches: HashMap<String, Vec<Vec<u8>>>,
+    /// Under a branch view over a base (live or frozen), what the head
+    /// rows of each branched table it reads mask (see [`ViewMask`]).
+    masks: Vec<ViewMask>,
+    /// The stored tables the query reads: a cut is taken only while the
+    /// store holds others' versions of them past the result's position.
+    tables: BTreeSet<String>,
+    /// The cut the last run read through (see [`Inner::visible_read`]):
+    /// its position and the own commits past it, or `None` for the
+    /// current state.
+    applied: Option<(sync::Pos, usize)>,
 }
 
 type SortKey = Vec<(Sql, bool)>;
 
 impl Group {
+    /// Under a branch view over a base: what its head rows mask.
+    pub(super) fn masks(&self) -> &[ViewMask] {
+        &self.masks
+    }
+
     /// Whether the last run waits on large-value chunks still to arrive.
     pub(super) fn awaiting(&self) -> bool {
         self.awaiting
@@ -145,6 +168,19 @@ fn canon(value: &Sql) -> String {
 
 fn canon_value(value: &Value) -> Option<String> {
     to_sql(value).ok().flatten().map(|sql| canon(&sql))
+}
+
+/// A value's canonical form ([`canon_value`]) as column `column` stores it:
+/// an enum variant's name as its tag where it has one, so it matches the
+/// cells of a changed row's image.
+fn stored_canon(column: Option<&crate::values::Column>, value: String) -> String {
+    let Some(tags) = column.and_then(|column| column.tags.as_ref()) else {
+        return value;
+    };
+    let tags = tags.borrow();
+    tags.iter()
+        .find(|(_, name)| canon(&Sql::Text(name.as_bytes().to_vec())) == value)
+        .map_or(value, |(tag, _)| canon(&Sql::Integer(tag)))
 }
 
 impl Fanout {
@@ -286,6 +322,7 @@ impl Inner {
             relations: format!("{:?}", prepared.query.array_subqueries),
             partial: format!("{:?}", compiled.partial),
             splices: read.splices.clone(),
+            position: format!("{:?}", read.position),
         };
         let now = settled.get();
         let member = |queue: &Queue| Member {
@@ -324,15 +361,23 @@ impl Inner {
             self.fan.stats.shared_joins += 1;
             return Ok((queue, Rc::downgrade(&handle)));
         }
-        // A replica missing chunks the result needs opens it once they arrive.
-        let (rows, awaiting) = match self
-            .execute(&compiled, &prepared.query.table)
-            .and_then(|rows| self.nest_relations(prepared, identity, &read, rows))
-        {
-            Ok(rows) => (rows, false),
-            Err(error) if crate::large::is_missing(&error) => (Vec::new(), true),
-            Err(error) => return Err(error),
+        // A replica missing chunks the result needs opens it once they
+        // arrive. Its cut is decided over its relations' tables too.
+        let tables = self.with_relation_tables(prepared, &compiled.tables)?;
+        let visible = self.visible_read(&read, &tables);
+        let applied = cut_of(&visible);
+        let run = match &visible {
+            Cow::Borrowed(_) => self.execute(&compiled, &prepared.query.table),
+            Cow::Owned(visible) => self
+                .compile(prepared, identity, visible)
+                .and_then(|compiled| self.execute(&compiled, &prepared.query.table)),
         };
+        let (rows, awaiting) =
+            match run.and_then(|rows| self.nest_relations(prepared, identity, &visible, rows)) {
+                Ok(rows) => (rows, false),
+                Err(error) if crate::large::is_missing(&error) => (Vec::new(), true),
+                Err(error) => return Err(error),
+            };
         let watches = self.watches(prepared, identity, &read, &compiled)?;
         let root = prepared
             .schema
@@ -343,6 +388,19 @@ impl Inner {
             )?
             .to_owned();
         let recheck = recheckable(&prepared.query, &root, &read, &compiled);
+        let branches = view_branches(
+            prepared.schema.as_ref().unwrap_or(&self.owner),
+            &read,
+            &watches,
+        );
+        let masks = view_masks(
+            prepared.schema.as_ref().unwrap_or(&self.owner),
+            prepared,
+            &read,
+            watches
+                .iter()
+                .map(|(Watch::Table(table) | Watch::Key(table, ..))| table),
+        );
         let projected = order_projected(&prepared.query, &compiled);
         let includes = self.output_only_includes(prepared, identity, &read, &compiled)?;
         let queue: Queue = Rc::new(RefCell::new(if awaiting {
@@ -369,6 +427,10 @@ impl Inner {
             includes,
             awaiting,
             opened: !awaiting,
+            branches,
+            masks,
+            tables,
+            applied,
         }));
         self.read_keys(&mut handle.borrow_mut());
         let weak = Rc::downgrade(&handle);
@@ -404,7 +466,7 @@ impl Inner {
             let target = schema.stored_table(target)?;
             if target != root.stored
                 && !others.contains(target)
-                && compiled.projection.iter().any(|(name, _)| name == column)
+                && compiled.projection.iter().any(|(name, ..)| name == column)
             {
                 out.push((target.to_owned(), column.to_owned()));
             }
@@ -421,10 +483,19 @@ impl Inner {
         prepared: &PreparedQuery,
         identity: Option<AuthorSubject>,
     ) -> Result<BTreeSet<String>, Error> {
-        let read = ReadSpec::default();
-        let (compiled, _) = self.compile_tracked(prepared, identity, &read)?;
+        self.read_dependencies_in(prepared, identity, &ReadSpec::default())
+    }
+
+    /// [`Self::read_dependencies`] of a read in `read`'s view.
+    pub(super) fn read_dependencies_in(
+        &self,
+        prepared: &PreparedQuery,
+        identity: Option<AuthorSubject>,
+        read: &ReadSpec,
+    ) -> Result<BTreeSet<String>, Error> {
+        let (compiled, _) = self.compile_tracked(prepared, identity, read)?;
         let mut tables = compiled.tables.clone();
-        for watch in self.watches(prepared, identity, &read, &compiled)? {
+        for watch in self.watches(prepared, identity, read, &compiled)? {
             match watch {
                 Watch::Table(table) | Watch::Key(table, ..) => {
                     tables.insert(table);
@@ -432,10 +503,14 @@ impl Inner {
             }
         }
         if let Some(author) = identity {
+            let policies = prepared
+                .schema
+                .as_ref()
+                .map_or(&*self.owner, |schema| schema.policy_schema());
             for table in tables.clone() {
                 // Internal tables (history, branches) carry no policy.
-                if self.owner.by_stored(&table).is_some() {
-                    tables.extend(self.read_policy_tables(&table, author)?);
+                if policies.by_stored(&table).is_some() {
+                    tables.extend(self.read_policy_tables(policies, &table, author)?);
                 }
             }
         }
@@ -452,6 +527,7 @@ impl Inner {
         let compiled = self
             .read_ctx(prepared, policy.as_ref(), &claims, read)
             .compile_query(&prepared.query, read.include_deleted)?;
+        self.refuse_latest_only_cut(&compiled, read)?;
         let used = claims.used.get() || policy.as_ref().is_some_and(|p| p.used.get());
         Ok((compiled, used))
     }
@@ -553,11 +629,10 @@ impl Inner {
                 let governing = policies.by_stored(&root.stored)?;
                 // As for a query key: only an application column is in a
                 // changed row's image (`$createdBy.account` is not).
-                governing
-                    .columns
-                    .iter()
-                    .any(|c| c.name == column)
-                    .then(|| (governing.stored_name(&column).to_owned(), value))
+                governing.columns.iter().any(|c| c.name == column).then(|| {
+                    let value = stored_canon(governing.column(&column), value);
+                    (governing.stored_name(&column).to_owned(), value)
+                })
             });
         let mut watches = Vec::new();
         let root_key = if structural.contains(&root.stored) {
@@ -568,7 +643,10 @@ impl Inner {
                 // a key on anything else (`$createdBy.identity.subject`,
                 // `id`) would never be hit.
                 .filter(|(column, _)| root.columns.iter().any(|c| c.name == *column))
-                .map(|(column, value)| (root.stored_name(&column).to_owned(), value))
+                .map(|(column, value)| {
+                    let value = stored_canon(root.column(&column), value);
+                    (root.stored_name(&column).to_owned(), value)
+                })
                 .or(policy_root_key)
         }
         .filter(|(column, _)| keyable(&root.stored, column));
@@ -606,12 +684,19 @@ impl Inner {
         // Per woken group: include targets that changed, as (root column, id).
         let mut targets: BTreeMap<u64, BTreeSet<(String, RowUuid)>> = BTreeMap::new();
         let groups = &self.fan.groups;
-        let mut wake = |gids: &BTreeSet<u64>, table: &str, row: RowUuid| {
+        let mut wake = |gids: &BTreeSet<u64>, table: &str, row: RowUuid, key: &[u8]| {
             for gid in gids {
                 let Some(group) = groups.get(gid) else {
                     continue;
                 };
                 let group = group.borrow();
+                if group
+                    .branches
+                    .get(table)
+                    .is_some_and(|keys| !keys.iter().any(|k| k == key))
+                {
+                    continue;
+                }
                 let root = group.root == table;
                 let entry = woken.entry(*gid).or_insert_with(|| Some(BTreeSet::new()));
                 let columns: Vec<&String> = group
@@ -635,7 +720,7 @@ impl Inner {
         };
         for (table, row, key) in &changes {
             if let Some(groups) = self.fan.tables.get(table) {
-                wake(groups, table, *row);
+                wake(groups, table, *row, key);
             }
             let Some(columns) = self.fan.key_columns.get(table) else {
                 continue;
@@ -643,7 +728,7 @@ impl Inner {
             for image in self.images(table, *row, key, columns) {
                 for (column, value) in image {
                     if let Some(groups) = self.fan.keys.get(&(table.clone(), column, value)) {
-                        wake(groups, table, *row);
+                        wake(groups, table, *row, key);
                     }
                 }
             }
@@ -651,7 +736,7 @@ impl Inner {
         for image in std::mem::take(&mut *self.gone.borrow_mut()) {
             let row = RowUuid::from_bytes(image.id);
             if let Some(groups) = self.fan.tables.get(&image.table) {
-                wake(groups, &image.table, row);
+                wake(groups, &image.table, row, &image.key);
             }
             let Some(columns) = self.fan.key_columns.get(&image.table) else {
                 continue;
@@ -664,7 +749,7 @@ impl Inner {
                         canon(&Sql::from(cell)),
                     ))
                 {
-                    wake(groups, &image.table, row);
+                    wake(groups, &image.table, row, &image.key);
                 }
             }
         }
@@ -724,12 +809,13 @@ impl Inner {
             .collect();
         for (gid, group) in groups {
             let mut group = group.borrow_mut();
-            // A schema the current one governs (a sync session's) takes the
-            // policies of whichever schema is current now.
+            // A sync session's schema is renamed for the new version and
+            // keeps whoever governs it: its bundle's policies when it is
+            // pinned to one, else whichever schema is current now.
             if reset
                 && let Some(pinned) = &group.prepared.schema
-                && pinned.policies_from.is_some()
-                && let Some(governed) = self.governed(pinned.jazz.version_id())
+                && let Some(policies) = &pinned.policies_from
+                && let Some(governed) = self.regoverned(pinned.jazz.version_id(), policies)
             {
                 group.prepared.schema = Some(governed);
             }
@@ -768,19 +854,24 @@ impl Inner {
             let Ok(mut statement) = self.conn.prepare_cached(&sql) else {
                 return Vec::new();
             };
-            let names: Vec<String> = statement
-                .column_names()
-                .iter()
-                .map(|s| (*s).to_owned())
-                .collect();
+            // Names from the first row: a cached `SELECT *` prepared before
+            // its table gained a column names the old columns until a step
+            // re-prepares it.
+            let mut names: Vec<String> = Vec::new();
             let rows = statement.query_map(params, |r| {
-                let mut seq = 0;
+                if names.is_empty() {
+                    let statement = r.as_ref();
+                    names = (0..statement.column_count())
+                        .map(|i| statement.column_name(i).map(str::to_owned))
+                        .collect::<Result<_, _>>()?;
+                }
+                let mut seq = 0i64;
                 let mut branch = Vec::new();
                 let mut out = Vec::new();
                 for (i, name) in names.iter().enumerate() {
-                    if name == "_seq" {
+                    if name == "_clock" {
                         seq = r.get(i)?;
-                    } else if name == "_b" {
+                    } else if name == "_branch" {
                         branch = r.get(i)?;
                     } else if columns.contains(name) {
                         out.push((name.clone(), canon(&r.get::<_, Sql>(i)?)));
@@ -802,8 +893,10 @@ impl Inner {
             .map_or(i64::MAX, |(seq, _, _)| *seq);
         let old = read(
             format!(
-                "SELECT * FROM {} WHERE id = ?1 AND _b = ?2 AND _seq < ?3 ORDER BY _seq DESC LIMIT 1",
-                quote(&format!("{table}__h"))
+                "SELECT * FROM {} WHERE id = ?1 AND _branch = ?2 AND _clock < ?3 \
+                 AND (_state & {}) = 0 ORDER BY _clock DESC LIMIT 1",
+                quote(&format!("{table}__h")),
+                crate::values::STATE_AS_SENT
             ),
             &[&id, &key, &seq],
         );
@@ -849,7 +942,14 @@ impl Inner {
         ));
         prepared.query.order_by.clear();
         prepared.query.limit = None;
-        let narrowed = match self.compile(&prepared, group.identity, &group.read) {
+        // Under a cut, a row changed past it still reads as it was. The
+        // other rows were read through the cut the last run applied: under
+        // another, only a full run (which records it) keeps them one state.
+        let read = self.visible_read(&group.read, &group.tables);
+        if cut_of(&read) != group.applied {
+            return None;
+        }
+        let narrowed = match self.compile(&prepared, group.identity, &read) {
             Ok(compiled) => compiled,
             Err(error) => return Some(Err(error)),
         };
@@ -1014,7 +1114,12 @@ impl Inner {
             Some(crate::query::OrderDirection::Desc)
         );
         let id_key = |row: &CurrentRow| (Sql::Blob(row.id.0.as_bytes().to_vec()), tie_desc);
+        let schema = group.prepared.schema.as_ref().unwrap_or(&self.owner);
         if projected {
+            // Cells sort as the compiled ORDER BY sorts them: an enum
+            // variant by its tag, or its rank in a schema whose declaration
+            // order is not tag order.
+            let root = schema.tables.get(&group.prepared.query.table)?;
             let mut keys = Vec::with_capacity(rows.len());
             for row in rows {
                 let mut key = Vec::with_capacity(order.len() + 1);
@@ -1030,9 +1135,23 @@ impl Inner {
                             .as_ref()
                         {
                             None => Sql::Null,
-                            Some(value) => match self.logical_key(to_sql(value).ok()??, None) {
-                                Ok(value) => value,
-                                Err(error) => return Some(Err(error)),
+                            // A value over the inline threshold sorts by its
+                            // chunked cell, which the row does not carry.
+                            Some(value) => match root
+                                .column(&by.column)
+                                .map_or_else(|| to_sql(value), |column| column.order_cell(value))
+                                .ok()??
+                            {
+                                Sql::Text(bytes) | Sql::Blob(bytes)
+                                    if bytes.len()
+                                        > root.column(&by.column).map_or(
+                                            jazz_types::large_values::INLINE_VALUE_MAX_BYTES,
+                                            crate::large::inline_max,
+                                        ) =>
+                                {
+                                    return None;
+                                }
+                                value => value,
                             },
                         }
                     };
@@ -1049,7 +1168,6 @@ impl Inner {
         if rows.is_empty() {
             return Some(Ok(Vec::new()));
         }
-        let schema = group.prepared.schema.as_ref().unwrap_or(&self.owner);
         let table = schema.tables.get(&group.prepared.query.table)?;
         // By id alone a branched table's row is ambiguous.
         if !table.branch_by.is_empty() {
@@ -1058,7 +1176,13 @@ impl Inner {
         let mut columns = String::new();
         for by in order {
             match crate::compile::column_sql(table, "t", &by.column) {
-                Ok(sql) => columns.push_str(&format!(", {sql}")),
+                Ok(sql) => {
+                    let sql = table
+                        .column(&by.column)
+                        .and_then(|column| column.rank_sql(&sql))
+                        .unwrap_or(sql);
+                    columns.push_str(&format!(", {sql}"));
+                }
                 Err(error) => return Some(Err(error)),
             }
         }
@@ -1083,53 +1207,24 @@ impl Inner {
             Err(error) => return Some(Err(storage(error))),
         };
         let mut keys = Vec::with_capacity(rows.len());
-        // Reads on past missing chunks, so one round trip asks for them all.
-        let mut blocked = false;
         for row in rows {
             let values = found.remove(row.id.0.as_bytes().as_slice())?;
-            let mut key: SortKey = Vec::with_capacity(order.len() + 1);
-            for (value, by) in values.into_iter().zip(order) {
-                let kind = table
-                    .column(&by.column)
-                    .filter(|column| crate::large::large_capable(column))
-                    .map(crate::large::kind);
-                let value = match self.logical_key(value, kind) {
-                    Ok(value) => value,
-                    Err(error) if crate::large::is_missing(&error) => {
-                        blocked = true;
-                        Sql::Null
-                    }
-                    Err(error) => return Some(Err(error)),
-                };
-                key.push((
-                    value,
-                    matches!(by.direction, crate::query::OrderDirection::Desc),
-                ));
-            }
+            // Stored cells order as the compiled ORDER BY orders them: a
+            // chunked cell by itself (SPEC 19.5).
+            let mut key: SortKey = values
+                .into_iter()
+                .zip(order)
+                .map(|(value, by)| {
+                    (
+                        value,
+                        matches!(by.direction, crate::query::OrderDirection::Desc),
+                    )
+                })
+                .collect();
             key.push(id_key(row));
             keys.push(key);
         }
-        if blocked {
-            return Some(Err(crate::large::missing()));
-        }
         Some(Ok(keys))
-    }
-
-    /// A sort-key cell as its logical value, so keys compare as the values
-    /// do: a chunked cell of a large-capable column of `kind` is read whole.
-    fn logical_key(
-        &self,
-        value: Sql,
-        kind: Option<jazz_types::large_values::LargeValueKind>,
-    ) -> Result<Sql, Error> {
-        Ok(match (value, kind) {
-            (Sql::Integer(cell), Some(kind)) => crate::large::inline_cell(
-                kind,
-                self.chunks
-                    .materialize(rusqlite::types::ValueRef::Integer(cell))?,
-            ),
-            (value, _) => value,
-        })
     }
 
     /// Re-run every result that waited for large-value chunks.
@@ -1148,9 +1243,28 @@ impl Inner {
     }
 
     /// A group's rows, with array relations nested in their cells.
-    fn group_rows(&self, group: &Group) -> Result<Vec<CurrentRow>, Error> {
-        let rows = self.run(&group.prepared, group.identity, &group.read)?;
-        self.nest_relations(&group.prepared, group.identity, &group.read, rows)
+    fn group_rows(&self, group: &mut Group) -> Result<Vec<CurrentRow>, Error> {
+        let read = self.visible_read(&group.read, &group.tables);
+        group.applied = cut_of(&read);
+        let rows = self.run(&group.prepared, group.identity, &read)?;
+        self.nest_relations(&group.prepared, group.identity, &read, rows)
+    }
+
+    /// Re-run the live results whose cut moved: their read's settle rose,
+    /// the connection's position did, or an own commit was accepted past
+    /// them.
+    pub(super) fn refresh_visibility(&mut self) -> Result<(), Error> {
+        let groups: Vec<Rc<RefCell<Group>>> = self.fan.groups.values().cloned().collect();
+        for group in groups {
+            let mut group = group.borrow_mut();
+            if group.read.position == Position::Current
+                || cut_of(&self.visible_read(&group.read, &group.tables)) == group.applied
+            {
+                continue;
+            }
+            self.refresh_group(&mut group, None);
+        }
+        Ok(())
     }
 
     fn reset_group(&self, group: &mut Group) {
@@ -1189,6 +1303,8 @@ impl Inner {
                 self.read_keys(group);
             }
             Err(error) => group.push(SubscriptionEvent::Rejected {
+                code: error.code,
+                message: error.message.clone(),
                 reason: error.to_string(),
             }),
         }
@@ -1238,8 +1354,15 @@ impl Inner {
             let Some(before) = prior.get(&out.row.id) else {
                 continue;
             };
-            let from = before.seq;
-            if from == out.row.seq {
+            // Two writers' pending versions can share a position.
+            let rank = |row: &CurrentRow| {
+                (
+                    row.seq,
+                    row.writer.as_deref().and_then(sync::writer_of_bytes),
+                )
+            };
+            let (from, to) = (rank(before), rank(&out.row));
+            if from == to {
                 continue;
             }
             for column in &group.key.splices {
@@ -1262,12 +1385,20 @@ impl Inner {
                     }
                     continue;
                 }
+                // Read access is by the group's own policies: a pinned
+                // session's bundle, not the current schema.
+                let policies = group
+                    .prepared
+                    .schema
+                    .as_ref()
+                    .map_or(&*self.owner, |schema| schema.policy_schema());
                 if let Ok(splices) = self.value_delta(
                     &group.prepared.query.table,
                     out.row.id,
                     column,
-                    (from, out.row.seq),
+                    (from, to),
                     group.identity,
+                    policies,
                 ) {
                     out.splices.push((column.clone(), splices));
                 }
@@ -1295,6 +1426,8 @@ impl Inner {
                 Some(Err(error)) if crate::large::is_missing(&error) => {}
                 Some(Err(error)) => {
                     group.push(SubscriptionEvent::Rejected {
+                        code: error.code,
+                        message: error.message.clone(),
                         reason: error.to_string(),
                     });
                     return false;
@@ -1310,6 +1443,8 @@ impl Inner {
             }
             Err(error) => {
                 let event = SubscriptionEvent::Rejected {
+                    code: error.code,
+                    message: error.message.clone(),
                     reason: error.to_string(),
                 };
                 group.push(event);
@@ -1412,6 +1547,120 @@ fn recheckable(query: &Query, root: &str, read: &ReadSpec, compiled: &Compiled) 
         && compiled.sql.matches(&quote(root)).count() == 1
 }
 
+/// The branch keys a branch-view group reads, per branched table it
+/// watches: its head's, and its base's unless the base is frozen (a cut
+/// state no later change reaches). Tables a selector cannot key are left
+/// out, so every change to them wakes the group.
+fn view_branches(
+    schema: &Schema,
+    read: &ReadSpec,
+    watches: &[Watch],
+) -> HashMap<String, Vec<Vec<u8>>> {
+    let mut out = HashMap::new();
+    let Some(view) = &read.view else {
+        return out;
+    };
+    for watch in watches {
+        let (Watch::Table(table) | Watch::Key(table, ..)) = watch;
+        let Some(t) = schema.by_stored(table).filter(|t| !t.branch_by.is_empty()) else {
+            continue;
+        };
+        let mut keys = vec![];
+        let live_base = view.base.as_ref().filter(|_| view.base_cut.is_none());
+        for selector in std::iter::once(&view.head).chain(live_base) {
+            match t.selector_key(selector) {
+                Ok(key) => keys.push(key),
+                Err(_) => {
+                    keys.clear();
+                    break;
+                }
+            }
+        }
+        if !keys.is_empty() {
+            out.insert(table.clone(), keys);
+        }
+    }
+    out
+}
+
+/// What a branch view over a base masks on a replica that reads it over
+/// the base rows it holds: a base row of a branched table it reads shows
+/// there unless the replica holds the head's row of it too (a tombstone, or
+/// a version the query leaves out), which the view's own result need not
+/// ship (ch. 8 §8.4). Only base rows the reader may see through the view
+/// need one: of the root table, those the query matches; of a table it
+/// reads besides (relations, joins, policies), those the reader may read.
+#[derive(Clone)]
+pub(crate) struct ViewMask {
+    pub table: String,
+    pub head: Vec<u8>,
+    pub base: Vec<u8>,
+    /// The root table's: the query without its window, read on the base
+    /// alone (as of a frozen base's cut).
+    pub base_query: Option<PreparedQuery>,
+    pub base_read: ReadSpec,
+}
+
+/// The [`ViewMask`]s of a read of `prepared` in `read` over the stored
+/// `tables` it reads, if it is a branch view over a base.
+pub(crate) fn view_masks<'t>(
+    schema: &Schema,
+    prepared: &PreparedQuery,
+    read: &ReadSpec,
+    tables: impl IntoIterator<Item = &'t String>,
+) -> Vec<ViewMask> {
+    let Some(view) = read.view.as_ref() else {
+        return Vec::new();
+    };
+    let Some(base) = view.base.as_ref() else {
+        return Vec::new();
+    };
+    let query = &prepared.query;
+    let root: Option<String> = history_source_table(&query.table)
+        .is_none()
+        .then(|| schema.stored_table(&query.table).ok().map(str::to_owned))
+        .flatten();
+    let base_read = ReadSpec {
+        position: Position::Current,
+        include_deleted: read.include_deleted,
+        settled_only: read.settled_only,
+        view: Some(View {
+            head: base.clone(),
+            base: None,
+            base_cut: None,
+        }),
+        cut: view.base_cut.clone(),
+        splices: Vec::new(),
+    };
+    let mut out: Vec<ViewMask> = Vec::new();
+    let tables: Vec<String> = tables.into_iter().cloned().chain(root.clone()).collect();
+    for table in tables.iter().map(String::as_str) {
+        if out.iter().any(|mask| mask.table == table) {
+            continue;
+        }
+        let Some(branched) = schema.by_stored(table).filter(|t| !t.branch_by.is_empty()) else {
+            continue;
+        };
+        let (Ok(head), Ok(base)) = (
+            branched.selector_key(&view.head),
+            branched.selector_key(base),
+        ) else {
+            continue;
+        };
+        if head == base {
+            continue;
+        }
+        out.push(ViewMask {
+            table: table.to_owned(),
+            head,
+            base,
+            base_query: (root.as_deref() == Some(table)).then(|| prepared.unwindowed()),
+            base_read: base_read.clone(),
+        });
+    }
+    out
+}
+
 /// Whether every order column of a query is among its shown columns.
 fn order_projected(query: &Query, compiled: &Compiled) -> bool {
     query.order_by.iter().all(|key| {
@@ -1419,7 +1668,7 @@ fn order_projected(query: &Query, compiled: &Compiled) -> bool {
             || compiled
                 .projection
                 .iter()
-                .any(|(name, _)| *name == key.column)
+                .any(|(name, ..)| *name == key.column)
     })
 }
 
@@ -1476,7 +1725,7 @@ pub(super) fn opening(rows: &[CurrentRow]) -> SubscriptionEvent {
 /// joined rows, and a union read's arm (the occurrence).
 type RowKey = (
     RowUuid,
-    u64,
+    crate::db::Pos,
     Arc<[crate::values::JoinedRow]>,
     Option<Arc<str>>,
 );
@@ -1485,7 +1734,7 @@ fn row_key(row: &CurrentRow) -> RowKey {
     let version = if is_history_table(&row.table) {
         row.seq
     } else {
-        0
+        crate::db::Pos::default()
     };
     (row.id, version, row.joined.clone(), row.union_arm.clone())
 }
@@ -1522,7 +1771,7 @@ fn page_splices(old: &Value, new: &Value) -> Option<Vec<crate::db::LargeValueDel
 }
 
 fn new_version(prior: &CurrentRow, row: &CurrentRow) -> bool {
-    prior.seq != row.seq && !(prior.seq >= crate::db::LOCAL_BASE && row.seq < crate::db::LOCAL_BASE)
+    prior.seq != row.seq && (prior.seq.accepted() || !row.seq.accepted())
 }
 
 fn diff(before: &[CurrentRow], after: &[CurrentRow]) -> Option<SubscriptionEvent> {
@@ -1742,7 +1991,10 @@ pub(super) fn stored_pins(
     pins.into_iter()
         .filter_map(|(table, pin)| {
             let table = schema.table(&table).ok()?;
-            let pin = pin.map(|(column, value)| (table.stored_name(&column).to_owned(), value));
+            let pin = pin.map(|(column, value)| {
+                let value = stored_canon(table.column(&column), value);
+                (table.stored_name(&column).to_owned(), value)
+            });
             Some((table.stored.clone(), pin))
         })
         .collect()
@@ -1765,4 +2017,12 @@ fn row_pin(policy: &PolicyExpr, session: &Session) -> Option<(String, String)> {
         PolicyExpr::And(list) => list.iter().find_map(|p| row_pin(p, session)),
         _ => None,
     }
+}
+
+/// The cut a run read through, as [`Group::applied`] keeps it.
+fn cut_of(read: &ReadSpec) -> Option<(sync::Pos, usize)> {
+    (read.position != Position::Current)
+        .then_some(read.cut.as_ref())
+        .flatten()
+        .map(|cut| (cut.seq, cut.extra.len()))
 }

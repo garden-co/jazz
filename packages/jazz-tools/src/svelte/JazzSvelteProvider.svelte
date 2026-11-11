@@ -8,15 +8,15 @@ serialises shutdown before starting a replacement.
 	import type { AccountDbConfig as DbConfig } from '../accounts/context.js';
 	import { serializeClientConfig } from '../runtime/client-config-key.js';
 	import JazzSvelteClientProvider from './JazzSvelteClientProvider.svelte';
-	import { createJazzClient, type JazzClient } from './create-jazz-client.js';
+	import { openJazzClient, type JazzClient } from './create-jazz-client.js';
 	import { assertNoClassicProviderProps } from '../classic-api.js';
+	import { refuseAutoAttachDevTools, type NoAutoAttachDevTools } from '../runtime/removed-provider-props.js';
 	import { toError } from '../runtime/util.js';
 
-	interface Props {
+	interface Props extends NoAutoAttachDevTools {
 		config: DbConfig;
 		children: import('svelte').Snippet<[{ db: Db }]>;
 		fallback?: import('svelte').Snippet;
-		autoAttachDevTools?: boolean;
 	}
 
 	type ConfigSnapshot =
@@ -70,9 +70,10 @@ serialises shutdown before starting a replacement.
 		return captured;
 	}
 
-	let { config, children, fallback, autoAttachDevTools = true, ...otherProps }: Props = $props();
+	let { config, children, fallback, ...otherProps }: Props = $props();
 
 	function validateClassicProps() {
+		refuseAutoAttachDevTools('JazzSvelteProvider', otherProps);
 		assertNoClassicProviderProps('JazzSvelteProvider', otherProps);
 	}
 
@@ -135,7 +136,7 @@ serialises shutdown before starting a replacement.
 				}
 
 				validateClassicProps();
-				const createdClient = await createJazzClient(nextConfig);
+				const createdClient = await openJazzClient(nextConfig);
 				if (cancelled) {
 					await createdClient.shutdown();
 					return;
@@ -170,7 +171,7 @@ serialises shutdown before starting a replacement.
 	<!-- Re-throw so an error boundary can catch it -->
 	{(() => { throw error; })()}
 {:else if client}
-	<JazzSvelteClientProvider {client} {fallback} {autoAttachDevTools}>
+	<JazzSvelteClientProvider {client} {fallback}>
 		{#snippet children({ db })}
 			{@render children({ db })}
 		{/snippet}

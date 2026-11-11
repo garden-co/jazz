@@ -30,13 +30,15 @@ use tower_http::trace::TraceLayer;
 use crate::server::{MAX_CATALOGUE_REQUEST_BODY_BYTES, ServerState};
 
 use http::{
-    admin_subscription_introspection_handler, deploy_handler, health_handler,
-    internal_shutdown_handler, migration_graph_handler, permissions_handler, schema_handler,
+    admin_subscription_introspection_handler, health_handler, internal_shutdown_handler,
+    migration_graph_handler, publish_bundle_handler, published_bundles_handler, schema_handler,
     schema_hashes_handler,
 };
 use utils::parse_app_id_param;
 pub(crate) use websocket::WebSocketAdmissionState;
 use websocket::ws_handler;
+#[cfg(feature = "embedded-server")]
+pub(crate) use websocket::{Handshake, handle_ws_connection};
 
 async fn app_id_gate(
     State(state): State<Arc<ServerState>>,
@@ -85,26 +87,28 @@ async fn app_shutdown_gate(
 
 pub fn create_router(state: Arc<ServerState>) -> Router {
     let admin_routes = Router::new()
-        .route("/deploy", post(deploy_handler))
+        .route(
+            "/bundles",
+            post(publish_bundle_handler).get(published_bundles_handler),
+        )
         .route("/accounts/resolve", post(accounts::resolve_for_admin))
-        .route("/permissions", get(permissions_handler))
+        .route(
+            "/accounts/login-or-register",
+            post(accounts::login_or_register_for_admin),
+        )
+        .route("/accounts/link", post(accounts::link_for_admin))
+        .route(
+            "/accounts/found-local-first",
+            post(accounts::found_local_first_for_admin),
+        )
+        .route("/accounts/revoke", post(accounts::revoke_for_admin))
         .route("/migrations/graph", get(migration_graph_handler))
         .route(
             "/introspection/subscriptions",
             get(admin_subscription_introspection_handler),
         )
         .layer(DefaultBodyLimit::max(MAX_CATALOGUE_REQUEST_BODY_BYTES));
-    let account_routes = Router::new()
-        .route("/register", post(accounts::register))
-        .route("/found-local-first", post(accounts::found_local_first))
-        .route("/revoke", post(accounts::revoke))
-        .route("/login", post(accounts::login))
-        .route("/login-or-register", post(accounts::login_or_register))
-        .route("/links/request", post(accounts::request_link))
-        .route("/links/accept", post(accounts::accept_link))
-        .layer(DefaultBodyLimit::max(64 * 1024));
     let traced_routes = Router::new()
-        .nest("/accounts", account_routes)
         .route("/backend/admit", post(accounts::admit_backend))
         .route("/ws", axum::routing::any(ws_handler))
         .route("/schema/{hash}", get(schema_handler))
@@ -113,6 +117,10 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             app_shutdown_gate,
+        ))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::middleware::workload::workload_gate,
         ))
         .route_layer(middleware::from_fn_with_state(state.clone(), app_id_gate))
         .layer(TraceLayer::new_for_http());
@@ -136,8 +144,7 @@ mod tests {
 
     use jazz::tools::AppId;
     use jazz::tools::public_schema::{
-        ColumnType, PolicyExpr, Schema, SchemaBuilder, SchemaHash, TableName, TablePolicies,
-        TableSchema,
+        ColumnType, Schema, SchemaBuilder, SchemaHash, TableName, TablePolicies, TableSchema,
     };
     use jazz::tools::schema_lens::LensOp;
     use std::time::Duration;
@@ -213,7 +220,6 @@ mod tests {
             backend_secret: None,
             admin_secret: Some("admin-secret".to_string()),
             allow_local_first_auth: true,
-            jwks_url: None,
             ..Default::default()
         }
     }
@@ -226,7 +232,6 @@ mod tests {
             backend_secret: Some(backend_secret.to_string()),
             admin_secret: None,
             allow_local_first_auth: false,
-            jwks_url: None,
             ..Default::default()
         };
 
@@ -312,7 +317,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method(Method::OPTIONS)
-                    .uri(test_app_route("/admin/deploy"))
+                    .uri(test_app_route("/admin/bundles"))
                     .header(header::ORIGIN, "http://localhost:3000")
                     .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
                     .header(header::ACCESS_CONTROL_REQUEST_HEADERS, requested_headers)
@@ -536,7 +541,6 @@ mod tests {
                 backend_secret: None,
                 admin_secret: Some("admin-secret".to_string()),
                 allow_local_first_auth: false,
-                jwks_url: None,
                 ..Default::default()
             })
             .with_storage(StorageBackend::InMemory)
@@ -686,7 +690,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri(test_app_route("/admin/deploy"))
+                    .uri(test_app_route("/admin/bundles"))
                     .header("Content-Type", "application/json")
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::from(
@@ -698,176 +702,6 @@ mod tests {
             .expect("publish obsolete schema shape");
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn chained_permissions_runtime_reconciliation_never_installs_stale_head() {
-        let schema = SchemaBuilder::new()
-            .table(TableSchema::builder("users").column("name", ColumnType::Text))
-            .build();
-        let schema_hash = SchemaHash::compute(&schema);
-        let state = make_state_with_schema(schema).await;
-        let users = TableName::new("users");
-        let permissions = |policy| {
-            let mut table_policies = TablePolicies::default();
-            table_policies.select.using = Some(policy);
-            std::collections::HashMap::from([(users, table_policies)])
-        };
-
-        state
-            .catalogue
-            .publish_permissions_bundle(
-                &state.catalogue_store,
-                schema_hash,
-                permissions(PolicyExpr::True),
-                None,
-            )
-            .expect("persist H1");
-        let h1 = state
-            .catalogue
-            .active_schema_summary(&state.catalogue_store)
-            .expect("read H1")
-            .expect("H1 exists")
-            .bundle_object_id;
-
-        // Freeze H1 after it reads the durable head but before it queues its
-        // runtime install. H2 is then a valid chained publication. Without the
-        // bridge mutex, H2 can install first and H1 resumes last, regressing
-        // the runtime policy despite the durable head remaining H2.
-        let (h1_read_tx, h1_read_rx) = std::sync::mpsc::sync_channel(1);
-        let (resume_h1_tx, resume_h1_rx) = std::sync::mpsc::sync_channel(1);
-        state.set_runtime_catalogue_after_permissions_read_hook_for_test(Box::new(move || {
-            h1_read_tx.send(()).expect("signal H1 durable read");
-            resume_h1_rx.recv().expect("resume H1 bridge");
-        }));
-        let first_state = state.clone();
-        let first_bridge = tokio::spawn(async move {
-            crate::server::runtime_catalogue::publish_runtime_catalogue(&first_state, &[], &[])
-                .await
-        });
-        tokio::task::spawn_blocking(move || h1_read_rx.recv())
-            .await
-            .expect("join H1 read waiter")
-            .expect("observe H1 durable read");
-
-        state
-            .catalogue
-            .publish_permissions_bundle(
-                &state.catalogue_store,
-                schema_hash,
-                permissions(PolicyExpr::False),
-                Some(h1),
-            )
-            .expect("persist H2 after H1");
-        let (h2_read_tx, h2_read_rx) = std::sync::mpsc::sync_channel(1);
-        state.set_runtime_catalogue_after_permissions_read_hook_for_test(Box::new(move || {
-            h2_read_tx.send(()).expect("signal H2 durable read");
-        }));
-        let (second_started_tx, second_started_rx) = std::sync::mpsc::sync_channel(1);
-        let (start_second_tx, start_second_rx) = std::sync::mpsc::sync_channel(1);
-        state.set_runtime_catalogue_before_publication_hook_for_test(Box::new(move || {
-            second_started_tx
-                .send(())
-                .expect("signal H2 bridge attempt");
-            start_second_rx.recv().expect("start H2 bridge");
-        }));
-        let second_state = state.clone();
-        let second_bridge = tokio::spawn(async move {
-            crate::server::runtime_catalogue::publish_runtime_catalogue(&second_state, &[], &[])
-                .await
-        });
-
-        tokio::task::spawn_blocking(move || second_started_rx.recv())
-            .await
-            .expect("join H2 bridge waiter")
-            .expect("observe H2 bridge attempt");
-        start_second_tx.send(()).expect("start H2 bridge");
-        assert!(
-            matches!(
-                h2_read_rx.recv_timeout(Duration::from_millis(100)),
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-            ),
-            "H2 must wait for H1's runtime bridge to release publication order"
-        );
-
-        resume_h1_tx.send(()).expect("resume H1 bridge");
-        first_bridge
-            .await
-            .expect("join H1 bridge")
-            .expect("bridge H1");
-        second_bridge
-            .await
-            .expect("join H2 bridge")
-            .expect("bridge H2");
-
-        let current = state
-            .catalogue
-            .active_schema(&state.catalogue_store)
-            .expect("read durable permissions")
-            .expect("durable H2");
-        assert_eq!(current.summary.version, 2);
-        assert_eq!(
-            current
-                .permissions
-                .get(&users)
-                .expect("durable users permissions")
-                .select
-                .using
-                .as_ref(),
-            Some(&PolicyExpr::False)
-        );
-
-        let runtime_snapshot = state
-            .runtime()
-            .expect("runtime shell started")
-            .trusted_catalogue_snapshot_for_test()
-            .await
-            .expect("read runtime catalogue");
-        let active_schema = runtime_snapshot
-            .schemas
-            .iter()
-            .find(|schema| schema.id == runtime_snapshot.current_write_schema.schema)
-            .expect("active runtime schema");
-        assert_eq!(
-            active_schema
-                .schema
-                .public_schema()
-                .get(&users)
-                .expect("runtime users table")
-                .policies
-                .select
-                .using
-                .as_ref(),
-            Some(&PolicyExpr::False),
-            "runtime policy must converge to the durable H2 head"
-        );
-    }
-
-    #[tokio::test]
-    async fn permissions_handler_returns_nulls_before_any_publish() {
-        let schema = SchemaBuilder::new()
-            .table(TableSchema::builder("users").column("name", ColumnType::Text))
-            .build();
-        let state = make_state_with_schema(schema).await;
-        let app = make_test_router(state);
-
-        let response = app
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri(test_app_route("/admin/permissions"))
-                    .header("X-Jazz-Admin-Secret", "admin-secret")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("permissions body");
-        let json: Value = serde_json::from_slice(&body).expect("permissions json");
-        assert!(json["head"].is_null());
-        assert!(json["permissions"].is_null());
     }
 
     async fn read_migration_graph(app: &axum::Router) -> Value {
@@ -915,13 +749,46 @@ mod tests {
         assert_eq!(
             read_migration_graph(&app).await,
             serde_json::json!({
-                "activeSchemaHash": null, "schemas": [], "migrations": []
+                "latestBundleSchemaHash": null, "schemas": [], "migrations": []
             })
         );
     }
 
     #[tokio::test]
-    async fn migration_graph_includes_isolated_schemas_forward_edges_and_active_schema() {
+    async fn published_bundles_require_the_admin_secret() {
+        let state = ServerBuilder::new(AppId::from_name("test-app"))
+            .with_auth_config(test_auth_config())
+            .with_storage(StorageBackend::InMemory)
+            .build()
+            .await
+            .unwrap()
+            .state;
+        let app = make_test_router(state);
+        for secret in [None, Some("wrong-secret"), Some("admin-secret")] {
+            let mut request = axum::http::Request::builder().uri(test_app_route("/admin/bundles"));
+            if let Some(secret) = secret {
+                request = request.header("X-Jazz-Admin-Secret", secret);
+            }
+            let response = app
+                .clone()
+                .oneshot(request.body(axum::body::Body::empty()).unwrap())
+                .await
+                .unwrap();
+            if secret != Some("admin-secret") {
+                assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+                continue;
+            }
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let json: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(json, serde_json::json!({ "bundles": [] }));
+        }
+    }
+
+    #[tokio::test]
+    async fn migration_graph_includes_isolated_schemas_and_forward_edges() {
         let schema = |column| {
             SchemaBuilder::new()
                 .table(TableSchema::builder("users").column(column, ColumnType::Text))
@@ -970,20 +837,6 @@ mod tests {
             serde_json::json!([{ "fromHash": from, "toHash": to }])
         );
         assert_eq!(read_migration_graph(&app).await, graph);
-
-        state
-            .catalogue
-            .publish_permissions_bundle(
-                &state.catalogue_store,
-                SchemaHash::from_hex(&to).unwrap(),
-                std::collections::HashMap::new(),
-                None,
-            )
-            .unwrap();
-        let active = read_migration_graph(&app).await;
-        assert_eq!(active["activeSchemaHash"], to);
-        assert_eq!(active["schemas"], graph["schemas"]);
-        assert_eq!(active["migrations"], graph["migrations"]);
     }
 
     #[tokio::test]
@@ -1043,7 +896,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri(test_app_route("/admin/deploy"))
+                    .uri(test_app_route("/admin/bundles"))
                     .header("Content-Type", "application/json")
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::from(
@@ -1139,7 +992,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri(test_app_route("/admin/deploy"))
+                    .uri(test_app_route("/admin/bundles"))
                     .header("Content-Type", "application/json")
                     .body(axum::body::Body::from(request_body.to_string()))
                     .unwrap(),
@@ -1152,7 +1005,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri(test_app_route("/admin/deploy"))
+                    .uri(test_app_route("/admin/bundles"))
                     .header("Content-Type", "application/json")
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::from(request_body.to_string()))
@@ -1215,7 +1068,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri(test_app_route("/admin/deploy"))
+                    .uri(test_app_route("/admin/bundles"))
                     .header("Content-Type", "application/json")
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::from(request_body.to_string()))
@@ -1304,7 +1157,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
-                    .uri(test_app_route("/admin/deploy"))
+                    .uri(test_app_route("/admin/bundles"))
                     .header("Content-Type", "application/json")
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .body(axum::body::Body::from(request_body.to_string()))
@@ -1616,7 +1469,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method(Method::POST)
-                    .uri(test_app_route("/admin/deploy"))
+                    .uri(test_app_route("/admin/bundles"))
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(padded_migration(
@@ -1631,7 +1484,7 @@ mod tests {
             .oneshot(
                 axum::http::Request::builder()
                     .method(Method::POST)
-                    .uri(test_app_route("/admin/deploy"))
+                    .uri(test_app_route("/admin/bundles"))
                     .header("X-Jazz-Admin-Secret", "admin-secret")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(padded_migration(
@@ -1683,61 +1536,9 @@ mod tests {
 
     /// A schema published without a lens is recorded by the admin catalogue
     /// but never reaches the Core runtime store. The next restart must still
-    /// start, and keep serving the active schema.
+    /// start, and keep serving the first schema.
     #[tokio::test]
-    async fn dynamic_core_restarts_after_unbridged_schema_publish_over_active_schema() {
-        let dir = tempfile::tempdir().unwrap();
-        let name = "restart-unbridged-active";
-        let (first, unbridged) = restart_fixture_schemas();
-        let first_runtime = jazz::schema::JazzSchema::new(&first).unwrap();
-
-        let built = persistent_dynamic_builder(dir.path(), name)
-            .build()
-            .await
-            .unwrap();
-        store_legacy_schema(&built.state, &first).await;
-        crate::server::runtime_catalogue::publish_permissions_and_runtime(
-            &built.state,
-            SchemaHash::compute(&first),
-            std::collections::HashMap::from([(
-                TableName::new("notes"),
-                TablePolicies::new().with_select(PolicyExpr::True),
-            )]),
-            None,
-        )
-        .await
-        .unwrap();
-        store_legacy_schema(&built.state, &unbridged).await;
-        built.shutdown().await;
-
-        let restarted = persistent_dynamic_builder(dir.path(), name)
-            .build()
-            .await
-            .expect("restart after publishing a schema without a lens");
-        let snapshot = restarted
-            .state
-            .runtime()
-            .expect("restarted core runtime")
-            .trusted_catalogue_snapshot_for_test()
-            .await
-            .unwrap();
-        assert_eq!(
-            snapshot.current_write_schema.schema,
-            first_runtime.version_id()
-        );
-        restarted.shutdown().await;
-
-        let restarted_again = persistent_dynamic_builder(dir.path(), name)
-            .build()
-            .await
-            .expect("second restart stays healthy");
-        restarted_again.shutdown().await;
-    }
-
-    /// Same as above for an app that never published permissions, so startup
-    /// has no active schema to fall back on.
-    #[tokio::test]
-    async fn dynamic_core_restarts_after_unbridged_schema_publish_without_permissions() {
+    async fn dynamic_core_restarts_after_unbridged_schema_publish() {
         let dir = tempfile::tempdir().unwrap();
         let name = "restart-unbridged-no-permissions";
         let (first, unbridged) = restart_fixture_schemas();
@@ -1756,11 +1557,8 @@ mod tests {
             .await
             .expect("restart after publishing a schema without a lens");
         let runtime = restarted.state.runtime().expect("restarted core runtime");
-        let snapshot = runtime.trusted_catalogue_snapshot_for_test().await.unwrap();
-        assert_eq!(
-            snapshot.current_write_schema.schema,
-            first_runtime.version_id()
-        );
+        let current = runtime.current_schema().await.unwrap();
+        assert_eq!(current.version_id(), first_runtime.version_id());
         assert!(
             !runtime
                 .runtime_catalogue_contains_schema(

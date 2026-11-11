@@ -36,6 +36,11 @@ type StructuralHashFixture = {
     compositeIndexes: string[][];
     hash: string;
   }>;
+  historyCases: Array<{
+    name: string;
+    history: "latest" | null;
+    hash: string;
+  }>;
 };
 
 const portableColumnTypeTags = [
@@ -103,6 +108,38 @@ describe("structuralSchemaHash", () => {
     }
   });
 
+  it("matches Rust for history retention, hashing full history as before", () => {
+    const hashes = new Map<string, string>();
+    for (const entry of structuralHashFixture.historyCases) {
+      const schema = schemaWithColumnType({ type: "Text" });
+      if (entry.history) schema.values!.history = entry.history;
+      expect(structuralSchemaHash(schema), entry.name).toBe(entry.hash);
+      hashes.set(entry.name, entry.hash);
+    }
+    expect(hashes.get("full")).toBe(structuralSchemaHash(schemaWithColumnType({ type: "Text" })));
+    expect(hashes.get("latest")).not.toBe(hashes.get("full"));
+
+    const latest = schemaWithColumnType({ type: "Text" });
+    latest.values!.history = "latest";
+    expect(wasmSchemasEqual(latest, schemaWithColumnType({ type: "Text" }))).toBe(false);
+  });
+
+  it("carries a table's latest-only retention into the wasm schema through other modifiers", () => {
+    const presence = s
+      .table({ session: s.string(), cursor: s.json() }, {})
+      .history("latest")
+      .indexOnly(["session"]);
+    const app = s.defineApp(
+      { presence, notes: s.table({ body: s.string() }, {}) },
+      { migrations: "none" },
+    );
+    expect(app.wasmSchema.presence!.history).toBe("latest");
+    expect(app.wasmSchema.notes!.history).toBeUndefined();
+    expect(() => s.table({ body: s.string() }, {}).history("30d" as unknown as "latest")).toThrow(
+      /supports only "latest"/,
+    );
+  });
+
   it("matches Rust-produced defaults, merge strategies, JSON metadata, and branch bindings", () => {
     expect(structuralHashFixture.defaultCases.length).toBeGreaterThanOrEqual(22);
     for (const entry of structuralHashFixture.defaultCases) {
@@ -147,9 +184,12 @@ describe("structuralSchemaHash", () => {
 
 describe("canonical witness default equality", () => {
   it("normalizes exact human-JSON bigint defaults and rejects invalid carriers", () => {
-    const schema = s.defineApp({
-      records: s.table({ value: s.bigint().default(9223372036854775807n) }, {}),
-    }).wasmSchema;
+    const schema = s.defineApp(
+      {
+        records: s.table({ value: s.bigint().default(9223372036854775807n) }, {}),
+      },
+      { migrations: "none" },
+    ).wasmSchema;
     const serialized = JSON.parse(
       JSON.stringify(schema, (_, value) => (typeof value === "bigint" ? value.toString() : value)),
     );
@@ -192,8 +232,14 @@ describe("canonical witness default equality", () => {
       ],
     ] as const;
     for (const [before, after] of pairs) {
-      const left = s.defineApp({ records: s.table({ value: before }, {}) }).wasmSchema;
-      const right = s.defineApp({ records: s.table({ value: after }, {}) }).wasmSchema;
+      const left = s.defineApp(
+        { records: s.table({ value: before }, {}) },
+        { migrations: "none" },
+      ).wasmSchema;
+      const right = s.defineApp(
+        { records: s.table({ value: after }, {}) },
+        { migrations: "none" },
+      ).wasmSchema;
       expect(wasmSchemasEqual(left, right)).toBe(false);
       expect(wasmSchemasEqual(left, structuredClone(left))).toBe(true);
       const missing = structuredClone(left);

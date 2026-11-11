@@ -1,15 +1,14 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import { useAll, useDb, useSession } from "jazz-tools/vue";
+import { useAll, useSession } from "jazz-tools/vue";
 import { toast } from "vue-sonner";
 import { app } from "./lib/schema.js";
 
-const db = useDb();
 // #region reading-reactive-vue
-const { data: todos } = useAll(app.todos);
+const { data: todos, db } = useAll(app.todos);
 // #endregion reading-reactive-vue
 const session = useSession();
-const sessionUserId = computed(() => session.value?.user.account ?? null);
+const sessionUserId = computed(() => session.value?.user ?? null);
 const title = ref("");
 
 function handleSubmit(e: Event) {

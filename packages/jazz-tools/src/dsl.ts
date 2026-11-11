@@ -107,11 +107,14 @@ type MergeStrategyColumnType = {
   html: "TEXT";
 };
 
+type TextMergeStrategy = "text" | "markdown" | "html";
+
+// Text merges also run on optional columns; counter and g-set need a value.
 type AllowedColumnMergeStrategy<
   Sql extends SqlType,
   Optional extends boolean,
 > = Optional extends true
-  ? "lww"
+  ? "lww" | (Sql extends "TEXT" ? TextMergeStrategy : never)
   :
       | "lww"
       | {
@@ -471,8 +474,8 @@ function normalizeColumnMergeStrategy(
     return undefined;
   }
   if (strategy === "text" || strategy === "markdown" || strategy === "html") {
-    if (nullable || sqlType !== "TEXT") {
-      throw new Error(`${strategy} merge strategy is only supported on non-nullable TEXT columns.`);
+    if (sqlType !== "TEXT") {
+      throw new Error(`${strategy} merge strategy is only supported on TEXT columns.`);
     }
     return strategy;
   }
@@ -499,7 +502,7 @@ abstract class BaseColumnBuilder implements ColumnBuilder {
 
   optional(): this {
     if (this._mergeStrategy !== undefined) {
-      // Every merge strategy requires a non-nullable column; re-validate as
+      // Counter and g-set columns must be non-nullable; re-validate as
       // nullable so the strategy's own error is thrown.
       normalizeColumnMergeStrategy(this._mergeStrategy, this._sqlType, true);
     }
@@ -698,6 +701,11 @@ class AddBuilder {
     return { _type: "add", sqlType: "BYTEA", default: opts.default };
   }
 
+  /** A plain `s.uuid()` column; for a reference to a table, use {@link AddBuilder.ref}. */
+  uuid<const TDefault extends string | null>(opts: { default: TDefault }): AddOp<"UUID", TDefault> {
+    return { _type: "add", sqlType: "UUID", default: opts.default };
+  }
+
   ref<const TTargetTable extends string, const TDefault extends string | null>(
     _targetTable: TTargetTable,
     opts: { default: TDefault },
@@ -798,6 +806,13 @@ class DropBuilder {
     backwardsDefault: TBackwardsDefault;
   }): DropOp<"BYTEA", TBackwardsDefault> {
     return { _type: "drop", sqlType: "BYTEA", backwardsDefault: opts.backwardsDefault };
+  }
+
+  /** A plain `s.uuid()` column; for a reference to a table, use {@link DropBuilder.ref}. */
+  uuid<const TBackwardsDefault extends string | null>(opts: {
+    backwardsDefault: TBackwardsDefault;
+  }): DropOp<"UUID", TBackwardsDefault> {
+    return { _type: "drop", sqlType: "UUID", backwardsDefault: opts.backwardsDefault };
   }
 
   ref<const TTargetTable extends string, const TBackwardsDefault extends string | null>(

@@ -74,9 +74,8 @@ export function CrewPanel({ show, crew }: { show: Show; crew: CrewMember[] }) {
 
 /** Only the chief can read the show's invite code, so only they see this. */
 function InviteLink({ show }: { show: Show }) {
-  const db = useDb();
   const [copied, setCopied] = useState(false);
-  const { data: invites = [] } = useAll(app.showInvites.where({ showId: show.id }));
+  const { data: invites = [], db } = useAll(app.showInvites.where({ showId: show.id }));
   const invite = invites[0];
   const link = invite
     ? `${window.location.origin}${window.location.pathname}${href.join(show.id, invite.code)}`
