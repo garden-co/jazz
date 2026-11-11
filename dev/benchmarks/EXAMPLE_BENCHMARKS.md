@@ -92,5 +92,22 @@ and hosted CodSpeed instrumentation.
 - [Permissioned resources](../../examples/permissioned-resources/benchmarks/README.md):
   anonymized adopter workload, 27,518-row first sync with deep permissions.
 
+## Contention workloads
+
+Some apps hold a slow request next to cheap ones on the same server. Their
+`contention` bench targets time a cheap request twice, with the server
+otherwise idle and while another client repeats the slow request back to back,
+so the difference is the contention. They run a real durable server with
+ordinary JWT clients over WebSockets, each client on its own thread, using
+`jazz_testkit::contention`. They are nightly extras.
+
+- [BigLabel](../../examples/big-label/benchmarks/README.md): another label's
+  back-catalogue search against opening and renaming your releases.
+- [BandBook](../../examples/band-book/benchmarks/README.md): another band
+  opening its big workspace against opening and checking off your pages.
+
+The design follows Tobias Lins's server read-contention harness
+([#4322](https://github.com/garden-co/jazz/pull/4322)).
+
 These packages completely replace their former crate-local benchmark targets.
 Their profiling binaries and CodSpeed suites use the same workload code.
