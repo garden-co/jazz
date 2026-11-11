@@ -235,6 +235,11 @@ export class BrowserWorkerTransportPump {
       if (drainedAuxiliary) await yieldToBrowserTask();
     }
   }
+
+  /** No progress or native tick: known retirement is checked synchronously. */
+  assertOpen(): void {
+    if (this.closed) throw new Error("Browser peer transport is retired");
+  }
 }
 
 export function transferableFrames(frames: readonly Uint8Array[]): Uint8Array[] {

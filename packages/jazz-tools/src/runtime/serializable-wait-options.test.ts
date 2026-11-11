@@ -124,3 +124,62 @@ it.each(kinds)("%s rejects invalid options before registering a runtime wait", a
   await expect(h.wait({ tier: "edge" } as never)).rejects.toThrow(/do not retry/);
   expect(f.calls).toHaveLength(0);
 });
+
+it("keeps the original deadline while a deferred transaction group has no committed ID", async () => {
+  vi.useFakeTimers();
+  const f = fixture();
+  const open = f.client.beginTransaction("serializable");
+  let resolveId!: (id: ReturnType<typeof testTxId>) => void;
+  const id = new Promise<ReturnType<typeof testTxId>>((resolve) => {
+    resolveId = resolve;
+  });
+  f.client.bindTransactionWait(open, id);
+  const h = new SerializableWriteHandle(id, f.client);
+  const wait = h.wait({ tier: "global", timeoutMs: 25 }).catch((error) => error);
+  await vi.advanceTimersByTimeAsync(25);
+  expect(await wait).toBeInstanceOf(WriteWaitTimeoutError);
+  resolveId(testTxId("after timeout"));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(f.calls).toHaveLength(0);
+});
+
+it("keeps one deadline for an already-resolved deferred transaction group", async () => {
+  vi.useFakeTimers();
+  const f = fixture();
+  const open = f.client.beginTransaction("serializable");
+  const id = Promise.resolve(testTxId("group committed"));
+  f.client.bindTransactionWait(open, id);
+  const h = new SerializableWriteHandle(id, f.client);
+  const first = h.wait({ tier: "global", timeoutMs: 1000 });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(f.calls).toHaveLength(1);
+  f.accept();
+  await first;
+  const second = h.wait({ tier: "global", timeoutMs: 25 }).catch((error) => error);
+  expect(f.calls).toHaveLength(2);
+  await vi.advanceTimersByTimeAsync(25);
+  expect(await second).toBeInstanceOf(WriteWaitTimeoutError);
+  expect(f.calls[1]!.signal.aborted).toBe(true);
+});
+
+it("keeps the same deadline through initialization completion after native Global", async () => {
+  vi.useFakeTimers();
+  const f = fixture();
+  const id = testTxId("native accepted");
+  let complete!: () => void;
+  f.client.setInitializationCompletion(
+    id,
+    new Promise<void>((resolve) => {
+      complete = resolve;
+    }),
+  );
+  const h = new SerializableWriteHandle(id, f.client);
+  const wait = h.wait({ tier: "global", timeoutMs: 25 }).catch((error) => error);
+  await vi.advanceTimersByTimeAsync(0);
+  f.accept();
+  await vi.advanceTimersByTimeAsync(25);
+  expect(await wait).toBeInstanceOf(WriteWaitTimeoutError);
+  complete();
+  await vi.advanceTimersByTimeAsync(0);
+  await expect(h.wait({ tier: "local" })).resolves.toBeUndefined();
+});

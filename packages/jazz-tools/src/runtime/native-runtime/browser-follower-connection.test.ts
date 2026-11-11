@@ -44,6 +44,10 @@ async function createWatchdogFollower(port = new TestPort()) {
     tick: () => 0,
   };
   const runtime = {
+    setStorageOwnerAdmission: vi.fn(() => () => {}),
+    setInitializationCommandOwner: vi.fn(() => () => {}),
+    setInitializationStatusOwner: vi.fn(),
+    waitForStorageOwner: vi.fn(async () => {}),
     connectUpstreamPeer: vi.fn(() => transport),
     onPeerTransportWork: vi.fn(() => () => undefined),
     onLocalSettlementChange: vi.fn((listener: (pending: boolean) => void) => {
@@ -178,6 +182,10 @@ describe("MessagePortBrowserFollowerConnection", () => {
         finishConnecting = resolve;
       });
       const runtime = {
+        setStorageOwnerAdmission: vi.fn(() => () => {}),
+        setInitializationCommandOwner: vi.fn(() => () => {}),
+        setInitializationStatusOwner: vi.fn(),
+        waitForStorageOwner: vi.fn(async () => {}),
         connectUpstreamPeer: vi.fn(() => pendingTransport),
         onPeerTransportWork: vi.fn(() => () => undefined),
         onLocalSettlementChange: vi.fn(() => () => undefined),
@@ -230,6 +238,10 @@ describe("MessagePortBrowserFollowerConnection", () => {
         tick: () => 0,
       };
       const runtime = {
+        setStorageOwnerAdmission: vi.fn(() => () => {}),
+        setInitializationCommandOwner: vi.fn(() => () => {}),
+        setInitializationStatusOwner: vi.fn(),
+        waitForStorageOwner: vi.fn(async () => {}),
         connectUpstreamPeer: vi.fn(() => transport),
         onPeerTransportWork: vi.fn(() => () => undefined),
         onLocalSettlementChange: vi.fn(() => () => undefined),
@@ -438,6 +450,10 @@ describe("MessagePortBrowserFollowerConnection", () => {
       tick: () => 0,
     };
     const runtime = {
+      setStorageOwnerAdmission: vi.fn(() => () => {}),
+      setInitializationCommandOwner: vi.fn(() => () => {}),
+      setInitializationStatusOwner: vi.fn(),
+      waitForStorageOwner: vi.fn(async () => {}),
       connectUpstreamPeer: vi.fn(() => transport),
       onPeerTransportWork: vi.fn(() => () => undefined),
       onLocalSettlementChange: vi.fn(() => () => undefined),
@@ -484,6 +500,10 @@ describe("MessagePortBrowserFollowerConnection", () => {
       tick: () => 0,
     };
     const runtime = {
+      setStorageOwnerAdmission: vi.fn(() => () => {}),
+      setInitializationCommandOwner: vi.fn(() => () => {}),
+      setInitializationStatusOwner: vi.fn(),
+      waitForStorageOwner: vi.fn(async () => {}),
       connectUpstreamPeer: vi.fn(() => transport),
       onPeerTransportWork: vi.fn(() => () => undefined),
       onLocalSettlementChange: vi.fn(() => () => undefined),
@@ -544,6 +564,10 @@ describe("MessagePortBrowserFollowerConnection", () => {
       tick: () => Promise.reject(failure),
     };
     const runtime = {
+      setStorageOwnerAdmission: vi.fn(() => () => {}),
+      setInitializationCommandOwner: vi.fn(() => () => {}),
+      setInitializationStatusOwner: vi.fn(),
+      waitForStorageOwner: vi.fn(async () => {}),
       connectUpstreamPeer: vi.fn(() => transport),
       onPeerTransportWork: vi.fn(() => () => undefined),
       onLocalSettlementChange: vi.fn(() => () => undefined),
@@ -593,6 +617,10 @@ describe("MessagePortBrowserFollowerConnection", () => {
       tick: () => 0,
     };
     const runtime = {
+      setStorageOwnerAdmission: vi.fn(() => () => {}),
+      setInitializationCommandOwner: vi.fn(() => () => {}),
+      setInitializationStatusOwner: vi.fn(),
+      waitForStorageOwner: vi.fn(async () => {}),
       connectUpstreamPeer: vi.fn(() => transport),
       onPeerTransportWork: vi.fn(() => () => undefined),
       onLocalSettlementChange: vi.fn(() => () => undefined),
@@ -669,6 +697,10 @@ describe("MessagePortBrowserFollowerConnection", () => {
       tick: () => 0,
     };
     const runtime = {
+      setStorageOwnerAdmission: vi.fn(() => () => {}),
+      setInitializationCommandOwner: vi.fn(() => () => {}),
+      setInitializationStatusOwner: vi.fn(),
+      waitForStorageOwner: vi.fn(async () => {}),
       connectUpstreamPeer: vi.fn(() => transport),
       onPeerTransportWork: vi.fn(() => () => undefined),
       onLocalSettlementChange: vi.fn(() => () => undefined),
@@ -724,6 +756,10 @@ describe("MessagePortBrowserFollowerConnection", () => {
       tick: () => 0,
     };
     const runtime = {
+      setStorageOwnerAdmission: vi.fn(() => () => {}),
+      setInitializationCommandOwner: vi.fn(() => () => {}),
+      setInitializationStatusOwner: vi.fn(),
+      waitForStorageOwner: vi.fn(async () => {}),
       connectUpstreamPeer: vi.fn(() => transport),
       onPeerTransportWork: vi.fn(() => () => undefined),
       onLocalSettlementChange: vi.fn(() => () => undefined),
@@ -768,5 +804,51 @@ describe("MessagePortBrowserFollowerConnection", () => {
     await expect(opening).rejects.toThrow("reconnecting");
     await expect(closed).resolves.toEqual({ type: "close" });
     request.port.close();
+  });
+});
+
+describe("durable before-begin request transport", () => {
+  it("returns only the worker result for the exact request without adopting a foreground batch", async () => {
+    const f = await createWatchdogFollower();
+    const pending = f.connection.initializationCommand({
+      operation: "seal",
+      handle: "private-worker-handle",
+    });
+    await vi.waitFor(() => expect(f.port.sent.at(-1)?.type).toBe("initialization-owner"));
+    const message = f.port.sent.at(-1);
+    if (message?.type !== "initialization-owner") throw new Error("missing owner request");
+    expect(message.command).toEqual({ operation: "seal", handle: "private-worker-handle" });
+    f.port.emit({ type: "result", id: message.id + 1, initializationResult: "wrong result" });
+    f.port.emit({ type: "result", id: message.id, initializationResult: "reservation-only" });
+    expect(await pending).toBe("reservation-only");
+    f.connection.detachForReconnect();
+  });
+
+  it("preserves worker refusal instead of treating a failed operation as staged", async () => {
+    const f = await createWatchdogFollower();
+    const pending = f.connection.initializationCommand({ operation: "commit", handle: "foreign" });
+    const refused = expect(pending).rejects.toThrow("foreign owner");
+    await vi.waitFor(() => expect(f.port.sent.at(-1)?.type).toBe("initialization-owner"));
+    const message = f.port.sent.at(-1);
+    if (message?.type !== "initialization-owner") throw new Error("missing owner request");
+    f.port.emit({
+      type: "result",
+      id: message.id,
+      error: serializeBrowserRelayError(new Error("foreign owner")),
+    });
+    await refused;
+    f.connection.detachForReconnect();
+  });
+
+  it("rejects an outstanding owner request when its connection retires", async () => {
+    const f = await createWatchdogFollower();
+    const pending = f.connection.initializationCommand({ operation: "cancel", handle: "old" });
+    const refused = expect(pending).rejects.toThrow(/reconnecting/);
+    await vi.waitFor(() => expect(f.port.sent.at(-1)?.type).toBe("initialization-owner"));
+    f.connection.detachForReconnect();
+    await refused;
+    await expect(
+      f.connection.initializationCommand({ operation: "commit", handle: "old" }),
+    ).rejects.toThrow();
   });
 });

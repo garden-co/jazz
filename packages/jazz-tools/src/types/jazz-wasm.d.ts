@@ -217,6 +217,12 @@ declare module "jazz-wasm" {
       attribution?: Uint8Array | null,
       acceptedEvidence?: boolean | null,
     ): void;
+    enableInitializationJournal(): void;
+    prepareInitializationInsert(id: string, table: string, rowId: Uint8Array): void;
+    sealInitializationTransaction(id: string): string;
+    publishInitializationTransaction(token: string): WasmWrite;
+    cancelInitializationTransaction(token: string): void;
+    initializationTransactionStatus(ids: string[]): string;
     commitTransaction(openTransactionId: string, kind?: string | null): WasmWrite;
     rollbackTransaction(openTransactionId: string): void;
 

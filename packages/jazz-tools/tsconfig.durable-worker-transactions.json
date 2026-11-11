@@ -1,0 +1,26 @@
+{
+  "extends": "./tsconfig.tests.json",
+  "include": [
+    "src/types/fs-native-extensions.d.ts",
+    "src/types/jazz-wasm.d.ts",
+    "src/runtime/client.ts",
+    "src/runtime/db.ts",
+    "src/runtime/provisional-initialization.ts",
+    "src/runtime/native-runtime/native-runtime-adapter.ts",
+    "src/runtime/native-runtime/browser-worker-protocol.ts",
+    "src/runtime/native-runtime/browser-worker-transport.ts",
+    "src/runtime/native-runtime/browser-follower-connection.ts",
+    "src/runtime/native-runtime/durable-initialization-remote.ts",
+    "src/worker/jazz-broker-worker-core.ts",
+    "src/worker/durable-initialization-owner.ts",
+    "src/worker/durable-initialization-owner.test.ts",
+    "src/runtime/native-runtime/durable-initialization-remote.test.ts",
+    "src/runtime/native-runtime/native-runtime-durable-owner.test.ts",
+    "src/runtime/native-runtime/browser-follower-connection.test.ts",
+    "src/runtime/serializable-wait-options.test.ts",
+    "src/runtime/client.write-wait.test.ts",
+    "src/runtime/native-runtime/native-runtime-transaction-lifecycle.test.ts",
+    "tests/browser/durable-worker-transactions.server.test.ts"
+  ],
+  "exclude": ["node_modules", "dist"]
+}
