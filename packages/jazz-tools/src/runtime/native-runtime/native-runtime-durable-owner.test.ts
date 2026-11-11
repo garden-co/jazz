@@ -212,3 +212,50 @@ it("keeps implicit durable-owner defaults distinct from explicit operation sessi
   });
   await f.client.rollbackTransaction(id);
 });
+
+it("captures immediate default writes only after freezing the selected owner route", async () => {
+  const f = fixture(true);
+  const prerequisite = deferred<void>();
+  const id = f.client.openTransaction(
+    "serializable",
+    undefined,
+    undefined,
+    undefined,
+    () => prerequisite.promise,
+    "client-accepted-evidence",
+  );
+  f.client.insertInternal("notes", text, { id: stableId }, undefined, undefined, id);
+  const prepared = f.client.transactionPreparation(id);
+  expect(f.commands).toEqual([]);
+  prerequisite.resolve();
+  await vi.waitFor(() => expect(f.commands[0]?.operation).toBe("begin"));
+  f.opened.resolve("actual-implicit-worker-owner");
+  await prepared;
+  const mutation = f.commands.find((c) => c.operation === "insert");
+  if (mutation?.operation !== "insert") throw new Error("missing queued mutation");
+  expect(JSON.parse(mutation.context).session).toBeUndefined();
+  expect(JSON.parse(mutation.context).transaction_id).toBe(id);
+  await f.client.rollbackTransaction(id);
+});
+
+it("cancels a frozen route without opening a batch or waiting for its prerequisite", async () => {
+  const f = fixture(true);
+  const prerequisite = deferred<void>();
+  const id = f.client.openTransaction(
+    "serializable",
+    undefined,
+    undefined,
+    undefined,
+    () => prerequisite.promise,
+    "client-accepted-evidence",
+  );
+  const opening = f.client.transactionPreparation(id);
+  if (!opening) throw new Error("missing actual prerequisite admission");
+  const admission = opening.catch((error) => error);
+  expect(await f.client.rollbackTransaction(id)).toBe(true);
+  expect(await admission).toBeInstanceOf(Error);
+  prerequisite.resolve();
+  expect(f.commands).toEqual([]);
+  expect(f.raw.beginTransaction).not.toHaveBeenCalled();
+  expect(f.raw.rollbackTransaction).not.toHaveBeenCalled();
+});

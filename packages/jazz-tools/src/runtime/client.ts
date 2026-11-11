@@ -226,6 +226,7 @@ export interface Runtime extends Partial<InitializationRuntime> {
     id: OpenTransactionId,
     session: string | null | undefined,
     readCapability: TransactionReadCapability,
+    beforeBegin?: TransactionAdmission,
   ): Promise<void> | undefined;
   /** @internal Authority evidence in an opted-in existing serializable batch. */
   queryAccepted?(
@@ -1342,30 +1343,46 @@ export class JazzClient {
         unopened: true,
       };
       this.transactionPreparations.set(id, state);
-      state.pending = Promise.resolve().then(async () => {
-        const assertCurrent = () => {
-          if (this.discarded) throw new Error("Client discarded before transaction admission");
-          if (this.shutdownPromise)
-            throw new Error("Client shut down before transaction admission");
-          if (this.transactionPreparations.get(id) !== state)
-            throw new Error("Transaction was rolled back before admission");
-        };
+      const assertCurrent = () => {
+        if (this.discarded) throw new Error("Client discarded before transaction admission");
+        if (this.shutdownPromise) throw new Error("Client shut down before transaction admission");
+        if (this.transactionPreparations.get(id) !== state)
+          throw new Error("Transaction was rolled back before admission");
+      };
+      const beforeBegin = async () => {
         assertCurrent();
         await prerequisite();
         assertCurrent();
-        const durable = readCapability
-          ? this.runtime.beginTransactionOnDurableOwner?.(kind, id, context, readCapability)
-          : undefined;
-        if (durable) {
-          state.durableOpening = true;
-          state.implicitDurableOwner =
-            readCapability === "client-accepted-evidence" && session === undefined;
-          await durable;
+      };
+      // Select and freeze the actual route synchronously, before immediate
+      // typed writes capture their contexts. No native BEGIN happens until
+      // the unchanged opening prerequisite has completed.
+      const durable = readCapability
+        ? this.runtime.beginTransactionOnDurableOwner?.(
+            kind,
+            id,
+            context,
+            readCapability,
+            beforeBegin,
+          )
+        : undefined;
+      if (durable) {
+        state.durableOpening = true;
+        state.implicitDurableOwner =
+          readCapability === "client-accepted-evidence" && session === undefined;
+        state.pending = durable.then(() => {
           assertCurrent();
-        } else if (readCapability) this.runtime.beginTransaction(kind, id, context, readCapability);
-        else this.runtime.beginTransaction(kind, id, context);
-        state.unopened = false;
-      });
+          state.unopened = false;
+        });
+      } else {
+        state.pending = Promise.resolve()
+          .then(beforeBegin)
+          .then(() => {
+            if (readCapability) this.runtime.beginTransaction(kind, id, context, readCapability);
+            else this.runtime.beginTransaction(kind, id, context);
+            state.unopened = false;
+          });
+      }
       state.pending.catch(() => {});
       return id;
     }

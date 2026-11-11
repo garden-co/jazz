@@ -26,6 +26,9 @@ export class RemoteDurableTransaction {
   private cancelling?: Promise<void>;
   private submitted = false;
   private publicationFailed = false;
+  private waitingForPrerequisite = false;
+  private openingRequested = false;
+  private readonly prerequisiteAbort = new AbortController();
   private readonly waitIntents = new Map<
     string,
     { tier: "local" | "global"; signal: AbortSignal; submitted?: boolean }
@@ -36,12 +39,32 @@ export class RemoteDurableTransaction {
     command: Extract<BrowserInitializationCommand, { operation: "begin" }>,
     private readonly request: DurableOwnerRequest,
     private readonly assertCurrent: () => void,
+    beforeBegin?: () => Promise<void>,
   ) {
+    this.waitingForPrerequisite = beforeBegin !== undefined;
     // Clone at admission, before any await: caller-owned schema/claims/bytes
     // cannot later change the actual opening request or a queued operation.
     const captured = structuredClone(command);
     this.opening = Promise.resolve().then(async () => {
       this.assertCurrent();
+      if (beforeBegin) {
+        this.check();
+        let end: (() => void) | undefined;
+        const aborted = new Promise<never>((_, reject) => {
+          end = () => reject(this.prerequisiteAbort.signal.reason);
+          this.prerequisiteAbort.signal.addEventListener("abort", end, { once: true });
+          if (this.prerequisiteAbort.signal.aborted) end();
+        });
+        try {
+          await Promise.race([Promise.resolve().then(beforeBegin), aborted]);
+        } finally {
+          if (end) this.prerequisiteAbort.signal.removeEventListener("abort", end);
+        }
+      }
+      this.waitingForPrerequisite = false;
+      if (beforeBegin) this.check();
+      else this.assertCurrent();
+      this.openingRequested = true;
       const handle = await request(captured);
       if (typeof handle !== "string" || !handle)
         throw new Error("Durable owner omitted its batch handle");
@@ -119,6 +142,8 @@ export class RemoteDurableTransaction {
 
   registerWait(waitId: string, tier: "local" | "global", signal: AbortSignal): boolean {
     if (this.retired || this.submitted || signal.aborted) return false;
+    if (!this.waitIntents.has(waitId) && this.waitIntents.size >= 64)
+      throw new Error("Too many waits for one opening durable transaction");
     this.waitIntents.set(waitId, { tier, signal });
     return true;
   }
@@ -165,6 +190,13 @@ export class RemoteDurableTransaction {
       );
     this.retired = true;
     this.accepting = false;
+    if (this.waitingForPrerequisite && !this.openingRequested) {
+      // No worker request or native batch exists yet. Cancel the local gate
+      // without waiting forever for an unrelated opening prerequisite.
+      this.prerequisiteAbort.abort(new Error("Durable opening prerequisite cancelled"));
+      this.cancelling = Promise.resolve();
+      return this.cancelling;
+    }
     // Do not await tail: it may be a pending native read which only this
     // cancellation can unwind. The worker owns exact rollback and token cleanup.
     this.cancelling = this.opening.then(async (handle) => {

@@ -275,6 +275,10 @@ it("aborts an actual durability wait without cancelling or changing the write", 
   const refused = expect(waiting).rejects.toThrow(/wait ended/);
   f.host.cancelWait(f.peer, waitId);
   await refused;
+  await expect(f.host.wait(f.peer, "normal commit" as TxId, "global", waitId)).rejects.toThrow(
+    /wait ended/,
+  );
+  expect(f.runtime.waitForTransaction).toHaveBeenCalledTimes(1);
   expect(f.runtime.rollbackTransaction).not.toHaveBeenCalled();
 });
 
@@ -315,3 +319,23 @@ it.each(["before publication", "after publication"])(
     }
   },
 );
+
+it("does not accumulate late cancellation tombstones after settled replies", async () => {
+  const f = fixture();
+  let count = 0;
+  f.runtime.commitTransaction.mockImplementation((_id, onPublished) => {
+    const tx = `settled-${++count}` as TxId;
+    onPublished?.(tx);
+    return tx;
+  });
+  for (let i = 0; i < 4097; i++) {
+    const handle = await f.open();
+    const waitId = crypto.randomUUID();
+    const tx = await f.host.commit(f.peer, handle, [{ waitId, tier: "global" }]);
+    await f.host.wait(f.peer, tx, "global", waitId);
+    // The worker has completed the wait; its reply can still be travelling
+    // when the page's original deadline sends this cancellation.
+    f.host.cancelWait(f.peer, waitId);
+  }
+  expect(f.runtime.rollbackTransaction).not.toHaveBeenCalled();
+});
