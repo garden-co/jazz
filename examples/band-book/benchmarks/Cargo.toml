@@ -34,6 +34,12 @@ harness = false
 name = "contention"
 harness = false
 
+# Song sheet text merges beyond one paragraph: nightly CodSpeed run only, like
+# `nightly`.
+[[bench]]
+name = "text_merge"
+harness = false
+
 [[bin]]
 name = "band-book-policy-read-receipt"
 path = "src/bin/receipt.rs"
