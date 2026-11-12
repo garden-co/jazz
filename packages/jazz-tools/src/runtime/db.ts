@@ -4404,7 +4404,9 @@ export class Db {
     // asks `next` instead: only the drain below waits for that server.
     own?.endUnsentReads?.();
     // Upload what this runtime still holds, then stop it. Until then its
-    // writes count in the sync status and in waitForSync.
+    // writes count in the sync status and in waitForSync. A stream still
+    // sending its value finishes first, unless the app shuts down.
+    const streams = this.letStreamsFinish();
     let draining = true;
     const drainListeners = new Set<() => void>();
     const drained = this.shutdown({ waitForSync: true }).finally(() => {
@@ -4414,6 +4416,7 @@ export class Db {
     void drained.catch(() => {});
     this.drain = {
       done: drained,
+      endStreamWait: () => streams.abort(),
       abort: () => {
         if (draining) this.abortGracefulShutdown();
       },
@@ -4535,17 +4538,38 @@ export class Db {
   private offlineRequested: boolean | undefined;
 
   /** Set once this Db adopted a successor: its own runtime's last uploads. */
-  private drain: { done: Promise<void>; abort(): void } | null = null;
+  private drain: { done: Promise<void>; endStreamWait(): void; abort(): void } | null = null;
+
+  /** Set by {@link letStreamsFinish}. */
+  private streamsMayFinish: AbortController | null = null;
+
+  /**
+   * @internal This Db's graceful shutdown lets streaming writes in flight on
+   * its own runtime finish (and waits for their writes) before closing it,
+   * until the returned controller aborts. Only the drain after the
+   * local-first upgrade asks for this: the app didn't ask for that shutdown,
+   * so it must not cut off an upload the app is making. A shutdown the app
+   * asks for (a sign-out, an account switch, a close) aborts it, so it is
+   * never held by a slow or stalled stream; the stream then fails saying why.
+   */
+  letStreamsFinish(): AbortController {
+    this.streamsMayFinish?.abort();
+    this.streamsMayFinish = new AbortController();
+    return this.streamsMayFinish;
+  }
 
   /**
    * @internal Stop this Db's own runtime after the upgrade. With
    * `waitForSync`, its writes upload first, the way a local-first client's
    * do when it shuts down; without, they are dropped, as when a thin client
-   * closes.
+   * closes. Either way a streaming write still sending its value is cut off
+   * (it fails saying why) rather than holding the app's shutdown.
    */
   async stopOwnRuntime(options: ShutdownOptions = {}): Promise<void> {
     const drain = this.drain;
     if (!drain) return this.shutdown(options);
+    // The app is shutting down: streams in flight no longer hold the drain.
+    drain.endStreamWait();
     if (!options.waitForSync) drain.abort();
     await drain.done.catch(() => {});
     // An aborted or failed drain leaves the runtime open: stop it now.
@@ -4610,7 +4634,9 @@ export class Db {
       try {
         await Promise.race([
           this.runtimeSource.waitForPendingWrites?.(syncAbort.signal) ??
-            this.connection.waitForPendingWrites(),
+            this.connection.waitForPendingWrites({
+              inFlightStreams: this.streamsMayFinish?.signal,
+            }),
           cancelled,
         ]);
       } catch (error) {
