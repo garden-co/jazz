@@ -707,6 +707,8 @@ const ACCESS_HEADER = "x-jazz-backend-access";
 const STAND_IN_SECRET = "stated-by-backend-credential";
 /** The core's refusal of every local-first identity: it admits none. */
 const LOCAL_FIRST_AUTH_DISABLED = "local_first_auth_disabled";
+/** What a core that admits no local-first identity tells a guest's session. */
+const CORE_REFUSES_GUESTS = "Local-first auth is not enabled";
 // What a browser's request to a public route carries on to a remote core:
 // never its cookies or its app session.
 const REMOTE_FORWARDED_HEADERS = ["accept", "content-type", "if-none-match"];
@@ -2024,7 +2026,20 @@ async function openJazz(initial: CreateJazzOptions, store: JazzStore): Promise<O
         );
         stopExpiry = startTimer(end, ttl);
       }
-      socket = core.openSocket(headerPairs(request.headers), onEvent, admitted.access);
+      // A guest's session the core refuses because it admits no device
+      // accounts at all: the client only goes offline, so say why here.
+      const relay: typeof onEvent = admitted.guest
+        ? (error, event) => {
+            if (
+              event.kind === "message" &&
+              event.data &&
+              Buffer.from(event.data).includes(CORE_REFUSES_GUESTS)
+            )
+              warnGuestsOffOnCore();
+            onEvent(error, event);
+          }
+        : onEvent;
+      socket = core.openSocket(headerPairs(request.headers), relay, admitted.access);
       return socket.send(admitted.prelude);
     };
     // Messages after the prelude wait for its admission, in order.

@@ -99,7 +99,7 @@ it("tells a send to a stream session that ended why, not that it reached another
           body: encodeStreamRecord(
             STREAM_RECORD_MESSAGE,
             new TextEncoder().encode("not a prelude"),
-          ),
+          ) as BodyInit,
         }),
       );
     // A prelude no one is admitted with ends the session (during its send).

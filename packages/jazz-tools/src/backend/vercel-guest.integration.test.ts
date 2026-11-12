@@ -350,3 +350,19 @@ it("says a core that admits no guests refuses them, not that the user has an acc
     error.mock.calls.filter((call) => /local_first_auth_disabled/.test(call.join(" "))),
   ).toHaveLength(1);
 }, 90_000);
+
+it("logs it on the server when the core refuses a guest's sync session", async () => {
+  const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const { appId, instances } = await deployment({ allowLocalFirstAuth: false });
+  const { origin } = await route(instances);
+
+  const session = await guestOf(appId, origin);
+  const guest = session.getSnapshot().client!;
+  void guest.db
+    .insert(app.todos, { title: "made as a guest", owner: guest.session!.user! })
+    .wait({ tier: "global" })
+    .catch(() => undefined);
+  const logged = () =>
+    error.mock.calls.filter((call) => /local_first_auth_disabled/.test(call.join(" ")));
+  await vi.waitFor(() => expect(logged()).toHaveLength(1), { timeout: 20_000 });
+}, 60_000);
