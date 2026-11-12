@@ -1024,15 +1024,19 @@ describe("createJazz", () => {
     for (const [wrong, shown] of [
       [{}, /returned an object with keys \[\]$/],
       [{ id: "alice" }, /returned an object with keys \[id\]$/],
-      [{ userId: 42 }, /keys \[userId\], userId: 42$/],
-      [{ userId: "" }, /keys \[userId\], userId: ""$/],
-      ["alice", /returned alice$/],
+      [{ userId: 42 }, /keys \[userId\], userId: a number$/],
+      [{ userId: "" }, /keys \[userId\], userId: an empty string$/],
+      [{ userId: { token: "secret-token" } }, /keys \[userId\], userId: an object$/],
+      ["secret-token", /returned a string$/],
     ] as const) {
       answer = wrong;
       await expect(jazz.accountFor(request())).rejects.toThrow(
         /^createJazz: authenticate must return \{ userId: string \}, acceptLocalFirstAuth\(request\) or null/,
       );
       await expect(jazz.accountFor(request())).rejects.toThrow(shown);
+      // It names the answer's shape, never its values: a wrong answer may be a token.
+      const error = await jazz.accountFor(request()).catch((caught: Error) => caught);
+      expect(String(error)).not.toMatch(/secret-token/);
       const response = await fetch(`${origin}/jazz/apps/${jazz.appId}/accounts/backend-user`, {
         method: "POST",
       });
