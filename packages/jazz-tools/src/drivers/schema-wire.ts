@@ -1,4 +1,5 @@
 import type { WasmSchema } from "./types.js";
+import type { ClientMigrations } from "../runtime/client-migrations.js";
 import { isRecord } from "../runtime/util.js";
 
 export function isWasmSchema(value: unknown): value is WasmSchema {
@@ -53,11 +54,15 @@ function sortSchemaTables(schema: WasmSchema): WasmSchema {
   ) as WasmSchema;
 }
 
-/** Serialize the developer-authored schema AST for Rust compilation. */
-export function serializeSchemaSource(schema: WasmSchema): string {
+/**
+ * Serialize the developer-authored schema AST for Rust compilation, with the
+ * migrations the app ships if it attaches them.
+ */
+export function serializeSchemaSource(schema: WasmSchema, migrations?: ClientMigrations): string {
   return JSON.stringify(
     {
       tables: sortSchemaTables(schema),
+      ...(migrations ? { migrations } : {}),
     },
     runtimeSchemaJsonReplacer,
   );
