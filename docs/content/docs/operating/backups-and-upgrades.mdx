@@ -51,8 +51,18 @@ rolling back means restoring the backup.
 ## Upgrading from alpha.60
 
 Alpha.61 gives a client one auth object, the **session**, and renames guest accounts to **device
-accounts**. Data and backends need no changes beyond one rename; client code does. Your backend
-still decides who is signed in: after your own sign-in or sign-out, `refresh()` follows it.
+accounts**. Data needs no changes. Backends need two (`expiresAt` and the `recheckSeconds`
+removal, below) and one rename; client code needs more. Your backend still decides who is signed
+in: after your own sign-in or sign-out, `refresh()` follows it.
+
+- **`authenticate` returns `expiresAt`.** A signed-in answer is now
+  `{ userId, expiresAt, claims? }`, where `expiresAt` is when the user's session ends, in Unix
+  seconds: the session a sign-out ends, not a short-lived access token. A sync session lasts until
+  then and authenticates again on its next connection. Without it, `createJazz` refuses the answer
+  with an error that says so.
+- **`recheckSeconds` is removed.** Jazz no longer re-asks `authenticate` on a timer. To end a user's
+  sessions at once, for example after a sign-out on your server or a permission change, call
+  `await jazz.revokeUser(userId)`. Passing `recheckSeconds` throws.
 
 - **One session.** `const session = await createJazzClient(config)`, or
   `<JazzProvider config={{ … }}>` in React, React Native, Expo, Vue, Solid and Svelte. Read it with
@@ -71,6 +81,7 @@ still decides who is signed in: after your own sign-in or sign-out, `refresh()` 
 | `createDb` (`jazz-tools`, `jazz-tools/react-native`)                                                      | `createJazzClient(…)`, then `session.db`                                                                                               |
 | `createJazzApp(config)`                                                                                   | `<JazzProvider config={config}>`, or `await createJazzClient(config)`                                                                  |
 | `<JazzProvider serverUrl="/jazz" …>` (config as props)                                                    | `<JazzProvider config={{ serverUrl: "/jazz", … }}>`                                                                                    |
+| `<JazzProvider client={() => import("jazz-tools/local-first")}>`                                          | `<JazzProvider config={{ …, client: () => import("jazz-tools/local-first") }}>`                                                        |
 | `<JazzProvider config={{ …, account }}>`, `JazzSvelteProvider`                                            | `<JazzProvider config={…}>`; a client you opened yourself: `<JazzClientProvider client>` (Svelte: `<JazzSvelteClientProvider client>`) |
 | `<JazzSessionProvider session={s}>`                                                                       | `<JazzProvider session={s}>`                                                                                                           |
 | `fallback`                                                                                                | `loading`, `signedOut`, `error`                                                                                                        |
@@ -88,9 +99,12 @@ still decides who is signed in: after your own sign-in or sign-out, `refresh()` 
 | `sessionActions.createLocalFirst()` and the other `sessionActions`                                        | the same operations on the session itself                                                                                              |
 | `useLocalFirstAuth`, `LocalFirstAuth`, `BrowserAuthSecretStore`, `ExpoAuthSecretStore`, `AuthSecretStore` | `session.exportDeviceKey()` and `session.restoreDeviceAccount(key)`                                                                    |
 | `acceptLocalFirstAuth` (backend)                                                                          | `acceptDeviceAccounts`                                                                                                                 |
+| `recheckSeconds` (backend)                                                                                | removed: sessions last until `expiresAt`; `jazz.revokeUser(userId)` ends them at once                                                  |
 
 `snapshot.user` is `{ accountId, kind: "device" | "backend", identity: { issuer, subject }, claims }`
-for whoever is signed in, a device account included, or `null`. A client config without `serverUrl`
+for whoever is signed in, a device account included, or `null`. So code that checked
+`user ? <SignOut /> : <SignIn />` now treats a guest on a device account as signed in: to ask
+whether someone signed in with your auth, check `user?.kind === "backend"`. A client config without `serverUrl`
 now means `"/jazz"` everywhere.
 
 ### Device accounts kept by `useLocalFirstAuth`
