@@ -25,7 +25,12 @@ import {
   type LocalFirstModule,
 } from "../runtime/local-first-upgrade.js";
 import { createJazzSessionOwner, replaceJazzSessionClient } from "./state.js";
-import { coreInitial, createStartedJazzSession, type JazzSession } from "./jazz-session.js";
+import {
+  coreInitial,
+  createStartedJazzSession,
+  refuseRemovedSessionOptions,
+  type JazzSession,
+} from "./jazz-session.js";
 import { DEFAULT_SERVER_URL, refuseClientAppId } from "../runtime/client-scope.js";
 import { browserBackendWatchEvents } from "./backend-watch.js";
 import {
@@ -169,6 +174,7 @@ export async function openBrowserSessionCore(
   config: JazzClientConfig,
 ): Promise<BrowserJazzSession> {
   refuseClientAppId(config);
+  refuseRemovedSessionOptions(config);
   if (config.serverUrl === null) return createDeviceOnlySession(config);
   const serverUrl = config.serverUrl ?? DEFAULT_SERVER_URL;
   const {

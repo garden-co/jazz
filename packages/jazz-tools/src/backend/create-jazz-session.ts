@@ -39,7 +39,11 @@ import { NativeRuntimeAdapter } from "../runtime/native-runtime/native-runtime-a
 import { RuntimeSource, type RuntimeClientContext } from "../runtime/runtime-source.js";
 import { attachSubscriptionStore, getSubscriptionStore } from "../subscription-store-internal.js";
 import { createJazzSessionOwner, type SessionCore } from "../session/state.js";
-import { createStartedJazzSession, type JazzSession } from "../session/jazz-session.js";
+import {
+  createStartedJazzSession,
+  refuseRemovedSessionOptions,
+  type JazzSession,
+} from "../session/jazz-session.js";
 import {
   createJazzClientFromDb,
   type JazzClient as SharedJazzClient,
@@ -261,6 +265,7 @@ export interface BackendClientSession extends Omit<JazzSession<JazzClient>, "clo
  * Supply an AccountStore to keep device accounts across process restarts.
  */
 export async function createJazzClient(input: JazzClientConfig): Promise<BackendClientSession> {
+  refuseRemovedSessionOptions(input);
   if (input.initial !== undefined && input.initial !== "device")
     throw new Error('createJazzClient: initial is "device" or left out');
   // The session core's name for a device account.

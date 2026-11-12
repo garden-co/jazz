@@ -669,4 +669,15 @@ describe("browser session", () => {
       createJazzClient({ ...base, client: loadLocalFirst, localFirst: "soon" as never }),
     ).rejects.toThrow(/Unknown localFirst "soon"/);
   });
+
+  it("refuses alpha.60's linkGuestOnSignUp and account by name instead of ignoring them", async () => {
+    const base = { serverUrl: "https://app.example.test/jazz", store: memoryStore() };
+    // Ignored, an app that turned guest linking off would link again.
+    await expect(createJazzClient({ ...base, linkGuestOnSignUp: false } as never)).rejects.toThrow(
+      /linkGuestOnSignUp is now linkDeviceAccountOnSignUp/,
+    );
+    await expect(createJazzClient({ ...base, account: {} } as never)).rejects.toThrow(
+      /takes no account: the session signs in itself/,
+    );
+  });
 });

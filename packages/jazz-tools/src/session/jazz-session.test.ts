@@ -329,6 +329,9 @@ describe("JazzSession lifecycle", () => {
       client,
       user: { identity: { subject: "one" } },
     });
+    // The failure shows, and retrying asks the backend again.
+    expect(app.getSnapshot()).toMatchObject({ recovery: "action" });
+    expect(app.getSnapshot().error?.message).toContain("could not ask your backend");
     await app.close();
   });
   it("retries a failed refresh by asking the backend, and clears it once a check follows", async () => {

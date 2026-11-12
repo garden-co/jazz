@@ -28,22 +28,18 @@ export {
   ThinRemoteError,
   type ThinRuntimeOptions,
 } from "./thin-runtime.js";
-export type {
-  AccountHandle,
-  AccountIdentity,
-  AccountManager,
-  AccountSnapshot,
-} from "../accounts/state.js";
-export { AccountAuthError, type JWTAuth } from "../accounts/enrollment.js";
-export type { AccountStore } from "../accounts/persistence.js";
+// Accounts are the session's (`createJazzClient`): only its error and the
+// storage a host may supply are public, as on the package root.
+export * from "../accounts/exports.js";
 export type { Db } from "../runtime/db.js";
 export type { LocalFirstLoader, LocalFirstModule } from "../runtime/local-first-upgrade.js";
 
 export type ThinDbConfig = AccountDbConfig & { thin?: ThinRuntimeOptions };
 
 /**
- * @internal Open a thin `Db` for a signed-in account (the session does, for
- * you: see `createJazzClient`). `serverUrl` is required.
+ * @internal The session opens its thin `Db` with this (`createJazzClient`);
+ * apps can't call it, since it takes the session's own account handle.
+ * `serverUrl` is required.
  */
 export async function createClient(config: ThinDbConfig): Promise<Db> {
   const { thin, ...dbConfig } = config;

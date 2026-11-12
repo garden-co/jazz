@@ -93,6 +93,28 @@ still decides who is signed in: after your own sign-in or sign-out, `refresh()` 
 for whoever is signed in, a device account included, or `null`. A client config without `serverUrl`
 now means `"/jazz"` everywhere.
 
+### Device accounts kept by `useLocalFirstAuth`
+
+Device accounts the session already knows open on their own: alpha.61 reads the same account
+storage. A key that only `useLocalFirstAuth`, `BrowserAuthSecretStore` or `ExpoAuthSecretStore`
+held, and never reached the account manager, needs moving once, or that user starts with a new
+device account. Read it where the old store kept it and restore it into the session:
+
+```ts
+import { authSecretStorageKey, createJazzClient } from "jazz-tools";
+
+const session = await createJazzClient({ serverUrl: "/jazz" });
+// The key alpha.60's store used: the `key` you gave it, or else this, with its appId and profile.
+const legacyKey = authSecretStorageKey({ appId: "your-old-app-id" });
+const secret = localStorage.getItem(legacyKey);
+if (secret && session.getSnapshot().user?.kind !== "device") {
+  await session.restoreDeviceAccount(secret);
+  localStorage.removeItem(legacyKey);
+}
+```
+
+On Expo, read the same key with `SecureStore.getItemAsync(legacyKey)` instead of `localStorage`.
+
 ## Upgrading from alpha.59
 
 Alpha.60 changes how Jazz runs, so an alpha.59 app needs more than a version bump:

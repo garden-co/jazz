@@ -16,6 +16,7 @@ import { refuseClientAppId } from "../runtime/client-scope.js";
 import {
   coreInitial,
   createStartedJazzSession,
+  refuseRemovedSessionOptions,
   type JazzSession,
 } from "../session/jazz-session.js";
 
@@ -66,6 +67,7 @@ export async function openNativeSessionCore(
   config: JazzClientConfig,
 ): Promise<UserFollowingSession<JazzClient>> {
   refuseClientAppId(config);
+  refuseRemovedSessionOptions(config);
   const { serverUrl } = config;
   const initial = coreInitial(config.initial);
   // Jazz on this device only: no backend names a user, so the session opens

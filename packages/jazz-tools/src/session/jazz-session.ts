@@ -378,16 +378,14 @@ export function ownJazzSession<Config, Client>(
         else await current.loginWithBackend();
       } catch (cause) {
         const after = core?.getSnapshot();
-        // A ready client stays: the backend couldn't be asked, so nothing
-        // says its user changed. Otherwise the session shows the failure
-        // (or the core's own), and retrying asks the backend again rather
-        // than reopening the old account.
-        if (after?.status !== "ready") {
-          failure = after?.error ? undefined : toError(cause);
-          if (after) {
-            manualRetry = session.refresh;
-            refreshFailedAt = after;
-          }
+        // The session shows the failure (or the core's own), and retrying
+        // asks the backend again rather than reopening the old account. A
+        // ready client stays ready (the backend couldn't be asked, so nothing
+        // says its user changed), with the error and `recovery: "action"`.
+        failure = after?.error ? undefined : toError(cause);
+        if (after) {
+          manualRetry = session.refresh;
+          refreshFailedAt = after;
         }
         throw cause;
       } finally {
@@ -545,4 +543,22 @@ export function jazzSessionActions<Client>(
     retry: session.retry,
     close: session.close,
   };
+}
+
+/**
+ * @internal Session options that alpha.60 took and the session no longer
+ * does. Refused by name: left in, they would reach the client config and be
+ * ignored, quietly changing what the app asked for (an app that turned guest
+ * linking off on shared devices would link again).
+ */
+export function refuseRemovedSessionOptions(config: object): void {
+  const given = config as Record<string, unknown>;
+  if ("linkGuestOnSignUp" in given)
+    throw new Error(
+      "createJazzClient: linkGuestOnSignUp is now linkDeviceAccountOnSignUp (guests are device accounts)",
+    );
+  if ("account" in given)
+    throw new Error(
+      'createJazzClient takes no account: the session signs in itself (initial: "device", createDeviceAccount(), or your backend\'s user). For a client you opened yourself, use <JazzClientProvider client>.',
+    );
 }
