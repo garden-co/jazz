@@ -34,7 +34,7 @@ use crate::server::shutdown::ActiveWebSocketGuard;
 use crate::server::{ServerState, WebSocketEntryRefused};
 
 const WS_HANDSHAKE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
-const WS_PER_IDENTITY_CONNECTION_CAP: usize = crate::server::PER_CLIENT_CONNECTION_CAP;
+const WS_PER_IDENTITY_CONNECTION_CAP: usize = crate::server::PER_IDENTITY_CONNECTION_CAP;
 const WS_MAX_FRAME_BYTES: usize = MAX_WIRE_FRAME_BYTES;
 const WS_MAX_MESSAGE_BYTES: usize = WS_MAX_FRAME_BYTES;
 const WS_AT_CAPACITY_RETRY_AFTER_SECS: u64 = 5;
@@ -174,13 +174,19 @@ struct WebSocketAdmissionEntry {
     id: u64,
     evict_tx: mpsc::UnboundedSender<WebSocketEviction>,
     /// When this connection's peer was last heard from (see
-    /// [`WebSocketAdmissionState::now_ms`]). A half-open socket stops
-    /// advancing it, so it is the one the cap evicts first.
+    /// [`WebSocketAdmissionState::now_ms`]), or [`WS_STILL_HANDSHAKING`]
+    /// until the server's Hello is sent. A half-open socket stops advancing
+    /// it, so it is the one the cap evicts first.
     last_heard: Arc<AtomicU64>,
 }
 
 #[derive(Debug)]
 struct WebSocketEviction;
+
+/// `last_heard` of a connection that hasn't finished its handshake: it ranks
+/// as the most recent, so a burst over the cap never evicts a socket on its
+/// first connect before it could be heard from at all.
+const WS_STILL_HANDSHAKING: u64 = u64::MAX;
 
 #[derive(Debug, Default)]
 struct WebSocketAdmissionRegistry {
@@ -240,7 +246,7 @@ fn ws_register_admission(
         .registry
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let last_heard = Arc::new(AtomicU64::new(owner.now_ms()));
+    let last_heard = Arc::new(AtomicU64::new(WS_STILL_HANDSHAKING));
     let entries = registry.by_key.entry(key).or_default();
     entries.push_back(WebSocketAdmissionEntry {
         id,
@@ -250,8 +256,11 @@ fn ws_register_admission(
 
     // The newest connection is always admitted. Past the cap, the link heard
     // from least recently goes first: a half-open socket a reconnect left
-    // behind stops answering keepalives, so it is evicted before a live tab
-    // or device of the same identity. Equally quiet links go oldest first.
+    // behind stops answering keepalives, so it is usually evicted before a
+    // live tab or device of the same identity. Equally quiet links go oldest
+    // first. Known limit: an idle live tab is heard from only by its pong to
+    // the keepalive ping, so a zombie whose peer vanished less than one
+    // keepalive interval ago can still rank above it.
     while entries.len() > WS_PER_IDENTITY_CONNECTION_CAP {
         let newest = entries.len() - 1;
         let quietest = entries
@@ -952,6 +961,9 @@ pub(crate) async fn handle_ws_connection<S: SyncSocket>(
             return;
         }
     };
+    // From here the peer can be heard from; until now it ranked as the most
+    // recent connection (see `WS_STILL_HANDSHAKING`).
+    admission_registration.heard();
     if send_ws_encoded_frames(&mut socket, &[server_hello])
         .await
         .is_err()
@@ -5152,6 +5164,38 @@ mod tests {
         .await
         .unwrap_or_else(|_| panic!("{label}: was not evicted"));
         assert!(saw_error, "{label}: eviction must carry a WireError");
+    }
+
+    // A connection still in its handshake ranks as the most recent, so a burst
+    // over the cap evicts an established quiet link instead of a socket on
+    // its first connect.
+    #[test]
+    fn per_identity_cap_never_evicts_a_connection_still_handshaking() {
+        let owner = Arc::new(WebSocketAdmissionState::default());
+        let key = WebSocketAdmissionKey {
+            app_id: AppId::random(),
+            identity: AuthorSubject::for_test_bytes([0x44; 16]),
+        };
+        let mut registrations: Vec<_> = (0..WS_PER_IDENTITY_CONNECTION_CAP)
+            .map(|_| ws_register_admission(Arc::clone(&owner), key, true))
+            .collect();
+        // Every link but the oldest finished its handshake and was heard.
+        for registration in registrations.iter().skip(1) {
+            registration.heard();
+        }
+        let _newest = ws_register_admission(Arc::clone(&owner), key, true);
+
+        assert!(
+            registrations[0].evict_rx.try_recv().is_err(),
+            "a connection still handshaking must not be evicted"
+        );
+        assert!(
+            registrations[1].evict_rx.try_recv().is_ok(),
+            "the established link heard from least recently is evicted"
+        );
+        for registration in registrations.iter_mut().skip(2) {
+            assert!(registration.evict_rx.try_recv().is_err());
+        }
     }
 
     // R42 (adopter repro c04): a cold start of six tabs of one signed-in user,

@@ -78,7 +78,7 @@ pub async fn push_catalogue_in_memory(
 /// reconnect overlap on each. 16 covers a dozen tabs or devices opening
 /// together while still bounding one identity to a small fraction of the
 /// process cap.
-pub(crate) const PER_CLIENT_CONNECTION_CAP: usize = 16;
+pub(crate) const PER_IDENTITY_CONNECTION_CAP: usize = 16;
 /// Default cap on live WebSocket connections per server process.
 ///
 /// Every connection may hold up to its per-session ingress and egress
