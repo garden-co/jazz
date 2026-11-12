@@ -3,6 +3,7 @@ import { render } from "solid-js/web";
 import { afterEach, expect, it, vi } from "vitest";
 import { AccountManager, type AccountHandle } from "../accounts/state.js";
 import { createJazzSessionOwner } from "../session/state.js";
+import { ownJazzSession, startJazzSession, type JazzSession } from "../session/jazz-session.js";
 import { attachSubscriptionStore } from "../subscription-store-internal.js";
 import { JazzProvider, useJazzSession } from "./session.js";
 import { useJazzClient } from "./provider.js";
@@ -177,4 +178,32 @@ it("refuses the removed autoAttachDevTools prop instead of passing it to the cli
     ),
   ).toThrow(/JazzProvider takes no autoAttachDevTools.*mountInspector/);
   expect(factory).not.toHaveBeenCalled();
+});
+
+it("renders nothing once its session is closed, or the closed view", async () => {
+  for (const closed of [undefined, <p>Session closed</p>]) {
+    const { owner } = await setup();
+    await owner.createLocalFirst();
+    const session = ownJazzSession({}, async () => owner, { start: false });
+    await startJazzSession(session as JazzSession<unknown>);
+    const node = document.createElement("div");
+    document.body.append(node);
+    dispose = render(
+      () => (
+        <JazzProvider session={session as never} loading={<p>Loading</p>} closed={closed}>
+          <p>data</p>
+        </JazzProvider>
+      ),
+      node,
+    );
+    await flush();
+    expect(node.textContent).toBe("data");
+    await session.close();
+    await flush();
+    expect(session.getSnapshot().status).toBe("closed");
+    // Before: the loading view, forever.
+    expect(node.textContent).toBe(closed ? "Session closed" : "");
+    dispose();
+    dispose = undefined;
+  }
 });
