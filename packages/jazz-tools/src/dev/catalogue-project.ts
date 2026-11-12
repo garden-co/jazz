@@ -37,6 +37,7 @@ import {
   hasRootSchema,
   loadCompiledSchema,
   importsClientMigrations,
+  rootSchemaFile,
   writeClientMigrationsModule,
   type LoadedSchemaProject,
 } from "../schema-loader.js";
@@ -224,12 +225,14 @@ export async function validateProject(
   await checkLocalMigrations(compiled.wasmSchema, migrationsDir);
   const schema = await schemaSnapshotStatus(migrationsDir, compiled.wasmSchema);
   if (!options.check) await writeLocalClientMigrations(options.schemaDir, migrationsDir);
+  const unshipped = await unshippedMigrationsWarning(options.schemaDir, migrationsDir);
   return {
     schema,
     schemaFile: compiled.schemaFile,
     permissionsFile: compiled.permissionsFile,
     tableCount: compiled.schema.tables.length,
     warnings: [
+      ...(unshipped ? [unshipped] : []),
       ...retired,
       ...collectConventionalProvenanceDiagnostics(compiled.schema),
       ...collectMissingExplicitPolicyDiagnostics(
@@ -1631,9 +1634,9 @@ export async function deploy(options: DeployOptions): Promise<DeployResult> {
 
 /**
  * The module an app imports its `migrations` from, in the `migrations`
- * directory beside schema.ts. `jazz-tools` writes it on every validate,
- * deploy and migration, so it exists even while an app has a single schema
- * version.
+ * directory beside schema.ts. For an app whose schema.ts imports it,
+ * `jazz-tools` writes it on every validate and `migrations create`, so it
+ * exists even while the app has a single schema version.
  */
 export const CLIENT_MIGRATIONS_FILE = CLIENT_MIGRATIONS_MODULE;
 
@@ -1963,6 +1966,28 @@ async function checkLegacyMigrations(
   if (pending.length === 0) return;
   throw new Error(
     `This project still uses the schema hashes Jazz used before alpha.60. Run \`jazz-tools validate\` to ${pending.join("; ")}.${plan.startFrom ? ` Then run \`jazz-tools migrations create\`: no snapshot is for schema.ts, so the app needs a migration from ${plan.startFrom}.` : ""}`,
+  );
+}
+
+/**
+ * The warning for a project that has schema snapshots but whose schema.ts
+ * doesn't import `./migrations`: `jazz-tools` writes migrations/index.ts only
+ * for an app that imports it, so such an app (still on `{ migrations: "none" }`)
+ * ships none of its migrations, and nothing else would say so.
+ */
+export async function unshippedMigrationsWarning(
+  schemaDir: string,
+  migrationsDir?: string,
+): Promise<string | null> {
+  const schemaFile = rootSchemaFile(schemaDir);
+  if (!schemaFile || (await importsClientMigrations(schemaFile))) return null;
+  const snapshots = await listLocalSnapshotEntries(schemaDir, migrationsDir);
+  if (snapshots.length === 0) return null;
+  return (
+    `${basename(schemaFile)} doesn't import its migrations, so jazz-tools did not write ` +
+    "migrations/index.ts and the app ships none of the schema versions in migrations/. " +
+    'Add `import { migrations } from "./migrations";` to schema.ts, pass `{ migrations }` to ' +
+    '`defineApp` (instead of `{ migrations: "none" }`), and run `jazz-tools validate` again.'
   );
 }
 

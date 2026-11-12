@@ -11,6 +11,7 @@ import {
   compileSchema as compileCatalogueSchema,
   requireAppId,
   requireServerValue,
+  unshippedMigrationsWarning,
   validateProject,
 } from "./dev/catalogue-project.js";
 import { renderMigrationGraph } from "./dev/migration-graph.js";
@@ -314,6 +315,13 @@ function requireMigrationServerOptions(options: MigrationCommandOptions): {
 }
 
 export async function createMigration(options: CreateMigrationOptions): Promise<string | null> {
+  const written = await reportCreatedMigration(options);
+  const unshipped = await unshippedMigrationsWarning(options.schemaDir, options.migrationsDir);
+  if (unshipped) console.warn(`\x1b[33m${unshipped}\x1b[0m`);
+  return written;
+}
+
+async function reportCreatedMigration(options: CreateMigrationOptions): Promise<string | null> {
   const result = await createCatalogueMigration(options);
 
   switch (result.status) {

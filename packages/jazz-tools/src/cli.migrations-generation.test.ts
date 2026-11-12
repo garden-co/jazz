@@ -109,6 +109,43 @@ describe("cli migrations", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  // An app still on `{ migrations: "none" }` got snapshots and a stub but no
+  // migrations/index.ts, and nothing said why (alpha.61 adopter round).
+  it("tells an app on migrations: none to import its migrations, then writes index.ts", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    const index = join(root, "migrations", "index.ts");
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await writeFile(join(root, "permissions.ts"), rootPermissionsSchema());
+    const hint = 'Add `import { migrations } from "./migrations";` to schema.ts';
+
+    // Nothing to ship yet: no hint before the first snapshot.
+    const { logs: fresh } = await captureConsoleLogs(() => validate({ schemaDir: root }));
+    expect(fresh.join("\n")).not.toContain(hint);
+
+    const { logs: created } = await captureConsoleLogs(() =>
+      createMigration({ schemaDir: root, migrationsDir }),
+    );
+    expect(created.join("\n")).toContain(hint);
+    expect(await fileExists(index)).toBe(false);
+
+    const { logs: validated } = await captureConsoleLogs(() => validate({ schemaDir: root }));
+    expect(validated.join("\n")).toContain(hint);
+    expect(await fileExists(index)).toBe(false);
+
+    // Following the hint: the import, then validate, writes the module.
+    await writeFile(
+      join(root, "schema.ts"),
+      `import { migrations } from "./migrations";\n` +
+        rootSchemaWithoutInlinePermissions().replace('{ migrations: "none" }', "{ migrations }"),
+    );
+    const { logs: shipped } = await captureConsoleLogs(() => validate({ schemaDir: root }));
+    expect(shipped.join("\n")).not.toContain(hint);
+    const module = await readFile(index, "utf8");
+    expect(module).toContain("`jazz-tools validate` and `jazz-tools migrations create` rewrite it");
+    expect(module).not.toContain("`deploy`");
+  });
+
   // A migration validate passed used to fail only at deploy (adopter b22):
   // renaming an optional column to a required one.
   it("refuses in validate a migration that a deploy would refuse, naming the column", async () => {
