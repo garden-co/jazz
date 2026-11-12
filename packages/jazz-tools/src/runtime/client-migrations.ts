@@ -2,10 +2,10 @@ import type { WasmSchema } from "../drivers/types.js";
 
 /**
  * The app's schema versions and the migrations between them (the `schemas`
- * and `migrations` a deployment publishes). `jazz-tools` generates them in
- * `migrations/index.ts` beside schema.ts on every validate and deploy, even
- * while the app has a single version, and the app passes them to
- * `defineApp`:
+ * and `migrations` a deployment publishes). Once schema.ts imports them,
+ * `jazz-tools` generates them in `migrations/index.ts` beside schema.ts on
+ * every validate and `migrations create`, even while the app has a single
+ * version, and the app passes them to `defineApp`:
  *
  * ```ts
  * import { migrations } from "./migrations";
