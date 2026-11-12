@@ -37,5 +37,6 @@ Migration:
 | `useAccountState`, `accountState`, `createAccountState`                                                   | `useJazzSession()` / `getJazzSession()`                                                                                                      |
 | `acceptLocalFirstAuth` (backend)                                                                          | `acceptDeviceAccounts`                                                                                                                       |
 | `createDb` (`jazz-tools`, `jazz-tools/react-native`)                                                      | `createJazzClient(...)` then `session.db`                                                                                                    |
+| `Jazz.layer({ …, account })` (`jazz-tools/effect`)                                                        | `Jazz.layer(config)` opens a session (pass `initial: "device"`), or `Jazz.layerDb(session.db)`                                               |
 
 `<JazzProvider>` refuses the old shapes (config as its own props, `fallback`, a config with an `account`) with an error that names the new one. This also fixes a client config without `serverUrl` meaning `"/jazz"` in the account manager but "local" in the Db (#5113): there is one config now, resolved in one place.
