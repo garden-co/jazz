@@ -5,5 +5,11 @@ import type { JazzClientConfig } from "jazz-tools/vue";
  * no URL. Everyone starts as a guest: a device account on this device.
  */
 export function sessionConfig(overrides: Partial<JazzClientConfig> = {}): JazzClientConfig {
-  return { env: "dev", initial: "device", ...overrides };
+  return {
+    env: "dev",
+    initial: "device",
+    // Local data, so the app works offline once it has loaded.
+    client: () => import("jazz-tools/local-first"),
+    ...overrides,
+  };
 }

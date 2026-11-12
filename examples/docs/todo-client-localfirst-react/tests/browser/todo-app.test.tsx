@@ -66,7 +66,7 @@ describe("React Todo App E2E", () => {
     const r = createRoot(el);
     const { deviceKey, ...overrides } = config;
     const resolvedConfig: SessionOverrides = {
-      appId: "test-app",
+      appId: SCOPE,
       store: memoryAccountStore(),
       driver: { type: "persistent", dbName: crypto.randomUUID() },
       ...overrides,

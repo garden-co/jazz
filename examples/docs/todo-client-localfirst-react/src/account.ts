@@ -10,5 +10,11 @@ export type SessionOverrides = Omit<Partial<JazzClientConfig>, "appId"> & { appI
 /** Everyone starts as a guest: a device account on this device. */
 export function sessionConfig({ appId, ...rest }: SessionOverrides = {}): JazzClientConfig {
   const overrides = appId === undefined ? rest : { ...rest, scope: appId };
-  return { env: "dev", initial: "device", ...overrides };
+  return {
+    env: "dev",
+    initial: "device",
+    // Local data, so the app works offline once it has loaded.
+    client: () => import("jazz-tools/local-first"),
+    ...overrides,
+  };
 }
