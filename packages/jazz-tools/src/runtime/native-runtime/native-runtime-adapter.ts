@@ -4,6 +4,7 @@ import { isHistoryTable, resolveQueryTable } from "../history-relation.js";
 import { AuxiliaryReceiveDeadline } from "./auxiliary-receive-deadline.js";
 import { Utf8Decoder } from "../utf8.js";
 import { parseSnapshotRef, UnsupportedSnapshotError, type SnapshotRef } from "../snapshot-ref.js";
+import { isAuthorityChangedError, upstreamRefusalError } from "../authority-changed-error.js";
 import { formatUuid, formatUuidAt } from "../hex.js";
 
 export { formatUuid };
@@ -17,9 +18,14 @@ import {
   DerivedStatePublisher,
   LOCAL_ONLY,
   linkStatusFromUpstream,
+  linkFailureOf,
+  NO_UPLOADS,
   offlineLink,
   sameLinkStatus,
+  sameUploadStatus,
+  type LinkFailure,
   type LinkStatus,
+  type UploadStatus,
 } from "../sync-status.js";
 import type {
   ColumnDescriptor,
@@ -104,6 +110,7 @@ import {
   WebSocketCarrier,
   WIRE_PROTOCOL_VERSION,
   isReconnectLaterWireError,
+  isSocketDropWireError,
   normalizeBackendWebSocketAuth,
   peerIdentityForWebSocketAuth,
   policyClaimsForAdmittedWebSocket,
@@ -260,7 +267,8 @@ type NativeDb = {
   /** A fresh upstream link machine for this runtime's server WebSocket. */
   createUpstreamLink?(seed: number): NativeUpstreamLink;
   /** How many local commits still wait for the server's verdict. */
-  pendingUploadCount?(): number;
+  /** This store's uploads; see {@link UploadStatus}. */
+  uploadStatus?(): UploadStatus;
   nativeConnectionStatus?(): {
     configured: boolean;
     explicitlyOffline: boolean;
@@ -386,6 +394,11 @@ type NativeDb = {
       | ((error: Error | null, urgency: string) => void),
   ): void;
   onMutationError(callback: (event: MutationErrorEvent) => void): void;
+  /**
+   * A durable browser store's writes to its backing storage started failing
+   * (`message`) or work again (`null`); only the browser WASM host has one.
+   */
+  onStorageFailure?(callback: (message: string | null) => void): void;
   /** A native host's upstream refused the credential; ticks keep running. */
   onAuthRejected?(callback: (reason: string) => void): void;
   /**
@@ -498,6 +511,12 @@ export type Transport = {
   takeAuxiliaryTrace?(): unknown[];
   setAuxiliaryTraceEnabled?(enabled: boolean): void;
   tick(): number | Promise<number>;
+  /**
+   * Why the core dropped this upstream link on its own (an `Error`-like
+   * value with the core `code`, e.g. `authority_changed`), or `null` while
+   * the link stands. Older bindings lack it.
+   */
+  upstreamRefusal?(): unknown;
   updateAuthenticatedClaims?(claims: Record<string, unknown>): void | Promise<void>;
   free?(): void;
 };
@@ -582,7 +601,7 @@ type UpstreamLinkStatus = {
   /** Only a new server or `connect()` revives the link: a stop, or a refused credential no renewal fixes. */
   terminal: boolean;
 };
-type RuntimeSyncStatus = { link: LinkStatus; pendingUploads: number };
+type RuntimeSyncStatus = { link: LinkStatus; uploads: UploadStatus };
 type UpstreamLinkStep = {
   actions: Array<
     | { type: "connect"; attempt: number }
@@ -609,10 +628,7 @@ function upstreamLinkFailure(error: WireError, negotiated: boolean): UpstreamLin
   }
   // The network or the server dropped the socket. A local-first client must
   // survive an outage of any length, including one it was opened in.
-  if (
-    error.retry === "later" &&
-    (error.code === "websocket_closed" || error.code === "websocket_error")
-  ) {
+  if (isSocketDropWireError(error)) {
     return { kind: "network", message };
   }
   // Anything else (a protocol error, an incompatible server) cannot succeed
@@ -891,6 +907,13 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverReplacementRetirement: Promise<void> | null = null;
   private serverTransportError: Error | null = null;
   private serverTransportErrorWaiters: ServerTransportErrorWaiter[] = [];
+  /**
+   * Why the durable worker cannot write its store now (storage full, most
+   * often), as relayed to this non-durable client. While set, its writes'
+   * `local` waits reject: the worker holds them only in memory.
+   */
+  private localStorageFailure: Error | null = null;
+  private readonly localStorageFailureWaiters = new Set<(error: Error) => void>();
   private serverTransportWorkEpoch = 0;
   private serverTransportWorkWaiters: ServerTransportWorkWaiter[] = [];
   private serverEndpointUrl: string | null = null;
@@ -909,6 +932,12 @@ export class NativeRuntimeAdapter implements Runtime {
   } | null = null;
   /** The error that ended the attempt the machine is deciding about. */
   private linkFailure: Error | null = null;
+  /**
+   * Why the core dropped the last admitted link on its own (see
+   * `Transport.upstreamRefusal`): the link is stopped with it until the next
+   * attempt, which an explicit reconnect starts.
+   */
+  private upstreamRefusal: Error | null = null;
   private linkCloseReason = "server transport replaced";
   /** The client keeps reconnecting through the current `serverTransportError`. */
   private serverTransportErrorRetrying = false;
@@ -924,8 +953,11 @@ export class NativeRuntimeAdapter implements Runtime {
   );
   private readonly syncStatusPublisher = new DerivedStatePublisher<RuntimeSyncStatus>(
     () => this.readSyncStatus(),
-    (a, b) => a.pendingUploads === b.pendingUploads && sameLinkStatus(a.link, b.link),
+    (a, b) => sameUploadStatus(a.uploads, b.uploads) && sameLinkStatus(a.link, b.link),
   );
+  /** The latest link failure, and the failing state it was recorded for. */
+  private lastFailure: LinkFailure | null = null;
+  private failingAs: string | null = null;
   private readonly pendingInboundServerFrames: Uint8Array[] = [];
   private serverInboundRouting: Promise<void> = Promise.resolve();
   private serverInboundProcessed = false;
@@ -1487,6 +1519,7 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private linkChanged(): void {
+    if (this === this.ownerRuntime) this.noteLinkFailure();
     this.remoteLink.changed();
     this.linkStatusPublisher.changed();
     this.syncStatusPublisher.changed();
@@ -1509,14 +1542,34 @@ export class NativeRuntimeAdapter implements Runtime {
       }
       return CONNECTING;
     }
+    if (this.linkStatus?.phase === "stopped" && isAuthorityChangedError(this.upstreamRefusal)) {
+      return offlineLink("authority-changed", false);
+    }
     return linkStatusFromUpstream(this.linkStatus);
   }
 
-  /** How many local commits still wait for the server's verdict. */
-  pendingUploadCount(): number {
-    if (this !== this.ownerRuntime) return this.ownerRuntime.pendingUploadCount();
-    if (this.closed) return 0;
-    return this.db?.pendingUploadCount?.() ?? 0;
+  /** This client's uploads: pending, since when, and the server's refusals. */
+  uploadStatus(): UploadStatus {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.uploadStatus();
+    if (this.closed) return NO_UPLOADS;
+    return this.db?.uploadStatus?.() ?? NO_UPLOADS;
+  }
+
+  /** The latest time the link failed, and how; it stays after the link recovers. */
+  lastLinkFailure(): LinkFailure | null {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.lastLinkFailure();
+    this.noteLinkFailure();
+    return this.lastFailure;
+  }
+
+  /** Record a failure the first time the link is seen failing that way. */
+  private noteLinkFailure(): void {
+    const link = this.upstreamLinkStatus();
+    const failing = link.state === "offline" ? link.reason : null;
+    if (failing === this.failingAs) return;
+    this.failingAs = failing;
+    const failure = linkFailureOf(link, (this.linkFailure ?? this.serverTransportError)?.message);
+    if (failure) this.lastFailure = failure;
   }
 
   /** Observe changes of {@link upstreamLinkStatus} alone. */
@@ -1529,7 +1582,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.startNativeLinkPoll();
   }
 
-  /** Observe changes of {@link upstreamLinkStatus} and {@link pendingUploadCount}. */
+  /** Observe changes of {@link upstreamLinkStatus} and {@link uploadStatus}. */
   onSyncStatusChange(listener: () => void, signal: AbortSignal): void {
     if (this !== this.ownerRuntime) {
       this.ownerRuntime.onSyncStatusChange(listener, signal);
@@ -1540,7 +1593,7 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private readSyncStatus(): RuntimeSyncStatus {
-    return { link: this.upstreamLinkStatus(), pendingUploads: this.pendingUploadCount() };
+    return { link: this.upstreamLinkStatus(), uploads: this.uploadStatus() };
   }
 
   private readRemoteLinkState(): RemoteLinkState {
@@ -1990,7 +2043,9 @@ export class NativeRuntimeAdapter implements Runtime {
     // Branch views have no partial-value coordinate space yet (#2087). Do not
     // silently read or stage through the root instead.
     if (branchView) {
-      throw new Error("Typed large-value updates are not supported in branch views.");
+      throw new Error(
+        "Partial-value updates (applyDiffs, editedFrom) are not yet supported in branch views.",
+      );
     }
     if (tx) {
       // The transaction was opened with its identity, and the core stages the
@@ -2028,7 +2083,9 @@ export class NativeRuntimeAdapter implements Runtime {
     // Outside a transaction the binding writes as the adapter's own identity.
     // Do not silently substitute it for a session or attributed write.
     if (largeValueWriteHasIncompatibleIdentity(writeContext, this.peerIdentity)) {
-      throw new Error("Typed large-value updates do not yet support an attributed identity.");
+      throw new Error(
+        "Partial-value updates (applyDiffs, editedFrom) do not yet support a session or attributed identity outside a transaction.",
+      );
     }
     const updateLargeValues = this.db.updateLargeValues;
     if (!updateLargeValues) {
@@ -2393,10 +2450,12 @@ export class NativeRuntimeAdapter implements Runtime {
       this.throwServerTransportErrorForTier(tier, true);
       const transportError = this.waitForServerTransportError(tier, true);
       const transportWork = this.waitForServerTransportWork(tier, observedServerWorkEpoch);
+      const storageFailure = this.waitForLocalStorageFailure(tier);
       let stopAbortWake: (() => void) | undefined;
       try {
         const wakes: Array<Promise<"settled" | "work"> | Promise<never>> = [settled];
         if (transportError) wakes.push(transportError.promise);
+        if (storageFailure) wakes.push(storageFailure.promise);
         if (transportWork) wakes.push(transportWork.promise.then(() => "work" as const));
         if (signal) {
           wakes.push(
@@ -2421,6 +2480,7 @@ export class NativeRuntimeAdapter implements Runtime {
         stopAbortWake?.();
         transportError?.cancel();
         transportWork?.cancel();
+        storageFailure?.cancel();
       }
     }
   }
@@ -2817,6 +2877,7 @@ export class NativeRuntimeAdapter implements Runtime {
     // A published outage stays visible to Global readers until a retry
     // actually reconnects; each failed attempt must not hide it again.
     if (!this.linkStatus?.outagePublished) this.forgetServerTransportError();
+    this.upstreamRefusal = null;
     this.linkChanged();
     let resolveTerminal!: (error: Error) => void;
     const terminal = new Promise<Error>((resolve) => {
@@ -2864,7 +2925,8 @@ export class NativeRuntimeAdapter implements Runtime {
         if (
           isReconnectLaterWireError(error) ||
           error.code === "websocket_closed" ||
-          error.code === "websocket_error"
+          error.code === "websocket_error" ||
+          error.code === "websocket_silent"
         ) {
           return;
         }
@@ -3059,6 +3121,15 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   /**
+   * A durable browser store's host reports `message` when writing the store
+   * to its backing storage starts failing, and `null` once it works again.
+   */
+  onStorageFailure(callback: (message: string | null) => void): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.onStorageFailure(callback);
+    this.db.onStorageFailure?.(callback);
+  }
+
+  /**
    * Observe the first upstream transport failure, and whether the client
    * keeps reconnecting through it. This has no fate semantics: it only wakes
    * remote waits and subscriptions that are active in this runtime.
@@ -3099,6 +3170,39 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!this.serverTransportError) return;
     this.forgetServerTransportError();
     this.linkChanged();
+  }
+
+  /**
+   * The durable worker this client writes through reports that writing its
+   * store failed (`message`), or works again (`null`). Meanwhile the worker
+   * keeps the writes in memory and acknowledges none of them, so every
+   * `local` wait rejects with code `storage` instead of waiting.
+   */
+  reportLocalStorageFailure(message: string | null): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.reportLocalStorageFailure(message);
+    if (message === null) {
+      this.localStorageFailure = null;
+      return;
+    }
+    const error = Object.assign(new Error(message), { code: "storage" });
+    this.localStorageFailure = error;
+    for (const reject of this.localStorageFailureWaiters) reject(error);
+    this.localStorageFailureWaiters.clear();
+  }
+
+  private waitForLocalStorageFailure(
+    tier: string,
+  ): { promise: Promise<never>; cancel: () => void } | null {
+    if (tier !== "local" || !this.nonDurableClient) return null;
+    if (this.localStorageFailure) {
+      return { promise: Promise.reject(this.localStorageFailure), cancel: () => {} };
+    }
+    let reject!: (error: Error) => void;
+    const promise = new Promise<never>((_, rejectWith) => {
+      reject = rejectWith;
+    });
+    this.localStorageFailureWaiters.add(reject);
+    return { promise, cancel: () => this.localStorageFailureWaiters.delete(reject) };
   }
 
   reportRemoteMutationError(event: MutationErrorEvent): void {
@@ -4093,6 +4197,7 @@ export class NativeRuntimeAdapter implements Runtime {
         ) {
           return;
         }
+        if (this.stopRefusedUpstream(transport)) return;
         const frames = normalizeTransportFrames(transport.recvWireFrames());
         if (frames.length > 0) {
           this.sendServerFrames(frames, carrier, generation);
@@ -4110,6 +4215,22 @@ export class NativeRuntimeAdapter implements Runtime {
         this.scheduleServerPump();
       }
     }
+  }
+
+  /**
+   * Stop the link when the core dropped `transport` on its own: nothing
+   * syncs over it, and a retry would be refused the same way (a server whose
+   * authority changed). Waits for the server fail with the refusal, and the
+   * link stays stopped until an explicit reconnect.
+   */
+  private stopRefusedUpstream(transport: Transport): boolean {
+    const refusal = upstreamRefusalError(transport.upstreamRefusal?.());
+    if (!refusal) return false;
+    const attempt = this.serverConnectionAttempt;
+    if (!attempt || attempt.transport !== transport) return false;
+    this.upstreamRefusal = refusal;
+    this.endLinkAttempt(attempt, refusal, { kind: "fatal", message: refusal.message });
+    return true;
   }
 
   private async routePendingInboundServerFrames(): Promise<boolean> {
@@ -5391,7 +5512,15 @@ function writeOrNormalizeRejection<T>(
     if (isCoreWriteRejection(error)) {
       const message = errorMessage(error);
       const reason = extractWriteRejectedReason(message) ?? message;
-      throw new Error(`${operation} failed: WriteError("${reason}")`);
+      // A synchronous NAPI throw carries no reason, but a denial's message
+      // leads with it. Either way the caller gets the code a rejected wait
+      // would carry, so one check handles a denial wherever it is decided.
+      const coreReason =
+        nativeCoreErrorReason(error) ??
+        (reason.startsWith("authorization_denied:") ? "authorization_denied" : undefined);
+      throw Object.assign(new Error(`${operation} failed: WriteError("${reason}")`), {
+        code: rejectionCode(coreReason),
+      });
     }
     throw error;
   }

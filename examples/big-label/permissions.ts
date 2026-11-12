@@ -13,12 +13,12 @@ const tenantPermissions = definePermissions(app, ({ policy, session, allowedTo, 
   const member = (organizationId: unknown) =>
     policy.memberships.exists.where({
       organizationId: organizationId as never,
-      userId: session.user.account,
+      userId: session.user,
     });
   const admin = (organizationId: unknown) =>
     policy.memberships.exists.where({
       organizationId: organizationId as never,
-      userId: session.user.account,
+      userId: session.user,
       role: "admin",
     });
   const editor = (organizationId: unknown) =>
@@ -26,7 +26,7 @@ const tenantPermissions = definePermissions(app, ({ policy, session, allowedTo, 
       catalogueEditors.map((role) =>
         policy.memberships.exists.where({
           organizationId: organizationId as never,
-          userId: session.user.account,
+          userId: session.user,
           role,
         }),
       ),
@@ -66,15 +66,13 @@ const tenantPermissions = definePermissions(app, ({ policy, session, allowedTo, 
 
   // You see your own profile and the people who share a label with you.
   policy.people.allowRead.where(
-    anyOf([{ userId: session.user.account }, allowedTo.read("membershipsViaPerson")]),
+    anyOf([{ userId: session.user }, allowedTo.read("membershipsViaPerson")]),
   );
   // Profiles are created only by the trusted bootstrap transaction. This
   // prevents a client-created duplicate from splitting a user's membership
   // identity before their personal tenant is established.
   policy.people.allowInsert.never();
-  policy.people.allowUpdate
-    .whereOld({ userId: session.user.account })
-    .whereNew({ userId: session.user.account });
+  policy.people.allowUpdate.whereOld({ userId: session.user }).whereNew({ userId: session.user });
   policy.people.allowDelete.never();
 
   policy.personEmails.allowRead.never();

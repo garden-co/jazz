@@ -1650,6 +1650,10 @@ fn foreground_command(
         Request::PendingUploadCount => Response::PendingUploadCount {
             count: binding.pending_upload_count() as u64,
         },
+        Request::UploadStatus => Response::UploadStatus {
+            status_json: serde_json::to_string(&binding.upload_status())
+                .expect("an upload status serializes"),
+        },
         Request::BeginStreamingMutation {
             mutation,
             table,
@@ -1801,10 +1805,11 @@ fn wait_for_write(
         .writes
         .get(&TransactionId(tx_id))
         .ok_or_else(|| HostError::Argument("unknown foreground transaction id".to_owned()))?;
-    let wait = client.binding.wait_for_write(&tracked.write, tier)?;
-    if !observe_only {
-        tracked.claimed.set(true);
-    }
+    let wait = client.binding.wait_for_write(
+        &tracked.write,
+        tier,
+        (!observe_only).then(|| Rc::clone(&tracked.claimed)),
+    )?;
     client.pending_or_ready(
         Box::pin(async move {
             wait.await?;

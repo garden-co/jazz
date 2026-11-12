@@ -14,6 +14,16 @@ export interface TransportControl {
   blockInbound(): void;
   /** Resume both directions, including buffered traffic. */
   unblock(): void;
+  /**
+   * The server goes away: close every connection and refuse new ones, as a
+   * stopped backend does, until {@link TransportControl.up}.
+   */
+  down(): void;
+  /**
+   * The server is back, at `serverUrl` if given (a restarted backend on a
+   * new port behind the same address the client knows).
+   */
+  up(serverUrl?: string): void;
   stop(): Promise<void>;
 }
 
@@ -24,14 +34,20 @@ export interface TransportControl {
  */
 export async function createTransportControl(serverUrl: string): Promise<TransportControl> {
   const upstream = new URL(serverUrl);
-  const upstreamPort = Number(upstream.port || (upstream.protocol === "https:" ? 443 : 80));
+  const portOf = (url: URL) => Number(url.port || (url.protocol === "https:" ? 443 : 80));
+  let upstreamAddress = { port: portOf(upstream), hostname: upstream.hostname };
+  let isDown = false;
   const sockets = new Set<Socket>();
   const queued: Array<{ destination: Socket; chunk: Buffer }> = [];
   let inboundBlocked = false;
   let outboundBlocked = false;
 
   const server = createServer((client) => {
-    const target = connect(upstreamPort, upstream.hostname);
+    if (isDown) {
+      client.destroy();
+      return;
+    }
+    const target = connect(upstreamAddress.port, upstreamAddress.hostname);
     sockets.add(client);
     sockets.add(target);
     const close = () => {
@@ -78,6 +94,19 @@ export async function createTransportControl(serverUrl: string): Promise<Transpo
       }
       inboundBlocked = false;
       outboundBlocked = false;
+    },
+    down() {
+      isDown = true;
+      queued.length = 0;
+      for (const socket of sockets) socket.destroy();
+      sockets.clear();
+    },
+    up(serverUrl?: string) {
+      if (serverUrl) {
+        const next = new URL(serverUrl);
+        upstreamAddress = { port: portOf(next), hostname: next.hostname };
+      }
+      isDown = false;
     },
     async stop() {
       queued.length = 0;

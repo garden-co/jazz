@@ -38,7 +38,7 @@ pub fn session_eq(column: &str, path: &[&str]) -> PolicyExpr {
 
 /// `column` equals the reading user's subject.
 pub fn is_me(column: &str) -> PolicyExpr {
-    session_eq(column, &["user", "identity", "subject"])
+    session_eq(column, &["identity", "subject"])
 }
 
 /// `column` equals `outer_column` of the row the policy is evaluated for.

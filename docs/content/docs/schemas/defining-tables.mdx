@@ -1,6 +1,6 @@
 ---
 title: Defining Tables
-description: Define tables and relationships in schema.ts using the TypeScript DSL.
+description: "Learn how to define tables and the relations between them in schema.ts."
 reviewedAt: "b29b48d1a"
 ---
 
@@ -23,7 +23,7 @@ app-root/
 
 ## Table definitions
 
-Tables are defined in `schema.ts` using the Jazz DSL. Each `s.table(columns, relations)` call declares its stored columns and named relations.
+Tables are defined in `schema.ts`. Each `s.table(columns, relations)` call declares its stored columns and named relations.
 The second argument is required; pass `{}` when the table has no relations.
 
 <include cwd lang="ts" meta='title="schema.ts"'>
@@ -57,13 +57,13 @@ const app = s.defineApp(schema, { migrations });
 `author` is the public relation name, `users` is its target table, and `authorId` is the
 local UUID column.
 
-`authoredPosts` names a reverse traversal of the `posts.author` relation;
-the second argument to `s.reverse` is a **forward relation name**, not a column name.
-No suffix convention, generated code, or automatic reverse relation is involved. A UUID
-column without a relation declaration remains an ordinary UUID column.
+`authoredPosts` lets you find all posts written by a user. It refers to the `author` relationship
+(not the `authorId` column) on the `posts` table. Relationships must be declared explicitly: a UUID
+column on its own does not create one.
 
-Use `s.uuid().optional()` for an optional ID and `s.array(s.uuid())` for an array of IDs;
-point `s.rel` at that column in both cases. Optionality and cardinality come from the column.
+Use an optional UUID (`s.uuid().optional()`) if a post might not have an author, or an array of
+UUIDs (`s.array(s.uuid())`) if it can have several; `s.rel` points at the column either way.
+
 A declared relation does not guarantee the target row exists or is readable: a peer may not
 have synced it, it may have been deleted, or permissions may hide it. See
 [Missing references](/docs/reading/includes-and-relations#missing-references).
@@ -73,11 +73,54 @@ Targets and local columns must exist, forward columns must have supported UUID s
 reverse declarations must resolve to a forward relation pointing back to their table.
 Relation names must not collide with stored column names.
 
+### Arrays or reverse relations?
+
+- **One-to-many: point each child row at its parent** with a UUID column, and give the parent an
+  `s.reverse` relation, as `authoredPosts` does above. Each link is its own row, so two people
+  adding at the same time never collide, any number of children fits, and each child has its own
+  permissions and history. Use this for comments on a post or tasks in a project.
+- **An array of UUIDs on one row** suits a short list that belongs to that row and is usually
+  edited by one person at a time, such as a post's co-authors or an ordered list of pinned items. The
+  array keeps its order, and policies can check membership. It is written as a whole, though: if two
+  people change it at once, the edit the server receives first wins, and the other is kept only in
+  the row's history.
+- **Many-to-many links that people edit concurrently, or that carry data of their own** (a role,
+  when someone joined): use a join table with an `s.rel` to each side, like the members table in
+  [Group permissions](/docs/recipes/access-control/group-permissions).
+
+## Latest-only tables
+
+By default a table keeps every version of every row, for [history](/docs/reading/history) reads,
+snapshots and branches. For a table whose rows change often and whose history you don't need, such
+as editor presence or cursors, keep only each row's latest version:
+
+```ts
+const presence = s.table({ doc: s.string(), cursor: s.string() }, {}).history("latest");
+```
+
+A latest-only table can't be read through `history`, at a snapshot or in a serializable
+transaction, and can't use `branchBy`, text-merging columns or values too large to store inline.
+Concurrent writes can overwrite one another, and Jazz can't report whether a write overwrote a
+change the writer hadn't seen. On a client, queries involving latest-only tables may show their
+newest values alongside older data from other tables. For example, a cursor position may briefly be
+newer than the document shown with it.
+
+Switching an existing table to latest-only stops history queries on it at once, and deletes each
+row's earlier versions the next time that row is written; those versions can't be recovered. So the
+first deployment that does it must pass `allowDroppingHistory: true` to `createJazz`. A row that
+already holds a value too large to store inline keeps it, but can't be written with such a value
+again.
+
+Each write follows the history settings of the client's schema. If you roll back to a schema that
+keeps full history, writes using that schema stop deleting old versions. However, once a table has
+been converted to latest-only, history queries for it remain unavailable, because Jazz can't
+guarantee its history is complete.
+
 ## Validate locally
 
 <SchemaSetup />
 
-When you change your schema on a shared app, prepare any required migration and run `jazz-tools deploy <appId>`. See [Migrations](/docs/schemas/migrations) for details.
+When you change your schema on a shared app, prepare any required migration and deploy your main backend: `createJazz` publishes the schema, permissions and migrations when it starts. See [Migrations](/docs/schemas/migrations) for details.
 
 ## Exporting the app
 
@@ -85,7 +128,7 @@ When you change your schema on a shared app, prepare any required migration and 
 This is what you pass to queries, mutations, and subscriptions throughout your application code.
 
 `migrations` comes from `migrations/index.ts` beside your `schema.ts`. `jazz-tools` writes that
-file on every `validate` and `deploy` of an app that imports it, even while your app has a single
+file on every `validate` and `migrations create` of an app that imports it, even while your app has a single
 schema version, so the import always looks the same:
 
 ```ts title="schema.ts"

@@ -11,7 +11,7 @@ import {
   TextInput,
   VStack,
 } from "@astryxdesign/core";
-import { useAll, useDb } from "jazz-tools/react";
+import { useAll } from "jazz-tools/react";
 import { History } from "lucide-react";
 import { useState } from "react";
 import { app } from "@/schema";
@@ -32,8 +32,7 @@ export function CheckpointShelf({
   previewCheckpointId: string | null;
   onPreview: (id: string | null) => void;
 }) {
-  const db = useDb();
-  const { data: checkpoints = [] } = useAll(
+  const { data: checkpoints = [], db } = useAll(
     app.checkpoints
       .where({ canvasId })
       .select("id", "label", "$createdAt")

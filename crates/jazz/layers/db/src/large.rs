@@ -264,6 +264,18 @@ pub(crate) fn large_capable(column: &Column) -> bool {
     matches!(ty, ValueType::String | ValueType::Bytes)
 }
 
+/// The most logical bytes a value of `column` keeps inline; a longer one
+/// is chunked. Text-merge columns chunk early
+/// ([`lv::TEXT_MERGE_INLINE_MAX_BYTES`]), every other column at
+/// [`lv::INLINE_VALUE_MAX_BYTES`].
+pub(crate) fn inline_max(column: &Column) -> usize {
+    if column.merge.text_format().is_some() {
+        lv::TEXT_MERGE_INLINE_MAX_BYTES
+    } else {
+        lv::INLINE_VALUE_MAX_BYTES
+    }
+}
+
 /// The column's declared kind.
 pub(crate) fn kind(column: &Column) -> LargeValueKind {
     use crate::records::ValueType;
@@ -558,6 +570,9 @@ struct State {
     /// The batch of chunk-store work that is out, if one is: one at a
     /// time, so a delete never overtakes the put it undoes.
     batch: Option<u64>,
+    /// Counts fetches answered (installed or failed) and failures
+    /// forgotten: a read that waited on offloaded nodes may answer now.
+    answered: u64,
 }
 
 /// Where a node's verified bytes are.
@@ -628,6 +643,7 @@ impl Chunks {
                 in_flight: BTreeSet::new(),
                 failed: BTreeMap::new(),
                 batch: None,
+                answered: 0,
             }),
             store,
             host_io,
@@ -688,6 +704,7 @@ impl Chunks {
     /// are no longer out, and what waited on them has its answer.
     pub(crate) fn landed(&self, requests: &[ChunkRequest]) {
         let mut state = self.state.lock().expect("chunk cache");
+        state.answered += 1;
         for request in requests {
             state.in_flight.remove(request);
             state.fetch.remove(request);
@@ -738,6 +755,11 @@ impl Chunks {
         self.state.lock().expect("chunk cache").take_wanted()
     }
 
+    /// [`State::answered`].
+    pub(crate) fn answered(&self) -> u64 {
+        self.state.lock().expect("chunk cache").answered
+    }
+
     /// The batch that is out, if one is.
     pub(crate) fn outstanding(&self) -> Option<u64> {
         self.state.lock().expect("chunk cache").batch
@@ -765,6 +787,9 @@ impl Chunks {
         let mut state = self.state.lock().expect("chunk cache");
         let any = !state.failed.is_empty();
         state.failed.clear();
+        if any {
+            state.answered += 1;
+        }
         any
     }
 
@@ -2444,6 +2469,7 @@ mod tests {
             branch_key_names: Vec::new(),
             provenance: Vec::new(),
             stored_provenance: Vec::new(),
+            latest_only: false,
         };
         let column = Column {
             name: "body".to_owned(),
@@ -2504,6 +2530,7 @@ mod tests {
             branch_key_names: Vec::new(),
             provenance: Vec::new(),
             stored_provenance: Vec::new(),
+            latest_only: false,
         };
         let column = |name: &str| Column {
             name: name.to_owned(),
@@ -2821,6 +2848,7 @@ mod tests {
             branch_key_names: Vec::new(),
             provenance: Vec::new(),
             stored_provenance: Vec::new(),
+            latest_only: false,
         };
         let column = Column {
             name: "body".to_owned(),

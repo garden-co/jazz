@@ -118,7 +118,7 @@ fn schema() -> JazzSchema {
         &[],
         TEAMS,
         "userTeamOf",
-        &["user", "identity", "subject"],
+        &["identity", "subject"],
         "id",
     );
     let table = TableSchemaBuilder::new;

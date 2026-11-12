@@ -33,7 +33,7 @@ async function openRemoteDb(label: string, secret: string): Promise<Db> {
 }
 
 function sessionUser(db: Db): string {
-  const id = db.getAuthState().session?.user.account;
+  const id = db.getAuthState().session?.user;
   if (!id) throw new Error("expected local-first user session");
   return id;
 }

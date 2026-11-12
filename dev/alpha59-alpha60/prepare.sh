@@ -33,9 +33,13 @@ install_tool() { # dir crate
   rm -rf "$dir/dev/alpha59-alpha60/$crate"
   cp -R "$here/$crate" "$dir/dev/alpha59-alpha60/$crate"
   # Join that checkout's workspace.
+  # perl, not sed: `0,/re/` and `\n` in a replacement are GNU-only, and BSD
+  # sed on macOS silently left the workspace unchanged.
   if ! grep -q "\"dev/alpha59-alpha60/$crate\"" "$dir/Cargo.toml"; then
-    sed -i.bak "0,/^members = \[/s||members = [\n  \"dev/alpha59-alpha60/$crate\",|" "$dir/Cargo.toml"
-    rm -f "$dir/Cargo.toml.bak"
+    MEMBER="dev/alpha59-alpha60/$crate" perl -0pi -e \
+      's/^members = \[/members = [\n  "$ENV{MEMBER}",/m' "$dir/Cargo.toml"
+    grep -q "^  \"dev/alpha59-alpha60/$crate\",\$" "$dir/Cargo.toml" ||
+      { echo "could not add dev/alpha59-alpha60/$crate to $dir/Cargo.toml" >&2; exit 1; }
   fi
 }
 
@@ -44,9 +48,9 @@ hook() { # src dest mod-file anchor-line
   name="$(basename "$dest" .rs)"
   cp "$src" "$dest"
   if ! grep -q "pub mod $name;" "$mod_file"; then
-    sed -i.bak "s|^$anchor\$|$anchor\npub mod $name;|" "$mod_file"
-    rm -f "$mod_file.bak"
-    grep -q "pub mod $name;" "$mod_file" || { echo "could not install $name into $mod_file" >&2; exit 1; }
+    ANCHOR="$anchor" NAME="$name" perl -pi -e \
+      's/^\Q$ENV{ANCHOR}\E$/$ENV{ANCHOR}\npub mod $ENV{NAME};/' "$mod_file"
+    grep -qx "pub mod $name;" "$mod_file" || { echo "could not install $name into $mod_file" >&2; exit 1; }
   fi
 }
 

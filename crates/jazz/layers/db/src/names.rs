@@ -580,6 +580,11 @@ impl Names {
             .map(|(version, _)| *version)
     }
 
+    /// How many versions are named.
+    pub(crate) fn len(&self) -> usize {
+        self.versions.len()
+    }
+
     pub(crate) fn get(&self, version: &SchemaVersionId) -> Option<&StoredNames> {
         self.versions.get(version).map(|(_, names)| names)
     }
@@ -606,11 +611,13 @@ impl Names {
     /// Record `schema`'s version, names, stored columns and definition
     /// (once per version), in the file and then in memory. All are written
     /// in one savepoint, so a version is never known by name without its
-    /// stored columns.
+    /// stored columns. Another hash of a version admitted already (one that
+    /// differs only in defaults or indexes) adds no names; its definition
+    /// is kept, so a bundle selecting it resolves.
     pub(crate) fn admit(&mut self, conn: &Connection, schema: &Schema) -> Result<(), Error> {
         let version = schema.jazz.version_id();
         if self.versions.contains_key(&version) {
-            return Ok(());
+            return crate::catalogue::record_equivalent(conn, &schema.jazz);
         }
         let n = self.versions.values().map(|(n, _)| *n).max().unwrap_or(0) + 1;
         let names = schema.names();

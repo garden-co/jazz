@@ -1,0 +1,5 @@
+---
+"jazz-tools": patch
+---
+
+Signing out no longer fails once the server refuses this user's sign-in, and neither does being signed out by the backend. That covers a backend session that ended, an expired credential, and another user who signed in through the app. Before, a user whose session ended with a write still on the device was stuck on "Graceful shutdown could not synchronize pending writes; the context remains open", through Retry, sign-out and reloads, with no way back to sign-in. When another user signed in on a local-first browser without signing out first, every tab was stuck on that error instead of switching to them. Jazz now signs out (or switches) and warns about the refused writes. A persistent client keeps them on this device and uploads them when that account signs in again. A client that keeps nothing says it dropped them. An expired credential counts as refused: sign out after renewing it if its writes must reach the server first. A sign-out during an outage still fails, so the app can retry once the writes can upload. With `clearOnSignOut`, a sign-out now also warns how many writes that hadn't reached the server its wipe removed.

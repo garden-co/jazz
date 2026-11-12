@@ -13,7 +13,7 @@ import { app } from "./schema.js";
  * - Checklist items are private to their owner.
  */
 export default s.definePermissions(app, ({ policy, session, anyOf, allOf, allowedTo }) => {
-  const me = session.user.account;
+  const me = session.user;
 
   // Better Auth's rows belong to the backend's auth routes; no browser reads them.
   for (const table of [

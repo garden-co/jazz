@@ -323,7 +323,6 @@ fn the_current_rows_read_policy_gates_its_history() {
                                 column: "owner".to_owned(),
                                 op: CmpOp::Eq,
                                 value: PolicyValue::SessionRef(vec![
-                                    "user".to_owned(),
                                     "identity".to_owned(),
                                     "subject".to_owned(),
                                 ]),
@@ -616,7 +615,6 @@ fn history_subscriptions_follow_current_access() {
                                 column: "owner".to_owned(),
                                 op: CmpOp::Eq,
                                 value: PolicyValue::SessionRef(vec![
-                                    "user".to_owned(),
                                     "identity".to_owned(),
                                     "subject".to_owned(),
                                 ]),

@@ -17,7 +17,7 @@ permissions; this app shows the Effect bindings.
   `server/jazz.ts`) under `/jazz` and Better Auth under `/api/auth`.
   `POST /api/shows/:id/checklist` (`server/checklist.ts`) runs the same
   `addChecklist` Effect as the requesting user (`Jazz.fromDb(await
-jazz.forRequest(request))`), so permissions.ts decides, exactly as for the
+jazz.forReqUser(request))`), so permissions.ts decides, exactly as for the
   browser.
 
 ## Run it

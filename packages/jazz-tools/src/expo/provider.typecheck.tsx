@@ -1,6 +1,7 @@
-import { JazzProvider, useJazzAuth, useDb } from "./index.js";
+import { JazzProvider, useJazzAuth, useDb, useSyncStatus, type SyncStatus } from "./index.js";
 function Data() {
   useDb();
+  useSyncStatus() satisfies SyncStatus;
   const { logout, retry, reauthenticate, user, status } = useJazzAuth();
   void logout;
   void retry;
@@ -23,6 +24,15 @@ export const expoApplication = (
 );
 export const expoApplicationWithoutGuests = (
   <JazzProvider serverUrl="https://app.example.test/jazz" initial="signed-out" signedOut={null}>
+    <Data />
+  </JazzProvider>
+);
+export const expoApplicationWithBearer = (
+  <JazzProvider
+    serverUrl="https://app.example.test/jazz"
+    bearer={async () => "app-token"}
+    signedOut={null}
+  >
     <Data />
   </JazzProvider>
 );

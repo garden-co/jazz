@@ -29,16 +29,36 @@ app=0a590000-0000-4000-8000-000000000059
 import=("$t60/release/jazz-alpha59-alpha60-import")
 
 "$t59/release/a59-produce" --out "$work/a59" --server-bin "$t59/release/jazz-tools"
+# A running alpha.59 server holds its RocksDB locks: the export refuses.
+python3 -c 'import fcntl, sys, time; f = open(sys.argv[1], "r+"); fcntl.lockf(f, fcntl.LOCK_EX); print("locked", flush=True); time.sleep(60)' \
+  "$work/a59/server-shell.rocksdb/LOCK" >"$work/lock.out" &
+holder=$!
+for _ in $(seq 1 50); do grep -q locked "$work/lock.out" && break; sleep 0.1; done
+if "$t59/release/jazz-alpha59-alpha60-export" --data-dir "$work/a59" --work "$work/live" --out "$work/live.dump" 2>"$work/live.err"; then
+  echo "the export ran against a held lock" >&2
+  exit 1
+fi
+grep -q "in use by a running alpha.59 server" "$work/live.err"
+kill "$holder"
+wait "$holder" || true
 "$t59/release/jazz-alpha59-alpha60-export" --data-dir "$work/a59" --work "$work/copy" --out "$work/dump"
 "$t59/release/jazz-alpha59-alpha60-export" --data-dir "$work/a59" --work "$work/copy2" --out "$work/census" --catalogue-only
 "$t59/release/dump-census" "$work/census" | tee "$work/census.json"
 grep -q '"unsupported_by_sqlite":\[\]' "$work/census.json"
 
 (cd "$root" && CARGO_TARGET_DIR="$t60" cargo test --release -p jazz-cli --lib alpha59_alpha60)
+# The import refuses another spelling of the app id than alpha.59 served.
+if "${import[@]}" import --dump "$work/dump" --data-dir "$work/wrong-app" --app-id "${app^^}" 2>"$work/wrong-app.err"; then
+  echo "the import took another app id" >&2
+  exit 1
+fi
+grep -q "is not this dump's app" "$work/wrong-app.err"
 "${import[@]}" import --dump "$work/dump" --data-dir "$work/a60" --app-id "$app" |
   tee "$work/import.json"
 # user-1, user-2 and user-9 link as createJazz users; revoked user-3 does not.
 grep -q '"backend_identities_linked":3' "$work/import.json"
+# The synthetic tenant has no local-first guests to tell about.
+grep -q '"local_first_guests":0' "$work/import.json"
 # The import keeps the app id beside the data, exactly as given: sqlite()
 # on this dir runs as the alpha.59 app.
 test "$(cat "$work/a60/app-id")" = "$app"
@@ -54,7 +74,28 @@ grep -q '"deleted_rows_dropping_content_written_while_deleted":1' "$work/import.
 # No version was refused: the v1 project keeps `paused`, which v2 dropped.
 grep -q '"versions_skipped_rejected":0' "$work/import.json"
 grep -q '"versions_keeping_a_removed_enum_variant":1' "$work/import.json"
+# The active bundle's alpha.59 session.user.account and
+# session.user.identity.subject come over under their new names.
+grep -q '"permission_session_paths_renamed":3' "$work/import.json"
 "${import[@]}" verify --dump "$work/dump" --data-dir "$work/a60" --app-id "$app"
+# A backend holding the dir's lock makes verify refuse.
+python3 -c 'import fcntl, sys, time; f = open(sys.argv[1], "a+"); fcntl.flock(f, fcntl.LOCK_EX); print("locked", flush=True); time.sleep(60)' \
+  "$work/a60/jazz.lock" >"$work/a60-lock.out" &
+holder=$!
+for _ in $(seq 1 50); do grep -q locked "$work/a60-lock.out" && break; sleep 0.1; done
+if "${import[@]}" verify --dump "$work/dump" --data-dir "$work/a60" --app-id "$app" >/dev/null 2>"$work/held.err"; then
+  echo "verify ran against a held lock" >&2
+  exit 1
+fi
+grep -q "stop the backend before verifying" "$work/held.err"
+kill "$holder"
+wait "$holder" || true
+# verify checks the id the import kept.
+if "${import[@]}" verify --dump "$work/dump" --data-dir "$work/a60" --app-id "${app^^}" 2>"$work/wrong-id.err"; then
+  echo "verify passed with another app id" >&2
+  exit 1
+fi
+grep -q "is not the id" "$work/wrong-id.err"
 
 # Only the active schema came over, and rows written under v1 read under
 # v2's names: no `title` column, every document has a `heading`.
@@ -96,6 +137,8 @@ assert bundles[0]["schemaHash"] and bundles[0]["permissions"], bundles
 PY
 kill -TERM "$server"
 wait "$server" || true
+# verify still reads the dir after the server's first start.
+"${import[@]}" verify --dump "$work/dump" --data-dir "$work/boot" --app-id "$app" >/dev/null
 
 # Verify must notice a changed cell.
 cp -R "$work/a60" "$work/tampered"

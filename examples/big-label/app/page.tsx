@@ -152,7 +152,7 @@ export default function Page() {
 }
 
 function AccountApp() {
-  const account = useSession()?.user.account;
+  const account = useSession()?.user;
   const email = authClient.useSession().data?.user.email ?? "";
   const { reauthenticate } = useJazzAuth();
   const [bootstrapping, setBootstrapping] = React.useState(false);

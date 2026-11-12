@@ -38,6 +38,7 @@ import {
   type NativeForegroundFactory,
   type NativeForegroundModule,
 } from "./native-foreground-db.js";
+import { importNativeRelay } from "./native-relay.js";
 
 /**
  * Opaque authority supplied by trusted native platform admission.  It is
@@ -91,7 +92,7 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
         if (this.pendingCapability || this.admittedCapability) return;
         assertAccountConfig(config);
         const session = resolveNativeSession(config);
-        const module = await import("jazz-rn/relay");
+        const module = await importNativeRelay();
         const factory = module.installNativeForegroundRuntime();
         if (factory.accountSecret) installNativeRuntimeEntropy(factory.accountSecret);
         const bearer = config.cookieSession
@@ -124,7 +125,7 @@ export class ReactNativeRuntimeSource extends RuntimeSource<ReactNativeDbConfig>
         // Capture before the first await: caller-owned bytes must never select
         // a different scope after native identity preflight.
         const capability = new Uint8Array(config.nativeRelay.capability);
-        const foreground = await import("jazz-rn/relay");
+        const foreground = await importNativeRelay();
         this.foregroundFactory = foreground.installNativeForegroundRuntime();
         if (this.foregroundFactory.accountSecret)
           installNativeRuntimeEntropy(this.foregroundFactory.accountSecret);

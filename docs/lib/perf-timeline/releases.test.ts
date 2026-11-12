@@ -52,6 +52,13 @@ test("a commit missing from the checkout stays unreleased with a warning", () =>
 
 test("only semantic-version tags count as releases", () => {
   for (const name of ["v2.0.0-alpha.57", "2.0.0", "v1.2.3+build"]) assert.ok(isVersionTag(name));
-  for (const name of ["jazz-sim-fixtures-v1", "perf-timeline-data", "v2"])
+  for (const name of [
+    "jazz-sim-fixtures-v1",
+    "perf-timeline-data",
+    "v2",
+    "v2.0.0-alpha.60-rc.3",
+    "v2.0.0-alpha.60-rc1",
+    "v2.0.0-alpha.60-preview.1",
+  ])
     assert.equal(isVersionTag(name), false);
 });

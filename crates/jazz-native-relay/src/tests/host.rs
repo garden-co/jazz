@@ -695,6 +695,40 @@ fn pending_upload_count_has_pinned_bytes_and_answers() {
 }
 
 #[test]
+fn upload_status_has_pinned_bytes_and_answers() {
+    // Appended command and answer: existing ordinals stay fixed.
+    assert_eq!(
+        postcard::to_allocvec(&ForegroundDbCommandRequest::UploadStatus).unwrap(),
+        vec![39]
+    );
+    assert_eq!(
+        postcard::to_allocvec(&ForegroundDbCommandResponse::UploadStatus {
+            status_json: "{}".to_owned()
+        })
+        .unwrap(),
+        vec![30, 2, b'{', b'}']
+    );
+
+    let directory = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new();
+    let capability = fixture.admit(&directory.path().join("alice.sqlite"), "alice", 0x11);
+    let foreground = fixture.open(&capability);
+    fixture.insert_todo(foreground, [0xa1; 16], "local only");
+    fixture.tick(foreground);
+    let ForegroundDbCommandResponse::UploadStatus { status_json } =
+        fixture.execute(foreground, ForegroundDbCommandRequest::UploadStatus)
+    else {
+        panic!("an upload status");
+    };
+    let status: serde_json::Value = serde_json::from_str(&status_json).unwrap();
+    assert_eq!(status["pending"], 1);
+    assert!(status["oldestPendingAt"].as_u64().is_some_and(|at| at > 0));
+    assert_eq!(status["rejected"], 0);
+    assert!(status["lastRejection"].is_null());
+    fixture.close(foreground);
+}
+
+#[test]
 fn slow_query_commands_have_pinned_bytes_and_answer() {
     // Appended commands and answers: existing ordinals stay fixed.
     assert_eq!(

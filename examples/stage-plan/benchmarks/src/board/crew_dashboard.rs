@@ -24,10 +24,10 @@ fn schema() -> JazzSchema {
             .table(
                 TableSchemaBuilder::new("teams")
                     .column("member", ColumnType::Uuid)
-                    .policies(TablePolicies::new().with_select(PolicyExpr::eq_session(
-                        "member",
-                        vec!["user".into(), "account".into()],
-                    ))),
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(PolicyExpr::eq_session("member", vec!["user".into()])),
+                    ),
             )
             .table(
                 TableSchemaBuilder::new("tasks")

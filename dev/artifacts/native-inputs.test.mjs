@@ -111,6 +111,33 @@ test("only missing fingerprints restage from the WASM profile already built", ()
   }
 });
 
+// What "Assemble npm packages" has when it builds jazz-tools: the downloaded
+// WASM package, the release NAPI manifests, and fingerprints staged from them.
+// There is no local build pointer.
+test("a CI release assembly counts as having every native input", () => {
+  const root = fixture();
+  try {
+    writeWasm(root);
+    mkdirSync(join(root, "crates/jazz-napi/provenance"), { recursive: true });
+    writeFileSync(
+      join(root, "crates/jazz-napi/provenance/jazz-napi.linux-x64-gnu.manifest.json"),
+      JSON.stringify({ kind: "napi", profile: "release", nativeArtifactFingerprint: fingerprint }),
+    );
+    for (const kind of ["napi", "wasm"]) writeFileSync(fingerprintFile(root, kind), "staged");
+    assert.deepEqual(missingNativeInputs(root), { wasm: false, napi: false, fingerprints: false });
+    assert.deepEqual(
+      ensureNativeInputs(root, {
+        env: { CI: "true" },
+        run: () => assert.fail("must not build"),
+        log: quiet,
+      }),
+      [],
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("CI never builds native inputs implicitly", () => {
   const root = fixture();
   try {

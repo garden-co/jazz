@@ -1,13 +1,12 @@
 <script lang="ts">
-  import { getDb, getSession, QuerySubscription } from "jazz-tools/svelte";
+  import { getSession, QuerySubscription } from "jazz-tools/svelte";
   import { app } from "../../schema";
   import Account from "$lib/components/Account.svelte";
   import Board from "$lib/components/Board.svelte";
   import { createShow, type Me } from "$lib/model/actions";
 
-  const db = getDb();
   const session = getSession();
-  const account = $derived(session.current?.user.account ?? null);
+  const account = $derived(session.current?.user ?? null);
   const profiles = new QuerySubscription(() =>
     account ? app.crew.where({ account }) : undefined,
   );
@@ -26,13 +25,13 @@
   function saveProfile(event: SubmitEvent) {
     event.preventDefault();
     if (!account || !profileName.trim()) return;
-    db.insert(app.crew, { account, name: profileName.trim() });
+    shows.db.insert(app.crew, { account, name: profileName.trim() });
   }
 
   async function addShow(event: SubmitEvent) {
     event.preventDefault();
     if (!me || !show.name.trim()) return;
-    const created = await createShow(db, me, { ...show, name: show.name.trim() });
+    const created = await createShow(shows.db, me, { ...show, name: show.name.trim() });
     selectedId = created.show.id;
     show = { name: "", venue: "", date: "", doors: "19:00" };
   }

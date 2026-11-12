@@ -180,9 +180,17 @@ pub enum ServerLinkAdmission {
 pub struct ServerSession(u64);
 
 /// Bytes a session may have queued in each direction. Inbound frames past
-/// it are refused (the peer ignored flow control); outbound messages past it
-/// wait in the engine until the socket catches up.
+/// it wait, unread, until the owner has taken earlier ones, so a fast peer
+/// is held back by its transport; outbound messages past it wait in the
+/// engine until the socket catches up.
 pub(crate) const SESSION_QUEUE_BUDGET: usize = 8 * 1024 * 1024;
+/// Bytes of split thin requests (each over a wire frame) the whole server
+/// may hold, being joined from parts or queued for the owner. A split past
+/// it waits for room before its parts are read, so many large writes at
+/// once slow down instead of growing memory without bound. Requests that
+/// fit one frame are bounded by their session's room alone, so they never
+/// queue behind large writes of other sessions.
+pub(crate) const THIN_INGRESS_SERVER_BUDGET: usize = 256 * 1024 * 1024;
 /// The slow-query threshold: `JAZZ_SLOW_QUERY_MS` (0 turns the log off),
 /// else jazz-db's default.
 fn slow_query_threshold() -> Option<Duration> {
@@ -817,6 +825,7 @@ impl AppStore {
                 activity,
                 next_session: AtomicU64::new(1),
                 edges: Mutex::new(HashMap::new()),
+                thin_ingress: Arc::new(tokio::sync::Semaphore::new(THIN_INGRESS_SERVER_BUDGET)),
             }),
         })
     }
@@ -1207,14 +1216,35 @@ struct Inner {
     activity: watch::Sender<u64>,
     next_session: AtomicU64,
     edges: Mutex<HashMap<ServerSession, Edge>>,
+    /// [`THIN_INGRESS_SERVER_BUDGET`], as permits of one byte.
+    thin_ingress: Arc<tokio::sync::Semaphore>,
 }
 
 /// The socket side of one session.
 struct Edge {
     /// Taken by [`ServerRuntimeHandle::open_wire_stream`].
     output: Option<tokio_mpsc::UnboundedReceiver<Outbound>>,
-    ingress: Arc<AtomicUsize>,
+    /// A sync session's room for frames read and not yet taken by the owner:
+    /// [`SESSION_QUEUE_BUDGET`], as permits of one byte.
+    ingress: Arc<tokio::sync::Semaphore>,
+    /// A thin session's room for requests being joined or queued: the most
+    /// one request takes, as permits of one byte.
+    thin_ingress: Arc<tokio::sync::Semaphore>,
     egress: Arc<AtomicUsize>,
+}
+
+/// Room for one thin request, in its session's and the server's ingress
+/// budgets, held from before its bytes are buffered until the owner has
+/// run it.
+pub struct ThinIngress {
+    _session: tokio::sync::OwnedSemaphorePermit,
+    _server: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+
+/// Room for one batch of sync frames in its session's ingress budget, held
+/// from when it was read until the owner has taken it.
+pub struct WireIngress {
+    _room: tokio::sync::OwnedSemaphorePermit,
 }
 
 /// A session's next frame batch, or the error frame that ends it.
@@ -1381,7 +1411,10 @@ impl ServerRuntimeHandle {
             session,
             Edge {
                 output: Some(receiver),
-                ingress: Arc::new(AtomicUsize::new(0)),
+                ingress: Arc::new(tokio::sync::Semaphore::new(SESSION_QUEUE_BUDGET)),
+                thin_ingress: Arc::new(tokio::sync::Semaphore::new(
+                    jazz::thin::MAX_THIN_MESSAGE_BYTES,
+                )),
                 egress,
             },
         );
@@ -1426,29 +1459,69 @@ impl ServerRuntimeHandle {
         })
     }
 
-    /// Queue inbound frames (each one `postcard(SyncMessage)`) for the
-    /// engine. Refused when the session already has its budget queued.
-    pub fn receive_wire_frames(
+    /// The room a batch of `bytes` takes: all of the budget for a batch
+    /// larger than it, so one never waits for room that cannot come.
+    fn wire_room(
         &self,
         session: ServerSession,
-        frames: Vec<AbiBytes>,
-    ) -> Result<(), String> {
-        if frames.is_empty() {
-            return Ok(());
-        }
-        let bytes = frames.iter().map(Vec::len).sum::<usize>();
-        let ingress = self
+        bytes: usize,
+    ) -> Result<(Arc<tokio::sync::Semaphore>, u32), String> {
+        let room = self
             .edges()?
             .get(&session)
             .map(|edge| Arc::clone(&edge.ingress))
             .ok_or_else(|| "unknown server session".to_owned())?;
-        if ingress.fetch_add(bytes, Ordering::AcqRel) + bytes > SESSION_QUEUE_BUDGET {
-            ingress.fetch_sub(bytes, Ordering::AcqRel);
-            return Err("session ingress budget exceeded".to_owned());
+        let permits =
+            u32::try_from(bytes.clamp(1, SESSION_QUEUE_BUDGET)).expect("the budget fits u32");
+        Ok((room, permits))
+    }
+
+    /// Room for a batch of `bytes` read off `session`'s socket, if its
+    /// ingress budget has it now.
+    pub fn try_admit_wire_frames(
+        &self,
+        session: ServerSession,
+        bytes: usize,
+    ) -> Result<Option<WireIngress>, String> {
+        let (room, permits) = self.wire_room(session, bytes)?;
+        match room.try_acquire_many_owned(permits) {
+            Ok(room) => Ok(Some(WireIngress { _room: room })),
+            Err(tokio::sync::TryAcquireError::NoPermits) => Ok(None),
+            Err(tokio::sync::TryAcquireError::Closed) => Err("server runtime stopped".to_owned()),
+        }
+    }
+
+    /// Wait for room for a batch of `bytes` in `session`'s ingress budget:
+    /// until the owner has taken enough of the frames before it.
+    pub async fn admit_wire_frames(
+        &self,
+        session: ServerSession,
+        bytes: usize,
+    ) -> Result<WireIngress, String> {
+        let (room, permits) = self.wire_room(session, bytes)?;
+        room.acquire_many_owned(permits)
+            .await
+            .map(|room| WireIngress { _room: room })
+            .map_err(|_| "server runtime stopped".to_owned())
+    }
+
+    /// Queue inbound frames (each one `postcard(SyncMessage)`) for the
+    /// engine, in the room [`Self::admit_wire_frames`] made for them, which
+    /// frees once the owner has taken them.
+    pub fn receive_wire_frames(
+        &self,
+        session: ServerSession,
+        frames: Vec<AbiBytes>,
+        ingress: WireIngress,
+    ) -> Result<(), String> {
+        if frames.is_empty() {
+            return Ok(());
+        }
+        if !self.edges()?.contains_key(&session) {
+            return Err("unknown server session".to_owned());
         }
         self.send(Box::new(move |owner| {
-            owner.receive(session, frames);
-            ingress.fetch_sub(bytes, Ordering::AcqRel);
+            owner.receive(session, frames, ingress)
         }))
     }
 
@@ -1481,27 +1554,61 @@ impl ServerRuntimeHandle {
         self.settle_open(session, opened)
     }
 
-    /// Queue a thin client's request, `bytes` long on the wire, for the
-    /// owner. Refused when the session already has its budget queued, as
-    /// [`Self::receive_wire_frames`] refuses sync frames.
+    /// Wait for room for a thin request `bytes` long on the wire, before
+    /// reading or joining it: in `session`'s budget (the most one request
+    /// takes, [`jazz::thin::MAX_THIN_MESSAGE_BYTES`]) and, for a request
+    /// `split` into parts, the server's ([`THIN_INGRESS_SERVER_BUDGET`]).
+    /// While it waits, its reader reads nothing more, so the client's
+    /// socket backs up instead of the session ending; the room frees as the
+    /// owner runs queued requests.
+    pub async fn admit_thin_request(
+        &self,
+        session: ServerSession,
+        bytes: usize,
+        split: bool,
+    ) -> Result<ThinIngress, String> {
+        let permits = u32::try_from(bytes)
+            .ok()
+            .filter(|_| bytes <= jazz::thin::MAX_THIN_MESSAGE_BYTES)
+            .ok_or_else(|| format!("a thin request of {bytes} bytes is over the most one takes"))?;
+        let room = self
+            .edges()?
+            .get(&session)
+            .map(|edge| Arc::clone(&edge.thin_ingress))
+            .ok_or_else(|| "unknown server session".to_owned())?;
+        let closed = |_| "server runtime stopped".to_owned();
+        // Session first: a session waiting on itself holds none of the
+        // server's room.
+        let session_room = room.acquire_many_owned(permits).await.map_err(closed)?;
+        let server_room = if split {
+            Some(
+                Arc::clone(&self.inner.thin_ingress)
+                    .acquire_many_owned(permits)
+                    .await
+                    .map_err(closed)?,
+            )
+        } else {
+            None
+        };
+        Ok(ThinIngress {
+            _session: session_room,
+            _server: server_room,
+        })
+    }
+
+    /// Queue a thin client's request for the owner, in the room
+    /// [`Self::admit_thin_request`] made for it, which frees once it ran.
     pub fn receive_thin_request(
         &self,
         session: ServerSession,
         request: jazz::thin::ThinRequest,
-        bytes: usize,
+        ingress: ThinIngress,
     ) -> Result<(), String> {
-        let ingress = self
-            .edges()?
-            .get(&session)
-            .map(|edge| Arc::clone(&edge.ingress))
-            .ok_or_else(|| "unknown server session".to_owned())?;
-        if ingress.fetch_add(bytes, Ordering::AcqRel) + bytes > SESSION_QUEUE_BUDGET {
-            ingress.fetch_sub(bytes, Ordering::AcqRel);
-            return Err("session ingress budget exceeded".to_owned());
+        if !self.edges()?.contains_key(&session) {
+            return Err("unknown server session".to_owned());
         }
         self.send(Box::new(move |owner| {
-            owner.thin_request(session, request);
-            ingress.fetch_sub(bytes, Ordering::AcqRel);
+            owner.thin_request(session, request, ingress);
         }))
     }
 
@@ -1860,6 +1967,12 @@ struct OwnerSession {
 
 struct SessionQueues {
     inbound: RefCell<VecDeque<SyncMessage>>,
+    /// The ingress room each received batch holds until the engine has
+    /// taken its last message: (messages pushed through that batch, room).
+    held_ingress: RefCell<VecDeque<(u64, WireIngress)>>,
+    /// Messages pushed onto `inbound`, and taken from it, ever.
+    pushed: std::cell::Cell<u64>,
+    taken: std::cell::Cell<u64>,
     /// Output the socket has not taken yet, encoded as it is queued so its
     /// size is known, with its bytes.
     outbound: RefCell<VecDeque<(Vec<AbiBytes>, usize)>>,
@@ -1943,9 +2056,21 @@ fn start_tick<'a>(sessions: impl Iterator<Item = &'a SessionQueues> + Clone) {
 struct SessionTransport(Rc<SessionQueues>);
 
 impl SessionQueues {
+    /// Free the room of every batch whose messages the engine has all taken.
+    fn release_taken_ingress(&self) {
+        let taken = self.taken.get();
+        let mut held = self.held_ingress.borrow_mut();
+        while held.front().is_some_and(|(through, _)| *through <= taken) {
+            held.pop_front();
+        }
+    }
+
     fn new(slice: Rc<TickSlice>, egress: Arc<AtomicUsize>) -> Self {
         Self {
             inbound: RefCell::default(),
+            held_ingress: RefCell::default(),
+            pushed: std::cell::Cell::new(0),
+            taken: std::cell::Cell::new(0),
             outbound: RefCell::default(),
             backlog: Backlog::new(egress),
             budget: std::cell::Cell::new(0),
@@ -2070,6 +2195,8 @@ impl Transport for SessionTransport {
         }
         let message = queues.inbound.borrow_mut().pop_front()?;
         queues.budget.set(budget - 1);
+        queues.taken.set(queues.taken.get() + 1);
+        queues.release_taken_ingress();
         Some(message)
     }
 }
@@ -2346,15 +2473,21 @@ impl Owner {
         Ok(())
     }
 
-    fn receive(&mut self, session: ServerSession, frames: Vec<AbiBytes>) {
+    /// Queue `frames`' messages for the engine. `ingress` stays held until
+    /// the engine has taken them, so the budget bounds what waits for it.
+    fn receive(&mut self, session: ServerSession, frames: Vec<AbiBytes>, ingress: WireIngress) {
         let Some(owner_session) = self.sessions.get_mut(&session) else {
             return;
         };
-        let mut inbound = owner_session.queues.inbound.borrow_mut();
+        let queues = Rc::clone(&owner_session.queues);
+        let mut inbound = queues.inbound.borrow_mut();
         for frame in frames {
             match owner_session.joiner.push(&frame) {
                 Ok(None) => {}
-                Ok(Some(message)) => inbound.push_back(message),
+                Ok(Some(message)) => {
+                    inbound.push_back(message);
+                    queues.pushed.set(queues.pushed.get() + 1);
+                }
                 Err(error) => {
                     drop(inbound);
                     let _ = owner_session.output.send((
@@ -2370,6 +2503,12 @@ impl Owner {
                 }
             }
         }
+        drop(inbound);
+        queues
+            .held_ingress
+            .borrow_mut()
+            .push_back((queues.pushed.get(), ingress));
+        queues.release_taken_ingress();
     }
 
     /// End every session (sync or thin) pinned to a bundle `ends` names,
@@ -2454,6 +2593,7 @@ impl Owner {
         if let Err(error) = ticked {
             tracing::error!(%error, "server runtime tick failed");
         }
+        self.retry_parked_thin();
         if let Some(runner) = &self.chunk_io {
             runner.pump(self);
         }
@@ -2674,6 +2814,70 @@ mod tests {
         let during = ticks[JOBS - 1] - ticks[0];
         // 200ms of host work in 4ms slices: about 40 ticks.
         assert!(during >= 20, "{during} ticks during {JOBS} host jobs");
+        store.close().unwrap();
+    }
+
+    /// A session's ingress budget holds back frames until the engine has
+    /// taken their messages, not only until the owner queued them: what
+    /// waits for the engine stays within the budget.
+    #[test]
+    fn received_frames_hold_their_room_until_the_engine_takes_them() {
+        let store = AppStore::memory().unwrap();
+        let runtime = store
+            .start_runtime(schema(), NodeRole::Core, false)
+            .unwrap();
+        let handle_room = Arc::new(tokio::sync::Semaphore::new(SESSION_QUEUE_BUDGET));
+        let available = {
+            let room = Arc::clone(&handle_room);
+            move || room.available_permits()
+        };
+        let room = Arc::clone(&handle_room);
+        let held = block_on(runtime.run(move |owner| {
+            let (output, _) = tokio_mpsc::unbounded_channel();
+            owner
+                .open_session(
+                    ServerSession(1),
+                    AuthorSubject::SYSTEM,
+                    BTreeMap::new(),
+                    None,
+                    output,
+                    Arc::default(),
+                )
+                .map_err(|error| error.to_string())?;
+            let frames = |ids: std::ops::Range<u64>| {
+                ids.flat_map(|id| jazz::db::encode_frames(SyncMessage::Unsubscribe { id }).unwrap())
+                    .collect::<Vec<_>>()
+            };
+            let take = |bytes: u32| WireIngress {
+                _room: Arc::clone(&room).try_acquire_many_owned(bytes).unwrap(),
+            };
+            // Two batches: two messages in 1000 bytes, then one in 500.
+            owner.receive(ServerSession(1), frames(0..2), take(1000));
+            owner.receive(ServerSession(1), frames(2..3), take(500));
+            // Queued for the engine, not taken: the room stays held.
+            Ok(room.available_permits())
+        }))
+        .unwrap();
+        assert_eq!(held, SESSION_QUEUE_BUDGET - 1500, "queued, not yet taken");
+        // The engine takes them on its next ticks, and the room comes back.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while available() < SESSION_QUEUE_BUDGET {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the engine never took them"
+            );
+            block_on(runtime.run(|_| Ok(()))).unwrap();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let left = block_on(runtime.run(|owner| {
+            Ok(owner.sessions[&ServerSession(1)]
+                .queues
+                .inbound
+                .borrow()
+                .len())
+        }))
+        .unwrap();
+        assert_eq!(left, 0, "room comes back only once every message is taken");
         store.close().unwrap();
     }
 
@@ -2960,13 +3164,14 @@ mod tests {
         })
     }
 
+    fn docs_source() -> jazz::tools::public_schema::Schema {
+        SchemaBuilder::new()
+            .table(TableSchema::builder("docs").column("body", ColumnType::Bytea))
+            .build()
+    }
+
     fn docs() -> JazzSchema {
-        JazzSchema::new(
-            &SchemaBuilder::new()
-                .table(TableSchema::builder("docs").column("body", ColumnType::Bytea))
-                .build(),
-        )
-        .unwrap()
+        JazzSchema::new(&docs_source()).unwrap()
     }
 
     fn read_body(db: &Db) -> Option<Vec<u8>> {
@@ -3043,6 +3248,308 @@ mod tests {
             bucket.state.calls.gets.load(Ordering::Relaxed) > 0,
             "read from the bucket"
         );
+        store.close().unwrap();
+    }
+
+    /// A 400 KiB value written to a store over `bucket`, whose leaves the
+    /// store moved to the bucket (some of them, at least) before closing.
+    fn offloaded_value(bucket: &crate::s3::mock::MockS3, storage: &StorageConfig) -> Vec<u8> {
+        let value: Vec<u8> = (0..400 * 1024u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+            .collect();
+        let store = AppStore::open(storage).unwrap();
+        let runtime = store.start_runtime(docs(), NodeRole::Core, false).unwrap();
+        let written = value.clone();
+        block_on(runtime.run(move |owner| {
+            block_on(owner.db.insert(
+                "docs",
+                BTreeMap::from([("body".to_owned(), jazz::records::Value::Bytes(written))]),
+                Default::default(),
+            ))
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+        }))
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        // Marked offloaded once a batch's hand-back ran, not when its puts
+        // reached the bucket.
+        while block_on(runtime.run(|owner| {
+            owner
+                .db
+                .offloaded_large_value_nodes_for_test()
+                .map_err(|error| error.to_string())
+        }))
+        .unwrap()
+            < 2
+        {
+            assert!(
+                Instant::now() < deadline,
+                "leaves never moved to the bucket"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(bucket.names("app/").len() >= 2);
+        store.close().unwrap();
+        value
+    }
+
+    /// A read (`all_serialized_query`) on the store thread, by a caller
+    /// that fetches in place, of a value whose leaves live only in the
+    /// bucket, after a restart: it fetches them and answers, instead of
+    /// waiting for a tick the blocked store thread can never run.
+    #[test]
+    fn a_serialized_read_of_offloaded_leaves_fetches_them_after_a_restart() {
+        let bucket = crate::s3::mock::MockS3::start();
+        let dir = tempfile::tempdir().unwrap();
+        let storage =
+            StorageConfig::data_dir(dir.path()).with_blobs(bucket_blobs(&bucket, "app/", "me"));
+        let value = offloaded_value(&bucket, &storage);
+        let store = AppStore::open(&storage).unwrap();
+        let runtime = store.start_runtime(docs(), NodeRole::Core, false).unwrap();
+        let query = postcard::to_allocvec(&jazz::query::Query::from("docs")).unwrap();
+        let read = |runtime: &ServerRuntimeHandle| {
+            let (done, answer) = std_mpsc::channel();
+            let (runtime, query) = (runtime.clone(), query.clone());
+            std::thread::spawn(move || {
+                let read = block_on(runtime.run(move |owner| {
+                    match block_on(owner.db.all_serialized_query(
+                        &query,
+                        jazz::db::ReadOpts::default(),
+                        None,
+                        None,
+                        None,
+                    )) {
+                        Ok(jazz::db::SerializedReadResult::Rows(rows)) => Ok(rows
+                            .first()
+                            .and_then(|row| row.cell("body"))
+                            .and_then(|value| match value {
+                                jazz::records::Value::Bytes(bytes) => Some(bytes),
+                                _ => None,
+                            })),
+                        Ok(_) => Err("expected rows".to_owned()),
+                        Err(error) => Err(error.to_string()),
+                    }
+                }));
+                let _ = done.send(read);
+            });
+            answer
+                .recv_timeout(Duration::from_secs(20))
+                .expect("the read answers instead of blocking the store thread")
+                .unwrap()
+        };
+        assert_eq!(read(&runtime).as_deref(), Some(value.as_slice()));
+        assert!(
+            bucket.state.calls.gets.load(Ordering::Relaxed) > 0,
+            "read from the bucket"
+        );
+        // The store thread is free: the next read answers too.
+        assert_eq!(read(&runtime).as_deref(), Some(value.as_slice()));
+        store.close().unwrap();
+    }
+
+    /// A trusted thin session on `runtime`, with the docs schema declared.
+    async fn thin_docs_session(
+        runtime: &ServerRuntimeHandle,
+    ) -> (ServerSession, ServerRuntimeFrameStream) {
+        let session = runtime
+            .open_thin_session(
+                AuthorSubject::SYSTEM,
+                BTreeMap::new(),
+                None,
+                CommitUnitTrust::TrustedBackend,
+            )
+            .await
+            .unwrap();
+        let mut stream = runtime.open_wire_stream(session).unwrap();
+        send_thin(
+            runtime,
+            session,
+            0,
+            jazz::thin::ThinOp::Schema {
+                schema: serde_json::to_vec(&docs_source()).unwrap(),
+            },
+        )
+        .await;
+        assert_eq!(
+            next_thin(&mut stream, Duration::from_secs(5)).await,
+            Some((0, jazz::thin::ThinBody::Ok))
+        );
+        (session, stream)
+    }
+
+    async fn send_thin(
+        runtime: &ServerRuntimeHandle,
+        session: ServerSession,
+        id: u64,
+        op: jazz::thin::ThinOp,
+    ) {
+        let room = runtime
+            .admit_thin_request(session, 1024, false)
+            .await
+            .unwrap();
+        runtime
+            .receive_thin_request(session, jazz::thin::ThinRequest { id, op }, room)
+            .unwrap();
+        runtime.request_wire_tick(session).unwrap();
+    }
+
+    /// The next thin answer within `wait`, or `None`.
+    async fn next_thin(
+        stream: &mut ServerRuntimeFrameStream,
+        wait: Duration,
+    ) -> Option<(u64, jazz::thin::ThinBody)> {
+        let frames = tokio::time::timeout(wait, stream.recv())
+            .await
+            .ok()?
+            .expect("open")
+            .expect("frames");
+        assert_eq!(frames.len(), 1, "one answer at a time");
+        match jazz::wire::decode_frame(&frames[0]).unwrap() {
+            jazz::wire::WireFrame::ThinResponse(response) => Some((response.id, response.body)),
+            other => panic!("expected a thin response, got {other:?}"),
+        }
+    }
+
+    fn thin_query(transaction: Option<&str>) -> jazz::thin::ThinOp {
+        jazz::thin::ThinOp::Query {
+            query: postcard::to_allocvec(&jazz::query::Query::from("docs")).unwrap(),
+            options: Vec::new(),
+            transaction: transaction.map(str::to_owned),
+        }
+    }
+
+    /// The body a thin query's rows hold.
+    fn thin_body(body: jazz::thin::ThinBody) -> Vec<u8> {
+        let jazz::thin::ThinBody::Rows { rows, .. } = body else {
+            panic!("expected rows, got {body:?}");
+        };
+        let rows = jazz::binding_codec::decode_rows(&rows).unwrap();
+        match rows[0].rows[0].cells.get("body") {
+            Some(jazz::records::Value::Bytes(bytes)) => bytes.clone(),
+            other => panic!("expected the body, got {other:?}"),
+        }
+    }
+
+    /// The store thread answers runtime work within a second.
+    async fn store_thread_is_free(runtime: &ServerRuntimeHandle) {
+        tokio::time::timeout(Duration::from_secs(1), runtime.run(|_| Ok(())))
+            .await
+            .expect("the store thread is not blocked")
+            .unwrap();
+    }
+
+    /// A thin session's read of offloaded leaves after a restart, inside
+    /// and outside a transaction, waits for the fetch lane instead of
+    /// fetching on the store thread, and answers once they landed. While
+    /// the bucket does not answer, the store thread serves everyone else,
+    /// and the session's next request waits behind the parked one.
+    #[test]
+    fn a_thin_read_of_offloaded_leaves_waits_for_the_fetch_lane() {
+        // The S3 store runs and drops a runtime of its own: only the thin
+        // client's side runs on this one.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let bucket = crate::s3::mock::MockS3::start();
+        let dir = tempfile::tempdir().unwrap();
+        let storage =
+            StorageConfig::data_dir(dir.path()).with_blobs(bucket_blobs(&bucket, "app/", "me"));
+        let value = offloaded_value(&bucket, &storage);
+        let store = AppStore::open(&storage).unwrap();
+        let runtime = store.start_runtime(docs(), NodeRole::Core, false).unwrap();
+        rt.block_on(async {
+            let (session, mut stream) = thin_docs_session(&runtime).await;
+            bucket.state.stall_gets.store(true, Ordering::Relaxed);
+            send_thin(&runtime, session, 1, thin_query(None)).await;
+            send_thin(&runtime, session, 2, thin_query(None)).await;
+            assert_eq!(
+                next_thin(&mut stream, Duration::from_millis(500)).await,
+                None,
+                "nothing answers while the bucket does not"
+            );
+            store_thread_is_free(&runtime).await;
+            bucket.state.stall_gets.store(false, Ordering::Relaxed);
+            for id in [1, 2] {
+                let (answered, body) = next_thin(&mut stream, Duration::from_secs(20))
+                    .await
+                    .expect("answered once the leaves landed");
+                assert_eq!(answered, id, "answered in order");
+                assert_eq!(thin_body(body), value);
+            }
+        });
+        assert!(bucket.state.calls.gets.load(Ordering::Relaxed) > 0);
+        store.close().unwrap();
+
+        // A transaction's read, after another restart.
+        let store = AppStore::open(&storage).unwrap();
+        let runtime = store.start_runtime(docs(), NodeRole::Core, false).unwrap();
+        rt.block_on(async {
+            let (session, mut stream) = thin_docs_session(&runtime).await;
+            let transaction = "0190f3e4000070008000000000000007";
+            send_thin(
+                &runtime,
+                session,
+                1,
+                jazz::thin::ThinOp::Begin {
+                    transaction: transaction.to_owned(),
+                    kind: "serializable".to_owned(),
+                },
+            )
+            .await;
+            assert_eq!(
+                next_thin(&mut stream, Duration::from_secs(5)).await,
+                Some((1, jazz::thin::ThinBody::Ok))
+            );
+            send_thin(&runtime, session, 2, thin_query(Some(transaction))).await;
+            let (answered, body) = next_thin(&mut stream, Duration::from_secs(20))
+                .await
+                .expect("the transaction's read answers");
+            assert_eq!(answered, 2);
+            assert_eq!(thin_body(body), value);
+        });
+        store.close().unwrap();
+    }
+
+    /// A bucket that fails a thin read's fetch answers the read with why,
+    /// and later reads of those leaves are refused at once while fetches
+    /// back off, without asking the bucket again.
+    #[test]
+    fn a_thin_read_of_leaves_the_bucket_fails_is_refused_with_backoff() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let bucket = crate::s3::mock::MockS3::start();
+        let dir = tempfile::tempdir().unwrap();
+        let storage =
+            StorageConfig::data_dir(dir.path()).with_blobs(bucket_blobs(&bucket, "app/", "me"));
+        offloaded_value(&bucket, &storage);
+        let store = AppStore::open(&storage).unwrap();
+        let runtime = store.start_runtime(docs(), NodeRole::Core, false).unwrap();
+        rt.block_on(async {
+            let (session, mut stream) = thin_docs_session(&runtime).await;
+            bucket.state.failing.store(true, Ordering::Relaxed);
+            send_thin(&runtime, session, 1, thin_query(None)).await;
+            let (answered, body) = next_thin(&mut stream, Duration::from_secs(20))
+                .await
+                .expect("refused, not left waiting");
+            assert_eq!(answered, 1);
+            assert!(
+                matches!(&body, jazz::thin::ThinBody::Error { code, .. } if code == "storage"),
+                "{body:?}"
+            );
+            let asked = bucket.state.calls.requests.load(Ordering::Relaxed);
+            send_thin(&runtime, session, 2, thin_query(None)).await;
+            let (answered, body) = next_thin(&mut stream, Duration::from_secs(1))
+                .await
+                .expect("refused at once while fetches back off");
+            assert_eq!(answered, 2);
+            assert!(
+                matches!(body, jazz::thin::ThinBody::Error { .. }),
+                "{body:?}"
+            );
+            assert_eq!(
+                bucket.state.calls.requests.load(Ordering::Relaxed),
+                asked,
+                "the bucket is not asked again before the backoff ends"
+            );
+            store_thread_is_free(&runtime).await;
+        });
         store.close().unwrap();
     }
 

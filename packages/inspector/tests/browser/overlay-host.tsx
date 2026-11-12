@@ -85,11 +85,7 @@ function HostApp({ primary, secondary }: { primary: AccountHandle; secondary: Ac
 
   return (
     <>
-      <JazzProvider
-        config={config}
-        autoAttachDevTools={false}
-        fallback={<p id="host-status">Connecting...</p>}
-      >
+      <JazzProvider config={config} fallback={<p id="host-status">Connecting...</p>}>
         <HostInner secondaryReady={secondaryReady} />
       </JazzProvider>
       <JazzProvider
@@ -101,7 +97,6 @@ function HostApp({ primary, secondary }: { primary: AccountHandle; secondary: Ac
           driver: { type: "persistent", dbName: APP_ID },
           devMode: true,
         }}
-        autoAttachDevTools={false}
       >
         <SecondaryRuntime onReady={() => setSecondaryReady(true)} />
       </JazzProvider>

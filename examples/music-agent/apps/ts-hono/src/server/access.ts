@@ -23,7 +23,7 @@ export async function userDb(request: Request): Promise<Db> {
   if (!session?.user) throw new AccessError("sign in required", 401);
   const jazz = await backendJazzClient();
   try {
-    return await jazz.forRequest(request);
+    return await jazz.forReqUser(request);
   } catch (error) {
     const code = accountAuthErrorCode(error);
     // Only the account registry's answer about this user is an auth failure.

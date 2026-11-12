@@ -232,7 +232,7 @@ fn resource_policy(access_table: &str) -> PolicyExpr {
         &[("administrator", PublicValue::Boolean(false))],
         GROUP_ACCESS,
         "user_id",
-        &["user", "account"],
+        &["user"],
         "group_id",
     )
 }

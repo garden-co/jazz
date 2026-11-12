@@ -1,30 +1,36 @@
 ---
 title: Writing Data
-description: Insert, update, and delete APIs with local-first execution, framework context hooks, and an intro to durability tiers.
+description: "Learn how to insert, update and delete rows, show sync status and handle write errors."
 reviewedAt: "b29b48d1a"
 ---
 
-## Local-first writes
+## How writes work
 
-Ordinary mutations execute against the local database first. `insert`, `restore`, `upsert`,
-`update`, and `delete` return a `MutationResult` immediately. Each result contains:
+Writes are methods on the `Db` handle: `insert`, `upsert`, `update`, `delete` and `restore`. Each
+call commits as its own transaction, which the server checks against your
+[declarative permissions](/docs/schemas/policies) and accepts or rejects as a whole. To make several
+reads and writes commit together, group them in a [transaction](#transactions).
 
-- `value`&hairsp;—&hairsp;The local result. `insert` and `restore` return the row; `upsert`, `update`,
-  and `delete` return `undefined`.
-- `txId`&hairsp;—&hairsp;A promise for the committed transaction ID. This is the durable identity
-  of this write; it does not mean the write has reached a server yet.
-- `wait(...)`&hairsp;—&hairsp;A method that waits for the mutation to reach a specific
-  [durability tier](#write-durability-tiers).
+Every write returns a `MutationResult`:
 
-The local `value` does not mean that the mutation has reached a server.
+- `value`&hairsp;—&hairsp;The written result. `insert` and `restore` return the row; `upsert`,
+  `update`, and `delete` return `undefined`.
+- `txId`&hairsp;—&hairsp;A promise for the committed transaction ID, the durable identity of this
+  write.
+- `wait(...)`&hairsp;—&hairsp;A method that waits until the write is confirmed at a
+  [durability tier](#write-durability-tiers), for example accepted by the server.
 
-Jazz also allows grouping writes together using [transactions](#transactions).
 Writes made through an open transaction are not individually waitable. Wait on the result returned
 by the transaction or its `commit()` call instead.
 
+When a write shows up depends on the client. A thin client shows it after the server answers. A
+[local-first client](/docs/setup/web-client/local-first-client) applies it to its local database
+first, so it shows at once, before the server has seen it.
+[Write durability tiers](#write-durability-tiers) covers what that means when you wait.
+
 ## Getting a `Db` handle
 
-Every framework provides a hook to access the database handle. In plain TypeScript, use the `Db` returned by `createDb` directly.
+Every framework provides a hook to access the database handle, and query hooks return it too. In plain TypeScript, use the `Db` returned by `createClient` directly.
 
 <Tabs
   groupId="jazz-framework"
@@ -63,7 +69,7 @@ Every framework provides a hook to access the database handle. In plain TypeScri
 
 Mutations are methods on the database handle. All three take a table as their first argument.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-crud-ts
@@ -74,18 +80,13 @@ Mutations are methods on the database handle. All three take a table as their fi
       ../examples/docs/todo-effect/src/docs-snippets.ts#writing-crud-effect
     </include>
   </Tab>
-  <Tab value="Rust">
-    <include cwd lang="rs">
-      ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-crud-rust
-    </include>
-  </Tab>
 </Tabs>
 
 ### Upsert with a known ID
 
 Use `upsert(...)` when your app already knows the row ID and wants to create that row if it does
-not exist, or update it if it does. Like `insert`, `update`, and `delete`, it applies locally first
-and returns a `MutationResult<void>` that can be awaited for durability.
+not exist, or update it if it does. Like `insert`, `update`, and `delete`, it returns a
+`MutationResult<void>` that can be awaited for durability.
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
   <Tab value="TypeScript">
@@ -127,7 +128,7 @@ Omitted fields are left unchanged; explicitly passing `undefined` also leaves a 
 To clear a nullable column in TypeScript, pass `null`.
 Required fields cannot be set to `null`.
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-nullable-update-ts
@@ -136,11 +137,6 @@ Required fields cannot be set to `null`.
   <Tab value="Effect">
     <include cwd lang="ts">
       ../examples/docs/todo-effect/src/docs-snippets.ts#writing-nullable-update-effect
-    </include>
-  </Tab>
-  <Tab value="Rust">
-    <include cwd lang="rs">
-      ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-nullable-update-rust
     </include>
   </Tab>
 </Tabs>
@@ -228,9 +224,62 @@ await db.transaction(async (tx) => {
 Only the pages a diff touches are rewritten, so streaming many small appends
 into a long value stays cheap however long it grows.
 
+### Uploading and downloading files
+
+Store a file in a `bytes` column next to its metadata:
+
+```ts title="schema.ts"
+files: s.table({
+  name: s.string(),
+  type: s.string(),
+  size: s.int(),
+  content: s.bytes(),
+}),
+```
+
+Upload from the browser with `insertStreaming`, which streams the bytes into the row instead of
+copying the whole file into memory. It works in the thin and the local-first client, and it goes
+through `/jazz`, so the file never passes through a route of your own:
+
+```ts
+async function upload(file: File) {
+  const inserted = await db.insertStreaming(app.files, {
+    name: file.name,
+    type: file.type,
+    size: file.size,
+    content: file.stream(),
+  });
+  await inserted.wait({ tier: "global" });
+  return inserted.value.id;
+}
+```
+
+`updateStreaming` and `upsertStreaming` replace a file in an existing row the same way.
+
+To download, select the column. For a large file, read it a page at a time with a range (see
+[Partial large values](/docs/reading/includes-and-relations#partial-large-values)):
+
+```ts
+const row = await db.one(app.files.where({ id }).select("name", "type", "content"));
+const url = URL.createObjectURL(new Blob([row!.content], { type: row!.type }));
+
+// Or the first megabyte only:
+const head = await db.one(app.files.where({ id }).select({ content: { from: 0, to: 1_048_576 } }));
+```
+
+## Transactions
+
+Use a transaction when several reads and writes must share one commit. Use a mergeable transaction
+for most work. Use a serializable transaction only when the authority must check the whole
+operation against one stable view of the data.
+
+See [Transactions](/docs/writing/transactions) for examples, error handling and the differences
+between commit and authority acceptance.
+
 ## Write durability tiers
 
-For ordinary mutations and mergeable transactions, `wait({ tier })` controls which
+A write can be confirmed at two points: when the client has saved it, and when the server has
+accepted it. For ordinary mutations and mergeable transactions, `wait({ tier })` controls which
 confirmation the caller waits for:
 
 | Tier     | Resolves when                           |
@@ -262,7 +311,7 @@ try {
 }
 ```
 
-<Tabs groupId="jazz-environment" items={["TypeScript", "Effect", "Rust"]} persist updateAnchor>
+<Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
   <Tab value="TypeScript">
     <include cwd lang="ts">
       ../examples/docs/todo-client-localfirst-ts/src/docs-snippets.ts#writing-durability-tier-ts
@@ -273,16 +322,11 @@ try {
       ../examples/docs/todo-effect/src/docs-snippets.ts#writing-durability-tier-effect
     </include>
   </Tab>
-  <Tab value="Rust">
-    <include cwd lang="rs">
-      ../examples/docs/todo-server-rs/src/docs_snippets.rs#writing-durability-tier-rust
-    </include>
-  </Tab>
 </Tabs>
 
 See [Durability Tiers](/docs/reference/durability-tiers) for the full reference, including read durability, data flow between tiers, and consistency semantics.
 
-Need to clear local data during development? See [Auth Lifecycle](/docs/setup/auth/lifecycle#storage-reset).
+Need to clear local data during development? See [Resetting browser storage](/docs/setup/auth/backend#resetting-browser-storage).
 
 ## Showing sync status
 
@@ -309,6 +353,28 @@ const unsubscribe = db.onSyncStatusChange((status) => renderBadge(status));
 | `connected`  | Connected to the server                                                                                                                                                                                                                                                          |
 | `offline`    | Not connected. `reason` says why: `disconnected` after `db.disconnect()`, `network` when the server has been unreachable for a while (the client keeps retrying), `auth` when the server refused the credential, or `stopped` after a failure that only `db.reconnect()` retries |
 
+`offline` can also have the reason `authority-changed`: the server serves a different history than
+the client's local store, because the server's store was recreated (a deleted dev data directory, a
+restarted in-memory server, a new environment behind the same URL) or it is another app's server.
+The client stops syncing with it, keeps its local data and unsynced writes, and fails `global` waits
+and `db.waitForSync()` with an `AuthorityChangedError` (check with `isAuthorityChangedError`). Nothing
+is reset automatically. To sync with the new server, reset the local store: in the browser,
+`await db.deleteClientStorage()`; in Node, delete the client's data directory and open
+it again. Writes that never reached the old server are lost with the store.
+
+In the browser, tabs that sync through a shared worker may not yet see this: a tab's `global` waits
+can keep waiting after the worker's link was refused. Treat `authority-changed` in a multi-tab app as
+best effort for now.
+
+In the browser, `offline` can also have the reason `held-by-another-tab`, with `retrying: true`.
+When a guest signs up in one tab, another tab may still hold the account's local store as the
+guest. The signed-up tab shows `connecting` and joins once that tab follows or closes. If that
+hasn't happened after 30 seconds (the other tab may be frozen in the background), the link reports
+`held-by-another-tab`, and waits fail with a `StoreHeldByAnotherTabError` (check with
+`isStoreHeldByAnotherTabError`), so the app can ask the user to close or reload the other tab. The
+tab keeps trying and joins as soon as it can. Writes made meanwhile stay in that tab's memory until
+then, so a reload before it joins loses them.
+
 A brief drop shows as `connecting`, not `offline`, so a status badge doesn't flicker. `synced` is
 `true` when nothing waits for upload and the link is `connected` (or `local-only`).
 
@@ -317,8 +383,8 @@ restart. In the browser, each tab counts only the transactions it committed itse
 recovered after a reload, or written by another tab, are uploaded by the shared worker and are not
 counted, and `db.waitForSync()` does not wait for them.
 
-The framework bindings expose the same object: `useSyncStatus()` in React, React Native and Solid
-(an accessor), `useSyncStatus()` in Vue (a ref), and `syncStatus()` in Svelte (a store, read as
+The framework bindings expose the same object: `useSyncStatus()` in React and React Native (from `jazz-tools/react-native`, also in Expo apps; the
+object), in Solid (an accessor) and in Vue (a ref), and `syncStatus()` in Svelte (a store, read as
 `$status`). The Effect layer has a `syncStatus` stream.
 
 ```tsx
@@ -347,8 +413,9 @@ A mutation can fail when you call it or while you wait:
 
 - If Jazz cannot apply the mutation locally, for example because the input is invalid, the mutation
   call throws immediately.
-- If a server later rejects the mutation, an active `wait(...)` call rejects with
-  `PersistedWriteRejectedError`.
+- If a server later rejects the mutation, an active `wait(...)` call rejects: with
+  `PersistedWriteRejectedError` on the local-first client, and with a `ThinRemoteError` (code
+  `WriteRejected`) on the thin client.
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
   <Tab value="TypeScript">
@@ -364,8 +431,15 @@ A mutation can fail when you call it or while you wait:
 </Tabs>
 
 Use `db.onMutationError(...)` as a fallback for rejected mutations without an active `wait(...)`.
+Its event is not an `Error`: read `event.code` and `event.reason`, not `.message`.
 This includes mutations you did not wait for and mutations whose wait finished before a later
 rejection arrived.
+
+An event with code `outcome_unknown` is not a rejection: the thin client's connection ended for
+good before the server answered (after `reauthenticate()` signed in someone else, `disconnect()` or
+`close()`), and the write may have been applied. Read the row again before you revert or retry it.
+An ordinary dropped socket doesn't cause this, since the thin client resends unanswered writes when
+it reconnects.
 
 <Tabs groupId="jazz-environment" items={["TypeScript", "Effect"]} persist updateAnchor>
   <Tab value="TypeScript">
@@ -383,22 +457,11 @@ rejection arrived.
 `onMutationError` returns an unsubscribe function. Without a listener, Jazz logs the rejection and
 keeps it so that a listener registered later can receive it.
 
-On a server, every `Db` from one `createJazzContext` (`db()`, `asBackend()`, `forRequest()`,
-`forSession()`) shares one runtime, so `onMutationError` is context-wide. A listener sees rejections
-of writes made through any of them, for every session, so a per-request handler must match events
-against its own transaction IDs. Rejections that arrive before any listener exists, such as writes
-that were still in flight when the process stopped and are settled on restart, go to whichever `Db`
-registers a listener first. Jazz keeps up to 256 of them and reports how many it dropped beyond
-that. A dropped or shut-down `Db` releases its listeners. `context.db()` returns a new `Db` on each
-call, so keep a reference to the `Db` you register on, for example a long-lived
-`const db = context.db()`. A listener on a `Db` you don't keep stops firing once that `Db` is
-garbage-collected.
-
-## Transactions
-
-Use a transaction when several reads and writes must share one commit. Use a mergeable transaction
-for normal local-first work. Use a serializable transaction only when the authority must check the
-whole operation against one stable view of the data.
-
-See [Transactions](/docs/writing/transactions) for examples, error handling and the differences
-between commit and authority acceptance.
+On a server, `jazz.db`, `jazz.forReqUser()` and `jazz.withAttribution()` from one `createJazz`
+share one runtime, so `onMutationError` is backend-wide. A listener sees rejections of writes made
+through any of them, for every user, so a per-request handler must match events against its own
+transaction IDs. Rejections that arrive before any listener exists, such as writes that were still in
+flight when the process stopped and are settled on restart, go to whichever `Db` registers a listener
+first. Jazz keeps up to 256 of them and reports how many it dropped beyond that. A dropped or
+shut-down `Db` releases its listeners, so register long-lived listeners on `jazz.db`: a listener on a
+per-request `Db` stops firing once that `Db` is garbage-collected.

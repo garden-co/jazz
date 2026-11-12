@@ -37,25 +37,25 @@ export default definePermissions(app, ({ policy, session, anyOf, allOf, allowedT
   const hasRole = (canvas: RowContext<Canvas>, role: Role) =>
     policy.canvasMembers.exists.where({
       canvasId: canvas.id,
-      memberAuthor: session.user.account,
+      memberAuthor: session.user,
       role,
     });
   const canRead = (canvas: RowContext<Canvas>) =>
-    policy.canvasMembers.exists.where({ canvasId: canvas.id, memberAuthor: session.user.account });
+    policy.canvasMembers.exists.where({ canvasId: canvas.id, memberAuthor: session.user });
   const isAdmin = (canvas: RowContext<Canvas>) => hasRole(canvas, "admin");
   // Child rows carry `canvasId`, so each rule below correlates on that column.
   const isMemberOf = (canvasId: RowRefValue) =>
-    policy.canvasMembers.exists.where({ canvasId, memberAuthor: session.user.account });
+    policy.canvasMembers.exists.where({ canvasId, memberAuthor: session.user });
   const canEditCanvas = (canvasId: RowRefValue) =>
     policy.canvasMembers.exists.where({
       canvasId,
-      memberAuthor: session.user.account,
+      memberAuthor: session.user,
       role: { in: ["editor", "admin"] },
     });
   const isAdminOf = (canvasId: RowRefValue) =>
     policy.canvasMembers.exists.where({
       canvasId,
-      memberAuthor: session.user.account,
+      memberAuthor: session.user,
       role: "admin",
     });
   // A shape may only sit on an unlocked layer of its own canvas. Checking this
@@ -78,7 +78,7 @@ export default definePermissions(app, ({ policy, session, anyOf, allOf, allowedT
   policy.canvasMembers.allowInsert.where(allowedTo.update("canvas"));
   policy.canvasMembers.allowUpdate.where(allowedTo.update("canvas"));
   policy.canvasMembers.allowDelete.where(
-    anyOf([allowedTo.update("canvas"), { memberAuthor: session.user.account }]),
+    anyOf([allowedTo.update("canvas"), { memberAuthor: session.user }]),
   );
 
   // Invites are visible to, and issued and revoked by, admins only. Redeeming
@@ -121,12 +121,12 @@ export default definePermissions(app, ({ policy, session, anyOf, allOf, allowedT
   // to; nobody may write or remove another member's cursor.
   policy.cursors.allowRead.where(allowedTo.read("canvas"));
   policy.cursors.allowInsert.where((cursor) =>
-    allOf([{ author: session.user.account }, isMemberOf(cursor.canvasId)]),
+    allOf([{ author: session.user }, isMemberOf(cursor.canvasId)]),
   );
   policy.cursors.allowUpdate
-    .whereOld({ author: session.user.account })
-    .whereNew((cursor) => allOf([{ author: session.user.account }, isMemberOf(cursor.canvasId)]));
-  policy.cursors.allowDelete.where({ author: session.user.account });
+    .whereOld({ author: session.user })
+    .whereNew((cursor) => allOf([{ author: session.user }, isMemberOf(cursor.canvasId)]));
+  policy.cursors.allowDelete.where({ author: session.user });
 
   // Checkpoints are admin-owned, immutable named snapshots, not cursor history.
   policy.checkpoints.allowRead.where(allowedTo.read("canvas"));

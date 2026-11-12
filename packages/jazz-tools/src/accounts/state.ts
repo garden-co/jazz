@@ -1,5 +1,6 @@
 import type { BackendAuth } from "./enrollment.js";
 import { createListeners, toError } from "../runtime/util.js";
+import { AccountAuthError, LINK_NEEDS_GUEST_MESSAGE } from "./registry-client.js";
 /** Framework-independent account selection. Credentials live in handles, never snapshots. */
 export interface AccountIdentity {
   readonly issuer: string;
@@ -157,7 +158,12 @@ export class AccountManager<Auth> {
   linkWithBackend(): Promise<AccountHandle> {
     const account = this.snapshot.account;
     return this.run("linkWithBackend", () => {
-      if (!account) throw new Error("Linking requires a logged-in account");
+      if (!account)
+        throw new AccountAuthError(
+          "local_first_account_required",
+          undefined,
+          LINK_NEEDS_GUEST_MESSAGE,
+        );
       if (!this.enrollment.linkWithBackend)
         throw new Error("Backend sign-in is unavailable on this host");
       return this.enrollment.linkWithBackend(account);

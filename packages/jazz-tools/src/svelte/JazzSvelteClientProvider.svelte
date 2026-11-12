@@ -3,7 +3,6 @@ Makes a caller-owned Jazz client available to descendant Svelte components.
 The caller remains responsible for shutting the client down.
 -->
 <script lang="ts">
-	import { startInspectorOnce } from '../dev-tools/auto-attach.js';
 	import type { Db } from '../runtime/db.js';
 	import { getSubscriptionStore } from '../subscription-store-internal.js';
 	import { initJazzContext } from './context.svelte.js';
@@ -14,10 +13,9 @@ The caller remains responsible for shutting the client down.
 		client: JazzClient | Promise<JazzClient>;
 		children: import('svelte').Snippet<[{ db: Db }]>;
 		fallback?: import('svelte').Snippet;
-		autoAttachDevTools?: boolean;
 	}
 
-	let { client, children, fallback, autoAttachDevTools = true }: Props = $props();
+	let { client, children, fallback }: Props = $props();
 
 	const ctx = initJazzContext();
 	let error = $state<Error | null>(null);
@@ -50,10 +48,6 @@ The caller remains responsible for shutting the client down.
 						ctx.session = session;
 					}
 				});
-
-				if (process.env.NODE_ENV !== 'production' && autoAttachDevTools) {
-					startInspectorOnce(resolvedClient.db);
-				}
 			})
 			.catch((reason) => {
 				if (!cancelled) {

@@ -4,7 +4,7 @@ This directory is the native relay package for Jazz's supported React Native
 alpha. Applications use the public `jazz-tools/react-native` client API: open
 a client with `createJazzClient` (or `<JazzSessionProvider>` from
 `jazz-tools/expo`), which keeps an `AccountHandle` for its user. The
-[canonical Expo scaffold](../../examples/todo-client-localfirst-expo) shows the
+[canonical Expo scaffold](https://github.com/garden-co/jazz/tree/main/examples/todo-client-localfirst-expo) shows the
 complete client lifecycle.
 
 The alpha requires a matching native development or release build. Expo Go
@@ -21,7 +21,7 @@ ordinary full-cell transaction commands onto its existing
 and the account-scoped persistent relay; applications do not construct a
 foreground engine or exchange native capabilities directly. The complete
 ownership/threading/packaging contract and staged acceptance path are specified in
-[`jazz/SPEC/19_native_relays.md`](../jazz/SPEC/19_native_relays.md#196-foreground-native-runtime-execution).
+[`crates/jazz/SPEC/19_native_relays.md`](https://github.com/garden-co/jazz/blob/main/crates/jazz/SPEC/19_native_relays.md#196-foreground-native-runtime-execution).
 
 The package reserves a generated `JazzRelay` TurboModule boundary. Android and
 iOS autolink the module and reject relay use unless a matching development or
@@ -32,9 +32,11 @@ install-time wiring; they are not a substitute for an installed-device receipt.
 
 `jazz-rn` requires the React Native **New Architecture**. Android Gradle and
 iOS CocoaPods fail early with an install/configuration instruction otherwise.
-For Expo, add `"plugins": ["jazz-rn"]` and run `expo prebuild`; the plugin
-sets `newArchEnabled`. Bare React Native apps must enable the New Architecture
-themselves. This requirement does not make Expo Go capable of loading Jazz.
+For Expo, add `"plugins": ["jazz-rn"]` and run `expo prebuild`. Expo SDK 54
+uses the New Architecture by default (do not set `newArchEnabled: false`), and
+SDK 55+ (React Native 0.82+) has no legacy architecture, so the plugin does not
+touch `newArchEnabled`. Bare React Native 0.81 apps must keep the New
+Architecture enabled themselves. This requirement does not make Expo Go capable of loading Jazz.
 
 The repository runs source/package receipts plus label-gated Android-emulator
 and iOS-simulator installed-device workflows. They prove native admission,
@@ -52,14 +54,14 @@ bearer tokens. On auth switch, trusted code revokes the old capability (closing
 all of its relay/client aliases) before admitting the new scope.
 
 The shared artifact seam is `jazz_native_relay_abi_version` from
-`jazz-native-relay`'s C ABI (`include/jazz_native_relay.h`). Android/JNI will
-link that artifact directly when the Android build pipeline exists; it must not
-route through the obsolete UniFFI library. The remaining Android runner gate is
-a real Gradle/NDK AAR build and emulator installation against that linked
-artifact.
+`jazz-native-relay`'s C ABI (`include/jazz_native_relay.h`). Android (JNI) and
+iOS link that artifact directly from the `jazz-rn-android` and `jazz-rn-ios`
+payloads; neither routes through the obsolete UniFFI library.
 
-The wrapper accepts ABI V1, which uses opaque host-generated admission
-capabilities and trusted revocation. ABI V1 defines the shared foreground
+The wrapper accepts exactly one ABI version, `NATIVE_RELAY_ABI_V1` (currently
+4, generated from `jazz-native-relay`), and refuses any other native build. That
+ABI uses opaque host-generated admission capabilities and trusted revocation.
+It defines the shared foreground
 `NativeDb` postcard seam with canonical-query prepare/read/subscribe/drain,
 plus pending-operation poll/cancel commands for chunk-backed reads. It is a
 byte-oriented native-host contract, not a new React Native row/query API:
@@ -84,6 +86,11 @@ For an Expo development build, the minimal configuration is:
 pnpm add jazz-tools@alpha jazz-rn@alpha
 ```
 
+Install the same version of both. A release candidate is not on npm: install
+`jazz-tools` and `jazz-rn` from the `.tgz` assets on its GitHub prerelease
+(`https://github.com/garden-co/jazz/releases/tag/v<version>`), whose `jazz-rn`
+already points `jazz-rn-ios` and `jazz-rn-android` at the same release's assets.
+
 ```json
 {
   "expo": {
@@ -93,12 +100,13 @@ pnpm add jazz-tools@alpha jazz-rn@alpha
 ```
 
 Then run `npx expo prebuild --clean` and make a development or release build.
-The plugin turns on the New Architecture, and native autolinking registers
+The New Architecture is Expo's default, and native autolinking registers
 `JazzRelayPackage` on Android and the `JazzRn` pod on iOS. Do not use Expo Go:
 it cannot contain the relay module.
 
-Expo Go is not supported. For a bare Android host set `newArchEnabled=true`;
-for iOS install pods with `RCT_NEW_ARCH_ENABLED=1 bundle exec pod install`.
+Expo Go is not supported. React Native 0.82+ always uses the New
+Architecture. For a bare React Native 0.81 host keep `newArchEnabled=true` on
+Android and do not install pods with `RCT_NEW_ARCH_ENABLED=0`.
 Use the `rn-preview-release` pull-request label when a preview must run the
 expensive native artifact and device workflows. Then open a client with
 `createJazzClient` from `jazz-tools/react-native` (in a bare host, pass an
@@ -130,7 +138,7 @@ Native hosts must include a matching native module and open it through an
 account handle.
 
 The normative host design and its implementation ledger live in
-[`crates/jazz/SPEC/19_native_relays.md`](../jazz/SPEC/19_native_relays.md).
+[`crates/jazz/SPEC/19_native_relays.md`](https://github.com/garden-co/jazz/blob/main/crates/jazz/SPEC/19_native_relays.md).
 
 ### Native release payloads
 

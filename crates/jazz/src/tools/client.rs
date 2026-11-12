@@ -168,7 +168,10 @@ enum TickFailure {
 fn classify_tick_driver_error(error: &CoreError) -> TickFailure {
     use crate::db::ErrorCode::*;
     match error.code {
-        Backpressure | Protocol | TransactionConflict | NotObserved => TickFailure::Recoverable,
+        // A refused upstream detaches only its link; the store is fine.
+        Backpressure | Protocol | TransactionConflict | NotObserved | AuthorityChanged => {
+            TickFailure::Recoverable
+        }
         Storage
         | UnsupportedStorageCodecs
         | Schema

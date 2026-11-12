@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { AccountManager, type AccountHandle, type AccountIdentity } from "../accounts/state.js";
 import { AccountAuthError } from "../accounts/registry-client.js";
-import { watchBackendUser } from "./backend-watch.js";
+import { watchBackendUser, type BackendUser } from "./backend-watch.js";
 import { followUser } from "./follow-user.js";
 import { createJazzSessionOwner } from "./state.js";
 
@@ -50,10 +50,19 @@ async function setup(
       };
     },
   });
+  // Every state the app could render, from the first on (repeats collapse).
+  const statuses: string[] = [];
+  const record = () => {
+    const snapshot = session.getSnapshot();
+    const next = `${snapshot.status}:${snapshot.account?.identity.subject ?? "-"}`;
+    if (statuses.at(-1) !== next) statuses.push(next);
+  };
+  record();
+  session.subscribe(record);
   let focus: (() => void) | undefined;
   const posts = vi.fn();
   let otherTab: (() => void) | undefined;
-  const probe = vi.fn(async (): Promise<AccountIdentity | null> => {
+  const probe = vi.fn(async (): Promise<BackendUser | null> => {
     if (options.noBackend) throw new AccountAuthError("not_found", 404);
     return backendUser?.identity ?? null;
   });
@@ -75,13 +84,20 @@ async function setup(
       },
       isVisible: () => options.visible ?? false,
     },
-    { confirmMs: 10, reconnect, reconnectBackoffMs: 20, refusedConfirmMs: 30 },
+    {
+      confirmMs: 10,
+      reconnect,
+      reconnectBackoffMs: 20,
+      refusedConfirmMs: 30,
+      notFoundRetryMs: 10,
+    },
   );
   return {
     session,
     probe,
     posts,
     events,
+    statuses,
     reconnect,
     loginWithBackend,
     watch,
@@ -197,8 +213,8 @@ it("follows the backend at once on reauthenticate, and only reconnects on a refu
   await t.watch.reauthenticate();
   expect(t.session.getSnapshot().account?.identity.subject).toBe("bob");
   t.watch.stop();
-  // A stopped watch answers at once.
-  await t.watch.reauthenticate();
+  // A stopped watch follows nothing: it says so rather than answer as if it had.
+  await expect(t.watch.reauthenticate()).rejects.toThrow("Jazz stopped following your backend");
   await t.session.close();
 });
 
@@ -302,21 +318,190 @@ it("answers a reauthenticate waiting on a transition when the watch stops", asyn
   await t.session.close();
 });
 
-it("stops when there is no backend to ask", async () => {
-  const t = await setup(undefined, { noBackend: true });
+/** Whether `promise` has settled yet. */
+function tracked(promise: Promise<unknown>) {
+  let done = false;
+  void promise.then(
+    () => (done = true),
+    () => (done = true),
+  );
+  return () => done;
+}
+
+it("started settles once the session follows the backend's first answer", async () => {
+  const t = await setup(undefined);
+  t.signIn(user("alice"));
+  const release = t.holdOpen();
+  const started = tracked(t.watch.started);
   await settle();
-  expect(t.hasListeners()).toBe(false);
+  // Asked, and signing alice in: not started until the session follows.
+  expect(t.probe).toHaveBeenCalledOnce();
+  expect(started()).toBe(false);
+  release();
+  await t.watch.started;
+  expect(t.session.getSnapshot().status).toBe("ready");
+  expect(t.session.getSnapshot().account?.identity.subject).toBe("alice");
+  t.watch.stop();
   await t.session.close();
 });
 
-it("fails running and queued reauthenticates alike when there is no backend", async () => {
+it("started settles signed out when the backend names no one or can't be asked", async () => {
+  const nobody = await setup(undefined);
+  await nobody.watch.started;
+  expect(nobody.probe).toHaveBeenCalledOnce();
+  expect(nobody.session.getSnapshot().status).toBe("signed-out");
+  nobody.watch.stop();
+  await nobody.session.close();
+
+  // A failed first check settles it too: it never rejects.
+  const offline = await setup(undefined);
+  offline.signIn(user("alice"));
+  offline.probe.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+  await expect(offline.watch.started).resolves.toBeUndefined();
+  expect(offline.session.getSnapshot().status).toBe("signed-out");
+  offline.watch.stop();
+  await offline.session.close();
+});
+
+it("started settles when the watch stops or finds no backend", async () => {
+  const stopped = await setup(undefined);
+  stopped.watch.stop();
+  await stopped.watch.started;
+  await settle();
+  expect(stopped.probe).not.toHaveBeenCalled();
+  await stopped.session.close();
+
+  // A 404 on start settles it (the check failed), though the watch keeps
+  // asking until 404s persist.
+  const none = await setup(undefined, { noBackend: true });
+  await none.watch.started;
+  expect(none.session.getSnapshot().status).toBe("signed-out");
+  expect(none.hasListeners()).toBe(true);
+  await settle(60);
+  expect(none.hasListeners()).toBe(false);
+  await none.session.close();
+});
+
+it("started waits past a refused check for one that may sign someone in", async () => {
+  const t = await setup(undefined);
+  t.signIn(user("alice"));
+  // A refusal still asking when the check on start comes: it only
+  // reconnects, never signs in, so it doesn't answer who is signed in.
+  t.probe.mockImplementationOnce(
+    () => new Promise((resolve) => setTimeout(() => resolve(user("alice").identity), 5)),
+  );
+  t.watch.authRefused();
+  await t.watch.started;
+  expect(t.session.getSnapshot().status).toBe("ready");
+  expect(t.session.getSnapshot().account?.identity.subject).toBe("alice");
+  t.watch.stop();
+  await t.session.close();
+});
+
+it("a refused check leaves a remembered user's claims refresh to the next check", async () => {
+  // Reopened from this device's memory, with the claims of an earlier sign-in.
+  const remembered = Object.freeze({
+    ...user("alice"),
+    claims: { role: "viewer" },
+  }) as AccountHandle;
+  const t = await setup(remembered);
+  t.signIn(user("alice"));
+  const answer = { ...user("alice").identity, claims: { role: "editor" } };
+  // The check on start can't reach the backend.
+  t.probe.mockRejectedValueOnce(new Error("offline"));
+  await settle();
+  expect(t.loginWithBackend).not.toHaveBeenCalled();
+  // A refused check only reconnects, so it doesn't refresh the claims...
+  t.probe.mockResolvedValue(answer);
+  t.watch.authRefused();
+  await settle();
+  expect(t.reconnect).toHaveBeenCalledOnce();
+  expect(t.loginWithBackend).not.toHaveBeenCalled();
+  // ...and the next check still does.
+  t.focus();
+  await settle();
+  expect(t.loginWithBackend).toHaveBeenCalledOnce();
+  t.watch.stop();
+  await t.session.close();
+});
+
+it("signs a remembered user in again, once, when the core lost their account", async () => {
+  // Reopened from this device's memory, but the core no longer holds the
+  // account (a reset dev store, a new core): sync admission refuses it.
+  const t = await setup(user("alice"));
+  t.signIn(user("alice"));
+  t.probe.mockResolvedValue({ ...user("alice").identity, hasAccount: false });
+  t.watch.authRefused();
+  await settle();
+  // Signing in again gives her a new account; reconnecting would only be refused.
+  expect(t.loginWithBackend).toHaveBeenCalledOnce();
+  expect(t.reconnect).not.toHaveBeenCalled();
+  // A backend that keeps saying no account doesn't make it sign in again and again.
+  t.watch.authRefused();
+  await settle();
+  expect(t.loginWithBackend).toHaveBeenCalledOnce();
+  // Once the backend says she has one, a later loss signs her in again.
+  t.watch.connected();
+  t.probe.mockResolvedValue({ ...user("alice").identity, hasAccount: true });
+  t.focus();
+  await settle();
+  t.probe.mockResolvedValue({ ...user("alice").identity, hasAccount: false });
+  t.watch.authRefused();
+  await settle();
+  expect(t.loginWithBackend).toHaveBeenCalledTimes(2);
+  expect(t.session.getSnapshot().status).toBe("ready");
+  t.watch.stop();
+  await t.session.close();
+});
+
+it("tries the sign-in for a lost account again when it failed", async () => {
+  const t = await setup(user("alice"));
+  t.signIn(user("alice"));
+  t.probe.mockResolvedValue({ ...user("alice").identity, hasAccount: false });
+  // The first sign-in can't reach the backend.
+  t.loginWithBackend.mockRejectedValueOnce(new AccountAuthError("account_request_failed", 503));
+  t.watch.authRefused();
+  await settle();
+  // A later check signs in again, and that one works.
+  t.watch.authRefused();
+  await settle();
+  expect(t.loginWithBackend).toHaveBeenCalledTimes(2);
+  await expect(t.loginWithBackend.mock.results[0]!.value).rejects.toThrow();
+  expect(t.session.getSnapshot().status).toBe("ready");
+  t.watch.stop();
+  await t.session.close();
+});
+
+it("stops only once the backend keeps answering 404, asking again with backoff", async () => {
+  const t = await setup(undefined, { noBackend: true });
+  await settle();
+  // One 404 may be a deploy or a proxy page: the watch keeps following.
+  expect(t.hasListeners()).toBe(true);
+  expect(t.probe).toHaveBeenCalledOnce();
+  await settle(15);
+  expect(t.probe).toHaveBeenCalledTimes(2);
+  expect(t.hasListeners()).toBe(true);
+  // Three 404s over three times the first wait: no backend to ask.
+  await settle(40);
+  expect(t.probe).toHaveBeenCalledTimes(3);
+  expect(t.hasListeners()).toBe(false);
+  await settle(50);
+  expect(t.probe).toHaveBeenCalledTimes(3);
+  await t.session.close();
+});
+
+it("rejects reauthenticates on a 404, and every later one once there is no backend", async () => {
   const t = await setup(undefined, { noBackend: true });
   const running = t.watch.reauthenticate();
   const queued = t.watch.reauthenticate();
   await expect(running).rejects.toThrow("Jazz could not ask your backend who is signed in");
-  await expect(queued).rejects.toThrow("Jazz found no backend to ask who is signed in");
-  // A stopped watch answers later ones at once.
-  await t.watch.reauthenticate();
+  await expect(queued).rejects.toThrow("Jazz could not ask your backend who is signed in");
+  await settle(60);
+  expect(t.hasListeners()).toBe(false);
+  // A watch stopped for no backend never answers as if it followed one.
+  await expect(t.watch.reauthenticate()).rejects.toThrow(
+    "Jazz found no backend to ask who is signed in",
+  );
   await t.session.close();
 });
 
@@ -485,6 +670,69 @@ it("signs a guest in as a user who already has an account, without linking", asy
   await settle();
   expect(loginWithBackend).toHaveBeenCalledOnce();
   expect(linkWithBackend).not.toHaveBeenCalled();
+  watch.stop();
+  await session.close();
+});
+
+// A network blip as the watch signs a user in (a guest's first visit after
+// sign-in): the watch tries again once it passes, with no focus needed.
+it("tries a sign-in that failed on the network again, without waiting for focus", async () => {
+  let blip = true;
+  const loginWithBackend = vi.fn(async () => {
+    if (blip) throw new TypeError("Failed to fetch");
+    return user("alice");
+  });
+  const session = await createJazzSessionOwner({
+    accounts: new AccountManager(
+      { createLocalFirst: () => guest, loginWithBackend, logout() {} },
+      guest,
+    ),
+    openClient: async () => ({ shutdown: async () => {} }),
+  });
+  let probeFails = true;
+  const watch = watchBackendUser(
+    session,
+    async () => {
+      if (probeFails) throw new TypeError("Failed to fetch");
+      return { ...user("alice").identity, hasAccount: true };
+    },
+    { onFocus: () => () => {} },
+    { retryMs: 10 },
+  );
+  // The backend can't be asked at first, then the sign-in itself fails.
+  await settle(5);
+  probeFails = false;
+  await expect.poll(() => loginWithBackend.mock.calls.length).toBeGreaterThan(0);
+  expect(session.getSnapshot().account).toBe(guest);
+  blip = false;
+  await expect.poll(() => session.getSnapshot().account?.identity.subject).toBe("alice");
+  // Once it followed, nothing more is scheduled.
+  const calls = loginWithBackend.mock.calls.length;
+  await settle(100);
+  expect(loginWithBackend).toHaveBeenCalledTimes(calls);
+  watch.stop();
+  await session.close();
+});
+
+it("doesn't retry a sign-in the backend refused", async () => {
+  const loginWithBackend = vi.fn(async () => {
+    throw new AccountAuthError("account_registry_refused", 403);
+  });
+  const session = await createJazzSessionOwner({
+    accounts: new AccountManager(
+      { createLocalFirst: () => guest, loginWithBackend, logout() {} },
+      guest,
+    ),
+    openClient: async () => ({ shutdown: async () => {} }),
+  });
+  const watch = watchBackendUser(
+    session,
+    async () => ({ ...user("alice").identity, hasAccount: true }),
+    { onFocus: () => () => {} },
+    { retryMs: 10 },
+  );
+  await settle(100);
+  expect(loginWithBackend).toHaveBeenCalledOnce();
   watch.stop();
   await session.close();
 });
@@ -859,4 +1107,145 @@ it("gives each user their own re-check when links keep answering signed out", as
   await expect(t.watch.reauthenticate()).rejects.toThrow("signed_out");
   expect(t.linkWithBackend).toHaveBeenCalledTimes(4);
   await t.close();
+});
+
+it("switches from one backend user to another in one transition, never signed-out in between", async () => {
+  const t = await setup(user("alice"), { clearOnSignOut: true });
+  t.signIn(user("alice"));
+  await settle();
+  t.signIn(user("bob"));
+  t.focus();
+  await settle(20);
+  expect(t.statuses).toEqual(["ready:alice", "transitioning:alice", "ready:bob"]);
+  // Alice is torn down as on sign-out, wipe included.
+  expect(t.events).toEqual(["wipe:alice", "close:alice"]);
+  // Other tabs hear of the switch once, when it is done.
+  expect(t.posts).toHaveBeenCalledOnce();
+  // The same through reauthenticate.
+  t.signIn(user("carol"));
+  await t.watch.reauthenticate();
+  expect(t.statuses.slice(3)).toEqual(["transitioning:bob", "ready:carol"]);
+  expect(t.posts).toHaveBeenCalledTimes(2);
+  t.watch.stop();
+  await t.session.close();
+});
+
+it("a switch whose sign-in fails ends signed out, never back on the first user", async () => {
+  const t = await setup(user("alice"));
+  t.signIn(user("alice"));
+  await settle();
+  t.signIn(user("bob"));
+  t.loginWithBackend.mockRejectedValueOnce(new Error("backend down"));
+  await expect(t.watch.reauthenticate()).rejects.toThrow("backend down");
+  expect(t.statuses).toEqual(["ready:alice", "transitioning:alice", "signed-out:-"]);
+  expect(t.session.getSnapshot().error?.message).toBe("backend down");
+  // Asking again signs bob in.
+  await t.watch.reauthenticate();
+  expect(t.statuses.at(-1)).toBe("ready:bob");
+  t.watch.stop();
+  await t.session.close();
+});
+
+it("a switch waits for an operation still finishing, then follows the backend", async () => {
+  const t = await setup(user("alice"));
+  t.signIn(user("alice"));
+  await settle();
+  // The app retries its session while the backend now names bob.
+  const release = t.holdOpen();
+  const retrying = t.session.retry();
+  t.signIn(user("bob"));
+  const asked = t.watch.reauthenticate();
+  release();
+  await retrying;
+  await asked;
+  expect(t.session.getSnapshot().account?.identity.subject).toBe("bob");
+  expect(t.statuses).not.toContain("signed-out:-");
+  t.watch.stop();
+  await t.session.close();
+});
+
+it("a stale sign-out confirmation does not log out a guest created meanwhile", async () => {
+  const t = await setup(user("alice"), { clearOnSignOut: true });
+  t.signIn(user("alice"));
+  await settle();
+  // The user signs out of the app's auth; a focus check sees it and waits to confirm.
+  t.signIn(null);
+  t.focus();
+  await settle(2);
+  // Meanwhile the app signs out of Jazz itself and continues as a guest.
+  await t.session.logout();
+  await t.session.createLocalFirst();
+  await settle(30);
+  expect(t.statuses).toEqual([
+    "ready:alice",
+    "transitioning:alice",
+    "signed-out:-",
+    "transitioning:-",
+    "ready:guest",
+  ]);
+  expect(t.events).toEqual(["wipe:alice", "close:alice"]);
+  t.watch.stop();
+  await t.session.close();
+});
+
+it("a stale sign-out confirmation does not log out a user the app signed in meanwhile", async () => {
+  const t = await setup(user("alice"));
+  t.signIn(user("alice"));
+  await settle();
+  t.signIn(null);
+  t.focus();
+  await settle(2);
+  // The app signs bob in itself, but its backend still says no one (its cookie lags).
+  t.loginWithBackend.mockResolvedValueOnce(user("bob"));
+  await t.session.loginWithBackend();
+  await settle(30);
+  expect(t.session.getSnapshot().account?.identity.subject).toBe("bob");
+  expect(t.statuses).not.toContain("signed-out:-");
+  t.watch.stop();
+  await t.session.close();
+});
+
+it("a transient 404 neither stops the watch nor lets reauthenticate resolve without following", async () => {
+  const t = await setup(user("alice"));
+  t.signIn(user("alice"));
+  t.probe.mockRejectedValueOnce(new AccountAuthError("not_found", 404));
+  await settle();
+  expect(t.hasListeners()).toBe(true);
+  // The backend is back and names bob; the app signed bob in and asks Jazz to follow.
+  t.signIn(user("bob"));
+  await t.watch.reauthenticate();
+  expect(t.session.getSnapshot().account?.identity.subject).toBe("bob");
+  expect(t.statuses).toEqual(["ready:alice", "transitioning:alice", "ready:bob"]);
+  // Focus is still followed.
+  t.signIn(user("carol"));
+  t.focus();
+  await settle(20);
+  expect(t.session.getSnapshot().account?.identity.subject).toBe("carol");
+  t.watch.stop();
+  await t.session.close();
+});
+
+it("a 404 asks again after a wait, and an answer in between resets the count", async () => {
+  const t = await setup(user("alice"));
+  t.signIn(user("alice"));
+  const notFound = () => t.probe.mockRejectedValueOnce(new AccountAuthError("not_found", 404));
+  notFound();
+  await settle();
+  expect(t.probe).toHaveBeenCalledTimes(1);
+  // The retry the 404 scheduled asks again on its own.
+  await settle(15);
+  expect(t.probe).toHaveBeenCalledTimes(2);
+  // Two 404s, an answer, then two more: never three in a row, so it keeps watching.
+  notFound();
+  notFound();
+  t.focus();
+  await settle(15);
+  t.focus();
+  await settle(60);
+  expect(t.hasListeners()).toBe(true);
+  t.signIn(user("bob"));
+  await t.watch.reauthenticate();
+  expect(t.session.getSnapshot().account?.identity.subject).toBe("bob");
+  t.watch.stop();
+  await t.session.close();
 });

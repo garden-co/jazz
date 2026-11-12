@@ -33,10 +33,10 @@ use thiserror::Error;
 pub use app_id::AppId;
 pub use public_api::session::unverified_jwt_scope_subject;
 pub use public_schema::{
-    AuthMode, CmpOp, ColumnDescriptor, ColumnMergeStrategy, ColumnType, Operation, OrderedRowDelta,
-    PolicyExpr, PolicyValue, QueryResult, QueryResultField, Row, RowDelta, RowDescriptor, Schema,
-    SchemaBuilder, SchemaHash, Session, TableName, TablePolicies, TableSchema, TableSchemaBuilder,
-    TransactionId, Value, WriteContext, permissions, policy_expr,
+    AuthMode, CmpOp, ColumnDescriptor, ColumnMergeStrategy, ColumnType, HistoryRetention,
+    Operation, OrderedRowDelta, PolicyExpr, PolicyValue, QueryResult, QueryResultField, Row,
+    RowDelta, RowDescriptor, Schema, SchemaBuilder, SchemaHash, Session, TableName, TablePolicies,
+    TableSchema, TableSchemaBuilder, TransactionId, Value, WriteContext, permissions, policy_expr,
 };
 pub use schema_lens::{Direction, Lens, LensOp, LensTransform};
 pub use transaction::OpenTransactionId;

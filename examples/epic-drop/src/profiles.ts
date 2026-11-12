@@ -1,5 +1,5 @@
 import * as React from "react";
-import { useAll, useDb } from "jazz-tools/react";
+import { useAll } from "jazz-tools/react";
 import { app } from "../schema.js";
 
 export function defaultName(userId: string): string {
@@ -12,8 +12,11 @@ export function defaultName(userId: string): string {
  * creating duplicates.
  */
 export function useEnsureProfile(userId: string | undefined) {
-  const db = useDb();
-  const { data: mine, isLoading } = useAll(userId ? app.profiles.where({ id: userId }) : undefined);
+  const {
+    data: mine,
+    isLoading,
+    db,
+  } = useAll(userId ? app.profiles.where({ id: userId }) : undefined);
   React.useEffect(() => {
     if (!userId || isLoading || !mine || mine.length > 0) return;
     db.upsert(app.profiles, userId, { name: defaultName(userId) });

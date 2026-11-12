@@ -1,4 +1,4 @@
-import { useAll, useDb } from "jazz-tools/react";
+import { useAll } from "jazz-tools/react";
 import { Button, Center, EmptyState, HStack, MobileNavToggle, VStack } from "@astryxdesign/core";
 import { app, type Profile } from "../../schema";
 
@@ -15,8 +15,9 @@ export function JoinRoom({
   profile: Profile;
   onDismiss: () => void;
 }) {
-  const db = useDb();
-  const { data: requests } = useAll(app.joinRequests.where({ roomId, requester: profile.author }));
+  const { data: requests, db } = useAll(
+    app.joinRequests.where({ roomId, requester: profile.author }),
+  );
   const pending = requests?.[0];
 
   return (

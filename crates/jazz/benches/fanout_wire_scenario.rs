@@ -91,7 +91,7 @@ fn room_of(user: usize, k: usize, cfg: &Config) -> usize {
 }
 
 pub fn run(cfg: &Config) -> WireReport {
-    let me = ["user", "identity", "subject"];
+    let me = ["identity", "subject"];
     let schema = compile_schema(
         &SchemaBuilder::new()
             .table(

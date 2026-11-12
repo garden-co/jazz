@@ -20,20 +20,21 @@ import type { Db } from "../runtime/db.js";
 import type { AccountDbConfig as DbConfig } from "../accounts/context.js";
 import { serializeClientConfig } from "../runtime/client-config-key.js";
 import { openJazzClient, type JazzClient as CreatedJazzClient } from "./create-jazz-client.js";
-import { startInspectorOnce } from "../dev-tools/auto-attach.js";
+import {
+  refuseAutoAttachDevTools,
+  type NoAutoAttachDevTools,
+} from "../runtime/removed-provider-props.js";
 import { assertNoClassicProviderProps } from "../classic-api.js";
 import { toError } from "../runtime/util.js";
 
 export type JazzClientContextValue = CreatedJazzClient;
 
-export interface JazzClientProviderProps {
+export interface JazzClientProviderProps extends NoAutoAttachDevTools {
   client: CreatedJazzClient | Promise<CreatedJazzClient>;
-  autoAttachDevTools?: boolean;
 }
 
-export interface LegacyJazzProviderProps {
+export interface LegacyJazzProviderProps extends NoAutoAttachDevTools {
   config: DbConfig;
-  autoAttachDevTools?: boolean;
 }
 
 const JazzContextKey: InjectionKey<ShallowRef<JazzClientContextValue | null>> = Symbol("jazz");
@@ -49,12 +50,9 @@ export const JazzClientProvider = defineComponent({
       type: Object as PropType<JazzClientProviderProps["client"]>,
       required: true,
     },
-    autoAttachDevTools: {
-      type: Boolean,
-      default: true,
-    },
   },
-  setup(props, { slots }) {
+  setup(props, { slots, attrs }) {
+    refuseAutoAttachDevTools("JazzClientProvider", attrs);
     const clientRef = shallowRef<JazzClientContextValue | null>(null);
     const errorRef = shallowRef<Error | null>(null);
     let runId = 0;
@@ -89,10 +87,6 @@ export const JazzClientProvider = defineComponent({
               }
               triggerRef(clientRef);
             });
-
-            if (process.env.NODE_ENV !== "production" && props.autoAttachDevTools) {
-              startInspectorOnce(client.db);
-            }
           })
           .catch((reason) => {
             if (cancelled || activeRunId !== runId) {
@@ -135,14 +129,14 @@ export const LegacyJazzProvider = defineComponent({
       type: Object as PropType<LegacyJazzProviderProps["config"]>,
       required: true,
     },
-    autoAttachDevTools: {
-      type: Boolean,
-      default: true,
-    },
   },
   setup(props, { slots, attrs }) {
+    refuseAutoAttachDevTools("JazzProvider", attrs);
     assertNoClassicProviderProps("JazzProvider", attrs);
-    onBeforeUpdate(() => assertNoClassicProviderProps("JazzProvider", attrs));
+    onBeforeUpdate(() => {
+      refuseAutoAttachDevTools("JazzProvider", attrs);
+      assertNoClassicProviderProps("JazzProvider", attrs);
+    });
     const clientRef = shallowRef<CreatedJazzClient | null>(null);
     const errorRef = shallowRef<Error | null>(null);
     let activeClient: CreatedJazzClient | null = null;
@@ -243,10 +237,7 @@ export const LegacyJazzProvider = defineComponent({
 
       return h(
         JazzClientProvider,
-        {
-          client: clientRef.value,
-          autoAttachDevTools: props.autoAttachDevTools,
-        },
+        { client: clientRef.value },
         { default: slots.default, fallback: slots.fallback },
       );
     };

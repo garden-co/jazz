@@ -58,7 +58,7 @@ read its own profile and the profiles of members of its labels, nothing more.
 To add a member, an admin enters their email. `POST /api/members` uses the
 backend only to look the email up in `personEmails` (written only by the
 bootstrap route from the verified sign-in, and unreadable by browsers). It then
-writes the membership as the caller, via `forRequest()`, so `permissions.ts`
+writes the membership as the caller, via `forReqUser()`, so `permissions.ts`
 decides: only admins add members, only as editors or viewers. The route
 answers non-admins with "forbidden" before looking anything up, so it can't be
 used to probe emails or membership. The write is a serializable

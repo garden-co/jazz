@@ -130,6 +130,7 @@ const mocks = vi.hoisted(() => {
           discard: vi.fn(),
           onAuthFailure: vi.fn(),
           onMutationError: vi.fn(),
+          onStorageFailure: vi.fn(),
           onServerTransportError: vi.fn(),
           onRemoteLinkStateChange: vi.fn(),
           remoteLinkState: vi.fn(() => "connected"),

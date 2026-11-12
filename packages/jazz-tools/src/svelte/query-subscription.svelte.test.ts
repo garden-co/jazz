@@ -12,12 +12,16 @@ const mocks = vi.hoisted(() => {
     subscribe,
   }));
 
+  const ctx: { db: unknown } = { db: null };
+
   return {
+    ctx,
     makeQueryKey,
     getCacheEntry,
     subscribe,
     unsubscribe,
     reset() {
+      ctx.db = null;
       unsubscribe.mockReset();
       subscribe.mockReset().mockReturnValue(unsubscribe);
       makeQueryKey.mockReset().mockImplementation((q: any) => `key:${q?._marker ?? "?"}`);
@@ -31,7 +35,9 @@ const mocks = vi.hoisted(() => {
 
 vi.mock("./context.svelte.js", () => ({
   getJazzContext: () => ({
-    db: null,
+    get db() {
+      return mocks.ctx.db;
+    },
     session: null,
     subscriptionStore: {
       makeQueryKey: mocks.makeQueryKey,
@@ -218,6 +224,24 @@ describe("svelte/QuerySubscription", () => {
     await settle();
 
     expect(mocks.makeQueryKey).toHaveBeenCalledWith(query, { tier: "remote" });
+
+    cleanup();
+  });
+
+  it("exposes the context's db handle via .db, and throws before it is open", () => {
+    let all!: InstanceType<typeof QuerySubscription<{ id: string }>>;
+    let one!: InstanceType<typeof QuerySubscriptionOne<{ id: string }>>;
+    const cleanup = $effect.root(() => {
+      all = new QuerySubscription(makeQuery());
+      one = new QuerySubscriptionOne(makeQuery());
+    });
+
+    expect(() => all.db).toThrow("Jazz database is not yet initialised");
+
+    const db = { marker: "db" };
+    mocks.ctx.db = db;
+    expect(all.db).toBe(db);
+    expect(one.db).toBe(db);
 
     cleanup();
   });

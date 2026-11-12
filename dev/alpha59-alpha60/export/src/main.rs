@@ -59,14 +59,22 @@ fn parse_args() -> Result<Args, String> {
     })
 }
 
+const USAGE: &str = "usage: jazz-alpha59-alpha60-export --data-dir <alpha.59 data dir> \
+    --work <empty dir> --out <dump> [--catalogue-only]";
+
 fn main() -> ExitCode {
+    if std::env::args()
+        .skip(1)
+        .any(|arg| arg == "--help" || arg == "-h")
+    {
+        println!("{USAGE}");
+        return ExitCode::SUCCESS;
+    }
     let args = match parse_args() {
         Ok(args) => args,
         Err(error) => {
             eprintln!("jazz-alpha59-alpha60-export: {error}");
-            eprintln!(
-                "usage: jazz-alpha59-alpha60-export --data-dir <alpha.59 data dir> --work <empty dir> --out <dump> [--catalogue-only]"
-            );
+            eprintln!("{USAGE}");
             return ExitCode::from(2);
         }
     };
@@ -94,10 +102,28 @@ fn main() -> ExitCode {
 fn run(args: &Args) -> Result<dump::Footer, String> {
     let shell = args.data_dir.join("server-shell.rocksdb");
     if !shell.is_dir() {
+        // A server that never had a schema deployed keeps only its
+        // catalogue and accounts: no rows to move.
+        if args.data_dir.join("catalogue.rocksdb").is_dir() {
+            return Err(format!(
+                "{} is an alpha.59 data dir no schema was ever deployed to: it has no rows to export",
+                args.data_dir.display()
+            ));
+        }
         return Err(format!(
             "{} is not an alpha.59 data dir",
             args.data_dir.display()
         ));
+    }
+    // The copy below would miss what a running server writes after it, and
+    // could catch a file mid-write.
+    for root in ROOTS {
+        if held(&args.data_dir.join(root))? {
+            return Err(format!(
+                "{} is in use by a running alpha.59 server (it holds {root}'s lock): stop the server first",
+                args.data_dir.display()
+            ));
+        }
     }
     if args.work.exists() && std::fs::read_dir(&args.work).map_err(err)?.next().is_some() {
         return Err(format!("{} is not empty", args.work.display()));
@@ -423,6 +449,31 @@ fn convert_value(value: &Value) -> Result<dump::Value, String> {
             return Err("nested record cells are not supported yet".to_owned());
         }
     })
+}
+
+/// Whether another process holds the lock of the RocksDB root `db`, as an
+/// open RocksDB does (`fcntl` on its `LOCK` file).
+fn held(db: &Path) -> Result<bool, String> {
+    use std::os::fd::AsRawFd;
+    let path = db.join("LOCK");
+    let file = match std::fs::File::open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("{}: {error}", path.display())),
+    };
+    // SAFETY: a zeroed `flock` is a valid argument, and `file` stays open
+    // for the call.
+    let mut lock: libc::flock = unsafe { std::mem::zeroed() };
+    lock.l_type = libc::F_WRLCK as _;
+    lock.l_whence = libc::SEEK_SET as _;
+    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLK, &mut lock) } != 0 {
+        return Err(format!(
+            "{}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(i32::from(lock.l_type) != i32::from(libc::F_UNLCK))
 }
 
 fn copy_dir(from: &Path, to: &Path) -> Result<(), String> {

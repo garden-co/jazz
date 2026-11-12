@@ -1,0 +1,99 @@
+## Connect the browser
+
+The browser talks to `/jazz` on the same origin by default and signs in with your app's own
+session cookie:
+
+```tsx title="App.tsx"
+<JazzProvider signedOut={<SignIn />}>
+  <App />
+</JazzProvider>
+```
+
+The client asks your backend who is signed in: `authenticate` answers, and the client gets the
+account, identity and claims as plain data. It asks again when the app starts, when the page regains
+focus and when another tab signs in or out. After your own sign-in or sign-out, call
+`reauthenticate()` from `useJazzAuth()`. Every sync connection asks `authenticate` again, so a
+sign-out on the server or changed claims apply without client code. See
+[How Auth Works in Jazz](/docs/setup/auth/backend#in-the-browser).
+
+## Trusted backend use
+
+`jazz.db` acts with backend authority: it sees and writes everything, so check access in your own
+code first. Use it for system work: jobs, webhooks, migrations, admin routes.
+
+```ts
+import { jazz } from "./jazz.server";
+import { app } from "./schema";
+
+await jazz.db.insert(app.auditLog, { event: "invoice.paid" });
+```
+
+## User-scoped use
+
+`await jazz.forReqUser(request)` runs your `authenticate` and returns a database with that user's
+policies and authorship. It's the default for anything a user triggers: route handlers, server
+actions, server components. Concurrent requests stay isolated.
+
+<Callout type="info" title="One handle per request">
+  Call `jazz.forReqUser(request)` in each request that needs it. Don't keep the handle it returns in
+  module-level state: it belongs to that request's user.
+</Callout>
+
+```ts title="app/api/todos/route.ts"
+import { jazz } from "@/jazz.server";
+import { app } from "@/schema";
+
+export async function GET(request: Request) {
+  const db = await jazz.forReqUser(request);
+  return Response.json(await db.all(app.todos));
+}
+```
+
+For a signed-out request, `forReqUser` throws a `RequestAuthenticationError` (`code: "signed_out"`).
+Map it to a 401 rather than a 500:
+
+```ts
+import { isRequestAuthenticationError } from "jazz-tools/backend";
+
+try {
+  const db = await jazz.forReqUser(request);
+  // …
+} catch (error) {
+  if (isRequestAuthenticationError(error)) return new Response(null, { status: 401 });
+  throw error;
+}
+```
+
+When a route acts with backend authority on a user's behalf (placing an order the user can't write
+directly, say), `await jazz.accountFor(request)` names that user's account, or `null` when signed
+out or when the user has no Jazz account yet, so the backend's `db` can write rows that point at it.
+
+### Users without an account
+
+Your backend never creates an account on its own. A user gets one when they sign in from a Jazz
+client, when a guest [links to them](/docs/setup/auth/backend#guests-and-linking), or when you call
+`jazz.createAccountFor(userId)`. Until then, `forReqUser` and `withAttribution` throw a
+`NoJazzAccountError` (`code: "no_account"`, with the `userId`), and `accountFor` returns `null`.
+
+For users who never open a client, such as API-only users, webhooks or imports, create the account
+yourself, for example in your sign-in route. It returns the account id, and calling it again
+returns the same one:
+
+```ts
+const user = await authenticate(request);
+if (!user) return new Response(null, { status: 401 });
+const account = await jazz.createAccountFor(user.userId);
+```
+
+Once a user has an account, a guest can no longer link to them, so don't call `createAccountFor` in
+a sign-up flow whose browser may hold a local-first guest. To tell the error apart, use
+`isNoJazzAccountError(error)` from `jazz-tools/backend`.
+
+A browser whose user no longer has an account on the core, for example after a reset dev store or
+on a new core, signs in again when sync refuses it, instead of reconnecting forever.
+
+## Backend clients
+
+Other trusted machines, such as a job runner, a worker on another cloud or a partner's service,
+connect to this backend's `/jazz` as [backend clients](/docs/setup/backend-client), with their own
+machine-to-machine credential. List the ones you trust in `createJazz({ backendClients })`.

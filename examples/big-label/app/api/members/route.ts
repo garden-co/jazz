@@ -21,7 +21,7 @@ export async function POST(request: Request) {
     return Response.json({ status: "invalid-request" }, { status: 400 });
 
   const backend = await jazz();
-  const caller = await backend.forRequest(request);
+  const caller = await backend.forReqUser(request);
   // Answer only admins, read as the caller, so nobody else can probe which
   // emails have accounts or who belongs to the label. The membership write
   // below is still checked by permissions.ts on its own.

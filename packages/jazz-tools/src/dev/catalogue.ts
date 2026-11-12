@@ -63,6 +63,11 @@ export interface DeployOptions extends CatalogueServerOptions {
   migrations?: readonly DefinedMigration[];
   /** A single reviewed migration. May also be supplied alongside migrations. */
   migration?: DefinedMigration;
+  /**
+   * Confirms switching tables of the active schema to latest-only history,
+   * which drops their past versions for good.
+   */
+  allowDroppingHistory?: boolean;
 }
 
 export interface DeployResult extends DeploymentResponse {
@@ -323,7 +328,7 @@ async function loadSchema(options: CatalogueServerOptions, hash: string): Promis
 
 /** Diff against the fetched graph and publish all missing artifacts in one request. */
 export async function deployArtifacts(
-  options: CatalogueServerOptions,
+  options: CatalogueServerOptions & { allowDroppingHistory?: boolean },
   graph: MigrationGraph,
   artifacts: DeploymentArtifacts,
 ): Promise<DeployResult> {

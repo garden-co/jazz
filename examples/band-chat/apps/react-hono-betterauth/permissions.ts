@@ -5,7 +5,7 @@ import { app, type Reaction, type Room } from "./schema";
 const bandChatPermissions = definePermissions(
   app,
   ({ policy, session, allOf, anyOf, allowedTo }) => {
-    const me = session.user.account;
+    const me = session.user;
     const isMember = (room: RowContext<Room>) =>
       policy.roomMembers.exists.where({ roomId: room.id, memberAuthor: me });
     const isMemberOf = (roomId: RowRefValue) =>
