@@ -32,6 +32,7 @@ export function jazz(): Promise<Jazz> {
       const role = (session.user as { role?: string | string[] | null }).role;
       return {
         userId: session.user.id,
+        expiresAt: Math.floor(session.session.expiresAt.getTime() / 1000),
         claims: { role: Array.isArray(role) ? role[0] : (role ?? "") },
       };
     },

@@ -94,7 +94,7 @@ afterAll(() => new Promise((resolve) => issuerServer.close(resolve)));
 /** The app's own auth: the user named in a header. */
 function authenticate(request: Request) {
   const userId = request.headers.get("x-test-user");
-  return userId ? { userId } : null;
+  return userId ? { userId, expiresAt: Math.floor(Date.now() / 1000) + 3600 } : null;
 }
 
 async function serve(jazz: Jazz): Promise<string> {

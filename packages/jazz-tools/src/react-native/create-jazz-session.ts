@@ -1,3 +1,4 @@
+import type { SignedOutDecision } from "../session/backend-watch.js";
 import { accountForgotten } from "../accounts/persistence.js";
 import { createJazzSessionOwner } from "../session/state.js";
 import {
@@ -44,6 +45,16 @@ export type JazzClientConfig = Omit<OpenJazzClientConfig, "account" | "serverUrl
      * user's own; the guest stays on this device).
      */
     linkGuestOnSignUp?: boolean;
+    /**
+     * Called when your backend says no one is signed in any more (confirmed
+     * by a second answer a moment later), before the session signs the
+     * user out. Return `"keep"` to stay signed in for now (your app refreshed
+     * its session itself, or redirects to sign-in first): the session asks
+     * your backend again on the next focus, refusal or `reauthenticate()`.
+     * Return `"sign-out"` (or nothing) to sign out. A hook that throws signs
+     * out.
+     */
+    onSignedOut?: () => SignedOutDecision | void | Promise<SignedOutDecision | void>;
   };
 
 /** Prepare the host account store once and own client replacement across authentication. */
@@ -59,23 +70,26 @@ export async function createJazzClient(
       'serverUrl: null has no backend to sign in through, so it always opens this device\'s local-first account: leave out initial or set it to "local-first"',
     );
   }
+  // The hook is the session's; a Db keeps only cloneable configuration.
+  const { onSignedOut, ...clientConfig } = config;
   const accounts = await createAccountManager(config);
   if (serverUrl === null) {
     return createJazzSessionOwner({
       accounts,
       initial: "local-first",
-      openClient: (account) => openJazzClient({ ...config, serverUrl: undefined, account }),
+      openClient: (account) => openJazzClient({ ...clientConfig, serverUrl: undefined, account }),
       decorate: () => ({ reauthenticate: async () => {} }),
     });
   }
   const session = await createJazzSessionOwner({
     accounts,
     initial: config.initial,
-    openClient: (account) => openJazzClient({ ...config, serverUrl, account }),
+    openClient: (account) => openJazzClient({ ...clientConfig, serverUrl, account }),
     decorate: followUser({
       registry: clientRegistryUrl(config),
       events: nativeBackendWatchEvents,
       linkGuest: config.linkGuestOnSignUp,
+      onSignedOut,
       forgotten: (account) => accountForgotten(accounts, account.id),
     }),
   });

@@ -36,7 +36,12 @@ export function backend(): Promise<Jazz> {
       const { auth } = await import("./auth");
       const session = await auth.api.getSession({ headers: request.headers });
       // Signed out: a local-first guest shopper.
-      return session ? { userId: session.user.id } : acceptLocalFirstAuth(request);
+      return session
+        ? {
+            userId: session.user.id,
+            expiresAt: Math.floor(session.session.expiresAt.getTime() / 1000),
+          }
+        : acceptLocalFirstAuth(request);
     },
   }).ready());
   // A failed start must not poison later requests.

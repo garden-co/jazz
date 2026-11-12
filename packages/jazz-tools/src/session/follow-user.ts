@@ -1,7 +1,12 @@
 import { AccountAuthError, requestBackendUser } from "../accounts/registry-client.js";
 import type { AccountHandle, AccountIdentity } from "../accounts/state.js";
 import type { SyncStatus } from "../runtime/sync-status.js";
-import { watchBackendUser, type BackendUser, type BackendWatchEvents } from "./backend-watch.js";
+import {
+  watchBackendUser,
+  type BackendUser,
+  type BackendWatchEvents,
+  type SignedOutDecision,
+} from "./backend-watch.js";
 import type { JazzSession } from "./state.js";
 
 /**
@@ -42,6 +47,8 @@ export function followUser(options: {
   fetch?: typeof fetch;
   /** See `linkGuestOnSignUp` on `createJazzClient`. Default true. */
   linkGuest?: boolean;
+  /** See `onSignedOut` on `createJazzClient`. */
+  onSignedOut?: () => SignedOutDecision | void | Promise<SignedOutDecision | void>;
   /** See `forgotten` on `watchBackendUser`. */
   forgotten?: (account: AccountHandle) => Promise<boolean>;
   /**
@@ -87,16 +94,20 @@ function decorate<Client>(
     events: BackendWatchEvents;
     fetch?: typeof fetch;
     linkGuest?: boolean;
+    onSignedOut?: () => SignedOutDecision | void | Promise<SignedOutDecision | void>;
     forgotten?: (account: AccountHandle) => Promise<boolean>;
     watchAccounts?: (changed: () => void) => () => void;
   },
 ): Pick<UserFollowingSession<Client>, "reauthenticate" | "linkWithBackend" | "close"> {
+  const probe = () => signedInIdentity(options.registry, options.fetch);
+  const singleFlight = options.events.singleFlight;
   const watch = watchBackendUser(
     session,
-    () => signedInIdentity(options.registry, options.fetch),
+    singleFlight ? () => singleFlight(probe) : probe,
     options.events,
     {
       linkGuest: options.linkGuest,
+      onSignedOut: options.onSignedOut,
       forgotten: options.forgotten,
       reconnect: () =>
         void (session.getSnapshot().client as ObservedClient | undefined)?.db

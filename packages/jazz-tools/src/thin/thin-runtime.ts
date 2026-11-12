@@ -78,6 +78,7 @@ import { encodeSchema } from "../runtime/native-runtime/schema-codec.js";
 import {
   WebSocketCarrier,
   peerIdentityForWebSocketAuth,
+  isReauthenticateWireError,
   wireAuthFailureReason,
   type WebSocketConstructor,
   type WireError,
@@ -251,6 +252,8 @@ export class ThinRuntime implements Runtime {
   private authJson?: string;
   /** Requests and live queries go out only once the schema is bound. */
   private bound = false;
+  /** A planned re-authentication is reconnecting a bound connection (see `lost`). */
+  private reauthenticating = false;
   private wanted = false;
   private closed = false;
   private attempt = 0;
@@ -393,6 +396,11 @@ export class ThinRuntime implements Runtime {
       authJson: this.authJson,
       WebSocket: this.WebSocketImpl,
       onFrame: (frame) => this.receive(carrier, frame),
+      // The server's planned re-authentication arrives as an error on an open
+      // connection, ahead of its close: handle it as the connection's end.
+      onError: (error) => {
+        if (isReauthenticateWireError(error)) this.lost(carrier, error);
+      },
       onTerminal: (error) => this.lost(carrier, error),
     });
     this.carrier = carrier;
@@ -424,6 +432,7 @@ export class ThinRuntime implements Runtime {
         }
         this.attempt = 0;
         this.bound = true;
+        this.reauthenticating = false;
         this.refused = false;
         this.stopped = false;
         this.clearOutage();
@@ -466,6 +475,19 @@ export class ThinRuntime implements Runtime {
   private lost(carrier: WebSocketCarrier, error: WireError): void {
     if (this.carrier !== carrier) return;
     const lostError = new ThinConnectionLostError(`${error.code}: ${error.message}`);
+    const wasBound = this.bound;
+    // A planned swap that ends any other way is reported as that ending.
+    this.reauthenticating = false;
+    if (isReauthenticateWireError(error) && wasBound) {
+      // The session reached the expiry the app's auth gave it: connect again
+      // at once so `authenticate` decides with the current credential. The
+      // app keeps seeing a connected link meanwhile; unanswered writes go
+      // out again on the new connection.
+      this.reauthenticating = true;
+      this.dropConnection(lostError, true);
+      this.open();
+      return;
+    }
     const authFailure = wireAuthFailureReason(error);
     if (authFailure) {
       // Refused before the drop publishes, so the link never reads
@@ -1241,7 +1263,7 @@ export class ThinRuntime implements Runtime {
   upstreamLinkStatus(): LinkStatus {
     if (this.stopped) return offlineLink("stopped");
     if (this.refused) return offlineLink("auth");
-    if (this.bound) return CONNECTED;
+    if (this.bound || this.reauthenticating) return CONNECTED;
     return this.outagePublished ? offlineLink("network") : CONNECTING;
   }
 

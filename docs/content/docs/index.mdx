@@ -43,7 +43,7 @@ const jazz = createJazz({
   app,
   permissions,
   store: sqlite({ path: "./data/jazz" }),
-  authenticate: async (request) => getSignedInUser(request), // your own auth: { userId } or null
+  authenticate: async (request) => getSignedInUser(request), // your own auth: { userId, expiresAt } or null
 });
 
 new Hono()
