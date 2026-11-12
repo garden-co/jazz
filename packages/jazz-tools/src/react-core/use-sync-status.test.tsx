@@ -21,12 +21,18 @@ describe("useSyncStatus", () => {
     expect(result.current).toEqual({
       link: { state: "connecting" },
       pendingUploads: 0,
+      oldestPendingAt: null,
+      rejected: 0,
+      lastError: null,
       synced: false,
     });
 
     const offline = {
       link: { state: "offline", reason: "network", retrying: true },
       pendingUploads: 2,
+      oldestPendingAt: 1,
+      rejected: 0,
+      lastError: null,
       synced: false,
     } as const;
     act(() => client.__setSyncStatus(offline));

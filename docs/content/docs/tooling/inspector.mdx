@@ -41,10 +41,17 @@ export const jazz = createJazz({
 </Callout>
 
 Without `inspect`, only local development gets in: a request from this machine while `NODE_ENV` is
-`"development"`. Jazz can only check that on hosts that hand it the Node request (`attach()` and
+`"development"`. A browser counts as local only when the page it comes from is on this machine too,
+judged by its `Origin`. Jazz can only check that on hosts that hand it the Node request (`attach()` and
 `nodeHandler`). On Next.js route handlers, Hono, Bun and Deno it can't see where a request comes
 from, so the default is off there; pass an `inspect` hook to use the Inspector. Pass `() => null` to
 turn it off everywhere.
+
+<Callout type="warn" title="Dev servers reachable from other machines">
+  Behind a dev proxy that adds no `X-Forwarded-For` header, such as Vite's `server.proxy` without
+  `xfwd` while you run `vite --host`, a non-browser client on another machine looks local too. If
+  other machines can reach your dev server, pass an `inspect` hook.
+</Callout>
 
 Every call is audited, allowed or refused. By default that's one `console.info` line per call; pass
 `inspector: { audit }` to send events to your own log.
@@ -82,8 +89,11 @@ the page shows the token to paste instead.
   example `claude mcp add jazz -- npx jazz-tools inspect mcp --app <url>`. An agent without a
   token calls the `request_access` tool, which starts the same approval.
 
+`jazz-tools inspect` and the MCP server send a token over plain `http://` only to this machine
+(`localhost` or a loopback address); anywhere else needs `https://`.
+
 Tokens are read-only unless you allow writes, can be limited to some tables, and expire (after a day
-at most, `inspector.maxTokenTtlSeconds`). To keep columns from agents, pass
+at most, `inspector.maxTokenTtlSeconds`). A token limited to some tables can't list sessions. To keep columns from agents, pass
 `inspector: { redact: { users: ["email"] } }`: those values read as `"[redacted]"`. To revoke every
 token, set `inspector.tokensIssuedAfter` to now.
 

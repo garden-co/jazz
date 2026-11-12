@@ -79,6 +79,9 @@ function TaskDetail({
   const me = useMe();
   const [title, setTitle] = useState(task.title);
   const [notes, setNotes] = useState(task.notes ?? "");
+  // The notes as they were when you started typing: the save is an edit of
+  // them, so a crewmate's edit that arrived meanwhile is merged, not undone.
+  const [notesBase, setNotesBase] = useState<string | null>(task.notes ?? null);
   const [comment, setComment] = useState("");
   const [canDelete, setCanDelete] = useState(false);
   const { data: comments = [], db } = useAll(
@@ -117,7 +120,7 @@ function TaskDetail({
   };
   const commitNotes = () => {
     setFocused(null);
-    if (notes !== (task.notes ?? "")) updateTaskNotes(db, task, notes);
+    if (notes !== (notesBase ?? "")) updateTaskNotes(db, task, notes, notesBase);
   };
 
   const crewOptions = [
@@ -179,7 +182,10 @@ function TaskDetail({
               isOptional
               value={notes}
               onChange={setNotes}
-              onFocus={() => setFocused("notes")}
+              onFocus={() => {
+                setNotesBase(task.notes ?? null);
+                setFocused("notes");
+              }}
               onBlur={commitNotes}
               rows={3}
             />
