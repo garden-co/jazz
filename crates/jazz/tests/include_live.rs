@@ -100,6 +100,76 @@ fn renaming_a_sender_updates_exactly_their_messages() {
     assert_eq!(updated(&mut stream), 10, "the 10 messages user 7 sent");
 }
 
+/// A nullable reference reads back wrapped (`Nullable(Some(uuid))`): renaming
+/// its target still updates the messages that point at it, and a message
+/// with no sender is left alone.
+#[test]
+fn renaming_a_sender_updates_messages_through_a_nullable_reference() {
+    let db = block_on(Db::open(DbConfig::new(
+        compile_schema(
+            &SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("users")
+                        .column("name", ColumnType::Text)
+                        .policies(allow_all_policies()),
+                )
+                .table(
+                    TableSchemaBuilder::new("messages")
+                        .nullable_fk_column("senderId", "users")
+                        .column("body", ColumnType::Text)
+                        .policies(allow_all_policies()),
+                )
+                .build(),
+        ),
+        DbIdentity {
+            node: NodeUuid::from_bytes([0; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+    )))
+    .unwrap();
+    for u in 0..2 {
+        db.seed_settled_mergeable_for_bootstrap(
+            "users",
+            id(1, u),
+            AuthorSubject::SYSTEM,
+            [("name".to_owned(), Value::String(format!("u{u}")))].into(),
+        )
+        .unwrap();
+    }
+    for (n, sender) in [Some(0), Some(1), Some(0), None].into_iter().enumerate() {
+        let sender = match sender {
+            Some(u) => Value::Uuid(id(1, u).0),
+            None => Value::Nullable(None),
+        };
+        let cells: BTreeMap<String, Value> = [
+            ("senderId".to_owned(), sender),
+            ("body".to_owned(), Value::String(format!("m{n}"))),
+        ]
+        .into();
+        db.seed_settled_mergeable_for_bootstrap(
+            "messages",
+            id(2, n as u32),
+            AuthorSubject::SYSTEM,
+            cells,
+        )
+        .unwrap();
+    }
+    let prepared = db
+        .prepare_query(&Query::from("messages").include("senderId"))
+        .unwrap();
+    let mut stream = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    updated(&mut stream);
+    block_on(db.update(
+        "users",
+        id(1, 0),
+        [("name".to_owned(), Value::String("renamed".into()))].into(),
+        Default::default(),
+    ))
+    .unwrap();
+    block_on(db.tick()).unwrap();
+    assert_eq!(updated(&mut stream), 2, "the 2 messages user 0 sent");
+}
+
 /// Timing probe (run with `--release -- --nocapture`): renaming one sender
 /// under a live 10,000-message view with the sender included.
 #[test]
