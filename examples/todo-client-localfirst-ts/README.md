@@ -1,11 +1,11 @@
 # todo-client-localfirst-ts
 
-Local-first todo app in vanilla TypeScript + Vite — no UI framework. Anonymous auth via `BrowserAuthSecretStore`, IndexedDB persistence.
+Local-first todo app in vanilla TypeScript + Vite — no UI framework. Anonymous device account via `createJazzClient({ initial: "device" })`, IndexedDB persistence.
 
 ## What it demonstrates
 
-- Anonymous identity from a locally generated secret — no login UI, no auth server.
-- The low-level Jazz client API: `createDb`, `db.subscribe`, `db.insert` / `db.update` / `db.delete`, `db.onAuthChanged` — consumed without React, Svelte, or Vue bindings.
+- Anonymous identity from a device account (its key lives on this device) — no login UI, no auth server.
+- The low-level Jazz client API: `createJazzClient` and `session.db`, `db.subscribe`, `db.insert` / `db.update` / `db.delete`, `db.onAuthChanged` — consumed without React, Svelte, or Vue bindings.
 - Row-level permissions — `owner_id` enforced by `definePermissions`; mutations on rows you don't own are rejected by the runtime.
 - IndexedDB-backed persistence across reload, synced through the app's own backend.
 - Jazz inside the app's backend: `jazz.server.ts` runs `createJazz` in the Vite server, so pages sync on their own origin under `/jazz`. In production, run the same `createJazz` in your server.

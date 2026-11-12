@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { schema } from "../../src/schema-namespace.js";
-import { createAccountManager } from "../../src/react-native/index.js";
+import { createAccountManager } from "../../src/react-native/create-account-manager.js";
 import {
   createNativeAccountTestSession,
   openJazzClient,

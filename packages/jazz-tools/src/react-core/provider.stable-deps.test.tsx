@@ -1,7 +1,7 @@
 import React from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, act } from "@testing-library/react";
-import { JazzProvider } from "./provider.js";
+import { JazzDbProvider } from "./provider.js";
 import { makeFakeAccount, makeFakeClient } from "./test-utils.js";
 import type { AccountDbConfig } from "../accounts/context.js";
 
@@ -16,7 +16,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("JazzProvider — stable config deps", () => {
+describe("JazzDbProvider — stable config deps", () => {
   /**
    * Regression: passing a fresh, structurally equivalent config object must not
    * trigger a cleanup→reacquire cycle, regardless of property insertion order.
@@ -42,9 +42,9 @@ describe("JazzProvider — stable config deps", () => {
 
     function Wrapper({ config }: { config: AccountDbConfig }) {
       return (
-        <JazzProvider config={config} openJazzClient={openJazzClient} fallback={null}>
+        <JazzDbProvider config={config} openJazzClient={openJazzClient} fallback={null}>
           <div data-testid="child" />
-        </JazzProvider>
+        </JazzDbProvider>
       );
     }
 
@@ -107,9 +107,9 @@ describe("JazzProvider — stable config deps", () => {
 
     function Wrapper({ factory }: { factory: typeof firstFactory }) {
       return (
-        <JazzProvider config={config} openJazzClient={factory} fallback={null}>
+        <JazzDbProvider config={config} openJazzClient={factory} fallback={null}>
           <div data-testid="child" />
-        </JazzProvider>
+        </JazzDbProvider>
       );
     }
 
@@ -142,9 +142,9 @@ describe("JazzProvider — stable config deps", () => {
 
     function Wrapper({ config }: { config: AccountDbConfig }) {
       return (
-        <JazzProvider config={config} openJazzClient={openJazzClient} fallback={null}>
+        <JazzDbProvider config={config} openJazzClient={openJazzClient} fallback={null}>
           <div data-testid="child" />
-        </JazzProvider>
+        </JazzDbProvider>
       );
     }
 

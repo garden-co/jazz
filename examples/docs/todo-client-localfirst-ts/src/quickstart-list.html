@@ -7,12 +7,11 @@
       <button>Add</button>
     </form>
     <script type="module">
-      import { createDb } from "jazz-tools";
+      import { createJazzClient } from "jazz-tools/client";
       import { app } from "./schema.js";
 
-      const db = await createDb({
-        env: "dev",
-      });
+      const session = await createJazzClient({ env: "dev", initial: "device" });
+      const db = session.db;
 
       const list = document.getElementById("todos");
 

@@ -10,9 +10,7 @@
  * the server too. Not supported yet: offline use and attributed writes.
  * Upgrade to the local-first client for offline use.
  */
-import type { AccountManagerConfig } from "../accounts/create-account-manager.js";
 import { createAccountDbWithRuntimeSource, type AccountDbConfig } from "../accounts/context.js";
-import { createAccountManagerWithMinter } from "../accounts/account-manager-core.js";
 import { authSecretSeedForMinting } from "../runtime/auth-secret-codec.js";
 import type { Db } from "../runtime/db.js";
 import { isThinDb, markThinDb } from "../runtime/local-first-upgrade.js";
@@ -30,20 +28,19 @@ export {
   ThinRemoteError,
   type ThinRuntimeOptions,
 } from "./thin-runtime.js";
-export type {
-  AccountHandle,
-  AccountIdentity,
-  AccountManager,
-  AccountSnapshot,
-} from "../accounts/state.js";
-export { AccountAuthError, type JWTAuth } from "../accounts/enrollment.js";
-export type { AccountStore } from "../accounts/persistence.js";
+// Accounts are the session's (`createJazzClient`): only its error and the
+// storage a host may supply are public, as on the package root.
+export * from "../accounts/exports.js";
 export type { Db } from "../runtime/db.js";
 export type { LocalFirstLoader, LocalFirstModule } from "../runtime/local-first-upgrade.js";
 
 export type ThinDbConfig = AccountDbConfig & { thin?: ThinRuntimeOptions };
 
-/** Open a thin `Db` for a signed-in account. `serverUrl` is required. */
+/**
+ * @internal The session opens its thin `Db` with this (`createJazzClient`);
+ * apps can't call it, since it takes the session's own account handle.
+ * `serverUrl` is required.
+ */
 export async function createClient(config: ThinDbConfig): Promise<Db> {
   const { thin, ...dbConfig } = config;
   const db = await createAccountDbWithRuntimeSource(
@@ -229,14 +226,6 @@ function thinRuntimeOf(thin: Db): ThinRuntime | null {
     throw new Error("upgradeToLocalFirst takes a Db created by jazz-tools/thin");
   }
   return runtime;
-}
-
-/**
- * The account manager of `jazz-tools`, signing local-first identities in
- * JavaScript instead of WASM.
- */
-export async function createAccountManager(config: AccountManagerConfig) {
-  return createAccountManagerWithMinter(config, mintLocalFirstTokenInJs);
 }
 
 /** @internal Sign a local-first token in JS, byte-identical to the WASM runtime. */

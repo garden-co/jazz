@@ -4,10 +4,10 @@ import { afterEach, expect, it, vi } from "vitest";
 import { AccountManager, type AccountHandle } from "../accounts/state.js";
 import { createJazzSessionOwner } from "../session/state.js";
 import { attachSubscriptionStore } from "../subscription-store-internal.js";
-import { JazzProvider, useJazzAuth } from "./app.js";
+import { JazzProvider, useJazzSession } from "./session.js";
 import { useJazzClient } from "./provider.js";
 const factory = vi.hoisted(() => vi.fn());
-vi.mock("../session/create-jazz-session.js", () => ({ createJazzClient: factory }));
+vi.mock("../session/create-jazz-session.js", () => ({ openBrowserSessionCore: factory }));
 vi.mock("../web/create-jazz-client.js", () => ({ openJazzClient: vi.fn() }));
 const flush = async () => {
   for (let i = 0; i < 40; i++) await Promise.resolve();
@@ -72,9 +72,9 @@ it("retries startup through the default UI and exposes unified auth to children"
   const { owner, events, failLogout } = await setup();
   await owner.createLocalFirst();
   factory.mockRejectedValueOnce(new Error("startup unavailable"));
-  let auth: ReturnType<typeof useJazzAuth>;
+  let auth: ReturnType<typeof useJazzSession>;
   const Child = () => {
-    auth = useJazzAuth();
+    auth = useJazzSession();
     expect(auth.snapshot().status).toBe("ready");
     expect(useJazzClient().db).toBe(owner.getSnapshot().client!.db);
     onCleanup(() => events.push("detached"));
@@ -84,7 +84,7 @@ it("retries startup through the default UI and exposes unified auth to children"
   document.body.append(node);
   dispose = render(
     () => (
-      <JazzProvider scope="test">
+      <JazzProvider config={{ scope: "test" }}>
         <Child />
       </JazzProvider>
     ),
@@ -98,20 +98,19 @@ it("retries startup through the default UI and exposes unified auth to children"
   expect(factory).toHaveBeenCalledTimes(2);
   expect(factory.mock.calls[1][0].initial).toBeUndefined();
   expect(node.textContent).toContain("PRIVATE");
-  await auth!.logout();
+  await auth!.signOut();
   expect(events).toEqual(["detached", "shutdown:local"]);
   expect(node.textContent).not.toContain("PRIVATE");
-  const actions = auth!.sessionActions;
-  await actions.createLocalFirst();
+  const { createDeviceAccount } = auth!;
+  await createDeviceAccount();
   await flush();
   expect(node.textContent).toContain("PRIVATE");
-  expect(auth!.sessionActions).toBe(actions);
   failLogout();
-  await expect(auth!.logout()).resolves.toBeUndefined();
+  await expect(auth!.signOut()).rejects.toThrow("logout failed");
   await flush();
-  expect(node.textContent).toContain("logout failed");
+  expect(auth!.snapshot().error?.message).toBe("logout failed");
 });
-it("follows the backend on reauthenticate and releases children before shutdown", async () => {
+it("follows the backend on refresh and releases children before shutdown", async () => {
   const { owner, events } = await setup();
   backend.user = null;
   let mounts = 0;
@@ -120,9 +119,9 @@ it("follows the backend on reauthenticate and releases children before shutdown"
     onCleanup(() => events.push("detached"));
     return <p>PRIVATE</p>;
   };
-  let auth!: ReturnType<typeof useJazzAuth>;
+  let auth!: ReturnType<typeof useJazzSession>;
   const SignedOut = () => {
-    auth = useJazzAuth();
+    auth = useJazzSession();
     return <p>{auth.snapshot().status}</p>;
   };
   const node = document.createElement("div");
@@ -130,8 +129,7 @@ it("follows the backend on reauthenticate and releases children before shutdown"
   dispose = render(
     () => (
       <JazzProvider
-        scope="test"
-        initial="signed-out"
+        config={{ scope: "test", initial: "signed-out" }}
         signedOut={<SignedOut />}
         loading={<p>WAIT</p>}
       >
@@ -145,12 +143,15 @@ it("follows the backend on reauthenticate and releases children before shutdown"
   expect(factory).toHaveBeenCalledWith(expect.objectContaining({ initial: "signed-out" }));
   expect(mounts).toBe(0);
   backend.user = "a";
-  await auth.reauthenticate();
+  await auth.refresh();
   await flush();
   expect(node.textContent).toBe("PRIVATE");
-  expect(auth.snapshot().user).toMatchObject({ id: "a", issuer: "test" });
+  expect(auth.snapshot().user).toMatchObject({
+    accountId: "a",
+    identity: { issuer: "test", subject: "a" },
+  });
   backend.user = "b";
-  await auth.reauthenticate();
+  await auth.refresh();
   await flush();
   expect(owner.getSnapshot().account?.identity.subject).toBe("b");
   expect(node.textContent).toBe("PRIVATE");
@@ -168,7 +169,7 @@ it("refuses the removed autoAttachDevTools prop instead of passing it to the cli
   expect(() =>
     render(
       () => (
-        <JazzProvider scope="test" {...props}>
+        <JazzProvider config={{ scope: "test" }} {...props}>
           <p>ready</p>
         </JazzProvider>
       ),

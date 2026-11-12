@@ -1,10 +1,10 @@
 <!-- #region auth-jwt-svelte -->
 <script lang="ts">
   import type { Snippet } from "svelte";
-  import type { DbConfig } from "jazz-tools";
-  import { JazzSvelteProvider } from "jazz-tools/svelte";
-  // Prepare a handle outside this context with createAccountManager.
-  let { config, children }: { config: DbConfig; children: Snippet } = $props();
+  import { JazzProvider } from "jazz-tools/svelte";
+  // Your backend names the user (its authenticate reads your session cookie).
+  // In `signedOut`, call getJazzSession().refresh() after your own sign-in.
+  let { children, signedOut }: { children: Snippet; signedOut: Snippet } = $props();
 </script>
-<JazzSvelteProvider {config}>{@render children()}</JazzSvelteProvider>
+<JazzProvider config={{ serverUrl: "/jazz" }} {signedOut}>{@render children()}</JazzProvider>
 <!-- #endregion auth-jwt-svelte -->

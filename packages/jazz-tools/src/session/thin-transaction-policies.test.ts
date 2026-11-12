@@ -4,7 +4,10 @@ import { definePermissions } from "../permissions/index.js";
 import type { AccountStore } from "../accounts/persistence.js";
 import { startTestJazz, type TestJazz } from "../testing/index.js";
 import { isThinDb } from "../runtime/local-first-upgrade.js";
-import { createJazzClient, type BrowserJazzSession } from "./create-jazz-session.js";
+import {
+  openBrowserSessionCore as createJazzClient,
+  type BrowserJazzSession,
+} from "./create-jazz-session.js";
 
 // A board and its owner's membership, written together: the membership's
 // insert policy needs the board, which only the same transaction holds.
@@ -64,7 +67,7 @@ it("lets a thin client's transaction satisfy exists with a row it inserted itsel
     scope: server.appId,
     serverUrl: server.url,
     store: memoryStore(),
-    initial: "local-first",
+    initial: "device",
     driver: { type: "memory" },
   });
   sessions.push(session);
@@ -113,7 +116,7 @@ it("lets a thin client's transaction satisfy allowedTo.update with a parent it i
     scope: server.appId,
     serverUrl: server.url,
     store: memoryStore(),
-    initial: "local-first",
+    initial: "device",
     driver: { type: "memory" },
   });
   sessions.push(session);

@@ -7,7 +7,8 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { App } from "../../src/App.js";
-import { TEST_SERVER_URL, SCOPE, testAccount } from "./test-constants.js";
+import { TEST_SERVER_URL, SCOPE } from "./test-constants.js";
+import { memoryAccountStore } from "../../../testing/accounts.js";
 import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
 
 // ---------------------------------------------------------------------------
@@ -131,7 +132,7 @@ describe("Chat App E2E", () => {
       appId?: string;
       dbName?: string;
       serverUrl?: string;
-      account?: import("jazz-tools").AccountHandle;
+      store?: ReturnType<typeof memoryAccountStore>;
     } = {},
   ): Promise<HTMLDivElement> {
     const el = document.createElement("div");
@@ -144,9 +145,9 @@ describe("Chat App E2E", () => {
     const appId =
       config.appId ?? `test-chat-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
-    const account = config.account ?? (await testAccount(crypto.randomUUID(), appId));
+    const store = config.store ?? memoryAccountStore();
 
-    r.render(<App config={{ account, appId, dbName: crypto.randomUUID(), ...config }} />);
+    r.render(<App config={{ store, appId, dbName: crypto.randomUUID(), ...config }} />);
 
     // Wait for the app to initialise and redirect to a chat
     await waitFor(
@@ -454,7 +455,7 @@ describe("Chat App E2E", () => {
     const aliceContainer = await mountApp({
       appId: SCOPE,
       serverUrl,
-      account: await testAccount(`chat-access-user-a-${Date.now()}`),
+      store: memoryAccountStore(),
     });
 
     await waitFor(
@@ -539,7 +540,7 @@ describe("Chat App E2E", () => {
     const bobContainer = await mountApp({
       appId: SCOPE,
       serverUrl,
-      account: await testAccount(`chat-access-user-b-${Date.now()}`),
+      store: memoryAccountStore(),
     });
 
     // Wait for sync to settle so Bob has whatever data the server delivers

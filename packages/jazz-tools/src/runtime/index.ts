@@ -30,7 +30,6 @@ export {
   isStoreHeldByAnotherTabError,
 } from "./store-held-by-another-tab-error.js";
 export { DbReplacedError, type DbReplacedReason } from "./db-replaced-error.js";
-export { createDb } from "./default-create-db.js";
 export {
   type SnapshotRef,
   parseSnapshotRef,
@@ -94,13 +93,11 @@ export {
 } from "./introspection-fetch.js";
 export {
   generateAuthSecret,
-  BrowserAuthSecretStore,
   authSecretStorageKey,
   formatAuthSecret,
   parseAuthSecret,
   AuthSecretFormatError,
 } from "./auth-secret-store.js";
-export type { AuthSecretStore, BrowserAuthSecretStoreOptions } from "./auth-secret-store.js";
 export type {
   ResolvedTextAnchor,
   ResolvedTextRange,

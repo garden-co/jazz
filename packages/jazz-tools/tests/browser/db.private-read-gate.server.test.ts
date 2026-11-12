@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { createAccountManager } from "../../src/accounts/create-account-manager.js";
 import {
-  createAccountManager,
   generateAuthSecret,
   schema,
   type CompiledPermissions,

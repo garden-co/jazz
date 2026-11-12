@@ -35,23 +35,23 @@ function stillUsable(client: unknown, cause: unknown): boolean {
   if (usable !== undefined) return usable;
   return cause instanceof GracefulShutdownSyncError || cause instanceof SharedClientShutdownError;
 }
-export type JazzSessionOperation =
+export type SessionCoreOperation =
   | "createLocalFirst"
   | "restoreLocalFirst"
   | "loginWithBackend"
   | "linkWithBackend"
   | "logout"
   | "retry";
-export interface JazzSessionSnapshot<Client> {
+export interface SessionCoreSnapshot<Client> {
   readonly status: "ready" | "signed-out" | "transitioning" | "error" | "closed";
   readonly account?: AccountHandle;
   readonly client?: Client;
-  readonly pending?: JazzSessionOperation;
+  readonly pending?: SessionCoreOperation;
   readonly error?: Error;
   /** Whether recovery repeats an uncommitted action or only reopens the selected account. */
   readonly recovery?: "action" | "session";
 }
-export interface JazzSessionActions {
+export interface SessionCoreActions {
   createLocalFirst(): Promise<void>;
   restoreLocalFirst(secret: string): Promise<void>;
   /**
@@ -70,15 +70,15 @@ export interface JazzSessionActions {
   retry(): Promise<void>;
   close(): Promise<void>;
 }
-export interface JazzSession<Client> extends JazzSessionActions {
-  getSnapshot(): JazzSessionSnapshot<Client>;
+export interface SessionCore<Client> extends SessionCoreActions {
+  getSnapshot(): SessionCoreSnapshot<Client>;
   subscribe(listener: () => void): () => void;
 }
-export interface JazzSessionConsumer<Client> {
-  acknowledge(snapshot: JazzSessionSnapshot<Client>): void;
+export interface SessionCoreConsumer<Client> {
+  acknowledge(snapshot: SessionCoreSnapshot<Client>): void;
   release(): void;
 }
-const consumers = new WeakMap<object, () => JazzSessionConsumer<unknown>>();
+const consumers = new WeakMap<object, () => SessionCoreConsumer<unknown>>();
 type ClientReplacer = (
   open: (current: unknown, account: AccountHandle) => Promise<unknown>,
   adopt?: (current: unknown, next: unknown) => void,
@@ -98,7 +98,7 @@ const switchers = new WeakMap<object, (from: AccountHandle) => Promise<boolean>>
  * switching when the session no longer holds `from` by then.
  */
 export function switchJazzSessionUser<Client>(
-  session: JazzSession<Client>,
+  session: SessionCore<Client>,
   from: AccountHandle,
 ): Promise<boolean> {
   const switchUser = switchers.get(session);
@@ -115,7 +115,7 @@ export function switchJazzSessionUser<Client>(
  * rejects.
  */
 export function replaceJazzSessionClient<Client>(
-  session: JazzSession<Client>,
+  session: SessionCore<Client>,
   open: (current: Client, account: AccountHandle) => Promise<Client>,
   /**
    * Hand the current client's work to `next` in place, instead of publishing
@@ -132,12 +132,12 @@ export function replaceJazzSessionClient<Client>(
   );
 }
 /** @internal Framework commit acknowledgement; never required by imperative callers. */
-export function attachJazzSessionConsumer<Client>(
-  session: JazzSession<Client>,
-): JazzSessionConsumer<Client> {
+export function attachSessionCoreConsumer<Client>(
+  session: SessionCore<Client>,
+): SessionCoreConsumer<Client> {
   const attach = consumers.get(session);
   if (!attach) throw new Error("Unknown Jazz session");
-  return attach() as JazzSessionConsumer<Client>;
+  return attach() as SessionCoreConsumer<Client>;
 }
 
 /** @internal Hosts prepare accounts and supply their client adapter once. */
@@ -160,8 +160,8 @@ export async function createJazzSessionOwner<
    */
   clearOnSignOut?: boolean;
   /** Add host methods (e.g. `reauthenticate`) to the session before it is sealed. */
-  decorate?(session: JazzSession<Client>): Extra;
-}): Promise<JazzSession<Client> & Extra> {
+  decorate?(session: SessionCore<Client>): Extra;
+}): Promise<SessionCore<Client> & Extra> {
   const { accounts, openClient } = options;
   let selected = accounts.getLoggedIn();
   if (!selected && options.initial === "local-first")
@@ -170,7 +170,7 @@ export async function createJazzSessionOwner<
     selected = await admitBackendAccount(accounts as AccountManager<unknown>, options.backend);
   await accounts.settleSelection();
   let client = selected ? await openClient(selected) : undefined;
-  let snapshot: JazzSessionSnapshot<Client> = Object.freeze({
+  let snapshot: SessionCoreSnapshot<Client> = Object.freeze({
     status: client ? "ready" : "signed-out",
     account: selected,
     client,
@@ -185,12 +185,12 @@ export async function createJazzSessionOwner<
   let closing: Promise<void> | undefined;
   let loggingOut: Promise<void> | undefined;
   let closed = false;
-  const publish = (next: JazzSessionSnapshot<Client>) => {
+  const publish = (next: SessionCoreSnapshot<Client>) => {
     snapshot = Object.freeze({ ...next });
     versions.set(snapshot, ++version);
     listeners.notify();
   };
-  const detach = (next: JazzSessionSnapshot<Client>) => {
+  const detach = (next: SessionCoreSnapshot<Client>) => {
     const waits = [...leases].map(
       (lease) =>
         new Promise<void>((resolve) => {
@@ -207,7 +207,7 @@ export async function createJazzSessionOwner<
   };
   const superseded = () => new Error("Jazz session operation was superseded");
   const perform = async (
-    operation: JazzSessionOperation,
+    operation: SessionCoreOperation,
     mutate: () => AccountHandle | undefined | Promise<AccountHandle | undefined>,
     token: number,
     detached?: Promise<void>,
@@ -335,7 +335,7 @@ export async function createJazzSessionOwner<
     });
   };
   const run = (
-    operation: JazzSessionOperation,
+    operation: SessionCoreOperation,
     mutate: () => AccountHandle | undefined | Promise<AccountHandle | undefined>,
     signsOut?: boolean,
   ): Promise<void> => {
@@ -360,7 +360,7 @@ export async function createJazzSessionOwner<
       .catch(() => {});
     return task;
   };
-  const session: JazzSession<Client> = {
+  const session: SessionCore<Client> = {
     getSnapshot: () => snapshot,
     subscribe: listeners.subscribe,
     createLocalFirst: () => run("createLocalFirst", () => accounts.createLocalFirst()),
@@ -487,7 +487,7 @@ export async function createJazzSessionOwner<
     };
   });
   if (options.decorate) Object.assign(session, options.decorate(session));
-  return Object.freeze(session) as JazzSession<Client> & Extra;
+  return Object.freeze(session) as SessionCore<Client> & Extra;
 }
 
 type SigningOutClient = {

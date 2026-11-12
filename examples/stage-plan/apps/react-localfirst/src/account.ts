@@ -1,14 +1,14 @@
 import type { JazzClientConfig } from "jazz-tools/client";
 
 /**
- * A local-first account, like the todo example: no sign-up, the browser
- * profile holds the account secret. Crew join shows through invite links.
+ * A device account, like the todo example: no sign-up, the browser profile
+ * holds the account's key. Crew join shows through invite links.
  */
 /**
  * Tests point the app at a sync server by its app id; a browser client takes
  * that as its `scope` (it names no app of its own).
  */
-type SessionOverrides = Omit<Partial<JazzClientConfig>, "appId"> & { appId?: string };
+export type SessionOverrides = Omit<Partial<JazzClientConfig>, "appId"> & { appId?: string };
 
 export function sessionConfig({ appId, ...rest }: SessionOverrides = {}): JazzClientConfig {
   const overrides = appId === undefined ? rest : { ...rest, scope: appId };
@@ -19,6 +19,6 @@ export function sessionConfig({ appId, ...rest }: SessionOverrides = {}): JazzCl
     // once the page has loaded, then keep working offline.
     client: () => import("jazz-tools/local-first"),
     ...overrides,
-    initial: "local-first",
+    initial: "device",
   };
 }

@@ -3,9 +3,20 @@ import { HttpServerRequest } from "effect/http";
 import { describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
 import { createJazz, memory } from "../backend/index.js";
-import { localAccountConfig } from "../runtime/testing/account-fixtures.js";
+import { createDb } from "../runtime/default-create-db.js";
 import { startTestJazz } from "../testing/index.js";
 import { Jazz, JazzBackend, JazzNoAccount, JazzWriteRejected } from "./backend/index.js";
+
+/** A device account of its own (a fresh store) for each session a test opens. */
+function memoryAccountStore() {
+  let stored: string | null = null;
+  return {
+    read: async () => stored,
+    update: async (transform: (current: string | null) => string | null) => {
+      stored = transform(stored);
+    },
+  };
+}
 
 const app = s.defineApp(
   {
@@ -50,7 +61,15 @@ describe("JazzBackend Effect layer", () => {
     });
     try {
       const backendLayer = JazzBackend.layerJazz(server.jazz);
-      const clientLayer = Jazz.layer(await localAccountConfig(server.appId, server.url));
+      const clientLayer = Jazz.layer({
+        scope: server.appId,
+        serverUrl: server.url,
+        initial: "device",
+        client: async () => ({ createClient: createDb }),
+        localFirst: "now",
+        store: memoryAccountStore(),
+        driver: { type: "memory" },
+      });
       // The reader is a user the backend serves without a client of their own.
       await server.jazz.createAccountFor("effect-reader");
       const headers = { authorization: `Bearer ${server.bearer("effect-reader")}` };
