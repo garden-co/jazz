@@ -1,7 +1,8 @@
-Both clients take these options:
+Both clients take these options, in `createJazzClient(config)` or `<JazzProvider config={…}>`:
 
-| Option           | Default        | What it does                                                                    |
-| :--------------- | :------------- | :------------------------------------------------------------------------------ |
-| `serverUrl`      | `/jazz`        | Where your main backend mounts Jazz. Set it only if you mount it somewhere else |
-| `initial`        | `"signed-out"` | `"local-first"` starts visitors as local-first guests                           |
-| `clearOnSignOut` | `false`        | Wipe the account's local data on sign-out, for shared devices                   |
+| Option                      | Default        | What it does                                                                    |
+| :-------------------------- | :------------- | :------------------------------------------------------------------------------ |
+| `serverUrl`                 | `/jazz`        | Where your main backend mounts Jazz. Set it only if you mount it somewhere else |
+| `initial`                   | `"signed-out"` | `"device"` starts visitors as guests on a device account                        |
+| `linkDeviceAccountOnSignUp` | `true`         | Link the device account to a user who signs up; turn off on shared devices      |
+| `clearOnSignOut`            | `false`        | Wipe the account's local data on sign-out, for shared devices                   |

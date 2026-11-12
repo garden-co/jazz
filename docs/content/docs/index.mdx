@@ -69,8 +69,8 @@ You can also query and write to the database right from your frontend. It is pro
     import { app } from "./schema";
 
     // Asks your backend's /jazz route who is signed in, with your app's own session cookie
-    const jazz = await createJazzClient({});
-    const db = jazz.getSnapshot().client!.db;
+    const session = await createJazzClient({ serverUrl: "/jazz" });
+    const db = session.db; // the signed-in user's Db
 
     // Live query: updates as soon as the server (or anyone else) changes a todo
     db.subscribe(app.todos.where({ done: false }), (todos) => {
@@ -99,8 +99,8 @@ You can also query and write to the database right from your frontend. It is pro
     ```tsx title="App.tsx"
     import { JazzProvider } from "jazz-tools/react";
 
-    // Connects to /jazz on your backend by default, signed in as your app's current user
-    <JazzProvider>
+    // Connects to /jazz on your backend, signed in as your app's current user
+    <JazzProvider config={{ serverUrl: "/jazz" }}>
       <Todos />
     </JazzProvider>;
     ```
@@ -129,8 +129,8 @@ You can also query and write to the database right from your frontend. It is pro
     </script>
 
     <template>
-      <!-- Connects to /jazz on your backend by default, signed in as your app's current user -->
-      <JazzProvider>
+      <!-- Connects to /jazz on your backend, signed in as your app's current user -->
+      <JazzProvider :config="{ serverUrl: '/jazz' }">
         <Todos />
       </JazzProvider>
     </template>
@@ -159,8 +159,8 @@ You can also query and write to the database right from your frontend. It is pro
       import { JazzProvider } from "jazz-tools/svelte";
     </script>
 
-    <!-- Connects to /jazz on your backend by default, signed in as your app's current user -->
-    <JazzProvider>
+    <!-- Connects to /jazz on your backend, signed in as your app's current user -->
+    <JazzProvider config={{ serverUrl: "/jazz" }}>
       <Todos />
     </JazzProvider>
     ```
@@ -191,8 +191,8 @@ You can also query and write to the database right from your frontend. It is pro
     ```tsx title="App.tsx"
     import { JazzProvider } from "jazz-tools/solid";
 
-    // Connects to /jazz on your backend by default, signed in as your app's current user
-    <JazzProvider>
+    // Connects to /jazz on your backend, signed in as your app's current user
+    <JazzProvider config={{ serverUrl: "/jazz" }}>
       <Todos />
     </JazzProvider>;
     ```

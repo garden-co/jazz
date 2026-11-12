@@ -88,26 +88,27 @@ export const auth = betterAuth({
 ## Connecting to Jazz
 
 `JazzProvider` asks your backend who is signed in, so forms only call Better Auth's sign-up or
-sign-in and then `reauthenticate()`. Jazz owns startup, account changes and error recovery, and
+sign-in and then `refresh()`: your backend decides who is signed in, and the session follows
+it. Jazz owns startup, account changes and error recovery, and
 also checks again on start, on focus and when another tab signs in or out.
 
 ```tsx title="App.tsx"
-import { JazzProvider, useJazzAuth } from "jazz-tools/react";
+import { JazzProvider, useJazzSession } from "jazz-tools/react";
 import { authClient } from "./auth-client";
 
 function Root() {
   return (
-    <JazzProvider signedOut={<SignIn />}>
+    <JazzProvider config={{ serverUrl: "/jazz" }} signedOut={<SignIn />}>
       <App />
     </JazzProvider>
   );
 }
 
 function SignIn() {
-  const { reauthenticate } = useJazzAuth();
+  const { refresh } = useJazzSession();
   async function signIn(email: string, password: string) {
     await authClient.signIn.email({ email, password });
-    await reauthenticate();
+    await refresh();
   }
   // ...your form calls signIn
 }
@@ -117,8 +118,8 @@ For a full working example, including Better Auth's tables stored in Jazz, see t
 [Better Auth chat example](https://github.com/garden-co/jazz/tree/main/examples/auth-betterauth-chat).
 
 <Callout type="info">
-  If your users start as local-first guests and sign up later, call `linkWithBackend()` after Better
-  Auth's sign-up so they keep their data. See [Other /
+  If your users start as guests ([device accounts](/docs/setup/auth/local-first)) and sign up later,
+  call `linkDeviceAccount()` after Better Auth's sign-up so they keep their data. See [Other /
   Custom](/docs/setup/auth/custom#guests-who-sign-up).
 </Callout>
 
