@@ -9172,7 +9172,10 @@ impl Db {
                             client.local_fates.insert(tx);
                         }
                         client.fates.insert(tx, result);
-                        client.settled_upstream += 1;
+                        // A relayed commit is a session's, not this store's.
+                        if !relayed {
+                            client.settled_upstream += 1;
+                        }
                         let node = client.node;
                         if let Some(hashes) = client.pushed.remove(&tx) {
                             crate::large::mark_pushed(&inner.conn, &hashes)?;
@@ -10553,13 +10556,35 @@ impl Db {
     /// against the writers' own commits (for tests and metrics): one per
     /// image a session's commits could have produced, however many commits
     /// one tick applied for it.
+    #[doc(hidden)]
     pub fn echo_probes(&self) -> u64 {
         self.inner.borrow().echo_probes
     }
 
-    /// Fates the upstream has given this replica's own commits since it
-    /// opened: a read the server answers after them (every read is queued
-    /// behind the commits staged before it) moves with this count.
+    /// Fates the upstream has given this replica's own commits (not ones
+    /// it relays for its sessions) since it opened, and how many of its
+    /// own commits are still pending: a read is queued behind those, and
+    /// the server answers it after their fates (see
+    /// `binding_host::CoverageBudget`).
+    #[doc(hidden)]
+    pub fn own_upload_progress(&self) -> (u64, u64) {
+        self.inner
+            .borrow()
+            .client
+            .as_ref()
+            .map_or((0, 0), |client| {
+                let pending = client
+                    .pending
+                    .iter()
+                    .filter(|p| !client.relayed_fates.contains_key(&p.tx))
+                    .count();
+                (client.settled_upstream, pending as u64)
+            })
+    }
+
+    /// The settled count of [`Self::own_upload_progress`] alone, without
+    /// counting what is pending.
+    #[doc(hidden)]
     pub fn settled_upstream(&self) -> u64 {
         self.inner
             .borrow()
@@ -11560,6 +11585,7 @@ impl Db {
             }
             // Superseded versions of the client's own commits land in its
             // history, while the row stays readable.
+            let mut superseded_rows = HashSet::new();
             for (table, row, key, at) in committed {
                 let superseded = match inner.current_image(&table, row, &key)? {
                     Some(current) => {
@@ -11568,7 +11594,7 @@ impl Db {
                     None => false,
                 };
                 if superseded {
-                    echoes.retain(|e| !(e.table == table && e.row == row && e.key == key));
+                    superseded_rows.insert((table.clone(), row, key.clone()));
                 }
                 if superseded && readable(&inner, &policies, &table, row, &key, policy)? {
                     let id = row.0.as_bytes().to_vec();
@@ -11581,6 +11607,11 @@ impl Db {
                         &[&id, &key, &at.0.t(), &w],
                     )?);
                 }
+            }
+            if !superseded_rows.is_empty() {
+                echoes.retain(|e| {
+                    !superseded_rows.contains(&(e.table.clone(), e.row, e.key.clone()))
+                });
             }
             // An eviction is the row's state as of now, after every event
             // drained above: a version of it a result shipped earlier in the
@@ -11677,29 +11708,39 @@ impl Db {
                 // By version, each in the order it was echoed: a tick that
                 // applied N commits of one writer matches its N images in
                 // one pass, not N scans of N echoes.
-                let mut by_version: HashMap<(String, [u8; 16], Vec<u8>, Pos), VecDeque<Echo>> =
+                let mut by_version: HashMap<(&str, [u8; 16], &[u8], Pos), Vec<usize>> =
                     HashMap::with_capacity(echoes.len());
-                for echo in echoes {
+                for (i, echo) in echoes.iter().enumerate() {
                     by_version
                         .entry((
-                            echo.table.clone(),
+                            echo.table.as_str(),
                             *echo.row.0.as_bytes(),
-                            echo.key.clone(),
+                            echo.key.as_slice(),
                             echo.at,
                         ))
                         .or_default()
-                        .push_back(echo);
+                        .push(i);
                 }
+                let mut taken = vec![false; echoes.len()];
                 images.retain(|image| {
                     if !image.at.accepted() {
                         return true;
                     }
                     echo_probes += 1;
-                    let version = (image.table.clone(), image.id, image.key.clone(), image.at);
-                    let Some(echo) = by_version.get_mut(&version).and_then(VecDeque::pop_front)
+                    let version = (
+                        image.table.as_str(),
+                        image.id,
+                        image.key.as_slice(),
+                        image.at,
+                    );
+                    let Some(&at) = by_version
+                        .get(&version)
+                        .and_then(|candidates| candidates.iter().find(|&&i| !taken[i]))
                     else {
                         return true;
                     };
+                    taken[at] = true;
+                    let echo = &echoes[at];
                     as_written
                         .entry(echo.id)
                         .or_default()

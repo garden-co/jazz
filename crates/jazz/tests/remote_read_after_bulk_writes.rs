@@ -18,7 +18,7 @@ use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
-use jazz::binding_host::{CoverageBudget, REMOTE_READ_COVERAGE_BUDGET};
+use jazz::binding_host::{CoverageBudget, REMOTE_READ_COVERAGE_BUDGET, REMOTE_READ_COVERAGE_CAP};
 use jazz::db::{
     Db, DbConfig, DbIdentity, ErrorCode, InsertOptions, ReadOpts, ReadTier, SerializedReadResult,
     SyncMessage, Transport, TransportError, Upstream, block_on,
@@ -59,11 +59,14 @@ fn alice_id() -> AuthorSubject {
 type Queue = Rc<RefCell<VecDeque<SyncMessage>>>;
 
 /// One end of the link. The server's end takes in at most `allowance`
-/// messages until it is refilled: a server working through a backlog.
+/// messages until it is refilled (a server working through a backlog),
+/// and with `drop_reads` loses every read (a server that never answers
+/// one, though it applies writes).
 struct End {
     out: Queue,
     inbox: Queue,
     allowance: Option<Rc<Cell<usize>>>,
+    drop_reads: Option<Rc<Cell<bool>>>,
 }
 
 impl Transport for End {
@@ -79,7 +82,14 @@ impl Transport for End {
             }
             allowance.set(allowance.get() - 1);
         }
-        self.inbox.borrow_mut().pop_front()
+        loop {
+            let message = self.inbox.borrow_mut().pop_front()?;
+            let dropped = matches!(message, SyncMessage::Read { .. })
+                && self.drop_reads.as_ref().is_some_and(|drop| drop.get());
+            if !dropped {
+                return Some(message);
+            }
+        }
     }
 }
 
@@ -87,16 +97,20 @@ struct Link {
     _upstream: Upstream,
     /// Messages the server takes in per turn.
     allowance: Rc<Cell<usize>>,
+    /// Whether the server loses reads.
+    drop_reads: Rc<Cell<bool>>,
 }
 
 fn connect(server: &Db, client: &Db) -> Link {
     let up: Queue = Rc::default();
     let down: Queue = Rc::default();
     let allowance = Rc::new(Cell::new(usize::MAX));
+    let drop_reads = Rc::new(Cell::new(false));
     let upstream = block_on(client.connect_upstream(Box::new(End {
         out: up.clone(),
         inbox: down.clone(),
         allowance: None,
+        drop_reads: None,
     })));
     server
         .accept_subscriber(
@@ -104,6 +118,7 @@ fn connect(server: &Db, client: &Db) -> Link {
                 out: down,
                 inbox: up,
                 allowance: Some(allowance.clone()),
+                drop_reads: Some(drop_reads.clone()),
             }),
             alice_id(),
         )
@@ -111,6 +126,7 @@ fn connect(server: &Db, client: &Db) -> Link {
     let link = Link {
         _upstream: upstream,
         allowance,
+        drop_reads,
     };
     for _ in 0..4 {
         turn(server, client);
@@ -173,6 +189,19 @@ fn read_behind_backlog(
     per_turn: Duration,
     expired: &dyn Fn() -> bool,
 ) -> (Result<usize, ErrorCode>, usize) {
+    read_with_turns(server, client, link, clock, per_turn, expired, &|| {})
+}
+
+/// [`read_behind_backlog`], running `each_turn` before each turn.
+fn read_with_turns(
+    server: Option<&Db>,
+    client: &Db,
+    link: &Link,
+    clock: &Clock,
+    per_turn: Duration,
+    expired: &dyn Fn() -> bool,
+    each_turn: &dyn Fn(),
+) -> (Result<usize, ErrorCode>, usize) {
     let query = postcard::to_allocvec(&Query::from("notes")).unwrap();
     let opts = ReadOpts::for_read_tier(ReadTier::Remote);
     let mut read = pin!(client.all_serialized_query(&query, opts, None, None, Some(expired)));
@@ -184,6 +213,7 @@ fn read_behind_backlog(
             Poll::Ready(Err(error)) => return (Err(error.code), turns),
             Poll::Pending => {}
         }
+        each_turn();
         link.allowance.set(1);
         match server {
             Some(server) => turn(server, client),
@@ -309,4 +339,81 @@ fn a_remote_read_fails_once_a_silent_server_spends_its_budget() {
         });
     assert_eq!(rows, Err(ErrorCode::NotObserved));
     assert_eq!(turns, 3, "spent 15 s after the read's first wait");
+}
+
+/// A read's budget counts only the commits ahead of it: alice's writes
+/// made after it settle steadily, but a server that never answers the
+/// read still fails it with `NotObserved` once the budget is spent.
+///
+/// ```text
+/// alice ──read──► server (loses it)
+/// alice ──write per turn──► server ──fate──► alice   (not ahead: no reset)
+///   ── 15 s ──► NotObserved
+/// ```
+#[test]
+fn writes_made_after_a_read_do_not_keep_it_waiting() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let alice = Rc::new(open(1, alice_id()));
+    let link = connect(&server, &alice);
+    link.drop_reads.set(true);
+    let clock = Clock::new();
+    let budget = {
+        let clock = clock.clone();
+        CoverageBudget::new(alice.clone(), REMOTE_READ_COVERAGE_BUDGET, move || {
+            clock.now()
+        })
+    };
+    let written = Cell::new(0);
+    let (rows, turns) = read_with_turns(
+        Some(&server),
+        &alice,
+        &link,
+        &clock,
+        Duration::from_secs(5),
+        &|| budget.spent(),
+        &|| {
+            insert(&alice, written.get());
+            written.set(written.get() + 1);
+        },
+    );
+    assert_eq!(rows, Err(ErrorCode::NotObserved));
+    assert_eq!(turns, 3, "spent 15 s after the read's first wait");
+    assert_eq!(count(&server, "docs"), 3, "the writes after it settled");
+}
+
+/// However steadily the commits ahead of a read settle, it waits at
+/// most `REMOTE_READ_COVERAGE_CAP` budgets.
+///
+/// ```text
+/// alice ──40 inserts, read──► server: one message per turn, 6 s each
+///   progress every turn, but 150 s in ──► NotObserved
+/// ```
+#[test]
+fn a_remote_read_waits_at_most_its_cap() {
+    let server = open(0, AuthorSubject::SYSTEM);
+    let alice = Rc::new(open(1, alice_id()));
+    let link = connect(&server, &alice);
+    for n in 0..40 {
+        insert(&alice, n);
+    }
+    let clock = Clock::new();
+    let budget = {
+        let clock = clock.clone();
+        CoverageBudget::new(alice.clone(), REMOTE_READ_COVERAGE_BUDGET, move || {
+            clock.now()
+        })
+    };
+    let (rows, _) = read_behind_backlog(
+        Some(&server),
+        &alice,
+        &link,
+        &clock,
+        Duration::from_secs(6),
+        &|| budget.spent(),
+    );
+    assert_eq!(rows, Err(ErrorCode::NotObserved));
+    assert_eq!(
+        clock.elapsed.get(),
+        REMOTE_READ_COVERAGE_BUDGET * REMOTE_READ_COVERAGE_CAP
+    );
 }

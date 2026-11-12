@@ -457,23 +457,33 @@ pub fn decode_schema(schema: &[u8]) -> HostResult<JazzSchema> {
 /// [`CoverageBudget`]).
 pub const REMOTE_READ_COVERAGE_BUDGET: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// A Remote read never waits for the server's coverage longer than this
+/// many budgets, however steadily the writes ahead of it settle.
+pub const REMOTE_READ_COVERAGE_CAP: u32 = 10;
+
 /// A Remote read's wait for the server's coverage, spent once `budget`
 /// passes with no progress toward its answer: from its first wait, and
-/// again from each fate the upstream gives one of this replica's own
-/// commits.
+/// again from each fate the upstream gives one of the commits this
+/// replica had pending when the read began. It is spent regardless after
+/// [`REMOTE_READ_COVERAGE_CAP`] budgets.
 ///
 /// The server answers a read after the commits staged before it (it
 /// applies a session's messages in order, so the read sees the writer's
 /// own writes): a read right after a burst of N writes waits for all N to
 /// be applied and settled, which takes time growing with N however healthy
-/// the link. Each settled commit shows the server working through what is
-/// ahead of the read, so the budget measures a stalled server, not a busy
-/// one. With nothing settling (a silent server, a lost link, nothing
-/// ahead of the read) it is a plain wall-clock budget.
+/// the link. Each of them settling shows the server working through what
+/// is ahead of the read, so the budget measures a stalled server, not a
+/// busy one. Commits staged after the read, and the sessions' commits a
+/// relay carries, are not ahead of it and do not count. With nothing
+/// settling (a silent server, a lost link, nothing ahead of the read) it
+/// is a plain wall-clock budget.
 pub struct CoverageBudget<N> {
     db: Rc<Db>,
     budget: std::time::Duration,
     now: N,
+    /// From the first check: when the read began, the settled count then,
+    /// and how many commits were ahead of it.
+    began: std::cell::Cell<Option<(web_time::Instant, u64, u64)>>,
     /// When the wait last made progress, and the settled count then.
     since: std::cell::Cell<Option<(web_time::Instant, u64)>>,
 }
@@ -485,6 +495,7 @@ impl<N: Fn() -> web_time::Instant> CoverageBudget<N> {
             db,
             budget,
             now,
+            began: std::cell::Cell::new(None),
             since: std::cell::Cell::new(None),
         }
     }
@@ -492,7 +503,21 @@ impl<N: Fn() -> web_time::Instant> CoverageBudget<N> {
     /// Whether the budget is spent; the first call starts it.
     pub fn spent(&self) -> bool {
         let now = (self.now)();
-        let settled = self.db.settled_upstream();
+        let (began, base, ahead) = match self.began.get() {
+            Some(began) => began,
+            None => {
+                let (settled, pending) = self.db.own_upload_progress();
+                let began = (now, settled, pending);
+                self.began.set(Some(began));
+                began
+            }
+        };
+        if now.saturating_duration_since(began) >= self.budget * REMOTE_READ_COVERAGE_CAP {
+            return true;
+        }
+        // Fates arrive in commit order: once as many have come as were
+        // ahead of the read, later ones are for commits behind it.
+        let settled = self.db.settled_upstream().min(base + ahead);
         let since = match self.since.get() {
             Some((since, seen)) if seen == settled => since,
             _ => {
