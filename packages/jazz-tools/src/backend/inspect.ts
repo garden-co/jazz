@@ -874,14 +874,6 @@ export function createInspector(deps: InspectorDeps) {
         if (request.method !== "GET" && request.method !== "HEAD") {
           return new Response(null, { status: 405 });
         }
-        if (path === INSPECT_PATH) {
-          // The page's assets are relative to it, so it lives at `/inspect/`.
-          // A redirect keeps the fragment, which carries any deep link.
-          return new Response(null, {
-            status: 308,
-            headers: { Location: `${deps.basePath}${INSPECT_PATH}/` },
-          });
-        }
         const served = await deps.serveUi(request, path.slice(INSPECT_PATH.length));
         return (
           served ??
