@@ -160,14 +160,11 @@ impl<T: WorkerSql> WorkerSql for Faults<T> {
     }
 }
 async fn file(pages: Arc<DatabaseFixture>, db: SqliteDb) -> anyhow::Result<StoreFile> {
-    Ok(StoreFile::worker_with_provider_tables(
-        Faults {
-            inner: jazz_rivet::test_connection(db).await?,
-            pages,
-            depth: Default::default(),
-        },
-        &["_rivet_"],
-    )
+    Ok(StoreFile::worker(Faults {
+        inner: jazz_rivet::test_connection(db).await?,
+        pages,
+        depth: Default::default(),
+    })
     .await?)
 }
 pub async fn open_jazz(
