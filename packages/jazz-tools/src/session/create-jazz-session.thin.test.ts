@@ -615,4 +615,48 @@ describe("browser session", () => {
     await db(session).insert(app.notes, { text: "still thin" }).wait({ tier: "global" });
     warn.mockRestore();
   }, 60_000);
+
+  it('opens the local-first client at once with localFirst: "now", on a first visit too', async () => {
+    vi.stubGlobal("localStorage", memoryLocalStorage());
+    const server = await startServer();
+    const session = await createJazzClient({
+      scope: server.appId,
+      serverUrl: server.url,
+      store: memoryStore(),
+      initial: "device",
+      driver: { type: "memory" },
+      client: loadLocalFirst,
+      localFirst: "now",
+    });
+    sessions.push(session);
+    expect(isThinDb(db(session))).toBe(false);
+    await db(session).insert(app.notes, { text: "local at once" }).wait({ tier: "global" });
+  }, 60_000);
+
+  it('fails instead of running thin when localFirst: "now" can\'t load the client', async () => {
+    const server = await startServer();
+    await expect(
+      createJazzClient({
+        scope: server.appId,
+        serverUrl: server.url,
+        store: memoryStore(),
+        initial: "device",
+        driver: { type: "memory" },
+        client: async () => {
+          throw new Error("Failed to fetch dynamically imported module");
+        },
+        localFirst: "now",
+      }),
+    ).rejects.toThrow("Failed to fetch dynamically imported module");
+  }, 60_000);
+
+  it('refuses localFirst: "now" without a client loader, and an unknown timing', async () => {
+    const base = { serverUrl: "https://app.example.test/jazz", store: memoryStore() };
+    await expect(createJazzClient({ ...base, localFirst: "now" })).rejects.toThrow(
+      /localFirst: "now" opens the local-first client, which needs the `client` loader/,
+    );
+    await expect(
+      createJazzClient({ ...base, client: loadLocalFirst, localFirst: "soon" as never }),
+    ).rejects.toThrow(/Unknown localFirst "soon"/);
+  });
 });
